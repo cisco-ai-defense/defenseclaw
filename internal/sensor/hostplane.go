@@ -119,6 +119,8 @@ type hostPlane struct {
 	containerEvents atomic.Int64
 	ownEvents       atomic.Int64
 	hookUnexpected  atomic.Int64
+	// customerEvents counts the events of the host's own Tetragon policies.
+	customerEvents atomic.Int64
 }
 
 // kernelConnect is a process's connection to a peer as a kernel connect
@@ -201,6 +203,13 @@ func (h *hostPlane) handle(event plane.Event) {
 		// processes are not the host agent's, whatever their names say, and
 		// no host process descends from them.
 		h.containerEvents.Add(1)
+		return
+	}
+	if event.PolicyOwner == plane.PolicyOwnerCustomer || event.Kind == plane.KindPolicyEvent {
+		// An event of the host's own Tetragon policy: a record of its own,
+		// never a tactic, a score, a Plane B connect or a kernel control's
+		// outcome.
+		h.customerEvents.Add(1)
 		return
 	}
 	// Every exec teaches the tracker, whether or not it classifies. Lineage is

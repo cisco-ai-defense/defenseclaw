@@ -87,8 +87,11 @@ type Config struct {
 	// It defaults to a /proc scan.
 	Procs         func(enrolled func(uid int) bool) ([]Proc, error)
 	ExtraPrefixes []string
-	Now           func() time.Time
-	Intervals     Intervals
+	// Customer reports the host's own Tetragon policies and the counts of
+	// their events, for the published state (nil: none).
+	Customer  CustomerSource
+	Now       func() time.Time
+	Intervals Intervals
 }
 
 // Hit is a kernel event from a DefenseClaw controls policy: an open that the
@@ -137,9 +140,14 @@ type Controller struct {
 	lastPIDs   map[int]bool
 	enabled    map[int]bool
 	alive      map[int]int
+	// progressAt is when each user's last uid_progress change was emitted.
+	progressAt map[int]time.Time
 
 	snapshot atomic.Pointer[State]
 	nudge    chan struct{}
+	// owned is a copy of recorded for Owns, which the event mapper calls
+	// from the stream's goroutine.
+	owned atomic.Pointer[map[string]bool]
 
 	// tallyMu guards what RecordHit and friends touch.
 	tallyMu sync.Mutex
@@ -147,6 +155,9 @@ type Controller struct {
 	stream  bool
 	loss    bool
 	names   map[string]known
+	// totals count the controls events since start (would_block_total,
+	// blocked_total), every user's.
+	totals map[string]int64
 	// streamNote is the event stream's last word about Tetragon, waiting
 	// for the off/consume loop to publish it.
 	streamNote *StreamStatus
@@ -180,16 +191,18 @@ func New(cfg Config) *Controller {
 	}
 	cfg.Intervals = cfg.Intervals.withDefaults()
 	c := &Controller{
-		cfg:      cfg,
-		tracker:  NewTracker(),
-		recorded: map[string]bool{},
-		retryAt:  map[string]time.Time{},
-		lastPIDs: map[int]bool{},
-		enabled:  map[int]bool{},
-		alive:    map[int]int{},
-		nudge:    make(chan struct{}, 1),
-		burn:     LoadBurnin(cfg.Dirs),
-		names:    map[string]known{},
+		cfg:        cfg,
+		tracker:    NewTracker(),
+		recorded:   map[string]bool{},
+		retryAt:    map[string]time.Time{},
+		lastPIDs:   map[int]bool{},
+		enabled:    map[int]bool{},
+		alive:      map[int]int{},
+		progressAt: map[int]time.Time{},
+		nudge:      make(chan struct{}, 1),
+		burn:       LoadBurnin(cfg.Dirs),
+		names:      map[string]known{},
+		totals:     map[string]int64{},
 	}
 	if err := readJSON(cfg.Dirs.StateFile(), &c.st); err != nil && !errors.Is(err, os.ErrNotExist) {
 		cfg.Logger.Warn("kernel policy state unreadable; starting from the live state", "error", err)
@@ -200,8 +213,9 @@ func New(cfg Config) *Controller {
 	c.st.HelperPID = os.Getpid()
 	c.st.KernelPolicy = Digest()
 	c.st.Intent = IntentStatus{
-		Mode: cfg.Intent.Mode, BurnIn: burnInText(cfg.Intent.BurnIn), EnforceAck: cfg.Intent.EnforceAck,
-		EnforceConnectors: cfg.Intent.EnforceConnectors, Problems: cfg.Intent.Problems,
+		Mode: cfg.Intent.Mode, BurnIn: burnInText(cfg.Intent.BurnIn), EnforceAck: strings.Join(cfg.Intent.EnforceAcks, ","),
+		EnforceConnectors: cfg.Intent.EnforceConnectors, CustomerEvents: cfg.Intent.CustomerEventsSetting(),
+		Problems: cfg.Intent.Problems,
 	}
 	if c.st.Applied == nil {
 		c.st.Applied = map[string]Applied{}
@@ -292,7 +306,37 @@ func (c *Controller) RecordHit(h Hit) {
 	}
 	// An enforcing controls policy denied this open; anything else would have.
 	blocked := entry.family == FamilyControls && entry.mode.Enforcing()
+	if blocked {
+		c.totals["blocked_total"]++
+	} else {
+		c.totals["would_block_total"]++
+	}
 	c.burn.Hit(h.UID, control, blocked, h.Path, h.Binary, at)
+}
+
+// Owns reports whether this helper recorded loading name (tetragon-loaded,
+// the record mayTouch reads), or retired it moments ago. It is the only
+// test of ownership: a policy named in DefenseClaw's pattern that this
+// helper did not load is the customer's. Safe from any goroutine.
+func (c *Controller) Owns(name string) bool {
+	if owned := c.owned.Load(); owned != nil && (*owned)[name] {
+		return true
+	}
+	c.tallyMu.Lock()
+	defer c.tallyMu.Unlock()
+	// An entry with a family came from an applied record; one without is
+	// only the path index of a policy compiled and not loaded yet.
+	entry, recent := c.names[name]
+	return recent && entry.family != ""
+}
+
+// noteRecorded publishes the record for Owns after it changed.
+func (c *Controller) noteRecorded() {
+	owned := make(map[string]bool, len(c.recorded))
+	for name := range c.recorded {
+		owned[name] = true
+	}
+	c.owned.Store(&owned)
 }
 
 // OwnsPolicy reports whether name is a policy of family that this helper
@@ -313,6 +357,10 @@ func (c *Controller) Status() State {
 	}
 	c.tallyMu.Lock()
 	out.BurnIn = c.burn.Snapshot()
+	out.HitTotals = make(map[string]int64, len(c.totals))
+	for key, value := range c.totals {
+		out.HitTotals[key] = value
+	}
 	c.tallyMu.Unlock()
 	if pause := ReadPause(c.cfg.Dirs, c.cfg.Now()); pause.Active() {
 		out.Pause = &pause
@@ -329,6 +377,7 @@ func (c *Controller) publish() {
 	snap.UIDs = append([]UIDStatus(nil), c.st.UIDs...)
 	snap.Warnings = append([]string(nil), c.st.Warnings...)
 	snap.Changes = append([]Change(nil), c.st.Changes...)
+	snap.CustomerPolicies = append([]CustomerPolicy(nil), c.st.CustomerPolicies...)
 	snap.Applied = map[string]Applied{}
 	for name, a := range c.st.Applied {
 		snap.Applied[name] = a
@@ -343,10 +392,49 @@ func (c *Controller) publish() {
 
 func (c *Controller) persist() {
 	c.st.UpdatedAt = c.cfg.Now().UTC()
+	c.applyCustomer()
 	if err := writeJSON(c.cfg.Dirs.StateFile(), c.st); err != nil {
 		c.cfg.Logger.Warn("kernel policy state not written", "error", err)
 	}
 	c.publish()
+}
+
+// applyCustomer refreshes the customer policies from the event stream's
+// ledger and the warnings they raise: a capped warning per policy over its
+// volume budget in the last hour and, in off and consume (no pass lists
+// Tetragon then), a foreign-name warning per customer policy named in
+// DefenseClaw's pattern.
+func (c *Controller) applyCustomer() {
+	if c.cfg.Customer == nil {
+		return
+	}
+	policies, events := c.cfg.Customer(c.cfg.Now())
+	c.st.CustomerPolicies = policies
+	c.st.CustomerEvents = nil
+	if events != (CustomerEvents{}) || len(policies) > 0 {
+		c.st.CustomerEvents = &events
+	}
+	listing := !c.cfg.Intent.Mode.LoadsPolicies()
+	kept := c.st.Warnings[:0:0]
+	for _, warning := range c.st.Warnings {
+		if strings.HasPrefix(warning, WarnCustomerEventsCapped+":") ||
+			(listing && strings.HasPrefix(warning, WarnForeignName+":")) {
+			continue
+		}
+		kept = append(kept, warning)
+	}
+	for _, policy := range policies {
+		if len(kept) >= 64 {
+			break
+		}
+		if policy.CappedLastHour > 0 {
+			kept = addUnique(kept, WarnCustomerEventsCapped+":"+policy.Name)
+		}
+		if listing && policy.Listed && IsDefenseClawName(policy.Name) {
+			kept = addUnique(kept, WarnForeignName+":"+policy.Name)
+		}
+	}
+	c.st.Warnings = kept
 }
 
 // change appends to the change ring.
@@ -452,6 +540,7 @@ func (c *Controller) reloadRecord() {
 			delete(c.st.Applied, name)
 		}
 	}
+	c.noteRecorded()
 }
 
 // lockReconciler holds the reconciler lock for as long as Run reconciles, so
@@ -490,6 +579,7 @@ func (c *Controller) recordLoaded(name string) error {
 		return nil
 	}
 	c.recorded[name] = true
+	c.noteRecorded()
 	return writeLoaded(c.cfg.Dirs, sortedKeys(c.recorded))
 }
 
@@ -498,6 +588,7 @@ func (c *Controller) forgetLoaded(name string) {
 		return
 	}
 	delete(c.recorded, name)
+	c.noteRecorded()
 	if err := writeLoaded(c.cfg.Dirs, sortedKeys(c.recorded)); err != nil {
 		c.cfg.Logger.Warn("tetragon-loaded not written", "error", err)
 	}
@@ -560,6 +651,8 @@ func (c *Controller) Run(ctx context.Context) error {
 			c.accrue()
 		case <-flush.C:
 			c.flush()
+			// The customer policies' counts, between passes.
+			c.persist()
 		}
 	}
 }
@@ -605,6 +698,10 @@ func (c *Controller) runRetire(ctx context.Context) error {
 	c.persist()
 	orphaned := false
 	var retry <-chan time.Time
+	// The customer policies' counts are written on this cadence (in consume
+	// the event stream runs and nothing else writes the state).
+	flush := time.NewTicker(c.cfg.Intervals.Flush)
+	defer flush.Stop()
 	for {
 		if len(c.recorded) > 0 && retry == nil {
 			err := c.retireOnce(ctx)
@@ -637,6 +734,8 @@ func (c *Controller) runRetire(ctx context.Context) error {
 			return nil
 		case <-retry:
 			retry = nil
+		case <-flush.C:
+			c.persist()
 		case <-c.nudge:
 			if c.noteStream() {
 				retry = nil // Tetragon answers again: retire now
@@ -683,6 +782,7 @@ func (c *Controller) retireOnce(ctx context.Context) error {
 	result, err := Cleanup(callCtx, client, c.cfg.Dirs)
 	for _, name := range append(append([]string(nil), result.Removed...), result.Missing...) {
 		delete(c.recorded, name)
+		c.noteRecorded()
 		delete(c.st.Applied, name)
 		c.change(Change{Event: EventRemoved, Policy: name, Reason: "mode " + string(c.cfg.Intent.Mode)})
 	}

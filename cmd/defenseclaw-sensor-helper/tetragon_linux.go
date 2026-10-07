@@ -58,7 +58,7 @@ func kernelPolicyIntent(lookup kernelpolicy.Lookup, logger *slog.Logger) kernelp
 // In modes off and consume the controller only retires the names an earlier
 // run recorded, then stops talking to Tetragon.
 func kernelPolicyStart(ctx context.Context, logger *slog.Logger, intent kernelpolicy.Intent, dial kernelpolicy.DialFunc,
-	manifestPath string) *kernelpolicy.Controller {
+	manifestPath string, customer kernelpolicy.CustomerSource) *kernelpolicy.Controller {
 	controller := kernelpolicy.New(kernelpolicy.Config{
 		Intent: intent,
 		Dirs:   kernelpolicy.DefaultDirs(),
@@ -68,10 +68,11 @@ func kernelPolicyStart(ctx context.Context, logger *slog.Logger, intent kernelpo
 			return kernelpolicy.LoadEnrollment(manifestPath, validateManifestTrust, lookupUser)
 		},
 		ExtraPrefixes: agentPrefixes(os.LookupEnv),
+		Customer:      customer,
 	})
 	logger.Info("kernel policy controller starting", "mode", intent.Mode, "kernel_policy", kernelpolicy.Digest(),
-		"burn_in", intent.BurnIn.String(), "enforce_ack_set", intent.EnforceAck != "",
-		"enforce_connectors", intent.EnforceConnectors)
+		"burn_in", intent.BurnIn.String(), "enforce_ack_set", len(intent.EnforceAcks) > 0, "approval", intent.Approval(),
+		"enforce_connectors", intent.EnforceConnectors, "customer_events", intent.CustomerEventsSetting())
 	go func() {
 		if err := controller.Run(ctx); err != nil {
 			logger.Error("kernel policy controller stopped", "error", err)

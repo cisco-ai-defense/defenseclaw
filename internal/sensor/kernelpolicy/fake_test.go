@@ -291,7 +291,11 @@ func enforceIntent(ack string, connectors ...string) Intent {
 	if len(connectors) == 0 {
 		connectors = []string{"claudecode", "codex"}
 	}
-	return Intent{Mode: ModeEnforce, BurnIn: 24 * time.Hour, EnforceAck: ack, EnforceConnectors: connectors}
+	var acks []string
+	if ack != "" {
+		acks = []string{ack}
+	}
+	return Intent{Mode: ModeEnforce, BurnIn: 24 * time.Hour, EnforceAcks: acks, EnforceConnectors: connectors}
 }
 
 func observeIntent() Intent { return Intent{Mode: ModeObserve, BurnIn: 24 * time.Hour} }
@@ -315,11 +319,18 @@ func (h *harness) resume() {
 }
 
 func (h *harness) loadedFile() []string {
-	names, err := readLoaded(h.dirs)
-	if err != nil {
-		h.t.Fatal(err)
+	// A controller running on its own goroutine may be rewriting the record
+	// (safefile refuses a file that changed while it was read): read again.
+	var err error
+	for attempt := 0; attempt < 20; attempt++ {
+		var names []string
+		if names, err = readLoaded(h.dirs); err == nil {
+			return names
+		}
+		time.Sleep(time.Millisecond)
 	}
-	return names
+	h.t.Fatal(err)
+	return nil
 }
 
 func (h *harness) writeRaw(path, content string) {

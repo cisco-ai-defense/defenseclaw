@@ -74,10 +74,18 @@ func mapFixture(t *testing.T, mapper *Mapper, name string) []mapped {
 	return out
 }
 
+// recordedFixture are the fixtures' policies this helper "recorded"
+// loading: ownership is the record, never the name.
+var recordedFixture = map[string]bool{
+	"defenseclaw-observe-89abcdef": true, "defenseclaw-connect-13579bdf": true,
+	"defenseclaw-controls-0a1b2c3d": true, "defenseclaw-controls-burnin-4e5f6a7b": true,
+}
+
 func fixtureMapper(modes map[string]string) *Mapper {
 	return NewMapper(MapperConfig{
 		Homes:      []string{fixtureHome},
 		PolicyMode: func(name string) string { return modes[name] },
+		Owns:       func(name string) bool { return recordedFixture[name] },
 	})
 }
 
@@ -128,7 +136,7 @@ func TestMapperMapsTheRecordedSession(t *testing.T) {
 	denied := one(t, lines[7])
 	if denied.Kind != plane.KindFileRead || denied.Path != fixtureHome+"/.ssh/id_ed25519" ||
 		denied.Policy != "defenseclaw-controls-0a1b2c3d" || denied.Control != ControlSSHPrivateKeyRead ||
-		denied.Outcome != plane.OutcomeBlocked {
+		denied.Outcome != plane.OutcomeBlocked || denied.PolicyOwner != plane.PolicyOwnerDefenseClaw {
 		t.Fatalf("controls deny %+v", denied)
 	}
 	burnin := one(t, lines[8])
@@ -152,8 +160,12 @@ func TestMapperMapsTheRecordedSession(t *testing.T) {
 		t.Fatalf("connect %+v", connect)
 	}
 
-	if len(lines[12].batch.Events) != 0 || mapper.Stats().Foreign != 1 {
-		t.Fatalf("a customer policy's event was forwarded: %+v, stats %+v", lines[12].batch, mapper.Stats())
+	// The customer's own policy: forwarded as a policy event of its own,
+	// never as a file event of DefenseClaw's.
+	if customer := one(t, lines[12]); customer.Kind != plane.KindPolicyEvent || customer.PolicyOwner != plane.PolicyOwnerCustomer ||
+		customer.Policy != "dc-tg2-file-sensitive" || customer.Target != "/etc/shadow" || customer.Path != "" ||
+		customer.Outcome != plane.OutcomeObserved || customer.KernelHookType != HookLSM || customer.Control != "" {
+		t.Fatalf("customer policy event %+v", customer)
 	}
 
 	container := one(t, lines[13])
@@ -187,9 +199,6 @@ func TestMapperMapsTheRecordedSession(t *testing.T) {
 	hookExit := one(t, lines[24])
 	if hookExit.Kind != plane.KindExit || hookExit.Hook != plane.HookVerified || hookExit.HookTools != 2 {
 		t.Fatalf("hook exit %+v", hookExit)
-	}
-	if mapper.Stats().Summarized != 2 {
-		t.Fatalf("stats %+v", mapper.Stats())
 	}
 
 	sudo := lines[25].batch.Events

@@ -145,6 +145,28 @@ const (
 	EnvBurnIn            = "DEFENSECLAW_SENSOR_TETRAGON_BURN_IN"
 	EnvEnforceAck        = "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_ACK"
 	EnvEnforceConnectors = "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_CONNECTORS"
+	EnvCustomerEvents    = "DEFENSECLAW_SENSOR_TETRAGON_CUSTOMER_EVENTS"
+)
+
+// MaxEnforceAcks bounds the digests enforce_ack may list: a release and
+// the ones a ring upgrade still runs.
+const MaxEnforceAcks = 4
+
+// Values of enterprise.tetragon.customer_events.
+const (
+	// CustomerEventsAgent forwards the events of the host's own Tetragon
+	// policies; the gateway records those below an AI agent (the default).
+	CustomerEventsAgent = "agent"
+	// CustomerEventsOff forwards none and keeps the counts and the list.
+	CustomerEventsOff = "off"
+)
+
+// Approval states of enforce_ack (kernel_status approval).
+const (
+	ApprovalNotNeeded = "not_needed"
+	ApprovalMissing   = "missing"
+	ApprovalStale     = "stale"
+	ApprovalApproved  = "approved"
 )
 
 // policyNamePattern is the only shape of name the helper may ever delete,
@@ -195,6 +217,11 @@ const (
 	ReasonNotEnrolled       = "not_enrolled"
 	ReasonGuardrailObserve  = "guardrail_observe"
 )
+
+// WarnCustomerEventsCapped:<policy> is one of the host's own Tetragon
+// policies whose events went over the helper's volume budget in the last
+// hour (the counts stay exact).
+const WarnCustomerEventsCapped = "tetragon_customer_events_capped"
 
 // Dirs locates the helper's state (survives reboots) and runtime (does not)
 // directories.
@@ -249,11 +276,16 @@ type Intent struct {
 	// BurnIn is the covered time a user needs before it is enforced: 0, or
 	// MinBurnIn..MaxBurnIn.
 	BurnIn time.Duration
-	// EnforceAck is the kernel_policy digest the administrator approved.
-	EnforceAck string
+	// EnforceAcks are the kernel_policy digests the administrator approved
+	// (enforce_ack, a string or a list of at most MaxEnforceAcks): the build
+	// enforces when its own digest is one of them.
+	EnforceAcks []string
 	// EnforceConnectors are the enrolled connectors whose effective
 	// guardrail mode is action. Only they can be anchored for a deny.
 	EnforceConnectors []string
+	// CustomerEvents is customer_events: CustomerEventsAgent (also when
+	// empty) or CustomerEventsOff.
+	CustomerEvents string
 	// Problems lists malformed drop-in values. Each one fell back to the
 	// narrower default.
 	Problems []string
@@ -261,7 +293,43 @@ type Intent struct {
 
 // Key identifies the intent for the purpose of clearing operator overrides:
 // an override lasts until the mode or the approval changes.
-func (i Intent) Key() string { return string(i.Mode) + "|" + i.EnforceAck }
+func (i Intent) Key() string { return string(i.Mode) + "|" + strings.Join(i.EnforceAcks, ",") }
+
+// Approves reports whether enforce_ack approves this build's control set.
+func (i Intent) Approves() bool {
+	for _, ack := range i.EnforceAcks {
+		if AckMatches(ack) {
+			return true
+		}
+	}
+	return false
+}
+
+// Approval is the approval state of the intent: not needed outside enforce,
+// else missing, stale (no listed digest is this build's) or approved.
+func (i Intent) Approval() string {
+	switch {
+	case i.Mode != ModeEnforce:
+		return ApprovalNotNeeded
+	case len(i.EnforceAcks) == 0:
+		return ApprovalMissing
+	case !i.Approves():
+		return ApprovalStale
+	}
+	return ApprovalApproved
+}
+
+// ForwardsCustomerEvents reports whether the events of the host's own
+// Tetragon policies are forwarded to the gateway.
+func (i Intent) ForwardsCustomerEvents() bool { return i.CustomerEvents != CustomerEventsOff }
+
+// CustomerEventsSetting is customer_events as the published state names it.
+func (i Intent) CustomerEventsSetting() string {
+	if i.ForwardsCustomerEvents() {
+		return CustomerEventsAgent
+	}
+	return CustomerEventsOff
+}
 
 // connectorName is the shape of a connector name in the drop-in; anything
 // else is dropped (it could never match an enrolled connector anyway).
@@ -276,7 +344,9 @@ type Lookup func(name string) (string, bool)
 //
 //   - a bad mode is consume (read only);
 //   - a bad burn_in is the default 168h (longer is safer);
-//   - a bad enforce_ack is empty (no approval).
+//   - a bad enforce_ack, or a list with one bad digest or more than
+//     MaxEnforceAcks, is empty (no approval);
+//   - a bad customer_events is off (nothing forwarded).
 func IntentFromLookup(lookup Lookup) Intent {
 	intent := Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn}
 	if lookup == nil {
@@ -301,11 +371,20 @@ func IntentFromLookup(lookup Lookup) Intent {
 		}
 	}
 	if value, ok := lookup(EnvEnforceAck); ok {
-		value = strings.TrimSpace(value)
-		if kernel.ValidAck(value) {
-			intent.EnforceAck = value
+		if acks, valid := parseAcks(value); valid {
+			intent.EnforceAcks = acks
 		} else {
 			*notes = append(*notes, WarnConfigInvalid+":"+EnvEnforceAck)
+		}
+	}
+	if value, ok := lookup(EnvCustomerEvents); ok {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "", CustomerEventsAgent:
+		case CustomerEventsOff:
+			intent.CustomerEvents = CustomerEventsOff
+		default:
+			intent.CustomerEvents = CustomerEventsOff
+			*notes = append(*notes, WarnConfigInvalid+":"+EnvCustomerEvents)
 		}
 	}
 	if value, ok := lookup(EnvEnforceConnectors); ok {
@@ -324,4 +403,28 @@ func IntentFromLookup(lookup Lookup) Intent {
 	}
 	sort.Strings(intent.EnforceConnectors)
 	return intent
+}
+
+// parseAcks reads the drop-in's enforce_ack: one digest, or a comma list
+// of at most MaxEnforceAcks, each in the enforce_ack shape. Duplicates
+// collapse; a one-item list is the single digest. Empty is no approval.
+func parseAcks(value string) ([]string, bool) {
+	var acks []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(value, ",") {
+		ack := strings.TrimSpace(part)
+		switch {
+		case ack == "" && strings.TrimSpace(value) == "":
+			return nil, true
+		case ack == "" || !kernel.ValidAck(ack):
+			return nil, false
+		case !seen[ack]:
+			seen[ack] = true
+			acks = append(acks, ack)
+		}
+	}
+	if len(acks) > MaxEnforceAcks {
+		return nil, false
+	}
+	return acks, true
 }

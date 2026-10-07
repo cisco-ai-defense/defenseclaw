@@ -22,7 +22,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -52,8 +51,19 @@ type MapperConfig struct {
 	BinDir string
 	// PolicyMode is the current mode of a loaded policy (enforce, monitor,
 	// monitor_only, unknown; "" when not listed). It decides whether a
-	// controls event was blocked or only would have been.
+	// controls event, or an enforcing action of a customer policy, was
+	// blocked or only would have been.
 	PolicyMode func(name string) string
+	// Owns reports whether this helper recorded loading a policy
+	// (kernelpolicy.Controller.Owns). Ownership is the record, never the
+	// name: every other policy, one named in DefenseClaw's pattern
+	// included, is the customer's. nil owns nothing.
+	Owns func(name string) bool
+	// Customer counts the events of customer policies (nil: not counted).
+	Customer *CustomerLedger
+	// CustomerEvents is AgentEvents (the default when empty) or OffEvents,
+	// which forwards no event of a customer policy and keeps the counts.
+	CustomerEvents string
 	// Now is the clock (tests).
 	Now func() time.Time
 }
@@ -68,18 +78,7 @@ type Mapper struct {
 	hookBinary string
 	self       map[string]bool
 	table      processTable
-	mu         sync.Mutex
-	stats      MapperStats
-}
-
-// MapperStats count what the mapper consumed without forwarding.
-type MapperStats struct {
-	// Foreign are kprobe and LSM events of policies DefenseClaw did not
-	// load (the customer's own). They are not forwarded.
-	Foreign int64
-	// Summarized are a verified hook's own tool processes, counted on the
-	// hook's exit instead of forwarded.
-	Summarized int64
+	gate       *customerGate
 }
 
 // NewMapper returns a mapper.
@@ -106,14 +105,8 @@ func NewMapper(config MapperConfig) *Mapper {
 			path.Join(config.BinDir, "defenseclaw-acp"):           true,
 		},
 		table: processTable{entries: map[string]*procInfo{}},
+		gate:  newCustomerGate(),
 	}
-}
-
-// Stats returns the counters.
-func (m *Mapper) Stats() MapperStats {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.stats
 }
 
 // Map maps one response.
@@ -130,10 +123,16 @@ func (m *Mapper) Map(response *pb.GetEventsResponse) plane.KernelBatch {
 		batch.Events = m.mapExit(event.ProcessExit, at)
 	case *pb.GetEventsResponse_ProcessKprobe:
 		k := event.ProcessKprobe
-		batch.Events = m.mapHook(k.GetProcess(), k.GetParent(), k.GetPolicyName(), k.GetFunctionName(), k.GetArgs(), at)
+		batch.Events = m.mapHook(hookEvent{
+			hookType: HookKprobe, process: k.GetProcess(), parent: k.GetParent(), policy: k.GetPolicyName(),
+			function: k.GetFunctionName(), args: k.GetArgs(), action: k.GetAction(), tags: k.GetTags(), message: k.GetMessage(),
+		}, at)
 	case *pb.GetEventsResponse_ProcessLsm:
 		l := event.ProcessLsm
-		batch.Events = m.mapHook(l.GetProcess(), l.GetParent(), l.GetPolicyName(), l.GetFunctionName(), l.GetArgs(), at)
+		batch.Events = m.mapHook(hookEvent{
+			hookType: HookLSM, process: l.GetProcess(), parent: l.GetParent(), policy: l.GetPolicyName(),
+			function: l.GetFunctionName(), args: l.GetArgs(), action: l.GetAction(), tags: l.GetTags(), message: l.GetMessage(),
+		}, at)
 	case *pb.GetEventsResponse_ProcessThrottle:
 		switch event.ProcessThrottle.GetType() {
 		case pb.ThrottleType_THROTTLE_START:
@@ -143,6 +142,10 @@ func (m *Mapper) Map(response *pb.GetEventsResponse) plane.KernelBatch {
 		}
 	case *pb.GetEventsResponse_RateLimitInfo:
 		batch.Dropped = int64(event.RateLimitInfo.GetNumberOfDroppedProcessEvents())
+	}
+	// Repeats of a customer policy's event whose fold window closed.
+	if folded := m.gate.sweep(at, false); len(folded) > 0 {
+		batch.Events = append(batch.Events, m.forwardCustomer(folded, at)...)
 	}
 	return batch
 }
@@ -210,9 +213,7 @@ func (m *Mapper) mapExec(exec *pb.ProcessExec, at time.Time) []plane.Event {
 	event := m.base(plane.KindExec, process, parent, at)
 	switch info.role {
 	case roleHookTool:
-		m.mu.Lock()
-		m.stats.Summarized++
-		m.mu.Unlock()
+		// Summarized: the hook's exit carries the count (HookTools).
 		return nil
 	case roleVerifiedHook:
 		event.Hook = plane.HookVerified
@@ -297,21 +298,39 @@ func privilegeAtExec(properties *pb.BinaryProperties) string {
 	return strings.Join(parts, "; ")
 }
 
-// mapHook maps a kprobe or LSM event. Only DefenseClaw's own policies are
-// forwarded; the customer's policy events are counted and dropped (their
-// actions are theirs to report, and fanotify keeps the file half until
-// DefenseClaw's observe policy takes it over).
-func (m *Mapper) mapHook(process, parent *pb.Process, policy, function string, args []*pb.KprobeArgument, at time.Time) []plane.Event {
-	family, own := OwnPolicyFamily(policy)
-	if !own || process == nil {
-		m.mu.Lock()
-		m.stats.Foreign++
-		m.mu.Unlock()
+// Hook types of a kprobe or LSM event.
+const (
+	HookKprobe = "kprobe"
+	HookLSM    = "lsm"
+)
+
+// hookEvent is a kprobe or LSM event as the mapper reads it.
+type hookEvent struct {
+	hookType         string
+	process, parent  *pb.Process
+	policy, function string
+	args             []*pb.KprobeArgument
+	action           pb.KprobeAction
+	tags             []string
+	message          string
+}
+
+// mapHook maps a kprobe or LSM event. A policy is DefenseClaw's only when
+// this helper recorded loading it (MapperConfig.Owns): its events are the
+// observe, connect and controls events below. Every other policy is the
+// customer's, and its events are mapped by mapCustomer.
+func (m *Mapper) mapHook(hook hookEvent, at time.Time) []plane.Event {
+	if hook.process == nil {
 		return nil
 	}
-	event := m.base(plane.KindFileRead, process, parent, at)
+	if m.config.Owns == nil || !m.config.Owns(hook.policy) {
+		return m.mapCustomer(hook, at)
+	}
+	family, _ := OwnPolicyFamily(hook.policy)
+	process := hook.process
+	event := m.base(plane.KindFileRead, process, hook.parent, at)
 	event.Cmdline = commandLine(process)
-	event.Policy = policy
+	event.Policy, event.PolicyOwner = hook.policy, plane.PolicyOwnerDefenseClaw
 	if info := m.table.get(process.GetExecId()); info != nil {
 		switch info.role {
 		case roleVerifiedHook:
@@ -322,11 +341,11 @@ func (m *Mapper) mapHook(process, parent *pb.Process, policy, function string, a
 		}
 	}
 
-	if remote, ok := connectPeer(args); ok {
+	if remote, ok := connectPeer(hook.args); ok {
 		event.Kind, event.Remote, event.Outcome = plane.KindConnect, remote, plane.OutcomeObserved
 		return []plane.Event{event}
 	}
-	file, write := fileArgument(function, args)
+	file, write := fileArgument(hook.function, hook.args)
 	if file == "" {
 		return nil
 	}
@@ -338,7 +357,7 @@ func (m *Mapper) mapHook(process, parent *pb.Process, policy, function string, a
 			write = true
 		}
 		event.Outcome = plane.OutcomeWouldBlock
-		if family == "controls" && m.config.PolicyMode != nil && m.config.PolicyMode(policy) == "enforce" {
+		if family == "controls" && m.config.PolicyMode != nil && m.config.PolicyMode(hook.policy) == "enforce" {
 			event.Outcome = plane.OutcomeBlocked
 		}
 	default:
@@ -348,6 +367,70 @@ func (m *Mapper) mapHook(process, parent *pb.Process, policy, function string, a
 		event.Kind = plane.KindFileWrite
 	}
 	return []plane.Event{event}
+}
+
+// mapCustomer maps an event of a customer policy (customer.go): a container
+// process's or one of DefenseClaw's own is counted and dropped, the rest is
+// typed and bounded, folded and budgeted. Only the target, the policy's tags
+// and message and the process facts are read from the event.
+func (m *Mapper) mapCustomer(hook hookEvent, at time.Time) []plane.Event {
+	policy := boundedText(hook.policy, MaxPolicyNameBytes)
+	ledger := m.config.Customer
+	ledger.seen(policy, at)
+	if containerID(hook.process) != "" {
+		// Never forwarded: a container's processes are not a host agent's.
+		ledger.count(policy, fateContainer, 1, at)
+		return nil
+	}
+	event := m.base(plane.KindPolicyEvent, hook.process, hook.parent, at)
+	if event.Self {
+		ledger.count(policy, fateSelf, 1, at)
+		return nil
+	}
+	if info := m.table.get(hook.process.GetExecId()); info != nil {
+		switch info.role {
+		case roleVerifiedHook, roleHookTool:
+			ledger.count(policy, fateSelf, 1, at)
+			return nil
+		case roleUnexpected:
+			event.Hook = plane.HookUnexpected
+		}
+	}
+	if m.config.CustomerEvents == OffEvents {
+		ledger.count(policy, fateWithheld, 1, at)
+		return nil
+	}
+	event.Cmdline = commandLine(hook.process)
+	event.Policy, event.PolicyOwner = policy, plane.PolicyOwnerCustomer
+	event.KernelHookType = hook.hookType
+	event.KernelFunction = boundedText(hook.function, MaxKernelFunctionByte)
+	event.KernelAction = customerAction(hook.action)
+	listed := ""
+	if m.config.PolicyMode != nil {
+		listed = m.config.PolicyMode(hook.policy)
+	}
+	event.PolicyMode = customerMode(listed)
+	event.Outcome = customerOutcome(event.KernelAction, event.PolicyMode)
+	event.Target = customerTarget(hook.args)
+	event.PolicyTags = customerTags(hook.tags)
+	event.PolicyMessage = boundedText(hook.message, MaxPolicyMessageBytes)
+	return m.forwardCustomer(m.gate.fold(event, at), at)
+}
+
+// forwardCustomer applies the volume budget to records of customer policies
+// and counts them, forwarded or capped, by the events they stand for.
+func (m *Mapper) forwardCustomer(records []plane.Event, at time.Time) []plane.Event {
+	out := records[:0]
+	for _, record := range records {
+		n := int64(max(record.Count, 1))
+		if !m.gate.allow(record.Policy, at) {
+			m.config.Customer.count(record.Policy, fateCapped, n, at)
+			continue
+		}
+		m.config.Customer.count(record.Policy, fateForwarded, n, at)
+		out = append(out, record)
+	}
+	return out
 }
 
 // connectPeer is the peer of a tcp_connect (sock) or socket_connect

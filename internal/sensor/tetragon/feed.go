@@ -42,6 +42,13 @@ type DialerConfig struct {
 	// last changed (kernelpolicy.Controller.PolicyMode). When it is newer
 	// than the last listing it decides; nil leaves the listing alone.
 	PolicyMode func(name string) (mode string, changed time.Time, ok bool)
+	// Owns reports a policy this helper recorded loading
+	// (kernelpolicy.Controller.Owns); every other policy is the customer's.
+	Owns func(name string) bool
+	// Customer counts the customer policies' events and keeps their latest
+	// listing; CustomerEvents is AgentEvents or OffEvents (see MapperConfig).
+	Customer       *CustomerLedger
+	CustomerEvents string
 	// MetricsInterval is how often the loss counters are scraped. Default
 	// 30 s.
 	MetricsInterval time.Duration
@@ -72,8 +79,11 @@ type feed struct {
 	cancel context.CancelFunc
 	mapper *Mapper
 
-	// own is DialerConfig.PolicyMode.
-	own func(name string) (string, time.Time, bool)
+	// own is DialerConfig.PolicyMode, owns DialerConfig.Owns and customer
+	// DialerConfig.Customer.
+	own      func(name string) (string, time.Time, bool)
+	owns     func(name string) bool
+	customer *CustomerLedger
 
 	mu        sync.Mutex
 	policies  []plane.BackendPolicy
@@ -96,8 +106,12 @@ func openFeed(ctx context.Context, config DialerConfig) (*feed, error) {
 		_ = client.Close()
 		return nil, refuse(ReasonUnavailable, err, "GetEvents: %v", err)
 	}
-	f := &feed{client: client, stream: stream, cancel: cancel, modes: map[string]string{}, own: config.PolicyMode}
-	f.mapper = NewMapper(MapperConfig{Homes: config.Homes, BinDir: config.BinDir, PolicyMode: f.policyMode})
+	f := &feed{client: client, stream: stream, cancel: cancel, modes: map[string]string{}, own: config.PolicyMode,
+		owns: config.Owns, customer: config.Customer}
+	f.mapper = NewMapper(MapperConfig{
+		Homes: config.Homes, BinDir: config.BinDir, PolicyMode: f.policyMode,
+		Owns: config.Owns, Customer: config.Customer, CustomerEvents: config.CustomerEvents,
+	})
 	f.refreshPolicies(ctx)
 	f.refreshLoss(ctx)
 	go f.poll(streamCtx, config)
@@ -170,7 +184,10 @@ func (f *feed) poll(ctx context.Context, config DialerConfig) {
 	}
 }
 
-// refreshPolicies lists the loaded policies and keeps DefenseClaw's own.
+// refreshPolicies lists the loaded policies: the modes of all of them (an
+// event's outcome reads them), DefenseClaw's own for the backend, and the
+// customer's for the ledger. Listing is the only call this session makes
+// about a policy: it never adds, changes or deletes one.
 func (f *feed) refreshPolicies(ctx context.Context) {
 	listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -179,23 +196,27 @@ func (f *feed) refreshPolicies(ctx context.Context) {
 		return
 	}
 	var own []plane.BackendPolicy
-	modes := map[string]string{}
+	var customer []CustomerListing
+	modes := make(map[string]string, len(statuses))
 	for _, status := range statuses {
-		if _, ok := OwnPolicyFamily(status.GetName()); !ok {
+		name := status.GetName()
+		modes[name] = PolicyMode(status.GetMode())
+		if f.owns == nil || !f.owns(name) {
+			customer = append(customer, customerListing(status))
 			continue
 		}
-		policy := plane.BackendPolicy{
-			Name:  status.GetName(),
-			Mode:  PolicyMode(status.GetMode()),
+		own = append(own, plane.BackendPolicy{
+			Name:  name,
+			Mode:  modes[name],
 			State: PolicyState(status.GetState()),
 			Error: status.GetError(),
-		}
-		own = append(own, policy)
-		modes[policy.Name] = policy.Mode
+		})
 	}
 	sort.Slice(own, func(i, j int) bool { return own[i].Name < own[j].Name })
+	now := time.Now()
+	f.customer.setListed(customer, now)
 	f.mu.Lock()
-	f.policies, f.modes, f.listedAt = own, modes, time.Now()
+	f.policies, f.modes, f.listedAt = own, modes, now
 	f.mu.Unlock()
 }
 
