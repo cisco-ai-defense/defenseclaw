@@ -32,10 +32,11 @@ import (
 
 // The protocol is deliberately tiny and closed.
 //
-// A client may ask for exactly three things and may not describe any of
-// them: the process table, the connection table, or the event stream. There
-// is no path, no filter, no glob, no pid, and no command anywhere in a
-// request. That is the whole security argument for putting a privileged
+// A client may ask for a fixed handful of things and may not describe any
+// of them: the process table, the connection table, the event stream, DNS
+// answers, liveness, and the kernel-policy status. There is no path, no
+// filter, no glob, no pid, and no command anywhere in a request. That is
+// the whole security argument for putting a privileged
 // process on the other end -- the set of things it will ever do is fixed at
 // compile time, so a compromised client gains no reach it did not already
 // have.
@@ -54,6 +55,11 @@ const (
 	OpDNS = "dns"
 	// OpHealth is a liveness probe that reads nothing.
 	OpHealth = "health"
+	// OpKernelStatus asks what the helper's kernel-policy reconciler has
+	// applied (managed Linux with Tetragon): a read of the helper's own
+	// state, fieldless like every other request. The gateway never sends
+	// policy; it only learns what is running.
+	OpKernelStatus = "kernel_status"
 )
 
 // protocolVersion is bumped on any incompatible frame change. A mismatch is
@@ -91,6 +97,89 @@ type ProcessTable struct {
 type ConnectionTable struct {
 	Rows         []wireConnection `json:"rows"`
 	Unattributed int              `json:"unattributed"`
+}
+
+// KernelStatus is the OpKernelStatus reply. It carries policy names, modes,
+// uids and counters, and nothing a user did: no path, no command line. The
+// helper's kernel-policy reconciler fills it from its own state; a helper
+// without one answers Available false.
+type KernelStatus struct {
+	// Available is false when this helper runs no kernel-policy reconciler
+	// (mode off or consume, a platform without Tetragon, or no reconciler
+	// in this build); Reason then says which.
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	// Mode is the effective enterprise.tetragon mode the helper runs.
+	Mode string `json:"mode,omitempty"`
+	// KernelPolicy is the digest of the built-in control set
+	// (sha256:<12 hex>), the value enforce_ack approves.
+	KernelPolicy string `json:"kernel_policy,omitempty"`
+	// Applied is true when the last reconcile pass left Tetragon with the
+	// policies the intent and the caps call for.
+	Applied bool `json:"applied"`
+	// Tetragon describes the agent as the reconciler last saw it.
+	Tetragon *KernelTetragon `json:"tetragon,omitempty"`
+	// Policies are the DefenseClaw policies the helper recorded or found.
+	Policies []KernelPolicyStatus `json:"policies,omitempty"`
+	// Users is the per-uid enforcement scope and burn-in.
+	Users []KernelUserStatus `json:"users,omitempty"`
+	// Counters are named totals (would_block, blocked, roots_over_limit,
+	// ...).
+	Counters map[string]int64 `json:"counters,omitempty"`
+	// Pause is the break-glass pause, when one is in force.
+	Pause *KernelPause `json:"pause,omitempty"`
+	// Overrides are the policy families an operator moved to monitor or
+	// deleted (kernel_policy_operator_override).
+	Overrides []string `json:"overrides,omitempty"`
+	// Warnings are the reason codes in force (tetragon_*, kernel_*).
+	Warnings []string `json:"warnings,omitempty"`
+	// UpdatedUnixNano is when the reconciler last wrote its state.
+	UpdatedUnixNano int64 `json:"updated_unix_ns,omitempty"`
+}
+
+// KernelTetragon is the agent the reconciler talks to.
+type KernelTetragon struct {
+	Version   string `json:"version,omitempty"`
+	Socket    string `json:"socket,omitempty"`
+	PID       int    `json:"pid,omitempty"`
+	Connected bool   `json:"connected"`
+	// KeepSensorsOnExit and LSM are the GetInfo facts enforcement needs;
+	// nil when unknown (Tetragon 1.6 has no GetInfo).
+	KeepSensorsOnExit *bool `json:"keep_sensors_on_exit,omitempty"`
+	LSM               *bool `json:"lsm,omitempty"`
+}
+
+// KernelPolicyStatus is one DefenseClaw policy.
+type KernelPolicyStatus struct {
+	Name   string `json:"name"`
+	Family string `json:"family,omitempty"`
+	Mode   string `json:"mode,omitempty"`
+	State  string `json:"state,omitempty"`
+	Error  string `json:"error,omitempty"`
+	// Recorded is true when the helper's own state lists the name.
+	Recorded bool `json:"recorded"`
+}
+
+// KernelUserStatus is one enrolled uid.
+type KernelUserStatus struct {
+	UID int `json:"uid"`
+	// Mode is enforce, burnin, monitor or observe_only.
+	Mode           string           `json:"mode,omitempty"`
+	Ready          bool             `json:"ready"`
+	CoveredSeconds int64            `json:"covered_seconds,omitempty"`
+	BurnInSeconds  int64            `json:"burn_in_seconds,omitempty"`
+	Hits           map[string]int64 `json:"hits,omitempty"`
+	Connectors     []string         `json:"connectors,omitempty"`
+	Reason         string           `json:"reason,omitempty"`
+}
+
+// KernelPause is the break-glass pause.
+type KernelPause struct {
+	UntilUnixNano int64  `json:"until_unix_ns,omitempty"`
+	UntilReboot   bool   `json:"until_reboot,omitempty"`
+	SetByUID      int    `json:"set_by_uid"`
+	SetAtUnixNano int64  `json:"set_at_unix_ns,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
 
 // ErrVersionMismatch is returned when the peer speaks a different protocol.
