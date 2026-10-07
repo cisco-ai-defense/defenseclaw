@@ -25,6 +25,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +60,11 @@ const (
 
 	// maxToolJoins bounds the joins kept for tool-call processes.
 	maxToolJoins = 8192
+
+	// maxKernelConnects bounds the kernel connects kept between two polls;
+	// the rest is counted. The connect policy sends at most one event a
+	// minute per process and peer.
+	maxKernelConnects = 4096
 )
 
 // hostPlane consumes the kernel event stream, attributes each observation to
@@ -89,6 +96,10 @@ type hostPlane struct {
 	// kernelEvents are the kernel control outcomes since the last drain.
 	kernelEvents  []KernelEvent
 	kernelDropped int64
+	// connects are the kernel tcp_connect events since the last drain (the
+	// Tetragon backend in observe and enforce), one per process and peer.
+	connects        map[kernelConnectKey]kernelConnect
+	connectsDropped int64
 	// gated counts observations discarded for having no agent above them. It
 	// is the denominator that makes the lineage gate auditable rather than
 	// invisible.
@@ -108,6 +119,22 @@ type hostPlane struct {
 	containerEvents atomic.Int64
 	ownEvents       atomic.Int64
 	hookUnexpected  atomic.Int64
+}
+
+// kernelConnect is a process's connection to a peer as a kernel connect
+// event reported it, with what the event said about the process.
+type kernelConnect struct {
+	PID     int
+	Name    string
+	Cmdline string
+	User    string
+	IP      net.IP
+	Port    int
+}
+
+type kernelConnectKey struct {
+	pid  int
+	peer string
 }
 
 // sessionMeta is what one agent session's records say beyond the score.
@@ -202,6 +229,12 @@ func (h *hostPlane) handle(event plane.Event) {
 		// lineage, so what they start is attributed through them, and are
 		// excluded from scoring. Counted, never hidden.
 		h.ownEvents.Add(1)
+		return
+	}
+	if event.Kind == plane.KindConnect {
+		// Plane B's evidence, not a host-plane tactic: the next poll scores
+		// it as a connection of its process.
+		h.recordConnect(event)
 		return
 	}
 
@@ -363,6 +396,72 @@ func (h *hostPlane) recordKernelEvent(event plane.Event, lineage agentchain.Line
 }
 
 // drainKernelEvents hands over the kernel outcomes since the last drain.
+// recordConnect keeps one kernel connect for the next poll.
+func (h *hostPlane) recordConnect(event plane.Event) {
+	host, portText, err := net.SplitHostPort(event.Remote)
+	if err != nil || event.PID <= 0 {
+		return
+	}
+	ip := net.ParseIP(host)
+	port, err := strconv.Atoi(portText)
+	if ip == nil || err != nil {
+		return
+	}
+	key := kernelConnectKey{pid: event.PID, peer: event.Remote}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, seen := h.connects[key]; seen {
+		return
+	}
+	if len(h.connects) >= maxKernelConnects {
+		h.connectsDropped++
+		return
+	}
+	if h.connects == nil {
+		h.connects = make(map[kernelConnectKey]kernelConnect)
+	}
+	h.connects[key] = kernelConnect{PID: event.PID, Name: event.Name, Cmdline: event.Cmdline, User: event.User, IP: ip, Port: port}
+}
+
+// drainConnects returns the kernel connects since the last drain, in pid
+// and peer order, and how many did not fit.
+func (h *hostPlane) drainConnects() ([]kernelConnect, int64) {
+	h.mu.Lock()
+	connects, dropped := h.connects, h.connectsDropped
+	h.connects, h.connectsDropped = nil, 0
+	h.mu.Unlock()
+	keys := make([]kernelConnectKey, 0, len(connects))
+	for key := range connects {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].pid != keys[j].pid {
+			return keys[i].pid < keys[j].pid
+		}
+		return keys[i].peer < keys[j].peer
+	})
+	out := make([]kernelConnect, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, connects[key])
+	}
+	return out, dropped
+}
+
+// coversConnects reports whether the running source delivers kernel
+// connects.
+func (h *hostPlane) coversConnects() bool {
+	_, _, running, coverage := h.stats()
+	if !running {
+		return false
+	}
+	for _, kind := range coverage.Kinds {
+		if kind == plane.KindConnect {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *hostPlane) drainKernelEvents() ([]KernelEvent, int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

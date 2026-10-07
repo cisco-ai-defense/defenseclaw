@@ -27,7 +27,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -489,6 +491,19 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 	processes, processSkipped, processErr := s.options.Acquirer.Processes(ctx)
 	connections, unattributed, connectionErr := s.options.Acquirer.Connections(ctx)
+	processesObserved, connectionsObserved := len(processes), len(connections)
+
+	// Kernel connects since the last poll (Tetragon, observe and enforce) are
+	// connections of their processes: a connect that opened and closed
+	// between two reads of the connection table still counts, and a process
+	// that exited since is scored from what its events said about it.
+	var exited []procprobe.Process
+	var connectsDropped int64
+	if s.hostPlane != nil {
+		var connects []kernelConnect
+		connects, connectsDropped = s.hostPlane.drainConnects()
+		connections, exited = mergeKernelConnects(processes, connections, connects)
+	}
 
 	byPID := make(map[int][]netprobe.Connection, len(processes))
 	for _, connection := range connections {
@@ -510,6 +525,8 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	}
 	s.tracker.ObserveProcessTable(rows)
 	s.tracker.Reap()
+	// Not in the process table the tracker learns from: they are gone.
+	processes = append(processes, exited...)
 
 	inventorySnapshot := correlate.Snapshot{}
 	if s.options.Config.CorrelationEnabled() && s.options.Inventory != nil {
@@ -602,9 +619,10 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		ScannedAt:               now,
 		Findings:                findings,
 		Planes:                  s.planeHealth(now, processErr == nil, connectionErr == nil),
-		ProcessesObserved:       len(processes),
+		ProcessesObserved:       processesObserved,
 		ProcessesSkipped:        processSkipped,
-		ConnectionsObserved:     len(connections),
+		ConnectionsObserved:     connectionsObserved,
+		KernelConnectsDropped:   connectsDropped,
 		ConnectionsUnattributed: unattributed,
 	}
 	if s.hostPlane != nil {
@@ -746,6 +764,9 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 				// is reported, never implied.
 				limits = append(limits, unprivilegedEgressLimit)
 			}
+			if s.hostPlane != nil && s.hostPlane.coversConnects() {
+				entry.Mechanism += " plus kernel connects (Tetragon)"
+			}
 			entry.Mechanism = s.egressMechanism(entry.Mechanism)
 			if reason := s.dnsCaptureStatus(); reason != "" {
 				// The plane still runs on reverse DNS; naming is just less
@@ -787,6 +808,42 @@ func planeIdleReason(health PlaneHealth) string {
 		return reason
 	}
 	return "not started"
+}
+
+// mergeKernelConnects adds kernel connects to the connection table, once
+// per process and peer, and returns what the events said about the
+// processes that are no longer in the process table.
+func mergeKernelConnects(processes []procprobe.Process, connections []netprobe.Connection, connects []kernelConnect) ([]netprobe.Connection, []procprobe.Process) {
+	if len(connects) == 0 {
+		return connections, nil
+	}
+	peerOf := func(pid int, ip net.IP, port int) kernelConnectKey {
+		return kernelConnectKey{pid: pid, peer: net.JoinHostPort(ip.String(), strconv.Itoa(port))}
+	}
+	seen := make(map[kernelConnectKey]bool, len(connections))
+	for _, connection := range connections {
+		if connection.PID > 0 && connection.RemoteIP != nil {
+			seen[peerOf(connection.PID, connection.RemoteIP, connection.RemotePort)] = true
+		}
+	}
+	live := make(map[int]bool, len(processes))
+	for _, process := range processes {
+		live[process.PID] = true
+	}
+	var exited []procprobe.Process
+	for _, connect := range connects {
+		if key := peerOf(connect.PID, connect.IP, connect.Port); !seen[key] {
+			seen[key] = true
+			connections = append(connections, netprobe.Connection{
+				PID: connect.PID, RemoteIP: connect.IP, RemotePort: connect.Port, State: netprobe.StateEstablished,
+			})
+		}
+		if !live[connect.PID] {
+			live[connect.PID] = true
+			exited = append(exited, procprobe.Process{PID: connect.PID, Name: connect.Name, Cmdline: connect.Cmdline, User: connect.User})
+		}
+	}
+	return connections, exited
 }
 
 // egressMechanism names how plane B names peers, so status never claims a

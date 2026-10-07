@@ -261,6 +261,10 @@ type Snapshot struct {
 	// difference between a quiet host and a blind sensor.
 	ConnectionsObserved     int
 	ConnectionsUnattributed int
+	// KernelConnectsDropped counts the kernel connects (Tetragon, observe
+	// and enforce) since the previous poll that did not fit the per-poll
+	// bound; the ones that did are scored as connections of their process.
+	KernelConnectsDropped int64
 	// HostPlaneObservations is how many kernel observations the host plane
 	// classified into a tactic, and HostPlaneGated how many it discarded for
 	// having no AI agent above them.
