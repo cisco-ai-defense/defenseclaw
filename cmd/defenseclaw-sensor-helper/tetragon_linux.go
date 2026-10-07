@@ -21,8 +21,11 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
 )
 
@@ -65,7 +68,7 @@ func kernelPolicyStart(ctx context.Context, logger *slog.Logger, intent kernelpo
 		Logger: logger,
 		Dial:   dial,
 		Enrollment: func() (kernelpolicy.Enrollment, error) {
-			return kernelpolicy.LoadEnrollment(manifestPath, validateManifestTrust, lookupUser)
+			return loadKernelEnrollment(manifestPath, logger)
 		},
 		ExtraPrefixes: agentPrefixes(os.LookupEnv),
 	})
@@ -108,6 +111,83 @@ func lookupUser(name string) (int, string, error) {
 		return 0, "", err
 	}
 	return uid, account.HomeDir, nil
+}
+
+// loadKernelEnrollment adds eligible accounts covered by vendor machine
+// policy. The enumerator gives those users no targets.yaml row in the
+// default managed configuration; without this input their CLI agents would
+// have no observe paths, burn-in or kernel controls. The descriptor is the
+// lifecycle's record of hooks actually published, not merely intended.
+func loadKernelEnrollment(manifestPath string, logger *slog.Logger) (kernelpolicy.Enrollment, error) {
+	enrolled, err := kernelpolicy.LoadEnrollment(manifestPath, validateManifestTrust, lookupUser)
+	if err != nil {
+		return kernelpolicy.Enrollment{}, err
+	}
+	descriptorPath := filepath.Join(filepath.Dir(filepath.Dir(filepath.Clean(manifestPath))), "managed-runtime.json")
+	descriptor, err := managed.LoadRuntimeDescriptor(descriptorPath)
+	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
+		return enrolled, nil
+	}
+	if err != nil {
+		logger.Warn("machine-policy descriptor unavailable; using manifest enrollment only", "error", err)
+		return enrolled, nil
+	}
+	if len(descriptor.MachinePolicyConnectors) == 0 {
+		return enrolled, nil
+	}
+	accounts, err := enterprisehooks.LoadUnixEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifestPath))
+	if err != nil {
+		logger.Warn("eligible accounts unavailable; using manifest enrollment only", "error", err)
+		return enrolled, nil
+	}
+	return mergeMachinePolicyEnrollment(enrolled, accounts, descriptor.MachinePolicyConnectors, lookupUser), nil
+}
+
+// mergeMachinePolicyEnrollment admits only current account identities and
+// command-line connectors. A stale uid/home record or an IDE surface never
+// becomes a kernel anchor. A manifest row takes precedence for its uid.
+func mergeMachinePolicyEnrollment(enrolled kernelpolicy.Enrollment, accounts []enterprisehooks.UnixEligibleAccount,
+	connectors []string, lookup kernelpolicy.UserLookup) kernelpolicy.Enrollment {
+	if lookup == nil {
+		return enrolled
+	}
+	seen := map[kernelpolicy.Enrolled]bool{}
+	for _, row := range enrolled.Rows {
+		seen[row] = true
+	}
+	for _, account := range accounts {
+		if account.UID <= 0 || account.User == "" || !filepath.IsAbs(account.Home) || account.Home == "/" {
+			continue
+		}
+		uid, home, err := lookup(account.User)
+		if err != nil || uid != account.UID || filepath.Clean(home) != filepath.Clean(account.Home) {
+			continue
+		}
+		if enrolled.Has(uid) && filepath.Clean(enrolled.HomeOf(uid)) != filepath.Clean(home) {
+			continue
+		}
+		for _, connector := range connectors {
+			if !kernelpolicy.IsCLIConnector(connector) {
+				continue
+			}
+			row := kernelpolicy.Enrolled{User: account.User, UID: uid, Home: filepath.Clean(home), Connector: connector}
+			if !seen[row] {
+				seen[row] = true
+				enrolled.Rows = append(enrolled.Rows, row)
+			}
+		}
+	}
+	sort.Slice(enrolled.Rows, func(i, j int) bool {
+		a, b := enrolled.Rows[i], enrolled.Rows[j]
+		if a.UID != b.UID {
+			return a.UID < b.UID
+		}
+		if a.Connector != b.Connector {
+			return a.Connector < b.Connector
+		}
+		return a.Home < b.Home
+	})
+	return enrolled
 }
 
 // kernelPolicyCleanup is the body of `--tetragon-cleanup`: the
