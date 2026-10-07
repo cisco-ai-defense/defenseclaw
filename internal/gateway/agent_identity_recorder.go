@@ -212,7 +212,7 @@ func (r *agentIdentityRecorder) store() *inventory.InventoryStore {
 	if dir == "" {
 		return nil
 	}
-	store, err := inventory.NewInventoryStore(filepath.Join(dir, "inventory.db"))
+	store, err := inventory.NewInventoryStoreForProfile(filepath.Join(dir, "inventory.db"), ManagedEnterpriseActive())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] agent identities not persisted: %v\n", err)
 		return nil

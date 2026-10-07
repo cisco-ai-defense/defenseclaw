@@ -66,6 +66,9 @@ type InventoryStore struct {
 	// closing the database pool more than once.
 	closeOnce sync.Once
 	closeErr  error
+	// legacySchema keeps the file on secureClientInventorySchema and makes
+	// the store write no table or column of a later schema.
+	legacySchema bool
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -125,6 +128,18 @@ const inventoryPragmas = "?_pragma=auto_vacuum(INCREMENTAL)" +
 // hashes and, when StoreRawLocalPaths is enabled, raw filesystem
 // paths.
 func NewInventoryStore(dbPath string) (*InventoryStore, error) {
+	return NewInventoryStoreForProfile(dbPath, false)
+}
+
+// secureClientInventorySchema is the inventory.db schema of 1.0.0. The Secure
+// Client profile keeps it (issue #1092): its gateway does not migrate the
+// file further and writes no later table or column, so 1.0.0 still reads it
+// after a rollback. A store opened for any other profile migrates it then.
+const secureClientInventorySchema = 3
+
+// NewInventoryStoreForProfile is NewInventoryStore for the deployment
+// profile: a Secure Client store stays on secureClientInventorySchema.
+func NewInventoryStoreForProfile(dbPath string, secureClient bool) (*InventoryStore, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, errors.New("inventory store: db path is required")
 	}
@@ -142,7 +157,7 @@ func NewInventoryStore(dbPath string) (*InventoryStore, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-	st := &InventoryStore{db: db, path: dbPath}
+	st := &InventoryStore{db: db, path: dbPath, legacySchema: secureClient}
 	if err := st.init(); err != nil {
 		st.Close() //nolint:errcheck
 		return nil, err
@@ -548,7 +563,11 @@ func (s *InventoryStore) init() error {
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&current); err != nil {
 		return fmt.Errorf("inventory store: read schema version: %w", err)
 	}
-	for i := current; i < len(inventoryMigrations); i++ {
+	target := len(inventoryMigrations)
+	if s.legacySchema {
+		target = secureClientInventorySchema
+	}
+	for i := current; i < target; i++ {
 		ver := i + 1
 		m := inventoryMigrations[i]
 		if err := s.applyMigration(ver, m); err != nil {
@@ -682,13 +701,7 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			lastActive = sql.NullTime{Time: *sig.LastActiveAt, Valid: true}
 		}
 
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO ai_signals
-			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
-			 category, detector, state, confidence,
-			 component_ecosystem, component_name, component_framework, component_version,
-			 last_seen, last_active_at, evidence_json, runtime_json, model_json,
-			 user_id, user_name)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		args := []any{
 			report.Summary.ScanID,
 			sig.Fingerprint,
 			sig.SignalID,
@@ -706,9 +719,24 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			string(evidenceJSON),
 			nullStringFromBytes(runtimeJSON),
 			nullStringFromBytes(modelJSON),
-			nullString(sig.UserID),
-			nullString(sig.UserName),
-		); err != nil {
+		}
+		insert := `INSERT OR REPLACE INTO ai_signals
+			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
+			 category, detector, state, confidence,
+			 component_ecosystem, component_name, component_framework, component_version,
+			 last_seen, last_active_at, evidence_json, runtime_json, model_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		if !s.legacySchema {
+			insert = `INSERT OR REPLACE INTO ai_signals
+			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
+			 category, detector, state, confidence,
+			 component_ecosystem, component_name, component_framework, component_version,
+			 last_seen, last_active_at, evidence_json, runtime_json, model_json,
+			 user_id, user_name)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			args = append(args, nullString(sig.UserID), nullString(sig.UserName))
+		}
+		if _, err := tx.ExecContext(ctx, insert, args...); err != nil {
 			return fmt.Errorf("inventory store: insert signal %s: %w", sig.SignalID, err)
 		}
 
@@ -751,7 +779,7 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 		}
 	}
 
-	if inv := report.IDEInventory; inv != nil && inv.persist && !inv.Carried {
+	if inv := report.IDEInventory; inv != nil && inv.persist && !inv.Carried && !s.legacySchema {
 		if err := recordIDEInventory(ctx, tx, report.Summary.ScanID, inv); err != nil {
 			return err
 		}
@@ -805,7 +833,7 @@ func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDE
 // LatestIDEPlugins returns the plugins of the most recently recorded IDE
 // inventory.
 func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, error) {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || s.legacySchema {
 		return nil, nil
 	}
 	rows, err := s.queryDB(ctx, "inventory_ide_plugins", `

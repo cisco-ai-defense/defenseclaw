@@ -109,7 +109,7 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 	if s == nil || s.db == nil {
 		return errors.New("inventory store: not open")
 	}
-	if len(batch) == 0 {
+	if len(batch) == 0 || s.legacySchema {
 		return nil
 	}
 	return s.runInTx(ctx, "agent_identities.upsert", func(tx *sql.Tx) error {
@@ -180,6 +180,9 @@ func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff 
 	if s == nil || s.db == nil {
 		return 0, errors.New("inventory store: not open")
 	}
+	if s.legacySchema {
+		return 0, nil
+	}
 	var removed int64
 	err := s.runInTx(ctx, "agent_identities.prune_sessions", func(tx *sql.Tx) error {
 		if err := ensureAgentIdentitiesTable(ctx, tx); err != nil {
@@ -200,6 +203,9 @@ func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff 
 func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentIdentityFilter) ([]AgentIdentityRecord, int, error) {
 	if s == nil || s.db == nil {
 		return nil, 0, errors.New("inventory store: not open")
+	}
+	if s.legacySchema {
+		return nil, 0, nil
 	}
 	if err := ensureAgentIdentitiesTable(ctx, s.db); err != nil {
 		return nil, 0, err
