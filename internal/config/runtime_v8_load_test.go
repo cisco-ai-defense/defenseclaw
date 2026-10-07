@@ -322,14 +322,14 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 		}
 	}
 
-	// The inspection loader decodes without the YAML entrypoint, so it reaches
+	// The inspection decoder runs without the YAML entrypoint, so it reaches
 	// the runtime gate directly. The gate must report the declared version, not
 	// the v7 stamp the compatibility decoder applies to older sources.
-	_, err := ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 5\n"))
+	_, err := loadConfigSource("config.yaml", false, []byte("config_version: 5\n"), true, false, true, false)
 	if err == nil || !strings.Contains(err.Error(), "config_version 5 is older than 8") {
 		t.Fatalf("pre-v8 inspection error = %v, want declared-version migrate guidance", err)
 	}
-	_, err = ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 9\n"))
+	_, err = loadConfigSource("config.yaml", false, []byte("config_version: 9\n"), true, false, true, false)
 	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 9)") {
 		t.Fatalf("newer inspection error = %v, want newer-release guidance", err)
 	}

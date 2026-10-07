@@ -846,7 +846,8 @@ def _schema_validator() -> Any:
         schema_path = root / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json"
         with schema_path.open(encoding="utf-8") as stream:
             schema = json.load(stream)
-    Draft202012Validator.check_schema(schema)
+    # The packaged schema is static data: test_packaged_v8_schema_is_a_valid_draft_2020_12_schema
+    # checks it, so a process does not spend half a second on it per run (GAP-0199).
     _assert_schema_parity(schema)
     go_anchored = validators.extend(Draft202012Validator, {"pattern": _go_pattern_keyword})
     return go_anchored(schema)
