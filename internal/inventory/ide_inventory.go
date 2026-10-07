@@ -423,6 +423,15 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 	if s.ideBaseline == nil {
 		s.ideBaseline = s.loadIDEBaseline()
 	}
+	if inv.Scope == config.IDEInventoryAIOnly {
+		// A row ai_only no longer collects leaves the baseline silently: a
+		// removal record would export the very plugin ai_only withholds.
+		for fp, prev := range s.ideBaseline {
+			if !prev.IsAI {
+				delete(s.ideBaseline, fp)
+			}
+		}
+	}
 	partial := map[string]bool{}
 	for _, inst := range inv.Installations {
 		if inst.Partial {

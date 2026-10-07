@@ -108,13 +108,15 @@ func TestIDEInventoryAttributesPluginsToProfileOwners(t *testing.T) {
 		t.Fatalf("ide_plugins rows = %d, %v; want the two full scans only (3 + 2)", rows, err)
 	}
 
-	// ai_only keeps only the AI plugins.
+	// ai_only keeps only the AI plugins, and the non-AI rows it stops
+	// collecting are not reported removed.
 	svc.opts.IDEInventory = config.IDEInventoryAIOnly
-	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
+	report, err = svc.runScan(context.Background(), true, "test")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.IDEInventory(); len(got.Plugins) != 1 || got.Plugins[0].PluginID != "github.copilot" {
-		t.Fatalf("ai_only = %+v", got.Plugins)
+	if got := svc.IDEInventory(); len(got.Plugins) != 1 || got.Plugins[0].PluginID != "github.copilot" || len(report.IDEInventory.Removed) != 0 {
+		t.Fatalf("ai_only = %+v, removed %+v", got.Plugins, report.IDEInventory.Removed)
 	}
 }
 
