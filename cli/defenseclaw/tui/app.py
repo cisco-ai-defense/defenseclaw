@@ -15368,7 +15368,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # the operator changed any setting that triggers a
                 # restart (e.g. toggling redaction off via setup) the
                 # whole TUI tore down.
-                self.setup_model.mark_restart_started(snapshot.started_at)
+                if self.setup_model.mark_restart_started(snapshot.started_at) and self.status_text.startswith(
+                    "Config changes saved"
+                ):
+                    # The status line still asked for the restart that just
+                    # happened (GAP-0342).
+                    self._set_status("Gateway restarted; it applies the saved config changes.")
             except (AttributeError, TypeError):
                 # Older SetupPanelModel without this method (or with a
                 # different signature) — fall back to clearing the

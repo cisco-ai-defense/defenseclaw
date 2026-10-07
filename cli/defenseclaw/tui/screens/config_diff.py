@@ -81,6 +81,8 @@ class ConfigDiffModalModel:
                 lines.append(f"... {len(self.entries) - index} more changes")
                 break
             key = f"{entry.key} (masked)" if entry.secret else entry.key
+            if entry.disk_changed:
+                key += "  (changed on disk; saving replaces it)"
             lines.append(key)
             lines.append(f"  before: {_truncate(entry.before, value_width)}")
             lines.append(f"  after:  {_truncate(entry.after, value_width)}")
