@@ -173,17 +173,15 @@ type enterpriseRuntimeBackend struct {
 	// policies and their event counts: DefenseClaw reads their events and
 	// never changes them.
 	CustomerPolicies []struct {
-		Name      string `json:"name"`
-		Mode      string `json:"mode,omitempty"`
-		State     string `json:"state,omitempty"`
-		Seen      int64  `json:"seen"`
-		Forwarded int64  `json:"forwarded"`
-		Dropped   int64  `json:"dropped"`
+		Name  string `json:"name"`
+		Mode  string `json:"mode,omitempty"`
+		State string `json:"state,omitempty"`
 	} `json:"customer_policies,omitempty"`
+	// Attributed are the events the gateway recorded below an AI agent;
+	// Capped the ones the helper did not forward over the volume budget.
 	CustomerEvents *struct {
-		Seen      int64 `json:"seen"`
-		Forwarded int64 `json:"forwarded"`
-		Dropped   int64 `json:"dropped"`
+		Attributed int64 `json:"attributed"`
+		Capped     int64 `json:"capped"`
 	} `json:"customer_events,omitempty"`
 }
 
@@ -291,12 +289,12 @@ func (b *enterpriseRuntimeBackend) lines() []string {
 		text := fmt.Sprintf("%d loaded (%d enforcing)", len(b.CustomerPolicies), enforcing)
 		if events := b.CustomerEvents; events != nil {
 			noun := "events"
-			if events.Forwarded == 1 {
+			if events.Attributed == 1 {
 				noun = "event"
 			}
-			text += fmt.Sprintf("; %d agent %s forwarded", events.Forwarded, noun)
-			if events.Dropped > 0 {
-				text += fmt.Sprintf(", %d over the budget", events.Dropped)
+			text += fmt.Sprintf("; %d agent %s forwarded", events.Attributed, noun)
+			if events.Capped > 0 {
+				text += fmt.Sprintf(", %d over the budget", events.Capped)
 			}
 		}
 		out = append(out, "your Tetragon policies: "+text+" (DefenseClaw never changes them)")

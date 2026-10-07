@@ -23,15 +23,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 )
 
-// A kernel denial is invisible to the agent: the tool sees only EPERM
-// ("Operation not permitted"), whether a DefenseClaw kernel control or the
-// organization's own Tetragon policy refused the open. So, on a managed
-// host, the post-tool hook answer of the agent's session says what was
-// blocked, under whose policy, not to retry it, and whom to ask: the same
-// pattern as the sandbox egress refusals (sandbox_egress_refusals.go). Only
-// denials (never a would-block) of the session's own tool calls, or of its
-// agent, are told, each once, at most kernelNoticeMax per answer; a block
-// or ask answer keeps its own text and the denials wait for the next one.
+// A kernel denial is invisible to the agent: the tool sees only an error (a
+// DefenseClaw kernel control returns EPERM, "Operation not permitted"; the
+// organization's own Tetragon policy may return another error or stop the
+// process). So, on a managed host, the post-tool hook answer of the agent's
+// session says what was blocked, under whose policy, not to retry it, and
+// whom to ask: the same pattern as the sandbox egress refusals
+// (sandbox_egress_refusals.go). Only denials (never a would-block) of the
+// calling user's own session tool calls, or of its agent, are told, each
+// once, at most kernelNoticeMax per answer; a block or ask answer keeps its
+// own text and the denials wait for the next one.
 
 // postToolContextEvents lists, per connector, the post-tool hook events
 // whose answer carries context the model reads: Claude Code's and Codex's
@@ -127,12 +128,15 @@ func (a *APIServer) safeAddKernelBlockNotice(
 	if service == nil {
 		return resp
 	}
-	return addKernelBlockNotice(ctx, profile, connName(connectorName), req, rawBody, payload, resp, service, peer.PID,
+	return addKernelBlockNotice(ctx, profile, connName(connectorName), req, rawBody, payload, resp, service, peer.PID, peer.UID,
 		defaultKernelNotices, time.Now())
 }
 
 // addKernelBlockNotice adds the session's untold kernel denials to a
-// post-tool hook answer and re-renders the harness output around it.
+// post-tool hook answer and re-renders the harness output around it. Only
+// denials of processes running as the hook's caller (peerUID, from
+// SO_PEERCRED) are told: a session id in the payload is the caller's word
+// and never reaches another user's denials.
 func addKernelBlockNotice(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -142,7 +146,7 @@ func addKernelBlockNotice(
 	payload map[string]interface{},
 	resp agentHookResponse,
 	source kernelBlocksSource,
-	peerPID int,
+	peerPID, peerUID int,
 	ledger *kernelNoticeLedger,
 	now time.Time,
 ) agentHookResponse {
@@ -157,6 +161,9 @@ func addKernelBlockNotice(
 	root, rootKnown := source.SessionRootOf(peerPID)
 	var mine []sensor.KernelBlock
 	for _, block := range source.KernelBlocks(now.Add(-kernelNoticeWindow)) {
+		if block.UID == nil || *block.UID != peerUID {
+			continue
+		}
 		sameSession := block.SessionID != "" && block.SessionID == req.SessionID
 		sameAgent := rootKnown && (block.SessionRootPID == root || block.RootPID == root)
 		if sameSession || sameAgent {
@@ -216,7 +223,18 @@ func kernelBlockSentence(block sensor.KernelBlock, earlier bool) string {
 	default:
 		sentence = fmt.Sprintf("DefenseClaw blocked %s from opening %s under your organization's policy (a kernel control).", process, target)
 	}
-	sentence += ` The tool saw "Operation not permitted". Do not retry it. Contact your administrator if you need it allowed.`
+	// What the tool saw: a DefenseClaw control always returns EPERM; a
+	// customer policy's Sigkill stops the process, and its Override can
+	// return any error.
+	switch {
+	case block.Owner != plane.PolicyOwnerCustomer:
+		sentence += ` The tool saw "Operation not permitted".`
+	case block.Action == "sigkill":
+		sentence += " The process was stopped."
+	default:
+		sentence += " The call failed."
+	}
+	sentence += " Do not retry it. Contact your administrator if you need it allowed."
 	if earlier {
 		// Told at a later post-tool hook than the call it happened in.
 		if rest, ok := strings.CutPrefix(sentence, "Your "); ok {

@@ -173,6 +173,10 @@ type KernelCustomerEvents struct {
 	Forwarded int64 `json:"forwarded"`
 	Dropped   int64 `json:"dropped"`
 	Container int64 `json:"container,omitempty"`
+	// Capped are the dropped events that went over the volume budget (the
+	// rest of Dropped are DefenseClaw's own processes' and those
+	// customer_events off kept back).
+	Capped int64 `json:"capped,omitempty"`
 }
 
 // KernelChange is one kernel-policy state change.

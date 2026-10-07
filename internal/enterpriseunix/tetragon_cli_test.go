@@ -1252,7 +1252,7 @@ func TestTetragonStatusListsYourPolicies(t *testing.T) {
 	extra := map[string]any{
 		"customer_policies": []map[string]any{
 			{"name": "10-file-sensitive", "listed": true, "mode": "enforce", "state": "enabled", "seen": 120, "forwarded": 12, "dropped": 0,
-				"actions": map[string]any{"post": 118, "override": 2}, "last_event_at": "2026-10-07T11:58:00Z"},
+				"blocked": 2, "actions": map[string]any{"post": 118, "override": 2, "signal": 3}, "last_event_at": "2026-10-07T11:58:00Z"},
 			{"name": "20-net-connect", "listed": true, "mode": "monitor", "state": "enabled", "seen": 40, "forwarded": 3, "dropped": 9,
 				"capped_last_hour": 7, "actions": map[string]any{"post": 40, "monitor_override": 5}},
 			// Tetragon no longer lists it; the helper keeps it for the events it had.
@@ -1276,7 +1276,7 @@ func TestTetragonStatusListsYourPolicies(t *testing.T) {
 		"    10-file-sensitive  enforce  enabled     120     12         2        2026-10-07T11:58:00Z\n",
 		"    20-net-connect     monitor  enabled     40      3          0        -\n",
 		"    30-removed         -        not listed  5       1          0        -\n",
-		"  ! " + codeCustomerEventsCapped + ":20-net-connect: 7 events of your Tetragon policy 20-net-connect from AI agents were not forwarded",
+		"  ! " + codeCustomerEventsCapped + ":20-net-connect: 7 events of your Tetragon policy 20-net-connect were not forwarded in the last hour",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("text lacks %q:\n%s", want, got)

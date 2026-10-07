@@ -263,8 +263,8 @@ var tetragonCodes = map[string]tetragonCodeText{
 		if f.Count > 0 {
 			what = fmt.Sprintf("%d events", f.Count)
 		}
-		return what + " of your Tetragon policy " + defaultStr(f.Detail, "") + " from AI agents were not forwarded in the last hour" +
-			" (per-policy limit 20/s; the counts stay exact); nothing to do, or " +
+		return what + " of your Tetragon policy " + defaultStr(f.Detail, "") + " were not forwarded in the last hour" +
+			" (over the per-policy limit of 20/s; the counts stay exact); nothing to do, or " +
 			adminConfig("enterprise.tetragon.customer_events: off")
 	}},
 	kernelpolicy.WarnEnforceAckMissing: {Message: func(f tetragonFacts) string {

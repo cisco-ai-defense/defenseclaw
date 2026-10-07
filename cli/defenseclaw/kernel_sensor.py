@@ -147,7 +147,11 @@ def kernel_controls_line(floor: Mapping[str, Any] | None) -> str:
 
 
 def your_policies_line(backend: Mapping[str, Any] | None) -> str:
-    """``your policies: 12 agent events``; empty when no policy of the customer's is reported."""
+    """``your policies: 12 agent events``; empty when no policy of the customer's is reported.
+
+    Agent events are the ones the gateway recorded below an AI agent
+    (``attributed``), not every event the helper forwarded.
+    """
 
     if not isinstance(backend, Mapping):
         return ""
@@ -156,10 +160,10 @@ def your_policies_line(backend: Mapping[str, Any] | None) -> str:
     loaded = len(policies) if isinstance(policies, list) else 0
     if not isinstance(events, Mapping):
         return "your policies: no agent events" if loaded else ""
-    forwarded = _int(events.get("forwarded"))
-    if forwarded:
-        noun = "agent event" if forwarded == 1 else "agent events"
-        return f"your policies: {forwarded} {noun}"
+    attributed = _int(events.get("attributed"))
+    if attributed:
+        noun = "agent event" if attributed == 1 else "agent events"
+        return f"your policies: {attributed} {noun}"
     return "your policies: no agent events" if loaded or events else ""
 
 
@@ -208,9 +212,12 @@ def your_policies_summary(backend: Mapping[str, Any] | None) -> str:
     enforcing = sum(1 for item in rows if str(item.get("mode") or "").strip().lower() == "enforce")
     text = f"{len(rows)} loaded ({enforcing} enforcing)"
     if isinstance(events, Mapping):
-        forwarded = _int(events.get("forwarded"))
-        text += f"; {forwarded} agent {'event' if forwarded == 1 else 'events'} forwarded"
-        dropped = _int(events.get("dropped"))
-        if dropped:
-            text += f", {dropped} over the budget"
+        # Agent events are the gateway's attributed ones; over the budget only
+        # the helper's capped ones (it also drops its own processes' events and,
+        # with customer_events off, every event).
+        attributed = _int(events.get("attributed"))
+        text += f"; {attributed} agent {'event' if attributed == 1 else 'events'} forwarded"
+        capped = _int(events.get("capped"))
+        if capped:
+            text += f", {capped} over the budget"
     return text

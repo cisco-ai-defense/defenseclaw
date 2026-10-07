@@ -205,6 +205,9 @@ type CustomerEvents struct {
 	// CappedLastHour is how many were over the budget in the last hour; it
 	// raises tetragon_customer_events_capped.
 	CappedLastHour int64 `json:"capped_last_hour,omitempty"`
+	// Blocked are the events, of every process, that say Tetragon denied
+	// the call or killed the process (outcome blocked).
+	Blocked int64 `json:"blocked,omitempty"`
 }
 
 // CustomerSource reports the customer policies and their totals now (the

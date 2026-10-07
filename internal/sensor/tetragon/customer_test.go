@@ -117,6 +117,11 @@ func TestCustomerPolicyEventsAreTypedAndBounded(t *testing.T) {
 	if totals.Seen != 10 || totals.Forwarded != 8 || totals.Container != 1 || totals.Self != 1 || totals.Dropped() != 1 {
 		t.Fatalf("totals %+v", totals)
 	}
+	// The override in enforce, the sigkill and the DefenseClaw-shaped
+	// customer policy's override: blocked, as their records say.
+	if totals.Blocked != 3 {
+		t.Fatalf("blocked %d, want the events whose outcome is blocked", totals.Blocked)
+	}
 	byName := map[string]CustomerPolicyStatus{}
 	for _, policy := range policies {
 		byName[policy.Name] = policy

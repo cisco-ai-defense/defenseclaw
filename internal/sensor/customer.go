@@ -247,7 +247,7 @@ func mergeCustomer(backend *plane.Backend, kernel *KernelState, gateway map[stri
 				Name: policy.Name, Mode: policy.Mode, State: policy.State,
 				CustomerEvents: plane.CustomerEvents{
 					Seen: policy.Seen, Forwarded: policy.Forwarded, Dropped: policy.Dropped, Container: policy.Container,
-					Attributed: counted.Attributed, Gated: counted.Gated,
+					Capped: policy.Capped, Attributed: counted.Attributed, Gated: counted.Gated,
 				},
 			})
 			seen[policy.Name] = true
@@ -255,6 +255,7 @@ func mergeCustomer(backend *plane.Backend, kernel *KernelState, gateway map[stri
 		if events := kernel.Status.CustomerEvents; events != nil {
 			backend.CustomerEvents.Seen, backend.CustomerEvents.Forwarded = events.Seen, events.Forwarded
 			backend.CustomerEvents.Dropped, backend.CustomerEvents.Container = events.Dropped, events.Container
+			backend.CustomerEvents.Capped = events.Capped
 		}
 	}
 	names := make([]string, 0, len(gateway))
@@ -285,9 +286,10 @@ type KernelBlock struct {
 	At    time.Time
 	Owner string // plane.PolicyOwnerDefenseClaw or plane.PolicyOwnerCustomer
 	// Control and RuleID name a DefenseClaw control; Policy and Function a
-	// customer policy and its hook.
-	Control, RuleID  string
-	Policy, Function string
+	// customer policy and its hook, Action that policy's action (override,
+	// sigkill or notify_enforcer).
+	Control, RuleID          string
+	Policy, Function, Action string
 	// Process is the executable basename and Target the path (or peer) the
 	// call concerned.
 	Process, Target string
@@ -304,7 +306,7 @@ const kernelBlockWindow = 5 * time.Minute
 
 func kernelBlockOf(record CustomerKernelEvent) KernelBlock {
 	block := KernelBlock{
-		At: record.At, Owner: plane.PolicyOwnerCustomer, Policy: record.Policy, Function: record.Function,
+		At: record.At, Owner: plane.PolicyOwnerCustomer, Policy: record.Policy, Function: record.Function, Action: record.Action,
 		Process: record.Process, Target: record.Target, UID: copyIntPtr(record.UID),
 		RootPID: record.RootPID, SessionRootPID: record.SessionRootPID, Connector: record.Connector,
 	}

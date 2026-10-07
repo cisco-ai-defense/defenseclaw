@@ -99,7 +99,7 @@ func TestKernelBlockNoticePerConnector(t *testing.T) {
 			source := fakeKernelBlocks{blocks: []sensor.KernelBlock{sshBlock("kblock-1")}}
 			ledger := newKernelNoticeLedger()
 			resp := addKernelBlockNotice(context.Background(), profile, connectorName, req, raw, payload,
-				agentHookResponse{Action: "allow", RawAction: "allow"}, source, 4242, ledger, noticeNow)
+				agentHookResponse{Action: "allow", RawAction: "allow"}, source, 4242, 1001, ledger, noticeNow)
 			want := "DefenseClaw blocked `python3` from reading your SSH private key (~/.ssh/id_ed25519) under your organization's policy " +
 				`(PATH-SSH-KEY, a kernel control). The tool saw "Operation not permitted". Do not retry it. Contact your administrator if you need it allowed.`
 			if resp.AdditionalContext != want {
@@ -112,7 +112,7 @@ func TestKernelBlockNoticePerConnector(t *testing.T) {
 				t.Fatalf("%s: told %v", connectorName, resp.KernelBlocksTold)
 			}
 			again := addKernelBlockNotice(context.Background(), profile, connectorName, req, raw, payload,
-				agentHookResponse{Action: "allow", RawAction: "allow"}, source, 4242, ledger, noticeNow)
+				agentHookResponse{Action: "allow", RawAction: "allow"}, source, 4242, 1001, ledger, noticeNow)
 			if again.AdditionalContext != "" || len(again.KernelBlocksTold) != 0 {
 				t.Fatalf("%s: told twice: %q", connectorName, again.AdditionalContext)
 			}
@@ -152,28 +152,52 @@ func TestKernelBlockNoticeOnlyTellsTheSessionsDenials(t *testing.T) {
 	} {
 		r := req
 		r.ConnectorName, r.HookEventName = tc.connector, tc.event
-		got := addKernelBlockNotice(context.Background(), profile, tc.connector, r, raw, payload, tc.resp, source, 4242, ledger, noticeNow)
+		got := addKernelBlockNotice(context.Background(), profile, tc.connector, r, raw, payload, tc.resp, source, 4242, 1001, ledger, noticeNow)
 		if got.AdditionalContext != tc.resp.AdditionalContext || got.Reason != tc.resp.Reason || len(got.KernelBlocksTold) != 0 {
 			t.Fatalf("%s: changed %+v", tc.name, got)
 		}
 	}
-	got := addKernelBlockNotice(context.Background(), profile, "claudecode", req, raw, payload, allow, source, 4242, ledger, noticeNow)
+	got := addKernelBlockNotice(context.Background(), profile, "claudecode", req, raw, payload, allow, source, 4242, 1001, ledger, noticeNow)
 	if len(got.KernelBlocksTold) != 1 || got.KernelBlocksTold[0] != "kblock-root" {
 		t.Fatalf("told %v: %q", got.KernelBlocksTold, got.AdditionalContext)
 	}
 	// Without the peer's root, only the session's own hook join counts.
 	source.roots = nil
 	source.blocks = append(source.blocks, sshBlock("kblock-session"))
-	got = addKernelBlockNotice(context.Background(), profile, "claudecode", req, raw, payload, allow, source, 4242, ledger, noticeNow)
+	got = addKernelBlockNotice(context.Background(), profile, "claudecode", req, raw, payload, allow, source, 4242, 1001, ledger, noticeNow)
 	if len(got.KernelBlocksTold) != 1 || got.KernelBlocksTold[0] != "kblock-session" {
 		t.Fatalf("told %v", got.KernelBlocksTold)
+	}
+}
+
+// TestKernelBlockNoticeNeverCrossesUsers: the session id in a hook payload is
+// the caller's word. Another user's agent that sends this user's session id
+// learns nothing of this user's denials, nor of a denial whose user is not
+// known, even with the same agent root.
+func TestKernelBlockNoticeNeverCrossesUsers(t *testing.T) {
+	withHomes(t)
+	api := &APIServer{}
+	profile := api.hookProfileForConnector("claudecode")
+	req, raw, payload := postToolRequest("claudecode", "PostToolUse")
+	unknown := sshBlock("kblock-unknown-user")
+	unknown.UID = nil
+	source := fakeKernelBlocks{blocks: []sensor.KernelBlock{sshBlock("kblock-alice"), unknown}, roots: map[int]int{4242: 1300}}
+	allow := agentHookResponse{Action: "allow", RawAction: "allow"}
+	ledger := newKernelNoticeLedger()
+	if got := addKernelBlockNotice(context.Background(), profile, "claudecode", req, raw, payload, allow, source, 4242, 1002, ledger, noticeNow); got.AdditionalContext != "" ||
+		len(got.KernelBlocksTold) != 0 {
+		t.Fatalf("another user was told %v: %q", got.KernelBlocksTold, got.AdditionalContext)
+	}
+	got := addKernelBlockNotice(context.Background(), profile, "claudecode", req, raw, payload, allow, source, 4242, 1001, ledger, noticeNow)
+	if len(got.KernelBlocksTold) != 1 || got.KernelBlocksTold[0] != "kblock-alice" {
+		t.Fatalf("the user's own denial: told %v", got.KernelBlocksTold)
 	}
 }
 
 func TestKernelBlockNoticeText(t *testing.T) {
 	withHomes(t)
 	customer := sensor.KernelBlock{ID: "c", Owner: plane.PolicyOwnerCustomer, Policy: "file-sensitive", Function: "security_file_open",
-		Process: "cat", Target: "/etc/shadow"}
+		Action: "override", Process: "cat", Target: "/etc/shadow"}
 	persistence := sensor.KernelBlock{ID: "p", Owner: plane.PolicyOwnerDefenseClaw, Control: "kernel.persistence_write",
 		RuleID: "persistence.shell_profile_write", Process: "sh", Target: "/home/dev/.bashrc", ToolInvocationID: "tool-0"}
 	text := kernelBlockNoticeText([]sensor.KernelBlock{customer, persistence, sshBlock("1"), sshBlock("2"), sshBlock("3")}, "tool-1")
@@ -181,9 +205,19 @@ func TestKernelBlockNoticeText(t *testing.T) {
 	if len(lines) != 4 {
 		t.Fatalf("%d lines: %s", len(lines), text)
 	}
+	// A customer policy's Override may return any error: the notice names no
+	// errno. A DefenseClaw control always returns EPERM.
 	if lines[0] != "Your organization's Tetragon policy `file-sensitive` blocked `cat` (security_file_open). "+
-		`The tool saw "Operation not permitted". Do not retry it. Contact your administrator if you need it allowed.` {
+		"The call failed. Do not retry it. Contact your administrator if you need it allowed." {
 		t.Fatalf("customer line %q", lines[0])
+	}
+	if !strings.Contains(lines[1], `The tool saw "Operation not permitted". Do not retry it.`) {
+		t.Fatalf("persistence line %q", lines[1])
+	}
+	killed := customer
+	killed.Action = "sigkill"
+	if got := kernelBlockSentence(killed, false); !strings.Contains(got, "blocked `cat` (security_file_open). The process was stopped. Do not retry it.") {
+		t.Fatalf("sigkill line %q", got)
 	}
 	if !strings.HasPrefix(lines[1], "In an earlier tool call, DefenseClaw blocked `sh` from changing your shell startup or autostart file (~/.bashrc)") ||
 		!strings.Contains(lines[1], "(persistence.shell_profile_write, a kernel control)") {

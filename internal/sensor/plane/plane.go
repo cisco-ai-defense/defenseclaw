@@ -302,8 +302,9 @@ type CustomerEvents struct {
 	// event it received; the ones it forwarded to the gateway (repeats
 	// folded into a forwarded one included); the ones it did not (over the
 	// volume budget, DefenseClaw's own processes, customer_events off); and
-	// those of container processes, never forwarded.
-	Seen, Forwarded, Dropped, Container int64
+	// those of container processes, never forwarded. Capped are the dropped
+	// ones over the volume budget.
+	Seen, Forwarded, Dropped, Container, Capped int64
 	// Attributed and Gated are the gateway's: forwarded events below an AI
 	// agent, which become records, and the rest, which are only counted.
 	Attributed, Gated int64

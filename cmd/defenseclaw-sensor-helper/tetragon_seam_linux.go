@@ -107,6 +107,7 @@ func customerEvents(counts tetragon.CustomerCounts) kernelpolicy.CustomerEvents 
 	return kernelpolicy.CustomerEvents{
 		Seen: counts.Seen, Forwarded: counts.Forwarded, Dropped: counts.Dropped(), Container: counts.Container,
 		Self: counts.Self, Capped: counts.Capped, Withheld: counts.Withheld, CappedLastHour: counts.CappedLastHour,
+		Blocked: counts.Blocked,
 	}
 }
 
@@ -131,7 +132,8 @@ func withCustomer(status *acquire.KernelStatus, ledger *tetragon.CustomerLedger,
 }
 
 func kernelCustomerEvents(counts tetragon.CustomerCounts) acquire.KernelCustomerEvents {
-	return acquire.KernelCustomerEvents{Seen: counts.Seen, Forwarded: counts.Forwarded, Dropped: counts.Dropped(), Container: counts.Container}
+	return acquire.KernelCustomerEvents{Seen: counts.Seen, Forwarded: counts.Forwarded, Dropped: counts.Dropped(), Container: counts.Container,
+		Capped: counts.Capped}
 }
 
 // tetragonInstalled reports whether Tetragon's discovery file exists.

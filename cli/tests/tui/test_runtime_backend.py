@@ -60,7 +60,7 @@ _ENFORCE: dict[str, Any] = {
     **_BACKEND,
     "mode": "enforce",
     "kernel_floor": _FLOOR,
-    "customer_events": {"seen": 40, "forwarded": 12, "dropped": 0, "container": 1},
+    "customer_events": {"seen": 40, "forwarded": 15, "dropped": 0, "container": 1, "attributed": 12, "gated": 3},
     "customer_policies": [{"name": "file-sensitive", "mode": "monitor", "state": "enabled"}],
 }
 
@@ -170,7 +170,7 @@ def test_blocks_and_your_policies_appear_only_when_the_gateway_reports_them() ->
     assert not any(line.startswith("blocks") or "your policies" in line for line in plain.detail_lines())
     quiet = {**_ENFORCE, "customer_events": {"seen": 0, "forwarded": 0, "dropped": 0, "container": 0}}
     assert "your policies: no agent events" in _plane_c(quiet).detail_lines()[2]
-    one = {**_ENFORCE, "customer_events": {"forwarded": 1}}
+    one = {**_ENFORCE, "customer_events": {"forwarded": 4, "attributed": 1}}
     assert _plane_c(one).detail_lines()[2].endswith("your policies: 1 agent event")
     # Counts without the block fields still print the customer half.
     no_blocks = {**_ENFORCE, "kernel_floor": {k: v for k, v in _FLOOR.items() if not k.endswith("_1h")}}

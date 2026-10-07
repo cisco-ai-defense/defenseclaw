@@ -239,13 +239,16 @@ type aiRuntimeCustomerPolicy struct {
 }
 
 // aiRuntimeCustomerEvents count a customer policy's events: in the helper
-// (seen, forwarded, dropped, container) and in the gateway (attributed: below
-// an AI agent, recorded; gated: the rest, counted only).
+// (seen, forwarded, dropped, container, and capped: the dropped ones over the
+// volume budget) and in the gateway (attributed: below an AI agent,
+// recorded; gated: the rest, counted only). The surfaces call attributed
+// "agent events" and capped "over the budget".
 type aiRuntimeCustomerEvents struct {
 	Seen       int64 `json:"seen"`
 	Forwarded  int64 `json:"forwarded"`
 	Dropped    int64 `json:"dropped"`
 	Container  int64 `json:"container"`
+	Capped     int64 `json:"capped"`
 	Attributed int64 `json:"attributed"`
 	Gated      int64 `json:"gated"`
 }
@@ -482,7 +485,7 @@ func renderAIRuntimeBackend(backend *plane.Backend, kernel *sensor.KernelState) 
 func customerEventsOf(events plane.CustomerEvents) aiRuntimeCustomerEvents {
 	return aiRuntimeCustomerEvents{
 		Seen: events.Seen, Forwarded: events.Forwarded, Dropped: events.Dropped, Container: events.Container,
-		Attributed: events.Attributed, Gated: events.Gated,
+		Capped: events.Capped, Attributed: events.Attributed, Gated: events.Gated,
 	}
 }
 

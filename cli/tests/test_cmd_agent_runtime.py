@@ -703,7 +703,7 @@ def test_status_names_the_kernel_sensor_controls_and_your_policies(monkeypatch: 
             "paused_until": "14:05", "approval": "approved", "next_ready_hours": 216,
         },
         "customer_policies": [{"name": "10-file-sensitive", "mode": "enforce", "state": "enabled", "forwarded": 12}],
-        "customer_events": {"seen": 40, "forwarded": 12, "dropped": 0, "container": 1},
+        "customer_events": {"seen": 40, "forwarded": 14, "dropped": 0, "container": 1, "attributed": 12, "gated": 2},
     }
     client = _StubClient(_snapshot_with_plane_c(backend))
     monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)

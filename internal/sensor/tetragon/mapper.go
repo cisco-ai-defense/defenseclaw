@@ -376,7 +376,16 @@ func (m *Mapper) mapHook(hook hookEvent, at time.Time) []plane.Event {
 func (m *Mapper) mapCustomer(hook hookEvent, at time.Time) []plane.Event {
 	policy := boundedText(hook.policy, MaxPolicyNameBytes)
 	ledger := m.config.Customer
-	ledger.seen(policy, at)
+	action := customerAction(hook.action)
+	listed := ""
+	if m.config.PolicyMode != nil {
+		listed = m.config.PolicyMode(hook.policy)
+	}
+	mode := customerMode(listed)
+	outcome := customerOutcome(action, mode)
+	// Every event counts, also those never forwarded: Tetragon denied or
+	// killed for the policy whichever process it was.
+	ledger.seen(policy, at, outcome == plane.OutcomeBlocked)
 	if containerID(hook.process) != "" {
 		// Never forwarded: a container's processes are not a host agent's.
 		ledger.count(policy, fateContainer, 1, at)
@@ -404,13 +413,7 @@ func (m *Mapper) mapCustomer(hook hookEvent, at time.Time) []plane.Event {
 	event.Policy, event.PolicyOwner = policy, plane.PolicyOwnerCustomer
 	event.KernelHookType = hook.hookType
 	event.KernelFunction = boundedText(hook.function, MaxKernelFunctionByte)
-	event.KernelAction = customerAction(hook.action)
-	listed := ""
-	if m.config.PolicyMode != nil {
-		listed = m.config.PolicyMode(hook.policy)
-	}
-	event.PolicyMode = customerMode(listed)
-	event.Outcome = customerOutcome(event.KernelAction, event.PolicyMode)
+	event.KernelAction, event.PolicyMode, event.Outcome = action, mode, outcome
 	event.Target = customerTarget(hook.args)
 	event.PolicyTags = customerTags(hook.tags)
 	event.PolicyMessage = boundedText(hook.message, MaxPolicyMessageBytes)

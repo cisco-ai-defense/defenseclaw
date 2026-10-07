@@ -43,7 +43,10 @@ says otherwise. Per-user installs never connect to Tetragon.
     `action` mode. `enforce_ack` takes one digest or a list of up to four, so
     a ring upgrade that changes a control does not drop users to monitor mode. Controls apply only below enrolled command-line agents of
     the user; IDE terminals, look-alike processes, other users and containers
-    are observed, never denied.
+    are observed, never denied. An eligible account counts as enrolled for
+    the connectors that reach it through vendor machine policy (Claude Code,
+    Codex, Cursor, Copilot CLI and OpenCode) without a `targets.yaml` row, so
+    the default `enterprise.enrollment.unenrolled_users` needs no change.
   - Your own Tetragon policies stay yours. In `consume`, `observe` and
     `enforce`, the events of your kprobe and LSM policies that hit an AI agent
     are forwarded as `ai.runtime.kernel_event` records (`customer_events:

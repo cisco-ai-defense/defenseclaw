@@ -166,9 +166,9 @@ func TestEnterpriseDiscoveryShowsTheKernelBackend(t *testing.T) {
 		 "backend":{"kind":"tetragon","version":"v1.7.1","mode":"enforce","events_lost":0,"loss_known":true,
 		  "kernel_floor":{"mode":"enforce","enforced_users":2,"enrolled_users":3,"burn_in_users":1,"paused_until":"2026-10-07T14:05:00Z",
 		   "approval":"approved","next_ready_hours":216},
-		  "customer_policies":[{"name":"10-file-sensitive","mode":"enforce","state":"enabled","seen":40,"forwarded":12},
+		  "customer_policies":[{"name":"10-file-sensitive","mode":"enforce","state":"enabled","seen":40,"forwarded":12,"attributed":12},
 		   {"name":"20-net-connect","mode":"monitor","state":"enabled","seen":3}],
-		  "customer_events":{"seen":43,"forwarded":12,"dropped":0,"container":1}}},
+		  "customer_events":{"seen":43,"forwarded":15,"dropped":0,"container":1,"attributed":12,"gated":3}}},
 		{"plane":"b","name":"shadow egress","available":true,"running":true,"mechanism":"proc"}]}`), &view); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,11 @@ func TestEnterpriseDiscoveryShowsTheKernelBackend(t *testing.T) {
 		`{"kind":"native","kernel_floor":{"mode":"enforce","enrolled_users":3,"approval":"stale"}}`:                                         "kernel controls: monitoring 3 users; the approval is for another build",
 		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":2,"burn_in_users":1,"next_ready_hours":20}}`: "kernel controls: enforcing 1 of 2 users; 1 in burn-in, next ready ~20 hours",
 		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":1}}`:                                         "kernel controls: enforcing 1 of 1 user",
-		`{"kind":"native","customer_events":{"forwarded":1}}`:                                                                               "your Tetragon policies: 0 loaded (0 enforcing); 1 agent event forwarded (DefenseClaw never changes them)",
+		`{"kind":"native","customer_events":{"forwarded":1,"attributed":1}}`:                                                                "your Tetragon policies: 0 loaded (0 enforcing); 1 agent event forwarded (DefenseClaw never changes them)",
+		// Events below no agent (a cron job) are not agent events, and only
+		// the budget is "over the budget" (customer_events off drops them too).
+		`{"kind":"native","customer_events":{"forwarded":5000,"attributed":0,"gated":5000,"dropped":9,"capped":4}}`: "your Tetragon policies: 0 loaded (0 enforcing); 0 agent events forwarded, 4 over the budget (DefenseClaw never changes them)",
+		`{"kind":"native","customer_events":{"dropped":5000,"capped":0}}`:                                           "your Tetragon policies: 0 loaded (0 enforcing); 0 agent events forwarded (DefenseClaw never changes them)",
 	} {
 		var b enterpriseRuntimeBackend
 		if err := json.Unmarshal([]byte(backend), &b); err != nil {

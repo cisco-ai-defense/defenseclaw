@@ -578,6 +578,14 @@ defenseclaw_tetragon_mode: observe
 defenseclaw_tetragon_burn_in: 40h
 ```
 
+Who is enrolled for the kernel controls: every user with a row in
+`targets.yaml`, and, for the connectors that reach users through vendor machine
+policy (Claude Code, Codex, Cursor, Copilot CLI and OpenCode), every eligible
+account of `enterprise.enrollment`, which has no row for them. You do not need
+to change `enterprise.enrollment.unenrolled_users`. A `targets.yaml` row for the
+same user and connector, enabled or not, decides for that pair. `status` marks
+a connector a user is enrolled for through machine policy with `*`.
+
 <Callout title="168h is 168 hours of agent use, not a week" type="info">
 `burn_in` counts covered agent-hours per user and computer. Time accrues only
 while an anchored agent of that user is running and the Tetragon stream is
@@ -624,14 +632,24 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify -
 
 It checks everything `observe` checks, plus `keep-sensors-on-exit`, BPF LSM,
 that an enrolled user has an anchored agent, and that each enrolled connector
-is in `action` mode (a connector in observe mode is never denied for). Then it
-prints the burn-in per user with progress and an estimate, the details of each
-hit, and the block to approve:
+is in `action` mode. A kernel control never denies for a connector in observe
+mode, so a user counts as ready only when their burn-in is done and one of
+their connectors is in `action` mode; the others are listed as monitor-only.
+`defenseclaw.connectors_action` fails when enforce would deny for nobody. Then
+it prints the burn-in per user with progress and an estimate, the details of
+each hit, and the block to approve. On a computer that still runs `consume`,
+nothing is measured yet: `defenseclaw.burn_in` fails and the next step is the
+observe ring.
 
 ```yaml title="group_vars/defenseclaw_ring_broad.yml"
 defenseclaw_tetragon_mode: enforce
 defenseclaw_tetragon_enforce_ack: sha256:08b71155b713   # the value `verify` prints for your build
+defenseclaw_guardrail_mode: action   # the kernel controls deny only for connectors in action mode
 ```
+
+`defenseclaw_guardrail_mode` sets `guardrail.mode` in the config template. In
+`action` mode the hooks also block what your guardrail policy blocks, so turn
+it on for the rings where you want enforcement, not only the kernel controls.
 
 Read these rules before you roll it out:
 
@@ -665,10 +683,12 @@ returns `Operation not permitted`; see
 Three views come from what each computer already reports; no new server is
 needed.
 
-**The fleet play.** `fleet-readiness.yml` runs `tetragon verify --json` and
-`tetragon status --json` on every computer and prints one summary: computers
-ready and not ready (with the failing checks), users enforcing, in burn-in and
-reset, and whether the computers run different builds (more than one digest).
+**The fleet play.** `fleet-readiness.yml` runs `tetragon verify --json` on
+every computer and prints one summary: computers ready and not ready (with the
+failing checks); users enforcing, ready for enforce, in burn-in, reset by a hit
+and monitor-only (from each user's burn-in toward enforce, which `verify`
+reports for `observe` and `enforce`); and whether the computers run different
+builds (more than one digest).
 
 ```yaml title="fleet-readiness.yml"
 # One-screen readiness of the whole fleet for a Tetragon mode.
@@ -867,12 +887,15 @@ and Devin):
 > kernel control). The tool saw "Operation not permitted". Do not retry it.
 > Contact your administrator if you need it allowed.
 
-The same applies, in the same words, to a block by your own Tetragon policy
-("Your organization's Tetragon policy `file-sensitive` blocked `cat`"), while
-`customer_events` is `agent`. A notice names only blocks, never would-blocks;
-it is told once, at most three to an answer, and it never replaces a block or
-ask answer. On other agents, and wherever the post-tool hook has no context
-field, the developer sees only the error.
+A block by your own Tetragon policy is told too, while `customer_events` is
+`agent`: "Your organization's Tetragon policy `file-sensitive` blocked `cat`
+(security_file_open). The call failed. Do not retry it." Your policy decides
+the error the tool sees, so the notice names none; for a `Sigkill` it says
+"The process was stopped." A notice names only blocks, never would-blocks; it
+is told once, at most three to an answer, only to the agent of the user whose
+process was blocked, and it never replaces a block or ask answer. On other
+agents, and wherever the post-tool hook has no context field, the developer
+sees only the error.
 
 The normal shell, IDE terminals, other users and `tmux` are never denied. The
 two controls cover only the processes below an enrolled user's own
@@ -1059,7 +1082,7 @@ reports in its load-error or error state is the problem
 | --- | --- | --- |
 | An agent got `Operation not permitted` | One of the two kernel controls, or one of your own enforcing policies, denied an open | Follow [the help-desk runbook](#when-a-control-blocks-something) |
 | `status` says Tetragon is not reachable in `consume` | Plane C is off, the helper cannot reach the socket, or Tetragon is stopped | `tetragon verify --ready-for consume` names the failing check and prints the command that fixes it |
-| No would-block hit appears for a Claude Code, Codex, Cursor or Copilot CLI user | The CLI is not installed in an enrolled home or an administrator prefix, the user is not enrolled, the connector has no enrollment row for the user, or the connector is in observe mode | `status` lists the users with no agent and the observed-but-not-enforced sessions with the reason. Set `enterprise.enrollment.agent_prefixes` for a CLI under an administrator prefix |
+| No would-block hit appears for a Claude Code, Codex, Cursor or Copilot CLI user | The CLI is not installed in the user's home or an administrator prefix; the user is not an eligible account of `enterprise.enrollment`; a disabled `targets.yaml` row for that user and connector; or the connector is in observe mode | `status` lists the users with no agent and the observed-but-not-enforced sessions with the reason, and marks the connectors enrolled through machine policy with `*`. Set `enterprise.enrollment.agent_prefixes` for a CLI under an administrator prefix |
 | Burn-in does not advance | Time accrues only while an anchored agent of that user is running and the stream is connected, and a hit resets the window | Read the user's row in `status` and the estimate in `verify --ready-for enforce` |
 | "Events lost" reads unknown | Tetragon's metrics listener is not on loopback, or Tetragon is 1.6.x | Set `metrics-server` to `127.0.0.1:2112` in [Harden Tetragon](#harden-tetragon) |
 | The ack went stale after an upgrade | The release changed a control, so the digest changed | Push the list form of `enforce_ack` with the old and the new digest |
@@ -1142,7 +1165,9 @@ Two controls exist. There are no per-control settings in this release.
 
 Who a control applies to is deliberately narrow. Each control covers only:
 
-- an enrolled user (a row in `targets.yaml`),
+- an enrolled user: a row in `targets.yaml`, or an eligible account of
+  `enterprise.enrollment` for a connector on vendor machine policy (Claude
+  Code, Codex, Cursor, Copilot CLI and OpenCode),
 - whose enrolled connector is a command-line agent (Claude Code, Codex,
   Cursor's `cursor-agent`, GitHub Copilot CLI, OpenCode, Amp, Devin, Hermes,
   OpenHands, OmniGent or Kiro CLI) that is installed,
@@ -1201,7 +1226,9 @@ Tetragon restart; it warns `kernel_policy_operator_override:<family>`. A new
 
 The helper writes `customer_policies` (at most 64) to its state file every 30
 seconds in every mode: name, mode, state, sensors, error, Tetragon's action
-counters, and events seen, forwarded and dropped. `/health` and the runtime API
+counters, and events seen, forwarded, dropped and blocked. `status` counts as
+blocked the events whose outcome is `blocked`, the same outcome the forwarded
+records carry. `/health` and the runtime API
 carry only counts and a summary of the same list. The runtime API also lists
 the last 100 attributed events (`customer_kernel_events`). The `status --json`
 output carries the same section.

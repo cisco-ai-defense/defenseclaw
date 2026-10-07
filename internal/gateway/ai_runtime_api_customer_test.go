@@ -64,7 +64,7 @@ func TestRenderCarriesTheCustomerPolicies(t *testing.T) {
 	backend := body["planes"].([]interface{})[0].(map[string]interface{})["backend"].(map[string]interface{})
 	policies := backend["customer_policies"].([]interface{})
 	if got, want := sortedKeys(policies[0].(map[string]interface{})),
-		[]string{"attributed", "container", "dropped", "forwarded", "gated", "mode", "name", "seen", "state"}; !reflect.DeepEqual(got, want) {
+		[]string{"attributed", "capped", "container", "dropped", "forwarded", "gated", "mode", "name", "seen", "state"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("customer policy keys %v", got)
 	}
 	if events := backend["customer_events"].(map[string]interface{}); events["attributed"] != float64(7) || events["seen"] != float64(12) {

@@ -278,8 +278,10 @@ type CustomerCounts struct {
 	// (repeats folded into a forwarded record included); Container those of
 	// container processes; Self, Capped and Withheld the ones not
 	// forwarded: DefenseClaw's own processes, over the volume budget,
-	// customer_events off.
-	Seen, Forwarded, Container, Self, Capped, Withheld int64
+	// customer_events off. Blocked are the events, of every process, whose
+	// outcome is blocked (customerOutcome): the BLOCKED count status shows,
+	// in the same terms as the forwarded records.
+	Seen, Forwarded, Container, Self, Capped, Withheld, Blocked int64
 	// CappedLastHour is how many were over the budget in the last hour.
 	CappedLastHour int64
 	// LastEvent is when the latest event was received.
@@ -375,27 +377,30 @@ func (l *CustomerLedger) count(policy string, fate customerFate, n int64, at tim
 	}
 }
 
-// seen records the arrival of one event.
-func (l *CustomerLedger) seen(policy string, at time.Time) {
+// seen records the arrival of one event, and whether it was a denial.
+func (l *CustomerLedger) seen(policy string, at time.Time, blocked bool) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.total.Seen++
-	if at.After(l.total.LastEvent) {
-		l.total.LastEvent = at
+	note := func(c *CustomerCounts) {
+		c.Seen++
+		if blocked {
+			c.Blocked++
+		}
+		if at.After(c.LastEvent) {
+			c.LastEvent = at
+		}
 	}
+	note(&l.total)
 	tally := l.counts[policy]
 	if tally == nil && len(l.counts) < maxTallies {
 		tally = &customerTally{}
 		l.counts[policy] = tally
 	}
 	if tally != nil {
-		tally.Seen++
-		if at.After(tally.LastEvent) {
-			tally.LastEvent = at
-		}
+		note(&tally.CustomerCounts)
 	}
 }
 

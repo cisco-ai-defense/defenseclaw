@@ -707,8 +707,11 @@ type TetragonCustomerPolicy struct {
 	State string `json:"state,omitempty"`
 	Error string `json:"error,omitempty"`
 	// Events, Forwarded and Dropped count what the helper saw of the
-	// policy, forwarded (from AI agents) and did not forward (over the
-	// budget); Blocked is how often Tetragon denied or killed for it.
+	// policy, forwarded to the gateway (which records those below an AI
+	// agent) and did not forward (DefenseClaw's own processes, over the
+	// budget, or customer_events off); Blocked counts its events that say
+	// Tetragon denied the call or killed the process, the same outcome the
+	// forwarded records carry.
 	Events    uint64 `json:"events"`
 	Forwarded uint64 `json:"forwarded"`
 	Dropped   uint64 `json:"dropped"`
@@ -1126,13 +1129,6 @@ func customerPolicies(state kernelpolicy.State) []kernelpolicy.CustomerPolicy {
 	return policies
 }
 
-// customerBlocked is how often Tetragon denied or killed for a customer
-// policy: its override, signal and notify_enforcer counters (exact, for
-// every process).
-func customerBlocked(policy kernelpolicy.CustomerPolicy) int64 {
-	return policy.Actions["override"] + policy.Actions["signal"] + policy.Actions["notify_enforcer"]
-}
-
 // cappedLastHour is how many events of the customer policy name the helper
 // did not forward in the last hour (over the budget).
 func cappedLastHour(state kernelpolicy.State, name string) int {
@@ -1265,7 +1261,7 @@ func (rep *TetragonReport) fillCustomer(state kernelpolicy.State) {
 	for _, policy := range customerPolicies(state) {
 		row := TetragonCustomerPolicy{
 			Name: policy.Name, Mode: policy.Mode, State: policy.State, Error: policy.Error, Events: counted(policy.Seen),
-			Forwarded: counted(policy.Forwarded), Dropped: counted(policy.Dropped), Blocked: counted(customerBlocked(policy)),
+			Forwarded: counted(policy.Forwarded), Dropped: counted(policy.Dropped), Blocked: counted(policy.Blocked),
 			LastEvent: formatTime(policy.LastEventAt),
 		}
 		if !policy.Listed {

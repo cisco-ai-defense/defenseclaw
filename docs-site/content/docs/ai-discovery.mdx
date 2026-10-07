@@ -1178,8 +1178,10 @@ The second line appears only when DefenseClaw's kernel controls are loaded
 (`observe` or `enforce`), and the third only when Tetragon has policies of
 yours. "next ready" is calendar time at the user's rate of agent use so far,
 shown once the burn-in window is a day old. During a pause the second line
-ends with `; paused until <time>`. The forwarded count is since the sensor
-helper started. `--json` includes the backend. When the number of lost events
+ends with `; paused until <time>`. The third line counts the events of your
+policies that the gateway recorded below an AI agent since it started, and
+"over the budget" only the ones the helper did not forward because they went
+over the volume limit. `--json` includes the backend. When the number of lost events
 is not known, the line says so instead of showing zero.
 
 ### Naming a peer: DNS capture

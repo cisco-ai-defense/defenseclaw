@@ -119,7 +119,7 @@ def test_managed_tetragon_backend_passes_with_version_mode_and_loss(tmp_path: Pa
             {"name": "10-file-sensitive", "mode": "enforce"},
             {"name": "20-net-connect", "mode": "monitor"},
         ],
-        customer_events={"seen": 40, "forwarded": 12, "dropped": 0},
+        customer_events={"seen": 40, "forwarded": 12, "dropped": 0, "attributed": 12},
     )
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(yours)))
     assert row["detail"] == (

@@ -167,8 +167,11 @@ def test_your_policies_summary_counts_without_naming_events() -> None:
             {"name": "10-file-sensitive", "mode": "enforce"},
             {"name": "20-net-connect", "mode": "monitor"},
         ],
-        "customer_events": {"seen": 40, "forwarded": 1, "dropped": 3},
+        "customer_events": {"seen": 40, "forwarded": 30, "dropped": 5, "capped": 3, "attributed": 1, "gated": 29},
     }
     assert your_policies_summary(backend) == "2 loaded (1 enforcing); 1 agent event forwarded, 3 over the budget"
+    # customer_events off drops every event: none is an agent event, none over the budget.
+    off = {**backend, "customer_events": {"seen": 40, "forwarded": 0, "dropped": 40}}
+    assert your_policies_summary(off) == "2 loaded (1 enforcing); 0 agent events forwarded"
     assert your_policies_summary({"customer_policies": []}) == ""
     assert your_policies_summary({"kind": "tetragon"}) == "" and your_policies_summary(None) == ""

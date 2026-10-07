@@ -187,10 +187,10 @@ func TestBackendMergesTheHelpersAndTheGatewaysCounts(t *testing.T) {
 	kernel := &KernelState{Status: acquire.KernelStatus{
 		CustomerPolicies: []acquire.KernelCustomerPolicy{
 			{Name: "10-file-sensitive", Mode: "enforce", State: "enabled",
-				KernelCustomerEvents: acquire.KernelCustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2}},
+				KernelCustomerEvents: acquire.KernelCustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2, Capped: 1}},
 			{Name: "20-net-connect", Mode: "monitor", State: "enabled"},
 		},
-		CustomerEvents: &acquire.KernelCustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2},
+		CustomerEvents: &acquire.KernelCustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2, Capped: 1},
 	}}
 	backend := &plane.Backend{Kind: plane.BackendTetragon}
 	mergeCustomer(backend, kernel, map[string]CustomerPolicyCounts{
@@ -199,14 +199,14 @@ func TestBackendMergesTheHelpersAndTheGatewaysCounts(t *testing.T) {
 	}, CustomerPolicyCounts{Seen: 10, Attributed: 7, Gated: 3})
 	want := []plane.CustomerPolicy{
 		{Name: "10-file-sensitive", Mode: "enforce", State: "enabled",
-			CustomerEvents: plane.CustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2, Attributed: 7, Gated: 2}},
+			CustomerEvents: plane.CustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2, Capped: 1, Attributed: 7, Gated: 2}},
 		{Name: "20-net-connect", Mode: "monitor", State: "enabled"},
 		{Name: "30-late", CustomerEvents: plane.CustomerEvents{Gated: 1}},
 	}
 	if !reflect.DeepEqual(backend.CustomerPolicies, want) {
 		t.Fatalf("policies\n got %+v\nwant %+v", backend.CustomerPolicies, want)
 	}
-	if backend.CustomerEvents != (plane.CustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2, Attributed: 7, Gated: 3}) {
+	if backend.CustomerEvents != (plane.CustomerEvents{Seen: 12, Forwarded: 9, Dropped: 1, Container: 2, Capped: 1, Attributed: 7, Gated: 3}) {
 		t.Fatalf("events %+v", backend.CustomerEvents)
 	}
 	// No helper answer yet: the gateway's counts alone.
