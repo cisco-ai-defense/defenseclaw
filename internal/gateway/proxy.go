@@ -1030,6 +1030,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = p.withProxyAgent(r)
+	// A hop the interceptor rewrote is agent traffic here too, so doctor does
+	// not report the OpenClaw Responses calls the proxy handled as a bypass
+	// (GAP-0245). Secure Client keeps the health record of main (issue #1092).
+	if strings.TrimSpace(r.Header.Get("X-DC-Target-URL")) != "" && !ManagedEnterpriseActive() {
+		p.health.RecordAgentProxyTraffic()
+	}
 
 	// Peek the body once so the shape classifier can run even when the
 	// URL is unknown. 10 MiB cap matches the original io.Copy budget.

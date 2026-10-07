@@ -1970,6 +1970,10 @@ func TestHandlePassthrough_PromptBlock(t *testing.T) {
 				t.Errorf("%s: expected a resp_blocked response object, got id=%q object=%q", target, resp.ID, resp.Object)
 			}
 		}
+		// Doctor counts these hops as proxied agent traffic (GAP-0245).
+		if snap := proxy.health.Snapshot(); snap.Interception == nil || snap.Interception.LastAgentTrafficAt == "" {
+			t.Errorf("passthrough hops were not recorded as agent proxy traffic: %+v", snap.Interception)
+		}
 	})
 }
 
