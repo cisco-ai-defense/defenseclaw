@@ -391,6 +391,31 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	}
 }
 
+// TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails pins GAP-0212:
+// explain resolves the account afresh, but the gateway's requests for it get
+// default_lookup_failed while its own lookups fail, and explain says so; groups
+// kept as numbers are named as a sign of an unreachable directory.
+func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
+	prevFacts, prevFailure := cachedDirectoryFacts, cachedDirectoryFailure
+	t.Cleanup(func() { cachedDirectoryFacts, cachedDirectoryFailure = prevFacts, prevFailure })
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
+		return useridentity.DirectoryFacts{}, time.Time{}, false
+	}
+	since := time.Now().Add(-time.Minute)
+	cachedDirectoryFailure = func(string) (time.Time, string, bool) { return since, "groups of dcad-manygroups: timeout", true }
+	explained := profileSubject{UserID: "94401116", UserName: "dcad-manygroups", Groups: []string{"94400513"}}
+	set := &guardrailProfileSet{}
+	decision := set.match(&explained, profileSubjectLookup, "", "")
+	view, warning := explainCacheView(set, &explained, decision, "", "", time.Now())
+	if view == nil || view["match"] != profileMatchDefaultLookupFailed || !strings.Contains(warning, "default_lookup_failed") ||
+		!strings.Contains(warning, "timeout") {
+		t.Fatalf("view %v, warning %q; want the lookup failure named", view, warning)
+	}
+	if note := unnamedGroupsNote(&explained); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
+		t.Fatalf("unnamed groups note = %q", note)
+	}
+}
+
 // TestExplainReportsGroupsThatCannotBeListed pins GAP-0201: an account whose
 // groups the OS database cannot list is a failed lookup in explain too, with
 // the reason, not an account with no groups that gets the plain default.
