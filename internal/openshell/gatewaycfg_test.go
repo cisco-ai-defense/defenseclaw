@@ -231,6 +231,19 @@ func TestGatewayConfigCreate(t *testing.T) {
 	}
 }
 
+// TestGatewayPlanSaysRemove (GAP-0075): keeping OpenShell's telemetry on
+// drops OPENSHELL_TELEMETRY_ENABLED from gateway.env, which the plan
+// showed as "set unset OPENSHELL_TELEMETRY_ENABLED".
+func TestGatewayPlanSaysRemove(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.write(t, "gateway.toml", disabledTOML)
+	f.write(t, "gateway.env", openshell.EnvTelemetryEnabled+"=false\n")
+	text := f.plan(t, openshell.GatewayChanges{UnsetEnv: []string{openshell.EnvTelemetryEnabled}}).String()
+	if !strings.Contains(text, "    remove "+openshell.EnvTelemetryEnabled+" (OpenShell's usage telemetry stays on, its default)\n") || strings.Contains(text, "set unset") {
+		t.Fatalf("plan:\n%s", text)
+	}
+}
+
 func TestGatewayConfigEditKeepsCommentsAndBacksUp(t *testing.T) {
 	f := newGatewayFixture(t)
 	f.write(t, "gateway.toml", operatorTOML)

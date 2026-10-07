@@ -782,7 +782,7 @@ func (p *GatewayPlan) String() string {
 			fmt.Fprintf(&b, "  edit %s (a timestamped backup is kept)\n", f.Path)
 		}
 		for _, s := range f.Summary {
-			fmt.Fprintf(&b, "    set %s\n", s)
+			fmt.Fprintf(&b, "    %s\n", summaryLine(s))
 		}
 		if !f.TOML {
 			// gateway.env may hold credentials: show only the summary.
@@ -813,6 +813,20 @@ func (p *GatewayPlan) String() string {
 		fmt.Fprintf(&b, "  then restart the gateway (%s); running sandboxes restart with it\n", p.Restart)
 	}
 	return b.String()
+}
+
+// summaryLine is one change of a plan's file: "set KEY = VALUE", or
+// "remove KEY" for a gateway.env variable it drops (editEnvFile's
+// "unset KEY"), saying what that leaves.
+func summaryLine(s string) string {
+	k, ok := strings.CutPrefix(s, "unset ")
+	switch {
+	case !ok:
+		return "set " + s
+	case k == EnvTelemetryEnabled:
+		return "remove " + k + " (OpenShell's usage telemetry stays on, its default)"
+	}
+	return "remove " + k
 }
 
 // Plan computes the changes without touching anything. On Linux it first
