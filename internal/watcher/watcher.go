@@ -209,6 +209,9 @@ type InstallWatcher struct {
 	// mcpMu serializes MCP admission between that loop and the rescan
 	// cycle, so a server is admitted once.
 	mcpMu sync.Mutex
+
+	// binaryVersions caches each scanner binary's probed --version.
+	binaryVersions sync.Map
 }
 
 type rootConnector struct {

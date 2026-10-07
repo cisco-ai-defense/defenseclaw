@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // countingScanner is a scanner.Scanner test double that records how many times
@@ -147,6 +148,14 @@ func TestScannerFingerprintStableAndChanges(t *testing.T) {
 	}
 	if again := w.scannerFingerprint(evt); again != base {
 		t.Fatalf("fingerprint not stable for identical config: %q != %q", again, base)
+	}
+
+	// GAP-0415: a config reload (new whole-config hash, next generation) of
+	// a key that does not change scan output must not rescan every skill.
+	version.SetContentHash([]byte("watch:\n  rescan_interval_min: 1\n"))
+	version.BumpGeneration()
+	if again := w.scannerFingerprint(evt); again != base {
+		t.Fatal("fingerprint changed with the config hash and generation alone")
 	}
 
 	// A scan-affecting config change must change the fingerprint.

@@ -132,7 +132,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 
 	// Scanner fingerprints depend on the target *type*, not the individual
 	// target, so compute them at most once per kind per cycle.
-	fpCache := make(map[InstallType]string)
+	fpCache := make(map[string]string)
 
 	var scanned, skipped int
 	for _, evt := range targets {
@@ -616,7 +616,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 // the scanner, diffs findings, emits drift alerts, and refreshes the baseline.
 // Targets whose content and scanner fingerprint are unchanged are skipped
 // without invoking the scanner or writing a scan_results row.
-func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[InstallType]string) rescanOutcome {
+func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[string]string) rescanOutcome {
 	if evt.Type == InstallMCP {
 		w.mcpMu.Lock()
 		defer w.mcpMu.Unlock()
@@ -878,24 +878,33 @@ func (w *InstallWatcher) findingDrift(baseline *audit.SnapshotRow, current *scan
 // cachedFingerprint returns the scanner fingerprint for evt's type, computing
 // it (and caching) on first use within a cycle. The fingerprint depends only on
 // the scanner kind + config + binary version, not the individual target.
-func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[InstallType]string) string {
+func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[string]string) string {
+	// A skill's fingerprint includes its connector's rule pack.
+	key := string(evt.Type)
+	if evt.Type == InstallSkill {
+		key += "\x00" + w.eventConnector(evt)
+	}
 	if cache != nil {
-		if fp, ok := cache[evt.Type]; ok {
+		if fp, ok := cache[key]; ok {
 			return fp
 		}
 	}
 	fp := w.scannerFingerprint(evt)
 	if cache != nil {
-		cache[evt.Type] = fp
+		cache[key] = fp
 	}
 	return fp
 }
 
 // scannerFingerprint builds a stable hash over the inputs that determine a
 // scanner's output for a given target kind: the scanner binary (path + probed
-// version), the scan-affecting config flags, and the DefenseClaw provenance
-// (binary version + config/policy content hash + generation). When any of these
-// change, byte-identical targets are re-scanned so updated rules take effect.
+// version), the scan-affecting settings (policy, judge model, analyzers), the
+// connector's rule pack for a skill, and the DefenseClaw build. When any of
+// these change, byte-identical targets are re-scanned so updated rules take
+// effect. The whole-config hash and the reload generation are not inputs:
+// they changed on every config reload and gateway start, so an unrelated key
+// (watch.rescan_interval_min) re-ran the paid judge on every installed skill
+// (GAP-0415).
 //
 // Secrets (API keys) are deliberately excluded — only non-sensitive routing
 // fields (model, provider, base URL) feed the fingerprint.
@@ -923,6 +932,7 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 			"llm_model="+llm.Model,
 			"llm_provider="+llm.Provider,
 			"llm_base_url="+llm.BaseURL,
+			"rulepack="+w.rulePackDigest(evt),
 		)
 	case InstallMCP:
 		c := w.cfg.Scanners.MCPScanner
@@ -953,8 +963,6 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 	prov := version.Current()
 	parts = append(parts,
 		"prov_binary="+prov.BinaryVersion,
-		"prov_content="+prov.ContentHash,
-		fmt.Sprintf("prov_generation=%d", prov.Generation),
 		fmt.Sprintf("prov_schema=%d", prov.SchemaVersion),
 	)
 
@@ -971,6 +979,29 @@ func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	if binary == "" {
 		return ""
 	}
+	// One probe per binary for the watcher's life (a config change starts a
+	// new watcher): it was a Python start per admission and per cycle.
+	if cached, ok := w.binaryVersions.Load(binary); ok {
+		return cached.(string)
+	}
+	probed := w.probeScannerBinaryVersion(binary)
+	w.binaryVersions.Store(binary, probed)
+	return probed
+}
+
+// rulePackDigest is the files digest of the rule pack evt's connector adds
+// to a skill scan, or "" when none applies.
+func (w *InstallWatcher) rulePackDigest(evt InstallEvent) string {
+	if w.rulePackSource == nil {
+		return ""
+	}
+	if pack := w.rulePackSource(w.eventConnector(evt)); pack != nil {
+		return pack.FilesDigest()
+	}
+	return ""
+}
+
+func (w *InstallWatcher) probeScannerBinaryVersion(binary string) string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

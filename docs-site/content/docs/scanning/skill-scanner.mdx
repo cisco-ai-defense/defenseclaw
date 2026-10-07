@@ -478,7 +478,7 @@ You don't have to wire any of that yourself. To record the severity verdicts wit
 defenseclaw config set gateway.watcher.skill.take_action false
 ```
 
-The watcher also rescans the skills it already knows. When it starts, and then every `watch.rescan_interval_min` minutes (60 by default), it rescans a skill whose content or scanner fingerprint changed. The fingerprint covers the scanner version, the policy, the judge model and the enabled analyzers. Every config reload restarts the watcher in place with the new settings, so a changed scanner setting reaches skills that were installed under the old one at once. The gateway log shows `restarting watcher after config reload` and then `[rescan] scanning skill <name> (scanner-fingerprint-changed)`; `defenseclaw audit logs --grep rescan` finds them.
+The watcher also rescans the skills it already knows. When it starts, and then every `watch.rescan_interval_min` minutes (60 by default), it rescans a skill whose content or scanner fingerprint changed. The fingerprint covers the scanner version, the policy, the judge model, the enabled analyzers and the connector's rule pack; other keys (`watch.rescan_interval_min`, `admission` actions) and a gateway restart do not rescan unchanged skills. Every config reload restarts the watcher in place with the new settings, so a changed scanner setting reaches skills that were installed under the old one at once. The gateway log shows `restarting watcher after config reload` and then `[rescan] scanning skill <name> (scanner-fingerprint-changed)`; `defenseclaw audit logs --grep rescan` finds them.
 
 ## Configure the action mapping
 
