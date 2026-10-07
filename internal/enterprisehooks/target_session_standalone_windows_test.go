@@ -235,7 +235,9 @@ func TestDeferredPendingProofForAnUntouchedProfile(t *testing.T) {
 // failed. The guardian retires the selection of a SID the machine policy no
 // longer registers; a registered SID's selection and another deployment's
 // stay, and the proof still refuses them. GAP-0271: a pass reads each
-// connector's machine policy once, not once per selection.
+// connector's machine policy once, not once per selection. GAP-0273: the
+// selections of an uninstalled deployment (its hook executable is gone) are
+// retired too.
 func TestStandaloneGuardianRetiresTheRuntimeSelectionOfAnUnregisteredUser(t *testing.T) {
 	target := deferredPendingProofFixture(t, true)
 	sid := currentWindowsTestSID(t)
@@ -309,8 +311,21 @@ func TestStandaloneGuardianRetiresTheRuntimeSelectionOfAnUnregisteredUser(t *tes
 	if _, err := os.Lstat(selectorPath); !os.IsNotExist(err) {
 		t.Fatalf("the emptied runtime selector stayed: %v", err)
 	}
-	publish(filepath.Join(t.TempDir(), "defenseclaw-hook.exe"))
+	other := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	if err := os.WriteFile(other, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publish(other)
 	if err := retireAndProve(); err == nil || !strings.Contains(err.Error(), "mismatched selected runtime") {
 		t.Fatalf("pending proof with another deployment's selection = %v, want the refusal", err)
+	}
+	// GAP-0273: once that deployment is uninstalled without purge (its hook
+	// executable is gone), a reinstall into another folder retires its
+	// selections instead of failing every Setup on them.
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireAndProve(); err != nil {
+		t.Fatalf("pending proof after the uninstalled deployment's selection was retired: %v", err)
 	}
 }

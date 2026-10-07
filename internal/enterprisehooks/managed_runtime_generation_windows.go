@@ -696,7 +696,10 @@ var windowsMachinePolicyRegisteredSIDs = func(connectorName, hookExecutable stri
 // selection through registration (GAP-0271: one lock and one policy read per
 // selection made every pass cost about 600 policy reads at 200 users). A selection made with another hook
 // executable belongs to another deployment and stays for the pending proof to
-// refuse. The selection's bundle is retired best effort: without the
+// refuse, unless that hook executable is gone: then the deployment was
+// uninstalled without purge, and a reinstall into another folder could never
+// enroll the user over its selection (GAP-0273), so it is retired too. The
+// selection's bundle is retired best effort: without the
 // selection it is unreachable, and generation GC collects what is left.
 // Standalone only; Secure Client keeps its selections as before.
 func RetireWindowsUnregisteredRuntimeSelections() error {
@@ -722,6 +725,11 @@ func RetireWindowsUnregisteredRuntimeSelections() error {
 		read := false
 		for _, entry := range selector.Targets {
 			if entry.HookExecutable != hookExecutable {
+				if windowsRuntimeSelectionHookGone(entry.HookExecutable) {
+					if err := retireWindowsOrphanedRuntimeSelection(name, entry); err != nil {
+						errs = append(errs, fmt.Errorf("%s runtime selection of %s left by %s: %w", name, entry.SID, entry.HookExecutable, err))
+					}
+				}
 				continue
 			}
 			if !read {
@@ -740,6 +748,37 @@ func RetireWindowsUnregisteredRuntimeSelections() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// windowsRuntimeSelectionHookGone reports a selection whose hook executable no
+// longer exists: nothing can read the selection any more.
+func windowsRuntimeSelectionHookGone(hookExecutable string) bool {
+	_, err := os.Lstat(hookExecutable)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// retireWindowsOrphanedRuntimeSelection removes a selection an uninstalled
+// deployment left, re-checked under the user's runtime transaction lock.
+func retireWindowsOrphanedRuntimeSelection(connectorName string, entry windowsManagedRuntimeSelectorTarget) error {
+	unlock, err := lockWindowsUserRuntimeTransaction(entry.SID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if !windowsRuntimeSelectionHookGone(entry.HookExecutable) {
+		return nil
+	}
+	commit, err := RemoveWindowsManagedRuntimeGenerationEnrollment(WindowsManagedRuntimeGenerationRemovalOptions{
+		Connector:                connectorName,
+		TargetSID:                entry.SID,
+		HookExecutable:           entry.HookExecutable,
+		PrimaryEnrollmentRemoved: true,
+	})
+	if err != nil {
+		return err
+	}
+	_ = commit.Finalize()
+	return nil
 }
 
 func retireWindowsUnregisteredRuntimeSelection(connectorName, sid, hookExecutable string) error {
