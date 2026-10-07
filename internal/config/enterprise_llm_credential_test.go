@@ -15,6 +15,7 @@ import (
 // environment, and a Secure Client config cannot name one.
 func TestStandaloneLLMKeyComesFromProtectedCredential(t *testing.T) {
 	t.Setenv("P0_JUDGE_KEY_ENV", "from-env")
+	t.Setenv(DefenseClawLLMKeyEnv, "inherited-key")
 	read := ""
 	prev := resolveStandaloneLLMCredential
 	resolveStandaloneLLMCredential = func(name, _ string) ([]byte, error) {
@@ -45,8 +46,8 @@ func TestStandaloneLLMKeyComesFromProtectedCredential(t *testing.T) {
 	}
 
 	cfg.Enterprise.Inspection.LLM.Credential = "missing"
-	if got := cfg.ResolveLLM("guardrail.judge").ResolvedAPIKey(); got == "from-env" {
-		t.Fatal("an unreadable credential must not fall back to the environment key")
+	if got := cfg.ResolveLLM("guardrail.judge").ResolvedAPIKey(); got != "" {
+		t.Fatal("an unreadable credential must not fall back to an inherited key")
 	}
 
 	sc := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{

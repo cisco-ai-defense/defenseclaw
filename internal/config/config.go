@@ -749,7 +749,8 @@ type LLMConfig struct {
 	// ExtraHeaders are additional HTTP headers sent on every request to
 	// this provider (e.g. {"llm-model": "gpt-5-5"} for Circuit routing).
 	// Forwarded to Bifrost's NetworkConfig.ExtraHeaders.
-	ExtraHeaders map[string]string `mapstructure:"extra_headers" yaml:"extra_headers,omitempty"`
+	ExtraHeaders                map[string]string `mapstructure:"extra_headers" yaml:"extra_headers,omitempty"`
+	protectedCredentialRequired bool
 }
 
 // TLSConfig captures per-instance TLS overrides on a role-level
@@ -830,6 +831,9 @@ type AzureKeyConfig struct {
 // Python parity test (cli/tests/test_llm_env.py::ParityTests) asserts
 // these stay in lock-step.
 func (l LLMConfig) ResolvedAPIKey() string {
+	if l.protectedCredentialRequired {
+		return l.APIKey
+	}
 	if l.APIKeyEnv != "" {
 		if v, ok := GetKey(l.APIKeyEnv); ok && strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
@@ -1091,6 +1095,7 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 	if key, configured := c.standaloneLLMKey(); configured {
 		out.APIKey = key
 		out.APIKeyEnv = ""
+		out.protectedCredentialRequired = true
 	}
 
 	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
