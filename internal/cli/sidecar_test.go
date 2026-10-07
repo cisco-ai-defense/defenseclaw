@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -178,17 +179,23 @@ func TestGuardrailBannerLinesShowJudgeNotBlankProxyRows(t *testing.T) {
 	}
 }
 
-// GAP-0077: a standalone managed service runs no watcher and dials no
-// OpenClaw fleet, so its banner must not advertise either. Secure Client
-// keeps the banner of main (GAP-0105, issue #1092).
+// GAP-0077: a standalone managed service dials no OpenClaw fleet and never
+// watches its own profile's folders, so its banner must not advertise
+// either. On Windows it watches every enrolled user's folders (GAP-0132), so
+// its watcher shows enabled there. Secure Client keeps the banner of main
+// (GAP-0105, issue #1092).
 func TestSidecarBannerManagedShowsNoWatcherOrFleet(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
 	cfg.Gateway.Host, cfg.Gateway.Port = "127.0.0.1", 18789
 	cfg.Gateway.Watcher.Enabled, cfg.Gateway.Watcher.Skill.Enabled = true, true
+	watcher := "Watcher:      idle (no directories to watch)"
+	if runtime.GOOS == "windows" {
+		watcher = "Watcher:      enabled"
+	}
 	got := fleetBannerLine(cfg) + "\n" + strings.Join(watcherBannerLines(cfg), "\n")
-	if strings.Contains(got, "18789") || strings.Contains(got, "Skill dirs") || !strings.Contains(got, "idle (no directories to watch)") {
+	if strings.Contains(got, "18789") || !strings.Contains(got, "Gateway:      none") || !strings.Contains(got, watcher) {
 		t.Fatalf("standalone banner:\n%s", got)
 	}
 	cfg.Enterprise.Profile = managed.ProfileSecureClient
