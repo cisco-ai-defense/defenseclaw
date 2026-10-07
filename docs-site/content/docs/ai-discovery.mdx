@@ -1169,15 +1169,18 @@ administrator installed the wheel.
 When the Plane C entry carries a backend, `runtime status` adds lines for it:
 
 ```text
-kernel sensor: Tetragon 1.7.1, observe, 0 events lost
-kernel controls: enforce for 2 of 3 users (1 in burn-in); paused until 14:05
-your Tetragon policies: 4 loaded (1 enforcing); 12 agent events in the last hour, 2 blocked
+kernel sensor: Tetragon v1.7.1, enforce, 0 events lost
+kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days
+your Tetragon policies: 4 loaded (1 enforcing); 12 agent events forwarded (DefenseClaw never changes them)
 ```
 
-The second line appears only when DefenseClaw's kernel controls are loaded,
-and the third only when Tetragon has policies of yours. `--json` includes the
-backend. When the number of lost events is not known, the line says so instead
-of showing zero.
+The second line appears only when DefenseClaw's kernel controls are loaded
+(`observe` or `enforce`), and the third only when Tetragon has policies of
+yours. "next ready" is calendar time at the user's rate of agent use so far,
+shown once the burn-in window is a day old. During a pause the second line
+ends with `; paused until <time>`. The forwarded count is since the sensor
+helper started. `--json` includes the backend. When the number of lost events
+is not known, the line says so instead of showing zero.
 
 ### Naming a peer: DNS capture
 
