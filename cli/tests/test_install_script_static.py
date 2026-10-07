@@ -1164,6 +1164,36 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
+def test_the_cli_says_an_install_is_running_during_the_swap(tmp_path: Path) -> None:
+    # GAP-0391: while the swap moved the venv, a second `defenseclaw rollback`
+    # (or any command after a killed run) failed with "command not found".
+    bin_dir, snap = tmp_path / "bin", tmp_path / "snap"
+    (snap / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    (bin_dir / "defenseclaw").symlink_to(tmp_path / "venv" / "bin" / "defenseclaw")
+    (snap / "bin" / "defenseclaw").symlink_to(tmp_path / "venv" / "bin" / "defenseclaw")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "swap.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_LINKS", "readonly BUSY_")))
+        + f'BIN_DIR="{bin_dir}" INSTALL_AGAIN="bash install.sh --local /assets"\n'
+        + _install_sh_functions("write_busy_shim", "restore_links")
+        + 'write_busy_shim\n"${BIN_DIR}/defenseclaw" --version || echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+
+    during = _run([str(script)], tmp_path)
+    after = subprocess.run([str(bin_dir / "defenseclaw")], capture_output=True, text=True, check=False)
+
+    assert "a DefenseClaw install is running (pid " in during.stderr and "rc=1" in during.stdout, during
+    assert "stopped before it finished; run the installer again to finish or undo it: bash install.sh" in after.stderr
+    restore = tmp_path / "restore.sh"
+    restore.write_text(script.read_text(encoding="utf-8").replace("write_busy_shim\n", f'restore_links "{snap}"\n'))
+    _run([str(restore)], tmp_path)
+    assert (bin_dir / "defenseclaw").is_symlink()
+
+
 def test_an_undone_install_drops_what_it_staged() -> None:
     # GAP-0388: after a rolled-back upgrade .staging (722 MB) and the new .uv
     # (478 MB) stayed next to the .failed-<time> copy, and only that was named.

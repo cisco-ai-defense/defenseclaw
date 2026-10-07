@@ -88,6 +88,8 @@ readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
+# The first line of the defenseclaw script the swap puts in place of the link.
+readonly BUSY_SHIM_MARK="# Written by the DefenseClaw installer while it replaces the install"
 # Data-dir entries that are install machinery, not user data.
 readonly NOT_DATA=".venv .uv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
 readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
@@ -392,6 +394,12 @@ if [[ -n "${TARGET_VERSION}" && "${TARGET_VERSION}" != "${VERSION}" && "${ROLLBA
         && die "DefenseClaw ${TARGET_VERSION} predates this installer; see ${RELEASE_BASE}/releases/tag/${TARGET_VERSION}"
     [[ -z "${LOCAL_DIR}" ]] || die "--local ${LOCAL_DIR} holds ${VERSION}, not ${TARGET_VERSION}"
     run_release_installer "${TARGET_VERSION}" ${FORWARD[@]+"${FORWARD[@]}"}
+fi
+# The command that runs this install again, for the recovery hints.
+if [[ -n "${LOCAL_DIR}" && -f "${LOCAL_DIR}/install.sh" ]]; then
+    INSTALL_AGAIN="bash ${LOCAL_DIR}/install.sh --local ${LOCAL_DIR}"
+else
+    INSTALL_AGAIN="curl -LsSf ${RELEASE_BASE}/releases/download/${VERSION}/install.sh | bash"
 fi
 
 [[ "${ROLLBACK}" == true ]] || require_free_space
@@ -1084,6 +1092,7 @@ snapshot() {
     for link in ${MANAGED_LINKS}; do
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${SNAP}/bin/${link}" || return 1; }
     done
+    write_busy_shim
     while IFS= read -r name; do
         cp -Rp "${DEFENSECLAW_HOME}/${name}" "${SNAP}/data/" || return 1
     done < <(data_entries)
@@ -1175,7 +1184,7 @@ recover_interrupted_run() {
             fi
         else
             # Setting it aside stopped part-way; the live binaries were only copied.
-            unstash_tree "${slot}" && drop_hold "${slot}"
+            unstash_tree "${slot}" && restore_links "${slot}" && drop_hold "${slot}"
         fi
     fi
     [[ ! -e "${slot}" ]] || die "Could not recover an interrupted rollback; ${slot} holds the install it set aside (see ${LOG})"
@@ -1188,7 +1197,47 @@ recover_interrupted_run() {
 undo_snapshot() {
     if [[ -d "${SNAP}/venv" && ! -e "${VENV}" ]]; then mv "${SNAP}/venv" "${VENV}"; fi
     if [[ -d "${SNAP}/installer" && ! -e "${INSTALLER_DIR}" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}"; fi
+    restore_links "${SNAP}"
     rm -rf "${SNAP}"
+}
+
+# write_busy_shim: during the swap the defenseclaw link points into a venv
+# that is being moved, so a command typed meanwhile, or after the run was
+# killed, failed with "command not found" (GAP-0391). This script stands in
+# for it: it says an install is running, or how to finish one that stopped.
+# The new link, or restore_links, replaces it.
+write_busy_shim() {
+    local shim="${BIN_DIR}/.defenseclaw.busy"
+    mkdir -p "${BIN_DIR}" 2>/dev/null || return 0
+    if cat > "${shim}" 2>/dev/null <<EOF
+#!/bin/sh
+${BUSY_SHIM_MARK} (pid $$).
+if kill -0 $$ 2>/dev/null; then
+    echo "defenseclaw: a DefenseClaw install is running (pid $$); run the command again when it has finished" >&2
+else
+    echo "defenseclaw: a DefenseClaw install (pid $$) stopped before it finished; run the installer again to finish or undo it: ${INSTALL_AGAIN:-the install command}" >&2
+fi
+exit 1
+EOF
+    then
+        chmod 755 "${shim}" && mv -f "${shim}" "${BIN_DIR}/defenseclaw" && return 0
+    fi
+    rm -f "${shim}"
+    return 0
+}
+
+# restore_links SLOT: put back the CLI links SLOT saved, over the busy shim.
+restore_links() {
+    local link
+    for link in ${MANAGED_LINKS}; do
+        if [[ -L "$1/bin/${link}" ]]; then
+            rm -f "${BIN_DIR:?}/${link}" && cp -P "$1/bin/${link}" "${BIN_DIR}/${link}" || true
+        elif [[ -f "${BIN_DIR}/${link}" && ! -L "${BIN_DIR}/${link}" ]] \
+            && [[ "$(head -n 2 "${BIN_DIR}/${link}" 2>/dev/null)" == *"${BUSY_SHIM_MARK}"* ]]; then
+            rm -f "${BIN_DIR:?}/${link}"
+        fi
+    done
+    return 0
 }
 
 # private_bin_dir: drop group and other write from BIN_DIR and its parent when
@@ -1313,7 +1362,7 @@ restore_snapshot() {
         free_mb="$(df -Pk "${DEFENSECLAW_HOME}" 2>/dev/null | awk 'NR==2{print int($4/1024)}')"
         RESTORED_NOTE="Your previous install is NOT back yet: ${SNAP} still holds it."
         err "Could not put ${PREV_VERSION:-the previous install} back completely (see the errors above); ${free_mb:-?} MB is free next to ${DEFENSECLAW_HOME}"
-        err "Free some space on that filesystem (df -h ${DEFENSECLAW_HOME}), then run the install command again: it puts the previous install back before anything else"
+        err "Free some space on that filesystem (df -h ${DEFENSECLAW_HOME}), then run the install command again (${INSTALL_AGAIN:-the same command}): it puts the previous install back before anything else"
         return 0
     fi
     rm -rf "${SNAP}" || true
@@ -1493,6 +1542,7 @@ stash_live() {
     for link in ${MANAGED_LINKS}; do
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${slot}/bin/${link}" || return 1; }
     done
+    write_busy_shim
     while IFS= read -r name; do
         mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
     done < <(data_entries)
@@ -1565,6 +1615,7 @@ swap_with_previous() {
     printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
     if ! stash_live "${hold}"; then
         if unstash_tree "${hold}"; then
+            restore_links "${hold}"
             drop_hold "${hold}"
             err "Could not set the current install aside; nothing was changed"
             return 1
