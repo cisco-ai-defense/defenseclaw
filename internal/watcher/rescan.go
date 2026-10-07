@@ -899,6 +899,11 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 	case InstallSkill:
 		c := w.cfg.Scanners.SkillScanner
 		llm := w.cfg.ResolveLLM("scanners.skill")
+		if w.rulePackSource != nil {
+			if pack := w.rulePackSource(w.eventConnector(evt)); pack != nil {
+				parts = append(parts, "rule_pack="+pack.Summary().Digest)
+			}
+		}
 		parts = append(parts,
 			"binary="+c.Binary,
 			"binver="+w.scannerBinaryVersion(c.Binary),

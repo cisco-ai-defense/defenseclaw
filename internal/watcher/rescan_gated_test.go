@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -189,6 +190,8 @@ func TestRescanCycleGatedSkipsUnchangedTargets(t *testing.T) {
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	fake := &countingScanner{name: "skill-scanner"}
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+	pack := &guardrail.RulePack{}
+	w.SetRulePackSource(func(string) *guardrail.RulePack { return pack })
 
 	ctx := context.Background()
 
@@ -227,6 +230,14 @@ func TestRescanCycleGatedSkipsUnchangedTargets(t *testing.T) {
 	w.runRescanCycle(ctx)
 	if fake.calls != 3 {
 		t.Fatalf("after fingerprint change: scanner calls = %d, want 3", fake.calls)
+	}
+
+	// An asset-only reload changes the composed pack without changing cfg or
+	// the installed skill's bytes.
+	pack = &guardrail.RulePack{LocalPatterns: &guardrail.LocalPatterns{}}
+	w.runRescanCycle(ctx)
+	if fake.calls != 4 {
+		t.Fatalf("after rule-pack change: scanner calls = %d, want 4", fake.calls)
 	}
 }
 
