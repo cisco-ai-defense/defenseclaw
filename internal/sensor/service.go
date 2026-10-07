@@ -52,7 +52,22 @@ const (
 	// resolver hold a poll open past the API client's scan timeout.
 	minNamingBudget = 5 * time.Second
 	maxNamingBudget = 20 * time.Second
+
+	// kernelStatusInterval is how often the managed Linux sensor helper is
+	// asked what its kernel-policy reconciler applied; a pause or an
+	// operator override reaches /health within it.
+	kernelStatusInterval = 10 * time.Second
+	// kernelStatusTimeout bounds one read.
+	kernelStatusTimeout = 5 * time.Second
+	// kernelStatusUnsupportedRetry is how long a helper that predates the
+	// op is left alone: it is upgraded with a restart, not mid-run.
+	kernelStatusUnsupportedRetry = 5 * time.Minute
 )
+
+// kernelStatusReader is the managed Linux sensor helper's kernel_status op.
+type kernelStatusReader interface {
+	KernelStatus(ctx context.Context) (acquire.KernelStatus, error)
+}
 
 // InventoryProvider supplies the discovery snapshot the join reads.
 //
@@ -139,6 +154,16 @@ type Service struct {
 	// process has reached. Escalation depends on that history, so it cannot be
 	// derived from a single poll.
 	episodes map[int]*episode
+
+	// kernelReader is the helper's kernel_status op, nil when the acquirer
+	// is not a helper or Plane C does not run. kernel (under mu) is its last
+	// answer; kernelNextTry belongs to Run's goroutine.
+	kernelReader  kernelStatusReader
+	kernel        *KernelState
+	kernelNextTry time.Time
+	// lastContainerEvents is the container-event count at the previous
+	// poll, for the per-cycle figure. Poll owns it (pollMu).
+	lastContainerEvents int64
 }
 
 type episode struct {
@@ -269,14 +294,107 @@ func New(options Options) (*Service, error) {
 			scoring.KillChainMinStages,
 		)
 	}
+	if service.hostPlane != nil && options.Acquirer.Brokered() {
+		// A brokered plane runs on a managed host, where the hooks that
+		// matter are machine policy every agent runs: a tool call no
+		// decision covers is a fact (hook_seen=false), not a missing
+		// install.
+		service.hostPlane.hooks = newHookRing(hookRingSize, hookRingWindow)
+		if reader, ok := options.Acquirer.(kernelStatusReader); ok {
+			service.kernelReader = reader
+		}
+	}
 	return service, nil
 }
 
-// Snapshot returns the most recent poll result.
+// RecordHookDecision hands the host plane a managed hook decision to label
+// the tool call's processes with. A no-op where Plane C does not run or the
+// host is not managed.
+func (s *Service) RecordHookDecision(decision HookDecision) {
+	if s == nil || s.hostPlane == nil || s.hostPlane.hooks == nil {
+		return
+	}
+	if decision.At.IsZero() {
+		decision.At = time.Now()
+	}
+	s.hostPlane.hooks.record(decision)
+}
+
+// Snapshot returns the most recent poll result, with the sensor helper's
+// latest kernel-policy state and Plane C's current backend: both change
+// between polls (a Tetragon restart, a pause), and /health reads this every
+// few seconds while a poll may be minutes apart.
 func (s *Service) Snapshot() Snapshot {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.snapshot
+	snapshot := s.snapshot
+	snapshot.Kernel = copyKernelState(s.kernel)
+	s.mu.RUnlock()
+	if s.hostPlane == nil || len(snapshot.Planes) == 0 {
+		return snapshot
+	}
+	planes := append([]PlaneHealth(nil), snapshot.Planes...)
+	for index := range planes {
+		if planes[index].Plane == platform.PlaneC && planes[index].Running {
+			planes[index].Backend = s.hostPlaneBackend()
+		}
+	}
+	snapshot.Planes = planes
+	return snapshot
+}
+
+func copyKernelState(state *KernelState) *KernelState {
+	if state == nil {
+		return nil
+	}
+	copied := *state
+	return &copied
+}
+
+// refreshKernelState asks the sensor helper what its kernel-policy
+// reconciler applied. A failed read keeps the last answer, marked
+// unreachable: policies a stopped helper loaded keep running in the kernel.
+func (s *Service) refreshKernelState(ctx context.Context) {
+	if s.kernelReader == nil {
+		return
+	}
+	now := s.options.Now()
+	if now.Before(s.kernelNextTry) {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, kernelStatusTimeout)
+	status, err := s.kernelReader.KernelStatus(readCtx)
+	cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case errors.Is(err, acquire.ErrKernelStatusUnsupported):
+		// A helper that predates the op: nothing to report, and nothing to
+		// infer about kernel policies it cannot load.
+		s.kernel = nil
+		s.kernelNextTry = now.Add(kernelStatusUnsupportedRetry)
+	case err != nil:
+		state := KernelState{}
+		if s.kernel != nil {
+			state = *s.kernel
+		}
+		if state.Reachable || state.UnreachableSince.IsZero() {
+			state.UnreachableSince = now
+		}
+		state.Reachable = false
+		state.Error = boundedError(err)
+		s.kernel = &state
+	default:
+		s.kernel = &KernelState{Status: status, FetchedAt: now, Reachable: true}
+	}
+}
+
+// boundedError is an error's text cut to a status-sized length.
+func boundedError(err error) string {
+	text := err.Error()
+	if len(text) > 256 {
+		text = text[:256]
+	}
+	return text
 }
 
 // Run polls until the context is cancelled.
@@ -301,6 +419,13 @@ func (s *Service) Run(ctx context.Context) error {
 		s.startHostPlane(ctx)
 		defer func() { _ = s.hostPlane.close() }()
 	}
+	var kernelTick <-chan time.Time
+	if s.kernelReader != nil {
+		s.refreshKernelState(ctx)
+		kernelTicker := time.NewTicker(kernelStatusInterval)
+		defer kernelTicker.Stop()
+		kernelTick = kernelTicker.C
+	}
 	// Poll once immediately so a freshly enabled sensor has a snapshot before
 	// the first interval elapses, rather than reporting "no data" for a minute.
 	s.Poll(ctx)
@@ -314,6 +439,8 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ticker.C:
 			s.startHostPlane(ctx)
 			s.Poll(ctx)
+		case <-kernelTick:
+			s.refreshKernelState(ctx)
 		}
 	}
 }
@@ -372,10 +499,14 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 	rows := make([]agentchain.ProcessRow, 0, len(processes))
 	for _, process := range processes {
-		rows = append(rows, agentchain.ProcessRow{
+		row := agentchain.ProcessRow{
 			PID: process.PID, PPID: process.PPID,
 			Name: process.Name, Cmdline: process.Cmdline,
-		})
+		}
+		if !process.StartedAt.IsZero() {
+			row.StartNS = process.StartedAt.UnixNano()
+		}
+		rows = append(rows, row)
 	}
 	s.tracker.ObserveProcessTable(rows)
 	s.tracker.Reap()
@@ -480,6 +611,15 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		classified, gated, _, _ := s.hostPlane.stats()
 		snapshot.HostPlaneObservations = classified
 		snapshot.HostPlaneGated = gated
+		snapshot.HostPlaneContainerEvents = s.hostPlane.containerEvents.Load()
+		snapshot.HostPlaneHookUnexpected = s.hostPlane.hookUnexpected.Load()
+		snapshot.KernelEvents, snapshot.KernelEventsDropped = s.hostPlane.drainKernelEvents()
+		for index := range snapshot.Planes {
+			if snapshot.Planes[index].Plane == platform.PlaneC {
+				snapshot.Planes[index].ContainerEvents = snapshot.HostPlaneContainerEvents - s.lastContainerEvents
+			}
+		}
+		s.lastContainerEvents = snapshot.HostPlaneContainerEvents
 	}
 	if processErr != nil {
 		snapshot.DegradedReasons = append(snapshot.DegradedReasons,
@@ -494,6 +634,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 	s.mu.Lock()
 	s.snapshot = snapshot
+	snapshot.Kernel = copyKernelState(s.kernel)
 	s.mu.Unlock()
 	return snapshot
 }
@@ -626,6 +767,9 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 				// and running in the same breath.
 				entry.Available = entry.Running || capability.Available
 			}
+			if entry.Running {
+				entry.Backend = s.hostPlaneBackend()
+			}
 		}
 		if entry.Running {
 			entry.ObservedAt = now
@@ -726,6 +870,21 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 	return true, coverage.Mechanism, ""
 }
 
+// hostPlaneBackend is a copy of the running Plane C source's backend: what
+// the managed Linux helper runs its process half on. nil everywhere else.
+func (s *Service) hostPlaneBackend() *plane.Backend {
+	if s.hostPlane == nil {
+		return nil
+	}
+	_, _, running, coverage := s.hostPlane.stats()
+	if !running || coverage.Backend == nil {
+		return nil
+	}
+	backend := *coverage.Backend
+	backend.Policies = append([]plane.BackendPolicy(nil), coverage.Backend.Policies...)
+	return &backend
+}
+
 // hostPlaneFindings scores the accumulated agent sessions.
 //
 // A host-plane finding is per agent session rather than per process: the whole
@@ -754,6 +913,15 @@ func (s *Service) hostPlaneFindings(
 			Correlation: correlation,
 			FirstSeen:   session.FirstSeen,
 			LastSeen:    session.LastSeen,
+			User:        session.Root.User,
+			Exe:         session.Root.Exe,
+			UID:         session.Root.UID,
+			AUID:        session.Root.AUID,
+			Connector:   session.Root.Agent.Connector,
+			// A heuristic or IDE-hosted root still attributes the session;
+			// it is only never an enforcement anchor.
+			NotEnforcedReason: session.Root.Agent.ObserveOnly,
+			Activities:        session.Activities,
 		})
 	}
 	return findings
