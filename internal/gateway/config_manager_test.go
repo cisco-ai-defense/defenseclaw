@@ -34,6 +34,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -75,6 +77,45 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	}
 	if got := mgr.Current().Guardrail.Mode; got != "action" {
 		t.Fatalf("current mode = %q, want action", got)
+	}
+}
+
+// GAP-0264: the startup reconcile does not parse, validate and compile
+// config.yaml again while the file still holds the bytes the gateway booted
+// from; once they changed it reloads.
+func TestConfigManagerStartupReconcileSkipsAnUnchangedSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		return nil
+	})
+	loads := 0
+	load := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, data []byte) (*config.Config, error) {
+		loads++
+		return load(source, data)
+	}
+	mgr.setStartupSource(path, raw)
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsw.Close() })
+	if err := mgr.reconcileStartup(t.Context(), fsw); err != nil || loads != 0 {
+		t.Fatalf("reconcile of the boot source: err %v, %d loads, want none", err, loads)
+	}
+	writeConfigForManagerTest(t, path, dir, "action")
+	if err := mgr.reconcileStartup(t.Context(), fsw); err != nil || loads == 0 || mgr.Current().Guardrail.Mode != "action" {
+		t.Fatalf("reconcile of a changed source: err %v, %d loads, mode %q", err, loads, mgr.Current().Guardrail.Mode)
 	}
 }
 

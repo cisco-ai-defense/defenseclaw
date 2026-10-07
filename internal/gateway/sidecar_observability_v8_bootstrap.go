@@ -142,6 +142,7 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if alreadyBound {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, nil)
 	}
+	s.bootConfigSourceName, s.bootConfigSource = sourceName, raw
 	compiled, err := config.ParseCompileObservabilityV8(
 		sourceName,
 		raw,
