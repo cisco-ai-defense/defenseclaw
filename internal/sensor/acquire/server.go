@@ -76,7 +76,7 @@ type TetragonConfig struct {
 	// Tap and Stream let the reconciler count controls hits, loss signals
 	// and connected time from the event stream (plane.TetragonOptions).
 	Tap    func(plane.KernelBatch)
-	Stream func(connected bool)
+	Stream func(plane.StreamState)
 }
 
 // tetragonMode is the effective Tetragon mode ("" when the helper has none).

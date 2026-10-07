@@ -144,6 +144,20 @@ type Controller struct {
 	stream  bool
 	loss    bool
 	names   map[string]known
+	// streamNote is the event stream's last word about Tetragon, waiting
+	// for the off/consume loop to publish it.
+	streamNote *StreamStatus
+}
+
+// StreamStatus is what the helper's event stream knows about Tetragon.
+type StreamStatus struct {
+	Connected bool
+	Version   string
+	PID       int
+	// Reason says why the stream is down ("tetragon_unavailable: ...",
+	// "tetragon_untrusted_endpoint: ..."); empty when the stream closed
+	// because nobody subscribes to it.
+	Reason string
 }
 
 // New creates a Controller and restores what a previous helper published
@@ -215,6 +229,25 @@ func (c *Controller) Nudge() {
 	case c.nudge <- struct{}{}:
 	default:
 	}
+}
+
+// NoteStream records what the event stream knows about Tetragon. Covered
+// time accrues only while it is connected. In observe and enforce every pass
+// asks Tetragon itself, and a new session triggers one (Tetragon may have
+// restarted and dropped the policies added over gRPC). In off and consume
+// the stream is the helper's only session with Tetragon, so it is what the
+// published state says about it: reachable with its version and pid, or the
+// reason it is not.
+func (c *Controller) NoteStream(s StreamStatus) {
+	c.SetStream(s.Connected)
+	if !c.cfg.Intent.Mode.LoadsPolicies() {
+		c.tallyMu.Lock()
+		c.streamNote = &s
+		c.tallyMu.Unlock()
+	} else if !s.Connected {
+		return
+	}
+	c.Nudge()
 }
 
 // SetStream tells the controller whether the Tetragon event stream is
@@ -448,7 +481,8 @@ func (c *Controller) forgetLoaded(name string) {
 }
 
 // Run drives the controller until ctx ends. In off and consume it only
-// retires names its record holds. The policies it loaded keep running when it
+// retires names its record holds (and, in consume, publishes what the event
+// stream says about Tetragon). The policies it loaded keep running when it
 // stops, with frozen anchors, until it returns; status says so.
 func (c *Controller) Run(ctx context.Context) error {
 	if !c.cfg.Intent.Mode.LoadsPolicies() {
@@ -533,35 +567,83 @@ func (c *Controller) pauseChanged() bool {
 }
 
 // runRetire is the whole of off and consume: retire the names this helper
-// recorded, if any, and then never connect again. Tetragon may be down at
-// start, so it retries until the record is empty.
+// recorded, if any, and never load anything. Tetragon may be down at start,
+// so it retries until the record is empty, at once when the event stream
+// connects again. Off then returns; consume keeps publishing what the event
+// stream says about Tetragon until ctx ends.
 func (c *Controller) runRetire(ctx context.Context) error {
 	c.st.Effective = string(c.cfg.Intent.Mode)
+	// What a previous mode published (its policies, users, warnings and the
+	// Tetragon its passes saw) is not this mode's.
+	c.st.Warnings = append([]string(nil), c.cfg.Intent.Problems...)
+	c.st.Policies, c.st.UIDs, c.st.Roots, c.st.InSync = nil, nil, RootsStatus{}, false
+	c.st.Tetragon = TetragonStatus{}
 	c.persist()
 	orphaned := false
+	var retry <-chan time.Time
 	for {
-		if len(c.recorded) == 0 {
-			return nil
-		}
-		if err := c.retireOnce(ctx); err == nil && len(c.recorded) == 0 {
-			return nil
-		} else if err != nil {
-			c.cfg.Logger.Warn("retiring recorded tetragon policies failed; will retry", "error", err)
-			if !orphaned {
+		if len(c.recorded) > 0 && retry == nil {
+			err := c.retireOnce(ctx)
+			switch {
+			case err != nil && !orphaned:
 				// Policies this helper loaded are still in Tetragon while the
 				// mode says none should be.
 				orphaned = true
 				c.change(Change{Event: EventOrphaned, Reason: fmt.Sprintf("%d recorded policies not retired: %v", len(c.recorded), err)})
-				c.st.Warnings = addUnique(c.st.Warnings, WarnTetragonUnavailable)
+				c.warn(WarnTetragonUnavailable)
+				c.persist()
+			case err == nil && orphaned:
+				orphaned = false
+				c.st.Warnings = withoutValue(c.st.Warnings, WarnTetragonUnavailable)
 				c.persist()
 			}
+			if err != nil {
+				c.cfg.Logger.Warn("retiring recorded tetragon policies failed; will retry", "error", err)
+			}
+			if len(c.recorded) > 0 {
+				retry = time.After(c.cfg.Intervals.Reconcile)
+			}
+		}
+		if len(c.recorded) == 0 && c.cfg.Intent.Mode != ModeConsume {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
+			c.persist()
 			return nil
-		case <-time.After(c.cfg.Intervals.Reconcile):
+		case <-retry:
+			retry = nil
+		case <-c.nudge:
+			if c.noteStream() {
+				retry = nil // Tetragon answers again: retire now
+			}
 		}
 	}
+}
+
+// noteStream publishes the event stream's last word about Tetragon (off and
+// consume) and reports whether the stream is connected.
+func (c *Controller) noteStream() bool {
+	c.tallyMu.Lock()
+	note := c.streamNote
+	c.streamNote = nil
+	c.tallyMu.Unlock()
+	if note == nil {
+		return false
+	}
+	switch {
+	case note.Connected:
+		c.st.Tetragon = TetragonStatus{Reachable: true, Version: note.Version, PID: note.PID, SeenAt: c.cfg.Now().UTC()}
+		c.st.Warnings = withoutValue(c.st.Warnings, WarnTetragonUnavailable)
+	case note.Reason != "":
+		c.st.Tetragon.Reachable, c.st.Tetragon.Reason = false, note.Reason
+		c.warn(WarnTetragonUnavailable)
+	default:
+		// Nobody subscribes to the stream any more: nothing is known.
+		c.st.Tetragon.Reachable, c.st.Tetragon.Reason = false, ""
+	}
+	c.persist()
+	return note.Connected
 }
 
 func (c *Controller) retireOnce(ctx context.Context) error {
@@ -589,6 +671,16 @@ func (c *Controller) retireOnce(ctx context.Context) error {
 	c.st.Policies = nil
 	c.persist()
 	return err
+}
+
+func withoutValue(list []string, value string) []string {
+	out := list[:0:0]
+	for _, item := range list {
+		if item != value {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func addUnique(list []string, value string) []string {

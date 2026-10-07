@@ -116,6 +116,7 @@ func (f *feed) Backend() plane.Backend {
 		Kind:       plane.BackendTetragon,
 		Version:    f.client.Version().String(),
 		Socket:     f.client.Socket(),
+		PID:        f.client.Info().PID,
 		EventsLost: f.lost,
 		LossKnown:  f.lossKnown,
 		Policies:   append([]plane.BackendPolicy(nil), f.policies...),

@@ -332,6 +332,17 @@ func (h *harness) writeRaw(path, content string) {
 	}
 }
 
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func indexOf(calls []string, prefix string) int {
 	for i, call := range calls {
 		if strings.HasPrefix(call, prefix) {

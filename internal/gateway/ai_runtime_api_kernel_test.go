@@ -280,12 +280,6 @@ func TestKernelOrphansFollowSpec78(t *testing.T) {
 	if got := kernelOrphans(gone, now.Add(2*time.Minute)); !reflect.DeepEqual(got, []string{"defenseclaw-controls-1a2b3c4d"}) {
 		t.Fatalf("orphans of a stopped helper = %v", got)
 	}
-	// The helper's own report.
-	reported := &sensor.KernelState{Reachable: true, FetchedAt: now, Status: acquire.KernelStatus{
-		Available: true, Mode: "observe", Warnings: []string{"kernel_policy_orphaned:defenseclaw-connect-11111111"}}}
-	if got := kernelOrphans(reported, now); !reflect.DeepEqual(got, []string{"defenseclaw-connect-11111111"}) {
-		t.Fatalf("reported orphans = %v", got)
-	}
 }
 
 // TestPolicyHealthBodyWithoutTheRuntimeIsUnchanged pins that /health's

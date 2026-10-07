@@ -221,7 +221,16 @@ func TestOffAndConsumeOnlyRetireRecordedNames(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			h := retireHarness(t, mode)
 			h.tg.take()
-			if err := h.ctl.Run(context.Background()); err != nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- h.ctl.Run(ctx) }()
+			if mode == ModeConsume {
+				// Consume keeps publishing the stream's view after the retire.
+				waitUntil(t, "the retire", func() bool { return len(h.loadedFile()) == 0 })
+				cancel()
+			}
+			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
 			if got := strings.Join(h.tg.names(), ","); got != "customer-tcp-policy,"+lookalike {
@@ -290,4 +299,71 @@ func TestRetireWaitsForTetragonThenNeverConnectsAgain(t *testing.T) {
 	if calls := h.tg.take(); len(calls) != 0 {
 		t.Fatalf("calls = %v; off never connects again", calls)
 	}
+}
+
+// In consume the event stream is the helper's only session with Tetragon:
+// the published state says what it says (reachable, version and pid, or the
+// refused endpoint), and nothing a previous mode published survives.
+func TestConsumePublishesWhatTheStreamSaysAboutTetragon(t *testing.T) {
+	h := newHarness(t, observeIntent(), baseTargets)
+	h.procs = twoUserProcs()
+	h.pass()
+	h.ctl.warn(WarnReconcileFailed)
+	h.ctl.persist()
+	h.start(Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.ctl.Run(ctx) }()
+	waitUntil(t, "the retire", func() bool { return len(h.loadedFile()) == 0 })
+	if st := h.status(); h.has(WarnReconcileFailed) || st.Tetragon.Reachable || len(st.Policies) != 0 || len(st.UIDs) != 0 {
+		t.Fatalf("observe's state survived the switch to consume: %+v", st.FileState)
+	}
+
+	h.ctl.NoteStream(StreamStatus{Reason: "tetragon_untrusted_endpoint: /var/run/tetragon is world-writable"})
+	waitUntil(t, "the refused endpoint", func() bool { return h.has(WarnTetragonUnavailable) })
+	if st := h.status().Tetragon; st.Reachable || !strings.HasPrefix(st.Reason, "tetragon_untrusted_endpoint:") {
+		t.Fatalf("tetragon = %+v", st)
+	}
+	h.ctl.NoteStream(StreamStatus{Connected: true, Version: "v1.7.1", PID: 4242})
+	waitUntil(t, "the stream", func() bool { return h.status().Tetragon.Reachable })
+	file, err := ReadState(h.dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Tetragon.Version != "v1.7.1" || file.Tetragon.PID != 4242 || !file.Tetragon.Reachable || h.has(WarnTetragonUnavailable) {
+		t.Fatalf("the state file the root CLI reads: %+v %v", file.Tetragon, file.Warnings)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A retire that failed while Tetragon was down runs again as soon as the
+// event stream connects, not a reconcile interval later.
+func TestConsumeRetiresAsSoonAsTetragonIsBack(t *testing.T) {
+	h := retireHarness(t, ModeConsume)
+	h.ctl.cfg.Intervals.Reconcile = time.Hour
+	var down atomic.Bool
+	down.Store(true)
+	h.ctl.cfg.Dial = func(context.Context) (Client, func(), error) {
+		if down.Load() {
+			return nil, nil, errors.New("connection refused")
+		}
+		return h.tg, func() {}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.ctl.Run(ctx) }()
+	waitUntil(t, "the orphaned warning", func() bool { return h.has(WarnTetragonUnavailable) })
+	down.Store(false)
+	h.ctl.NoteStream(StreamStatus{Connected: true, Version: "v1.7.1"})
+	waitUntil(t, "the retire", func() bool { return len(h.loadedFile()) == 0 })
+	if h.has(WarnTetragonUnavailable) {
+		t.Fatalf("warnings = %v", h.status().Warnings)
+	}
+	cancel()
+	<-done
 }

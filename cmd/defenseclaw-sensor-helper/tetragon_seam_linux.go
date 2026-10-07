@@ -63,13 +63,10 @@ func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string,
 			return kernelStatusOf(controller.Status(), intent.Mode), nil
 		},
 		Tap: hitTap(controller),
-		Stream: func(connected bool) {
-			controller.SetStream(connected)
-			if connected {
-				// A new session may mean Tetragon restarted and dropped the
-				// policies added over gRPC: look at once.
-				controller.Nudge()
-			}
+		Stream: func(state plane.StreamState) {
+			controller.NoteStream(kernelpolicy.StreamStatus{
+				Connected: state.Connected, Version: state.Version, PID: state.PID, Reason: state.Reason,
+			})
 		},
 	}
 	if intent.Mode != kernelpolicy.ModeOff {
@@ -124,12 +121,32 @@ func hitTap(sink hitSink) func(plane.KernelBatch) {
 // kernelStatusOf is the broker's kernel_status reply: uids and counters and
 // nothing a user did (no path, no command line). The root CLI reads the full
 // state from the helper's files.
+//
+// In off and consume no reconciler runs (Available is false), but the reply
+// still names what the retire step has not removed yet, with its warnings and
+// change records: that is how the gateway reports orphaned policies and
+// emits the removals.
 func kernelStatusOf(state kernelpolicy.State, mode kernelpolicy.Mode) acquire.KernelStatus {
 	if !mode.LoadsPolicies() {
-		return acquire.KernelStatus{
-			Available: false, Mode: string(mode),
-			Reason: "mode " + string(mode) + ": the helper only retires policies it recorded",
+		status := acquire.KernelStatus{
+			Available: false, Mode: string(mode), KernelPolicy: state.KernelPolicy,
+			Reason:   "mode " + string(mode) + ": the helper only retires policies it recorded",
+			Warnings: append([]string(nil), state.Warnings...),
 		}
+		if !state.UpdatedAt.IsZero() {
+			status.UpdatedUnixNano = state.UpdatedAt.UnixNano()
+		}
+		if mode == kernelpolicy.ModeConsume {
+			status.Tetragon = &acquire.KernelTetragon{
+				Version: state.Tetragon.Version, PID: state.Tetragon.PID, Connected: state.Tetragon.Reachable,
+			}
+		}
+		for _, name := range state.Loaded {
+			family, _ := kernelpolicy.FamilyOfName(name)
+			status.Policies = append(status.Policies, acquire.KernelPolicyStatus{Name: name, Family: string(family), Recorded: true})
+		}
+		status.Changes = kernelChanges(state.Changes)
+		return status
 	}
 	status := acquire.KernelStatus{
 		Available:    true,
@@ -198,13 +215,20 @@ func kernelStatusOf(state kernelpolicy.State, mode kernelpolicy.Mode) acquire.Ke
 		status.Overrides = append(status.Overrides, string(family))
 	}
 	sort.Strings(status.Overrides)
-	for _, change := range state.Changes {
-		status.Changes = append(status.Changes, acquire.KernelChange{
+	status.Changes = kernelChanges(state.Changes)
+	return status
+}
+
+// kernelChanges is the change ring as the gateway drains it.
+func kernelChanges(changes []kernelpolicy.Change) []acquire.KernelChange {
+	var out []acquire.KernelChange
+	for _, change := range changes {
+		out = append(out, acquire.KernelChange{
 			Seq: change.Seq, AtUnixNano: change.At.UnixNano(), Event: change.Event, Policy: change.Policy,
 			Family: string(change.Family), Mode: string(change.Mode), State: change.State, UID: change.UID, Reason: change.Reason,
 		})
 	}
-	return status
+	return out
 }
 
 func userMode(state string) string {

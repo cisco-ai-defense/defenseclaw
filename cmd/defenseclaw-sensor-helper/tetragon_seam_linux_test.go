@@ -71,12 +71,37 @@ func TestHitTapCountsControlsEventsAndLoss(t *testing.T) {
 	}
 }
 
-func TestKernelStatusOfOffAndConsumeIsUnavailable(t *testing.T) {
+// In off and consume nothing reconciles, but what the retire step has not
+// removed yet still reaches the gateway (its orphan report), with the
+// warnings and the change records of the retire.
+func TestKernelStatusOfOffAndConsumeNamesWhatIsStillRecorded(t *testing.T) {
 	for _, mode := range []kernelpolicy.Mode{kernelpolicy.ModeOff, kernelpolicy.ModeConsume} {
 		status := kernelStatusOf(kernelpolicy.State{}, mode)
-		if status.Available || status.Mode != string(mode) || status.Reason == "" {
+		if status.Available || status.Mode != string(mode) || status.Reason == "" || len(status.Policies) != 0 {
 			t.Fatalf("%s: %+v", mode, status)
 		}
+	}
+	state := kernelpolicy.State{
+		FileState: kernelpolicy.FileState{
+			KernelPolicy: "sha256:08b71155b713", Effective: "consume", UpdatedAt: time.Unix(1700000000, 0),
+			Tetragon: kernelpolicy.TetragonStatus{Reason: "tetragon_unavailable: connection refused"},
+			Warnings: []string{kernelpolicy.WarnTetragonUnavailable},
+			Changes:  []kernelpolicy.Change{{Seq: 3, Event: kernelpolicy.EventOrphaned, Reason: "1 recorded policies not retired"}},
+		},
+		Loaded: []string{"defenseclaw-controls-0123abcd"},
+	}
+	status := kernelStatusOf(state, kernelpolicy.ModeConsume)
+	if status.Available || len(status.Policies) != 1 || !status.Policies[0].Recorded || status.Policies[0].Family != "controls" {
+		t.Fatalf("policies = %+v", status.Policies)
+	}
+	if len(status.Warnings) != 1 || len(status.Changes) != 1 || status.Changes[0].Event != "orphaned" || status.UpdatedUnixNano == 0 {
+		t.Fatalf("status = %+v", status)
+	}
+	if status.Tetragon == nil || status.Tetragon.Connected {
+		t.Fatalf("tetragon = %+v", status.Tetragon)
+	}
+	if off := kernelStatusOf(state, kernelpolicy.ModeOff); off.Tetragon != nil {
+		t.Fatalf("off never talks to Tetragon's stream: %+v", off.Tetragon)
 	}
 }
 

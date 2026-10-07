@@ -219,6 +219,9 @@ type Backend struct {
 	Mode string
 	// Socket is the unix socket the helper dialled.
 	Socket string
+	// PID is the Tetragon agent's pid from its info file. The helper's
+	// reconciler reports it; it does not travel to the gateway.
+	PID int
 	// EventsLost is how many events the backend reported losing since the
 	// stream opened: rate-limit drops in the stream, plus Tetragon's own
 	// loss counters when LossKnown.
@@ -302,9 +305,22 @@ type TetragonOptions struct {
 	// loss signals there, from the stream it can vouch for. It must not
 	// block.
 	Tap func(KernelBatch)
-	// Stream, when set, is told when the Tetragon event stream connects
-	// (true) and ends (false); burn-in time accrues only while it is up.
-	Stream func(connected bool)
+	// Stream, when set, is told when the Tetragon event stream connects,
+	// when it ends and when a dial fails with a new reason: burn-in time
+	// accrues only while it is up, and in consume the helper's published
+	// Tetragon status comes from it. It must not block.
+	Stream func(StreamState)
+}
+
+// StreamState is the Tetragon event stream as the source sees it.
+type StreamState struct {
+	Connected bool
+	// Version and PID describe the connected Tetragon.
+	Version string
+	PID     int
+	// Reason says why the stream is down: a reason code, a colon and the
+	// detail ("tetragon_unavailable: ..."). Empty when the source closed.
+	Reason string
 }
 
 // Complete reports whether the source is delivering every kind it knows about.

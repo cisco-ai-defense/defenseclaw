@@ -551,11 +551,6 @@ func kernelModeCounts(users []acquire.KernelUserStatus) map[string]int {
 // recorded names it last reported -- gRPC-loaded policies outlive it.
 func kernelOrphans(state *sensor.KernelState, now time.Time) []string {
 	names := map[string]bool{}
-	for _, warning := range state.Status.Warnings {
-		if name, ok := strings.CutPrefix(warning, "kernel_policy_orphaned:"); ok && strings.TrimSpace(name) != "" {
-			names[strings.TrimSpace(name)] = true
-		}
-	}
 	reconciling := state.Status.Mode == "observe" || state.Status.Mode == "enforce"
 	switch {
 	case state.Reachable && !reconciling:

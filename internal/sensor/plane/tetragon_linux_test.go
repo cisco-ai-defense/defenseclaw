@@ -358,14 +358,14 @@ func TestTetragonSourcePrefersTheTetragonFileEvent(t *testing.T) {
 // Tetragon batch (its hit and loss tally) and the stream going up and down.
 func TestTetragonSourceTapsTheStreamForTheReconciler(t *testing.T) {
 	h := newHarness(t)
-	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1", PID: 4242})
 	h.feeds <- feed
 	var mu sync.Mutex
 	var tapped []KernelBatch
-	var stream []bool
+	var stream []StreamState
 	source := NewTetragonSource(nil, TetragonOptions{Mode: "enforce", Dial: h.dial,
 		Tap:    func(batch KernelBatch) { mu.Lock(); tapped = append(tapped, batch); mu.Unlock() },
-		Stream: func(up bool) { mu.Lock(); stream = append(stream, up); mu.Unlock() },
+		Stream: func(state StreamState) { mu.Lock(); stream = append(stream, state); mu.Unlock() },
 	})
 	if err := source.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -383,7 +383,10 @@ func TestTetragonSourceTapsTheStreamForTheReconciler(t *testing.T) {
 	if len(tapped) != 2 || tapped[0].Events[0].Policy != hit.Policy || !tapped[1].ThrottleStart {
 		t.Fatalf("tapped %+v", tapped)
 	}
-	if stream[0] != true || stream[1] != false {
-		t.Fatalf("stream %v", stream)
+	if !stream[0].Connected || stream[0].Version != "v1.7.1" || stream[0].PID != 4242 {
+		t.Fatalf("stream up %+v", stream[0])
+	}
+	if stream[1].Connected || !strings.HasPrefix(stream[1].Reason, "tetragon_unavailable: the event stream ended") {
+		t.Fatalf("stream down %+v", stream[1])
 	}
 }

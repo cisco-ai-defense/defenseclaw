@@ -200,6 +200,7 @@ func (s *tetragonSource) Start(ctx context.Context) error {
 	dialErr := s.dial(ctx)
 	if dialErr != nil {
 		s.startFallback(ctx, reasonOf(dialErr))
+		s.report()
 	}
 	if len(s.homes) > 0 {
 		s.startFiles(ctx)
@@ -271,16 +272,24 @@ func (s *tetragonSource) dial(ctx context.Context) error {
 	}
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.readFeed(ctx, feed) }()
-	s.stream(true)
+	s.report()
 	s.changed()
 	return nil
 }
 
-// stream tells the reconciler whether the Tetragon stream is up.
-func (s *tetragonSource) stream(connected bool) {
-	if s.options.Stream != nil {
-		s.options.Stream(connected)
+// report tells the reconciler what the Tetragon stream is now: up with the
+// agent's version and pid, or down with the reason.
+func (s *tetragonSource) report() {
+	if s.options.Stream == nil {
+		return
 	}
+	s.mu.Lock()
+	state := StreamState{Reason: s.fallback}
+	if s.feed != nil {
+		state = StreamState{Connected: true, Version: s.backend.Version, PID: s.backend.PID}
+	}
+	s.mu.Unlock()
+	s.options.Stream(state)
 }
 
 // startFallback starts cn_proc because Tetragon is not delivering.
@@ -411,8 +420,8 @@ func (s *tetragonSource) feedEnded(ctx context.Context, feed KernelFeed, err err
 	s.lossAt, s.fileSince, s.observeSince, s.throttled = s.now(), time.Time{}, time.Time{}, false
 	handed := s.handed
 	s.mu.Unlock()
-	s.stream(false)
 	s.startFallback(ctx, reasonOf(fmt.Errorf("tetragon_unavailable: the event stream ended: %w", err)))
+	s.report()
 	if handed {
 		s.startFiles(ctx)
 	}
@@ -547,6 +556,7 @@ func (s *tetragonSource) supervise(ctx context.Context) {
 				}
 				s.mu.Unlock()
 				if changed {
+					s.report()
 					s.changed()
 				}
 				retry = min(retry*2, redialMax)
@@ -737,7 +747,9 @@ func (s *tetragonSource) Close() error {
 	}
 	if feed != nil {
 		_ = feed.Close()
-		s.stream(false)
+		if s.options.Stream != nil {
+			s.options.Stream(StreamState{})
+		}
 	}
 	if proc != nil {
 		_ = proc.Close()
