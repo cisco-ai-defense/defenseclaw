@@ -828,13 +828,17 @@ change:
 | `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
 | `restart` | Validate first, then use a fresh gateway process only for edits that cross a restart boundary, such as listener, topology, or storage changes. Fields that are explicitly hot-reloadable—including observability destinations—still reconcile in process so active agent sessions are not interrupted. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path when one is required; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
 
-In `hot` mode, a change to a key that needs a restart (`data_dir`, the audit
-and judge-bodies database paths, the gateway listener and credentials, and the
-rest of the list under [Reload without restart](#reload-without-restart)) is
-not rejected: the gateway keeps that key's running value, logs
+In `hot` mode, a change to a key that needs a restart (the gateway listener
+and credentials, the resource identity, and the rest of the list under
+[Reload without restart](#reload-without-restart)) is not rejected: the gateway
+keeps that key's running value, logs
 `[config] restart the gateway to apply <key>; the rest of the change applies now`,
-and applies everything else. Changing `gateway.config_reload.mode` itself needs
-a restart to take effect.
+and applies everything else. The storage paths (`data_dir`,
+`observability.local.path`, `observability.local.judge_bodies_path`) and
+`deployment_mode` can not be kept that way: the gateway refuses the reload, and
+every later one, until it restarts. `/health` shows `last_reload_error`, and an
+`/enforce` write answers `applied: false` with the error. Changing
+`gateway.config_reload.mode` itself needs a restart to take effect.
 
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/guardrail/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 

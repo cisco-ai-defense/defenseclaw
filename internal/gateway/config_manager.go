@@ -731,10 +731,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	diff := diffConfigs(oldCfg, next)
 	// In hot mode a restart-required edit (a listener, the hook settings
-	// setup bakes in, a section still read once at start) keeps its running
-	// value and is reported as pending, so the rest of the edit, and every
-	// later one, still applies instead of each reload failing until the
-	// gateway restarts. Secure Client keeps its behaviour.
+	// setup bakes in, the resource identity, a section still read once at
+	// start) keeps its running value and is reported as pending, so the rest
+	// of the edit, and every later one, still applies instead of each reload
+	// failing until the gateway restarts. A storage path or deployment_mode
+	// change can not be held (holdRestartRequired) and still fails the
+	// reload. Secure Client keeps its behaviour.
 	var pendingRestart []string
 	if len(diff.RestartRequired) > 0 && configReloadMode(next) != "restart" &&
 		!oldCfg.SecureClientIntegration() && !next.SecureClientIntegration() {
@@ -1334,10 +1336,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 }
 
 // holdRestartRequired returns next with every restart-required section at
-// its running value, or nil when a path can not be held: storage paths, the
-// resource identity the compiled observability plan already carries, the
-// deployment mode and enterprise profile, and the legacy sandbox mode. Such
-// a reload still fails as restart-required.
+// its running value, or nil when a path can not be held: the storage paths,
+// which the compiled observability plan of the candidate already carries, and
+// the deployment mode, which the managed destination of that plan is built
+// from. Such a reload still fails as restart-required.
 func holdRestartRequired(running, next *config.Config, restart []string) *config.Config {
 	if running == nil || next == nil {
 		return nil
@@ -1357,6 +1359,18 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.Gateway.ConfigReload, held.Gateway.Watcher = reload, watcher
 		case "guardrail", "guardrail.retain_judge_bodies", "guardrail.scanner_mode", "guardrail.connectors":
 			holdGuardrailProcessSettings(&held.Guardrail, running.Guardrail)
+		case "environment", "tenant_id", "workspace_id", "discovery_source":
+			// The OTel resource identity the provider factory captured at start.
+			held.Environment, held.TenantID = running.Environment, running.TenantID
+			held.WorkspaceID, held.DiscoverySource = running.WorkspaceID, running.DiscoverySource
+		case "enterprise", "enterprise.network":
+			// Enrollment, the hook-socket authorizer and the egress route are
+			// installed at start; enterprise.inspection stays hot.
+			inspection := held.Enterprise.Inspection
+			held.Enterprise = running.Enterprise
+			held.Enterprise.Inspection = inspection
+		case "openshell.mode":
+			held.OpenShell.Mode = running.OpenShell.Mode
 		default:
 			return nil
 		}
