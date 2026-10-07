@@ -95,4 +95,6 @@ def test_identity_table_uses_cell_width_and_removes_control_characters() -> None
     rendered = cmd_agent._render_agent_identities([row])
     assert "	" not in rendered
     heading, value = rendered.splitlines()
-    assert heading.index("Connector") == value.index("claudecode")
+    from rich.cells import cell_len
+
+    assert cell_len(heading[:heading.index("Connector")]) == cell_len(value[:value.index("claudecode")])

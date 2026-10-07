@@ -165,7 +165,7 @@ func TestLargeVSCodeInventoryKeepsLaterJetBrainsPlugins(t *testing.T) {
 	}
 	manifest.WriteByte(']')
 	writeFile(t, filepath.Join(home, ".vscode", "extensions", "extensions.json"), manifest.String())
-	writeFile(t, filepath.Join(home, ".local", "share", "JetBrains", "IdeaIC2025.2", "plugins", "ai", "META-INF", "plugin.xml"),
+	writeFile(t, filepath.Join(home, ".local", "share", "JetBrains", "IdeaIC2025.2", "ai", "META-INF", "plugin.xml"),
 		`<idea-plugin><id>com.example.ai</id></idea-plugin>`)
 	installs := Scan(home, "linux", Limits{})
 	vs, jb := false, false

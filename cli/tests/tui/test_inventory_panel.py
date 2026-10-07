@@ -630,8 +630,10 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert len(panel.data_table_rows()) == 3
     assert panel.data_table_rows()[1] == ("codex", "bob", "agt-0123456789abcdef", "agent identity", "", "", "")
     long_user = "A" * 300
-    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [identity("agt-long", long_user)]}))
-    assert panel.data_table_rows()[-1][1] == "A" * 29 + "..."
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [
+        identity("agt-long", long_user), identity("agt-short", "bob"),
+    ]}))
+    assert any(row[1] == "A" * 29 + "..." for row in panel.data_table_rows())
 
     panel.set_cursor(1)
     assert dict(panel.detail_info().fields)["Sessions"] == "3"
