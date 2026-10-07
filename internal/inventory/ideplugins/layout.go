@@ -207,6 +207,15 @@ func windowsVimGrants(home, root string, out *[]WindowsGrant) {
 		}
 		root += `\site`
 	}
+	if root == `vimfiles` {
+		plugged := root + `\plugged`
+		self(plugged)
+		for _, name := range windowsSubdirs(home, plugged, vimMaxPlugins) {
+			if safeName(name) && !strings.HasPrefix(name, ".") {
+				self(plugged + `\` + name)
+			}
+		}
+	}
 	packRoot := root + `\pack`
 	self(packRoot)
 	for _, pack := range windowsSubdirs(home, packRoot, vimMaxPacks) {
