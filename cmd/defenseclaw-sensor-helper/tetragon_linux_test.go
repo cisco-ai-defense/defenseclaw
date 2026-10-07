@@ -86,27 +86,13 @@ func cleanupDirs(t *testing.T, recorded ...string) kernelpolicy.Dirs {
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-func TestKernelPolicyCleanupCheckOnlyReportsSupport(t *testing.T) {
-	var out bytes.Buffer
-	dial := func(context.Context) (kernelpolicy.Client, func(), error) {
-		t.Fatal("--check must not dial")
-		return nil, nil, nil
-	}
-	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, cleanupDirs(t, recordedObserve), dial, true); code != 0 {
-		t.Fatalf("exit %d", code)
-	}
-	if !strings.Contains(out.String(), "supported") {
-		t.Fatalf("output %q", out.String())
-	}
-}
-
 func TestKernelPolicyCleanupWithNothingRecordedNeverDials(t *testing.T) {
 	var out bytes.Buffer
 	dial := func(context.Context) (kernelpolicy.Client, func(), error) {
 		t.Fatal("nothing is recorded; an uninstall must not need Tetragon")
 		return nil, nil, nil
 	}
-	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, cleanupDirs(t), dial, false); code != 0 {
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, cleanupDirs(t), dial); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
 }
@@ -116,7 +102,7 @@ func TestKernelPolicyCleanupRemovesOnlyRecordedNames(t *testing.T) {
 	dirs := cleanupDirs(t, recordedObserve, recordedControls)
 	var out bytes.Buffer
 	dial := func(context.Context) (kernelpolicy.Client, func(), error) { return fake, func() {}, nil }
-	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, dial, false); code != 0 {
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, dial); code != 0 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
 	if len(fake.deleted) != 2 || fake.loaded[recordedObserve] || fake.loaded[recordedControls] || !fake.loaded[lookalikeName] || !fake.loaded["customer-policy"] {
@@ -143,7 +129,7 @@ func TestKernelPolicyCleanupExitCodes(t *testing.T) {
 		return nil, nil, errors.New("connection refused")
 	}
 	dirs := cleanupDirs(t, recordedObserve)
-	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, down, false); code != cleanupUnreachable {
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, down); code != cleanupUnreachable {
 		t.Fatalf("exit %d; an unreachable Tetragon is its own code so the lifecycle can warn and go on", code)
 	}
 	if !strings.Contains(out.String(), "systemctl restart tetragon") {
@@ -156,7 +142,7 @@ func TestKernelPolicyCleanupExitCodes(t *testing.T) {
 	fake := &cleanupFake{loaded: map[string]bool{recordedObserve: true}, failWith: map[string]error{recordedObserve: errors.New("boom")}}
 	out.Reset()
 	bad := func(context.Context) (kernelpolicy.Client, func(), error) { return fake, func() {}, nil }
-	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, bad, false); code != cleanupFailed {
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, bad); code != cleanupFailed {
 		t.Fatalf("exit %d", code)
 	}
 	if !strings.Contains(out.String(), "kept "+recordedObserve) {
@@ -177,7 +163,7 @@ func TestKernelPolicyCleanupRefusesWhileAHelperReconciles(t *testing.T) {
 		t.Fatal("a refused cleanup must not reach Tetragon")
 		return nil, nil, nil
 	}
-	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, dial, false); code != cleanupFailed {
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, dial); code != cleanupFailed {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "stop it first") {
@@ -189,7 +175,7 @@ func TestKernelPolicyCleanupRefusesWhileAHelperReconciles(t *testing.T) {
 	unlock()
 	fake := &cleanupFake{loaded: map[string]bool{recordedObserve: true}}
 	ok := func(context.Context) (kernelpolicy.Client, func(), error) { return fake, func() {}, nil }
-	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, ok, false); code != cleanupOK {
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, ok); code != cleanupOK {
 		t.Fatalf("exit %d once the helper stopped", code)
 	}
 }

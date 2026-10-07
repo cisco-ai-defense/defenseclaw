@@ -263,6 +263,10 @@ type Intent struct {
 // an override lasts until the mode or the approval changes.
 func (i Intent) Key() string { return string(i.Mode) + "|" + i.EnforceAck }
 
+// connectorName is the shape of a connector name in the drop-in; anything
+// else is dropped (it could never match an enrolled connector anyway).
+var connectorName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
 // Lookup is the environment read seam (envvars.Lookup in the helper).
 type Lookup func(name string) (string, bool)
 
@@ -308,7 +312,11 @@ func IntentFromLookup(lookup Lookup) Intent {
 		seen := map[string]bool{}
 		for _, part := range strings.Split(value, ",") {
 			connector := strings.ToLower(strings.TrimSpace(part))
-			if connector != "" && !seen[connector] {
+			switch {
+			case connector == "" || seen[connector]:
+			case !connectorName.MatchString(connector):
+				*notes = addUnique(*notes, WarnConfigInvalid+":"+EnvEnforceConnectors)
+			default:
 				seen[connector] = true
 				intent.EnforceConnectors = append(intent.EnforceConnectors, connector)
 			}

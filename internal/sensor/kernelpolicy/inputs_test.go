@@ -50,6 +50,9 @@ func TestIntentFromLookupFallsBackToTheNarrowSide(t *testing.T) {
 			Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn, Problems: []string{WarnConfigInvalid + ":" + EnvBurnIn}}},
 		{"a malformed ack is no ack", env(EnvMode, "enforce", EnvEnforceAck, "sha256:XYZ"),
 			Intent{Mode: ModeEnforce, BurnIn: DefaultBurnIn, Problems: []string{WarnConfigInvalid + ":" + EnvEnforceAck}}},
+		{"a malformed connector is dropped", env(EnvMode, " OFF ", EnvEnforceConnectors, "Codex,bad connector,,codex"),
+			Intent{Mode: ModeOff, BurnIn: DefaultBurnIn, EnforceConnectors: []string{"codex"},
+				Problems: []string{WarnConfigInvalid + ":" + EnvEnforceConnectors}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

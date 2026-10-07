@@ -4333,10 +4333,6 @@
           "description": "The lifecycle renders it from enterprise.tetragon.burn_in (the only writer)"
         },
         {
-          "location": "cmd/defenseclaw-sensor-helper/main.go",
-          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
-        },
-        {
           "location": "internal/sensor/kernelpolicy/types.go",
           "description": "IntentFromLookup reads it for the kernel-policy reconciler; a malformed value falls back to 168h"
         }
@@ -4361,10 +4357,6 @@
         {
           "location": "internal/enterpriseunix/render.go",
           "description": "The lifecycle renders it from enterprise.tetragon.enforce_ack (the only writer)"
-        },
-        {
-          "location": "cmd/defenseclaw-sensor-helper/main.go",
-          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
         },
         {
           "location": "internal/sensor/kernelpolicy/types.go",
@@ -4393,10 +4385,6 @@
           "description": "The lifecycle renders it from the enrolled connectors' effective guardrail mode (the only writer)"
         },
         {
-          "location": "cmd/defenseclaw-sensor-helper/main.go",
-          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
-        },
-        {
           "location": "internal/sensor/kernelpolicy/types.go",
           "description": "IntentFromLookup reads it for the kernel-policy reconciler"
         }
@@ -4423,10 +4411,6 @@
         {
           "location": "internal/enterpriseunix/render.go",
           "description": "The lifecycle renders the effective mode from enterprise.tetragon (the only writer)"
-        },
-        {
-          "location": "cmd/defenseclaw-sensor-helper/main.go",
-          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
         },
         {
           "location": "internal/sensor/kernelpolicy/types.go",

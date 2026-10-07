@@ -64,14 +64,6 @@ type TetragonConfig struct {
 	// Mode is the effective mode (the Plane C cap applied): off, consume,
 	// observe or enforce.
 	Mode string
-	// BurnIn is the covered agent time a uid needs before it is enforced
-	// (0 skips it, with a warning).
-	BurnIn time.Duration
-	// EnforceAck is the approved kernel_policy digest ("" when none).
-	EnforceAck string
-	// EnforceConnectors are the enrolled connectors whose effective
-	// guardrail mode is action: only they can be anchored for enforcement.
-	EnforceConnectors []string
 	// Dial opens a Tetragon event session (tetragon.NewDialer). With Mode
 	// off, or without Dial, the event stream is the native one.
 	Dial plane.KernelDialer

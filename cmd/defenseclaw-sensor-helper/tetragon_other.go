@@ -14,27 +14,17 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 
-	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 )
 
 // Tetragon runs on Linux only. Managed macOS and Windows accept the
-// enterprise.tetragon block and ignore it; these stubs keep the helper's
-// other files portable.
+// enterprise.tetragon block and ignore it; main reaches neither stub there.
 
-func kernelPolicyIntent(kernelpolicy.Lookup, *slog.Logger) kernelpolicy.Intent {
-	return kernelpolicy.Intent{Mode: kernelpolicy.ModeOff}
-}
-
-func kernelPolicyStart(context.Context, *slog.Logger, kernelpolicy.Lookup, kernelpolicy.DialFunc, string) *kernelpolicy.Controller {
+func startKernelPolicy(context.Context, *slog.Logger, []string, string) *acquire.TetragonConfig {
 	return nil
 }
 
-func kernelPolicyCleanup(_ context.Context, _ *slog.Logger, out io.Writer, _ kernelpolicy.Dirs,
-	_ kernelpolicy.DialFunc, _ bool) int {
-	fmt.Fprintln(out, "tetragon-cleanup: not applicable on this platform")
-	return 0
-}
+func cleanupKernelPolicy(context.Context, io.Writer, *slog.Logger) error { return nil }

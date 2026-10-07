@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
@@ -27,12 +28,8 @@ import (
 	pb "github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon"
 )
 
-// This file fills the hooks main.go leaves for the kernel-policy reconciler
-// (kernelPolicy): it connects the reconciler to the helper's Tetragon client,
-// the event stream and the broker's kernel_status reply.
-func init() {
-	kernelPolicy = kernelPolicyHooks{start: startKernelPolicy, cleanup: cleanupKernelPolicy}
-}
+// This file connects the kernel-policy reconciler to the helper's Tetragon
+// client, the event stream and the broker's kernel_status reply.
 
 // policyDialer opens one short session per call, scoped to what the mode may
 // do: ScopePolicy to load and change policies (observe and enforce), the
@@ -48,16 +45,21 @@ func policyDialer(scope tetragon.Scope) kernelpolicy.DialFunc {
 	}
 }
 
-func startKernelPolicy(ctx context.Context, input kernelPolicyInput) kernelPolicyRuntime {
-	intent := kernelPolicyIntent(input.Lookup, input.Logger)
+// startKernelPolicy runs the kernel-policy reconciler for the helper's
+// lifetime and returns the event stream's Tetragon wiring: the drop-in's
+// mode, the event dialer (none in off) and the hooks that feed the
+// reconciler and answer kernel_status. The drop-in is read once, here.
+func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string, manifest string) *acquire.TetragonConfig {
+	intent := kernelPolicyIntent(envvars.Lookup, logger)
 	scope := tetragon.ScopeCleanup
 	if intent.Mode.LoadsPolicies() {
 		scope = tetragon.ScopePolicy
 	}
-	controller := kernelPolicyStart(ctx, input.Logger, input.Lookup, policyDialer(scope), input.Manifest)
-	return kernelPolicyRuntime{
+	controller := kernelPolicyStart(ctx, logger, intent, policyDialer(scope), manifest)
+	config := &acquire.TetragonConfig{
+		Mode:             string(intent.Mode),
 		OwnObservePolicy: func(name string) bool { return controller.OwnsPolicy(name, kernelpolicy.FamilyObserve) },
-		Status: func(context.Context) (acquire.KernelStatus, error) {
+		KernelStatus: func(context.Context) (acquire.KernelStatus, error) {
 			return kernelStatusOf(controller.Status(), intent.Mode), nil
 		},
 		Tap: hitTap(controller),
@@ -70,10 +72,14 @@ func startKernelPolicy(ctx context.Context, input kernelPolicyInput) kernelPolic
 			}
 		},
 	}
+	if intent.Mode != kernelpolicy.ModeOff {
+		config.Dial = tetragon.NewDialer(tetragon.DialerConfig{Homes: homes, BinDir: helperBinDir()})
+	}
+	return config
 }
 
 func cleanupKernelPolicy(ctx context.Context, out io.Writer, logger *slog.Logger) error {
-	return cleanupResult(kernelPolicyCleanup(ctx, logger, out, kernelpolicy.DefaultDirs(), policyDialer(tetragon.ScopeCleanup), false))
+	return cleanupResult(kernelPolicyCleanup(ctx, logger, out, kernelpolicy.DefaultDirs(), policyDialer(tetragon.ScopeCleanup)))
 }
 
 // cleanupResult turns kernelPolicyCleanup's exit code into the command's

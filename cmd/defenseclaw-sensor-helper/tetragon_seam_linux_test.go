@@ -30,12 +30,6 @@ type recordingSink struct {
 func (s *recordingSink) RecordHit(h kernelpolicy.Hit) { s.hits = append(s.hits, h) }
 func (s *recordingSink) RecordLoss()                  { s.losses++ }
 
-func TestTheReconcilerHooksAreRegistered(t *testing.T) {
-	if kernelPolicy.start == nil || kernelPolicy.cleanup == nil {
-		t.Fatal("the kernel-policy hooks are not filled in")
-	}
-}
-
 // The cleanup's exit code reaches the command's exit status: the lifecycle
 // tells "Tetragon did not answer" (3) from a failed cleanup (1).
 func TestCleanupResultKeepsTheExitCode(t *testing.T) {

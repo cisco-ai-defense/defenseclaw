@@ -57,9 +57,8 @@ func kernelPolicyIntent(lookup kernelpolicy.Lookup, logger *slog.Logger) kernelp
 //
 // In modes off and consume the controller only retires the names an earlier
 // run recorded, then stops talking to Tetragon.
-func kernelPolicyStart(ctx context.Context, logger *slog.Logger, lookup kernelpolicy.Lookup, dial kernelpolicy.DialFunc,
+func kernelPolicyStart(ctx context.Context, logger *slog.Logger, intent kernelpolicy.Intent, dial kernelpolicy.DialFunc,
 	manifestPath string) *kernelpolicy.Controller {
-	intent := kernelPolicyIntent(lookup, logger)
 	controller := kernelpolicy.New(kernelpolicy.Config{
 		Intent: intent,
 		Dirs:   kernelpolicy.DefaultDirs(),
@@ -70,7 +69,9 @@ func kernelPolicyStart(ctx context.Context, logger *slog.Logger, lookup kernelpo
 		},
 		ExtraPrefixes: agentPrefixes(os.LookupEnv),
 	})
-	logger.Info("kernel policy controller starting", "mode", intent.Mode, "kernel_policy", kernelpolicy.Digest())
+	logger.Info("kernel policy controller starting", "mode", intent.Mode, "kernel_policy", kernelpolicy.Digest(),
+		"burn_in", intent.BurnIn.String(), "enforce_ack_set", intent.EnforceAck != "",
+		"enforce_connectors", intent.EnforceConnectors)
 	go func() {
 		if err := controller.Run(ctx); err != nil {
 			logger.Error("kernel policy controller stopped", "error", err)
@@ -109,23 +110,19 @@ func lookupUser(name string) (int, string, error) {
 	return uid, account.HomeDir, nil
 }
 
-// kernelPolicyCleanup is the body of `--tetragon-cleanup [--check]`: the
+// kernelPolicyCleanup is the body of `--tetragon-cleanup`: the
 // one-shot retire of every policy this helper recorded, run with the binary
 // that loaded them before binaries or state go away (uninstall, purge,
 // rollback, downgrade). It calls ListTracingPolicies and DeleteTracingPolicy
 // only, and deletes only names that are both recorded and shaped like the
 // ones this helper loads.
 //
-// With check it reports support and touches nothing. It returns an exit code:
-// 0 for done or nothing to do, 3 when Tetragon is not reachable while names
-// are still recorded (the lifecycle warns and goes on), 1 for an incomplete
-// cleanup.
+// It returns an exit code: 0 for done or nothing to do, 3 when Tetragon is
+// not reachable while names are still recorded (the lifecycle warns and
+// goes on), 1 for an incomplete or refused cleanup. --check is answered by
+// runTetragonCleanup before this runs.
 func kernelPolicyCleanup(ctx context.Context, logger *slog.Logger, out io.Writer, dirs kernelpolicy.Dirs,
-	dial kernelpolicy.DialFunc, check bool) int {
-	if check {
-		fmt.Fprintln(out, "tetragon-cleanup: supported")
-		return cleanupOK
-	}
+	dial kernelpolicy.DialFunc) int {
 	recorded, err := kernelpolicy.Recorded(dirs)
 	if err != nil {
 		fmt.Fprintf(out, "tetragon-cleanup: cannot read the record of loaded policies: %v\n", err)
