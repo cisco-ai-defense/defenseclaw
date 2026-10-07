@@ -1297,7 +1297,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             "Config validation",
             f"{exc}; re-run defenseclaw doctor",
             r=r,
-            check_id="doctor.config.canonical-v8",
+            check_id="doctor.config.validation",
             reason_code="canonical-validation-timeout",
         )
         return
@@ -1327,7 +1327,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             # (GAP-1499), not the wire record.
             detail,
             r=r,
-            check_id="doctor.config.canonical-v8",
+            check_id="doctor.config.validation",
             reason_code="canonical-validation-failed",
             remediation=remediation,
         )
@@ -1338,7 +1338,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             "Config validation",
             "the configuration validator returned no validity decision",
             r=r,
-            check_id="doctor.config.canonical-v8",
+            check_id="doctor.config.validation",
             reason_code="canonical-validation-unavailable",
             remediation="defenseclaw config validate",
         )
@@ -1348,7 +1348,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         "Config file",
         f"{cfg_path}; canonical schema valid",
         r=r,
-        check_id="doctor.config.canonical-v8",
+        check_id="doctor.config.validation",
     )
 
 
@@ -1375,7 +1375,7 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
             "This device is managed: DefenseClaw is configured by your administrator (MDM or management plane), "
             "so there is no per-user config and no per-user check applies",
             r=r,
-            check_id="doctor.config.canonical-v8",
+            check_id="doctor.config.validation",
             reason_code="managed-device",
         )
     else:
@@ -1384,14 +1384,20 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
             "Config file",
             f"{cfg_path} not found; DefenseClaw is not initialized, so no other check can run",
             r=r,
-            check_id="doctor.config.canonical-v8",
+            check_id="doctor.config.validation",
             reason_code="not-initialized",
             remediation="defenseclaw init",
         )
     if write_cache and os.path.isdir(str(getattr(cfg, "data_dir", "") or "")):
         _write_doctor_cache(cfg, r)
     if json_out:
-        click.echo(json.dumps(r.to_dict(), indent=2))
+        payload = r.to_dict()
+        if managed:
+            # The process exits 3 on a managed device, as every command that needs a per-user
+            # config does; the JSON must say the same, not "healthy" with exit_code 0 (GAP-0239).
+            payload["outcome"] = "managed"
+            payload["exit_code"] = 3
+        click.echo(json.dumps(payload, indent=2))
         return 3 if managed else 1
     _doctor_subsection("Summary")
     if managed:
@@ -1461,7 +1467,7 @@ def _doctor_config_present(cfg) -> bool:
     return os.path.isfile(config_path_for_data_dir(data_dir))
 
 
-_CONFIG_PREFLIGHT_REPAIR_ID = "doctor.config.canonical-v8.preflight"
+_CONFIG_PREFLIGHT_REPAIR_ID = "doctor.config.validation.preflight"
 
 
 def _plan_canonical_config_preflight(cfg) -> RepairDecision:
@@ -9732,7 +9738,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
 def _config_validation_failed(r: _DoctorResult) -> bool:
     """True once this run's Config validation row reported a failure."""
     return any(
-        check.get("check_id") == "doctor.config.canonical-v8" and check.get("status") == "fail"
+        check.get("check_id") == "doctor.config.validation" and check.get("status") == "fail"
         for check in r.checks
     )
 

@@ -83,7 +83,7 @@ def test_observability_plan_skips_after_config_validation_failed(tmp_path: Path)
     # GAP-1662: the guardrail error is not repeated as an observability failure.
     (tmp_path / "config.yaml").write_text("config_version: 8\nobservability:\n  destinations: wrong\n")
     r = _DoctorResult()
-    r.record("fail", "Config validation", "line 2: ...", check_id="doctor.config.canonical-v8")
+    r.record("fail", "Config validation", "line 2: ...", check_id="doctor.config.validation")
     _check_observability(SimpleNamespace(data_dir=str(tmp_path)), r)
     row = next(c for c in r.checks if c["label"] == "Observability plan")
     assert row["status"] == "skip"

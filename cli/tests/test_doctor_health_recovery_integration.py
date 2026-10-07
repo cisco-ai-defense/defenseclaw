@@ -245,7 +245,7 @@ def test_dry_run_projects_token_creation_into_token_env_plan(tmp_path) -> None:
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.credentials.dotenv.protect", "noop"),
         ("doctor.gateway.token.ensure", "applicable"),
         ("doctor.gateway.token-env.canonicalize", "applicable"),
@@ -618,7 +618,7 @@ def test_missing_or_noncanonical_config_blocks_every_real_repair(
             ),
         )
 
-    assert result.repairs[0]["repair_id"] == "doctor.config.canonical-v8.preflight"
+    assert result.repairs[0]["repair_id"] == "doctor.config.validation.preflight"
     assert result.repairs[0]["state"] == "blocked"
     assert all(applier.call_count == 0 for applier in appliers.values())
     cfg.save.assert_not_called()
@@ -849,7 +849,7 @@ def test_audit_recovery_removes_stale_pid_dependency_in_one_run(tmp_path) -> Non
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "applied"),
         ("doctor.state.audit-db.initialize", "applied"),
     ]
@@ -880,7 +880,7 @@ def test_audit_recovery_dry_run_projects_stale_pid_removal_without_writes(tmp_pa
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "applicable"),
         ("doctor.state.audit-db.initialize", "applicable"),
     ]
@@ -925,7 +925,7 @@ def test_audit_recovery_dry_run_does_not_project_noop_pid_as_absent(tmp_path) ->
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "noop"),
         ("doctor.state.audit-db.initialize", "blocked"),
     ]
@@ -1041,7 +1041,7 @@ def test_device_identity_requires_explicit_attended_repair(tmp_path) -> None:
         )
 
     assert [(row["repair_id"], row["state"]) for row in result.repairs] == [
-        ("doctor.config.canonical-v8.preflight", "noop"),
+        ("doctor.config.validation.preflight", "noop"),
         ("doctor.gateway.pid.remove-stale", "noop"),
         ("doctor.identity.device-key.initialize", "requires_confirmation"),
     ]
