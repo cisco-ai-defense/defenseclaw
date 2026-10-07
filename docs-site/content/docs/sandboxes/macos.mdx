@@ -96,17 +96,19 @@ first lines look like this:
 ```text
 DefenseClaw sandbox setup
   Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
-Install OpenShell 0.1.1 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
+Install OpenShell 0.1.2 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
 ```
 
 Then it:
 
-1. **Installs OpenShell 0.1.1** from the `nvidia/openshell` Homebrew
+1. **Installs OpenShell 0.1.2** from the `nvidia/openshell` Homebrew
    formula, without `sudo`. NVIDIA's installer script is checked against a
    pinned SHA-256 before it runs. The plan lists what else changes: Homebrew
    may update itself first, and the gateway is registered as `openshell` in
    `~/.config/openshell`. With the same consent it installs `e2fsprogs`
-   when it is missing.
+   when it is missing. On OpenShell 0.1.1 setup offers the upgrade to 0.1.2
+   in place instead (`brew reinstall` of the formula; see
+   [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 2. **Switches the gateway to MicroVMs.** It asks:
 
    ```text
@@ -197,18 +199,18 @@ On a Mac set up through Homebrew, the output looks like this:
   ✓ Disk space                 37.8 GiB free under ~/.local/state/openshell/vm-driver
   - systemd linger             Homebrew services run while you are logged in
   ✓ Gateway service            nvidia/openshell/openshell started
-  ✓ OpenShell CLI              0.1.1 at /opt/homebrew/bin/openshell
+  ✓ OpenShell CLI              0.1.2 at /opt/homebrew/bin/openshell
   ✓ SSH connection sharing     off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either
   ✓ Gateway registration       openshell at https://localhost:17670 (mtls)
   ✓ Gateway mTLS files         private key is owner-only
-  ✓ Gateway                    0.1.1 healthy at https://localhost:17670
+  ✓ Gateway                    0.1.2 healthy at https://localhost:17670
   ✓ Gateway compute driver     vm (OpenShell MicroVM; experimental upstream)
   ✓ Global policy              none; sandbox policies apply
   - Project bind mounts        the OpenShell MicroVM (vm) driver mounts no host folders: every run works on a copy
   - OpenShell telemetry        DefenseClaw changes it on Linux only; the Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from ~/.config/openshell/gateway.env
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
   ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
-  ✓ DefenseClaw daemon         connected to OpenShell 0.1.1 gateway openshell (MicroVM driver); ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.2 gateway openshell (MicroVM driver); ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
   ✓ Sandbox hooks              no sandbox is running
   ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
   ✓ Shell wrappers             none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)

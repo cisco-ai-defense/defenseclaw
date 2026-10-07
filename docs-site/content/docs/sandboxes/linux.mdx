@@ -101,14 +101,14 @@ like this (the install plan and build lines are shortened):
 ```text
 DefenseClaw sandbox setup
   Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✗ OpenShell not installed
-Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
+Install OpenShell 0.1.2 with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
 OpenShell install plan
-  Release     v0.1.1 (NVIDIA OpenShell upstream installer)
+  Release     v0.1.2 (NVIDIA OpenShell upstream installer)
   SHA-256     … (verified)
   Privileges  the script uses sudo to install the openshell package, then enables and
               starts the openshell-gateway user service (systemd --user)
 Run this plan? [y/N] y
-  ✓ OpenShell 0.1.1 installed, gateway running
+  ✓ OpenShell 0.1.2 installed, gateway running
 Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n]
 Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
   OpenShell gateway configuration changes
@@ -135,10 +135,12 @@ Build the Claude Code image now? (the first build downloads about 3 GB; otherwis
 
 ### Understand what it changed
 
-- **OpenShell 0.1.1** is installed with NVIDIA's installer, whose script is
+- **OpenShell 0.1.2** is installed with NVIDIA's installer, whose script is
   checked against a pinned SHA-256 before it runs. It uses `sudo` for the
   package, then enables and starts the `openshell-gateway` user service.
-  DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2.
+  DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2. On
+  OpenShell 0.1.1 setup offers the upgrade to 0.1.2 in place (see
+  [upgrade OpenShell](/docs/sandboxes/guide#upgrade-openshell)).
 - **The gateway** listens on `localhost:17670` with mTLS, so only you can
   call it. Setup turns on project-folder mounts in
   `~/.config/openshell/gateway.toml`, and turns OpenShell's anonymous usage
@@ -177,18 +179,18 @@ defenseclaw sandbox doctor
   ✓ Disk space                 40.0 GiB free under /var/lib/docker
   ✓ systemd linger             enabled for alice
   ✓ Gateway service            openshell-gateway active (running)
-  ✓ OpenShell CLI              0.1.1 at /usr/bin/openshell
+  ✓ OpenShell CLI              0.1.2 at /usr/bin/openshell
   ✓ SSH connection sharing     off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either
   ✓ Gateway registration       openshell at https://127.0.0.1:17670 (mtls)
   ✓ Gateway mTLS files         private key is owner-only
-  ✓ Gateway                    0.1.1 healthy at https://127.0.0.1:17670
+  ✓ Gateway                    0.1.2 healthy at https://127.0.0.1:17670
   ✓ Gateway compute driver     docker
   ✓ Global policy              none; sandbox policies apply
   ✓ Project bind mounts        enabled for the docker driver
   ✓ OpenShell telemetry        OpenShell usage telemetry is off
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
   ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
-  ✓ DefenseClaw daemon         connected to OpenShell 0.1.1 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.2 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
   ✓ Sandbox hooks              no sandbox is running
   ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
   ✓ Shell wrappers             none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)
