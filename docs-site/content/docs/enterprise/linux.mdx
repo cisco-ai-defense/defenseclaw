@@ -367,8 +367,8 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `errors` | Empty |
 
 When the config enables no agent under `guardrail.connectors` while there
-are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
-`security_complete` is `false`. Otherwise neither field checks that the
+are users to enroll, `status` warns `no_connectors_enabled`, `verify` fails,
+and `security_complete` is `false`. Otherwise neither field checks that the
 users you expect are enrolled, so check `enrollment` too. For per-user connectors, a newly added
 user shows up after the next enumerator cycle (up to five minutes), then the
 guardian reconciles.

@@ -1258,6 +1258,20 @@ func TestLastUserTextEmpty(t *testing.T) {
 	}
 }
 
+// Secure Client keeps the prompt inspection source of main, the latest user
+// message, not the whole user turn of GAP-0190 (issue #1092).
+func TestSecureClientPromptInspectTextIsTheLatestUserMessage(t *testing.T) {
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(false) })
+	got := promptInspectText([]ChatMessage{
+		{Role: "user", Content: "the current prompt"},
+		{Role: "user", Content: "trailing context"},
+	})
+	if got != "trailing context" {
+		t.Fatalf("Secure Client promptInspectText() = %q, want the latest user message", got)
+	}
+}
+
 func TestPromptInspectText(t *testing.T) {
 	t.Parallel()
 
@@ -3812,6 +3826,65 @@ func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
 	}
 	if count := countStoredCanonicalEventsV8(t, capture.store.DatabasePath(), observability.TelemetryEventPolicyReloadRejected, true); count != 1 {
 		t.Fatalf("generated failed policy reload events=%d", count)
+	}
+}
+
+// A Secure Client host keeps the admission fallback of main (GAP-0106,
+// issue #1092): findings that are all severity NONE are a warning, and no
+// scan yet answers "scan required" with no actions, also when policy_dir
+// holds Rego modules but no data.json, which the engine of main needed.
+// Other profiles keep the fail-closed answer of the compiled admission.
+func TestSecureClientAdmissionKeepsTheFallbackOfMain(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()}
+	for _, module := range []string{"admission.rego", "guardrail.rego"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "policies", "rego", module))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cfg.PolicyDir, module), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := &APIServer{scannerCfg: cfg}
+	none := policy.AdmissionInput{TargetType: "skill", TargetName: "s", ScanResult: &policy.ScanResultInput{MaxSeverity: "NONE", TotalFindings: 1}}
+	out, _ := api.evaluateAdmissionPolicy(context.Background(), none, "")
+	if *out != (policy.AdmissionOutput{Verdict: "warning", Reason: "findings present (max NONE) — allowed with warning",
+		FileAction: "none", InstallAction: "none", RuntimeAction: "allow"}) {
+		t.Fatalf("Secure Client NONE findings = %+v", out)
+	}
+	out, _ = api.evaluateAdmissionPolicy(context.Background(), policy.AdmissionInput{TargetType: "skill", TargetName: "s"}, "")
+	if *out != (policy.AdmissionOutput{Verdict: "scan", Reason: "scan required"}) {
+		t.Fatalf("Secure Client without a scan = %+v", out)
+	}
+	cfg.DeploymentMode = ""
+	if out, _ = api.evaluateAdmissionPolicy(context.Background(), none, ""); out.Verdict != "rejected" {
+		t.Fatalf("per-user NONE findings = %+v, want the fail-closed rejection", out)
+	}
+}
+
+// A Secure Client host keeps the policy reload and guardrail answers of
+// main (GAP-0107, issue #1092): without a data.json the reload fails 500
+// with policy.reload.rejected, and the fail-closed reason names data.json.
+func TestSecureClientPolicyReloadKeepsTheAnswersOfMain(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
+	scanCfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()}
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: scanCfg}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+	api.SetPolicyReloader(func() error { return nil })
+
+	w := httptest.NewRecorder()
+	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), `"reload failed: policy: read data.json: `) {
+		t.Fatalf("reload = %d %s", w.Code, w.Body.String())
+	}
+	if count := countStoredCanonicalEventsV8(t, capture.store.DatabasePath(), observability.TelemetryEventPolicyReloadRejected, true); count != 1 {
+		t.Fatalf("policy.reload.rejected events = %d", count)
+	}
+	out, _ := api.evaluateGuardrailPolicy(context.Background(), policy.GuardrailInput{Mode: "action"})
+	if !strings.HasPrefix(out.Reason, "guardrail failing closed: policy engine load failed: policy: read data.json: ") {
+		t.Fatalf("guardrail reason = %q", out.Reason)
 	}
 }
 

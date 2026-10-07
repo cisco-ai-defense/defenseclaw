@@ -128,7 +128,7 @@ func (s *InventoryStore) PruneScanHistory(ctx context.Context, cutoff time.Time,
 // that runs again is recorded again under the same id, which is derived
 // from the account and install, not stored state.
 func (s *InventoryStore) PruneAgentIdentities(ctx context.Context, cutoff time.Time) (int, error) {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || s.legacySchema {
 		return 0, nil
 	}
 	if err := ensureAgentIdentitiesTable(ctx, s.db); err != nil {

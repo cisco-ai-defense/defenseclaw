@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -48,7 +50,8 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 		t.Fatalf("initial load: %v", err)
 	}
 	applied := false
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff, source configReloadSource) error {
+	health := NewSidecarHealth()
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, health, "", func(_ context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff, source configReloadSource) error {
 		applied = true
 		if source.compiledV8 == nil || source.compiledV8.Plan == nil {
 			t.Fatal("apply did not receive a compiled v8 source")
@@ -71,6 +74,11 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	}
 	if got := mgr.Current().Guardrail.Mode; got != "action" {
 		t.Fatalf("current mode = %q, want action", got)
+	}
+	// Nothing needs a restart: restart_required is [] as on main, not null
+	// (GAP-0109).
+	if raw, _ := json.Marshal(health.Snapshot().Config.Details["restart_required"]); string(raw) != "[]" {
+		t.Fatalf("restart_required = %s, want []", raw)
 	}
 }
 
@@ -762,6 +770,21 @@ func TestDiffConfigsMarksACPChangedHotReloadable(t *testing.T) {
 	}
 	if slices.Contains(diff.RestartRequired, "acp") {
 		t.Fatalf("restart_required = %v, ACP must hot reload", diff.RestartRequired)
+	}
+}
+
+// GAP-0104: an ai_discovery edit reloads hot (GAP-0047) except under Secure
+// Client, which keeps the restart of main (issue #1092).
+func TestDiffConfigsAIDiscoveryRestartOnlyForSecureClient(t *testing.T) {
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		oldCfg := config.DefaultConfig()
+		oldCfg.DeploymentMode, oldCfg.Enterprise.Profile = managed.DeploymentModeManagedEnterprise, profile
+		newCfg := cloneConfig(oldCfg)
+		newCfg.AIDiscovery.Enabled = !oldCfg.AIDiscovery.Enabled
+		diff := diffConfigs(oldCfg, newCfg)
+		if got, want := slices.Contains(diff.RestartRequired, "ai_discovery"), profile == managed.ProfileSecureClient; got != want {
+			t.Fatalf("%s: restart_required = %v, ai_discovery restart %t, want %t", profile, diff.RestartRequired, got, want)
+		}
 	}
 }
 

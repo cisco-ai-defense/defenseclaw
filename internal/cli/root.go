@@ -208,7 +208,10 @@ func openCommandAuditStore(path string) (*audit.Store, error) {
 		return nil, fmt.Errorf("failed to open audit store: %w", err)
 	}
 	// A command's output is not the place for per-migration notes (GAP-0153).
-	store.SetMigrationProgress(io.Discard)
+	// Secure Client keeps them on stderr, as on main (issue #1092).
+	if cfg == nil || !cfg.SecureClientIntegration() {
+		store.SetMigrationProgress(io.Discard)
+	}
 	if err := store.Init(); err != nil {
 		store.Close()
 		return nil, fmt.Errorf("failed to init audit store: %w", err)
@@ -453,7 +456,7 @@ func ExecuteContext(ctx context.Context) int {
 	}
 	addManagedWindowsSetupAnswer(rootCmd)
 	addManagedHostHelp(rootCmd)
-	dropEnterpriseIdentityViewsOnSecureClient(rootCmd)
+	keepCommandTreeOfMainOnSecureClient(rootCmd)
 	installUsageArgChecks(rootCmd)
 	pendingUnknownSubcommand = nil
 	err := rootCmd.ExecuteContext(ctx)

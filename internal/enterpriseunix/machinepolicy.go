@@ -455,7 +455,7 @@ const codeNoConnectorsEnabled = "no_connectors_enabled"
 // warnNoConnectorsEnabled reports a config without an enabled
 // guardrail.connectors entry on a host with eligible users: the enumerator
 // publishes no target for them, and status would otherwise read coverage and
-// security complete with 0 targets.
+// security complete with 0 targets. verify fails on it (GAP-0221).
 func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 	env, r := l.env, l.result
 	if len(validated.Connectors) > 0 {
@@ -476,7 +476,7 @@ func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 		users = "user"
 	}
 	r.AddWarning(codeNoConnectorsEnabled, fmt.Sprintf(
-		"the enumerator found %d eligible %s, but config.yaml enables no guardrail.connectors entry, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {enabled: true}) and run `%s`",
+		"the enumerator found %d eligible %s, but config.yaml enables no guardrail.connectors entry, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {}) and run `%s`",
 		len(record.Accounts), users, env.lifecycleCommand("ensure")))
 	r.SecurityComplete = false
 }

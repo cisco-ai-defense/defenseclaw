@@ -84,12 +84,16 @@ func policyConfigOnlyPostRun(*cobra.Command, []string) {}
 var policyValidateCmd = &cobra.Command{
 	Use:               "validate",
 	Short:             "Compile-check all Rego modules and the admission policy compiled from config.yaml",
+	Annotations:       map[string]string{secureClientShortAnnotation: "Compile-check all Rego modules and validate data.json"},
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
 			return err
+		}
+		if cfg != nil && cfg.SecureClientIntegration() {
+			return validateSecureClientPolicy(regoDir)
 		}
 
 		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
@@ -110,6 +114,28 @@ var policyValidateCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// validateSecureClientPolicy is policy validate of main, which a Secure
+// Client host keeps (issue #1092): data.json is required, then the Rego
+// modules compile.
+func validateSecureClientPolicy(regoDir string) error {
+	fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
+	data, err := policy.LoadSecureClientData(regoDir)
+	if err != nil {
+		return fmt.Errorf("policy: load failed: %w", err)
+	}
+	if _, err := policy.NewExact(regoDir); err != nil {
+		return fmt.Errorf("policy: compilation failed:\n%w", err)
+	}
+	fmt.Println("All Rego modules compiled successfully.")
+	for _, key := range []string{"config", "actions", "severity_ranking"} {
+		if _, ok := data[key]; !ok {
+			fmt.Fprintf(os.Stderr, "warning: data.json missing key: %s\n", key)
+		}
+	}
+	fmt.Println("data.json schema: OK")
+	return nil
 }
 
 var policyTestCmd = &cobra.Command{
@@ -198,17 +224,15 @@ func policyCommandRegoDir(cmd *cobra.Command) (string, error) {
 var policyShowCmd = &cobra.Command{
 	Use:               "show",
 	Short:             "Display the admission policy and thresholds compiled from config.yaml",
+	Annotations:       map[string]string{secureClientShortAnnotation: "Display the current OPA data.json policy configuration"},
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(_ *cobra.Command, _ []string) error {
-		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
 		if cfg != nil && cfg.SecureClientIntegration() {
-			view["guardrail"] = map[string]string{
-				"block_at":          cfg.Guardrail.BlockAt,
-				"alert_at":          cfg.Guardrail.AlertAt,
-				"cisco_trust_level": cfg.Guardrail.CiscoTrustLevel,
-			}
-		} else if cfg != nil {
+			return showSecureClientPolicy()
+		}
+		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
+		if cfg != nil {
 			// The levels the gateway resolves: block_at / alert_at over
 			// the rule pack's posture.
 			levels := gateway.ConfigThresholds(cfg, "")
@@ -228,6 +252,25 @@ var policyShowCmd = &cobra.Command{
 	},
 }
 
+// showSecureClientPolicy is policy show of main, which a Secure Client
+// host keeps (issue #1092): the data.json of the Rego directory.
+func showSecureClientPolicy() error {
+	paths, err := resolvePolicyPaths()
+	if err != nil {
+		return fmt.Errorf("policy: resolve paths: %w", err)
+	}
+	data, err := policy.LoadSecureClientData(paths.regoDir)
+	if err != nil {
+		return fmt.Errorf("policy: load effective data: %w", err)
+	}
+	out, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
+}
+
 var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
 	Short: "Dry-run the admission policy for a given input",
@@ -244,6 +287,14 @@ var policyEvaluateCmd = &cobra.Command{
 
 		if targetName == "" {
 			return fmt.Errorf("--target-name is required")
+		}
+
+		secureClient := cfg != nil && cfg.SecureClientIntegration()
+		if secureClient {
+			// Secure Client keeps the data.json requirement of main (issue #1092).
+			if _, err := policy.LoadSecureClientData(paths.regoDir); err != nil {
+				return err
+			}
 		}
 
 		block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
@@ -269,11 +320,12 @@ var policyEvaluateCmd = &cobra.Command{
 		defer cancel()
 
 		// The managed packages ship no Rego: the config-driven twin the
-		// gateway falls back to decides, as it does there.
+		// gateway falls back to decides, as it does there. Secure Client
+		// keeps the engine error of main (issue #1092).
 		var out *policy.AdmissionOutput
 		engine, err := policy.NewExact(paths.regoDir)
 		switch {
-		case errors.Is(err, policy.ErrNoModules) || errors.Is(err, fs.ErrNotExist):
+		case !secureClient && (errors.Is(err, policy.ErrNoModules) || errors.Is(err, fs.ErrNotExist)):
 			out = policy.EvaluateAdmissionFallback(input)
 		case err != nil:
 			return err
@@ -347,6 +399,9 @@ var policyReloadCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		body, _ := io.ReadAll(resp.Body)
+		if cfg != nil && cfg.SecureClientIntegration() {
+			return printSecureClientPolicyReload(resp.StatusCode, body)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return policyReloadError(resp.StatusCode, body)
 		}
@@ -354,6 +409,23 @@ var policyReloadCmd = &cobra.Command{
 		fmt.Println(policyReloadMessage(body))
 		return nil
 	},
+}
+
+// printSecureClientPolicyReload is the policy reload output of main, which a
+// Secure Client host keeps (issue #1092): a refused reload shows the HTTP
+// status and the body, a successful one the indented JSON answer.
+func printSecureClientPolicyReload(status int, body []byte) error {
+	if status != http.StatusOK {
+		return fmt.Errorf("reload failed (HTTP %d): %s", status, string(body))
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err == nil {
+		out, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(out))
+	} else {
+		fmt.Println(string(body))
+	}
+	return nil
 }
 
 // policyReloadMessage says a successful /policy/reload in one sentence, naming

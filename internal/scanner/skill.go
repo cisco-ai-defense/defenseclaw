@@ -391,7 +391,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, scannerFailureText(stderrStr))
 			return nil, scanErr
 		}
 	}
@@ -414,7 +414,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	// an LLM/behavioral/meta configuration error, and DefenseClaw never
 	// passes --fail-on-severity, so there is no "findings" exit to accept.
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, stderrStr)
+		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, scannerFailureText(stderrStr))
 		return result, scanErr
 	}
 

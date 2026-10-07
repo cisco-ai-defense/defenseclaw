@@ -16,7 +16,10 @@
 
 package scanner
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Scanner defines the interface that all scanner implementations must satisfy.
 // Built-in scanners wrap external CLI tools. Plugins implement this interface
@@ -26,4 +29,18 @@ type Scanner interface {
 	Version() string
 	SupportedTargets() []string
 	Scan(ctx context.Context, target string) (*ScanResult, error)
+}
+
+// scannerFailureText is a scanner subprocess's stderr as it is reported to the
+// caller: a Python traceback is cut to its exception line, so interpreter and
+// package paths and scanner source lines do not reach CLI or API output
+// (GAP-0229). ScanResult.ScanError keeps the full text for diagnostics.
+func scannerFailureText(stderr string) string {
+	text := strings.TrimSpace(stderr)
+	head, _, found := strings.Cut(text, "Traceback (most recent call last)")
+	if !found {
+		return text
+	}
+	last := text[strings.LastIndex(text, "\n")+1:]
+	return strings.TrimSpace(strings.TrimSpace(head) + " " + strings.TrimSpace(last))
 }

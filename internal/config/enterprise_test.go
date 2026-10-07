@@ -11,6 +11,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -319,6 +320,34 @@ func TestManagedAIDDestinationSkippedForStandalone(t *testing.T) {
 	})
 	if err != nil || got != plan {
 		t.Fatalf("standalone must leave the observability plan untouched: plan=%p got=%p err=%v", plan, got, err)
+	}
+}
+
+// A Secure Client plan keeps the retired trace_policy.compatibility_aliases
+// switch of main, so the plan digest every local audit record carries stays
+// the digest of main; a standalone plan does not carry it (issue #1092).
+func TestSecureClientPlanKeepsTheAliasSwitchOfMain(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("the Secure Client profile exists on macOS and Windows only")
+	}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	for profile, want := range map[string]bool{managed.ProfileSecureClient: true, managed.ProfileStandalone: false} {
+		raw := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: " + profile + "\n"
+		compiled, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), []byte(raw),
+			ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		var plan struct {
+			TracePolicy map[string]any `json:"trace_policy"`
+		}
+		if err := json.Unmarshal(compiled.Plan.EffectiveJSON(), &plan); err != nil {
+			t.Fatal(err)
+		}
+		if value, ok := plan.TracePolicy["compatibility_aliases"]; ok != want || (ok && value != true) {
+			t.Fatalf("%s: trace_policy.compatibility_aliases = %v (present %t), want present %t", profile, value, ok, want)
+		}
 	}
 }
 

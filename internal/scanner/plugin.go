@@ -120,7 +120,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, scannerFailureText(stderrStr))
 			return nil, scanErr
 		}
 	}
@@ -144,7 +144,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	// comment in mcp.go and finding "Non-zero plugin scanner exits
 	// can be treated as successful scans".
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, stderrStr)
+		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, scannerFailureText(stderrStr))
 		return result, scanErr
 	}
 

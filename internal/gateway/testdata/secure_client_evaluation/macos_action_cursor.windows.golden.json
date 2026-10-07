@@ -1,0 +1,717 @@
+{
+  "answers": [
+    {
+      "name": "admission/skill/CRITICAL",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "max severity CRITICAL triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/skill/HIGH",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "max severity HIGH triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/skill/MEDIUM",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "findings present (max MEDIUM) — allowed with warning",
+          "runtime_action": "allow",
+          "verdict": "warning"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/skill/LOW",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "findings present (max LOW) — allowed with warning",
+          "runtime_action": "allow",
+          "verdict": "warning"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/skill/NONE",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "findings present (max NONE) — allowed with warning",
+          "runtime_action": "allow",
+          "verdict": "warning"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/skill/no_scan",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "",
+          "install_action": "",
+          "reason": "scan required",
+          "runtime_action": "",
+          "verdict": "scan"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/skill/scan_error",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "scanner failed: scanner crashed (exit_code=2)",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/CRITICAL",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "max severity CRITICAL triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/HIGH",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "max severity HIGH triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/MEDIUM",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "max severity MEDIUM triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/LOW",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "max severity LOW triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/NONE",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "findings present (max NONE) — allowed with warning",
+          "runtime_action": "allow",
+          "verdict": "warning"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/no_scan",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "",
+          "install_action": "",
+          "reason": "scan required",
+          "runtime_action": "",
+          "verdict": "scan"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/scan_error",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "scanner failed: scanner crashed (exit_code=2)",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/plugin/CRITICAL",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "max severity CRITICAL triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/plugin/HIGH",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "max severity HIGH triggers block per policy",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/plugin/MEDIUM",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "findings present (max MEDIUM) — allowed with warning",
+          "runtime_action": "allow",
+          "verdict": "warning"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/plugin/LOW",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "findings present (max LOW) — allowed with warning",
+          "runtime_action": "allow",
+          "verdict": "warning"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/plugin/NONE",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "none",
+          "install_action": "none",
+          "reason": "findings present (max NONE) — allowed with warning",
+          "runtime_action": "allow",
+          "verdict": "warning"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/plugin/no_scan",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "",
+          "install_action": "",
+          "reason": "scan required",
+          "runtime_action": "",
+          "verdict": "scan"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/plugin/scan_error",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "quarantine",
+          "install_action": "block",
+          "reason": "scanner failed: scanner crashed (exit_code=2)",
+          "runtime_action": "block",
+          "verdict": "rejected"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "enforce/block_skill",
+      "status": 200,
+      "body": {
+        "status": "blocked"
+      }
+    },
+    {
+      "name": "enforce/allow_mcp",
+      "status": 200,
+      "body": {
+        "status": "allowed"
+      }
+    },
+    {
+      "name": "admission/skill/block_list",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "",
+          "install_action": "",
+          "reason": "sceval block",
+          "runtime_action": "",
+          "verdict": "blocked"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/mcp/allow_list",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "",
+          "install_action": "",
+          "reason": "sceval allow",
+          "runtime_action": "",
+          "verdict": "allowed"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "admission/skill/first_party",
+      "status": 200,
+      "body": {
+        "data": {
+          "file_action": "",
+          "install_action": "",
+          "reason": "first-party DefenseClaw skill",
+          "runtime_action": "",
+          "verdict": "allowed"
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "guardrail_evaluate/action/none",
+      "status": 200,
+      "body": {
+        "action": "block",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/action/local_high",
+      "status": 200,
+      "body": {
+        "action": "block",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/action/cisco_critical",
+      "status": 200,
+      "body": {
+        "action": "block",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/action/cisco_high",
+      "status": 200,
+      "body": {
+        "action": "block",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/action/cisco_low",
+      "status": 200,
+      "body": {
+        "action": "block",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/observe/none",
+      "status": 200,
+      "body": {
+        "action": "alert",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/observe/local_high",
+      "status": 200,
+      "body": {
+        "action": "alert",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/observe/cisco_critical",
+      "status": 200,
+      "body": {
+        "action": "alert",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/observe/cisco_high",
+      "status": 200,
+      "body": {
+        "action": "alert",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "guardrail_evaluate/observe/cisco_low",
+      "status": 200,
+      "body": {
+        "action": "alert",
+        "reason": "guardrail failing closed: policy engine load failed: policy: read data.json: open <ROOT>\\runtime\\policies\\data.json: The system cannot find the file specified.",
+        "scanner_sources": [
+          "policy-outage"
+        ],
+        "severity": "HIGH"
+      }
+    },
+    {
+      "name": "inspect_tool/allow",
+      "status": 200,
+      "body": {
+        "action": "allow",
+        "confidence": 0,
+        "findings": [],
+        "mode": "action",
+        "raw_action": "allow",
+        "reason": "",
+        "severity": "NONE"
+      },
+      "sent_to_ai_defense": [
+        "user: Tool call: run_shell\n{\"command\":\"ls -la\"}\n"
+      ]
+    },
+    {
+      "name": "inspect_prompt/allow",
+      "status": 200,
+      "body": {
+        "action": "allow",
+        "confidence": 0,
+        "findings": [],
+        "mode": "action",
+        "raw_action": "allow",
+        "reason": "",
+        "severity": "NONE"
+      },
+      "sent_to_ai_defense": [
+        "user: hello there\n"
+      ]
+    },
+    {
+      "name": "inspect_tool/block",
+      "status": 200,
+      "body": {
+        "action": "block",
+        "confidence": 0,
+        "detailed_findings": [
+          {
+            "confidence": 0,
+            "evidence": "\u003cempty\u003e",
+            "rule_id": "AID-POLICY",
+            "severity": "CRITICAL",
+            "tags": [
+              "ai-defense"
+            ],
+            "title": "AID-POLICY"
+          }
+        ],
+        "findings": [
+          "ai-defense:AID-POLICY"
+        ],
+        "mode": "action",
+        "raw_action": "block",
+        "reason": "\u003credacted len=16 sha=07cb9c35\u003e",
+        "severity": "CRITICAL"
+      },
+      "sent_to_ai_defense": [
+        "user: Tool call: run_shell\n{\"command\":\"echo sceval-block\"}\n"
+      ]
+    },
+    {
+      "name": "inspect_prompt/block",
+      "status": 200,
+      "body": {
+        "action": "block",
+        "confidence": 0,
+        "detailed_findings": [
+          {
+            "confidence": 0,
+            "evidence": "\u003cempty\u003e",
+            "rule_id": "AID-POLICY",
+            "severity": "CRITICAL",
+            "tags": [
+              "ai-defense"
+            ],
+            "title": "AID-POLICY"
+          }
+        ],
+        "findings": [
+          "ai-defense:AID-POLICY"
+        ],
+        "mode": "action",
+        "raw_action": "block",
+        "reason": "\u003credacted len=16 sha=07cb9c35\u003e",
+        "severity": "CRITICAL"
+      },
+      "sent_to_ai_defense": [
+        "user: please sceval-block now\n"
+      ]
+    },
+    {
+      "name": "inspect_tool/high",
+      "status": 200,
+      "body": {
+        "action": "alert",
+        "confidence": 0,
+        "detailed_findings": [
+          {
+            "confidence": 0,
+            "evidence": "\u003cempty\u003e",
+            "rule_id": "AID-HIGH",
+            "severity": "HIGH",
+            "tags": [
+              "ai-defense"
+            ],
+            "title": "AID-HIGH"
+          }
+        ],
+        "findings": [
+          "ai-defense:AID-HIGH"
+        ],
+        "mode": "action",
+        "raw_action": "alert",
+        "reason": "\u003credacted len=14 sha=5a92a2ad\u003e",
+        "severity": "HIGH"
+      },
+      "sent_to_ai_defense": [
+        "user: Tool call: run_shell\n{\"command\":\"echo sceval-high\"}\n"
+      ]
+    },
+    {
+      "name": "inspect_prompt/high",
+      "status": 200,
+      "body": {
+        "action": "alert",
+        "confidence": 0,
+        "detailed_findings": [
+          {
+            "confidence": 0,
+            "evidence": "\u003cempty\u003e",
+            "rule_id": "AID-HIGH",
+            "severity": "HIGH",
+            "tags": [
+              "ai-defense"
+            ],
+            "title": "AID-HIGH"
+          }
+        ],
+        "findings": [
+          "ai-defense:AID-HIGH"
+        ],
+        "mode": "action",
+        "raw_action": "alert",
+        "reason": "\u003credacted len=14 sha=5a92a2ad\u003e",
+        "severity": "HIGH"
+      },
+      "sent_to_ai_defense": [
+        "user: please sceval-high now\n"
+      ]
+    },
+    {
+      "name": "inspect_tool/no_verdict",
+      "status": 200,
+      "body": {
+        "action": "allow",
+        "confidence": 0,
+        "findings": [],
+        "mode": "action",
+        "raw_action": "allow",
+        "reason": "",
+        "severity": "NONE"
+      },
+      "sent_to_ai_defense": [
+        "user: Tool call: run_shell\n{\"command\":\"echo sceval-none\"}\n"
+      ]
+    },
+    {
+      "name": "inspect_prompt/no_verdict",
+      "status": 200,
+      "body": {
+        "action": "allow",
+        "confidence": 0,
+        "findings": [],
+        "mode": "action",
+        "raw_action": "allow",
+        "reason": "",
+        "severity": "NONE"
+      },
+      "sent_to_ai_defense": [
+        "user: please sceval-none now\n"
+      ]
+    }
+  ],
+  "audit_records": [
+    "{\"action\":\"api-enforce-allow\",\"actor\":\"defenseclaw\",\"details\":\"type=mcp reason=sceval allow\",\"severity\":\"INFO\",\"structured\":null,\"target\":\"sceval-allowed-mcp\"}",
+    "{\"action\":\"api-enforce-block\",\"actor\":\"defenseclaw\",\"details\":\"type=skill reason=sceval block\",\"severity\":\"INFO\",\"structured\":null,\"target\":\"sceval-blocked-skill\"}",
+    "{\"action\":\"config.change.applied\",\"actor\":\"observability_runtime\",\"details\":\"config.change.applied\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.admin.operation\":\"reload_applied\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-action-cisco_critical\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"block\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"enforce\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"CISCO-POLICY\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-action-cisco_high\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"block\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"enforce\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"CISCO-HIGH\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-action-cisco_low\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"block\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"enforce\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"CISCO-LOW\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-action-local_high\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"block\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"enforce\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"UNKNOWN-L1\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-action-none\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"block\",\"defenseclaw.guardrail.finding_count\":0,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"enforce\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-observe-cisco_critical\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"alert\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"observe\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"CISCO-POLICY\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-observe-cisco_high\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"alert\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"observe\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"CISCO-HIGH\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-observe-cisco_low\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"alert\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"observe\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"CISCO-LOW\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-observe-local_high\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"alert\",\"defenseclaw.guardrail.finding_count\":1,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"observe\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.rule_ids\":[\"UNKNOWN-L1\"],\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.guardrail_evaluate\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"sceval-observe-none\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa-guardrail\",\"defenseclaw.guardrail.detector.sources\":[\"policy-outage\"],\"defenseclaw.guardrail.direction\":\"input\",\"defenseclaw.guardrail.effective_action\":\"alert\",\"defenseclaw.guardrail.finding_count\":0,\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.mode\":\"observe\",\"defenseclaw.guardrail.name\":\"opa-guardrail\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"guardrail failing closed: policy engine load failed: policy: read data.json: open \u003cROOT\u003e\\\\runtime\\\\policies\\\\data.json: The system cannot find the file specified.\",\"defenseclaw.guardrail.stage\":\"input\",\"defenseclaw.guardrail.strategy\":\"both\",\"defenseclaw.guardrail.target_type\":\"prompt\",\"defenseclaw.security.severity\":\"HIGH\",\"gen_ai.request.model\":\"gpt\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"allow\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"allowed\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"first-party DefenseClaw skill\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"codeguard\",\"defenseclaw.guardrail.target_type\":\"skill\",\"defenseclaw.security.severity\":\"HIGH\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"allow\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"allowed\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"sceval allow\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-allowed-mcp\",\"defenseclaw.guardrail.target_type\":\"mcp\",\"defenseclaw.security.severity\":\"CRITICAL\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"blocked\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"sceval block\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-blocked-skill\",\"defenseclaw.guardrail.target_type\":\"skill\",\"defenseclaw.security.severity\":\"INFO\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity CRITICAL triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-mcp\",\"defenseclaw.guardrail.target_type\":\"mcp\",\"defenseclaw.security.severity\":\"CRITICAL\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity CRITICAL triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-plugin\",\"defenseclaw.guardrail.target_type\":\"plugin\",\"defenseclaw.security.severity\":\"CRITICAL\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity CRITICAL triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-skill\",\"defenseclaw.guardrail.target_type\":\"skill\",\"defenseclaw.security.severity\":\"CRITICAL\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity HIGH triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-mcp\",\"defenseclaw.guardrail.target_type\":\"mcp\",\"defenseclaw.security.severity\":\"HIGH\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity HIGH triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-plugin\",\"defenseclaw.guardrail.target_type\":\"plugin\",\"defenseclaw.security.severity\":\"HIGH\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity HIGH triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-skill\",\"defenseclaw.guardrail.target_type\":\"skill\",\"defenseclaw.security.severity\":\"HIGH\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity LOW triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-mcp\",\"defenseclaw.guardrail.target_type\":\"mcp\",\"defenseclaw.security.severity\":\"LOW\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"max severity MEDIUM triggers block per policy\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-mcp\",\"defenseclaw.guardrail.target_type\":\"mcp\",\"defenseclaw.security.severity\":\"MEDIUM\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"scanner failed: scanner crashed (exit_code=2)\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-mcp-err\",\"defenseclaw.guardrail.target_type\":\"mcp\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"scanner failed: scanner crashed (exit_code=2)\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-plugin-err\",\"defenseclaw.guardrail.target_type\":\"plugin\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"block\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"rejected\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"scanner failed: scanner crashed (exit_code=2)\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-skill-err\",\"defenseclaw.guardrail.target_type\":\"skill\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"scan\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"scan required\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-mcp-noscan\",\"defenseclaw.guardrail.target_type\":\"mcp\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"scan\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"scan required\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-plugin-noscan\",\"defenseclaw.guardrail.target_type\":\"plugin\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"scan\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"scan required\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-skill-noscan\",\"defenseclaw.guardrail.target_type\":\"skill\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"warning\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"findings present (max LOW) — allowed with warning\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-plugin\",\"defenseclaw.guardrail.target_type\":\"plugin\",\"defenseclaw.security.severity\":\"LOW\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"warning\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"findings present (max LOW) — allowed with warning\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-skill\",\"defenseclaw.guardrail.target_type\":\"skill\",\"defenseclaw.security.severity\":\"LOW\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"warning\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"findings present (max MEDIUM) — allowed with warning\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-plugin\",\"defenseclaw.guardrail.target_type\":\"plugin\",\"defenseclaw.security.severity\":\"MEDIUM\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"warning\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"findings present (max MEDIUM) — allowed with warning\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-skill\",\"defenseclaw.guardrail.target_type\":\"skill\",\"defenseclaw.security.severity\":\"MEDIUM\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"warning\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"findings present (max NONE) — allowed with warning\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-mcp\",\"defenseclaw.guardrail.target_type\":\"mcp\",\"defenseclaw.security.severity\":\"INFO\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"warning\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"findings present (max NONE) — allowed with warning\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-plugin\",\"defenseclaw.guardrail.target_type\":\"plugin\",\"defenseclaw.security.severity\":\"INFO\"},\"target\":\"\"}",
+    "{\"action\":\"guardrail-opa-verdict\",\"actor\":\"gateway.api.policy_evaluation\",\"details\":\"guardrail.evaluation.completed\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.guardrail.decision\":\"review\",\"defenseclaw.guardrail.detector.name\":\"opa\",\"defenseclaw.guardrail.effective_action\":\"warning\",\"defenseclaw.guardrail.latency_ms\":\"\u003cN\u003e\",\"defenseclaw.guardrail.name\":\"opa-admission\",\"defenseclaw.guardrail.phase\":\"policy\",\"defenseclaw.guardrail.reason\":\"findings present (max NONE) — allowed with warning\",\"defenseclaw.guardrail.stage\":\"admission\",\"defenseclaw.guardrail.target_ref\":\"sceval-skill\",\"defenseclaw.guardrail.target_type\":\"skill\",\"defenseclaw.security.severity\":\"INFO\"},\"target\":\"\"}",
+    "{\"action\":\"inspect-tool-alert\",\"actor\":\"defenseclaw\",\"details\":\"severity=HIGH confidence=0.00 reason=aid high match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=alert request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-HIGH\",\"severity\":\"HIGH\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=HIGH confidence=0.00 reason=aid high match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=alert request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-HIGH\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"message\"},\"target\":\"message\"}",
+    "{\"action\":\"inspect-tool-alert\",\"actor\":\"defenseclaw\",\"details\":\"severity=HIGH confidence=0.00 reason=aid high match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=alert request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-HIGH\",\"severity\":\"HIGH\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=HIGH confidence=0.00 reason=aid high match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=alert request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-HIGH\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"run_shell\"},\"target\":\"run_shell\"}",
+    "{\"action\":\"inspect-tool-allow\",\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"severity\":\"INFO\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"message\"},\"target\":\"message\"}",
+    "{\"action\":\"inspect-tool-allow\",\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"severity\":\"INFO\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"message\"},\"target\":\"message\"}",
+    "{\"action\":\"inspect-tool-allow\",\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"severity\":\"INFO\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"run_shell\"},\"target\":\"run_shell\"}",
+    "{\"action\":\"inspect-tool-allow\",\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"severity\":\"INFO\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=NONE confidence=0.00 reason= elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=allow request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"run_shell\"},\"target\":\"run_shell\"}",
+    "{\"action\":\"inspect-tool-block\",\"actor\":\"defenseclaw\",\"details\":\"severity=CRITICAL confidence=0.00 reason=aid policy match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=block request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-POLICY\",\"severity\":\"CRITICAL\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=CRITICAL confidence=0.00 reason=aid policy match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=block request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-POLICY\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"message\"},\"target\":\"message\"}",
+    "{\"action\":\"inspect-tool-block\",\"actor\":\"defenseclaw\",\"details\":\"severity=CRITICAL confidence=0.00 reason=aid policy match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=block request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-POLICY\",\"severity\":\"CRITICAL\",\"structured\":{\"actor\":\"defenseclaw\",\"details\":\"severity=CRITICAL confidence=0.00 reason=aid policy match elapsed=\u003cDUR\u003e mode=action would_block=false raw_action=block request_id=\u003cUUID\u003e evaluation_id=\u003cUUID\u003e rule_ids=AID-POLICY\",\"structured_json\":\"{\\\"connector\\\":\\\"cursor\\\",\\\"route\\\":\\\"\\u003credacted type=secrets.high_entropy v=1 key=\u003cK\u003e len=20 hmac=\u003cK\u003e\\u003e\\\"}\",\"target\":\"run_shell\"},\"target\":\"run_shell\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=prompt findings=0 max_severity=INFO verdict=clean\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":0,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":0,\"defenseclaw.scan.high_count\":0,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"INFO\",\"defenseclaw.scan.target_ref\":\"cursor:message\",\"defenseclaw.scan.target_type\":\"prompt\",\"defenseclaw.scan.verdict\":\"clean\"},\"target\":\"cursor:message\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=prompt findings=0 max_severity=INFO verdict=clean\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":0,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":0,\"defenseclaw.scan.high_count\":0,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"INFO\",\"defenseclaw.scan.target_ref\":\"cursor:message\",\"defenseclaw.scan.target_type\":\"prompt\",\"defenseclaw.scan.verdict\":\"clean\"},\"target\":\"cursor:message\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=prompt findings=1 max_severity=CRITICAL verdict=block\",\"severity\":\"CRITICAL\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":1,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":1,\"defenseclaw.scan.high_count\":0,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"CRITICAL\",\"defenseclaw.scan.target_ref\":\"cursor:message\",\"defenseclaw.scan.target_type\":\"prompt\",\"defenseclaw.scan.verdict\":\"block\"},\"target\":\"cursor:message\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=prompt findings=1 max_severity=HIGH verdict=clean\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":0,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":1,\"defenseclaw.scan.high_count\":1,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"HIGH\",\"defenseclaw.scan.target_ref\":\"cursor:message\",\"defenseclaw.scan.target_type\":\"prompt\",\"defenseclaw.scan.verdict\":\"clean\"},\"target\":\"cursor:message\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=tool_call findings=0 max_severity=INFO verdict=clean\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":0,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":0,\"defenseclaw.scan.high_count\":0,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"INFO\",\"defenseclaw.scan.target_ref\":\"cursor:run_shell\",\"defenseclaw.scan.target_type\":\"tool_call\",\"defenseclaw.scan.verdict\":\"clean\"},\"target\":\"cursor:run_shell\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=tool_call findings=0 max_severity=INFO verdict=clean\",\"severity\":\"INFO\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":0,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":0,\"defenseclaw.scan.high_count\":0,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"INFO\",\"defenseclaw.scan.target_ref\":\"cursor:run_shell\",\"defenseclaw.scan.target_type\":\"tool_call\",\"defenseclaw.scan.verdict\":\"clean\"},\"target\":\"cursor:run_shell\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=tool_call findings=1 max_severity=CRITICAL verdict=block\",\"severity\":\"CRITICAL\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":1,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":1,\"defenseclaw.scan.high_count\":0,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"CRITICAL\",\"defenseclaw.scan.target_ref\":\"cursor:run_shell\",\"defenseclaw.scan.target_type\":\"tool_call\",\"defenseclaw.scan.verdict\":\"block\"},\"target\":\"cursor:run_shell\"}",
+    "{\"action\":\"scan\",\"actor\":\"audit_logger\",\"details\":\"scanner=inspect-http target_type=tool_call findings=1 max_severity=HIGH verdict=clean\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.critical_count\":0,\"defenseclaw.scan.duration_ms\":\"\u003cN\u003e\",\"defenseclaw.scan.exit_code\":0,\"defenseclaw.scan.finding_count\":1,\"defenseclaw.scan.high_count\":1,\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.info_count\":0,\"defenseclaw.scan.low_count\":0,\"defenseclaw.scan.medium_count\":0,\"defenseclaw.scan.scanner\":\"inspect-http\",\"defenseclaw.scan.severity_max\":\"HIGH\",\"defenseclaw.scan.target_ref\":\"cursor:run_shell\",\"defenseclaw.scan.target_type\":\"tool_call\",\"defenseclaw.scan.verdict\":\"clean\"},\"target\":\"cursor:run_shell\"}",
+    "{\"action\":\"scan-finding\",\"actor\":\"audit_logger\",\"details\":\"scanner=ai-defense\",\"severity\":\"CRITICAL\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.content_fingerprint\":\"\u003cK\u003e\",\"defenseclaw.finding.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.location\":\"\\u003chashed class=path v=1 key=\u003cK\u003e len=14 hmac=\u003cK\u003e\\u003e\",\"defenseclaw.finding.rule_id\":\"AID-POLICY\",\"defenseclaw.finding.tags\":[\"ai-defense\"],\"defenseclaw.finding.target_ref\":\"cursor:message\",\"defenseclaw.finding.title\":\"AID-POLICY\",\"defenseclaw.guardrail.evidence_summary\":\"rule=AID-POLICY; title=AID-POLICY; target_type=prompt; location=cursor:message\",\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.scanner\":\"ai-defense\",\"defenseclaw.security.severity\":\"CRITICAL\"},\"target\":\"cursor:message\"}",
+    "{\"action\":\"scan-finding\",\"actor\":\"audit_logger\",\"details\":\"scanner=ai-defense\",\"severity\":\"CRITICAL\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.content_fingerprint\":\"\u003cK\u003e\",\"defenseclaw.finding.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.location\":\"\\u003chashed class=path v=1 key=\u003cK\u003e len=16 hmac=\u003cK\u003e\\u003e\",\"defenseclaw.finding.rule_id\":\"AID-POLICY\",\"defenseclaw.finding.tags\":[\"ai-defense\"],\"defenseclaw.finding.target_ref\":\"cursor:run_shell\",\"defenseclaw.finding.title\":\"AID-POLICY\",\"defenseclaw.guardrail.evidence_summary\":\"rule=AID-POLICY; title=AID-POLICY; target_type=tool_call; location=cursor:run_shell\",\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.scanner\":\"ai-defense\",\"defenseclaw.security.severity\":\"CRITICAL\"},\"target\":\"cursor:run_shell\"}",
+    "{\"action\":\"scan-finding\",\"actor\":\"audit_logger\",\"details\":\"scanner=ai-defense\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.content_fingerprint\":\"\u003cK\u003e\",\"defenseclaw.finding.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.location\":\"\\u003chashed class=path v=1 key=\u003cK\u003e len=14 hmac=\u003cK\u003e\\u003e\",\"defenseclaw.finding.rule_id\":\"AID-HIGH\",\"defenseclaw.finding.tags\":[\"ai-defense\"],\"defenseclaw.finding.target_ref\":\"cursor:message\",\"defenseclaw.finding.title\":\"AID-HIGH\",\"defenseclaw.guardrail.evidence_summary\":\"rule=AID-HIGH; title=AID-HIGH; target_type=prompt; location=cursor:message\",\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.scanner\":\"ai-defense\",\"defenseclaw.security.severity\":\"HIGH\"},\"target\":\"cursor:message\"}",
+    "{\"action\":\"scan-finding\",\"actor\":\"audit_logger\",\"details\":\"scanner=ai-defense\",\"severity\":\"HIGH\",\"structured\":{\"defenseclaw.evaluation.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.content_fingerprint\":\"\u003cK\u003e\",\"defenseclaw.finding.id\":\"\u003cUUID\u003e\",\"defenseclaw.finding.location\":\"\\u003chashed class=path v=1 key=\u003cK\u003e len=16 hmac=\u003cK\u003e\\u003e\",\"defenseclaw.finding.rule_id\":\"AID-HIGH\",\"defenseclaw.finding.tags\":[\"ai-defense\"],\"defenseclaw.finding.target_ref\":\"cursor:run_shell\",\"defenseclaw.finding.title\":\"AID-HIGH\",\"defenseclaw.guardrail.evidence_summary\":\"rule=AID-HIGH; title=AID-HIGH; target_type=tool_call; location=cursor:run_shell\",\"defenseclaw.scan.id\":\"\u003cUUID\u003e\",\"defenseclaw.scan.scanner\":\"ai-defense\",\"defenseclaw.security.severity\":\"HIGH\"},\"target\":\"cursor:run_shell\"}"
+  ]
+}

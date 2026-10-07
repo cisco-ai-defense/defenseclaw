@@ -209,6 +209,24 @@ func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 		}
 	})
 
+	// A Secure Client host keeps policy show, validate and evaluate of main
+	// (GAP-0114, issue #1092): each needs the data.json that no Secure
+	// Client layout ships, and there is no policy digest.
+	t.Run("Secure Client", func(t *testing.T) {
+		setPolicyPathTestConfig(t, &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()})
+		setPolicyPathTestFlags(t)
+		for _, command := range policyPathTestCommands() {
+			_, err := capturePolicyPathTestOutput(t, func() error { return command.cmd.RunE(command.cmd, nil) })
+			if err == nil || !strings.Contains(err.Error(), "policy: read data.json: open ") ||
+				!strings.Contains(err.Error(), filepath.Join("rego", "data.json")) {
+				t.Fatalf("%s error = %v", command.name, err)
+			}
+		}
+		if err := policyDigestCmd.RunE(policyDigestCmd, nil); err == nil || !strings.Contains(err.Error(), `unknown command "digest" for`) {
+			t.Fatalf("digest error = %v", err)
+		}
+	})
+
 	// An upgraded 0.8 install can still hold the firewall and audit modules
 	// and the firewall data file (an edited copy is kept): the gateway's load
 	// and every policy command work around them.
@@ -258,6 +276,39 @@ func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	})
 	if err := policyReloadCmd.RunE(policyReloadCmd, nil); err != nil {
 		t.Fatalf("reload resolved local policy paths: %v", err)
+	}
+}
+
+// A Secure Client host keeps the policy reload output of main (issue #1092):
+// the HTTP status and body of a refused reload, not the GAP-0160 sentence.
+func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
+	ownGatewayListener(t)
+	const token = "reload-fixture-value"
+	const body = `{"error":"reload failed: policy: read data.json: open /p/data.json: no such file or directory","status":"failed"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	setPolicyPathTestConfig(t, &config.Config{
+		DeploymentMode: "managed_enterprise",
+		Enterprise:     config.EnterpriseConfig{Profile: "secure_client"},
+		Gateway:        config.GatewayConfig{APIBind: host, APIPort: port, Token: token},
+	})
+	err = policyReloadCmd.RunE(policyReloadCmd, nil)
+	if want := "reload failed (HTTP 500): " + body; err == nil || err.Error() != want {
+		t.Fatalf("Secure Client reload error = %v, want %q", err, want)
 	}
 }
 
