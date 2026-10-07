@@ -279,8 +279,6 @@ def _external_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
     return detail
 
 
-
-
 @click.group()
 def skill() -> None:
     """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore.
@@ -1490,20 +1488,6 @@ def _skill_list_json_items(
         item["verdict"] = verdict_label
         items.append(item)
     return items
-
-
-def _print_skill_list_json(
-    skills: list[dict[str, Any]],
-    scan_map: dict[str, dict[str, Any]],
-    actions_map: dict[str, Any],
-    *,
-    connector: str = "",
-) -> None:
-    click.echo(json.dumps(
-        _skill_list_json_items(skills, scan_map, actions_map, connector=connector),
-        indent=2,
-        default=str,
-    ))
 
 
 def _print_skill_list_table(
@@ -5722,32 +5706,3 @@ def _run_clawhub_install(skill_name: str, force: bool, cwd: str | None = None) -
         )
         raise SystemExit(1)
 
-
-def _run_clawhub_uninstall(skill_name: str, cwd: str | None = None) -> None:
-    """Best-effort rollback for a partial install.
-
-    Runs `clawhub uninstall <skill>` with a short timeout. We
-    intentionally do not raise on rollback failures — the caller is
-    already exiting non-zero — but we surface the error to the
-    operator so they can manually remediate.
-    """
-    try:
-        args = _clawhub_args("uninstall", skill_name)
-        result = _run_clawhub_process(args, timeout=120, cwd=cwd, input_text="y\n")
-    except subprocess.TimeoutExpired:
-        ux.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — manual cleanup may be required",
-            err=True,
-        )
-    except (OSError, ValueError) as exc:
-        ux.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — manual cleanup may be required",
-            err=True,
-        )
-    else:
-        if result.returncode != 0:
-            ux.echo(
-                f"[install] warning: clawhub uninstall of {skill_name!r} failed: "
-                f"{_external_failure_detail(result)} — manual cleanup may be required",
-                err=True,
-            )

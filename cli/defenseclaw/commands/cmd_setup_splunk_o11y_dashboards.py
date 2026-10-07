@@ -632,14 +632,6 @@ def _expected_group_name(name_prefix: str) -> str:
     return f"{prefix} DefenseClaw O11y".strip() if prefix else "DefenseClaw O11y"
 
 
-def _dashboard_group_id(item: dict) -> str:
-    for key in ("dashboardGroupId", "dashboardGroupID", "groupId", "dashboard_group_id"):
-        value = item.get(key)
-        if value:
-            return str(value)
-    return ""
-
-
 def _terraform_import(
     terraform_bin: str,
     *,
@@ -655,21 +647,6 @@ def _terraform_import(
         env=prepared.env,
         timeout=timeout,
     )
-
-
-def _dashboard_charts(detail: object) -> list[dict]:
-    if not isinstance(detail, dict):
-        return []
-    for container in (detail, detail.get("dashboard"), detail.get("data")):
-        if not isinstance(container, dict):
-            continue
-        for key in ("charts", "dashboardCharts", "elements", "items"):
-            value = container.get(key)
-            if isinstance(value, list):
-                charts = [item if isinstance(item, dict) else {"id": str(item)} for item in value if item is not None]
-                if charts:
-                    return charts
-    return []
 
 
 def _adopt_existing_resources(

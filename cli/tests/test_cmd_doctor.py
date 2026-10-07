@@ -106,7 +106,7 @@ class DoctorRetiredPolicyDataTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as policy_dir:
             os.makedirs(os.path.join(policy_dir, "rego"))
-            for name in ("data.json", "data-sandbox.json"):
+            for name in ("data.json", "data-sandbox.json", "firewall.rego", "audit.rego"):
                 with open(os.path.join(policy_dir, "rego", name), "w", encoding="utf-8") as f:
                     f.write("{}")
             result = _DoctorResult()
@@ -115,16 +115,19 @@ class DoctorRetiredPolicyDataTests(unittest.TestCase):
             cmd_doctor._check_policy_evidence_files(cfg, result)
         detail = result.checks[0]["detail"]
         self.assertIn("data.json", detail)
-        self.assertNotIn("data-sandbox.json", detail)
+        for leftover in ("data-sandbox.json", "firewall.rego", "audit.rego"):
+            self.assertNotIn(leftover, detail)
 
 
 class DoctorVirusTotalTests(unittest.TestCase):
     """GAP-1936: the VirusTotal row agrees with the credential row."""
 
     def _cfg(self, use_virustotal: bool, key_env: str = ""):
-        from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.config import SkillScannerAnalyzers, SkillScannerConfig, SkillScannerVirusTotal
 
-        sc = SkillScannerConfig(use_virustotal=use_virustotal, virustotal_api_key_env=key_env)
+        sc = SkillScannerConfig(
+            analyzers=SkillScannerAnalyzers(virustotal=SkillScannerVirusTotal(enabled=use_virustotal, api_key_env=key_env))
+        )
         return SimpleNamespace(scanners=SimpleNamespace(skill_scanner=sc))
 
     def test_disabled_is_skipped(self):

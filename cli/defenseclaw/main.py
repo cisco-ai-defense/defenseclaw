@@ -110,7 +110,7 @@ SKIP_LOAD_COMMANDS = {
 SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "version"}
 
 # These commands are the only top-level boundaries permitted to operate on an
-# existing pre-v8 document. They either create/replace a configuration,
+# existing unconverted 0.8.x document. They either create/replace a configuration,
 # migrate or replace the installation, remove it, or (for ``config``) hand the
 # decision to that group's own guard, which lets only ``validate`` explain such
 # a file. Every other group preflights the raw schema discriminator and stops
@@ -577,11 +577,6 @@ def _whole_words_help_tree(command: click.Command, seen: set[int] | None = None)
 
 
 _whole_words_help_tree(cli)
-
-
-def _ensure_codeguard_skill(cfg) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = cfg
 
 
 def _try_launch_tui() -> bool:

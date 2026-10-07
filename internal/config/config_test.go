@@ -187,10 +187,11 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	}
 }
 
-// TestLoadFromFileRefusesPreV8WithOneInstruction pins the single runtime
-// answer for a released 0.8.x (config_version 7) file: one error that names
-// the repair, whatever pre-v8 keys the file carries. Nothing is half-loaded.
-func TestLoadFromFileRefusesPreV8WithOneInstruction(t *testing.T) {
+// TestLoadFromFileRefusesAnOlderConfigWithOneInstruction pins the single
+// runtime answer for a released 0.8.x (config_version 7) file: one error that
+// names the repair, whatever released keys the file carries. Nothing is
+// half-loaded.
+func TestLoadFromFileRefusesAnOlderConfigWithOneInstruction(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, DefaultConfigName)
 	raw := "config_version: 7\nsplunk:\n  enabled: true\notel:\n  enabled: true\n  endpoint: localhost:4317\n" +
@@ -209,6 +210,25 @@ func TestLoadFromFileRefusesPreV8WithOneInstruction(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "splunk") || strings.Contains(err.Error(), "audit_sinks") {
 		t.Fatalf("LoadFromFile error = %q, want one version error, not a per-key legacy error", err)
+	}
+}
+
+// TestValidateCandidateRefusesReleasedObservabilityKeysInCurrentFile pins that
+// the canonical validator, which the config writers, the v9 migration and the
+// gateway start run, names a released 0.8.x observability key left in a current
+// file instead of ignoring it: the exporter or sink it described would
+// otherwise silently stop. The schema alone enforces this; there is no
+// per-key legacy check.
+func TestValidateCandidateRefusesReleasedObservabilityKeysInCurrentFile(t *testing.T) {
+	for _, body := range []string{
+		"otel:\n  enabled: true\n",
+		"audit_sinks:\n  - name: siem\n    kind: http_jsonl\n",
+		"splunk:\n  enabled: true\n",
+	} {
+		raw := []byte("config_version: 9\nobservability: {}\n" + body)
+		if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil {
+			t.Fatalf("ValidateCandidate accepted %q; want a schema refusal", body)
+		}
 	}
 }
 
@@ -403,37 +423,6 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	}
 	if !cfg.Guardrail.Judge.PII {
 		t.Error("expected judge.pii true by default")
-	}
-}
-
-func TestValidate_ValidConfig(t *testing.T) {
-	sa := DefaultSkillActions()
-	if err := sa.Validate(); err != nil {
-		t.Errorf("Validate() returned unexpected error: %v", err)
-	}
-}
-
-func TestValidate_InvalidRuntime(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.Critical.Runtime = "invalid"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid runtime")
-	}
-}
-
-func TestValidate_InvalidFile(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.High.File = "delete"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid file action")
-	}
-}
-
-func TestValidate_InvalidInstall(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.Medium.Install = "reject"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid install action")
 	}
 }
 
@@ -947,29 +936,6 @@ func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
 	}
 }
 
-func TestPluginActionsValidate(t *testing.T) {
-	pa := DefaultPluginActions()
-	if err := pa.Validate(); err != nil {
-		t.Errorf("Validate() returned unexpected error: %v", err)
-	}
-}
-
-func TestPluginActionsValidateInvalid(t *testing.T) {
-	pa := DefaultPluginActions()
-	pa.Critical.Runtime = "invalid"
-	if err := pa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid runtime")
-	}
-}
-
-func TestDefaultConfigPluginActions(t *testing.T) {
-	cfg := DefaultConfig()
-	if cfg.PluginActions.Critical.Install != InstallNone {
-		t.Errorf("DefaultConfig().PluginActions.Critical.Install = %q, want %q",
-			cfg.PluginActions.Critical.Install, InstallNone)
-	}
-}
-
 func TestConfig_PluginDirs(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "test-oc-home")
 	cfg := &Config{
@@ -1078,7 +1044,6 @@ func TestSkillScannerConfigNoLLMFields(t *testing.T) {
 		t.Error("expected default lenient=true")
 	}
 	_ = sc.UseLLM
-	_ = sc.VirusTotalKey
 }
 
 func TestMCPScannerConfigNoLLMFields(t *testing.T) {
@@ -1356,6 +1321,24 @@ func TestRecognizedLLMProvidersLockstep(t *testing.T) {
 	for _, p := range mustHave {
 		if _, ok := recognizedLLMProviders[p]; !ok {
 			t.Errorf("recognizedLLMProviders missing %q — keep this set in lockstep with cli/defenseclaw/config.py:_RECOGNIZED_LLM_PROVIDERS", p)
+		}
+	}
+}
+
+// GAP-0156: the judge posts to <host>/v1/chat/completions and LiteLLM to
+// <base>/chat/completions, so an OpenAI-style bare host gets /v1 for LiteLLM.
+func TestLLMRequestBaseURL(t *testing.T) {
+	for _, tc := range []struct{ provider, base, want string }{
+		{"openai", "http://127.0.0.1:28555", "http://127.0.0.1:28555/v1"},
+		{"openai-compatible", "https://llm.example/", "https://llm.example/v1"},
+		{"openai", "https://llm.example/v1", "https://llm.example/v1"},
+		{"openai", "https://llm.example/api", "https://llm.example/api"},
+		{"anthropic", "https://llm.example", "https://llm.example"},
+		{"openai", "", ""},
+	} {
+		got := LLMConfig{Provider: tc.provider, BaseURL: tc.base}.RequestBaseURL()
+		if got != tc.want {
+			t.Errorf("%s %q: RequestBaseURL = %q, want %q", tc.provider, tc.base, got, tc.want)
 		}
 	}
 }

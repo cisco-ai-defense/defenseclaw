@@ -2741,3 +2741,25 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 		})
 	}
 }
+
+// A Secure Client host still loads the packs in <data_dir>/signature-packs
+// (GAP-0146, issue #1092); every other profile loads only the packs that
+// ai_discovery.signature_packs lists.
+func TestSecureClientLoadsTheDataDirSignaturePacks(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite(t, filepath.Join(tmp, "signature-packs", "custom.json"),
+		`{"version": 1, "signatures": [{"id": "custom-data-dir-ai", "name": "Custom", "vendor": "Example", "category": "ai_cli", "confidence": 0.8}]}`)
+	loaded := func(cfg *config.Config) bool {
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "custom-data-dir-ai" })
+	}
+	if !loaded(&config.Config{DeploymentMode: "managed_enterprise", DataDir: tmp}) {
+		t.Fatal("Secure Client did not load the data directory pack")
+	}
+	if loaded(&config.Config{DataDir: tmp}) {
+		t.Fatal("a per-user host loaded an unlisted data directory pack")
+	}
+}

@@ -697,6 +697,10 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/models", p.handleModels)
 	mux.HandleFunc("/models", p.handleModels)
 	mux.HandleFunc("/health/liveness", p.handleHealth)
+	if ManagedEnterpriseActive() {
+		// Secure Client keeps the LiteLLM-era alias (issue #1092).
+		mux.HandleFunc("/health/liveliness", p.handleHealth)
+	}
 	mux.HandleFunc("/health/readiness", p.handleHealth)
 	mux.HandleFunc("/health", p.handleHealth)
 	// Layer 3 (observability): egress events reported back from the

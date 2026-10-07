@@ -2241,4 +2241,18 @@ func TestManagedAIDOnly_ServesNoIdentityRoutes(t *testing.T) {
 	if status, body := get("/api/v1/ai-usage"); status != http.StatusOK || strings.Contains(body, "ide_plugins") {
 		t.Fatalf("/api/v1/ai-usage = %d %s, want a body without ide_plugins", status, body)
 	}
+	// It still serves POST /config/patch (GAP-0144): with no OpenClaw
+	// gateway the bridge answers 503.
+	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/config/patch", strings.NewReader(`{"path":"a.b","value":true}`))
+	req.Header.Set("Authorization", "Bearer sc-route-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", "secure-client-test")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("POST /config/patch = %d, want the bridge 503", resp.StatusCode)
+	}
 }

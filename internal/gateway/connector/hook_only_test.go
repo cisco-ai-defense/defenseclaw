@@ -3112,7 +3112,6 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	previousEvent := copilotHookInvocationCommandForEvent("windows", "preToolUse", previous)
 	legacy := legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary)
 	duplicated := legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary)
-	legacyEvent := legacyWindowsCopilotPowerShellHookCommandForEvent("preToolUse", hookBinary)
 	historic := legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 	)
@@ -3123,7 +3122,6 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 		"hooks": map[string]interface{}{
 			"preToolUse": []interface{}{
 				map[string]interface{}{"type": "command", "powershell": previousEvent, "timeoutSec": 30},
-				map[string]interface{}{"type": "command", "powershell": legacyEvent, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": duplicated, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": legacy, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": historic, "timeoutSec": 30},
@@ -3160,7 +3158,7 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 					t.Errorf("%s canonical entry drifted: %#v", event, entry)
 				}
 			}
-			if command == previousEvent || command == legacy || command == duplicated || command == historic || command == legacyEvent {
+			if command == previousEvent || command == legacy || command == duplicated || command == historic {
 				t.Errorf("%s retained legacy Copilot command %q", event, command)
 			}
 		}
@@ -3194,7 +3192,7 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 		t.Fatalf("read config after teardown: %v", err)
 	}
 	after := string(afterData)
-	ownedCommands := []string{current, legacy, duplicated, historic, legacyEvent}
+	ownedCommands := []string{current, legacy, duplicated, historic}
 	for _, event := range copilotCurrentHookEvents {
 		ownedCommands = append(ownedCommands, copilotHookInvocationCommandForEvent("windows", event, current))
 	}

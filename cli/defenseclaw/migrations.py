@@ -62,8 +62,6 @@ from defenseclaw.file_permissions import (
     set_file_mode,
 )
 
-_OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 if TYPE_CHECKING:
     from defenseclaw.observability.v8_migration import V8MigrationResult
 
@@ -142,7 +140,6 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
     return tuple(out)
 
 
-
 # ---------------------------------------------------------------------------
 # MigrationContext
 # ---------------------------------------------------------------------------
@@ -197,7 +194,6 @@ class _PreparedObservabilityV8Migration:
     environment: dict[str, str] = field(repr=False)
     environment_file_present: bool
     environment_file_sha256: str = field(repr=False)
-
 
 
 def _prepare_observability_v8_migration(
@@ -363,7 +359,6 @@ def _read_stable_observability_v8_upgrade_file(
                 pass
 
 
-
 def _migrate_observability_v8(ctx: MigrationContext) -> None:
     """Convert, target-validate, and activate config v8 (the 0.8.5 hard cut).
 
@@ -454,7 +449,6 @@ def _preflight_observability_v8(
     )
 
 
-
 def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
     """Create one descriptor-pinned private bundle recovery directory."""
 
@@ -504,7 +498,6 @@ def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
             os.close(root_descriptor)
         if data_descriptor >= 0:
             os.close(data_descriptor)
-
 
 
 def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
@@ -565,13 +558,6 @@ def _observability_v8_upgrade_environment_snapshot(
         if _ENVIRONMENT_NAME.fullmatch(name) is not None
     )
     return snapshot, present, digest
-
-
-def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, str]:
-    """Read the exact active dotenv without the legacy parser's silent loss."""
-
-    snapshot, _present, _sha256 = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
-    return snapshot
 
 
 def _read_observability_v8_upgrade_dotenv_snapshot(
@@ -3388,8 +3374,6 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
 ]
 
 
-
-
 # ---------------------------------------------------------------------------
 # defenseclaw migrate
 # ---------------------------------------------------------------------------
@@ -3406,8 +3390,9 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
     The one implementation is Go (``defenseclaw-gateway config migrate --to
     9``, ``internal/config/migrate_v9.go``): it moves data.json admission and
     guardrail values, the *_actions keys, rule_pack_dir, the v8 scanner keys,
-    update_check and the operator block/allow rows of audit.db into
-    config.yaml, keeps ``config.yaml.v8.bak`` and writes ``migration-v9.json``.
+    update_check, a leftover privacy section and the operator block/allow
+    rows of audit.db into config.yaml, keeps ``config.yaml.v8.bak`` and
+    writes ``migration-v9.json``.
     """
     from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
 
@@ -3447,6 +3432,23 @@ def _preview_config_v9(config_path: str, gateway_binary: str) -> None:
         f"  {ux.dim('→')} config_version 9: {len(record.get('moved') or [])} policy values move into "
         f"config.yaml, {len(record.get('conflicts') or [])} conflicts"
     )
+
+def _check_staged_gateway_accepts(config_path: str, data_dir: str, gateway_binary: str) -> None:
+    """Fail the upgrade check when the staged gateway would refuse this config.
+
+    The staged gateway loads the config the way it will at start, rule packs and
+    their ``custom_packs`` pins included, so a pin it refuses ends the check
+    before the installer stops the gateway or swaps anything (GAP-0158). The
+    dry-run migration above validates the document only, not the packs it names.
+    """
+    from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
+    from defenseclaw.config_writer import plain_error
+
+    try:
+        inspect_v8_config("validate", config_path=config_path, data_dir=data_dir, gateway_binary=gateway_binary)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"the new release would refuse your configuration: {plain_error(exc)}") from exc
+
 
 # The schema written by the 0.8.5 hard cut. Anything older is a 0.x install
 # that the frozen ``MIGRATIONS`` chain imports.
@@ -3553,8 +3555,10 @@ def migrate(
                 raise
             except Exception as exc:  # noqa: BLE001 - reported like a failed step
                 raise MigrationError(f"the v8 conversion check failed: {exc}") from exc
-        if version >= _FIRST_V8_CONFIG_VERSION and gateway_binary and _V9_STEP_NAME in names:
-            _preview_config_v9(config_path, gateway_binary)
+        if version >= _FIRST_V8_CONFIG_VERSION and gateway_binary:
+            if _V9_STEP_NAME in names:
+                _preview_config_v9(config_path, gateway_binary)
+            _check_staged_gateway_accepts(config_path, data_dir, gateway_binary)
         return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
 
     if steps:

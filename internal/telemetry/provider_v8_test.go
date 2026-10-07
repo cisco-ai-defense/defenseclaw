@@ -662,11 +662,10 @@ func TestV8ResourceUsesPlanAndSafeProcessMetadataOnly(t *testing.T) {
 	for key, want := range map[string]string{
 		"service.name": "custom-service", "service.namespace": "defenseclaw",
 		"service.instance.id": "test-instance", "service.version": "test-version",
-		"deployment.environment.name": "configured-environment", "deployment.environment": "configured-environment", "tenant.id": "tenant-a",
-		"workspace.id": "workspace-a", "defenseclaw.deployment.mode": "unmanaged", "deployment.mode": "unmanaged", "defenseclaw.claw.mode": "multi",
-		"defenseclaw.instance.id":                   "defenseclaw-instance",
-		"defenseclaw.device.public_key_fingerprint": fingerprint, "defenseclaw.device.id": fingerprint,
-		"custom.safe": "configured",
+		"deployment.environment.name": "configured-environment", "tenant.id": "tenant-a",
+		"workspace.id": "workspace-a", "defenseclaw.deployment.mode": "unmanaged", "defenseclaw.claw.mode": "multi",
+		"defenseclaw.instance.id": "defenseclaw-instance", "custom.safe": "configured",
+		"defenseclaw.device.public_key_fingerprint": fingerprint,
 	} {
 		if got := resourceAttribute(provider, key); got != want {
 			t.Errorf("resource %s=%q, want %q", key, got, want)
@@ -674,6 +673,11 @@ func TestV8ResourceUsesPlanAndSafeProcessMetadataOnly(t *testing.T) {
 	}
 	if got := resourceAttribute(provider, "defenseclaw.claw.home_dir"); got != "" {
 		t.Fatalf("v8 resource captured ambient home dir %q", got)
+	}
+	for _, retired := range []string{"deployment.environment", "deployment.mode", "defenseclaw.device.id"} {
+		if got := resourceAttribute(provider, retired); got != "" {
+			t.Fatalf("v8 resource carries the retired alias %s=%q", retired, got)
+		}
 	}
 	if got := resourceAttribute(provider, "discovery.source"); got != "" {
 		t.Fatalf("v8 resource retained non-canonical discovery.source %q", got)
@@ -789,15 +793,15 @@ func TestV8ResourceTrustedPrecedenceUsesValidatedRegisteredPlanValues(t *testing
 	for key, want := range map[string]string{
 		"service.name": "plan-service",
 		"tenant.id":    "plan-tenant", "workspace.id": "plan-workspace",
-		"deployment.environment.name": "plan-environment", "deployment.environment": "plan-environment",
-		"service.version": "trusted-version", "service.instance.id": "trusted-service-instance",
+		"deployment.environment.name": "plan-environment",
+		"service.version":             "trusted-version", "service.instance.id": "trusted-service-instance",
 		"defenseclaw.instance.id": "trusted-service-instance",
 	} {
 		if got := resourceAttribute(provider, key); got != want {
 			t.Errorf("resource %s=%q, want %q", key, got, want)
 		}
 	}
-	for _, key := range []string{"deployment.mode", "defenseclaw.deployment.mode", "defenseclaw.claw.mode", "discovery.source", "defenseclaw.device.id", "defenseclaw.device.public_key_fingerprint"} {
+	for _, key := range []string{"deployment.environment", "deployment.mode", "defenseclaw.deployment.mode", "defenseclaw.claw.mode", "discovery.source", "defenseclaw.device.id", "defenseclaw.device.public_key_fingerprint"} {
 		if got := resourceAttribute(provider, key); got != "" {
 			t.Errorf("resource %s=%q, want spoofed plan value omitted", key, got)
 		}

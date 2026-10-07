@@ -153,6 +153,20 @@ func (c *Client) GetConfig(ctx context.Context) (json.RawMessage, error) {
 	return c.Request(ctx, "config.get", nil)
 }
 
+// PatchConfig applies a partial configuration update (POST /config/patch,
+// Secure Client only).
+func (c *Client) PatchConfig(ctx context.Context, path string, value interface{}) error {
+	params := ConfigPatchParams{
+		Path:  path,
+		Value: value,
+	}
+	_, err := c.Request(ctx, "config.patch", params)
+	if err != nil {
+		return fmt.Errorf("gateway: config.patch %q: %w", path, err)
+	}
+	return nil
+}
+
 // GetStatus fetches gateway status.
 func (c *Client) GetStatus(ctx context.Context) (json.RawMessage, error) {
 	return c.Request(ctx, "status", nil)

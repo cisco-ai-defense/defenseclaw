@@ -248,25 +248,6 @@ def remove_source(data_dir: str, source_id: str) -> None:
     shutil.rmtree(d, ignore_errors=True)
 
 
-def index_from_manifest(source_id: str, manifest: Manifest) -> SourceIndex:
-    """Project a fresh manifest into a :class:`SourceIndex` skeleton.
-
-    Used at the start of a sync — every entry starts at
-    ``status="pending"`` and gets updated as the scanner returns.
-    """
-    verdicts: list[EntryVerdict] = []
-    for entry in manifest.entries:
-        verdicts.append(_verdict_from_entry(entry))
-    idx = SourceIndex(
-        source_id=source_id,
-        schema_version=manifest.schema_version,
-        publisher=manifest.publisher,
-        verdicts=verdicts,
-    )
-    idx.recount()
-    return idx
-
-
 def merge_manifest_into_index(
     idx: SourceIndex, manifest: Manifest,
 ) -> SourceIndex:

@@ -262,8 +262,8 @@ def make_temp_config(tmp_dir: str | None = None) -> Config:
     cfg.environment = "macos"
     cfg.claw = ClawConfig(mode="openclaw", home_dir=tmp_dir)
     cfg.scanners = ScannersConfig(
-        skill_scanner=SkillScannerConfig(binary="skill-scanner"),
-        mcp_scanner=MCPScannerConfig(binary="mcp-scanner"),
+        skill_scanner=SkillScannerConfig(),
+        mcp_scanner=MCPScannerConfig(),
     )
     cfg.openshell = OpenShellConfig()
     cfg.gateway = GatewayConfig(host="127.0.0.1", api_port=18970)

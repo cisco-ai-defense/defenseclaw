@@ -296,11 +296,10 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 	}
 
 	// The inspection loader decodes without the YAML entrypoint, so it reaches
-	// the runtime gate directly. The gate must report the declared version, not
-	// the v7 stamp the compatibility decoder applies to older sources.
+	// the runtime gate directly. The gate must report the declared version.
 	_, err := ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 5\n"))
 	if err == nil || !strings.Contains(err.Error(), "config_version 5 is older than 8") {
-		t.Fatalf("pre-v8 inspection error = %v, want declared-version migrate guidance", err)
+		t.Fatalf("older-version inspection error = %v, want declared-version migrate guidance", err)
 	}
 	_, err = ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 10\n"))
 	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 10)") {
@@ -426,9 +425,10 @@ observability: {}
 
 func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 	for path, body := range map[string]string{
-		"$.skill_actions": "skill_actions: {}\n",
-		"$.guardrail.profiles.p.connectors.codex.rule_pack_dir": "guardrail:\n  profiles:\n    p:\n      connectors:\n        codex: {rule_pack_dir: /x}\n",
-		"$.scanners.skill_scanner.use_virustotal":               "scanners:\n  skill_scanner: {use_virustotal: true}\n",
+		"$.guardrail.profiles.p.connectors.codex.rule_pack_dir":           "guardrail:\n  profiles:\n    p:\n      connectors:\n        codex: {rule_pack_dir: /x}\n",
+		"$.scanners.skill_scanner.use_virustotal":                         "scanners:\n  skill_scanner: {use_virustotal: true}\n",
+		"$.observability.trace_policy.compatibility_aliases":              "observability:\n  trace_policy: {compatibility_aliases: true}\n",
+		"$.observability.resource.attributes[\"deployment.environment\"]": "observability:\n  resource:\n    attributes: {deployment.environment: prod}\n",
 	} {
 		for _, version := range []int{8, 9} {
 			var document yaml.Node
@@ -444,6 +444,35 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 				t.Errorf("v9 %s: got %v", path, err)
 			}
 		}
+	}
+}
+
+// A config_version 8 document that skips the in-memory migration (a Secure
+// Client one) still enables VirusTotal and AI Defense through its v8 keys; the
+// model carries them only as analyzers (GAP-0157).
+func TestRuntimeV8FoldsTheRetiredScannerKeysIntoAnalyzers(t *testing.T) {
+	const keyEnv = "DEFENSECLAW_TEST_GAP0157_VT"
+	t.Setenv(keyEnv, "")
+	raw := []byte("config_version: 8\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    use_aidefense: true\n" +
+		"    virustotal_api_key_env: " + keyEnv + "\n    virustotal_api_key: inline-test-value\nobservability: {}\n")
+	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cfg.Scanners.SkillScanner
+	if !sc.Analyzers.VirusTotal.Enabled || !sc.Analyzers.AIDefense.Enabled || sc.VirusTotalKeyEnvName() != keyEnv {
+		t.Errorf("analyzers = %+v, want virustotal and aidefense on with key env %s", sc.Analyzers, keyEnv)
+	}
+	if got := sc.ResolvedVirusTotalKey(); got != "inline-test-value" {
+		t.Errorf("inline v8 key = %q, want it kept for the document", got)
+	}
+	written := append(raw[:len(raw)-len("observability: {}\n")], []byte("    analyzers: {virustotal: {enabled: false}}\nobservability: {}\n")...)
+	cfg, err = LoadRuntimeV8FromBytes("config.yaml", written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scanners.SkillScanner.Analyzers.VirusTotal.Enabled {
+		t.Error("an analyzers key that is written must win over use_virustotal")
 	}
 }
 

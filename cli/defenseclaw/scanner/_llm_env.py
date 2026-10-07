@@ -246,5 +246,5 @@ def litellm_completion_kwargs(llm: LLMConfig) -> dict:
     if api_key:
         kwargs["api_key"] = api_key
     if llm.base_url:
-        kwargs["api_base"] = llm.base_url
+        kwargs["api_base"] = llm.request_base_url()
     return kwargs

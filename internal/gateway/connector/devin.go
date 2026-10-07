@@ -414,9 +414,6 @@ func devinOwnedHookCommandsForOS(goos string, opts SetupOpts, hookScript string)
 	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
 		commands = append(commands,
 			windowsDevinBashHookCommand(hookBinary),
-			legacyWindowsDevinEncodedPowerShellHookCommandForBinary(hookBinary),
-			legacyWindowsDevinUnquotedPowerShellHookCommandForBinary(hookBinary),
-			legacyWindowsDevinPowerShellHookCommandForBinary(hookBinary),
 		)
 	}
 	return uniqueNonEmptyStrings(commands)

@@ -68,12 +68,12 @@
     },
     {
       "title": "Policy and Rego",
-      "purpose": "Guide to DefenseClaw policy layers: top-level YAML profiles, skill_actions, plugin_actions, MCP actions, guardrail config, scanner profiles, firewall Rego modules, data files, hot reload, testing with opa, and parity checks. Reference docs/CONFIG_FILES.md, policies/, policies/rego/, internal/policy/, and internal/config/.",
+      "purpose": "Guide to DefenseClaw policy layers: top-level YAML profiles, skill_actions, plugin_actions, MCP actions, guardrail config, scanner profiles, admission and guardrail Rego modules, hot reload, testing with opa, and parity checks. Reference docs/CONFIG_FILES.md, policies/, policies/rego/, internal/policy/, and internal/config/.",
       "parent": "Home"
     },
     {
       "title": "Firewall and Legacy Sandbox Cleanup",
-      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, the removal of the legacy openshell-sandbox 0.0.x standalone integration, defenseclaw sandbox legacy-cleanup, and the legacy bind shim and degraded sandbox health state that remain until cleanup runs. NVIDIA OpenShell 0.1 support is coming in a future release; do not describe it. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/config/legacy_openshell.go, internal/firewall/, internal/gateway/connector/subprocess.go, policies/rego/firewall.rego, and policies/rego/data-sandbox.json.",
+      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, the removal of the legacy openshell-sandbox 0.0.x standalone integration, defenseclaw sandbox legacy-cleanup, and the legacy bind shim and degraded sandbox health state that remain until cleanup runs. NVIDIA OpenShell 0.1 support is coming in a future release; do not describe it. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/config/legacy_openshell.go, internal/firewall/, and internal/gateway/connector/subprocess.go.",
       "parent": "Home"
     },
     {

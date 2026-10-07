@@ -244,8 +244,5 @@ func DefaultConfig() *Config {
 				},
 			},
 		},
-		SkillActions:  DefaultSkillActions(),
-		MCPActions:    DefaultMCPActions(),
-		PluginActions: DefaultPluginActions(),
 	}
 }
