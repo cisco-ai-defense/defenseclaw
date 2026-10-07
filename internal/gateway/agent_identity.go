@@ -244,11 +244,24 @@ func claimedInstallHint(payload map[string]interface{}) string {
 			}
 		}
 	}
-	hint = strings.TrimSpace(stripLogInjectionRunes(hint))
+	hint = strings.TrimSpace(displaySafeText(hint))
 	if hint == "" || len(hint) > maxInstallHintBytes {
 		return ""
 	}
 	return hint
+}
+
+// displaySafeText replaces what makes agent-claimed text render other than
+// it reads on an admin's terminal with a space: C0 and C1 controls, and the
+// bidi overrides, isolates and marks and other invisible format characters
+// stripZeroWidth drops (GAP-0380).
+func displaySafeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 0x80 && r <= 0x9F) || (r > 0x7F && stripZeroWidth(string(r)) == "") {
+			return ' '
+		}
+		return r
+	}, stripLogInjectionRunes(s))
 }
 
 // hookSubagentID is the sub-agent a hook belongs to, or "" for the session's

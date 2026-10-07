@@ -343,6 +343,15 @@ func TestAgentIdentitiesRoutePages(t *testing.T) {
 	}
 }
 
+// GAP-0380: a config root the agent claims is shown to an admin; control and
+// bidi formatting characters in it are replaced, as ESC already was.
+func TestClaimedInstallHintReplacesDisplayControls(t *testing.T) {
+	hint := claimedInstallHint(map[string]interface{}{"config_dir": "/home/m/cfg-x\x1b[31mRED-\u202eend\u2066\u200f\u0085"})
+	if hint != "/home/m/cfg-x [31mRED- end" {
+		t.Fatalf("hint = %q, want controls and bidi characters replaced", hint)
+	}
+}
+
 // GAP-0393: when inventory.db cannot be written, agent identities run from
 // memory. The route says persisted false with the reason, and /health carries
 // it for status and doctor.
