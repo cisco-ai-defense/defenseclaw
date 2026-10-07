@@ -12966,6 +12966,30 @@ def _emit_rule_pack_row(
     enabled_rule_count = summary.get("enabled_rule_count", 0)
     rule_count = summary.get("rule_count", 0)
     digest = summary.get("digest", "")
+    stale = summary.get("stale_rule_count", 0)
+    alert_only = summary.get("alert_only_rule_count", 0)
+    if stale or alert_only:
+        # GAP-0360: a 0.8.x copy of the default pack enforced nothing in 1.0,
+        # where a command, path, agent-file or C2 rule blocks only with an
+        # expression, and this row said PASS.
+        problems = []
+        if stale:
+            problems.append(f"{stale} are 0.8.x copies of built-in command, path, agent-file or C2 rules")
+        if alert_only:
+            problems.append(f"{alert_only} of your own in those categories")
+        _emit(
+            "warn",
+            "Rule pack",
+            f"{kind} {shown_path}: {enabled_rule_count}/{rule_count} rules enabled, but "
+            f"{' and '.join(problems)} have no expression, so they record matches and never block",
+            r=r,
+            remediation=(
+                "Rebase it on the 1.0 default pack: copy policies/guardrail/default to a new folder, add your own "
+                "rules to its rules/*.yaml with an expression (see the CEL rule authoring guide), then run "
+                "defenseclaw guardrail use-pack <folder>"
+            ),
+        )
+        return
     detail = (
         f"{kind} {shown_path}: "
         f"{enabled_rule_count}/{rule_count} rules enabled"

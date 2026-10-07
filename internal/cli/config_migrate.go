@@ -116,6 +116,19 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 }
 
+// rebaseRulePackForMigration is guardrail.PlanRulePackRebase in the config
+// package's terms (GAP-0360).
+func rebaseRulePackForMigration(dir string) (*config.RulePackRebasePlan, error) {
+	plan, err := guardrail.PlanRulePackRebase(dir)
+	if err != nil || plan == nil {
+		return nil, err
+	}
+	return &config.RulePackRebasePlan{
+		Files: plan.Files, Digest: plan.Digest, Updated: plan.Updated,
+		Carried: plan.Carried, Expressed: plan.Expressed, AlertOnly: plan.AlertOnly, Disabled: plan.Disabled,
+	}, nil
+}
+
 // configMigrateV9Input resolves the data.json and audit.db inputs of the
 // config at path. A v8 file the runtime loader refuses (it still carries a key
 // the runtime no longer knows, such as update_check or skill_actions) falls
@@ -133,6 +146,7 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		ConfigPath:     abs,
 		Source:         raw,
 		RulePackDigest: guardrail.RulePackDigest,
+		RebaseRulePack: rebaseRulePackForMigration,
 	}
 	policyDir, auditDB := "", ""
 	if cfg, loadErr := config.LoadRuntimeV8File(abs); loadErr == nil {
