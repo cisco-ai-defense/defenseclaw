@@ -1044,7 +1044,7 @@ def _set_alert_disposition(
     from defenseclaw.config import is_current_schema
 
     if app.cfg is None or not is_current_schema(getattr(app.cfg, "_source_config_version", None)):
-        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+        raise click.ClickException("This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first.")
 
     selector = _alert_selector(
         alert_ids=alert_ids,

@@ -348,7 +348,7 @@ def _print_v8_setup_result(
     click.echo(f"  Log stream:  {logstream}")
     click.echo("  Signals:     traces")
     ux.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
-    click.echo(f"  Config:      v8 ({'changed' if result.changed else 'already configured'})")
+    click.echo(f"  Config:      config.yaml ({'changed' if result.changed else 'already configured'})")
     echo_setup_notes(resolve_preset("galileo"), warnings)
     if not dry_run and not key_saved:
         # GAP-1299: the key came from this shell only. A gateway started

@@ -78,6 +78,7 @@ def test_v8_setup_writes_trace_destination_and_secret_outside_yaml(tmp_path, mon
 
     assert result.exit_code == 0, result.output
     assert "Action:      ADD" in result.output
+    assert "Config:      config.yaml (changed)" in result.output  # GAP-0155: no retired version label
     assert "not saved" not in result.output
     source = (tmp_path / "config.yaml").read_text(encoding="utf-8")
     assert "must-never-print" not in source + result.output

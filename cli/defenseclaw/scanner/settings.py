@@ -91,16 +91,13 @@ def effective_review_queue_min(sc: Any) -> str:
 
 
 def virustotal_enabled(sc: Any) -> bool:
-    """analyzers.virustotal.enabled, or the v8 use_virustotal migration input."""
     analyzers = getattr(sc, "analyzers", None)
-    vt = getattr(analyzers, "virustotal", None)
-    return bool(getattr(vt, "enabled", False) or getattr(sc, "use_virustotal", False))
+    return bool(getattr(getattr(analyzers, "virustotal", None), "enabled", False))
 
 
 def aidefense_enabled(sc: Any) -> bool:
     analyzers = getattr(sc, "analyzers", None)
-    aid = getattr(analyzers, "aidefense", None)
-    return bool(getattr(aid, "enabled", False) or getattr(sc, "use_aidefense", False))
+    return bool(getattr(getattr(analyzers, "aidefense", None), "enabled", False))
 
 
 def osv_enabled(sc: Any) -> bool:
@@ -111,11 +108,7 @@ def osv_enabled(sc: Any) -> bool:
 def virustotal_key_env(sc: Any) -> str:
     analyzers = getattr(sc, "analyzers", None)
     vt = getattr(analyzers, "virustotal", None)
-    return (
-        (getattr(vt, "api_key_env", "") or "").strip()
-        or (getattr(sc, "virustotal_api_key_env", "") or "").strip()
-        or "VIRUSTOTAL_API_KEY"
-    )
+    return (getattr(vt, "api_key_env", "") or "").strip() or "VIRUSTOTAL_API_KEY"
 
 
 def normalize_mcp_analyzers(raw: Any) -> list[str]:

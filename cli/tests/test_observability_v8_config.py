@@ -254,7 +254,8 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
         load_validate_v8(f"config_version: 8\n{legacy}\n")
 
     assert captured.value.keyword in {"additionalProperties", "oneOf"}
-    assert "run defenseclaw upgrade" in str(captured.value)
+    # An upgrade cannot fix a released key left in a current file.
+    assert "run defenseclaw upgrade" not in str(captured.value)
 
 
 def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
@@ -286,7 +287,7 @@ def test_v9_names_the_replacement_of_a_removed_v8_key(removed: str, path: str, t
     assert captured.value.keyword == "legacy-key-forbidden"
     message = str(captured.value)
     assert f"use {target}" in message
-    assert "invalid v9 configuration" in message
+    assert "invalid configuration" in message and "invalid v9" not in message
     assert "defenseclaw upgrade" not in message
 
 
@@ -579,11 +580,11 @@ def test_resource_attribute_aggregate_boundary() -> None:
 @pytest.mark.parametrize(
     ("attributes", "message"),
     [
-        ({"custom.label": ""}, "canonical v8 schema"),
+        ({"custom.label": ""}, "configuration schema"),
         ({"custom.label": " \u00a0 "}, "nonblank"),
         ({"custom.label": "line\nvalue"}, "control characters"),
         ({"custom.label": "\ud800"}, "valid UTF-8"),
-        ({"custom/label": "value"}, "canonical v8 schema"),
+        ({"custom/label": "value"}, "configuration schema"),
         ({"defenseclaw.instance.id": "value"}, "process-owned"),
         ({"defenseclaw.preset": "generic-otlp"}, "process-owned"),
         (
