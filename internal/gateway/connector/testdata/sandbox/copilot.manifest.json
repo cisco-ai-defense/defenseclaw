@@ -58,32 +58,32 @@
     "/usr/local/lib/defenseclaw/hooks/copilot-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7900,
-      "sha256": "96596259a31e75a9babdb21a29d38b29c8d602387a6ecefdf667ccbc4f9f1683"
+      "size": 7653,
+      "sha256": "a79e992d14851fe53cbbbc672df78baa2dc1d8f0c911a45e39cd3d2f6734e10a"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6325,
-      "sha256": "8285c1e34efd9997f74f459465f4d34d42a8a5182963614fcd2b218febf64e8f"
+      "size": 6078,
+      "sha256": "a929e5a48788d71c71c2b6f489234bcc3d9dae6f60bfb673c33794181872d717"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5593,
-      "sha256": "fe8046b5e2e43c3b42122284aa9f77519a516e30d447af1e3a19a9502eeb28f3"
+      "size": 5346,
+      "sha256": "11c3bf359802dfec9ff5ba23700e90e3ba83efc67d2b1f56f55182b55553cc57"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6111,
-      "sha256": "d992d92545d476152ede4d0d5d334fccabb57ab5e1102fa6cfe1b419089bdbca"
+      "size": 5864,
+      "sha256": "503c0d7e4f4cf18ecb910e6927dcd6950913ea29ecefd6b945c4d11b161dff69"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6495,
-      "sha256": "36628a8d00c46836dbe49235427086214c64815db8428cce2146e97800b26c53"
+      "size": 6248,
+      "sha256": "ae53ab8376eb50b22719979cc6286330bab770b34302649894f5244f56ccc820"
     }
   }
 }

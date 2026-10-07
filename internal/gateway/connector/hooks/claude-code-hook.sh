@@ -187,12 +187,12 @@ fail_response() {
 
 {{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
-  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+{{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
   case "${API_TOKEN}" in
     *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
   esac
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+{{end}}  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
 # W3C trace propagation: forward validated traceparent / tracestate.
