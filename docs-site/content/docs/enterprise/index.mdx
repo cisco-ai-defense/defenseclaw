@@ -262,7 +262,11 @@ they write nothing:
 
 The gateway records each refused attempt in the audit log with
 `outcome=refused reason=managed_device`, and the CLI does the same when it can
-reach the gateway. The enterprise packages ship no
+reach the gateway. On Linux and macOS the CLI reports through the gateway
+hook socket, so a standard user refusal is recorded too, with the account the
+kernel reports (`actor=uid:501 user=alice`); a standard user holds no gateway
+token. Windows has no hook socket: only a refusal by an account that holds the
+gateway token is recorded there. The enterprise packages ship no
 `defenseclaw` CLI, so these commands matter where an earlier per-user install
 left one behind; the gateway's API refuses regardless of the client.
 
