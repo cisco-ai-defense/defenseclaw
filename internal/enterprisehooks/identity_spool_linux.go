@@ -53,7 +53,7 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	if err != nil {
 		return IdentitySpoolRecord{}, err
 	}
-	facts, err := resolver.DirectoryFactsForUID(account.UID, now)
+	facts, err := resolver.DirectoryFactsWithoutGroupsForUID(account.UID, now)
 	if err != nil {
 		return IdentitySpoolRecord{}, err
 	}

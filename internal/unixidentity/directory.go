@@ -76,6 +76,17 @@ const groupQueryBatch = 64
 // resolved (the gateway keeps them for 15 minutes) and select the default
 // profile as though the account had no groups.
 func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
+	return r.directoryFactsForUID(uid, now, true)
+}
+
+// DirectoryFactsWithoutGroupsForUID is for the guardian spool. The Linux
+// gateway resolves groups itself, so naming them here can consume the time
+// reserved for the privileged InfoPipe UPN lookup.
+func (r *NSSResolver) DirectoryFactsWithoutGroupsForUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
+	return r.directoryFactsForUID(uid, now, false)
+}
+
+func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups bool) (useridentity.DirectoryFacts, error) {
 	account, err := r.LookupUID(uid)
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
@@ -139,11 +150,13 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 			}
 		}
 	}
-	groups, err := r.groupNames(account)
-	if err != nil {
-		return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
+	if includeGroups {
+		groups, err := r.groupNames(account)
+		if err != nil {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
+		}
+		facts.Groups = groups
 	}
-	facts.Groups = groups
 	if facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind {
 		realms, realmErr := hostRealms(r.context())
 		if realmErr != nil {
