@@ -634,6 +634,23 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return failUnreachable(opts, sp, failMode, "gateway cold start failed")
 		}
 	}
+	// A gateway that has taken all it can answer in time (or an account over
+	// its own budget) answers 429 with Retry-After at once. The call has not
+	// been evaluated, so it is sent again a few times within the hook's own
+	// deadline instead of failing the tool call for a burst the gateway
+	// clears in seconds (GAP-0205).
+	for retry := 0; err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
+		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
+		_ = resp.Body.Close()
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return failUnreachable(opts, sp, failMode, "gateway busy")
+		case <-timer.C:
+		}
+		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+	}
 	if err != nil {
 		reason := "gateway unreachable"
 		if errors.Is(context.Cause(ctx), errGatewayStartFailing) {
@@ -667,6 +684,20 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 
 	return sp.decide(opts, body)
+}
+
+// hookBusyRetries is how many times a hook sends its call again after the
+// gateway answered 429.
+const hookBusyRetries = 4
+
+// retryAfterDelay is the pause a 429's Retry-After asks for, in whole seconds,
+// kept between 1 s and 3 s; a missing or unreadable value means 1 s.
+func retryAfterDelay(value string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || seconds < 1 {
+		seconds = 1
+	}
+	return time.Duration(min(seconds, 3)) * time.Second
 }
 
 // refusalReason is the reason of a gateway refusal body
