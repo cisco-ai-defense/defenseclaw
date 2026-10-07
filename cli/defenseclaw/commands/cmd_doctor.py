@@ -11966,6 +11966,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             False,
         ),
         (
+            "doctor.connector.proxy-lock.refresh",
+            "stale proxy connector lock entry",
+            "disruptive",
+            _fix_stale_proxy_contract_lock,
+            ("doctor.gateway.service.reconcile",),
+            ("drop an OpenClaw or ZeptoClaw lock entry that names another agent version and restart the gateway",),
+            True,
+            False,
+        ),
+        (
             "doctor.acp.guard.repin",
             "ACP guard pins",
             "safe",
@@ -15468,6 +15478,85 @@ def _fix_hook_script_drift(
             f"the gateway restarted but {', '.join(left)} still differs from setup's render; run {commands}",
         )
     return ("pass", f"rendered the {names} hook script(s) again")
+
+
+_PROXY_LOCK_CONNECTORS = ("openclaw", "zeptoclaw")
+
+
+def _stale_proxy_lock_entries(cfg) -> dict[str, tuple[str, str]]:
+    """Proxy connector lock entries that name another agent version (GAP-0225).
+
+    OpenClaw and ZeptoClaw have no hook contract, so their entry in
+    hook_contract_lock.json only records the agent version the gateway last
+    started with. A gateway from before the GAP-0225 fix refused to start after
+    an OpenClaw upgrade or downgrade until that entry was gone. The installed
+    version comes from the discovery cache setup refreshes; nothing is run.
+    """
+    from defenseclaw.connector_contracts import resolve_connector_contract
+    from defenseclaw.inventory.agent_discovery import _read_cache
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
+            entries = json.load(fh).get("connectors")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(entries, dict):
+        return {}
+    agents = getattr(_read_cache(data_dir=data_dir), "agents", None) or {}
+    stale: dict[str, tuple[str, str]] = {}
+    for name in _PROXY_LOCK_CONNECTORS:
+        entry = entries.get(name)
+        recorded = str(entry.get("raw_agent_version") or "").strip() if isinstance(entry, dict) else ""
+        installed = str(getattr(agents.get(name), "version", "") or "").strip()
+        if not recorded or not installed:
+            continue
+        if (
+            resolve_connector_contract(name, recorded).normalized_version
+            != resolve_connector_contract(name, installed).normalized_version
+        ):
+            stale[name] = (recorded, installed)
+    return stale
+
+
+def _fix_stale_proxy_contract_lock(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Drop a stale OpenClaw/ZeptoClaw lock entry and restart the gateway (GAP-0225)."""
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    stale = _stale_proxy_lock_entries(cfg)
+    if not stale:
+        return ("skip", "the proxy connector lock entries match the installed agent versions")
+    detail = "; ".join(f"{name} records {old!r}, installed is {new!r}" for name, (old, new) in sorted(stale.items()))
+    if plan_only:
+        return ("plan", f"drop the stale hook contract lock entry and restart the gateway to record it ({detail})")
+    prompt = f"    Drop the stale lock entry ({detail}) and restart the gateway?"
+    if not assume_yes and not click.confirm(prompt, default=True):
+        return ("skip", "declined by user")
+    lock_path = os.path.join(str(cfg.data_dir), "hook_contract_lock.json")
+    try:
+        with open(lock_path, encoding="utf-8") as fh:
+            lock = json.load(fh)
+        for name in stale:
+            lock["connectors"].pop(name, None)
+        atomic_write_private_bytes(lock_path, (json.dumps(lock, indent=2) + "\n").encode("utf-8"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return ("fail", f"could not update {lock_path}: {exc}")
+    trust = _trusted_gateway_listener_for_lifecycle(cfg)
+    if not trust.trusted:
+        return ("pass", f"dropped the stale lock entry ({detail}); the next gateway start records the new version")
+    repaired, restart_detail = _repair_gateway_lifecycle(cfg, start_if_stopped=False)
+    if not repaired:
+        return (
+            "fail",
+            f"dropped the stale lock entry but could not restart the gateway ({restart_detail}); "
+            "run `defenseclaw-gateway restart`",
+        )
+    return ("pass", f"dropped the stale lock entry and restarted the gateway ({detail})")
 
 
 def _fix_acp_guard_pins(
