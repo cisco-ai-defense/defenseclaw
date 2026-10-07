@@ -1204,6 +1204,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
 	userText := lastUserText(partial.Messages)
+	// turnText is the whole user turn of a message list, inspected instead of
+	// userText as on the chat-completions route: OpenClaw 2026.9 appends a
+	// context message after the prompt (GAP-0190, GAP-0243). userText still
+	// drives the heartbeat and session-startup gates.
+	turnText := promptTurnText(partial.Messages)
 	// A coexisting Ollama /api/generate `prompt` is the user generation
 	// input. Do not let top-level `system` replace it (#718). Anthropic
 	// and other system-only native shapes still fall through here when
@@ -1243,6 +1248,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					}
 				}
 				userText = lastUserText(inputMsgs)
+				turnText = promptTurnText(inputMsgs)
 				if len(partial.Messages) == 0 {
 					partial.Messages = inputMsgs
 				}
@@ -1273,6 +1279,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
 			}
 			userText = lastUserText(geminiMsgs)
+			turnText = promptTurnText(geminiMsgs)
 			if len(partial.Messages) == 0 {
 				partial.Messages = geminiMsgs
 			}
@@ -1315,6 +1322,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectRaw := userText
+	if strings.TrimSpace(turnText) != "" {
+		inspectRaw = turnText
+	}
 	if ollamaSystemText != "" {
 		inspectRaw = ollamaSystemText + "\n" + userText
 	}

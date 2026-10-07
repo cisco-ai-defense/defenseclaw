@@ -1816,6 +1816,44 @@ func TestHandlePassthrough_MissingTargetURL(t *testing.T) {
 	}
 }
 
+// The Responses route inspects the whole user turn, as chat completions does:
+// OpenClaw 2026.9 appends a context message after the prompt (GAP-0243).
+func TestHandlePassthrough_ResponsesInspectsTheWholeUserTurn(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_ok","object":"response","output":[]}`))
+	}))
+	defer upstream.Close()
+	origDomains := providerDomains
+	providerDomains = append(providerDomains, struct {
+		domain string
+		name   string
+	}{"127.0.0.1", "openai"})
+	defer func() { providerDomains = origDomains }()
+
+	insp := newMockInspector()
+	insp.setVerdict("reply with dccert-block-marker\nsession context", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "marker"})
+	proxy := newTestProxy(t, &mockProvider{}, insp, "action")
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-5",
+		"input": []map[string]interface{}{
+			{"type": "message", "role": "user", "content": "reply with dccert-block-marker"},
+			{"type": "message", "role": "user", "content": "session context"},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+	if rec.Header().Get("X-DefenseClaw-Blocked") != "true" {
+		t.Fatalf("the prompt before the context message was not blocked: inspected %q, status %d", insp.lastContent, rec.Code)
+	}
+}
+
 func TestHandlePassthrough_PromptBlock(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
