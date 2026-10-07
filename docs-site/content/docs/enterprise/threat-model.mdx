@@ -637,6 +637,38 @@ Where standard users can create a private user and mount namespace, an agent sta
 
 **What reduces it:** Set `user.max_user_namespaces=0`, or on AppArmor hosts `kernel.apparmor_restrict_unprivileged_unconfined=1`, for example in `/etc/sysctl.d`. Both also restrict the Codex and Claude Code command sandboxes; see [User namespaces](/docs/enterprise/linux#user-namespaces).
 
+#### Tetragon's API is root-equivalent
+
+If the computer runs Tetragon, the root sensor helper connects to it, and Tetragon's API lets its caller load kernel programs. Only the helper connects, only over a Unix socket that root owns and root serves, and never over TCP; it changes only the `defenseclaw-*` policies it recorded itself, and the calls it may make depend on `enterprise.tetragon.mode`. A compromise of the helper is a kernel-policy compromise as well as a root one, which the trusted-administrator assumption already covers. A Tetragon that serves its API on TCP lets every local account load or remove kernel policies, whatever DefenseClaw does; `defenseclaw doctor` and `enterprise linux status` warn (`tetragon_tcp_api`).
+
+**Where:** Linux standalone, with Tetragon.
+
+**What reduces it:** Set Tetragon's `server-address` to a Unix socket. Keep `enterprise.tetragon.mode` at `consume` where you do not need the kernel controls. See [AI Discovery Plane C (Tetragon)](/docs/enterprise/linux#ai-discovery-plane-c-tetragon).
+
+#### The kernel controls are narrow, and fail open
+
+The two controls deny in-place write opens of shell profiles and user autostart entries, and opens of SSH private keys by name, for the descendants of an enrolled command-line agent, and only after an administrator approves them. They do not stop these:
+
+- Replacing a shell profile by rename, or removing it.
+- A second name for the same file that the user created beforehand, such as a link.
+- A library-based SSH tool (libssh2, paramiko) inside the agent's tree is denied like any other reader, which the burn-in shows first.
+- A process that is not below an enrolled agent: an IDE terminal, a look-alike program by name, or another user.
+- Agent configuration files, repository files, program execution and destinations. The kernel floor does not cover them at all.
+
+Enforcement also fails open. While Tetragon is stopped nothing is denied, after a restart the policies are loaded again within about a minute, and while the helper is stopped the loaded policies keep the scope they had.
+
+**Where:** Linux standalone, with Tetragon in `enforce` mode.
+
+**What reduces it:** Hook rules and the `observe` policy record what the controls do not stop. Pause or end enforcement from the computer with `enterprise linux tetragon pause`; see [Agent segmentation, visibility and enforcement](/docs/segmentation#what-the-kernel-floor-leaves-to-other-layers).
+
+#### Codex notify arguments
+
+Codex passes the content of each turn to its notify program as an argument. The sensor helper withholds those arguments from the events it sends to the gateway, but any other process accounting on the computer, such as Tetragon's own export file (root-only, and yours) or `auditd`, records them.
+
+**Where:** Linux, with Codex.
+
+**What reduces it:** Apply redaction filters in Tetragon, and restrict who can read your process accounting.
+
 #### Short windows during administrator actions
 
 A running gateway can reload an edited config just before the lifecycle rejects and reverts it, and on Linux an upgrade that changes a socket unit releases the gateway's port while the socket restarts.
