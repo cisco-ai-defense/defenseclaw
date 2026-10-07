@@ -683,6 +683,67 @@ def test_runtime_dataclass_matches_the_closed_schema():
     assert {f.name for f in fields(AIRuntimeConfig)} == set(runtime["properties"])
 
 
+def _snapshot_with_plane_c(backend: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(_DEGRADED_SNAPSHOT)
+    plane_c: dict[str, Any] = {
+        "plane": "c", "name": "agent actions", "available": True, "running": True,
+        "mechanism": "Tetragon (exec, exit) + fanotify",
+    }
+    if backend is not None:
+        plane_c["backend"] = backend
+    payload["planes"] = [payload["planes"][0], plane_c]
+    return payload
+
+
+def test_status_names_the_kernel_sensor_and_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = {
+        "kind": "tetragon", "version": "1.7.1", "mode": "enforce", "events_lost": 0, "loss_known": True,
+        "kernel_floor": {
+            "mode": "enforce", "enforced_users": 2, "enrolled_users": 3, "burn_in_users": 1,
+            "paused_until": "14:05",
+        },
+    }
+    client = _StubClient(_snapshot_with_plane_c(backend))
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("status")
+    assert result.exit_code == 0, result.output
+    assert "kernel sensor: Tetragon 1.7.1, enforce, 0 events lost" in result.output
+    assert "kernel floor: enforce for 2 of 3 users (1 in burn-in); paused until 14:05" in result.output
+
+    as_json = _invoke("status", "--json")
+    planes = json.loads(as_json.output)["planes"]
+    assert planes[1]["backend"] == backend
+
+
+def test_status_says_why_tetragon_is_not_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    fallback = {"kind": "native", "fallback_reason": "tetragon_tcp_api", "loss_known": False}
+    client = _StubClient(_snapshot_with_plane_c(fallback))
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("status")
+    assert result.exit_code == 0, result.output
+    assert "kernel sensor: cn_proc and fanotify (Tetragon not used: tetragon_tcp_api)" in result.output
+    assert "kernel floor" not in result.output
+
+
+def test_status_without_a_backend_prints_no_kernel_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every gateway but the managed Linux sensor helper's omits the field.
+    client = _StubClient(_snapshot_with_plane_c(None))
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("status")
+    assert result.exit_code == 0, result.output
+    assert "kernel sensor" not in result.output
+    assert "agent actions: running via Tetragon" in result.output
+
+
+def test_kernel_sensor_summary_never_claims_unknown_loss_is_zero() -> None:
+    assert cmd_agent.kernel_sensor_summary({"kind": "tetragon", "version": "1.7.1", "mode": "consume"}) == (
+        "Tetragon 1.7.1, consume, events lost unknown"
+    )
+    assert cmd_agent.kernel_sensor_summary(
+        {"kind": "tetragon", "mode": "observe", "events_lost": 12, "loss_known": True}
+    ) == "Tetragon, observe, 12 events lost"
+
+
 def test_status_marks_a_limited_running_plane_partial(monkeypatch: pytest.MonkeyPatch) -> None:
     # GAP-1377: a non-elevated Windows gateway runs Plane B on its own sockets
     # only; status and findings must not print a plain "running".

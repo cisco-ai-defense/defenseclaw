@@ -2970,6 +2970,92 @@ def enable_all_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, objec
     return changes
 
 
+def runtime_plane_c_selected(runtime: Any) -> bool:
+    """Whether Plane C runs: the runtime planes are enabled and Go's
+    ``AIRuntimeConfig.EffectivePlanes`` contains ``c`` (an empty ``planes``
+    list plus ``enable_host_plane``, or ``c`` listed with it)."""
+    if runtime is None or not bool(getattr(runtime, "enabled", False)):
+        return False
+    if not bool(getattr(runtime, "enable_host_plane", False)):
+        return False
+    planes = [str(plane).strip().lower() for plane in (getattr(runtime, "planes", None) or [])]
+    return not planes or "c" in planes
+
+
+# enterprise.tetragon: how the managed Linux sensor helper uses the Tetragon
+# the host already runs. Python has no enterprise mirror (only the lifecycle
+# acts on the block), so these read it as config.yaml writes it, for
+# `config get --effective` and doctor. They mirror Go's
+# EnterpriseTetragonConfig.Effective and Config.TetragonMode.
+TETRAGON_MODES: tuple[str, ...] = ("off", "consume", "observe", "enforce")
+TETRAGON_DEFAULTS: dict[str, str] = {"mode": "consume", "burn_in": "168h", "enforce_ack": ""}
+
+
+def tetragon_block(document: Any) -> dict[str, Any]:
+    """``enterprise.tetragon`` exactly as a config document writes it ({} when absent)."""
+    enterprise = document.get("enterprise") if isinstance(document, dict) else None
+    block = enterprise.get("tetragon") if isinstance(enterprise, dict) else None
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def _tetragon_text(value: Any) -> str:
+    # A YAML 1.1 loader (PyYAML's safe_load) reads an unquoted ``off`` as
+    # False; the Go loader and the v8 schema read the string "off".
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return str(value).strip()
+
+
+def tetragon_configured_mode(document: Any) -> str:
+    """``enterprise.tetragon.mode`` as written, lowercased; ``consume`` when unset."""
+    value = tetragon_block(document).get("mode")
+    return (_tetragon_text(value).lower() if value is not None else "") or TETRAGON_DEFAULTS["mode"]
+
+
+def effective_tetragon(
+    document: Any,
+    *,
+    deployment_mode: str,
+    runtime: Any,
+    os_name: str,
+) -> dict[str, tuple[str, str]]:
+    """Each ``enterprise.tetragon`` key as the managed sensor helper runs it,
+    with its source: ``config:enterprise.tetragon.<key>`` or ``builtin``.
+
+    The mode is capped at ``off`` where the helper does not use Tetragon:
+    macOS and Windows ignore the block, only a managed Linux deployment has
+    the helper, and Plane C must be selected. ``enforce_ack`` is marked inert
+    unless the mode is ``enforce``. The caps that need the helper's own state
+    (a stale ack, the Tetragon version) are reported by
+    ``defenseclaw-gateway enterprise linux tetragon status``.
+    """
+    written = tetragon_block(document)
+    view: dict[str, tuple[str, str]] = {}
+    for key, default in TETRAGON_DEFAULTS.items():
+        value = written.get(key)
+        if value is None:
+            view[key] = (default, "builtin")
+        else:
+            view[key] = (_tetragon_text(value), f"config:enterprise.tetragon.{key}")
+    mode, source = view["mode"]
+    mode = mode.lower()
+    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
+        deployment_mode
+    )
+    cap = ""
+    if os_name != "linux":
+        cap = "macOS and Windows ignore enterprise.tetragon"
+    elif not managed:
+        cap = "only the managed Linux sensor helper uses Tetragon"
+    elif not runtime_plane_c_selected(runtime):
+        cap = "Plane C is off (ai_discovery.runtime.enable_host_plane)"
+    view["mode"] = ("off", f"{source}, capped: {cap}") if cap and mode != "off" else (mode, source)
+    ack, ack_source = view["enforce_ack"]
+    if ack and view["mode"][0] != "enforce":
+        view["enforce_ack"] = (ack, f"{ack_source} (inert: the mode is not enforce)")
+    return view
+
+
 @dataclass
 class AIDiscoveryConfig:
     enabled: bool = False

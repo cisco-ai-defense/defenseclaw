@@ -2191,6 +2191,63 @@ def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
             ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
         else:
             ux.warn(f"{name}: unavailable -- {plane.get('reason') or 'no reason given'}", indent=indent)
+        _render_kernel_backend(plane.get("backend"), indent=indent + "  ")
+
+
+def kernel_sensor_summary(backend: dict) -> str:
+    """``Tetragon 1.7.1, observe, 0 events lost`` for a Tetragon backend.
+
+    Loss is "unknown" unless the helper knows it: a count it cannot vouch for
+    would read as a clean stream.
+    """
+    parts = [" ".join(part for part in ("Tetragon", str(backend.get("version") or "").strip()) if part)]
+    if backend.get("mode"):
+        parts.append(str(backend["mode"]))
+    if backend.get("loss_known") is False or "events_lost" not in backend:
+        parts.append("events lost unknown")
+    else:
+        parts.append(f"{int(backend.get('events_lost') or 0)} events lost")
+    return ", ".join(parts)
+
+
+def _kernel_floor_line(floor: dict) -> str:
+    """``enforce for 2 of 3 users (1 in burn-in); paused until 14:05``."""
+    mode = str(floor.get("mode") or "").strip() or "monitor"
+    enrolled = int(floor.get("enrolled_users") or 0)
+    if mode == "enforce":
+        text = f"enforce for {int(floor.get('enforced_users') or 0)} of {enrolled} users"
+        burning = int(floor.get("burn_in_users") or 0)
+        if burning:
+            text += f" ({burning} in burn-in)"
+    else:
+        text = f"{mode} for {enrolled} users"
+    paused = str(floor.get("paused_until") or "").strip()
+    if paused:
+        text += f"; paused until {paused}"
+    return text
+
+
+def _render_kernel_backend(backend: object, *, indent: str) -> None:
+    """The Plane C backend line under the plane strip, when the gateway reports one.
+
+    Only the managed Linux sensor helper reports a backend; every other
+    gateway omits the field and this prints nothing.
+    """
+    from defenseclaw import ux
+
+    if not isinstance(backend, dict):
+        return
+    kind = str(backend.get("kind") or "").strip().lower()
+    if kind == "tetragon":
+        ux.subhead(f"kernel sensor: {kernel_sensor_summary(backend)}", indent=indent)
+    elif backend.get("fallback_reason"):
+        ux.subhead(
+            f"kernel sensor: cn_proc and fanotify (Tetragon not used: {backend['fallback_reason']})",
+            indent=indent,
+        )
+    floor = backend.get("kernel_floor")
+    if isinstance(floor, dict) and floor:
+        ux.subhead(f"kernel floor: {_kernel_floor_line(floor)}", indent=indent)
 
 
 def _render_coverage(payload: dict, *, indent: str = "  ") -> None:
