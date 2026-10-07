@@ -368,9 +368,18 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
+	scanPath, unstage, err := stageUTF16Skill(target)
+	defer unstage()
+	if err != nil {
+		result.Duration = time.Since(start)
+		result.ScanError = err.Error()
+		result.ExitCode = -1
+		return result, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.Config.ScanTimeoutSeconds())*time.Second)
 	defer cancel()
-	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(target, policy)...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(scanPath, policy)...)
 	cmd.Env = s.scanEnv()
 
 	var stdout, stderr bytes.Buffer
@@ -402,7 +411,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	}
 
 	if stdout.Len() > 0 {
-		findings, parseErr := parseSkillOutput(stdout.Bytes(), target)
+		findings, parseErr := parseSkillOutput(stdout.Bytes(), scanPath)
 		if parseErr != nil {
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr

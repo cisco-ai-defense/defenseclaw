@@ -22,10 +22,13 @@ to the skill-scanner CLI.  Maps SDK ScanResult/Finding → DefenseClaw models.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import os
 import sys
+import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -102,6 +105,62 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
         timeout=il.timeout,
         max_retries=il.max_retries,
     )
+
+
+# Bounds on the copy _utf8_skill_copy makes (Go stageUTF16Skill).
+_UTF16_STAGE_MAX_BYTES = 64 << 20
+_UTF16_STAGE_MAX_FILES = 2000
+
+
+@contextlib.contextmanager
+def _utf8_skill_copy(target: str) -> Iterator[str]:
+    """Yield a copy of the skill whose UTF-16 SKILL.md is re-encoded as UTF-8.
+
+    skill-scanner refuses a SKILL.md with NUL bytes, which is how Windows
+    editors save "Unicode" text (GAP-0417); the install watcher scans the
+    same copy (internal/scanner stageUTF16Skill). Any other skill is scanned
+    in place, and the skill's own files are never changed.
+    """
+    manifest = ""
+    for name in ("SKILL.md", "skill.md"):
+        candidate = os.path.join(target, name)
+        if os.path.isfile(candidate) and not os.path.islink(candidate):
+            manifest = name
+            break
+    if not manifest:
+        yield target
+        return
+    with open(os.path.join(target, manifest), "rb") as fh:
+        head = fh.read(2)
+    if head not in (b"\xff\xfe", b"\xfe\xff"):
+        yield target
+        return
+    from defenseclaw.skill_discovery import decode_skill_text
+
+    with tempfile.TemporaryDirectory(prefix="dc-skill-utf8-") as tmp:
+        stage = os.path.join(tmp, os.path.basename(os.path.normpath(target)))
+        total = files = 0
+        for root, dirs, names in os.walk(target):
+            rel_root = os.path.relpath(root, target)
+            os.makedirs(os.path.join(stage, rel_root), exist_ok=True)
+            for name in dirs + names:
+                if os.path.islink(os.path.join(root, name)):
+                    raise RuntimeError(f"{manifest} is saved as UTF-16 and the skill holds a link; save it as UTF-8")
+            for name in names:
+                source = os.path.join(root, name)
+                files += 1
+                total += os.path.getsize(source)
+                if files > _UTF16_STAGE_MAX_FILES or total > _UTF16_STAGE_MAX_BYTES:
+                    raise RuntimeError(
+                        f"{manifest} is saved as UTF-16 and the skill is too large to re-encode; save it as UTF-8"
+                    )
+                with open(source, "rb") as fh:
+                    data = fh.read()
+                if rel_root == "." and name == manifest:
+                    data = decode_skill_text(data).encode("utf-8")
+                with open(os.path.join(stage, rel_root, name), "wb") as fh:
+                    fh.write(data)
+        yield stage
 
 
 # The INFO finding skill-scanner reports when its LLM judge started but did
@@ -225,12 +284,13 @@ class SkillScannerWrapper:
             scanner = SkillScanner(analyzers=analyzers, policy=policy)
 
             start = time.monotonic()
-            sdk_result = scanner.scan_skill(str(target), lenient=cfg.lenient)
-            if cfg.enable_meta and judge and len(analyzers) > 1:
-                _apply_meta_analysis(scanner, sdk_result, target, cfg.lenient, judge, policy)
-            elapsed = time.monotonic() - start
-
-        result = self._convert(sdk_result, target, elapsed)
+            with _utf8_skill_copy(str(target)) as scan_target:
+                sdk_result = scanner.scan_skill(scan_target, lenient=cfg.lenient)
+                if cfg.enable_meta and judge and len(analyzers) > 1:
+                    _apply_meta_analysis(scanner, sdk_result, scan_target, cfg.lenient, judge, policy)
+                elapsed = time.monotonic() - start
+                result = self._convert(sdk_result, scan_target, elapsed)
+        result.target = target
         if judge:
             _raise_on_judge_failure(result)
         # The scan says which policy and judge model it ran with (GAP-0047).
