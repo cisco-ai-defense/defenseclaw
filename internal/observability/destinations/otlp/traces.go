@@ -698,6 +698,10 @@ func (exporter *SpanExporter) deliveryHealthSnapshot() delivery.HealthSnapshot {
 	lastFailure := exporter.lastFailure
 	exporter.healthMu.Unlock()
 	circuit := exporter.circuit.Snapshot()
+	if circuit.State == delivery.CircuitHalfOpen && state == delivery.HealthFailing {
+		state = delivery.HealthDegraded
+		reason = delivery.HealthReasonCircuitHalfOpen
+	}
 	counters := exporter.Counters()
 	return delivery.HealthSnapshot{
 		State: state, Reason: string(reason),

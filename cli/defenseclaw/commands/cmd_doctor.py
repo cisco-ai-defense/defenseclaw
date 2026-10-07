@@ -10014,7 +10014,7 @@ def _check_observability_v8_status(
                     "unsafe_endpoint",
                 }:
                     tag = "fail"
-                elif tag == "pass":
+                else:
                     tag = "warn"
                 destination_arg = shlex.quote(destination.name)
                 detail += (

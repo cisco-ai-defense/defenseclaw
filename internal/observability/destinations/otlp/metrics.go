@@ -608,6 +608,10 @@ func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot
 	lastFailureCode := exporter.lastFailureCode
 	exporter.healthMu.Unlock()
 	circuit := exporter.circuit.Snapshot()
+	if circuit.State == delivery.CircuitHalfOpen && state == delivery.HealthFailing {
+		state = delivery.HealthDegraded
+		reason = delivery.HealthReasonCircuitHalfOpen
+	}
 	counters := exporter.Counters()
 	return delivery.HealthSnapshot{
 		State: state, Reason: string(reason),
