@@ -362,6 +362,8 @@ class TestOpenShellValidation(unittest.TestCase):
             ({"admission": {"skill": {"actions": {"high": "explode"}}}}, "$.admission.skill.actions.high",
              "use one of block, quarantine, warn, allow or a mapping with file, runtime, install"),
             ({"gateway": {"api_port": "abc"}}, "$.gateway.api_port", "use a value of type integer"),
+            ({"guardrail": {"hilt": {"min_severity": "bogus"}}}, "$.guardrail.hilt.min_severity",
+             "use one of LOW, MEDIUM, HIGH, CRITICAL (empty inherits)"),
         ):
             with self.assertRaises(V8ConfigError) as caught:
                 load_validate_v8({"config_version": 9, **document})

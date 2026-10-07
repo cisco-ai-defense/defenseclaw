@@ -265,6 +265,17 @@ nfpms:
         dst: /usr/lib/sysusers.d/defenseclaw.conf
       - src: packaging/systemd/defenseclaw.conf
         dst: /usr/lib/tmpfiles.d/defenseclaw.conf
+      # apt hook that refuses a package downgrade before dpkg replaces any
+      # file. Not a conffile: it must go away with the package, or apt would
+      # keep calling a script that is no longer there.
+      - src: packaging/linux/apt-downgrade-guard.sh
+        dst: /usr/lib/defenseclaw-enterprise/apt-downgrade-guard
+        packager: deb
+        file_info:
+          mode: 0755
+      - src: packaging/linux/apt-downgrade-guard.conf
+        dst: /etc/apt/apt.conf.d/50defenseclaw-enterprise
+        packager: deb
       # An rpm owns only the directories it lists, so without this entry an
       # erase leaves /usr/share/doc/defenseclaw-enterprise behind, empty.
       - dst: /usr/share/doc/defenseclaw-enterprise
