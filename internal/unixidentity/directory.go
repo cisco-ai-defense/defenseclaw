@@ -35,7 +35,11 @@ import (
 // winbind (CORP\alice) reports, a NetBIOS domain by the DNS name of its
 // realm, and groups from initgroups plus group lookups for all of their
 // ids. The realm and directory type of an SSSD or winbind
-// account come from realmd, which any account may ask (realm_linux.go).
+// account come from realmd, which any account may ask (realm_linux.go). A
+// bare SSSD name (use_fully_qualified_names = False) gets a realm only when
+// SSSD resolves the name qualified with that realm's domain to the same
+// account (sssdAccountInDomain): SSSD may serve a plain LDAP domain next to
+// the joined one, under the same kind of name.
 // UPN and mail need SSSD InfoPipe, which only root may call, so the root
 // guardian adds them (enterprisehooks identity spool).
 
@@ -162,9 +166,46 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		if realmErr != nil {
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: realmd lookup: %w", realmErr)
 		}
-		applyRealm(&facts, account.Name, realms)
+		applyRealm(&facts, account.Name, realms, func(domain string) bool {
+			return r.sssdAccountInDomain(account, domain)
+		})
 	}
 	return facts, nil
+}
+
+// sssdDomainCheckTimeout bounds the lookup that confirms the SSSD domain of a
+// bare name. SSSD answers it from the entry the uid lookup just refreshed; a
+// lookup that runs out confirms nothing.
+const sssdDomainCheckTimeout = 2 * time.Second
+
+// sssdAccountInDomain asks SSSD for the account's name in the SSSD domain
+// named domain (getent -s sss passwd name@domain) and reports whether the
+// answer is this account: the same name, uid, primary group, home and shell.
+// SSSD looks a qualified name up in that domain only, whatever its
+// use_fully_qualified_names, and reports it in the domain's own name form,
+// so an account of another domain that has the same short name answers with
+// another uid, and a name that domain lacks is not found. Any account may
+// ask: the NSS responder needs no privilege, unlike InfoPipe. Every failure
+// confirms nothing.
+func (r *NSSResolver) sssdAccountInDomain(account Account, domain string) bool {
+	bare, _ := useridentity.SplitQualifiedName(account.Name)
+	key := bare + "@" + domain
+	if bare == "" || domain == "" || validName(key) != nil || strings.HasPrefix(key, "-") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.context(), sssdDomainCheckTimeout)
+	defer cancel()
+	result, err := r.runner(ctx, r.path, []string{"-s", "sss", "passwd", key})
+	if err != nil || result.exitCode != getentExitOK {
+		return false
+	}
+	lines := nonEmptyLines(string(result.stdout))
+	if len(lines) != 1 {
+		return false
+	}
+	found, err := ParsePasswdLine(lines[0])
+	return err == nil && strings.EqualFold(found.Name, account.Name) && found.UID == account.UID &&
+		found.GID == account.GID && found.Home == account.Home && found.Shell == account.Shell
 }
 
 // groupNames names the account's groups with getent group calls of

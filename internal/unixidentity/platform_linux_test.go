@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -122,18 +123,58 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	// With winbind use default domain only the names of other domains are
 	// qualified, and realmd reports the format %U.
-	if realm, ok := realmFor("emea", useridentity.SourceWinbind, []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}); ok {
+	if realm, ok := realmFor("emea", useridentity.SourceWinbind, []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}, nil); ok {
 		t.Errorf("a trusted NetBIOS domain took the realm %+v", realm)
 	}
 }
 
-func TestBareSSSDAccountDoesNotInheritUnverifiedRealm(t *testing.T) {
-	realm := []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM",
-		ServerSoftware: "active-directory", ClientSoftware: "sssd"}}
-	facts := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "ldap"}
-	applyRealm(&facts, "bob@LDAP", realm)
-	if facts.Directory != "" || facts.Domain != "ldap" || facts.Realm != "" || facts.Principal != "" {
-		t.Fatalf("unrelated SSSD account inherited AD realm: %+v", facts)
+// A bare SSSD name (use_fully_qualified_names = False) takes the joined
+// realm only when SSSD resolves name@domain to the same account (GAP-0497):
+// not an account of a plain LDAP domain, not one that shares its short name
+// with an AD account, and not when SSSD does not answer.
+func TestBareSSSDAccountTakesOnlyTheRealmSSSDConfirms(t *testing.T) {
+	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
+	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
+	dir := t.TempDir()
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM",
+			ServerSoftware: "active-directory", ClientSoftware: "sssd"}}, nil
+	}
+	line := func(name string, uid int) commandResult {
+		id := strconv.Itoa(uid)
+		return commandResult{stdout: []byte(name + ":*:" + id + ":" + id + "::/home/" + name + ":/bin/bash\n")}
+	}
+	f := &fakeRun{results: map[string]commandResult{}, errs: map[string]error{}}
+	for uid, name := range map[int]string{80001: "alice", 80002: "bob", 80003: "carol", 80004: "dave"} {
+		f.results["passwd "+strconv.Itoa(uid)] = line(name, uid)
+		f.results["-s sss passwd "+strconv.Itoa(uid)] = line(name, uid)
+	}
+	f.results["-s sss passwd alice@corp.example.com"] = line("alice", 80001)
+	f.results["-s sss passwd carol@corp.example.com"] = line("carol", 90003)
+	f.errs["-s sss passwd dave@corp.example.com"] = context.DeadlineExceeded
+	r := newFakeNSS(f)
+	for uid, principal := range map[int]string{80001: "alice@corp.example.com", 80002: "", 80003: "", 80004: ""} {
+		facts, err := r.DirectoryFactsWithoutGroupsForUID(uid, time.Now())
+		if err != nil {
+			t.Fatalf("uid %d: %v", uid, err)
+		}
+		want := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD}
+		if principal != "" {
+			want = useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Directory: useridentity.DirectoryActiveDirectory,
+				Domain: "corp.example.com", Realm: "CORP.EXAMPLE.COM", Principal: principal}
+		}
+		got := useridentity.DirectoryFacts{Source: facts.Source, Directory: facts.Directory, Domain: facts.Domain,
+			Realm: facts.Realm, Principal: facts.Principal}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("uid %d = %+v, want %+v", uid, got, want)
+		}
 	}
 }
 

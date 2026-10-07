@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,13 @@ import (
 // InfoPipe (org.freedesktop.sssd.infopipe GetUserAttr, which sssd-ifp
 // answers for root only). Without InfoPipe the principal is
 // sAMAccountName@REALM, recorded as upn_source=derived.
+//
+// InfoPipe is asked by uid which SSSD domain holds the account (Users.FindByID),
+// and the UPN is read for the name qualified with that domain. A bare name
+// (use_fully_qualified_names = False) is not enough: SSSD looks it up in its
+// domains in order, so an account of a plain LDAP domain that shares its
+// short name with an AD account would get the AD account's UPN. When
+// InfoPipe cannot say, the record carries no UPN.
 
 const (
 	infoPipeService   = "org.freedesktop.sssd.infopipe"
@@ -37,10 +45,11 @@ const (
 	infoPipeGetAttr   = "org.freedesktop.sssd.infopipe.GetUserAttr"
 	infoPipeUPNAttr   = "userPrincipalName"
 	infoPipeUsers     = "/org/freedesktop/sssd/infopipe/Users"
-	infoPipeFindUser  = "org.freedesktop.sssd.infopipe.Users.FindByName"
+	infoPipeFindByID  = "org.freedesktop.sssd.infopipe.Users.FindByID"
 	infoPipeUserIface = "org.freedesktop.sssd.infopipe.Users.User"
 	infoPipeDomIface  = "org.freedesktop.sssd.infopipe.Domains"
 	dbusPropertiesGet = "org.freedesktop.DBus.Properties.Get"
+	dbusGetAll        = "org.freedesktop.DBus.Properties.GetAll"
 	infoPipeCallLimit = 5 * time.Second
 )
 
@@ -63,25 +72,26 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		return record, nil
 	}
 	if facts.Source == useridentity.SourceSSSD {
-		if facts.Directory == "" {
-			// A domain realmd did not join, such as a plain LDAP directory
-			// or a cloud directory's LDAP interface: its SSSD id provider
-			// names the directory type.
-			callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
-			provider, providerErr := infoPipeDomainProvider(callCtx, nss.Name)
-			cancel()
-			if providerErr == nil {
+		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
+		domain, provider, domainErr := infoPipeAccountDomain(callCtx, account.UID)
+		cancel()
+		if domainErr == nil {
+			if facts.Directory == "" {
+				// A domain realmd did not join, such as a plain LDAP directory
+				// or a cloud directory's LDAP interface: its SSSD id provider
+				// names the directory type.
 				facts.Directory = sssdProviderDirectory(provider)
 			}
-		}
-		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
-		upn, upnErr := infoPipeUPN(callCtx, nss.Name)
-		cancel()
-		if upn = useridentity.NormalizeUPN(upn); upnErr == nil && upn != "" {
-			facts.UPN = upn
-			facts.Principal = upn
-			facts.Source = useridentity.SourceSSSDInfoPipe
-			record.UPNSource = UPNSourceInfoPipe
+			bare, _ := useridentity.SplitQualifiedName(nss.Name)
+			callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
+			upn, upnErr := infoPipeUPN(callCtx, bare+"@"+domain)
+			cancel()
+			if upn = useridentity.NormalizeUPN(upn); upnErr == nil && upn != "" {
+				facts.UPN = upn
+				facts.Principal = upn
+				facts.Source = useridentity.SourceSSSDInfoPipe
+				record.UPNSource = UPNSourceInfoPipe
+			}
 		}
 	}
 	if record.UPNSource == "" && facts.Principal != "" {
@@ -118,35 +128,39 @@ func infoPipeUPN(ctx context.Context, name string) (string, error) {
 	return "", errors.New("unexpected InfoPipe userPrincipalName type")
 }
 
-// infoPipeDomainProvider returns the id provider ("ldap", "ad", "ipa", ...)
-// of the SSSD domain that serves the account name.
-func infoPipeDomainProvider(ctx context.Context, name string) (string, error) {
+// infoPipeAccountDomain returns the name and id provider ("ldap", "ad",
+// "ipa", ...) of the SSSD domain that holds uid.
+func infoPipeAccountDomain(ctx context.Context, uid int) (string, string, error) {
+	if uid < 0 || int64(uid) > math.MaxUint32 {
+		return "", "", errors.New("uid out of range")
+	}
 	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer conn.Close()
 	var user dbus.ObjectPath
-	if err := conn.Object(infoPipeService, infoPipeUsers).CallWithContext(ctx, infoPipeFindUser, 0, name).Store(&user); err != nil {
-		return "", err
+	if err := conn.Object(infoPipeService, infoPipeUsers).CallWithContext(ctx, infoPipeFindByID, 0, uint32(uid)).Store(&user); err != nil {
+		return "", "", err
 	}
 	var domain dbus.Variant
 	if err := conn.Object(infoPipeService, user).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeUserIface, "domain").Store(&domain); err != nil {
-		return "", err
+		return "", "", err
 	}
 	domainPath, ok := domain.Value().(dbus.ObjectPath)
 	if !ok || !domainPath.IsValid() {
-		return "", errors.New("unexpected InfoPipe user domain")
+		return "", "", errors.New("unexpected InfoPipe user domain")
 	}
-	var provider dbus.Variant
-	if err := conn.Object(infoPipeService, domainPath).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeDomIface, "provider").Store(&provider); err != nil {
-		return "", err
+	var props map[string]dbus.Variant
+	if err := conn.Object(infoPipeService, domainPath).CallWithContext(ctx, dbusGetAll, 0, infoPipeDomIface).Store(&props); err != nil {
+		return "", "", err
 	}
-	value, ok := provider.Value().(string)
-	if !ok {
-		return "", errors.New("unexpected InfoPipe domain provider type")
+	name, _ := props["name"].Value().(string)
+	provider, _ := props["provider"].Value().(string)
+	if name = strings.TrimSpace(name); name == "" || strings.ContainsAny(name, "@\\\x00") {
+		return "", "", errors.New("unexpected InfoPipe domain name")
 	}
-	return value, nil
+	return name, provider, nil
 }
 
 // sssdProviderDirectory maps the id provider of an SSSD domain to the
