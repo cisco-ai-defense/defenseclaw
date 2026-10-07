@@ -161,6 +161,7 @@ type Install struct {
 type Plugin struct {
 	ID            string
 	DisplayName   string
+	Description   string
 	Publisher     string
 	Version       string
 	Enabled       string
