@@ -478,8 +478,11 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	}
 	setupDone := false
 	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
-		if info, statErr := os.Lstat(acpContractLockPath(enrollment.dataDir, enrollment.client, enrollment.agent)); statErr == nil && info.Mode().IsRegular() {
-			setupDone = true
+		if !cfg.SecureClientIntegration() {
+			lock := acpContractLockPath(enrollment.dataDir, enrollment.client, enrollment.agent)
+			if info, statErr := os.Lstat(lock); statErr == nil && info.Mode().IsRegular() {
+				setupDone = true
+			}
 		}
 		if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) && !cfg.SecureClientIntegration() {
