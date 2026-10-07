@@ -84,6 +84,19 @@ func writeJar(t *testing.T, path, pluginXML string) {
 	}
 }
 
+func TestJetBrainsJarChargesCompressedBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plugin.jar")
+	writeJar(t, path, `<idea-plugin><id>example.plugin</id></idea-plugin>`)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newScanner("linux", Limits{MaxBytes: info.Size() - 1})
+	if _, ok := s.readJetBrainsJar(path); ok {
+		t.Fatal("jar exceeded scan byte budget")
+	}
+}
+
 func byID(installs []Install, family, product, remote string) map[string]Plugin {
 	out := map[string]Plugin{}
 	for _, inst := range installs {
