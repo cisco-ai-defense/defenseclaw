@@ -22118,10 +22118,22 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
             -Role $role
     }
 
+    # Standalone keeps its managed IPC directory (gateway and sensor helper
+    # sockets) and the managed OpenCode plugin under InstallRoot with
+    # descriptors the native exact-root validator does not adopt, so a
+    # state-absent purge refused the root ("foreign descriptor" on ...\ipc,
+    # GAP-0250). With every service stopped they hold at most stale socket
+    # leaves and the plugin: remove them as the regular uninstall does. Both
+    # refuse unexpected content before deleting anything; Ensure recreates
+    # them. Secure Client is unchanged: both return at once there.
+    Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout
+    Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout
+
     # With exact services stopped, prove the whole root is canonical and that
     # every inode can be opened with the same no-sharing destructive access
     # required by the removal pass. Failure leaves all SCM rows available for
-    # an authenticated retry and does not revoke IPC or mutate the filesystem.
+    # an authenticated retry and does not revoke IPC or mutate the filesystem
+    # (beyond the standalone IPC directory and plugin above).
     [void](Invoke-DefenseClawNamespaceRootCleanup `
         -Source $nativeCleanup `
         -Request $request `
