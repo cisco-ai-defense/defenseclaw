@@ -90,6 +90,34 @@ def test_intune_group_devices_match_directory_ids(capsys: pytest.CaptureFixture[
     assert [d["id"] for d in json.loads(capsys.readouterr().out)] == ["managed-1"]
 
 
+@pytest.mark.parametrize("command", ["remediation", "macos-script"])
+def test_intune_script_validates_group_before_upsert(tmp_path: Path, command: str) -> None:
+    intune = _load(INTUNE)
+    script = tmp_path / "script.txt"
+    script.write_text("echo ok\n", encoding="ascii")
+    mutations = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return []
+            return [{"id": "script-1"}]
+
+        def request(self, method: str, path: str, body):
+            mutations.append((method, path))
+            return {}
+
+    options = (
+        ["--detect", str(script), "--remediate", str(script)]
+        if command == "remediation"
+        else ["--name", "test", "--file", str(script)]
+    )
+    args = intune.build_parser().parse_args([command, *options, "--group", "missing", "--apply"])
+    with pytest.raises(SystemExit, match="no group named"):
+        args.func(Graph(), args)
+    assert not mutations
+
+
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
     entra = _load(ENTRA)
     # Data1 = 1; Data2 and Data3 share one little-endian word; Data4 is two more.

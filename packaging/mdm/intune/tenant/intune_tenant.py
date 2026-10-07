@@ -647,9 +647,9 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
         "remediationScriptContent": b64(remediate),
     }
     collection = f"{BETA}/deviceManagement/deviceHealthScripts"
+    group = group_by_name(graph, args.group) if args.group else None
     script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package")
-    if args.group:
-        group = group_by_name(graph, args.group)
+    if group:
         existing = graph.get_all(f"{collection}/{script_id}/assignments") if script_id else []
         kept = [a for a in existing if a.get("target", {}).get("groupId") != group["id"]]
         if len(kept) != len(existing):
@@ -693,9 +693,9 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
         "executionFrequency": args.frequency,
     }
     collection = f"{BETA}/deviceManagement/deviceShellScripts"
+    group = group_by_name(graph, args.group) if args.group else None
     script_id = _upsert(graph, collection, args.name, body, args.apply, "macOS shell script")
-    if args.group:
-        group = group_by_name(graph, args.group)
+    if group:
         existing = graph.get_all(f"{collection}/{script_id}/groupAssignments") if script_id else []
         if any(a.get("targetGroupId") == group["id"] for a in existing):
             print(f"{plan_tag(args.apply)}{args.name!r} is already assigned to {args.group}")
