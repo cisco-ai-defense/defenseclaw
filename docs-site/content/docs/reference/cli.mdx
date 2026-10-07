@@ -199,7 +199,7 @@ writer refuses such a change up front; the gateway rejects it when someone edits
 the file by hand:
 
 ```text
-  [FAIL] Config validation  —  line 11: guardrail: config rule pack "badpack": digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5 does not match guardrail.custom_packs.badpack.digest; expected rule packs, custom pack digests and rule IDs the gateway can load; fix the reference, then retry.
+  [FAIL] Config validation  —  line 11: guardrail: config rule pack "badpack": digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5 does not match guardrail.custom_packs.badpack.digest (the pack's files changed after it was pinned; if that was intended, pin the new digest: defenseclaw config set guardrail.custom_packs.badpack.digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5); expected rule packs, custom pack digests and rule IDs the gateway can load; fix the reference, then retry.
   [FAIL] Policy  —  generation 20, digest sha256:f61a485cfcbf is still enforcing: the last change was rejected (config reload rule pack preflight: global rule pack "badpack": digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5 does not match guardrail.custom_packs.badpack.digest)
       ↪ Next step: Fix the change the error names in config.yaml or the policy asset; the gateway applies it once it builds
 ```

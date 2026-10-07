@@ -3340,7 +3340,8 @@ def use_pack_cmd(
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
     ``guardrail.custom_packs.NAME`` with its validated digest, so an edited
-    pack is refused until it is pinned again. Without ``--connector`` every
+    pack is refused until ``use-pack NAME`` pins it again (it runs while that
+    stale pin fails the config check). Without ``--connector`` every
     connector uses PACK and per-connector packs are removed. ``--clear
     --connector X`` removes X's pack. The running gateway picks it up on its
     next reload; nothing is restarted.

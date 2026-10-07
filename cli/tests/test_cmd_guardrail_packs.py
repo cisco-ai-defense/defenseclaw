@@ -259,3 +259,25 @@ def test_switching_away_drops_the_unused_custom_pin(env):
     result = _run(app, ["use-pack", "permissive", "--connector", "codex", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["dropped_pins"] == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["guardrail", "use-pack", "cert-rb"], True),
+        (["guardrail", "use-pack", "default", "--connector", "codex"], True),
+        (["guardrail", "status"], False),
+        (["guardrail", "--json", "use-pack", "x"], False),
+        (["status"], False),
+    ],
+)
+def test_use_pack_skips_the_startup_config_check(monkeypatch, argv, expected):
+    """GAP-0128: use-pack re-pins an edited pack whose stale pin fails the
+    start-up config check (its own write validates the candidate)."""
+    import click
+    from defenseclaw import main as main_module
+
+    monkeypatch.setattr(main_module.sys, "argv", ["defenseclaw", *argv])
+    ctx = click.Context(main_module.cli)
+    ctx.invoked_subcommand = argv[0]
+    assert main_module._is_rule_pack_switch(ctx) is expected

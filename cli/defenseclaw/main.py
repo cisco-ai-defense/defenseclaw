@@ -162,6 +162,26 @@ def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
     )
 
 
+def _is_rule_pack_switch(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail use-pack``.
+
+    It repairs the state the config check refuses most often: an edited
+    custom pack no longer matches its ``guardrail.custom_packs`` pin, and
+    ``use-pack NAME`` pins it again (``use-pack default`` switches away). The
+    write itself validates the whole candidate config, so skipping the
+    start-up check lets nothing invalid through (GAP-0128). Matched like
+    :func:`_is_offline_rulepack_validation`.
+    """
+    if ctx.invoked_subcommand != "guardrail":
+        return False
+    argv = sys.argv[1:]
+    try:
+        guardrail_index = argv.index("guardrail")
+    except ValueError:
+        return False
+    return guardrail_index + 1 < len(argv) and argv[guardrail_index + 1] == "use-pack"
+
+
 def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     """Return whether a ``sandbox`` stub runs without a DefenseClaw config.
 
@@ -347,7 +367,7 @@ def cli(ctx: click.Context) -> None:
     # see a clear diagnostic instead of a deep stack trace. Skipped for
     # recovery commands (doctor/config/keys/upgrade) so a broken config
     # doesn't lock them out of the tools that would fix it.
-    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup":
+    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup" and not _is_rule_pack_switch(ctx):
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()

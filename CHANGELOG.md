@@ -65,6 +65,12 @@ stopped`. Nothing is changed; use the install command above.
   no connector or profile selects after the switch (it used to stay, pointing
   at the folder after it was deleted) and names it; `use-pack DIR` pins the
   pack again.
+- `defenseclaw guardrail use-pack NAME` re-pins a custom pack that was edited
+  after it was pinned: it now runs while that stale pin fails the start-up
+  config check (its write still validates the whole config), and
+  `use-pack default` switches away. On a per-user install the mismatch error
+  from the config check and the gateway names the `config set` command that
+  pins the new digest.
 
 ### Added
 
