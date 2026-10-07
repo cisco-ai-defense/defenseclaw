@@ -37,7 +37,7 @@ diagnostics:
 Collection happens once; every destination independently selects, redacts, and
 delivers its own projection.
 
-The source of truth is `observability:` under `config_version: 8`. It owns
+The source of truth is `observability:` under `config_version: 9`. It owns
 collection, local retention, resource attributes, sampling, metric policy,
 redaction profiles, destination routing, and transport settings. Notification
 webhooks remain a separate product surface.
@@ -58,7 +58,7 @@ boundary, per-profile inventory joins, and the opt-in plaintext email field.
 The minimal configuration is:
 
 ```yaml
-config_version: 8
+config_version: 9
 observability: {}
 ```
 
@@ -124,7 +124,7 @@ remain in `security.finding`. An asset lifecycle transition also produces an
 This configuration sends everything supported to both destinations:
 
 ```yaml
-config_version: 8
+config_version: 9
 observability:
   destinations:
     - name: engineering

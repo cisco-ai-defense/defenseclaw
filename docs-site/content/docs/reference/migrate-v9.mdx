@@ -29,7 +29,7 @@ result.
 | Per-user install on 1.0.x (`config_version: 8`) | `defenseclaw upgrade` runs the migration. Until it has run, the gateway reads your v8 file as if it were migrated, in memory only, so nothing you configured stops applying. CLI reads such as `defenseclaw config get --effective` still show what the v8 file itself says. |
 | Managed standalone host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) | The lifecycle (`ensure` or `upgrade`) migrates a version 8 admin config in place and keeps `config.yaml.v8.bak`. Operator rows in `audit.db` are not moved: the admin config is the policy. See [Lifecycle](/docs/enterprise/lifecycle). |
 | Secure Client profile | No change. It keeps its existing path: the gateway does not migrate its config in memory. |
-| A fresh `defenseclaw init` | `init` still writes `config_version: 8`. The next `defenseclaw migrate`, which the installer and `defenseclaw upgrade` run for you, rewrites it as 9. |
+| A fresh `defenseclaw init` | `init` writes `config_version: 9`. There is nothing to migrate. |
 | DefenseClaw 0.x | Take the 1.0 upgrade first ([Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10)). |
 
 An unmodified 1.0.x install moves one value (`scanners.skill_scanner.policy:
@@ -43,7 +43,7 @@ quiet`) and no conflicts. The rest of this page covers customised installs.
 | `defenseclaw migrate` | Brings configuration and data to this release's schema, including the v9 step. `--check` lists the pending steps without changing anything. |
 | `defenseclaw config migrate [--dry-run] [--ack] [--json]` | Runs only the v9 step. `--dry-run` writes nothing. `--ack` marks `migration-v9.json` as read. `--json` prints the whole record. |
 | `defenseclaw-gateway config migrate [--dry-run] [--ack] [--json]` | The same implementation, which `defenseclaw config migrate` calls. Its output also lists the removed keys and the audit entries it moved. |
-| The gateway, at start and on a reload | A `config_version: 8` file is migrated in memory, read-only. The file on disk is not touched. If the in-memory migration fails, the gateway logs a `[config]` line that tells you to run `defenseclaw migrate` and loads the file as version 8. |
+| The gateway, at start and on a reload | A `config_version: 8` file is migrated in memory, read-only. The file on disk is not touched. If the in-memory migration fails, the gateway refuses the file: at start it exits with an error that tells you to run `defenseclaw migrate`, and on a reload the previous configuration keeps running. |
 
 A migration whose result would not validate stops with an error and writes
 nothing. So does one that finds `config.yaml` changed while it ran: run it
