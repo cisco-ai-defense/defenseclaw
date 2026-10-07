@@ -416,7 +416,7 @@ alice  zed              html                                              0.2.1 
 
 | IDE family | Products | Plugin list | Enabled state from |
 | --- | --- | --- | --- |
-| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop, Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
+| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop (including legacy Windsurf folders), Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
 | VS Code Remote-SSH servers | `~/.vscode-server`, `~/.cursor-server` and the other forks' servers, on the host you connect to | The server's `extensions` folder, shown as `vscode (ssh)`, `cursor (ssh)` and so on | `client_side_unknown`, shown as `client side`: the IDE on your laptop keeps that state |
 | JetBrains | IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, DataSpell, RustRover, Aqua, Writerside and Android Studio, plus JetBrains remote development (shown as `(remote dev)`) | Each plugin's `META-INF/plugin.xml` in the plugin folders and bundled JARs | `disabled_plugins.txt`: enabled when not listed |
 | Visual Studio (Windows) | Visual Studio per instance, including the experimental hive: the user's extensions under `%LOCALAPPDATA%\Microsoft\VisualStudio`, and the machine-wide ones under Program Files | `extension.vsixmanifest` | Visual Studio's private registry (`privateregistry.bin`); `unknown` while Visual Studio is running and holds the hive locked |
@@ -537,7 +537,8 @@ defenseclaw aibom scan --only ide_plugins
 ```
 
 `--ide` takes a product (`vscode`, `cursor`, `pycharm`) or a family
-(`jetbrains`). The footer line reports the counts of the rows that the filters
+(`jetbrains`). `--ide windsurf` is an alias for `devin-desktop` so
+older Windsurf profiles can be found by that name. The footer line reports the counts of the rows that the filters
 select. Without AI discovery enabled, the command tells you to run
 `defenseclaw agent discovery enable`.
 

@@ -418,7 +418,11 @@ def ide_plugins(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.ai_usage_ide_plugins_all(user=user.strip(), ide=ide.strip().lower(), ai_only=ai_only)
+        payload = client.ai_usage_ide_plugins_all(
+            user=user.strip(),
+            ide="devin-desktop" if ide.strip().lower() == "windsurf" else ide.strip().lower(),
+            ai_only=ai_only,
+        )
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
