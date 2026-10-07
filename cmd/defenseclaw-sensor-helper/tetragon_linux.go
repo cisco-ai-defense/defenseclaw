@@ -143,8 +143,9 @@ func kernelPolicyCleanup(ctx context.Context, logger *slog.Logger, out io.Writer
 		fmt.Fprintf(out, "tetragon-cleanup: %v; %d recorded policies left in place: %v\n", err, len(recorded), recorded)
 		return cleanupFailed
 	case err != nil:
-		// A lock that cannot be taken at all must not stop an uninstall.
-		logger.Warn("tetragon cleanup runs without the reconciler lock", "error", err)
+		fmt.Fprintf(out, "tetragon-cleanup: reconciler lock unavailable: %v; %d recorded policies left in place\n", err, len(recorded))
+		logger.Warn("tetragon cleanup refused without the reconciler lock", "error", err)
+		return cleanupFailed
 	default:
 		defer unlock()
 	}
