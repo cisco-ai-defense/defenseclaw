@@ -779,6 +779,8 @@ async def test_the_unblock_dialog_says_why_it_was_blocked(fetch, monkeypatch) ->
         "DefenseClaw blocked this destination: Webhook catchers record every request sent to them "
         "for whoever holds the URL, a common exfiltration sink."
     )
+    # GAP-0164: Enter alone cancels; lifting the block takes a deliberate choice.
+    assert screens[0].actions[screens[0].selected_index].action_id == "cancel"
 
 
 def test_tool_blocks_do_not_offer_unblock() -> None:

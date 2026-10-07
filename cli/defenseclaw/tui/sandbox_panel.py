@@ -797,6 +797,10 @@ class SandboxPanelMixin:
                 f"Unblock {host}",
                 tuple(actions),
                 subtitle=subtitle,
+                # Cancel is focused, as for the other confirmations: a stray
+                # u then Enter (a command line typed into the TUI) lifted a
+                # paste-site block at once (GAP-0164).
+                selected_index=len(actions) - 1,
                 show_descriptions=True,
             )
         )
