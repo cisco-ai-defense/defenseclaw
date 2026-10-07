@@ -365,8 +365,10 @@ $config = Join-Path $stage 'config.yaml'
 # keeps security_complete false until an administrator records the live Claude
 # Code policy proof with Repair -AttestClaudeEffectivePolicy
 # (docs/WINDOWS-ENTERPRISE-CERTIFICATION.md), which a runner cannot give.
+# The lane config sets no LLM judge, so status and verify also warn
+# scanner_judge_missing once the Setup has installed the scanner runtime.
 $installedChecks = @(
-    '--coverage-complete', '--security-incomplete',
+    '--coverage-complete', '--security-incomplete', '--allow-warning', 'scanner_judge_missing',
     '--machine-policy-enforced', 'codex', '--machine-policy-target', 'claudecode'
 )
 
