@@ -1030,6 +1030,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = p.withProxyAgent(r)
+	// A hop the interceptor rewrote is agent traffic here too, so doctor does
+	// not report the OpenClaw Responses calls the proxy handled as a bypass
+	// (GAP-0245). Secure Client keeps the health record of main (issue #1092).
+	if strings.TrimSpace(r.Header.Get("X-DC-Target-URL")) != "" && !ManagedEnterpriseActive() {
+		p.health.RecordAgentProxyTraffic()
+	}
 
 	// Peek the body once so the shape classifier can run even when the
 	// URL is unknown. 10 MiB cap matches the original io.Copy budget.
@@ -1204,6 +1210,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
 	userText := lastUserText(partial.Messages)
+	// turnText is the whole user turn of a message list, inspected instead of
+	// userText as on the chat-completions route: OpenClaw 2026.9 appends a
+	// context message after the prompt (GAP-0190, GAP-0243). userText still
+	// drives the heartbeat and session-startup gates.
+	turnText := promptTurnText(partial.Messages)
 	// A coexisting Ollama /api/generate `prompt` is the user generation
 	// input. Do not let top-level `system` replace it (#718). Anthropic
 	// and other system-only native shapes still fall through here when
@@ -1243,6 +1254,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					}
 				}
 				userText = lastUserText(inputMsgs)
+				turnText = promptTurnText(inputMsgs)
 				if len(partial.Messages) == 0 {
 					partial.Messages = inputMsgs
 				}
@@ -1273,6 +1285,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
 			}
 			userText = lastUserText(geminiMsgs)
+			turnText = promptTurnText(geminiMsgs)
 			if len(partial.Messages) == 0 {
 				partial.Messages = geminiMsgs
 			}
@@ -1315,6 +1328,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectRaw := userText
+	if strings.TrimSpace(turnText) != "" {
+		inspectRaw = turnText
+	}
 	if ollamaSystemText != "" {
 		inspectRaw = ollamaSystemText + "\n" + userText
 	}
@@ -1550,6 +1566,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
+			return
+		}
 		if provider == "bedrock" {
 			writeBedrockUpstreamError(w, upstreamErrorMessage("upstream error: ", err))
 		} else {
@@ -3231,6 +3251,10 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			llmCtx, r, req, providerName, promptID, "", "", lifecycleOutcome, "", nil,
 		)
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedChatReply(w, aliasModel, req.Stream, msg)
+			return
+		}
 		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
@@ -3887,7 +3911,7 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 //
 // Dispatch order:
 //
-//  1. Bedrock is provider-specific (binary eventstream framing, AWS Sigv4
+//  1. Bedrock's native /model/ API is provider-specific (eventstream framing, SigV4
 //     auth) and predates the FormatAdapter registry — it keeps its own
 //     branch so #124's proxy_bedrock_block.go handler stays the single
 //     source of truth for Bedrock wire formats.
@@ -3901,7 +3925,7 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 //     formats should go through the registry, not through more branches
 //     here.
 func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, provider, model string, stream bool, msg string) {
-	if provider == "bedrock" {
+	if provider == "bedrock" && !bedrockOpenAICompatibleReply(path) {
 		// Bedrock decides streaming vs non-streaming from the URL path
 		// (/converse-stream vs /converse, /invoke-with-response-stream
 		// vs /invoke) rather than a `stream: true` body field, so the
@@ -3925,6 +3949,16 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, pr
 	} else {
 		p.writeBlockedResponse(w, model, msg)
 	}
+}
+
+// writeBlockedChatReply answers a chat-completions request with msg as the
+// assistant turn, streamed when the client asked for a stream.
+func (p *GuardrailProxy) writeBlockedChatReply(w http.ResponseWriter, model string, stream bool, msg string) {
+	if stream {
+		p.writeBlockedStream(w, model, msg)
+		return
+	}
+	p.writeBlockedResponse(w, model, msg)
 }
 
 // writeBlockedResponseGemini returns a blocked response in Gemini
@@ -5722,6 +5756,10 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	resp, err := doProviderRequest(upReq, p.emitEgress)
 	if err != nil {
 		failModel("upstream_error", err)
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedChatReply(w, req.Model, req.Stream, msg)
+			return
+		}
 		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}

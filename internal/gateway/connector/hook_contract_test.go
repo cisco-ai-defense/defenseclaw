@@ -2316,6 +2316,14 @@ func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 		t.Fatal("agent version changes must remain lock drift")
 	}
 
+	t.Run("an OpenClaw upgrade or downgrade is no drift (GAP-0225)", func(t *testing.T) {
+		older := HookContractLockEntry{Connector: "openclaw", RawAgentVersion: "OpenClaw 2026.6.8 (844f405)", NormalizedAgentVersion: "2026.6.8"}
+		newer := HookContractLockEntry{Connector: "openclaw", RawAgentVersion: "OpenClaw 2026.9.8 (fc23bc8)", NormalizedAgentVersion: "2026.9.8"}
+		if HookContractCompatibilityDrifted(older, newer) || HookContractCompatibilityDrifted(newer, older) {
+			t.Fatal("a proxy connector has no hook contract to drift from")
+		}
+	})
+
 	t.Run("Amp relative release age is presentation-only", func(t *testing.T) {
 		previous := HookContractLockEntry{
 			Connector:              "amp",

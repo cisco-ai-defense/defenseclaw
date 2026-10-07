@@ -7266,55 +7266,18 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	return api.Run(ctx)
 }
 
-// subscribeToSessions lists active sessions and subscribes to each one
-// so we receive session.tool events for tool call/result tracing.
+// subscribeToSessions subscribes the connection to the session events of the
+// gateway (session.message and session.tool for tool call/result tracing).
+// One connection-level subscription covers every session, also those that
+// start after this call (GAP-0224).
 func (s *Sidecar) subscribeToSessions(ctx context.Context) {
 	subCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
-	raw, err := s.client.SessionsList(subCtx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] sessions.list failed (will still receive agent events): %v\n", err)
+	if err := s.client.SessionsSubscribe(subCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] subscribe to session events failed (will still receive agent events): %v\n", err)
 		return
 	}
-
-	// The gateway returns sessions as either an array or an object keyed by
-	// session ID. Try both formats.
-	type sessionEntry struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	var sessions []sessionEntry
-
-	if err := json.Unmarshal(raw, &sessions); err != nil {
-		// Try object format: {"sessionId": {id, name, ...}, ...}
-		var sessMap map[string]json.RawMessage
-		if err2 := json.Unmarshal(raw, &sessMap); err2 != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] parse sessions list: %v\n", err)
-			return
-		}
-		for k, v := range sessMap {
-			var entry sessionEntry
-			if json.Unmarshal(v, &entry) == nil {
-				if entry.ID == "" {
-					entry.ID = k
-				}
-				sessions = append(sessions, entry)
-			}
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "[sidecar] found %d active sessions, subscribing for tool events...\n", len(sessions))
-
-	for _, sess := range sessions {
-		subCtx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
-		if err := s.client.SessionsSubscribe(subCtx2, sess.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] subscribe to session %s failed: %v\n", sess.ID, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "[sidecar] subscribed to session %s (%s)\n", sess.ID, sess.Name)
-		}
-		cancel2()
-	}
+	fmt.Fprintf(os.Stderr, "[sidecar] subscribed to session events\n")
 }
 
 func (s *Sidecar) logHello(h *HelloOK) {

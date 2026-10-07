@@ -183,3 +183,29 @@ def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
         cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     row = r.checks[-1]
     assert row["status"] == "warn" and "defenseclaw doctor --fix" in row["remediation"]
+
+
+def test_fix_drops_a_stale_openclaw_lock_entry(tmp_path, monkeypatch):
+    # GAP-0225: after an OpenClaw upgrade or downgrade the lock still named the
+    # old version, the gateway refused to start and doctor --fix had no repair.
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.inventory import agent_discovery
+
+    lock_path = tmp_path / "hook_contract_lock.json"
+    entries = {"openclaw": {"raw_agent_version": "OpenClaw 2026.9.8 (fc23bc8)"}, "codex": {"raw_agent_version": "0.142.4"}}
+    lock_path.write_text(json.dumps({"version": 2, "connectors": entries}))
+    installed = SimpleNamespace(agents={"openclaw": SimpleNamespace(version="OpenClaw 2026.6.8 (844f405)")})
+    monkeypatch.setattr(agent_discovery, "_read_cache", lambda data_dir: installed)
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener_for_lifecycle", lambda _cfg: SimpleNamespace(trusted=True, detail="")
+    )
+    restarts = []
+    monkeypatch.setattr(
+        cmd_doctor, "_repair_gateway_lifecycle", lambda _cfg, *, start_if_stopped: (restarts.append(1) or True, "")
+    )
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+
+    assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "pass"
+    assert set(json.loads(lock_path.read_text())["connectors"]) == {"codex"} and restarts == [1]
+    assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "skip"

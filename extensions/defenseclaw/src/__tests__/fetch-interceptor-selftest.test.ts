@@ -11,6 +11,7 @@
  * local proxy without leaving the box.
  */
 
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -76,6 +77,34 @@ describe("OpenClaw interception self-test", () => {
       await agent.close();
     }
     expect(forwarded.some((url) => url.includes("api.openai.com"))).toBe(false);
+  });
+
+  it("sends the origin only as X-DC-Target-URL from the undici layer (GAP-0242)", async () => {
+    // The proxy appends the request path to X-DC-Target-URL; a path in the header too sent
+    // allowed model calls to .../openai/v1/responses/openai/v1/responses.
+    const { Agent, request } = createRequire(import.meta.url)("undici") as typeof import("undici");
+    const seen: { path?: string; target?: string } = {};
+    const proxy = createServer((req, res) => {
+      seen.path = req.url;
+      seen.target = String(req.headers["x-dc-target-url"]);
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => proxy.listen(guardrailPort, "127.0.0.1", resolve));
+    const agent = new Agent();
+    try {
+      const response = await request("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+        dispatcher: agent,
+      });
+      await response.body.text();
+    } finally {
+      await agent.close();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
+    expect(seen.path).toBe("/openai/v1/responses");
+    expect(seen.target).toBe("https://bedrock-runtime.us-east-1.amazonaws.com");
   });
 
   it("records fetch, http, https, and undici layers on the startup banner", () => {

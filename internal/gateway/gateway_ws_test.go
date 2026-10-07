@@ -654,6 +654,22 @@ func TestGetToolsCatalogRPC(t *testing.T) {
 	}
 }
 
+// OpenClaw 2026.9 validates sessions.subscribe params as sessions.list params
+// and rejects a sessionId; empty params subscribe the connection (GAP-0224).
+func TestSessionsSubscribeRPC(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+
+	if err := client.SessionsSubscribe(context.Background()); err != nil {
+		t.Fatalf("SessionsSubscribe: %v", err)
+	}
+	rpc := drainRPC(t, received)
+	if rpc.Method != "sessions.subscribe" || string(rpc.Params) != "{}" {
+		t.Errorf("request = %s %s, want sessions.subscribe {}", rpc.Method, rpc.Params)
+	}
+}
+
 func TestResolveApprovalRPC(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))

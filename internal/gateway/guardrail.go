@@ -2538,15 +2538,22 @@ func currentTurnUserText(messages []ChatMessage) string {
 	return strings.Join(turn, "\n")
 }
 
+// promptTurnText is the user text the proxy inspects before a call: the user
+// turn in progress. Secure Client keeps the source of main, the latest user
+// message, so AI Defense is sent the text it was sent before (issue #1092).
+func promptTurnText(messages []ChatMessage) string {
+	if ManagedEnterpriseActive() {
+		return lastUserText(messages)
+	}
+	return currentTurnUserText(messages)
+}
+
 // promptInspectText is the pre-call inspection source: the user turn in
-// progress, else the latest user message, else prompt-side system/developer
-// text. Secure Client keeps the source of main, the latest user message, so
-// AI Defense is sent the text it was sent before (issue #1092).
+// progress (promptTurnText), else the latest user message, else prompt-side
+// system/developer text.
 func promptInspectText(messages []ChatMessage) string {
-	if !ManagedEnterpriseActive() {
-		if text := currentTurnUserText(messages); text != "" {
-			return text
-		}
+	if text := promptTurnText(messages); strings.TrimSpace(text) != "" {
+		return text
 	}
 	if text := lastUserText(messages); strings.TrimSpace(text) != "" {
 		return text

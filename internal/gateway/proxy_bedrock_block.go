@@ -74,6 +74,22 @@ func (p *GuardrailProxy) writeBlockedPassthroughBedrock(w http.ResponseWriter, p
 	}
 }
 
+// bedrockOpenAICompatibleReply reports a request to the OpenAI-compatible API
+// of a Bedrock host (for example /openai/v1/responses) instead of its native
+// /model/{modelId}/{action} API. A block is answered in the OpenAI shape the
+// client sent: the Converse JSON left the OpenClaw TUI showing only "error"
+// (GAP-0244). Secure Client keeps the Converse reply of main (issue #1092).
+func bedrockOpenAICompatibleReply(path string) bool {
+	if ManagedEnterpriseActive() || strings.Contains(path, "/model/") {
+		return false
+	}
+	switch adapterFor(path, "bedrock").(type) {
+	case openaiResponsesAdapter, openaiChatAdapter:
+		return true
+	}
+	return false
+}
+
 // writeBedrockUpstreamError reports a failed upstream call the way Bedrock
 // reports its own errors (an X-Amzn-ErrorType header and a "message" body),
 // so the AWS SDK in the agent shows the reason instead of "UnknownError"

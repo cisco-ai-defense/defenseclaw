@@ -222,6 +222,7 @@ writes for other tools, or `config.yaml` itself:
 | `doctor.providers.overlay.regenerate` | safe | Rewrites `custom-providers.json` from `llm_providers` in `config.yaml`. Fixes the Custom-provider overlay row. |
 | `doctor.connector.hook-scripts.restore-mode` | safe | Restores the owner execute bit on the generated hook scripts setup sealed. It does not re-render them. |
 | `doctor.connector.hook-scripts.regenerate` | safe | Re-renders the hook scripts of a connector whose script no longer matches the digest setup sealed (a hand edit, or a copy from another build), and seals the new digest. Fixes the Hook runtime files row. On a managed host `enterprise <os> repair` does this. |
+| `doctor.connector.proxy-lock.refresh` | disruptive | Drops the OpenClaw or ZeptoClaw entry of `hook_contract_lock.json` when it names another agent version than the one discovery found (after an upgrade or downgrade), and restarts the gateway so it records the installed version. Proxy connectors have no hook contract, so nothing else changes. |
 | `doctor.acp.guard.repin` | safe | Re-pins the upgraded ACP guard in the editor entries DefenseClaw wrote. |
 | `doctor.gateway.token-env.canonicalize` | safe | Saves the canonical gateway token provider in `config.yaml`. |
 | `doctor.policy.plugin-registry.clear-dead-end` | policy | Changes explicit plugin admission policy in `config.yaml`. Select it by ID; a blanket `--yes` never runs it. |

@@ -1519,6 +1519,12 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false
 	}
+	// A proxy connector has no hook contract, so a new agent version in either
+	// direction is no drift: Setup records it in the lock (GAP-0225). Secure
+	// Client resolves contracts strictly and keeps the gate of main.
+	if proxyConnectorsWithoutHookGate[normalizeConnectorName(previous.Connector)] && !StrictHookContractResolution() {
+		return false
+	}
 	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
 		return true
 	}
