@@ -148,10 +148,11 @@ stopped`. Nothing is changed; use the install command above.
   activity buffer, and suggests a pack that extends `balanced` with the hosts
   reached that balanced does not cover, each with the programs that reached
   it. Hosts only ever refused, shadow AI, blocklist-feed hosts and the
-  sandbox's model provider are listed apart. Ports beyond balanced's 80 and
-  443 that the allowed hosts used go in `egress.ports`; past what a pack
-  holds (1024 allow entries with balanced's, 64 KiB) the most requested
-  hosts stay and a warning names the rest. `--pack-out FILE` writes the
+  sandbox's model provider and `--credential` endpoints are listed apart.
+  Ports beyond balanced's 80 and 443 that the allowed hosts used go in
+  `egress.ports`; past what a pack holds (1024 allow entries with
+  balanced's, 64 KiB) the most requested hosts stay and a warning names the
+  rest. `--pack-out FILE` writes the
   pack (a new file, relative paths in the current folder, checked like
   `pack validate`), `--diff` shows the
   settings it changes and the reached hosts it would block. The old

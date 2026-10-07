@@ -1397,8 +1397,10 @@ restarts and stops) and suggests a pack that extends `balanced` with every
 host they reached that the balanced pack's curated allowlist doesn't cover.
 Each host carries a comment with its request count and the programs that
 reached it. Hosts that were only ever refused, shadow AI, hosts on the
-blocklist feed, and the sandbox's own model provider are listed apart as
-comments, not suggested. Ports beyond balanced's 80 and 443 that the allowed
+blocklist feed, and the sandbox's own model provider and `--credential`
+endpoints are listed apart as comments, not suggested (OpenShell's provider
+rule already opens those to the programs they bind; an allow entry would open
+them to every program). Ports beyond balanced's 80 and 443 that the allowed
 hosts were reached on go in `egress.ports`. When the hosts don't fit in a
 pack (1024 allow entries with balanced's, 64 KiB), the most requested stay
 and a warning names how many were left out. Without `--pack-out` it prints

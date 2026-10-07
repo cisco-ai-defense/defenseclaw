@@ -32,9 +32,10 @@ import (
 
 // Record, then lock: the suggested pack extends balanced with the hosts the
 // sandboxes reached that its curated list lacks. Hosts only ever refused,
-// shadow AI, the blocklist feed and the model provider are left out with a
-// reason; the pack validates, is never written over a file, and --diff
-// names the reached hosts it would block.
+// shadow AI, the blocklist feed, the model provider and a --credential
+// endpoint (even one another sandbox reached as a plain host) are left out
+// with a reason; the pack validates, is never written over a file, and
+// --diff names the reached hosts it would block.
 func TestPolicySuggestWritesAValidPack(t *testing.T) {
 	ta := newTestApp(t, "", sandboxapi.Sandbox{Name: "web", Harness: "claudecode"}, sandboxapi.Sandbox{Name: "api", Harness: "claudecode"})
 	ta.daemon.destinations = map[string]*sandboxapi.Destinations{
@@ -45,9 +46,11 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 			{Host: "api.openai.com", Kind: sandboxapi.DestinationOtherAI, Provider: "OpenAI", Tunnels: 1},
 			{Host: "pastebin.com", Kind: "paste_site", Tunnels: 1},
 			{Host: "api.anthropic.com", Kind: sandboxapi.DestinationModelProvider, Connections: 50, Rule: "_provider_web"},
+			{Host: "api.stripe.com", Ports: []int{443}, Kind: sandboxapi.DestinationCredential, Connections: 3, Rule: "_provider_web_cred"},
 		}},
 		"api": {Name: "api", Destinations: []sandboxapi.DestinationRow{
 			{Host: "artifacts.example.com", Kind: sandboxapi.DestinationOther, Tunnels: 2, Binaries: []string{"/usr/bin/curl\n# not a comment"}},
+			{Host: "api.stripe.com", Ports: []int{443}, Kind: sandboxapi.DestinationOther, Tunnels: 1},
 		}},
 	}
 	out := filepath.Join(ta.home, "packs", "recorded", packs.PackFileName)
@@ -59,7 +62,8 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 	}
 	if pack.Name != "recorded" || pack.Extends != "balanced" || pack.Network.Mode != packs.NetworkAllowlist ||
 		!slices.Contains(pack.Egress.Allow, "artifacts.example.com") || slices.Contains(pack.Egress.Allow, "api.openai.com") ||
-		slices.Contains(pack.Egress.Allow, "pastebin.com") || slices.Contains(pack.Egress.Allow, "api.anthropic.com") {
+		slices.Contains(pack.Egress.Allow, "pastebin.com") || slices.Contains(pack.Egress.Allow, "api.anthropic.com") ||
+		slices.Contains(pack.Egress.Allow, "api.stripe.com") {
 		t.Fatalf("pack = %+v", pack)
 	}
 	data, err := os.ReadFile(out)
@@ -72,7 +76,9 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 		"#   refused.example.net: only ever refused",
 		"#   api.openai.com: shadow AI (OpenAI)",
 		"#   pastebin.com: on DefenseClaw's blocklist feed",
-		"#   api.anthropic.com: the sandbox's model or credential provider")
+		"#   api.anthropic.com: the sandbox's model provider opens it",
+		"#   api.stripe.com: a --credential binding of the sandbox opens it directly to the programs it binds")
+	lacks(t, text, `- "api.stripe.com"`)
 	lacks(t, text, "\n# not a comment")
 
 	if err := ta.PolicySuggest(bg, SuggestOptions{PackOut: out}); err == nil {
@@ -85,7 +91,7 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{Sandbox: "web", Diff: true}))
 	has(t, ta.output(), "pack web-recorded against the policy of sandbox web (pack open)", "network.mode", "open → allowlist",
 		"approvals.mode", "auto → triage", "reached now, blocked with the pack:", "api.openai.com — network_allowlist", "pastebin.com — feed")
-	lacks(t, ta.output(), "artifacts.example.com —", "registry.npmjs.org —", "api.anthropic.com —")
+	lacks(t, ta.output(), "artifacts.example.com —", "registry.npmjs.org —", "api.anthropic.com —", "api.stripe.com —")
 }
 
 // A recorded host that is not a host name is whatever text the sandbox's

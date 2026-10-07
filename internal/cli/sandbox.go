@@ -774,9 +774,10 @@ list of {host, port, binary, expect: allow|block, rule} and exits 1 on any misma
 		Long: `Record, then lock: read the destinations your sandboxes reached (kept across daemon
 restarts and stops) and suggest a pack that extends balanced with every host they
 reached that balanced's curated allowlist does not cover. Hosts only ever refused,
-shadow AI, hosts on the blocklist feed and the sandbox's own model provider are
-listed apart, not suggested. --pack-out writes the pack to a new file, --diff shows
-what it changes against the effective policy. Nothing is applied.`,
+shadow AI, hosts on the blocklist feed and the sandbox's own model provider and
+--credential endpoints are listed apart, not suggested. --pack-out writes the pack
+to a new file, --diff shows what it changes against the effective policy. Nothing
+is applied.`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())

@@ -73,7 +73,8 @@ type suggestedHost struct {
 // suggestion is what `policy suggest` recorded: the hosts to allow, the
 // ones the base pack's curated list covers, and the ones left out (each with
 // why: only ever refused, shadow AI, the blocklist feed, the sandbox's own
-// model provider, not a host name the allow list takes).
+// model provider or --credential endpoints, not a host name the allow list
+// takes).
 type suggestion struct {
 	Sandboxes []string        `json:"sandboxes"`
 	Allow     []suggestedHost `json:"allow"`
@@ -118,10 +119,10 @@ type settingChange struct {
 // kept destinations views, which survive daemon restarts and stops), and
 // suggests a pack that extends balanced with every host they reached that
 // balanced's curated list does not cover. Hosts only ever refused, shadow
-// AI, hosts on the blocklist feed and the sandbox's own model provider are
-// listed apart, not suggested. --pack-out writes the pack (checked as `pack
-// validate` would), --diff says what it changes against the effective
-// policy. Nothing is applied.
+// AI, hosts on the blocklist feed and the sandbox's own model provider and
+// --credential endpoints are listed apart, not suggested. --pack-out writes
+// the pack (checked as `pack validate` would), --diff says what it changes
+// against the effective policy. Nothing is applied.
 func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 	a.defaults()
 	if o.PackOut != "" {
@@ -237,7 +238,10 @@ func (a *App) recordDestinations(ctx context.Context, api API, sandbox string) (
 		h := s.byHost[host]
 		switch {
 		case h.kind == sandboxapi.DestinationModelProvider:
-			h.Why = "the sandbox's model or credential provider opens it directly to its own programs"
+			h.Why = "the sandbox's model provider opens it directly to its own programs"
+			s.Excluded = append(s.Excluded, *h)
+		case h.kind == sandboxapi.DestinationCredential:
+			h.Why = "a --credential binding of the sandbox opens it directly to the programs it binds"
 			s.Excluded = append(s.Excluded, *h)
 		case sandboxapi.ShadowAIKind(h.kind):
 			h.Why = "shadow AI (" + firstNonEmpty(h.label, "an AI API") + "): an AI service the harness does not use; add it yourself if you use it"
@@ -287,8 +291,9 @@ func (s *suggestion) add(sandbox string, r sandboxapi.DestinationRow) {
 			h.Binaries = append(h.Binaries, b)
 		}
 	}
-	// The AI kinds win over plain ones: a host one sandbox reached as its
-	// model provider and another as shadow AI is not suggested.
+	// The provider and AI kinds win over plain ones: a host one sandbox
+	// reached as its model provider or a --credential endpoint and another
+	// as shadow AI or a plain host is not suggested.
 	if kindRank(r.Kind) > kindRank(h.kind) {
 		h.kind = r.Kind
 	}
@@ -304,7 +309,7 @@ func (s *suggestion) add(sandbox string, r sandboxapi.DestinationRow) {
 
 func kindRank(kind string) int {
 	switch {
-	case kind == sandboxapi.DestinationModelProvider:
+	case kind == sandboxapi.DestinationModelProvider || kind == sandboxapi.DestinationCredential:
 		return 3
 	case sandboxapi.ShadowAIKind(kind):
 		return 2
@@ -677,7 +682,7 @@ func (a *App) suggestionDiff(ctx context.Context, api API, sandbox string, s *su
 	}
 	for _, host := range s.order {
 		h := s.byHost[host]
-		if h.Requests == 0 || h.kind == sandboxapi.DestinationModelProvider {
+		if h.Requests == 0 || h.kind == sandboxapi.DestinationModelProvider || h.kind == sandboxapi.DestinationCredential {
 			continue
 		}
 		ports := s.ports[host]
