@@ -21,10 +21,11 @@ const (
 
 // CacheEntry stores a verdict with TTL metadata.
 type CacheEntry struct {
-	Action   Action
-	Severity uint8
-	CachedAt time.Time
-	TTL      time.Duration
+	Action     Action
+	Severity   uint8
+	CachedAt   time.Time
+	TTL        time.Duration
+	LastAccess time.Time // tracks last read for LRU eviction
 }
 
 // TTLs per action (matching proposal §6.2)
@@ -111,10 +112,10 @@ func (c *Cache) Lookup(toolHash [32]byte) (CacheEntry, bool) {
 		return CacheEntry{}, false
 	}
 
-	// Update CachedAt on access for true LRU eviction.
+	// Update LastAccess on access for true LRU eviction.
 	c.mu.Lock()
 	if e, still := c.entries[toolHash]; still {
-		e.CachedAt = time.Now()
+		e.LastAccess = time.Now()
 	}
 	c.mu.Unlock()
 
@@ -150,11 +151,13 @@ func (c *Cache) Store(toolHash [32]byte, action Action, severity uint8) {
 		c.evictLRU()
 	}
 
+	now := time.Now()
 	c.entries[toolHash] = &CacheEntry{
-		Action:   action,
-		Severity: severity,
-		CachedAt: time.Now(),
-		TTL:      ttl,
+		Action:     action,
+		Severity:   severity,
+		CachedAt:   now,
+		TTL:        ttl,
+		LastAccess: now,
 	}
 	if c.onStore != nil {
 		c.onStore()
@@ -199,9 +202,9 @@ func (c *Cache) evictLRU() {
 	first := true
 
 	for key, entry := range c.entries {
-		if first || entry.CachedAt.Before(oldestTime) {
+		if first || entry.LastAccess.Before(oldestTime) {
 			oldestKey = key
-			oldestTime = entry.CachedAt
+			oldestTime = entry.LastAccess
 			first = false
 		}
 	}

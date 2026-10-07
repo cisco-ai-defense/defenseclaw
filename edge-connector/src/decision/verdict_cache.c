@@ -4,6 +4,8 @@
 
 extern dclaw_state_t *dclaw_get_state(void);
 
+#if DCLAW_VERDICT_CACHE_SIZE > 0
+
 static uint32_t ttl_for_action(dclaw_action_t action) {
     switch (action) {
     case DCLAW_ACTION_ALLOW: return 24 * 60;  /* 24 hours */
@@ -36,6 +38,8 @@ static size_t find_lru_slot(void) {
     }
     return lru_idx;
 }
+
+#endif /* DCLAW_VERDICT_CACHE_SIZE > 0 */
 
 bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out) {
 #if DCLAW_VERDICT_CACHE_SIZE == 0
@@ -97,8 +101,12 @@ void dclaw_cache_store_enriched(const uint8_t *tool_hash, dclaw_action_t action,
 
 void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
                        dclaw_severity_t severity) {
+#if DCLAW_VERDICT_CACHE_SIZE == 0
+    (void)tool_hash; (void)action; (void)severity;
+#else
     /* Backward compatibility: call enriched store with empty category and evidence */
     dclaw_cache_store_enriched(tool_hash, action, severity, 0, "");
+#endif
 }
 
 void dclaw_cache_invalidate(const uint8_t *tool_hash) {

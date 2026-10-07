@@ -254,7 +254,9 @@ typedef struct {
     dclaw_device_info_t     device;
     dclaw_clock_t           clock;
     dclaw_session_t         sessions[DCLAW_MAX_SESSIONS];
+#if DCLAW_VERDICT_CACHE_SIZE > 0
     dclaw_cache_entry_t     cache[DCLAW_VERDICT_CACHE_SIZE];
+#endif
     dclaw_pending_verdict_t pending[DCLAW_PENDING_SLOTS];
     dclaw_speculative_slot_t speculative[DCLAW_SPECULATIVE_SLOTS];
     dclaw_rate_limiter_t    rate_limiters[DCLAW_RATE_LIMITERS];

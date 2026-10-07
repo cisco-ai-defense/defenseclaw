@@ -215,7 +215,7 @@ int main(void) {
                     const char *err =
                         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
                         "\"message\":\"Invalid Request\"},\"id\":null}\n";
-                    write(client_fds[i], err, strlen(err));
+                    (void)write(client_fds[i], err, strlen(err));
                 }
 
                 size_t consumed = msg_len + 1;

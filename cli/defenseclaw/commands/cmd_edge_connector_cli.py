@@ -215,53 +215,66 @@ def register(app: AppContext, device_id: int, tenant_id: int, fleet_id: int, tag
 
 
 @edge_connector_group.command("decommission")
-@click.argument("device_id")
+@click.argument("device_id", type=int)
+@click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
 @pass_ctx
-def decommission(app: AppContext, device_id: str, assume_yes: bool) -> None:
+def decommission(app: AppContext, device_id: int, tenant_id: int, fleet_id: int, assume_yes: bool) -> None:
     """Decommission a single device from the fleet."""
     if not assume_yes and not click.confirm(f"Decommission device '{device_id}'? This cannot be undone"):
         ux.echo("Cancelled.")
         return
     c = _client(app)
     try:
-        resp = c.post("/devices/decommission-batch", {"device_ids": [device_id]})
+        resp = c.post("/devices/decommission-batch", {
+            "devices": [{"tenant_id": tenant_id, "fleet_id": fleet_id, "device_id": device_id}],
+        })
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
     _check(resp, f"Failed to decommission device '{device_id}'")
     data = _body(resp) or {}
-    failed = data.get("failed", [])
-    if failed:
+    not_found = data.get("not_found", [])
+    if not_found:
         ux.err(f"Device '{device_id}' not found.")
         raise SystemExit(1)
     ux.ok(f"Device '{device_id}' decommissioned.")
 
 
 @edge_connector_group.command("decommission-batch")
-@click.option("--ids", required=True, help="Comma-separated device IDs to decommission.")
+@click.option("--ids", required=True, help="Comma-separated device IDs to decommission (format: tenant:fleet:device or just device_id).")
+@click.option("--tenant-id", default=1, type=int, help="Default tenant ID when using plain device IDs (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Default fleet ID when using plain device IDs (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
 @pass_ctx
-def decommission_batch(app: AppContext, ids: str, assume_yes: bool) -> None:
+def decommission_batch(app: AppContext, ids: str, tenant_id: int, fleet_id: int, assume_yes: bool) -> None:
     """Decommission multiple devices at once."""
-    device_ids = [d.strip() for d in ids.split(",") if d.strip()]
-    if not device_ids:
+    raw_ids = [d.strip() for d in ids.split(",") if d.strip()]
+    if not raw_ids:
         ux.err("No device IDs provided.")
         raise SystemExit(1)
-    if not assume_yes and not click.confirm(f"Decommission {len(device_ids)} device(s)? This cannot be undone"):
+    devices = []
+    for raw in raw_ids:
+        parts = raw.split(":")
+        if len(parts) == 3:
+            devices.append({"tenant_id": int(parts[0]), "fleet_id": int(parts[1]), "device_id": int(parts[2])})
+        else:
+            devices.append({"tenant_id": tenant_id, "fleet_id": fleet_id, "device_id": int(raw)})
+    if not assume_yes and not click.confirm(f"Decommission {len(devices)} device(s)? This cannot be undone"):
         ux.echo("Cancelled.")
         return
     c = _client(app)
     try:
-        resp = c.post("/devices/decommission-batch", {"device_ids": device_ids})
+        resp = c.post("/devices/decommission-batch", {"devices": devices})
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
     _check(resp, "Failed to decommission devices")
     data = _body(resp) or {}
-    ux.ok(f"{data.get('removed', len(device_ids))} device(s) decommissioned.")
-    for f in data.get("failed", []):
-        ux.warn(f"  Failed: {f}")
+    ux.ok(f"{data.get('decommissioned', len(devices))} device(s) decommissioned.")
+    for f in data.get("not_found", []):
+        ux.warn(f"  Not found: {f}")
 
 
 @edge_connector_group.command("health")
@@ -280,11 +293,18 @@ def health(app: AppContext, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(data, indent=2))
         return
-    online, offline = int(data.get("online", 0)), int(data.get("offline", 0))
+    fleet = data.get("fleet", data)  # API nests health under "fleet"; fall back to top-level
+    online = int(fleet.get("online", 0))
+    offline = int(fleet.get("offline", 0))
+    total = int(fleet.get("total_devices", online + offline))
     ux.section("Edge Connector Health")
-    ux.echo(f"  Total devices:   {online + offline}")
+    ux.echo(f"  Total devices:   {total}")
     ux.echo(f"  Online:          {ux._style(str(online), fg='green')}")
     ux.echo(f"  Offline:         {ux._style(str(offline), fg='yellow') if offline else '0'}")
+    if fleet.get("degraded"):
+        ux.echo(f"  Degraded:        {fleet['degraded']}")
+    if fleet.get("lockdown"):
+        ux.echo(f"  Lockdown:        {fleet['lockdown']}")
     if data.get("last_check"):
         ux.echo(f"  Last check:      {data['last_check']}")
 
@@ -387,13 +407,13 @@ def policy_versions(app: AppContext, tenant_id: int, fleet_id: int, as_json: boo
 
 
 @edge_connector_group_policy.command("emergency")
-@click.argument("cmd", type=click.Choice(["flush-cache", "enter-lockdown", "revoke-sessions"]))
+@click.argument("cmd", type=click.Choice(["block-all", "enter-lockdown", "revoke-sessions", "force-sync"]))
 @click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
 @click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
 @pass_ctx
 def policy_emergency(app: AppContext, cmd: str, tenant_id: int, fleet_id: int, assume_yes: bool) -> None:
-    """Send an emergency fleet command (flush-cache, enter-lockdown, revoke-sessions)."""
+    """Send an emergency fleet command (block-all, enter-lockdown, revoke-sessions, force-sync)."""
     if not assume_yes and not click.confirm(f"Send emergency command '{cmd}' to the entire fleet?"):
         ux.echo("Cancelled.")
         return
