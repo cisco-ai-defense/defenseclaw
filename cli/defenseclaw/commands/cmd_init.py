@@ -397,7 +397,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     else:
         cfg = load()
         if not is_current_schema(getattr(cfg, "_source_config_version", None)):
-            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw migrate' first")
+            raise click.ClickException("this configuration was written by an older DefenseClaw; run 'defenseclaw migrate' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
 
     cfg.environment = env

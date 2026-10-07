@@ -957,7 +957,7 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
         parts += _first_unexpected_key(error)
     path = _json_path(parts)
     action = {
-        "additionalProperties": "remove unsupported or legacy fields and run defenseclaw upgrade",
+        "additionalProperties": "remove unsupported fields; see the configuration reference",
         "const": "use the exact value from the configuration reference",
         "enum": "choose a value from the documented vocabulary",
         "oneOf": "use exactly one supported source shape",

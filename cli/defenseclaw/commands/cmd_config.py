@@ -83,10 +83,10 @@ _MAX_VERSION_PROBE_BYTES = 4 * 1024 * 1024 + 1
 def config_cmd(ctx: click.Context) -> None:
     """Inspect and validate DefenseClaw configuration."""
 
-    # The root command lets this group run while a pre-v8 source still exists,
-    # so ``validate`` can explain a file the root preflight would only refuse,
-    # and ``reference`` reads no file. Every other subcommand needs a
-    # current-schema source and stops with the one instruction.
+    # The root command lets this group run while an unconverted 0.8.x source
+    # still exists, so ``validate`` can explain a file the root preflight would
+    # only refuse, and ``reference`` reads no file. Every other subcommand needs
+    # a current-schema source and stops with the one instruction.
     subcommand = ctx.invoked_subcommand
     path = config_module.config_path()
     if (
@@ -95,7 +95,7 @@ def config_cmd(ctx: click.Context) -> None:
         and path.exists()
         and not _looks_like_v8_config(str(path))
     ):
-        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+        raise click.ClickException("This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first.")
 
 
 # ---------------------------------------------------------------------------
@@ -449,9 +449,9 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
             path=path,
         )
     except config_writer.ManagedConfigWriteError as exc:
-        from defenseclaw.enforce.asset_lists import audit_managed_refusal
+        from defenseclaw.enforce.asset_lists import audit_managed_config_refusal
 
-        audit_managed_refusal("config-update", key or "config", f"verb={verb}")
+        audit_managed_config_refusal(key or "config", f"config {verb}")
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(MANAGED_EXIT_CODE) from exc
     except config_writer.ConfigConflictError as exc:
@@ -901,7 +901,7 @@ def validate_config() -> ValidationResult:
     if config_module.config_is_empty(cfg_path):
         res.errors.append(config_module.empty_config_message(cfg_path))
         return res
-    res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+    res.errors.append("This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first.")
     return res
 
 

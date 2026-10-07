@@ -49,14 +49,31 @@ profile attributes.
 ## Attribution, not authorization
 
 Hooks execute in the interactive user's session, read uid/name or SID/name
-from the operating system and send them to the loopback gateway as headers.
-Those headers are a claim, not proof. Where the gateway authenticates the
-request (a managed hook peer, a per-user credential, or the account a
-per-user gateway runs as), it replaces the claimed user with the verified one,
-so a forged `X-DefenseClaw-User-*` header or payload user cannot re-attribute
-a record to another account. A connector-native payload identity is used only
-for a connector that supplies one, and an unmanaged gateway may use its own OS
-identity because it runs as the interactive user.
+from the operating system and send them to the loopback gateway as headers
+(`X-DefenseClaw-User-Id` and `X-DefenseClaw-User-Name`). Those headers are a
+claim, not proof, and so is a user named in a hook payload. On the routes
+below the gateway ignores the claim and names the user it authenticated (see
+[how the gateway learns who called](/docs/enterprise/identity-sources#how-the-gateway-learns-who-called)),
+so a forged header or payload user cannot re-attribute a record to another
+account.
+
+| Route | Per-user install | Standalone enterprise |
+| --- | --- | --- |
+| Hook and inspect routes | The gateway's own account | The peer uid of the hook socket, or the uid or SID of the per-user credential. A request whose headers name another user is refused with `403` |
+| ACP routes | The gateway's own account, for signed requests and bearer tokens | No user is bound. The ACP guard sends no identity headers, so the records name no user and the default profile applies |
+| LLM proxy | The gateway's own account when the request presents the gateway token or the master key. The `X-DefenseClaw-User-*` pair is removed from every proxy request, because no proxy client sends it | No user is bound. The pair is removed |
+| Sandbox ingress | The host user on the sandbox binding. Identity headers from the sandbox are ignored | A sandbox of a service-account gateway records the host user on its binding, without a verified user |
+| Other API routes that take the gateway token | The gateway's own account | No user is bound |
+
+A request that proves nothing has no verified user. On the LLM proxy that is a
+loopback caller admitted without a credential, or with only a provider key.
+Its records name no user or, on a per-user install, the gateway's own account,
+and never the user the request claimed. Application-level fields, such as an
+`X-User-Id` header or a `user` field in a request body, are recorded as a
+label without `defenseclaw.user.id_kind`, and only when no user was verified.
+They never choose a guardrail profile. A connector-native payload identity is
+used only for a connector that supplies one, and only when nothing else names
+the user.
 
 In managed enterprise mode, the gateway runs as a service identity. DefenseClaw
 does not attribute that identity to the endpoint user. Inventory instead derives

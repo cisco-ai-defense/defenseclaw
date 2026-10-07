@@ -187,10 +187,11 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	}
 }
 
-// TestLoadFromFileRefusesPreV8WithOneInstruction pins the single runtime
-// answer for a released 0.8.x (config_version 7) file: one error that names
-// the repair, whatever pre-v8 keys the file carries. Nothing is half-loaded.
-func TestLoadFromFileRefusesPreV8WithOneInstruction(t *testing.T) {
+// TestLoadFromFileRefusesAnOlderConfigWithOneInstruction pins the single
+// runtime answer for a released 0.8.x (config_version 7) file: one error that
+// names the repair, whatever released keys the file carries. Nothing is
+// half-loaded.
+func TestLoadFromFileRefusesAnOlderConfigWithOneInstruction(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, DefaultConfigName)
 	raw := "config_version: 7\nsplunk:\n  enabled: true\notel:\n  enabled: true\n  endpoint: localhost:4317\n" +
@@ -209,6 +210,25 @@ func TestLoadFromFileRefusesPreV8WithOneInstruction(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "splunk") || strings.Contains(err.Error(), "audit_sinks") {
 		t.Fatalf("LoadFromFile error = %q, want one version error, not a per-key legacy error", err)
+	}
+}
+
+// TestValidateCandidateRefusesReleasedObservabilityKeysInCurrentFile pins that
+// the canonical validator, which the config writers, the v9 migration and the
+// gateway start run, names a released 0.8.x observability key left in a current
+// file instead of ignoring it: the exporter or sink it described would
+// otherwise silently stop. The schema alone enforces this; there is no
+// per-key legacy check.
+func TestValidateCandidateRefusesReleasedObservabilityKeysInCurrentFile(t *testing.T) {
+	for _, body := range []string{
+		"otel:\n  enabled: true\n",
+		"audit_sinks:\n  - name: siem\n    kind: http_jsonl\n",
+		"splunk:\n  enabled: true\n",
+	} {
+		raw := []byte("config_version: 9\nobservability: {}\n" + body)
+		if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil {
+			t.Fatalf("ValidateCandidate accepted %q; want a schema refusal", body)
+		}
 	}
 }
 
