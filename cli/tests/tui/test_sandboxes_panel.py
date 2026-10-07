@@ -619,6 +619,28 @@ def _blocked(seq: int, host: str, port: int, **fields: Any) -> dict[str, Any]:
     return {"seq": seq, "kind": "egress.blocked", "sandbox": "s", "host": host, "port": port, **fields}
 
 
+def test_a_destination_names_its_lineage_like_the_cli() -> None:
+    # GAP-0185: with the process tree on, `sandbox destinations` names the
+    # connecting program's lineage; the detail named only the binary.
+    curl = {
+        "host": "pypi.org",
+        "kind": "other",
+        "connections": 3,
+        "binaries": ["/usr/bin/curl"],
+        "lineage": [
+            {"pid": 41, "ppid": 40, "exe": "/usr/bin/curl", "comm": "curl"},
+            {"pid": 40, "ppid": 12, "exe": "/usr/bin/bash"},
+            {"pid": 12, "comm": "claude"},
+        ],
+    }
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [])
+    _title, pairs = model.detail_pairs({"destinations": [curl]})
+    assert [value for label, value in pairs if label == "Destination"] == [
+        "pypi.org — other · 3 requests · curl ← bash ← claude"
+    ]
+
+
 def test_an_approved_host_port_reads_like_the_cli_feed() -> None:
     # GAP-0182: `sandbox activity` says "(port 8765 on this machine)" for the
     # first connection to an approved --host-port; the panel showed the bare

@@ -2014,6 +2014,19 @@ _DESTINATION_KINDS = {
 DETAIL_DESTINATIONS = 12
 
 
+def _destination_program(row: dict[str, Any]) -> str:
+    """sandboxcli.destinationBinary: the program that last connected; with the
+    process tree on, its lineage, the process first, then its parents."""
+    lineage = [_dict(p) for p in _list(row.get("lineage"))]
+    if len(lineage) >= 2:
+        return " ← ".join(
+            _text(p.get("comm")) or _text(p.get("exe")).rsplit("/", 1)[-1] or str(_int(p.get("pid")))
+            for p in lineage
+        )
+    binaries = [_text(b) for b in _list(row.get("binaries")) if _text(b)]
+    return binaries[-1] if binaries else ""
+
+
 def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS) -> tuple[tuple[str, str], ...]:
     """The Destinations section of a sandbox's detail: one pair per host, shadow AI first, then the models."""
     item = _dict(response)
@@ -2031,9 +2044,8 @@ def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS
         requests = _int(row.get("connections")) + _int(row.get("tunnels"))
         refused = _int(row.get("refused")) + _int(row.get("blocked"))
         parts = [what, _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")]
-        binaries = [_text(b) for b in _list(row.get("binaries")) if _text(b)]
-        if binaries:
-            parts.append(binaries[-1])
+        if program := _destination_program(row):
+            parts.append(program)
         pairs.append(("Destination", f"{_text(row.get('host'))} — " + " · ".join(parts)))
     if len(rows) > limit:
         pairs.append(("Destinations", f"+{len(rows) - limit} more: defenseclaw sandbox destinations {name}"))
