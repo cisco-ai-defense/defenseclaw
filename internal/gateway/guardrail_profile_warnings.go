@@ -21,7 +21,9 @@ import (
 // does not show.
 func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) []string {
 	var warnings []string
-	warnings = append(warnings, set.unknownGroupWarnings(profileGroupCheckWait)...)
+	if subject == nil || !subject.LookupFailed {
+		warnings = append(warnings, set.unknownGroupWarnings(profileGroupCheckWait)...)
+	}
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
@@ -38,6 +40,12 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 // group" for is a warning in explain, status, doctor and `profile list`, and
 // a line in the gateway log at start and at each reload (GAP-0135). A lookup
 // that fails or runs out of time says nothing: only a definite absence warns.
+//
+// An SSSD that is offline with a cold cache does not fail: it answers "no such
+// group" for groups that exist. So nothing is warned while the directory
+// lookups of the gateway fail (the "Directory lookups" warning says so once),
+// or for an account whose own lookup failed, and a pass that ran meanwhile
+// is not kept (GAP-0229).
 
 const (
 	profileGroupCheckTTL    = time.Minute
@@ -71,6 +79,11 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 	}
 	check := &set.groupCheck
 	check.mu.Lock()
+	if directoryCacheHealth().Failing > 0 {
+		check.warnings, check.checked = nil, false
+		check.mu.Unlock()
+		return nil
+	}
 	if (!check.checked || time.Since(check.checkedAt) >= profileGroupCheckTTL) && check.running == nil {
 		done := make(chan struct{})
 		check.running = done
@@ -78,8 +91,12 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
 			warnings := unknownAssignmentGroups(ctx, set.assignments, profileGroupExists)
 			cancel()
+			failing := directoryCacheHealth().Failing > 0
+			if failing {
+				warnings = nil
+			}
 			check.mu.Lock()
-			check.warnings, check.checked, check.checkedAt, check.running = warnings, true, time.Now(), nil
+			check.warnings, check.checked, check.checkedAt, check.running = warnings, !failing, time.Now(), nil
 			check.mu.Unlock()
 			close(done)
 		}()
@@ -226,6 +243,17 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 // directoryCacheHealth reads the health of the cache requests use. Tests
 // replace it.
 var directoryCacheHealth = func() identityCacheHealth { return peerDirectoryCache().health() }
+
+// directoryHealthSummary is the "directory" object of the unauthenticated
+// /health document on the standalone profile: how many accounts fail since
+// when, and no reason or account, because the reason can name one. The Linux
+// and macOS lifecycle turns it into a warning of status and verify (GAP-0216).
+func directoryHealthSummary(h identityCacheHealth) map[string]any {
+	if h.Failing == 0 {
+		return nil
+	}
+	return map[string]any{"failing": h.Failing, "since": h.Since.UTC().Format(time.RFC3339), "stale": h.Stale}
+}
 
 // directoryHealthView returns the "directory" object of the resolve answer
 // and its one-line message, or nil when no lookup failed recently.

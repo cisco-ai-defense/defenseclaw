@@ -258,6 +258,13 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
     assert "run defenseclaw upgrade" not in str(captured.value)
 
 
+def test_v9_schema_refusals_say_v9() -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8("config_version: 9\nobservability: 5\n")
+
+    assert "v8" not in str(captured.value)
+
+
 def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8("config_version: 9\nguardrail: {no_such_key: 1}\n")

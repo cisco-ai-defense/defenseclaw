@@ -4685,13 +4685,12 @@ function Assert-NoGatewayAutoStart {
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
 # operator piped to Out-Host in Constrained Language mode. It returns the
-# launcher, its arguments and the call-operator invocation, or $null when the
-# script is not exactly that bridge with the same launcher and arguments in
-# both branches.
+# launcher and its arguments, or $null when the script is not exactly that
+# bridge with the same launcher and arguments in both branches.
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
-        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
         '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +

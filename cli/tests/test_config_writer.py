@@ -254,6 +254,37 @@ def test_a_standard_users_refusal_goes_to_the_managed_gateway_hook_socket(monkey
         (asset_lists.MANAGED_REFUSAL_PATH, {"action": "skill-block", "target": "p0-test-skill", "details": "type=skill"})
     ]
     logger.log_action.assert_not_called()
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes")
+def test_managed_refusal_leaves_the_config_directory_and_lock_alone(tmp_path, monkeypatch):
+    path = _config(tmp_path)
+    tmp_path.chmod(0o755)
+    monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
+    assert not os.path.exists(path + ".lock")
+
+
+def test_failed_generation_record_restores_the_previous_config(tmp_path, monkeypatch):
+    path = _config(tmp_path, "guardrail:\n  mode: observe\n")
+    before = open(path, "rb").read()
+    verified: list[str] = []
+
+    def no_space(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(config_writer, "record_generation", no_space)
+    with pytest.raises(OSError):
+        config_writer.write_with(
+            lambda current, _name: (current.replace(b"observe", b"action"), ["guardrail.mode"]),
+            "cli:test",
+            "t",
+            path=path,
+            verify=verified.append,
+        )
+    assert open(path, "rb").read() == before
+    assert not verified
 
 
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):

@@ -167,11 +167,14 @@ and upgrades.
 The machine ID comes from `/etc/machine-id`, the Windows `MachineGuid` or the
 macOS `IOPlatformUUID`. A config root the agent claims, such as a
 `CLAUDE_CONFIG_DIR` override, is recorded as a hint and never changes the ID.
-Two users who reuse the same session ID get different session IDs, and a
+Two users who reuse the same session ID get different `ais-` IDs and different
+agents: the main agent's ID is made from the user's `agt-`, the connector and
+the session ID, so `gen_ai.agent.id` and the lineage IDs below differ too. A
 chat that resumes after a gateway restart keeps its `ais-` ID and is not
 counted again in the Sessions column of `defenseclaw agent identities`, however
-many chats were open at the restart. The Secure Client profile keeps its
-existing agent IDs and gets no new attributes.
+many chats were open at the restart. The column counts chats: a sub-agent that
+runs in a session of its own, as a Codex 0.160 thread does, is not counted. The
+Secure Client profile keeps its existing agent IDs and gets no new attributes.
 
 Claude Code and Codex name a sub-agent on every hook it makes, so each of those
 hooks carries the sub-agent's `ais-` at depth one with the main agent as its
@@ -182,7 +185,9 @@ at depth one with the parent session named, under the `ais-` of its own session.
 
 A sub-agent has no `agt-` of its own: it runs in its parent's install, so it
 shares the parent's `agt-` and has its own `ais-`. The lineage attributes link
-it to its parent and hold the IDs the connector reports, not DefenseClaw's.
+it to its parent and hold the IDs the connector reports. A main agent that
+reports none, as Claude Code's and Codex's do, gets one DefenseClaw makes
+(`agent-` and 16 hex digits) from the `agt-`, the connector and the session ID.
 `defenseclaw.agent.parent.id` and `defenseclaw.agent.root.id` name the
 connector agent ID of the parent and the root (`gen_ai.agent.id` on their own
 records), and `defenseclaw.session.parent.id` and
@@ -467,8 +472,9 @@ What stays on in either case: `user.id`, the account name, the domain, the
 directory type, the assurance, the session kind and the client address. There
 is no separate switch for them, so choose destinations accordingly. The
 principal, the Kerberos principal, the client address and the tenant ID are
-marked sensitive; like `user.id` they are identifiers that v8 redaction
-profiles preserve so records still join. See
+marked sensitive. Unlike `user.id`, nothing joins records on them, so the `strict`
+redaction profile (and a custom profile that extends it) removes them from what a
+destination receives, while `none`, `sensitive` and `content` keep them. See
 [Redaction](/docs/observability/redaction). The `identity.observed` record
 carries a group count, never group names. The Secure Client profile collects
 none of these facts.
@@ -481,7 +487,7 @@ none of these facts.
 | No UPN, the principal reads `account@REALM` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
 | No `defenseclaw.user.directory` for an SSSD account | The directory type comes from realmd: run `realm list` as that user. It is expected to be missing when the account's domain is not a joined realm or a child domain of one (a plain LDAP domain, for example), or when the host has several realms and the account name carries no DNS domain. The gateway refreshes directory facts every 15 minutes. The domain and groups are still verified. |
 | First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
-| `doctor` or `guardrail status` warns "directory lookups are failing" | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Users without cached facts get the default profile (`default_lookup_failed`); users with cached facts keep them for at most an hour, then fall back the same way. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |
+| `doctor` or `guardrail status` warns "directory lookups are failing" (on a managed host, `enterprise linux status` and `verify` warn `directory_lookups_failing`) | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Users without cached facts get the default profile (`default_lookup_failed`); users with cached facts keep them for at most an hour, then fall back the same way. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Their audit rows carry no principal or directory but always `user.id`; on a managed Linux or macOS host `defenseclaw.user.name` is the name the guardian recorded for the uid when the account lookup itself failed (a record up to an hour old). Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |
 | No Kerberos principal, or an old one | The principal is read from the credential cache as a claim: it is the cache's default principal, and its tickets are not checked, so an expired TGT still reports it (`klist` shows the end time). With KCM the caches belong to the uid, not to one login: `kdestroy` removes the session's own cache, and another cache of the same uid (another login) becomes the default, so the record keeps naming a principal; `kdestroy -A` empties the uid's collection. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. The OpenCode plugin, the Amp plugin and the Omnigent bridge never send it: they do not read the ticket cache. |
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |
 | `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
@@ -490,7 +496,7 @@ none of these facts.
 | A user's new group has no effect, or `explain` shows it and the audit rows do not yet | Three layers sit between the directory and a decision. SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. The gateway keeps the user's directory facts for 15 minutes from the user's first request. And the first request after those 15 minutes still uses the old facts while one background lookup replaces them. `guardrail profile explain` asks the operating system directly, so it shows the profile requests get after the next refresh; its `cache:` line gives the age of the facts requests use now, with a warning when they give another profile. Restart the gateway to drop its cache and use the new group at once. |
 | A new session ID after a restart | Expected only for a new chat. A resumed chat keeps its `ais-` ID and the agent ID (`agt-`) stays the same; if the agent ID changed, the connector's config root moved. |
 | `profile explain --user alice` answers `default_lookup_failed` | With SSSD fully qualified names the short name `alice` is not an account on the host. Pass the name `getent passwd` shows (`alice@corp.example.com`, in any case, so the upper-case realm form Kerberos reports works too) or the uid. |
-| `profile explain` says the gateway did not answer within 35 s (status and doctor: "running but did not answer in time") | The gateway is running and still resolving the user, which a cold SSSD or a slow domain controller causes (an account in several hundred groups can need about 20 seconds the first time). Time `getent initgroups alice@corp.example.com` on the host, then ask again: the answer is quick once SSSD has the groups. Only `Could not ask the gateway ... Start it with` means the gateway is not running. |
+| `profile explain` says the gateway did not answer within 35 s (status and doctor: "running but did not answer in time"; on a managed host `enterprise linux profile-explain` says the gateway "took the connection but did not answer within 35 s") | The gateway is running and still resolving the user, which a cold SSSD or a slow domain controller causes (an account in several hundred groups can need about 20 seconds the first time). Time `getent initgroups alice@corp.example.com` on the host, then ask again: the answer is quick once SSSD has the groups. Only `Could not ask the gateway ... Start it with` (on a managed host, `did not answer; check the deployment with`) means the gateway is not running. |
 
 ## IDE plugin inventory
 

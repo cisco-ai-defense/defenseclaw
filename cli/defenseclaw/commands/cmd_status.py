@@ -386,10 +386,10 @@ def status(app: AppContext, as_json: bool) -> None:
         else:
             ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
 
-    # N3: surface the active policy's scanner action overrides (data.json).
-    # Only `policy show` exposed these before, so `status` was blind to a
-    # policy that, say, downgrades a scanner surface to warn/allow. Empty for a
-    # policy that declares none, so the common case renders nothing.
+    # N3: surface the admission actions config.yaml sets for an asset type
+    # (admission.<type>.actions) when they differ from the built-in policy, so
+    # `status` shows a type that, say, downgrades a severity to warn/allow.
+    # Empty when config.yaml sets none, so the common case renders nothing.
     overrides_summary = _scanner_overrides_summary(cfg)
     if overrides_summary:
         _echo_wrapped(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}", 20)

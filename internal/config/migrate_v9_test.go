@@ -34,6 +34,68 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// The installer's rollback copy covers the data home only. A data.json and
+// audit.db that policy_dir and data_dir place elsewhere keep their v8 state, so
+// restoring config.yaml.v8.bak leaves a 1.0 gateway its policy data.
+func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	home, elsewhere := t.TempDir(), t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + elsewhere + "\npolicy_dir: " + filepath.Join(elsewhere, "policies") +
+		"\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataJSON := filepath.Join(elsewhere, "policies", "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions": {"HIGH": {"install": "none", "file": "none", "runtime": "allow"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auditDB := filepath.Join(elsewhere, "audit.db")
+	db, err := sql.Open("sqlite", auditDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_name TEXT NOT NULL,
+		  source_path TEXT, actions_json TEXT NOT NULL DEFAULT '{}', reason TEXT, updated_at DATETIME NOT NULL,
+		  connector TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO actions VALUES ('1','skill','bad-skill','','{"install":"block"}','operator','now','')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, AuditDBPath: auditDB})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if _, err := os.Stat(dataJSON); err != nil {
+		t.Errorf("data.json outside the data home was renamed: %v", err)
+	}
+	db, _ = sql.Open("sqlite", auditDB)
+	defer db.Close()
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM actions`).Scan(&rows); err != nil || rows != 1 {
+		t.Errorf("audit.db rows outside the data home = %d (%v), want the operator row kept", rows, err)
+	}
+	if migrated, _ := os.ReadFile(configPath); !strings.Contains(string(migrated), "bad-skill") {
+		t.Error("the operator block was not copied into config.yaml")
+	}
+	var noted bool
+	for _, note := range result.Record.Notes {
+		noted = noted || strings.Contains(note, "outside the data home")
+	}
+	if !noted {
+		t.Errorf("no note says what was left in place: %v", result.Record.Notes)
+	}
+}
+
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
@@ -467,6 +529,7 @@ func TestMigrateV9InlineKeyGoesToTheRuntimeDataDir(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	dataDir := filepath.Join(home, ".dctest")
 	if err := os.MkdirAll(filepath.Join(dataDir, "signature-packs"), 0o700); err != nil {
 		t.Fatal(err)
@@ -652,6 +715,9 @@ func TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon(t *testing.T) {
 // the strict preset (which resolves to that pack) instead of a custom pack
 // pinned to files the next package replaces.
 func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the shipped-pack preset serves the Linux and macOS standalone layouts; a Linux layout path is not absolute on Windows")
+	}
 	layout, err := managed.StandaloneLayoutFor("linux")
 	if err != nil {
 		t.Fatal(err)

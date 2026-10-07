@@ -341,8 +341,8 @@ class ValidatedV8Config:
         return hashlib.sha256(self.masked_json().encode("utf-8")).hexdigest()
 
 
-class _StrictLoader(yaml.SafeLoader):
-    """SafeLoader variant that rejects aliases, merge keys, and duplicates."""
+class _StrictConstructors:
+    """Construction rules shared by the pure-Python and the libyaml loaders."""
 
     _ALLOWED_TAGS = frozenset(
         (
@@ -357,12 +357,6 @@ class _StrictLoader(yaml.SafeLoader):
             "tag:yaml.org,2002:binary",
         )
     )
-
-    def compose_node(self, parent: Any, index: Any) -> Any:
-        if self.check_event(AliasEvent):
-            event = self.peek_event()
-            raise ComposerError(None, None, "aliases are not allowed", event.start_mark)
-        return super().compose_node(parent, index)
 
     def construct_object(self, node: Any, deep: bool = False) -> Any:
         if node.tag not in self._ALLOWED_TAGS:
@@ -389,6 +383,16 @@ class _StrictLoader(yaml.SafeLoader):
                 raise ConstructorError(None, None, "duplicate mapping key", key_node.start_mark)
             result[key] = self.construct_object(value_node, deep=deep)
         return result
+
+
+class _StrictLoader(_StrictConstructors, yaml.SafeLoader):
+    """SafeLoader variant that rejects aliases, merge keys, and duplicates."""
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(AliasEvent):
+            event = self.peek_event()
+            raise ComposerError(None, None, "aliases are not allowed", event.start_mark)
+        return super().compose_node(parent, index)
 
 
 def _construct_text_scalar(loader: _StrictLoader, node: Any) -> str:
@@ -421,6 +425,56 @@ _V8SourceLoader.yaml_implicit_resolvers = {
 _V8SourceLoader.add_implicit_resolver(
     _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
 )
+
+# libyaml parses a 150 KB policy config in tens of milliseconds where the
+# pure-Python parser needs about 1.5 s, and the source is parsed twice (the
+# preflight events, then the load): with 100 profiles and 2,000 assignments
+# that was most of the 4 s a `defenseclaw status` spent checking the config
+# (GAP-0199). The libyaml classes do not run compose_node, so the preflight,
+# which rejects aliases first, must stay in front of every load. PyYAML builds
+# without libyaml fall back to the pure-Python loaders.
+_LIBYAML_LOADER = getattr(yaml, "CSafeLoader", None)
+
+if _LIBYAML_LOADER is not None:
+
+    class _V8SourceLibyamlLoader(_StrictConstructors, _LIBYAML_LOADER):  # type: ignore[misc, valid-type]
+        """_V8SourceLoader's rules on the libyaml parser."""
+
+    _V8SourceLibyamlLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_text_scalar)
+    _V8SourceLibyamlLoader.add_constructor("tag:yaml.org,2002:binary", _construct_text_scalar)
+    _V8SourceLibyamlLoader.yaml_implicit_resolvers = {
+        first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+        for first, resolvers in _LIBYAML_LOADER.yaml_implicit_resolvers.items()
+    }
+    _V8SourceLibyamlLoader.add_implicit_resolver(
+        _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+    )
+    _V8_SOURCE_LOADER: type = _V8SourceLibyamlLoader
+    _PREFLIGHT_LOADER: type = _LIBYAML_LOADER
+else:
+    _V8_SOURCE_LOADER = _V8SourceLoader
+    _PREFLIGHT_LOADER = _StrictLoader
+
+# What a parser (not a construction rule) rejects: the cases libyaml and the
+# pure-Python parser can word differently.
+_PARSE_ERRORS = (yaml.reader.ReaderError, yaml.scanner.ScannerError, yaml.parser.ParserError)
+
+
+def _load_v8_source(text: str) -> Any:
+    """Load one source with libyaml, and let the pure-Python loader decide on a parse error.
+
+    libyaml is stricter than PyYAML in a few places (a lone surrogate escape
+    such as ``"\\uD800"``), and the validation reports those with their own
+    wording; a document the C parser rejects is therefore parsed again by the
+    pure-Python loader, which accepts it or words the error as it always did.
+    """
+
+    if _V8_SOURCE_LOADER is not _V8SourceLoader:
+        try:
+            return yaml.load(text, Loader=_V8_SOURCE_LOADER)
+        except _PARSE_ERRORS:
+            pass
+    return yaml.load(text, Loader=_V8SourceLoader)
 
 
 def load_config_value(text: str) -> Any:
@@ -517,7 +571,7 @@ def _parse_source(data: str | bytes | Mapping[str, Any], source_name: str) -> di
             raise V8ConfigError(source_name, "$", "utf-8", "save the configuration as UTF-8") from exc
         _preflight_yaml_structure(text, source_name)
         try:
-            document = yaml.load(text, Loader=_V8SourceLoader)
+            document = _load_v8_source(text)
         except (RecursionError, OverflowError):
             raise V8ConfigError(
                 source_name,
@@ -590,7 +644,22 @@ def _preflight_python_structure(value: Any, source_name: str) -> None:
 
 
 def _preflight_yaml_structure(text: str, source_name: str, *, reject_aliases: bool = True) -> None:
-    """Enforce YAML node, collection-depth, and mapping limits before construction."""
+    """Enforce YAML node, collection-depth, and mapping limits before construction.
+
+    The events come from libyaml where PyYAML has it; a document it rejects is
+    read again by the pure-Python parser, which words the error as before.
+    """
+
+    if _PREFLIGHT_LOADER is not _StrictLoader:
+        try:
+            return _preflight_yaml_events(text, source_name, reject_aliases, _PREFLIGHT_LOADER)
+        except V8ConfigError as exc:
+            if exc.keyword != "yaml":
+                raise
+    return _preflight_yaml_events(text, source_name, reject_aliases, _StrictLoader)
+
+
+def _preflight_yaml_events(text: str, source_name: str, reject_aliases: bool, loader: type) -> None:
 
     nodes = 0
     frames: list[list[int | bool]] = []
@@ -611,7 +680,7 @@ def _preflight_yaml_structure(text: str, source_name: str, *, reject_aliases: bo
         frame[1] = frame[1] is not True
 
     try:
-        for event in yaml.parse(text, Loader=_StrictLoader):
+        for event in yaml.parse(text, Loader=loader):
             if reject_aliases and isinstance(event, AliasEvent):
                 raise V8ConfigError(
                     source_name,
@@ -956,6 +1025,7 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
         # holds it ("$.no.such", not "$").
         parts += _first_unexpected_key(error)
     path = _json_path(parts)
+    label = "v9" if v9 else "v8"
     action = {
         "additionalProperties": "remove unsupported fields; see the configuration reference",
         "const": "use the exact value from the configuration reference",

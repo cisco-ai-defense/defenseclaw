@@ -149,9 +149,25 @@ type Result struct {
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
 	// Policy is the effective policy state; nil (omitted) under the Secure
 	// Client integration and when the gateway did not report it.
-	Policy   *PolicyState `json:"policy,omitempty"`
+	Policy *PolicyState `json:"policy,omitempty"`
+	// Scanners is the standalone Windows scanner runtime (skill, MCP and
+	// plugin scanners); nil (omitted) everywhere else.
+	Scanners *ScannerRuntime `json:"scanners,omitempty"`
 	LogPath  string       `json:"log_path,omitempty"`
 	ExitCode int          `json:"exit_code"`
+}
+
+// ScannerRuntime reports the scanners a standalone Windows deployment runs.
+type ScannerRuntime struct {
+	// State: ready, not_prepared (installed but not unpacked), missing.
+	State string `json:"state"`
+	// Versions of the pinned components (skill-scanner, mcp-scanner,
+	// litellm, python, ...).
+	Versions map[string]string `json:"versions,omitempty"`
+	// Policy is scanners.skill_scanner.policy; JudgeModel the resolved
+	// scanner LLM judge model ("" when no judge is configured).
+	Policy     string `json:"policy,omitempty"`
+	JudgeModel string `json:"judge_model,omitempty"`
 }
 
 // PolicyState reports the effective policy a lifecycle step left in place.

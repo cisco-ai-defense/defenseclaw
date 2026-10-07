@@ -14,14 +14,14 @@
 # Two payload channels:
 #
 #   default (hash-pinned, unsigned)
-#       Builds the seven inner files from this checkout and embeds them
+#       Builds the eight inner files from this checkout and embeds them
 #       with distribution_flavor "standalone-unsigned". At install time the
 #       Setup stages the digests it verified against its own manifest as the
 #       lifecycle's hash_pinned trust anchor, so the trust root is the Setup
 #       file your MDM delivered (Intune and other MDMs pin the package hash).
 #
 #   --payload-dir <dir> (Authenticode-signed)
-#       Embeds seven inner files that were already Authenticode-signed
+#       Embeds eight inner files that were already Authenticode-signed
 #       (Cisco release signing, or your own code-signing certificate for
 #       customer re-signing) with distribution_flavor "standalone". The
 #       lifecycle requires a Valid signature on every file; pass
@@ -29,7 +29,7 @@
 #       Sign the outer Setup with the same certificate afterward.
 #
 #   --sign-command <cmd> (Authenticode-signed, built here)
-#       Builds the seven inner files like the default channel, runs
+#       Builds the eight inner files like the default channel, runs
 #       "<cmd> <file>" on each of them (the command signs the file in place,
 #       for example packaging/mdm/signing/authenticode-sign.sh), embeds them
 #       with distribution_flavor "standalone", then signs the outer Setup
@@ -40,7 +40,11 @@
 #       [--out-dir dist/windows-standalone-1.4.0]
 #       [--payload-dir <signed> | --sign-command <cmd>]
 #
-# Prereqs: bash, git, go. Runs on macOS or Linux (cross-builds windows/amd64).
+# defenseclaw-scanners.exe carries the Python scanner runtime
+# (build-scanner-runtime.sh: CPython 3.13 and the uv.lock scanner pins).
+#
+# Prereqs: bash, git, go, uv, python3, curl. Runs on macOS or Linux
+# (cross-builds windows/amd64).
 
 set -euo pipefail
 
@@ -86,6 +90,7 @@ PAYLOAD_FILES=(
     defenseclaw-acp.exe
     defenseclaw-gateway.exe
     defenseclaw-hook.exe
+    defenseclaw-scanners.exe
     defenseclaw-sensor-helper.exe
     defenseclaw.exe
     install-enterprise.ps1
@@ -93,11 +98,13 @@ PAYLOAD_FILES=(
 
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dc-standalone-windows.XXXXXX")"
 EMBED_DIR="${REPO_ROOT}/cmd/defenseclaw-enterprise-setup/payload"
+SCANNERS_EMBED_DIR="${REPO_ROOT}/cmd/defenseclaw-scanners/payload"
 cleanup() {
-    rm -rf "${STAGE_DIR}"
-    # The embed directory is git-ignored except its .gitkeep; leave it as
-    # the checkout had it so a later build cannot embed a stale payload.
-    find "${EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
+    rm -rf "${STAGE_DIR:?}"
+    # The embed directories are git-ignored except their .gitkeep; leave
+    # them as the checkout had them so a later build cannot embed a stale
+    # payload.
+    find "${EMBED_DIR}" "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
 }
 trap cleanup EXIT
 
@@ -142,6 +149,10 @@ else
     build "${STAGE_DIR}/defenseclaw-acp.exe" ./cmd/defenseclaw-acp acp-guard console
     build "${STAGE_DIR}/defenseclaw-hook.exe" ./cmd/defenseclaw-hook hook gui
     build "${STAGE_DIR}/defenseclaw-sensor-helper.exe" ./cmd/defenseclaw-sensor-helper sensor-helper gui
+    echo "==> building the scanner runtime"
+    "${REPO_ROOT}/packaging/windows/standalone/build-scanner-runtime.sh" --out-dir "${STAGE_DIR}/scanner-runtime"
+    cp -f "${STAGE_DIR}/scanner-runtime/runtime.zip" "${STAGE_DIR}/scanner-runtime/runtime.json" "${SCANNERS_EMBED_DIR}/"
+    build "${STAGE_DIR}/defenseclaw-scanners.exe" ./cmd/defenseclaw-scanners launcher console
     # The CLI is the gateway image, exactly as in the Secure Client kit.
     cp -f "${STAGE_DIR}/defenseclaw-gateway.exe" "${STAGE_DIR}/defenseclaw.exe"
     cp -f "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" "${STAGE_DIR}/install-enterprise.ps1"
