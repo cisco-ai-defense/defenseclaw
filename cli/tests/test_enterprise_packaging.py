@@ -797,7 +797,7 @@ def test_linux_preremove_waits_for_the_lock_and_refuses_the_removal_when_busy(tm
 
 # After preremove refuses a removal (busy lock), dpkg runs "postinst
 # abort-remove": the postinstall must not wait on the same lock again.
-# "abort-upgrade" follows a refused downgrade the same way.
+# "abort-upgrade" follows a failed upgrade step the same way.
 @pytest.mark.parametrize("argument", ["abort-remove", "abort-upgrade"])
 def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, argument: str) -> None:
     host = _Host(tmp_path, gateway_rc=75, apply_path_active=True)
@@ -808,23 +808,25 @@ def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, 
 
 # GAP-0112: an older deb replaced the binaries before its own scripts could
 # refuse it, and the older release cannot read the config_version 9 config, so
-# the services crash-looped. The installed package's prerm refuses the
-# downgrade before any file changes, unless the rollback marker exists.
+# the services crash-looped. dpkg falls back to the incoming package's prerm
+# when the installed one fails, so an apt Pre-Install-Pkgs hook refuses the
+# downgrade before dpkg runs, unless the rollback marker exists.
 @pytest.mark.parametrize(
-    ("incoming", "marker", "exit_code"),
+    ("line", "marker", "exit_code"),
     [
-        ("1.0.47-SNAPSHOT-aaa", False, 0),
-        ("1.0.46-SNAPSHOT-aaa", False, 0),
-        ("1.0.45-SNAPSHOT-aaa", False, 1),
-        ("1.0.45-SNAPSHOT-aaa", True, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb < 1.0.47~SNAPSHOT-aaa f.deb", False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.46~SNAPSHOT-aaa f.deb", False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > - **REMOVE**", False, 0),
+        ("other-package 1.0.46 > 1.0.45 f.deb", False, 0),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", False, 1),
+        ("defenseclaw-enterprise 1.0.46~SNAPSHOT-bbb > 1.0.45~SNAPSHOT-aaa f.deb", True, 0),
     ],
 )
-def test_linux_preremove_refuses_a_deb_downgrade_unless_the_marker_exists(
-    tmp_path: Path, incoming: str, marker: bool, exit_code: int
+def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
+    tmp_path: Path, line: str, marker: bool, exit_code: int
 ) -> None:
     host = _Host(tmp_path)
     host.state.mkdir()
-    _write_stub(host.bin, "dpkg-query", "printf '1.0.46-SNAPSHOT-bbb'")
     _write_stub(
         host.bin,
         "dpkg",
@@ -834,13 +836,39 @@ def test_linux_preremove_refuses_a_deb_downgrade_unless_the_marker_exists(
     allow = host.state / "allow-downgrade"
     if marker:
         allow.write_text("", encoding="utf-8")
-    result = host.run(_linux_scriptlet(host, "preremove.sh"), "upgrade", incoming)
+    script = _rooted(
+        (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
+        {"state=/var/lib/defenseclaw-enterprise": f"state={host.state}"},
+    )
+    path = tmp_path / "guard.sh"
+    path.write_text(script, encoding="utf-8")
+    protocol = f"VERSION 2\nAPT::Architecture=amd64\n\n{line}\n"
+    result = subprocess.run(
+        ["sh", str(path)],
+        input=protocol,
+        env={"PATH": f"{host.bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert result.returncode == exit_code, (result.stdout, result.stderr)
-    assert host.calls() == []  # the lifecycle is never run on an upgrade
     assert not allow.exists() or exit_code == 1
     if exit_code:
-        assert "refusing to downgrade to " + incoming in result.stderr
+        assert "refusing to downgrade to 1.0.45~SNAPSHOT-aaa" in result.stderr
         assert f"sudo touch {allow}" in result.stderr
+
+
+def test_enterprise_deb_ships_the_apt_downgrade_hook_and_rpm_does_not() -> None:
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
+    hook = {c["dst"]: c for c in nfpm["contents"] if c.get("packager") == "deb"}
+    script = "/usr/lib/defenseclaw-enterprise/apt-downgrade-guard"
+    assert set(hook) == {script, "/etc/apt/apt.conf.d/50defenseclaw-enterprise"}
+    assert hook[script]["file_info"]["mode"] == 0o755
+    assert hook["/etc/apt/apt.conf.d/50defenseclaw-enterprise"].get("type") != "config"  # removed with the package
+    apt_config = (ROOT / hook["/etc/apt/apt.conf.d/50defenseclaw-enterprise"]["src"]).read_text(encoding="utf-8")
+    assert f'DPkg::Pre-Install-Pkgs {{ "{script}"; }};' in apt_config
+    assert f'DPkg::Tools::Options::{script}::Version "2";' in apt_config
 
 
 def _macos_pkg_postinstall(host: _Host) -> str:
