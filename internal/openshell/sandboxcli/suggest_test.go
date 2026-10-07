@@ -85,3 +85,37 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 		"approvals.mode", "auto → triage", "reached now, blocked with the pack:", "api.openai.com — network_allowlist", "pastebin.com — feed")
 	lacks(t, ta.output(), "artifacts.example.com —", "registry.npmjs.org —", "api.anthropic.com —")
 }
+
+// A recorded host that is not a host name is whatever text the sandbox's
+// traffic carried. Listed in a comment of the pack, a YAML line break in it
+// (NEL, U+2028, U+2029) cannot set pack keys, and a character the YAML
+// reader refuses (U+FFFE) does not break the pack.
+func TestPolicySuggestKeepsRecordedHostsInComments(t *testing.T) {
+	ls, ps, nel, nonchar := "\xe2\x80\xa8", "\xe2\x80\xa9", "\xc2\x85", "\xef\xbf\xbe"
+	ta := newTestApp(t, "", sandboxapi.Sandbox{Name: "web", Harness: "claudecode"})
+	ta.daemon.destinations = map[string]*sandboxapi.Destinations{"web": {Name: "web", Destinations: []sandboxapi.DestinationRow{
+		{Host: "artifacts.example.com", Kind: sandboxapi.DestinationOther, Tunnels: 1},
+		{Host: "x" + ls + "network: {mode: open}" + ls + "approvals: {mode: auto}" + ls + "#", Kind: sandboxapi.DestinationBlocked, Blocked: 1},
+		{Host: "y" + ps + "egress: {ports: [22]}" + nel + "#", Kind: sandboxapi.DestinationOtherAI, Provider: "P" + ls + "q", Tunnels: 1},
+		{Host: "z" + nonchar + ".example", Kind: sandboxapi.DestinationBlocked, Blocked: 1},
+	}}}
+	out := filepath.Join(ta.home, "recorded.yaml")
+	ta.ok(t, ta.PolicySuggest(bg, SuggestOptions{PackOut: out}))
+	pack, err := packs.Validate(out, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pack.Network.Mode != packs.NetworkAllowlist || pack.Approvals.Mode != packs.ApprovalsTriage || !slices.Equal(pack.Egress.Ports, []int{80, 443}) {
+		t.Fatalf("a recorded host set pack keys: network %s, approvals %s, ports %v", pack.Network.Mode, pack.Approvals.Mode, pack.Egress.Ports)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	has(t, string(data), "#   x?network: {mode: open}?approvals: {mode: auto}?#: only ever refused",
+		"#   y?egress: {ports: [22]}?#: shadow AI (P?q)", "#   z?.example: only ever refused")
+	lacks(t, string(data), ls, ps, nel, nonchar)
+	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{}))
+	has(t, ta.output(), "#   x?network: {mode: open}")
+	lacks(t, ta.output(), ls, ps, nel, nonchar)
+}

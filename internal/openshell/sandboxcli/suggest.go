@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -154,7 +155,7 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 		a.note("review it, then lock a project to it: " + CommandName + " run --pack " + o.PackOut +
 			" (or put it at <openshell.pack_dir>/" + s.PackName + "/" + packs.PackFileName + " and use --pack " + s.PackName + ")")
 	case !o.Diff:
-		_, err := fmt.Fprint(a.IO.Out, s.Pack)
+		_, err := fmt.Fprint(a.IO.Out, terminalText(s.Pack))
 		return err
 	}
 	if s.Diff != nil {
@@ -259,7 +260,7 @@ func (s *suggestion) add(sandbox string, r sandboxapi.DestinationRow) {
 		h.Sandboxes = append(h.Sandboxes, sandbox)
 	}
 	for _, b := range r.Binaries {
-		if b = commentText(b); b != "" && !slices.Contains(h.Binaries, b) && len(h.Binaries) < 4 {
+		if b = commentText(b, 120); b != "" && !slices.Contains(h.Binaries, b) && len(h.Binaries) < 4 {
 			h.Binaries = append(h.Binaries, b)
 		}
 	}
@@ -269,7 +270,7 @@ func (s *suggestion) add(sandbox string, r sandboxapi.DestinationRow) {
 		h.kind = r.Kind
 	}
 	if label := firstNonEmpty(r.Provider, r.Category); label != "" {
-		h.label = commentText(label)
+		h.label = commentText(label, 120)
 	}
 	for _, p := range r.Ports {
 		if !slices.Contains(s.ports[host], p) {
@@ -303,16 +304,21 @@ func suffixIf(ok bool, s string) string {
 	return ""
 }
 
-// commentText makes agent-controlled text (binary paths, provider labels)
-// safe in a YAML comment: one line of printable characters, bounded.
-func commentText(s string) string {
+// commentText makes agent-controlled text (a recorded host, a binary path,
+// a provider label) safe in a YAML comment of the pack, at most n
+// characters: everything but printable characters becomes '?'. YAML ends a
+// comment at NEL, U+2028 and U+2029 as well as at a newline, so a host that
+// held one would set pack keys; control, format and bidirectional
+// characters would hide text from the reviewer, and U+FFFE/U+FFFF the YAML
+// reader refuses.
+func commentText(s string, n int) string {
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == '\u2028' || r == '\u2029' {
-			return '?'
+		if unicode.IsPrint(r) {
+			return r
 		}
-		return r
+		return '?'
 	}, strings.TrimSpace(s))
-	return truncate(s, 120)
+	return truncate(s, n)
 }
 
 var packNameUnsafe = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -380,7 +386,9 @@ func (s *suggestion) render(day, sandbox string) string {
 		}
 		fmt.Fprintf(&b, "# %s:\n", group.what)
 		for _, h := range group.hosts {
-			fmt.Fprintf(&b, "#   %s: %s\n", h.Host, h.Why)
+			// These hosts are not checked as host names: any text the
+			// sandbox's traffic carried.
+			fmt.Fprintf(&b, "#   %s: %s\n", commentText(h.Host, 256), h.Why)
 		}
 	}
 	return b.String()
@@ -400,7 +408,7 @@ func hostComment(h suggestedHost) string {
 func joinHosts(list []suggestedHost) string {
 	names := make([]string, 0, len(list))
 	for _, h := range list {
-		names = append(names, h.Host)
+		names = append(names, commentText(h.Host, 256))
 	}
 	return listFit(strings.Join(names, ", "), 200)
 }
