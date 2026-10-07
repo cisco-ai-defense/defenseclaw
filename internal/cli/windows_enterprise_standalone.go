@@ -464,7 +464,9 @@ func runWindowsEnterpriseStandaloneInstaller(
 	if !containsString(args, "-Json") {
 		args = append(append([]string{}, args...), "-Json")
 	}
+	migrationRecord := readWindowsEnterpriseMigrationRecord()
 	run, err := windowsEnterpriseStandaloneRunner(ctx, cmd, script, args)
+	noteWindowsEnterpriseMigration(opts, migrationRecord)
 	if err != nil {
 		return nil, run, err
 	}
@@ -476,6 +478,37 @@ func runWindowsEnterpriseStandaloneInstaller(
 		return nil, run, fmt.Errorf("installer exited %d without a valid JSON report: %w", run.ExitCode, parseErr)
 	}
 	return report, run, nil
+}
+
+// readWindowsEnterpriseMigrationRecord reads the migration-v9.json beside the
+// installed config, or nil when there is none.
+func readWindowsEnterpriseMigrationRecord() []byte {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || strings.TrimSpace(layout.ConfigPath) == "" {
+		return nil
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(config.MigrationRecordPath(layout.ConfigPath), windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// noteWindowsEnterpriseMigration keeps the audit.db block/allow entries a
+// config_version 9 migration left in place, when the installer run wrote a
+// new migration-v9.json. The installer migrates in its config step
+// (validate-service-config --record-lifecycle, a child process), so the
+// record is how the count reaches the result, as the Unix lifecycle reports
+// it (GAP-0292). A run that rolled back restored the previous record.
+func noteWindowsEnterpriseMigration(opts *windowsEnterpriseLifecycleOptions, before []byte) {
+	after := readWindowsEnterpriseMigrationRecord()
+	if opts == nil || after == nil || bytes.Equal(before, after) {
+		return
+	}
+	var record config.MigrationRecord
+	if json.Unmarshal(trimWindowsJSONBOM(after), &record) == nil && record.ActionsRowsIgnored > 0 {
+		opts.localEnforcementEntriesIgnored = record.ActionsRowsIgnored
+	}
 }
 
 // parseWindowsEnterpriseInstallerReport takes the last JSON object line;
@@ -1331,6 +1364,11 @@ func finishWindowsEnterpriseStandalone(
 	failureCode int,
 ) error {
 	applyWindowsStandaloneScannerRuntime(result, opts)
+	if opts.localEnforcementEntriesIgnored > 0 {
+		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
+			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",
+			opts.localEnforcementEntriesIgnored))
+	}
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
