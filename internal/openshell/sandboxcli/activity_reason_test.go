@@ -42,6 +42,31 @@ func TestEveryBlockedReasonReadsInWords(t *testing.T) {
 	}
 }
 
+// TestMetadataBlocksAreNotThisMachine (GAP-0147): a refused request to the
+// cloud metadata address read "169.254.169.254:80 (this machine)" through the
+// proxy and "(no OpenShell rule allows it)" directly. Both name a cloud
+// metadata or link-local address; this machine stays this machine.
+func TestMetadataBlocksAreNotThisMachine(t *testing.T) {
+	ta := newTestApp(t, "")
+	const metadata = "(cloud metadata or link-local address, never reachable from a sandbox)"
+	for _, ev := range []sandboxapi.ActivityEvent{
+		{Host: "169.254.169.254", Port: 80, Category: "host_internal"},
+		{Host: "169.254.169.254", Port: 80, Reason: "transparent_tcp_policy_denied"},
+		{Host: "[fe80::1]", Port: 80, Category: "host_internal"},
+		{Host: "metadata.google.internal", Port: 80, Category: "host_internal"},
+		{Host: "168.63.129.16", Port: 80, Category: "host_internal"},
+	} {
+		ev.Kind, ev.Time = sandboxapi.ActivityEgressBlocked, ta.Now()
+		if line := ta.activityLine(ev, false); !strings.Contains(line, metadata) {
+			t.Errorf("%s: line = %q", ev.Host, line)
+		}
+	}
+	if line := ta.activityLine(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Host: "127.0.0.1", Port: 8080,
+		Category: "host_internal", Time: ta.Now()}, false); !strings.Contains(line, "(this machine)") {
+		t.Fatalf("loopback line = %q", line)
+	}
+}
+
 // TestSSHBlocksSayUseHTTPS (GAP-0090, GAP-0111): git over SSH failed with
 // only the client's "Permission denied", and the feed offered an unblock
 // that cannot open port 22. A refused port 22 says to use an HTTPS remote.

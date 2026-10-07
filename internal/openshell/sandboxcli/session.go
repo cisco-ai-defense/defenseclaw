@@ -487,7 +487,7 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 			text += " (" + clause + ")"
 		}
 	case why != "":
-		text += " (" + reasonText(why) + ")"
+		text += " (" + blockedText(why, ev.Host) + ")"
 	}
 	host := strings.ToLower(ev.Host)
 	n := sessionNotice{summary: text}

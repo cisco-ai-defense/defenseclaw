@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -170,7 +171,7 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 			// The proxy's reason names the threshold the upload crossed.
 			b.WriteString(" (" + sandboxapi.LargeUploadBlockedText(ev.Reason) + ")")
 		case why != "":
-			b.WriteString(" (" + reasonText(why) + ")")
+			b.WriteString(" (" + blockedText(why, ev.Host) + ")")
 		}
 		if ev.Unblockable && ev.Host != "" && !sshPort(ev) {
 			scope := ""
@@ -290,6 +291,33 @@ func reasonText(token string) string {
 		return text
 	}
 	return strings.ReplaceAll(token, "_", " ")
+}
+
+// blockedText is why a block of host reads as it does: reasonText, except
+// that a cloud metadata or link-local address is named as such whatever
+// refused it (the proxy's host_internal, or OpenShell's missing rule), not
+// as this machine (GAP-0147).
+func blockedText(token, host string) string {
+	if metadataOrLinkLocal(host) {
+		return "cloud metadata or link-local address, never reachable from a sandbox"
+	}
+	return reasonText(token)
+}
+
+// metadataOrLinkLocal reports a link-local address, the cloud metadata
+// addresses and names outside that range the egress guard refuses
+// (egress.NeverReachPrefixes), and metadata.google.internal.
+func metadataOrLinkLocal(host string) bool {
+	h := strings.TrimSuffix(strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]"), ".")
+	if h == "metadata.google.internal" {
+		return true
+	}
+	addr, err := netip.ParseAddr(h)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsLinkLocalUnicast() || slices.ContainsFunc(egress.NeverReachPrefixes(), func(p netip.Prefix) bool { return p.Contains(addr) })
 }
 
 // largeUploadText is an egress.large_upload report to dest (the feed's
