@@ -34,7 +34,7 @@ func TestMultiUserControlsDoNotCrossMatchNativeBinaries(t *testing.T) {
 			}
 		}
 	}
-	if binarySelectors == 0 || len(policy.PIDs) != 2 {
-		t.Fatalf("anchors missing: binary selectors %d, verified root pids %v", binarySelectors, policy.PIDs)
+	if binarySelectors == 0 || len(policy.PIDs) != 0 {
+		t.Fatalf("enforcement must use only native binary selectors: %d selectors, pids %v", binarySelectors, policy.PIDs)
 	}
 }

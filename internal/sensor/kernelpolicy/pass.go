@@ -609,14 +609,11 @@ func (c *Controller) rescanFromPolicies() {
 	c.alive = alive
 }
 
-// hasAnchor reports whether uid has anything to anchor an enforcing control
-// to: a resolved native install of an anchored connector or a live root.
+// hasAnchor reports whether uid has a native binary anchor in an enforcing
+// control. Numeric PID anchors remain monitor-only because PIDs can be reused.
 func (c *Controller) hasAnchor(uid int, plan Plan, compiled Compiled) bool {
 	if plan.Controls == nil {
 		return false
-	}
-	if c.alive[uid] > 0 {
-		return true
 	}
 	for _, policy := range compiled.Policies {
 		if policy.Family == FamilyControls && policy.BinaryUID == uid && len(policy.Binaries) > 0 {

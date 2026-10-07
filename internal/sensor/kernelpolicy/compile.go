@@ -397,15 +397,11 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	if len(uids) == 0 {
 		return tp, Policy{}, append(notes, "controls: no enrolled user"), 0
 	}
-	var homeDirs []string
-	for _, uid := range uids {
-		homeDirs = append(homeDirs, homes[uid])
-	}
-
 	// A binary selector can carry only one uid set. Keep its binaries from
 	// one uid: taking the union of both would deny one enrolled user's
 	// ordinary process when it runs the other user's agent binary. The PID
-	// selector still covers the verified live roots of every enrolled uid.
+	// selector covers verified roots only in monitor mode: a numeric PID can
+	// be recycled between reconciles, so it must never cause an Override.
 	binsByUID := map[int]map[string]bool{}
 	addBin := func(uid int, native string) {
 		if !validBinary(native) {
@@ -429,14 +425,17 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		if !uidSet[root.UID] || !scope.allows(root.Connector) {
 			continue
 		}
+		if root.Native {
+			addBin(root.UID, root.Exe)
+		}
+		if scope.Mode == PolicyEnforce {
+			continue
+		}
 		if len(pids) >= MaxPIDs {
 			over++
 			continue
 		}
 		pids = append(pids, root.PID)
-		if root.Native {
-			addBin(root.UID, root.Exe)
-		}
 	}
 	sort.Ints(pids)
 	binaryUID := 0
@@ -452,6 +451,19 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	binList := sortedKeys(binsByUID[binaryUID])
 	if over > 0 {
 		notes = append(notes, fmt.Sprintf("%s:%d", WarnRootsOverLimit, over))
+	}
+	if scope.Mode == PolicyEnforce && len(in.Roots) > 0 {
+		notes = append(notes, WarnPIDMonitorOnly)
+	}
+	var homeDirs []string
+	if scope.Mode == PolicyEnforce {
+		if len(binList) > 0 {
+			homeDirs = append(homeDirs, homes[binaryUID])
+		}
+	} else {
+		for _, uid := range uids {
+			homeDirs = append(homeDirs, homes[uid])
+		}
 	}
 
 	ssh, _ := set.Control(kernel.ControlSSHPrivateKeyRead)
@@ -525,7 +537,11 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	if len(tp.Spec.LsmHooks) == 0 {
 		return tp, Policy{}, append(notes, ReasonNoAnchors), over
 	}
-	meta := Policy{UIDs: uids, PIDs: pids, BinaryUID: binaryUID, Binaries: binList, Paths: PathIndex{Exact: map[string]string{}, Prefixes: map[string]string{}}}
+	policyUIDs := uids
+	if scope.Mode == PolicyEnforce {
+		policyUIDs = []int{binaryUID}
+	}
+	meta := Policy{UIDs: policyUIDs, PIDs: pids, BinaryUID: binaryUID, Binaries: binList, Paths: PathIndex{Exact: map[string]string{}, Prefixes: map[string]string{}}}
 	for _, p := range sshFiles {
 		meta.Paths.Exact[p] = kernel.ControlSSHPrivateKeyRead
 	}

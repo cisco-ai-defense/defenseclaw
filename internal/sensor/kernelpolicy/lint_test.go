@@ -21,7 +21,7 @@ func validControls(t *testing.T) (tracingPolicy, LintOptions, *world) {
 	t.Helper()
 	w := newWorld(t, baseTargets)
 	roots := w.roots(nativeProc(4001, 1, 100, 1001, aliceClaudeNew), codexProc(5001, 1, 120, 1002))
-	c := w.compile(Input{Controls: &Scope{Mode: PolicyEnforce, UIDs: []int{1001, 1002}}, Roots: roots.Roots})
+	c := w.compile(Input{Controls: &Scope{Mode: PolicyMonitor, UIDs: []int{1001, 1002}}, Roots: roots.Roots})
 	p := policyOf(t, c, FamilyControls)
 	opts := LintOptions{Homes: []string{"/home/alice", "/home/bob"}, FS: w.fs}
 	if v := Lint(p.YAML, opts); len(v) != 0 {
@@ -45,7 +45,7 @@ func cloneTP(t *testing.T, tp tracingPolicy) tracingPolicy {
 
 func lintTP(t *testing.T, tp tracingPolicy, opts LintOptions) []Violation {
 	t.Helper()
-	data, err := render(FamilyControls, tp, PolicyEnforce)
+	data, err := render(FamilyControls, tp, PolicyMonitor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestLintRules(t *testing.T) {
 			tc.mutate(&tp)
 			// render adds the mode option unless told not to; the option cases
 			// set their own.
-			mode := PolicyEnforce
+			mode := PolicyMonitor
 			if len(tp.Spec.Options) > 0 {
 				mode = ""
 			}
@@ -300,7 +300,7 @@ func TestLintRule6SymlinkLeftInPath(t *testing.T) {
 
 func TestLintRule8Text(t *testing.T) {
 	tp, opts, _ := validControls(t)
-	good, err := render(FamilyControls, tp, PolicyEnforce)
+	good, err := render(FamilyControls, tp, PolicyMonitor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestFinalizeRepairNeverWidens(t *testing.T) {
 	for i := range bad.Spec.LsmHooks[0].Selectors[selSSHPids].MatchPIDs[0].Values {
 		bad.Spec.LsmHooks[0].Selectors[selSSHPids].MatchPIDs[0].Values[i] = 9000 + i
 	}
-	policy, dropped, err := finalize(FamilyControls, PolicyEnforce, bad, Policy{}, opts)
+	policy, dropped, err := finalize(FamilyControls, PolicyMonitor, bad, Policy{}, opts)
 	if err != nil || policy == nil {
 		t.Fatalf("policy %v err %v dropped %v", policy, err, dropped)
 	}
@@ -361,7 +361,20 @@ func TestFinalizeRepairNeverWidens(t *testing.T) {
 	broken := cloneTP(t, tp)
 	broken.Metadata.Name = ""
 	broken.Spec.LsmHooks[0].Selectors[selNoPost].MatchBinaries[0].Values = []string{"relative"}
-	if policy, dropped, _ := finalize(FamilyControls, PolicyEnforce, broken, Policy{}, opts); policy != nil {
+	if policy, dropped, _ := finalize(FamilyControls, PolicyMonitor, broken, Policy{}, opts); policy != nil {
 		t.Fatalf("a broken exemption must drop the policy, got %v (%v)", policy.Name, dropped)
+	}
+}
+
+func TestLintRefusesPIDSelectorsInEnforcingPolicy(t *testing.T) {
+	tp, opts, _ := validControls(t)
+	for _, mode := range []PolicyMode{PolicyEnforce, ""} {
+		data, err := render(FamilyControls, tp, mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := Lint(data, opts); !hasRule(v, 2) {
+			t.Fatalf("%q policy with numeric pid selector passed lint: %v", mode, v)
+		}
 	}
 }

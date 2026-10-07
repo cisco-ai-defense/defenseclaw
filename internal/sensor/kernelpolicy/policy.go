@@ -199,9 +199,18 @@ type Policy struct {
 	tp tracingPolicy
 }
 
-// withMode returns p rendered in mode. The name is unchanged: the mode is
-// not part of the name, so Tetragon flips it in place.
+// withMode returns p rendered in mode. Only a binary-scoped policy may be
+// promoted: numeric PID selectors can match a different process after reuse.
 func (p Policy) withMode(mode PolicyMode) (Policy, error) {
+	if mode == PolicyEnforce {
+		for _, hook := range p.tp.Spec.LsmHooks {
+			for _, selector := range hook.Selectors {
+				if len(selector.MatchPIDs) > 0 {
+					return p, fmt.Errorf("cannot promote policy with numeric pid selectors")
+				}
+			}
+		}
+	}
 	data, err := render(p.Family, p.tp, mode)
 	if err != nil {
 		return p, err
