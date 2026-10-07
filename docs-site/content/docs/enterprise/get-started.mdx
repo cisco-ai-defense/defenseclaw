@@ -47,7 +47,7 @@ one of three ways:
 | --- | --- | --- |
 | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
 | [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force. On Linux and macOS also OpenHands and OmniGent | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
-| [ACP guard](/docs/enterprise/concepts#acp-mediated-connector) | Kiro in an editor that starts it over ACP | Nothing per user: the editor runs Kiro through `defenseclaw-gateway enterprise acp` |
+| [ACP guard](/docs/enterprise/concepts#acp-mediated-connector) | Kiro in an editor that starts it over ACP | The administrator enrolls the user with `defenseclaw-gateway enterprise acp enroll`, and the user runs the `enterprise acp setup` command it reports |
 
 OpenHands and OmniGent are refused on Windows. Which agent and OS combinations
 were verified in this release is in the

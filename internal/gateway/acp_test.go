@@ -466,6 +466,29 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 	}
 }
 
+// An ACP frame names the ACP session it belongs to, and its records carry the
+// agent instance (ais-) the hook path derives for a session of the connector's
+// agent: stable for the session, different for another one, absent for a
+// frame that names none (GAP-0252).
+func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	instance := func(sessionParams string) string {
+		req := deniedACPTestEvaluation()
+		req.Payload = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":` + sessionParams + `}`)
+		return AgentIdentityFromContext(acpEvaluationContext(t.Context(), req, "kiro")).AgentInstanceID
+	}
+	first := instance(`{"sessionId":"acp-session-1"}`)
+	if first == "" || first != instance(`{"sessionId":"acp-session-1"}`) {
+		t.Fatalf("the instance of one ACP session is not stable: %q", first)
+	}
+	if other := instance(`{"sessionId":"acp-session-2"}`); other == "" || other == first {
+		t.Fatalf("another ACP session shares the instance: %q and %q", first, other)
+	}
+	if none := instance(`{}`); none != "" {
+		t.Fatalf("a frame without a session got the instance %q", none)
+	}
+}
+
 func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
 	return api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
