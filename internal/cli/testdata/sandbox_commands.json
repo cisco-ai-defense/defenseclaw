@@ -993,7 +993,7 @@
     "path": "sandbox unblock",
     "use": "unblock \u003chost\u003e",
     "short": "Lift an egress block for one sandbox or for every sandbox",
-    "long": "Lifts a block of the blocklist feed or of the profile's default (IP addresses under\nopen, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for\nevery sandbox (--always). It cannot lift a block-list entry: remove your own with\n`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository\npolicy's (.defenseclaw/sandbox.yaml) and your organization's stay.",
+    "long": "Lifts a block of the blocklist feed or of the profile's default (IP addresses under\nopen, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for\nevery sandbox (--always). It cannot lift a block-list entry: remove your own with\n`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository\npolicy's (.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open\na private network (add the exact host to openshell.egress.allow), this machine (run\nthe sandbox with --host-port PORT) or a cloud metadata or link-local address.",
     "flags": [
       {
         "name": "always",

@@ -140,6 +140,8 @@ def test_long_help_and_examples_are_the_go_ones() -> None:
     shown = CliRunner().invoke(sandbox, ["unblock", "--help"], obj=AppContext())
     assert shown.exit_code == 0, shown.output
     assert "It cannot lift a block-list entry" in words(shown.output)
+    # GAP-0187: nor what the egress guard keeps closed.
+    assert "Nor does it open a private network" in words(shown.output)
 
 
 def test_bool_and_repeatable_flags_have_the_matching_click_shape() -> None:
