@@ -1352,40 +1352,64 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     )
 
 
-def _doctor_config_present(cfg) -> bool:
-    from defenseclaw.config import config_path_for_data_dir
-
-    return os.path.isfile(str(config_path_for_data_dir(getattr(cfg, "data_dir", None))))
-
-
-def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool) -> None:
-    """Render the whole Doctor result for an install that was never initialized."""
+def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool) -> int:
+    """Render the whole Doctor result for an install that was never initialized
+    and return the exit code. A managed device has no per-user config by
+    design: the administrator's config rules, so Doctor says that (exit 3, as
+    every command that needs a per-user config) instead of sending the user
+    to ``defenseclaw init``."""
 
     from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config_writer import machine_managed_standalone
+    from defenseclaw.upgrade_shim import managed_lifecycle_command
 
+    managed = machine_managed_standalone()
     cfg_path = str(config_path_for_data_dir(getattr(cfg, "data_dir", None)))
     r.set_section("configuration")
     if not json_out:
         _doctor_subsection("Configuration")
-    _emit(
-        "fail",
-        "Config file",
-        f"{cfg_path} not found; DefenseClaw is not initialized, so no other check can run",
-        r=r,
-        check_id="doctor.config.canonical-v8",
-        reason_code="not-initialized",
-        remediation="defenseclaw init",
-    )
+    if managed:
+        _emit(
+            "skip",
+            "Config file",
+            "This device is managed: DefenseClaw is configured by your administrator (MDM or management plane), "
+            "so there is no per-user config and no per-user check applies",
+            r=r,
+            check_id="doctor.config.canonical-v8",
+            reason_code="managed-device",
+        )
+    else:
+        _emit(
+            "fail",
+            "Config file",
+            f"{cfg_path} not found; DefenseClaw is not initialized, so no other check can run",
+            r=r,
+            check_id="doctor.config.canonical-v8",
+            reason_code="not-initialized",
+            remediation="defenseclaw init",
+        )
     if write_cache and os.path.isdir(str(getattr(cfg, "data_dir", "") or "")):
         _write_doctor_cache(cfg, r)
     if json_out:
         click.echo(json.dumps(r.to_dict(), indent=2))
-        return
+        return 3 if managed else 1
     _doctor_subsection("Summary")
+    if managed:
+        lifecycle = managed_lifecycle_command()
+        ux.echo("  Health: managed by your administrator")
+        ux.echo()
+        ux.warn(
+            "DefenseClaw is managed on this device."
+            + (f" An administrator checks it with: sudo {lifecycle} status" if lifecycle else ""),
+            indent="  ",
+        )
+        ux.echo()
+        return 3
     ux.echo("  Health: " + ux._style(f"{r.failed} failed", fg="red", bold=True))
     ux.echo()
     ux.warn("DefenseClaw is not initialized. Run: defenseclaw init, then re-run: defenseclaw doctor", indent="  ")
     ux.echo()
+    return 1
 
 
 def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
@@ -9069,8 +9093,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
 
 
 def _check_signature_packs(cfg, r: _DoctorResult) -> None:
-    """A signature pack that fails its pin is not loaded, and discovery is
-    blind to the agents it describes: name it with both digests."""
+    """A signature pack that fails its pin, or whose file is gone, is not
+    loaded and discovery is blind to the agents it describes: name it, with
+    both digests for a pin mismatch."""
     discovery = getattr(cfg, "ai_discovery", None)
     if not getattr(discovery, "enabled", False) or not getattr(discovery, "signature_packs", None):
         return
@@ -9092,8 +9117,8 @@ def _check_signature_packs(cfg, r: _DoctorResult) -> None:
         check_id="doctor.discovery.signature-pack-refused",
         reason_code="signature-pack-refused",
         remediation=(
-            "Restore the pinned pack, or pin the file you trust in ai_discovery.signature_pack_digests "
-            "with `defenseclaw config set`"
+            "Restore the pack file, drop it from ai_discovery.signature_packs, or pin the file you trust in "
+            "ai_discovery.signature_pack_digests with `defenseclaw config set`"
         ),
     )
 
@@ -10784,8 +10809,9 @@ def doctor(
     # with a page of failures and --fix / gateway start hints. Say once that
     # DefenseClaw is not initialized and stop, as `defenseclaw status` does.
     if not _doctor_config_present(cfg):
-        _report_uninitialized_install(cfg, r, json_out=json_out, write_cache=not (do_fix and dry_run))
-        raise SystemExit(1)
+        raise SystemExit(
+            _report_uninitialized_install(cfg, r, json_out=json_out, write_cache=not (do_fix and dry_run))
+        )
 
     # Repair first, then diagnose the resulting state.  The former ordering
     # ran fixers after every check, leaving already-repaired failures in the

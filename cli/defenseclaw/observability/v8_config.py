@@ -1131,6 +1131,22 @@ def _first_unexpected_key(error: Any) -> tuple[str, ...]:
 _MAX_LISTED_ENUM_VALUES = 16
 
 
+def _enum_action(values: Any) -> str:
+    """The words an enum allows, or "" when it is not a short list of strings."""
+
+    if not (
+        isinstance(values, list)
+        and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
+        and all(isinstance(value, str) for value in values)
+    ):
+        return ""
+    # An empty value is how a field inherits; list the words only.
+    words = [value for value in values if value]
+    if not words:
+        return ""
+    return "use one of " + ", ".join(words) + (" (empty inherits)" if len(words) < len(values) else "")
+
+
 def _declared_action(keyword: str, error: Any) -> str:
     """What the schema declares at a failed enum or bound, as Go's validator says it.
 
@@ -1139,25 +1155,23 @@ def _declared_action(keyword: str, error: Any) -> str:
     """
 
     if keyword == "enum":
-        values = error.validator_value
-        if (
-            isinstance(values, list)
-            and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
-            and all(isinstance(value, str) for value in values)
-        ):
-            # An empty value is how a field inherits; list the words only.
-            words = [value for value in values if value]
-            if not words:
-                return ""
-            return "use one of " + ", ".join(words) + (" (empty inherits)" if len(words) < len(values) else "")
-        return ""
+        return _enum_action(error.validator_value)
     if keyword == "pattern":
         return _pattern_action(error.validator_value)
     if keyword == "oneOf":
         return _one_of_action(error.validator_value)
     if keyword == "type":
         types = error.validator_value if isinstance(error.validator_value, list) else [error.validator_value]
-        return "use a value of type " + " or ".join(str(t) for t in types) if types else ""
+        if not types:
+            return ""
+        # A number typed for an enum or pattern key learns the words it takes,
+        # as a wrong string does (GAP-0222).
+        schema = error.schema if isinstance(error.schema, Mapping) else {}
+        return (
+            _enum_action(schema.get("enum"))
+            or _pattern_action(schema.get("pattern"))
+            or "use a value of type " + " or ".join(str(t) for t in types)
+        )
     if keyword not in ("minimum", "maximum") or not isinstance(error.schema, Mapping):
         return ""
 
