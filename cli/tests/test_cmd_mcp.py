@@ -1463,6 +1463,39 @@ class TestMCPScan(MCPCommandTestBase):
             self.app.store.has_action("mcp", "ctx7", "install", "block", "hermes")
         )
 
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.commands.cmd_mcp._run_scan")
+    def test_scan_rejection_prints_the_pinned_allow_that_admits_it(self, mock_run_scan, mock_set):
+        # GAP-0372: the HIGH rejection offered only --skip-scan. It now prints
+        # the reviewed path, an allow pinned to this definition, and that
+        # allow admits the same definition only (GAP-0371).
+        import shlex
+
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_run_scan.return_value = ScanResult(
+            scanner="mcp-scanner", target="ctx7", timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="coercive", scanner="mcp-scanner")],
+        )
+        npx_args = '["-y", "@upstash/context7-mcp"]'
+        rejected = self.invoke(["set", "ctx7", "--command", "npx", "--args", npx_args, "--connector", "codex"])
+        self.assertEqual(rejected.exit_code, 1, rejected.output)
+        allow_line = next(line for line in rejected.output.splitlines() if "defenseclaw mcp allow" in line)
+        allow_argv = shlex.split(allow_line.strip().replace('"<why>"', "reviewed"))[2:]
+        self.assertEqual(
+            allow_argv,
+            ["allow", "ctx7", "--command", "npx", "--args", '["-y", "@upstash/context7-mcp"]',
+             "--connector", "codex", "--reason", "reviewed"],
+        )
+        self.assertEqual(self.invoke(allow_argv).exit_code, 0)
+
+        admitted = self.invoke(["set", "ctx7", "--command", "npx", "--args", npx_args, "--connector", "codex"])
+        self.assertEqual(admitted.exit_code, 0, admitted.output)
+        self.assertIn("Allowed override for ctx7", admitted.output)
+        self.assertEqual(mock_run_scan.call_count, 1)
+        other = self.invoke(["set", "ctx7", "--command", "uvx", "--args", "other-mcp", "--connector", "codex"])
+        self.assertEqual(other.exit_code, 1, other.output)
+        self.assertEqual(mock_run_scan.call_count, 2)
+
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
     def test_unset_skips_unsupported_write_surface(self, mock_unset):
         # A connector can expose the server via its READ surface yet have no

@@ -2497,6 +2497,34 @@ def _opencode_command_trust_error(cmd: str) -> str | None:
     return None
 
 
+def _echo_scan_rejected_next_steps(
+    app: AppContext, name: str, connectors: list[str], cmd: str, args: list[str], url: str, transport: str,
+) -> None:
+    """What to do after the scan rejected a server (GAP-0372): where the full
+    findings are, and the reviewed path, an allow pinned to this definition,
+    before the --skip-scan escape hatch."""
+    import shlex
+
+    connector = connectors[0] if len(connectors) == 1 else ""
+    if url:
+        details = _mcp_scan_command(url, "", url)
+    elif connector and _connector_has_server_quiet(app, connector, name):
+        details = _mcp_scan_command(name, connector)
+    else:
+        details = ""
+    if details:
+        click.echo(f"  Full findings: {details} --json")
+    pin = f"--url {shlex.quote(url)}" if url else f"--command {shlex.quote(cmd)}"
+    if args and not url:
+        pin += f" --args {shlex.quote(json.dumps(args))}"
+    if transport:
+        pin += f" --transport {shlex.quote(transport)}"
+    scope = f" --connector {connector}" if connector else ""
+    click.echo("  If you reviewed this server and trust it, allow this exact definition, then run this mcp set again:")
+    click.echo(f"    defenseclaw mcp allow {shlex.quote(name)} {pin}{scope} --reason \"<why>\"")
+    click.echo("  A different command or URL under the same name is still scanned. --skip-scan adds it without a scan.")
+
+
 @mcp.command("set")
 @click.argument("name")
 @click.option(
@@ -2731,11 +2759,7 @@ def set_server(
             post_c = _admit(c, scan_result=result)
             if post_c.verdict == "rejected":
                 sev = result.max_severity()
-                ux.secho(
-                    f"  blocked [{c}]: {sev} findings — rejected by the admission policy "
-                    "(use --skip-scan to override)",
-                    fg="red",
-                )
+                ux.secho(f"  blocked [{c}]: {sev} findings — rejected by the admission policy", fg="red")
                 scan_rejected.append(c)
                 continue
         try:
@@ -2762,6 +2786,9 @@ def set_server(
                 raise
             click.secho(f"  failed [{c}]: {exc}", fg="red")
             write_failed.append((c, exc))
+
+    if scan_rejected and result is not None:
+        _echo_scan_rejected_next_steps(app, name, scan_rejected, cmd, parsed_args, url, transport)
 
     if not applied:
         # Scan rejection is recorded for each connector that rejected the
