@@ -23,6 +23,8 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 			"OriginalNodeName:\n /Active Directory/CORP/corp.example.com\n"
 		networkAccount = "AuthenticationAuthority: ;Kerberosv5;;bob@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM; ;NetLogon;bob;CORP\n" +
 			"No such key: OriginalNodeName\n"
+		forestAccount = "AuthenticationAuthority: ;Kerberosv5;;dave@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM;\n" +
+			"OriginalNodeName:\n /Active Directory/CORP/All Domains\n"
 		localAccount = "AuthenticationAuthority: ;ShadowHash;HASHLIST:<SALTED-SHA512-PBKDF2> " +
 			";Kerberosv5;;carol@LKDC:SHA1.0123456789ABCDEF0123456789ABCDEF01234567;LKDC:SHA1.0123456789ABCDEF0123456789ABCDEF01234567;\n" +
 			"No such key: OriginalNodeName\n"
@@ -48,6 +50,12 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
 		{"network AD account on a bound Mac", MacOSDirectoryInputs{DSCL: networkAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "bob@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", ""},
+		// Without dsconfigad only the original node can name the directory and the domain.
+		{"mobile AD account on a Mac without dsconfigad", MacOSDirectoryInputs{DSCL: mobileAccount, AppSSO: noPlatformSSO},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
+		// The forest-wide node ("All Domains") names no domain: dsconfigad's applies.
+		{"AD account of a forest-wide search node", MacOSDirectoryInputs{DSCL: forestAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "dave@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
 		{"local account with an LKDC authority", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: noPlatformSSO},
 			DirectoryLocal, SourceMacOSOpenDirectory, "", "", ""},
 		{"Entra ID Platform SSO", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: platformSSO("com.microsoft.CompanyPortalMac.ssoextension")},

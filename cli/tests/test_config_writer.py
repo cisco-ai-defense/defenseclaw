@@ -230,6 +230,19 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     assert "configuration schema" not in config_writer.plain_error(other)
 
 
+def test_a_refused_config_set_names_the_missing_and_the_unknown_field(tmp_path):
+    """GAP-0159: the key a typo or a missing field is about is in the sentence, with no v8 reference."""
+    path = _config(tmp_path)
+    expected = {
+        "guardrail.custom_packs.bad": ({"path": str(tmp_path)}, "guardrail.custom_packs.bad: add the required field digest."),
+        "guardrail.mdoe": ("observe", 'guardrail.mdoe: unknown field (did you mean "mode"?). All fields: '),
+    }
+    for key, (value, sentence) in expected.items():
+        with pytest.raises(Exception) as refused:
+            config_writer.apply([Change(key, value)], "cli:test", "t", path=path)
+        assert config_writer.plain_error(refused.value).startswith(sentence)
+
+
 def test_only_the_writer_writes_config_yaml():
     """Spec section 3 guard: config.yaml is written through config_writer
     (which takes config.yaml.lock, validates and records the generation).

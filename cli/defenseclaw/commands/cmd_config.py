@@ -381,7 +381,11 @@ def _update_view(cfg: object) -> tuple[dict, dict[str, str]]:
     check = getattr(written, "check", None)
     channel = str(getattr(written, "channel", "") or "")
     source = str(getattr(written, "source", "") or "")
-    data = {"check": True if check is None else bool(check), "channel": channel or "stable", "source": source or OFFICIAL_SOURCE}
+    data = {
+        "check": True if check is None else bool(check),
+        "channel": channel or "stable",
+        "source": source or OFFICIAL_SOURCE,
+    }
     sources = {
         name: f"config:update.{name}" if is_set else "builtin"
         for name, is_set in (("check", check is not None), ("channel", bool(channel)), ("source", bool(source)))
@@ -1104,7 +1108,7 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     detail = "; ".join(parts).rstrip(".") or "is not valid"
     # ``config reference`` (YAML) covers only observability; the JSON schema
     # lists every section and field (GAP-1661).
-    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code == "config_schema_invalid" else ""
+    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code in ("config_schema_invalid", "additionalProperties") else ""
     return f"{where}{field}: {detail}.{suffix}"
 
 
