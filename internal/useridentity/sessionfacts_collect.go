@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -57,26 +56,12 @@ func SessionFactsEnvKey(getenv func(string) string) string {
 	}, "|")
 }
 
-var (
-	sessionFactsOnce   sync.Once
-	sessionFactsHeader string
-)
-
 // CurrentSessionFactsHeader returns the X-DefenseClaw-Session-Facts value
-// for the calling process's session, or "" when nothing resolved. Call it
-// only from a process that runs as the end user (a hook). The answer is
-// computed once per process.
+// for the current session, or "" when nothing resolved. Call it only from
+// a process that runs as the end user. The file cache handles retries,
+// expiry and credential-cache changes for long-lived ACP processes.
 func CurrentSessionFactsHeader() string {
-	sessionFactsOnce.Do(func() {
-		sessionFactsHeader = currentSessionFactsHeader(time.Now())
-	})
-	return sessionFactsHeader
-}
-
-// CurrentSessionFactsHeaderLive reads the current session for a long-lived
-// process such as an ACP guard. It bypasses the hook process and disk caches.
-func CurrentSessionFactsHeaderLive() string {
-	return currentSessionFactsHeaderLive(time.Now())
+	return currentSessionFactsHeader(time.Now())
 }
 
 // cachedSessionFactsHeader returns the cached header for key and envKey

@@ -65,8 +65,6 @@ const (
 	logonCachedRemoteInteractive = 12
 )
 
-func currentSessionFactsHeaderLive(now time.Time) string { return currentSessionFactsHeader(now) }
-
 func currentSessionFactsHeader(time.Time) string {
 	facts := SessionFromSSHEnv(os.Getenv)
 	upn := ""

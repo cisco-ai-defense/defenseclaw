@@ -93,3 +93,26 @@ func TestADUPNCacheWaitsAndRetriesFailures(t *testing.T) {
 		t.Fatalf("lookup after a failure = %q after %d calls; want the last good UPN kept", got, calls)
 	}
 }
+
+func TestWindowsBuiltInAndServiceSIDsAreLocal(t *testing.T) {
+	reader := fakeWindowsReader{
+		accounts: map[string][2]string{
+			"S-1-5-18":     {"SYSTEM", "NT AUTHORITY"},
+			"S-1-5-80-123": {"agent", "NT SERVICE"},
+		},
+		computer: "WS01",
+	}
+	lookups := 0
+	for _, sid := range []string{"S-1-5-18", "S-1-5-80-123"} {
+		facts := resolveWindowsDirectoryFacts(reader, sid, func(string) string {
+			lookups++
+			return ""
+		}, time.Unix(1_800_000_000, 0))
+		if facts.Directory != DirectoryLocal || facts.Domain != "" {
+			t.Fatalf("%s resolved as %+v", sid, facts)
+		}
+	}
+	if lookups != 0 {
+		t.Fatalf("service accounts triggered %d AD UPN lookups", lookups)
+	}
+}
