@@ -136,17 +136,13 @@ iot_extensions:
     ssrf_protection:
       enabled: true
       block_private_ranges: true
-      block_metadata_endpoints: true
+      block_cloud_metadata: true
       block_link_local: true
-
-    custom_patterns:
-      - name: "internal_project_code"
-        category: secrets
-        regex: "PROJ-[A-Z]{3}-[0-9]{6}"
-        severity: high
 ```
 
-Custom patterns are compiled into the same DFA tables as built-in patterns. They follow the same format and can target any category.
+<Callout type="info">
+**Custom regex patterns** are planned for a future release. The policy compiler currently supports only the built-in content categories listed above (`secret`, `pii`, `credential`, `exfil`, `injection`, `command`). Custom pattern support (user-defined regex compiled into the DFA tables) is tracked internally and will be documented here when available.
+</Callout>
 
 ## Compile the policy
 

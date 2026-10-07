@@ -298,7 +298,7 @@ def edge_connector_group_policy() -> None:
     """Manage fleet-wide policies -- push, list versions, emergency commands."""
 
 
-@fleet_policy.command("push")
+@edge_connector_group_policy.command("push")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False))
 @click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
 @pass_ctx
@@ -307,12 +307,15 @@ def policy_push(app: AppContext, file: str, as_json: bool) -> None:
     import yaml
     try:
         with open(file) as fh:
-            data = yaml.safe_load(fh) or {}
+            raw_yaml = fh.read()
+            data = yaml.safe_load(raw_yaml) or {}
     except Exception as exc:
         ux.err(f"Failed to read policy file: {exc}"); raise SystemExit(1)
     meta = data.get("metadata", {}) or {}
-    payload = {"tenant_id": int(meta.get("tenant_id", 1)),
-               "fleet_id": int(meta.get("fleet_id", 1)), "policy": data}
+    payload = {"policy_yaml": raw_yaml,
+               "profile": str(meta.get("profile", "standard")),
+               "tenant_id": int(meta.get("tenant_id", 1)),
+               "fleet_id": int(meta.get("fleet_id", 1))}
     c = _client(app)
     try:
         resp = c.post("/policy/push", payload)
@@ -325,14 +328,14 @@ def policy_push(app: AppContext, file: str, as_json: bool) -> None:
     ux.ok(f"Edge Connector policy '{meta.get('name', os.path.basename(file))}' {result.get('status', 'distributed')}.")
 
 
-@fleet_policy.command("versions")
+@edge_connector_group_policy.command("versions")
 @click.option("--json", "as_json", is_flag=True, help="Emit versions as JSON.")
 @pass_ctx
 def policy_versions(app: AppContext, as_json: bool) -> None:
     """List edge connector policy versions."""
     c = _client(app)
     try:
-        resp = c.get("/policy/versions")
+        resp = c.get("/policy/versions?tenant_id=1&fleet_id=1")
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR); raise SystemExit(1)
     _check(resp, "Failed to list policy versions")
@@ -350,7 +353,7 @@ def policy_versions(app: AppContext, as_json: bool) -> None:
                 f"{str(v.get('pushed_at') or v.get('created_at') or '—')}")
 
 
-@fleet_policy.command("emergency")
+@edge_connector_group_policy.command("emergency")
 @click.argument("cmd", type=click.Choice(["flush-cache", "enter-lockdown", "revoke-sessions"]))
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
 @pass_ctx
@@ -358,9 +361,11 @@ def policy_emergency(app: AppContext, cmd: str, assume_yes: bool) -> None:
     """Send an emergency fleet command (flush-cache, enter-lockdown, revoke-sessions)."""
     if not assume_yes and not click.confirm(f"Send emergency command '{cmd}' to the entire fleet?"):
         ux.echo("Cancelled."); return
+    # API expects uppercase underscore command names (e.g. FLUSH_CACHE)
+    api_cmd = cmd.upper().replace("-", "_")
     c = _client(app)
     try:
-        resp = c.post("/policy/emergency", {"command": cmd})
+        resp = c.post("/policy/emergency", {"command": api_cmd})
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR); raise SystemExit(1)
     _check(resp, f"Failed to send emergency command '{cmd}'")

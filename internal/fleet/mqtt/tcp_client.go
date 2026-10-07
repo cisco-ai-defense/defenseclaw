@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,11 +52,25 @@ type TCPClient struct {
 	readerDone   chan struct{}
 }
 
+// stripMQTTScheme removes URI scheme prefixes (tcp://, mqtt://, mqtts://,
+// ssl://) from a broker address, returning just the host:port portion that
+// net.Dial expects.
+func stripMQTTScheme(addr string) string {
+	for _, prefix := range []string{"tcp://", "mqtt://", "mqtts://", "ssl://"} {
+		if strings.HasPrefix(addr, prefix) {
+			return strings.TrimPrefix(addr, prefix)
+		}
+	}
+	return addr
+}
+
 // NewTCPClient creates a new minimal MQTT client that connects to the given
 // broker address (host:port). The clientID identifies this client to the broker.
+// The address may include a URI scheme (tcp://, mqtt://) which is stripped
+// automatically since net.Dial expects bare host:port.
 func NewTCPClient(addr, clientID string) *TCPClient {
 	return &TCPClient{
-		addr:     addr,
+		addr:     stripMQTTScheme(addr),
 		clientID: clientID,
 		subs:     make(map[string]func(Message)),
 	}
@@ -70,9 +85,12 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 		return nil // already connected
 	}
 
+	// Defensively strip URI scheme prefixes — net.Dial expects bare host:port.
+	addr := stripMQTTScheme(c.addr)
+
 	// Dial with context deadline if present.
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", c.addr)
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("tcp dial %s: %w", c.addr, err)
 	}

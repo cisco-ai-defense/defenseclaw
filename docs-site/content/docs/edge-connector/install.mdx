@@ -133,7 +133,7 @@ iot_extensions:
     ssrf_protection:
       enabled: true
       block_private_ranges: true     # 10.x, 172.16-31.x, 192.168.x
-      block_metadata_endpoints: true # 169.254.169.254
+      block_cloud_metadata: true     # 169.254.169.254
 ```
 
 ### Step 3 — Compile (optional)
@@ -361,12 +361,26 @@ The Edge Connector uses MQTT 3.1.1 for cloud escalation (device to gateway) and 
 
 **Quick start with Docker:**
 
+Mosquitto 2.x defaults to local-only mode (no remote connections). You must mount a config file that binds to `0.0.0.0`:
+
 ```bash
-docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2
+# Create a minimal config that accepts remote connections
+cat > mosquitto.conf <<'EOF'
+listener 1883 0.0.0.0
+allow_anonymous true
+EOF
+
+docker run -d --name mosquitto -p 1883:1883 \
+  -v ./mosquitto.conf:/mosquitto/config/mosquitto.conf \
+  eclipse-mosquitto:2
 ```
 
-<Callout type="info">
-For production, configure TLS on the broker and use `mqtts://` or `ssl://` URIs. See the Mosquitto documentation for TLS listener setup.
+<Callout type="warn">
+`allow_anonymous true` is acceptable for quick-start testing only. For production, configure a `password_file` or use an authentication plugin. See the Mosquitto documentation for details.
+</Callout>
+
+<Callout type="warn">
+TLS is not yet implemented in the Edge Connector. Use plaintext MQTT on a trusted network for now. mTLS support is planned for Phase 2.
 </Callout>
 
 **Configure the gateway (Go fleet server):**
@@ -391,7 +405,7 @@ Both sides must point to the same broker. The gateway publishes commands and pol
 | --- | --- | --- |
 | `DCLAW_FLEET_API_TOKEN` | yes | Bearer token for authenticating Fleet API requests. If unset, all API requests are rejected. |
 | `DCLAW_MQTT_BROKER_URL` | yes | MQTT broker connection URI (e.g., `tcp://broker-host:1883`). Used for command dispatch, policy distribution, and heartbeat ingestion. |
-| `DCLAW_OTA_KEY` | yes | Ed25519 private key (hex-encoded) for signing OTA policy updates. Devices verify signatures using the corresponding public key. |
+| `DCLAW_OTA_KEY` | yes | Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes). Used to sign OTA policy updates. Must match the key configured on devices. |
 
 ### Device-side (C edge connector and Python hooks)
 
@@ -401,7 +415,7 @@ Both sides must point to the same broker. The gateway publishes commands and pol
 | `DCLAW_FLEET_ID` | (none) | Fleet identifier for this device. |
 | `DCLAW_DEVICE_ID` | (none) | Unique device identifier within the fleet. |
 | `DCLAW_BROKER_URL` | (none) | MQTT broker URI (e.g., `mqtt://broker-host:1883`). Used for heartbeats and cloud escalation. |
-| `DCLAW_OTA_KEY` | (none) | Ed25519 public key (hex-encoded) for verifying OTA policy signatures. |
+| `DCLAW_OTA_KEY` | (none) | Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes). Must match the key configured on the server. |
 | `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library. |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |
 | `DCLAW_AUDIT_KEY` | (none) | HMAC key for the tamper-evident audit chain. If unset, audit entries are not cryptographically chained. |
@@ -428,7 +442,7 @@ A pre-built Grafana dashboard is included at `edge-connector/dashboards/fleet-da
 4. Click **Import**.
 
 <Callout type="warn">
-The dashboard expects the `DS_PROMETHEUS` datasource variable to be configured. It queries the Prometheus metrics exposed by the fleet gateway at `GET /metrics` (see the [API reference](/docs/edge-connector/api-reference#prometheus-metrics)). Ensure your Prometheus instance is scraping the fleet gateway endpoint with the correct `Authorization` header.
+The dashboard expects the `DS_PROMETHEUS` datasource variable to be configured. It queries the Prometheus metrics exposed by the fleet gateway at `GET /api/v1/fleet/metrics` (see the [API reference](/docs/edge-connector/api-reference#prometheus-metrics)). Ensure your Prometheus instance is scraping the fleet gateway endpoint with the correct `Authorization` header.
 </Callout>
 
 The dashboard includes panels for:

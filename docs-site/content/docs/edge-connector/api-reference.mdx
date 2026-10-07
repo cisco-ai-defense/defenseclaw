@@ -18,7 +18,16 @@ The Fleet API is mounted at `/api/v1/fleet/` on the DefenseClaw gateway HTTP ser
 All endpoints require a Bearer token passed in the `Authorization` header. The token is read from the `DCLAW_FLEET_API_TOKEN` environment variable on the server.
 
 ```bash
+# GET request (read-only)
 curl -H "Authorization: Bearer $DCLAW_FLEET_API_TOKEN" \
+  https://gateway.example.com/api/v1/fleet/devices
+
+# POST request (state-changing — requires CSRF header)
+curl -X POST \
+  -H "Authorization: Bearer $DCLAW_FLEET_API_TOKEN" \
+  -H "X-DefenseClaw-Client: true" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":1,"fleet_id":2,"device_id":1001}' \
   https://gateway.example.com/api/v1/fleet/devices
 ```
 
@@ -27,6 +36,10 @@ If `DCLAW_FLEET_API_TOKEN` is not set, **all requests are rejected** with `401 U
 </Callout>
 
 All request and response bodies use `Content-Type: application/json`. Request bodies are limited to 1 MB.
+
+### CSRF protection
+
+All state-changing requests (`POST`, `PUT`, `DELETE`) must include the `X-DefenseClaw-Client: true` header. Requests without this header are rejected with `403 Forbidden`. This prevents cross-site request forgery from browser contexts.
 
 ---
 

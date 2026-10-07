@@ -69,10 +69,10 @@
         "gridPos": {"x": 0, "y": 12, "w": 8, "h": 6}
       },
       {
-        "title": "Policy Version Distribution",
+        "title": "Device Status Distribution",
         "type": "piechart",
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "sum by (policy_version) (defenseclaw_fleet_devices_total)"}],
+        "targets": [{"expr": "sum by (status) (defenseclaw_fleet_devices_total)"}],
         "gridPos": {"x": 8, "y": 12, "w": 8, "h": 6}
       },
       {

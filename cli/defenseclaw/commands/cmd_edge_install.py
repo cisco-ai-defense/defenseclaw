@@ -167,17 +167,14 @@ def _configure_remote_env(
 
 
 def _start_remote_daemon(target: str, user: str) -> None:
-    """Start the edge-connector daemon on the remote device."""
+    """Print instructions to start the edge-connector daemon on the remote device."""
     ux.echo()
     ux.section("Starting edge-connector daemon")
-    result = subprocess.run(
-        _ssh_cmd(target, user, "sudo systemctl restart dclaw-edge-connector 2>/dev/null || dclaw-edge-connector &"),
-        text=True,
-    )
-    if result.returncode == 0:
-        ux.ok("Edge connector daemon started")
-    else:
-        ux.warn("Could not auto-start daemon. Start it manually on the device.")
+    ux.echo("  Start the daemon manually on the device:")
+    ux.echo(f"    ssh {user}@{target} 'sudo edge-connector &'")
+    ux.echo()
+    ux.echo("  Or to run in the foreground for debugging:")
+    ux.echo(f"    ssh {user}@{target} 'sudo edge-connector'")
 
 
 def _build_local(source: Path, profile: str) -> bool:

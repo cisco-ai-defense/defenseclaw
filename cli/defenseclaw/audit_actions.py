@@ -297,6 +297,20 @@ ACTION_TOOL_BLOCK: Final[str] = "tool-block"
 ACTION_TOOL_ALLOW: Final[str] = "tool-allow"
 ACTION_TOOL_UNBLOCK: Final[str] = "tool-unblock"
 
+# Fleet (Edge Connector IoT device management). These actions track
+# device registration, heartbeat processing, verdict decisions,
+# policy pushes, emergency commands, decommissioning, and device
+# alerts detected by the fleet manager's anomaly monitor.
+ACTION_FLEET_DEVICE_REGISTERED: Final[str]   = "fleet.device.registered"
+ACTION_FLEET_DEVICE_HEARTBEAT: Final[str]    = "fleet.device.heartbeat"
+ACTION_FLEET_DEVICE_OFFLINE: Final[str]      = "fleet.device.offline"
+ACTION_FLEET_DEVICE_DECOMMISSION: Final[str] = "fleet.device.decommission"
+ACTION_FLEET_DEVICE_COMMAND: Final[str]      = "fleet.device.command"
+ACTION_FLEET_POLICY_PUSH: Final[str]         = "fleet.policy.push"
+ACTION_FLEET_POLICY_EMERGENCY: Final[str]    = "fleet.policy.emergency"
+ACTION_FLEET_THREAT_INTEL: Final[str]        = "fleet.threat_intel.push"
+ACTION_FLEET_ALERT: Final[str]               = "fleet.alert"
+
 
 ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INIT,
@@ -512,6 +526,15 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_BLOCK,
     ACTION_TOOL_ALLOW,
     ACTION_TOOL_UNBLOCK,
+    ACTION_FLEET_DEVICE_REGISTERED,
+    ACTION_FLEET_DEVICE_HEARTBEAT,
+    ACTION_FLEET_DEVICE_OFFLINE,
+    ACTION_FLEET_DEVICE_DECOMMISSION,
+    ACTION_FLEET_DEVICE_COMMAND,
+    ACTION_FLEET_POLICY_PUSH,
+    ACTION_FLEET_POLICY_EMERGENCY,
+    ACTION_FLEET_THREAT_INTEL,
+    ACTION_FLEET_ALERT,
 )
 
 

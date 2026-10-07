@@ -13281,6 +13281,147 @@ producer_mappings:
     bucket: enforcement.action
     compatibility_only: true
 - producer: audit_action
+  key: fleet.alert
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_alert
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - durable_health_transition
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.alert
+    bucket: platform.health
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.device.command
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.device.command
+    bucket: compliance.activity
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.device.decommission
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.device.decommission
+    bucket: agent.lifecycle
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.device.heartbeat
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.device.heartbeat
+    bucket: agent.lifecycle
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.device.offline
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - durable_health_transition
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.device.offline
+    bucket: platform.health
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.device.registered
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_device
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.device.registered
+    bucket: agent.lifecycle
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.policy.emergency
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_policy
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.policy.emergency
+    bucket: compliance.activity
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.policy.push
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_policy
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.policy.push
+    bucket: compliance.activity
+    compatibility_only: false
+- producer: audit_action
+  key: fleet.threat_intel.push
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.fleet_threat_intel
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: fleet.threat_intel.push
+    bucket: compliance.activity
+    compatibility_only: false
+- producer: audit_action
   key: gateway-agent-end
   source: internal/audit/actions.go
   event_name_policy: context_optional
