@@ -3598,9 +3598,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// the principal it was enrolled for on a managed gateway, the
 			// gateway's own account on a per-user one. Identity headers the
 			// caller sent stay claims.
-			authenticated = authenticated.WithContext(
-				a.attachACPSubject(PromoteSessionIfAuthenticated(authenticated.Context())),
-			)
+			authenticated = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
 			return
 		}
@@ -3728,7 +3726,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
 			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachACPSubject(PromoteSessionIfAuthenticated(authenticated.Context())))
+				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 				next.ServeHTTP(w, r)
 				return
 			}

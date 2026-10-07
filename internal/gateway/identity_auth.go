@@ -17,7 +17,6 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -76,49 +75,6 @@ func (a *APIServer) attachProcessOwnerSubject(ctx context.Context) context.Conte
 		return ctx
 	}
 	return attachProcessOwner(ctx, a.observabilityV8RuntimeEmitter())
-}
-
-// attachACPSubject binds the verified subject of an authenticated ACP request.
-// On a managed gateway the request presented an enterprise ACP credential:
-// `enterprise acp enroll` issued it for one principal, the gateway keeps the
-// record in its protected state, and only the bearer copy is in that user's
-// private ACP runtime. A uid: or sid: principal is then the verified subject,
-// as the uid or SID a per-user hook credential is bound to; a home:
-// principal names no account and binds none. A per-user gateway binds its
-// process owner (attachProcessOwnerSubject). defenseclaw-acp sends no
-// identity headers, so an X-DefenseClaw-User-* pair stays a claim either way.
-func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
-	credential, ok := acpEnterpriseCredentialFromContext(ctx)
-	if !ok {
-		return a.attachProcessOwnerSubject(ctx)
-	}
-	identity, ok := acpCredentialIdentity(credential.Principal)
-	if !ok || !identityFactsEnabled.Load() {
-		return ctx
-	}
-	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
-	return attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity,
-		sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
-}
-
-// acpCredentialIdentity is the canonical uid or SID of an enterprise ACP
-// credential principal (uid:<n> or sid:<SID>), or false for any other one.
-func acpCredentialIdentity(principal string) (string, bool) {
-	kind, value, ok := strings.Cut(strings.TrimSpace(principal), ":")
-	if !ok {
-		return "", false
-	}
-	identity, ok := connector.CanonicalUserScopedIdentity(value)
-	if !ok {
-		return "", false
-	}
-	switch useridentity.KindForID(identity) {
-	case useridentity.KindPOSIXUID:
-		return identity, kind == "uid"
-	case useridentity.KindWindowsSID:
-		return identity, kind == "sid"
-	}
-	return "", false
 }
 
 // attachProcessOwner is attachProcessOwnerSubject for listeners that do not
