@@ -10510,6 +10510,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         filter_text = (
             f"  [{TOKENS.text_muted}]showing:[/] {self.inventory_model.filter}" if self.inventory_model.filter else ""
         )
+        if (self.inventory_model.active_sub == "ide_plugins"
+                and self.inventory_model.inventory is not None
+                and self.inventory_model.inventory.ide_partial):
+            scan_scope += " · partial installation"
+
         # 8.13: surface the shared connector filter chip (multi-connector
         # installs) so it's explicit which connector's inventory is shown and
         # how to change it. Empty for single-connector installs.
