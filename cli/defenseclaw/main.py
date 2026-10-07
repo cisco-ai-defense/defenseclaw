@@ -302,7 +302,7 @@ def cli(ctx: click.Context) -> None:
                 )
             except cfg_mod.ConfigVersionError as exc:
                 ux.echo(str(exc), err=True)
-                raise SystemExit(1) from exc
+                raise SystemExit(exc.exit_code) from exc
         return
 
     if invoked == "setup":
@@ -315,13 +315,13 @@ def cli(ctx: click.Context) -> None:
             cfg_mod.require_v8_config(allow_missing=True)
         except cfg_mod.ConfigVersionError as exc:
             ux.echo(str(exc), err=True)
-            raise SystemExit(1) from exc
+            raise SystemExit(exc.exit_code) from exc
     elif invoked not in SKIP_AUTO_VALIDATE:
         try:
             cfg_mod.require_v8_config()
         except cfg_mod.ConfigVersionError as exc:
             ux.echo(str(exc), err=True)
-            raise SystemExit(1) from exc
+            raise SystemExit(exc.exit_code) from exc
 
     if invoked == "doctor" and cfg_mod.config_is_empty():
         # An empty config.yaml loads as built-in defaults; judging the install

@@ -483,6 +483,29 @@ func TestLoadAISignaturesPinnedByDigest(t *testing.T) {
 	if seen := load("sha256:"+strings.Repeat("0", 64), false); seen["pinned-ai"] || !seen["dropped-ai"] {
 		t.Fatalf("mismatched pin = %v, want the pinned pack refused", seen)
 	}
+
+	// An apply refuses what the loader would skip, instead of accepting it
+	// with only a log line (GAP-0173); a host that is not managed standalone
+	// is left alone.
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.AIDiscovery.SignaturePacks = []string{pack}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + hex.EncodeToString(sum[:])}
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("matching pin refused: %v", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + strings.Repeat("0", 64)}
+	if err := CheckSignaturePackPins(cfg); err == nil || !strings.Contains(err.Error(), "does not match the pinned") {
+		t.Fatalf("mismatched pin: err = %v, want a refusal naming the mismatch", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = nil
+	if err := CheckSignaturePackPins(cfg); err == nil {
+		t.Fatal("an unpinned pack on a managed standalone host was accepted")
+	}
+	cfg.DeploymentMode = ""
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("an unmanaged host was refused: %v", err)
+	}
 }
 
 func TestConfidencePolicyPinnedByDigest(t *testing.T) {

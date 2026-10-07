@@ -25,42 +25,9 @@ set -u
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 state=/var/lib/defenseclaw-enterprise
 
-# A package downgrade replaces the binaries before the older package's own
-# scripts can refuse it, and the older release cannot read the config_version
-# 9 file this release writes, so its services would fail to start. dpkg runs
-# the installed package's prerm with the version being installed ($2): refuse
-# an older one here, before any file changes, unless the administrator asked
-# for the rollback with the marker (used up by the downgrade it allows). rpm
-# gives the old package's %preun no version and runs it after the new files
-# are in place, so an rpm downgrade cannot be refused from here.
-refuse_downgrade() {
-    incoming=$1
-    [ -n "$incoming" ] && command -v dpkg-query >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1 || return 0
-    installed=$(dpkg-query -W -f='${Version}' defenseclaw-enterprise 2>/dev/null) || return 0
-    [ -n "$installed" ] || return 0
-    # Snapshot builds share a release number; compare the release only.
-    if ! dpkg --compare-versions "$(printf '%s' "$incoming" | sed 's/[-~+].*$//')" lt \
-        "$(printf '%s' "$installed" | sed 's/[-~+].*$//')"; then
-        return 0
-    fi
-    marker=$state/allow-downgrade
-    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
-        rm -f "$marker"
-        return 0
-    fi
-    echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming, because the older release cannot read this release's config_version 9 config." >&2
-    echo "  For a deliberate rollback create the marker first: sudo touch $marker" >&2
-    echo "  then install the older package and finish with: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak" >&2
-    exit 1
-}
-
 case "${1:-}" in
     remove | 0) ;;
-    upgrade)
-        refuse_downgrade "${2:-}"
-        exit 0
-        ;;
-    *) exit 0 ;; # deb deconfigure, rpm upgrade ($1 = 1)
+    *) exit 0 ;; # deb upgrade and deconfigure, rpm upgrade ($1 = 1)
 esac
 
 if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then

@@ -23,6 +23,7 @@ import stat
 
 import pytest
 from defenseclaw import config_writer
+from defenseclaw.config import locked_config_yaml
 from defenseclaw.config_writer import Change
 
 
@@ -130,9 +131,14 @@ def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, mo
     monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
     with pytest.raises(config_writer.ManagedConfigWriteError):
         config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        with locked_config_yaml(path):
+            pass
     with pytest.raises(FileNotFoundError):
         config_writer.read_generation_state(path)
-    # A refusal leaves the lifecycle's folder as it was: every user's hook reads it.
+    # A refusal leaves nothing behind: no lock file (GAP-0171), and the
+    # lifecycle's folder keeps its mode, because every user's hook reads it.
+    assert not os.path.lexists(path + config_writer.LOCK_SUFFIX)
     if os.name != "nt":
         assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
 
@@ -152,6 +158,25 @@ def test_machine_marker_makes_a_standard_users_writers_managed(tmp_path, monkeyp
     with pytest.raises(asset_lists.ManagedDeviceError):
         asset_lists.refuse_if_managed(default_config(), target_type="skill", op=asset_lists.OP_BLOCK, name="x")
     config_writer.apply([Change("guardrail.mode", "action")], config_writer.ACTOR_LIFECYCLE, "t", path=path)
+
+
+def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path, monkeypatch):
+    # GAP-0172: a standard user with no per-user config was sent to init, whose
+    # wizard would create a config the device ignores.
+    from click.testing import CliRunner
+    from defenseclaw import upgrade_shim
+    from defenseclaw.main import cli
+
+    home = tmp_path / ".defenseclaw"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    for argv in (["skill", "block", "x"], ["guardrail", "protection", "enable", "x"], ["setup", "codex", "--yes"], ["init"]):
+        result = CliRunner().invoke(cli, argv)
+        assert result.exit_code == 3, (argv, result.output)
+        assert "This device is managed" in result.output and "run 'defenseclaw init'" not in result.output
+    assert not home.exists()
 
 
 def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
