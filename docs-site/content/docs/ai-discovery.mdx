@@ -386,6 +386,9 @@ Continue installed, and is it switched on?" is one command. The inventory is
 part of the continuous scan and refreshes with every full scan (every five
 minutes by default). Nothing is executed: the scan reads small, bounded
 metadata files only.
+Bundled extensions inside an IDE application, including VS Code built-in GitHub
+Copilot Chat, are not listed. The inventory reads per-user extension data folders.
+
 
 ```text
 $ defenseclaw agent ide-plugins --user alice
