@@ -836,8 +836,12 @@ decider holds the administrator's lists as they were then. Instead:
   pack), every triaged rule is removed.
 
 The feed, the log (`OPENSHELL_PACK_INVALID`) and a degraded health record
-say so once. The credential comes back with a rebuilt decider as soon as
-the policy resolves again.
+say so once. The record says what to do (restore the pack or the
+configuration, or `defenseclaw sandbox delete NAME`), and is a HIGH alert
+only while the sandbox runs: a stopped one gets a MEDIUM record, since
+nothing runs under the policy and its start refuses with the reason. The
+credential comes back with a rebuilt decider as soon as the policy
+resolves again.
 
 ### Request handling
 

@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -157,6 +158,12 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	name, bindingID, skip := b.rec.Name, b.rec.BindingID, b.creating || b.deleted
 	cred, sandboxID := b.cred, scopeID(b.rec.ID, b.rec.Name)
 	id := b.identity()
+	// A sandbox that is not running sends nothing under the policy, and its
+	// start refuses with the reason: its record is no alert (GAP-0160).
+	severity := ""
+	if cmp.Or(b.phase, audit.SandboxPhase(b.rec.Phase)) != audit.SandboxPhaseReady {
+		severity = "MEDIUM"
+	}
 	m.mu.Unlock()
 	if skip {
 		return
@@ -177,8 +184,9 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	m.logf("%s: sandbox %s: its policy cannot be resolved; its egress is blocked until it can: %s",
 		gatewaylog.ErrCodeOpenShellPackInvalid, name, detail)
 	m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
-		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid),
-		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+detail, 512), Timestamp: m.now(),
+		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid), Severity: severity,
+		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+truncate(detail, 320)+". Restore the pack or the configuration, "+
+			"or delete the sandbox: defenseclaw sandbox delete "+name, 512), Timestamp: m.now(),
 	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceProxy,
 		Reason: policyUnresolvedReason, Message: truncate("✗ all web egress: the sandbox policy cannot be resolved ("+detail+
