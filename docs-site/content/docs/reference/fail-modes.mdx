@@ -119,12 +119,11 @@ The fail mode is written to `guardrail.hook_fail_mode` (or the connector's own
 `hook_fail_mode`) in `config.yaml`, and it is also baked into the generated hook
 scripts: each carries a `# defenseclaw-derived: sha256=... fail_mode=closed`
 header. The scripts are derived files, so the command restarts the gateway by
-default to render them again and reconcile native hook state. A gateway
-restart is the one step a running gateway cannot do by hot reload for this
-key; it is on the list of
-[restart-required keys](/docs/reference/cli#restart-required-keys).
-`--no-restart` saves the value but leaves the running hooks on the prior mode
-until the next restart. `guardrail status` reports configured and runtime
+default to render them again and reconcile native hook state. The key is
+not one of the
+[restart-required keys](/docs/reference/cli#restart-required-keys): with
+`--no-restart` the running gateway still reloads the new mode and, with hook
+self-heal on, renders the hook scripts again itself. `guardrail status` reports configured and runtime
 values so that drift is visible, and `defenseclaw doctor` warns with `stale
 generated script (... bakes hook fail mode open; config.yaml says closed)` and
 names the command that renders the scripts again.
