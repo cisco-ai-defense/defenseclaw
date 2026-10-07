@@ -273,6 +273,7 @@ render() {
 import os
 import re
 import sys
+import tempfile
 
 template, out = sys.argv[1:3]
 prefix = "OKTA_KIT_"
@@ -291,9 +292,14 @@ if unknown:
     sys.exit("template placeholders without a value: " + ", ".join(unknown))
 # One pass, so a value that looks like a placeholder is never expanded again.
 body = re.sub(r"@([A-Z_]+)@", lambda m: values[m.group(1)], body)
-fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="ascii") as handle:
-    handle.write(body)
+fd, temporary = tempfile.mkstemp(prefix=".sssd-okta-", dir=os.path.dirname(out) or ".")
+try:
+    with os.fdopen(fd, "w", encoding="ascii") as handle:
+        handle.write(body)
+    os.replace(temporary, out)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 PY
 }
 
