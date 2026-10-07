@@ -52,7 +52,8 @@ type enrolledWatchSet struct {
 	pluginDirs []string
 	// roots maps each watched folder to the connector that owns it.
 	roots map[string]string
-	// mcp is every enrolled user's MCP servers, tagged with the connector.
+	// mcp is every enrolled user's MCP servers, tagged with the connector
+	// and the user home.
 	mcp []config.MCPServerEntry
 	// live is what the running watcher reads; the poller refreshes it.
 	live *enrolledMCPServers
@@ -178,11 +179,15 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 		if wcfg.Plugin.Enabled {
 			add(components["plugin"], seenPlugin, &set.pluginDirs)
 		}
+		// A server is the user's and the connector's: another user's (or
+		// connector's) server with the same name is admitted on its own.
 		for _, entry := range config.ReadUserMCPServersForHome(target.connector, target.home) {
-			if entry.Name == "" || entry.Bundled || seenMCP[entry.Name] {
+			entry.Home = target.home
+			key := watcher.MCPEventPath(entry)
+			if entry.Name == "" || entry.Bundled || seenMCP[key] {
 				continue
 			}
-			seenMCP[entry.Name] = true
+			seenMCP[key] = true
 			set.mcp = append(set.mcp, entry)
 		}
 	}

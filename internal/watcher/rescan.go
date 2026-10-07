@@ -385,7 +385,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		targets = append(targets, InstallEvent{
 			Type:      InstallMCP,
 			Name:      server.Name,
-			Path:      server.Name,
+			Path:      MCPEventPath(server),
 			Connector: server.Connector,
 			Timestamp: time.Now().UTC(),
 		})
@@ -1256,7 +1256,7 @@ func summarizeDrift(deltas []DriftDelta) string {
 func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, error) {
 	switch evt.Type {
 	case InstallMCP:
-		return w.snapshotMCPServer(evt.Name)
+		return w.snapshotMCPServer(evt)
 	default:
 		if _, err := os.Stat(evt.Path); err != nil {
 			return nil, err
@@ -1265,8 +1265,9 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 	}
 }
 
-func (w *InstallWatcher) snapshotMCPServer(name string) (*TargetSnapshot, error) {
-	entry, err := w.lookupMCPServer(name)
+func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, error) {
+	name := evt.Name
+	entry, err := w.lookupMCPServer(evt)
 	if err != nil {
 		return nil, err
 	}
@@ -1292,13 +1293,25 @@ func (w *InstallWatcher) snapshotMCPServer(name string) (*TargetSnapshot, error)
 	return snap, nil
 }
 
-func (w *InstallWatcher) lookupMCPServer(name string) (*config.MCPServerEntry, error) {
+// MCPEventPath is the key of an MCP server in the watcher: its event Path
+// and target snapshot. A server a managed gateway read from a user home is
+// keyed by its name, connector and home, so a second user's server with the
+// same name has its own baseline and admission; any other server is keyed by
+// its name.
+func MCPEventPath(server config.MCPServerEntry) string {
+	if server.Home == "" {
+		return server.Name
+	}
+	return server.Name + "@" + server.Connector + ":" + server.Home
+}
+
+func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEntry, error) {
 	servers, err := w.readMCPServers()
 	if err != nil {
 		return nil, err
 	}
 	for _, server := range servers {
-		if server.Name == name {
+		if server.Name == evt.Name && MCPEventPath(server) == evt.Path {
 			serverCopy := server
 			return &serverCopy, nil
 		}
@@ -1310,7 +1323,7 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 	if evt.Type != InstallMCP {
 		return evt.Path
 	}
-	entry, err := w.lookupMCPServer(evt.Name)
+	entry, err := w.lookupMCPServer(evt)
 	if err != nil {
 		return evt.Name
 	}
