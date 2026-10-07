@@ -840,7 +840,12 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	}
 	warn(m.removeRunConfig(rec.Name))
 	warn(m.removeRunLog(rec.Name))
+	// A discovery that overlaps the release (an on-demand one) ends first,
+	// and none writes the folder again.
+	b.discoverMu.Lock()
+	b.discoveryReleased = true
 	warn(m.removeDiscovery(rec.Name))
+	b.discoverMu.Unlock()
 	if !retained {
 		warn(m.removeRecord(b))
 		m.removeSandboxDir(rec.Name)

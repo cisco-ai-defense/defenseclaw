@@ -98,6 +98,9 @@ type box struct {
 	// (discovery.go); discoverMu serializes its discoveries.
 	observe    *observeRun
 	discoverMu sync.Mutex
+	// discoveryReleased is set, under discoverMu, once cleanup removed the
+	// sandbox's discovery folder: no discovery writes it again.
+	discoveryReleased bool
 	// procs is the sandbox's process tree (processes.go), made once its
 	// process tree is on.
 	procs *procTree

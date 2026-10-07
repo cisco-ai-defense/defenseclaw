@@ -22,10 +22,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -45,11 +48,10 @@ func collectPairs(call openshelltest.ExecCall) [][2]string {
 }
 
 // discoveringEnv is a running manager with AI discovery on and one ready
-// sandbox whose collector answers with an MCP configuration naming
-// dccert-marker, a running claude process and an environment variable name.
+// sandbox whose collector answers discoveryAnswer.
 func discoveringEnv(t *testing.T, name string, edit func(*config.Config)) *harnessEnv {
 	t.Helper()
-	e := liveEnv(t, name, func(c *config.Config) {
+	e := newEnv(t, func(c *config.Config) {
 		c.AIDiscovery.Enabled = true
 		c.AIDiscovery.Mode = "enhanced"
 		c.AIDiscovery.IncludeEnvVarNames = true
@@ -58,20 +60,36 @@ func discoveringEnv(t *testing.T, name string, edit func(*config.Config)) *harne
 			edit(c)
 		}
 	})
-	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		if !isCollect(call) {
-			return openshelltest.ExecResponse{}
-		}
-		lines := []string{"T 100 1700000000", "P 42 1 1000 100 S", "Pc 42 claude", "Pa 42 claude", "V ANTHROPIC_API_KEY"}
-		for _, kv := range collectPairs(call) {
-			if kv[0] == "C" && strings.HasSuffix(kv[1], "/mcp.json") && strings.HasPrefix(kv[1], "/sandbox/") {
-				lines = append(lines, "E f 40 1700000100 "+kv[1], "F "+kv[1], b64(`{"mcpServers":{"dccert-marker":{"command":"true"}}}`))
-				break
-			}
-		}
-		return openshelltest.ExecResponse{Stdout: answerOf(append(lines, collectEnd)...)}
-	})
+	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse { return discoveryAnswer(call) })
+	e.live(sandboxapi.CreateRequest{Name: name})
 	return e
+}
+
+// discoveryAnswer answers a collector call with an MCP configuration naming
+// dccert-marker, a running claude process and an environment variable name.
+func discoveryAnswer(call openshelltest.ExecCall) openshelltest.ExecResponse {
+	if !isCollect(call) {
+		return openshelltest.ExecResponse{}
+	}
+	lines := []string{"T 100 1700000000", "P 42 1 1000 100 S", "Pc 42 claude", "Pa 42 claude", "V ANTHROPIC_API_KEY"}
+	for _, kv := range collectPairs(call) {
+		if kv[0] == "C" && strings.HasSuffix(kv[1], "/mcp.json") && strings.HasPrefix(kv[1], "/sandbox/") {
+			lines = append(lines, "E f 40 1700000100 "+kv[1], "F "+kv[1], b64(`{"mcpServers":{"dccert-marker":{"command":"true"}}}`))
+			break
+		}
+	}
+	return openshelltest.ExecResponse{Stdout: answerOf(append(lines, collectEnd)...)}
+}
+
+// discoverCalls are the discover-mode collector calls made of a sandbox.
+func discoverCalls(e *harnessEnv, name string) []openshelltest.ExecCall {
+	var out []openshelltest.ExecCall
+	for _, c := range e.fake.ExecCalls() {
+		if isCollect(c) && c.Sandbox == name && c.Command[10] == "discover" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func TestDiscoverInventoriesTheSandbox(t *testing.T) {
@@ -110,14 +128,9 @@ func TestDiscoverInventoriesTheSandbox(t *testing.T) {
 		}
 	}
 	// The collector ran in an empty environment, read-only, as asked.
-	var calls []openshelltest.ExecCall
-	for _, c := range e.fake.ExecCalls() {
-		if isCollect(c) && c.Sandbox == "discbox" {
-			calls = append(calls, c)
-		}
-	}
-	if len(calls) == 0 || calls[len(calls)-1].Command[10] != "discover" {
-		t.Fatalf("collector calls = %d", len(calls))
+	calls := discoverCalls(e, "discbox")
+	if len(calls) == 0 {
+		t.Fatal("no collector call")
 	}
 	for _, kv := range collectPairs(calls[len(calls)-1]) {
 		switch kv[0] {
@@ -150,6 +163,46 @@ func TestDiscoverInventoriesTheSandbox(t *testing.T) {
 	e.deleteBox("discbox", sandboxapi.DeleteRequest{})
 	if _, err := os.Stat(e.m.discoveryDir("discbox")); !os.IsNotExist(err) {
 		t.Fatalf("discovery folder after delete: %v", err)
+	}
+}
+
+// A discovery that overlaps a delete leaves nothing of the deleted sandbox:
+// the delete's release waits for it, and none writes after the release.
+func TestDiscoverOverlappingADeleteLeavesNothing(t *testing.T) {
+	e := discoveringEnv(t, "racebox", nil)
+	var armed atomic.Bool
+	deleted := make(chan error, 1)
+	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if isCollect(call) && armed.CompareAndSwap(true, false) {
+			// The delete runs while the sandbox is read: it removes the
+			// sandbox from OpenShell and goes on to release it.
+			go func() {
+				_, err := e.m.Delete(context.Background(), "racebox", sandboxapi.DeleteRequest{})
+				deleted <- err
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, err := e.client.GetSandbox(ctx, "racebox"); openshell.IsNotFound(err) {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		return discoveryAnswer(call)
+	})
+	armed.Store(true)
+	_, _ = e.m.Discover(context.Background(), "racebox")
+	select {
+	case err := <-deleted:
+		if err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("the delete did not end")
+	}
+	if _, err := os.Stat(e.m.discoveryDir("racebox")); !os.IsNotExist(err) {
+		t.Fatalf("the deleted sandbox's discovery folder: %v", err)
 	}
 }
 

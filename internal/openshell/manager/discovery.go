@@ -269,7 +269,9 @@ func (m *Manager) Discover(ctx context.Context, name string) (*sandboxapi.Discov
 
 // discover runs one discovery of a ready sandbox: one collector exec, the
 // tree it answered written under the sandbox's discovery folder, the scan of
-// that tree, and the scan record. Discoveries of a sandbox never overlap.
+// that tree, and the scan record. Discoveries of a sandbox never overlap,
+// and a release of the sandbox (cleanup) waits for the one running: none
+// writes after it.
 func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryResult, error) {
 	b.discoverMu.Lock()
 	defer b.discoverMu.Unlock()
@@ -278,7 +280,7 @@ func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryRe
 	defer cancel()
 	m.mu.Lock()
 	rec := b.rec
-	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
+	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained && !b.discoveryReleased
 	id := b.sandboxID()
 	m.mu.Unlock()
 	if !ready {
