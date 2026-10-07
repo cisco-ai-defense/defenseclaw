@@ -20,9 +20,10 @@
 #      explain`.
 #
 # Exit codes: 0 no check failed (skipped checks do not fail), 1 at least one
-# check failed, 2 bad arguments.
+# check failed, 2 bad arguments. A failed check is counted and the run goes on,
+# so no check command may end the script: each one is tested in an if or with ||.
 
-set -uo pipefail
+set -euo pipefail
 
 SELF=$(basename "$0")
 CFG_RULES=${OKTA_KIT_SSSD_CFG_RULES:-/usr/share/sssd/cfg_rules.ini}

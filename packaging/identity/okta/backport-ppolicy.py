@@ -18,6 +18,9 @@ import os
 import re
 import sys
 
+if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+    print(__doc__)
+    sys.exit(0)
 if not os.path.isfile("src/providers/ldap/ldap_opts.c"):
     sys.exit("run this inside the prepared SSSD 2.9.8 source tree (the folder that holds src/providers)")
 
