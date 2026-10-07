@@ -12651,7 +12651,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return setup_center.task_statuses(self.setup_model)
 
     def _setup_header(self) -> str:
-        """``Setup · 19 tasks ok · 1 needs attention — i readiness checks``.
+        """``Setup · 19 tasks ok · 1 needs attention — i task details``.
 
         Tasks by status (see setup_catalog.task_status), then the ``i`` hint
         when it fits. The count says "tasks": "11 ok — i readiness details"
@@ -12668,7 +12668,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         room = self._body_width() - len("Setup · ")
         plain = " · ".join(text for text, _style in parts)
         tail = next(
-            (tail for tail in (" — i readiness checks", " — i checks", "") if len(plain) + len(tail) <= room),
+            (tail for tail in (" — i task details", " — i details", "") if len(plain) + len(tail) <= room),
             "",
         )
         counts = " · ".join("[" + style + "]" + rich_escape(text) + "[/]" for text, style in parts)

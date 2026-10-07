@@ -232,4 +232,4 @@ async def test_setup_header_counts_tasks_at_80x24(tmp_path) -> None:
         await pilot.pause()
         header = app._setup_header()  # noqa: SLF001
     assert " task ok" in header or " tasks ok" in header
-    assert "readiness details" not in header
+    assert "i task details" in header or "i details" in header
