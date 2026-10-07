@@ -64,6 +64,13 @@ root_tetra() {
     done
 }
 
+# A package handoff must not delete policies under a live reconciler. If
+# systemd cannot stop the helper, keep the names for later cleanup.
+stop_helper_for_cleanup() {
+    [ -d /run/systemd/system ] || return 1
+    systemctl stop defenseclaw-sensor-helper.service >/dev/null 2>&1
+}
+
 # deb_upgrade_handoff NEW_VERSION
 deb_upgrade_handoff() {
     [ -n "${1:-}" ] || return 0
@@ -74,8 +81,9 @@ deb_upgrade_handoff() {
     fi
     # A running helper would load its policies again before the older
     # package's postinstall replaces it.
-    if [ -d /run/systemd/system ]; then
-        systemctl stop defenseclaw-sensor-helper.service >/dev/null 2>&1 || true
+    if ! stop_helper_for_cleanup; then
+        echo "defenseclaw-enterprise: could not stop the sensor helper; recorded Tetragon policies stay for later cleanup" >&2
+        return 0
     fi
     if [ -x "$helper" ] && "$helper" --tetragon-cleanup; then
         return 0
@@ -88,6 +96,10 @@ rpm_upgrade_handoff() {
     names=$(recorded_policies)
     [ -n "$names" ] || return 0
     if [ -x "$helper" ] && "$helper" --tetragon-cleanup --check >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! stop_helper_for_cleanup; then
+        echo "defenseclaw-enterprise: could not stop the sensor helper; recorded Tetragon policies stay for later cleanup" >&2
         return 0
     fi
     tetra=$(root_tetra)
