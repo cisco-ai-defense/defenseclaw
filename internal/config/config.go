@@ -2706,6 +2706,7 @@ func loadConfigSourceChecked(
 		}
 		return nil, err
 	}
+	applySecureClientScannerDefaults(&cfg)
 	if enforceManagedTrust && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
 			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
@@ -3159,6 +3160,20 @@ func normalizeDeploymentMode(mode string) string {
 		return string(DeploymentModeServer)
 	default:
 		return strings.TrimSpace(mode)
+	}
+}
+
+// applySecureClientScannerDefaults preserves the v8 scanner defaults when
+// Secure Client omits these keys. Explicit settings still win.
+func applySecureClientScannerDefaults(cfg *Config) {
+	if !cfg.SecureClientIntegration() {
+		return
+	}
+	if !viper.InConfig("scanners.skill_scanner.use_llm") {
+		cfg.Scanners.SkillScanner.UseLLM = false
+	}
+	if !viper.InConfig("scanners.skill_scanner.policy") {
+		cfg.Scanners.SkillScanner.Policy = "permissive"
 	}
 }
 

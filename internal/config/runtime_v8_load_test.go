@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"gopkg.in/yaml.v3"
 )
@@ -544,5 +546,37 @@ func TestRuntimeV8RejectsAdmissionTool(t *testing.T) {
 	raw := []byte("config_version: 9\nadmission:\n  tool:\n    actions: {medium: block}\nobservability: {}\n")
 	if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err == nil {
 		t.Fatal("admission.tool loaded; want a validation error")
+	}
+}
+
+// Secure Client keeps the origin/main v8 values for omitted skill scanner
+// settings, while an explicit v8 setting remains authoritative.
+func TestSecureClientSkillScannerOmittedDefaults(t *testing.T) {
+	for _, source := range []struct {
+		name, yaml, policy string
+		useLLM             bool
+	}{
+		{"omitted", "scanners: {}", "permissive", false},
+		{"explicit", "scanners: {skill_scanner: {use_llm: true, policy: strict}}", "strict", true},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			viper.SetConfigType("yaml")
+			setDefaults(t.TempDir())
+			if err := viper.ReadConfig(strings.NewReader(source.yaml)); err != nil {
+				t.Fatal(err)
+			}
+			var cfg Config
+			if err := viper.Unmarshal(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.DeploymentMode = "managed_enterprise"
+			cfg.Enterprise.Profile = "secure_client"
+			applySecureClientScannerDefaults(&cfg)
+			if got := cfg.Scanners.SkillScanner; got.UseLLM != source.useLLM || got.Policy != source.policy {
+				t.Fatalf("scanner defaults = use_llm:%t policy:%q, want %t %q", got.UseLLM, got.Policy, source.useLLM, source.policy)
+			}
+		})
 	}
 }
