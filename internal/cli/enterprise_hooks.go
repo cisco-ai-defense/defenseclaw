@@ -2184,6 +2184,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
+	startEnterpriseHookQuarantineRemovals(cmd.Context(), cmd.ErrOrStderr())
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)

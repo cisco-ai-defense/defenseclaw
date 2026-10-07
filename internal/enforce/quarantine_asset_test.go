@@ -8,8 +8,10 @@ package enforce
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAssetQuarantineAndRestorePreserveHashAndOwnership(t *testing.T) {
@@ -191,5 +193,75 @@ func TestAssetRestoreRejectsRelativePathsBeforeFilesystemMutation(t *testing.T) 
 	}
 	if _, err := os.Lstat(restorePath); !os.IsNotExist(err) {
 		t.Fatalf("relative restore plan created destination: %v", err)
+	}
+}
+
+// GAP-0202: a source the process may only read (a managed Windows gateway in
+// an enrolled user's folder) is removed by the hook guardian on request, and
+// the guardian refuses a source outside the watched folders.
+func TestQuarantineSourceTheProcessMayNotDeleteIsRemovedByTheGuardian(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the test process may not delete in")
+	}
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "user", "skills")
+	quarantineRoot := filepath.Join(root, "quarantine")
+	source := filepath.Join(skillsRoot, "bad-skill")
+	if err := os.MkdirAll(skillsRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("marker\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := NewAssetQuarantinePlan(quarantineRoot, []string{skillsRoot}, "skill", "bad-skill", "claudecode", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(skillsRoot, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsRoot, 0o755) })
+	channel := QuarantineRemovalChannelFor(filepath.Join(root, "data"), filepath.Join(root, "guardian"))
+	SetQuarantineSourceRemover(channel.Remover(10 * time.Second))
+	t.Cleanup(func() { SetQuarantineSourceRemover(nil) })
+	refused := make(chan error, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			channel.ServeOnce(func(request QuarantineRemovalRequest) error {
+				outside := request
+				outside.SourcePath = filepath.Join(root, "elsewhere", "bad-skill")
+				_, _, err := VerifyQuarantineRemoval(outside, []string{skillsRoot}, quarantineRoot)
+				select {
+				case refused <- err:
+				default:
+				}
+				found, _, err := VerifyQuarantineRemoval(request, []string{skillsRoot}, quarantineRoot)
+				if err != nil {
+					return err
+				}
+				_ = os.Chmod(skillsRoot, 0o755)
+				return os.Remove(found)
+			})
+		}
+	}()
+
+	if err := ExecuteAssetQuarantine(plan, "rec-gap0202"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Fatalf("source still present: %v", err)
+	}
+	if err := requireAssetHash(plan.QuarantinePath, plan.ContentHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-refused; err == nil {
+		t.Fatal("the guardian accepted a source outside the watched folders")
 	}
 }

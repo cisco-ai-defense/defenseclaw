@@ -68,7 +68,7 @@ The four services:
 | --- | --- | --- |
 | `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway`, with `SeChangeNotifyPrivilege` only | Runs the policy engine and the hook API on `127.0.0.1:18970` |
 | `DefenseClawSensorHelper` | LocalSystem, with `SeChangeNotifyPrivilege` only | Answers the gateway's fixed AI Discovery requests |
-| `DefenseClawHookGuardian` | LocalSystem, with a fixed privilege list | Writes and repairs each enrolled user's hook registrations, using that user's token |
+| `DefenseClawHookGuardian` | LocalSystem, with a fixed privilege list | Writes and repairs each enrolled user's hook registrations, and removes a quarantined skill or plugin from a user's folder, using that user's token |
 | `DefenseClawHookEnumerator` | LocalSystem, with the same privilege list | Finds eligible profiles (local, domain and Microsoft Entra ID accounts) and writes the target manifest |
 
 The Service Control Manager restarts each service after a failure.
@@ -584,6 +584,12 @@ per-user install:
 - A verdict at a level whose `admission.<type>.actions` value is `block`
   blocks the asset. Its folder stays where the user put it
   (`file_action=none` in the audit row).
+- A verdict whose action is `quarantine` moves the skill or plugin out of the
+  user's folder, as on a per-user install. The gateway service may only read
+  user folders, so it copies the folder to
+  `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine` and the hook
+  guardian removes the original as that user, after checking that it is in a
+  watched folder and matches the copy.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
   user adds goes through admission within about 30 seconds, also while a

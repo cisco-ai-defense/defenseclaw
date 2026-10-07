@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -3295,6 +3296,10 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 }
 
+// guardianQuarantineRemovalTimeout bounds the wait for the hook guardian to
+// remove a quarantined source in an enrolled user's folder.
+const guardianQuarantineRemovalTimeout = 30 * time.Second
+
 // runWatcherOnce runs one watcher until ctx ends, or until a managed
 // gateway's set of enrolled users' folders changes (restart is then true).
 func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) {
@@ -3334,6 +3339,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		if watcherUsesEnrolledUserDirs(cfg) {
 			set := resolveEnrolledWatchSet(cfg, reg, wcfg, serviceHomeDir())
 			enrolled = &set
+			// The service reads the users' folders but may not delete in
+			// them: the hook guardian removes a quarantined source (GAP-0202).
+			enforce.SetQuarantineSourceRemover(enforce.QuarantineRemovalChannelFor(
+				cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir),
+			).Remover(guardianQuarantineRemovalTimeout))
 			if src.Skill != watcherDirsFromConfig {
 				skillDirs = set.skillDirs
 			}

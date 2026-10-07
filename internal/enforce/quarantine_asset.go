@@ -149,7 +149,7 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 		if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 			return fmt.Errorf("enforce: source changed during quarantine recovery: %w", err)
 		}
-		return removeAssetPath(plan.SourcePath, plan.SourceRoot)
+		return removeQuarantinedSource(plan, recordID)
 	}
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 		return fmt.Errorf("enforce: source changed before quarantine: %w", err)
@@ -191,7 +191,7 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 		return fmt.Errorf("enforce: source changed during quarantine: %w", err)
 	}
-	if err := removeAssetPath(plan.SourcePath, plan.SourceRoot); err != nil {
+	if err := removeQuarantinedSource(plan, recordID); err != nil {
 		return fmt.Errorf("enforce: remove quarantined source: %w", err)
 	}
 	return nil
