@@ -338,7 +338,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if r.Class == ocsf.ClassHTTP {
 			ev.Scheme = schemeOf(r.URL)
 		}
-		m.tel.RecordSandboxEgress(ctx, ev)
+		if !m.connectionRequest(b, r, host, at) {
+			m.tel.RecordSandboxEgress(ctx, ev)
+		}
 		if r.Denied() && !quiet {
 			m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
 				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
@@ -368,6 +370,68 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
 			Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
 	}
+}
+
+// l7Window bounds how long after OpenShell allowed a connection the first
+// request it inspected on it may come; maxOpenConns bounds the connections
+// a sandbox has awaiting one.
+const (
+	l7Window     = 5 * time.Second
+	maxOpenConns = 256
+)
+
+// openConns are OpenShell's allowed connections to one host and port whose
+// first inspected request has not come yet.
+type openConns struct {
+	at      time.Time
+	pending int
+}
+
+// connectionRequest reports an allowed OpenShell HTTP record that is the
+// first request on a connection whose NET record was already recorded.
+// OpenShell reports an allowed connection (NET, naming the process) and
+// then each HTTP request it inspects on it, so recording both made one
+// plain request two egress records (GAP-0093). Each later request on the
+// connection is a record of its own, and so is every denied one. It notes
+// an allowed NET open and returns false for it.
+func (m *Manager) connectionRequest(b *box, r ocsf.Record, host string, at time.Time) bool {
+	open := r.Class == ocsf.ClassNetwork && strings.EqualFold(r.Activity, "OPEN")
+	if !r.Allowed() || (!open && r.Class != ocsf.ClassHTTP) {
+		return false
+	}
+	key := host + ":" + strconv.Itoa(r.Port)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o := b.opens[key]
+	if !open {
+		if o == nil || o.pending == 0 || at.Sub(o.at) > l7Window {
+			return false
+		}
+		o.pending--
+		return true
+	}
+	if o == nil {
+		if len(b.opens) >= maxOpenConns {
+			for k, v := range b.opens {
+				if at.Sub(v.at) > l7Window {
+					delete(b.opens, k)
+				}
+			}
+			if len(b.opens) >= maxOpenConns {
+				return false
+			}
+		}
+		if b.opens == nil {
+			b.opens = map[string]*openConns{}
+		}
+		o = &openConns{}
+		b.opens[key] = o
+	} else if at.Sub(o.at) > l7Window {
+		o.pending = 0
+	}
+	o.at = at
+	o.pending++
+	return false
 }
 
 // dnsRefusal reports OpenShell's refusal of a name lookup ("NET:REFUSE …

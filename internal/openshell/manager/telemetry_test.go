@@ -251,6 +251,29 @@ func TestOCSFActivityRecords(t *testing.T) {
 	}
 }
 
+// OpenShell reports an allowed connection and then each HTTP request it
+// inspects on it: the connection and its first request are one egress
+// record, a later request on it another (GAP-0093).
+func TestAnInspectedConnectionIsOneEgressRecord(t *testing.T) {
+	e := liveEnv(t, "l7box", nil)
+	now := time.Now()
+	for _, line := range []string{
+		"NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> host.openshell.internal:8080/tcp [policy:allow_host_openshell_internal_8080 engine:opa]",
+		"HTTP:GET [INFO] ALLOWED GET http://host.openshell.internal:8080/ [policy:allow_host_openshell_internal_8080 engine:l7]",
+		"NET:OPEN [INFO] ALLOWED /usr/bin/curl(10) -> api.github.com:443/tcp [policy:allow_github engine:opa]",
+		"HTTP:GET [INFO] ALLOWED GET http://api.github.com:443/zen [policy:allow_github engine:l7]",
+		"HTTP:GET [INFO] ALLOWED GET http://api.github.com:443/octocat [policy:allow_github engine:l7]",
+	} {
+		e.ocsf("l7box", line, now)
+	}
+	count := func(host string) int {
+		return len(where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == host }))
+	}
+	if hp, gh := count(openshellHostAlias), count("api.github.com"); hp != 1 || gh != 2 {
+		t.Fatalf("egress records: host port %d (want 1), api.github.com %d (want 2)", hp, gh)
+	}
+}
+
 // An allowed connection to a host port other than DefenseClaw's own is an
 // allowed egress record and a destination.
 func TestAllowedHostPortConnectionsAreRecorded(t *testing.T) {

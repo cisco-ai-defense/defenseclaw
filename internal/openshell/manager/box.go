@@ -128,6 +128,9 @@ type box struct {
 	// closedPorts are the undeclared host ports whose denial the feed
 	// explained this session (hostPortDenied).
 	closedPorts map[int]bool
+	// opens are OpenShell's allowed connections awaiting their first
+	// inspected request, by host:port (connectionRequest).
+	opens map[string]*openConns
 	// blockedRequests counts the connections OpenShell refused (the
 	// DefenseClaw proxy counts its own refusals), and blockedHosts the
 	// destinations they were to, as the feed names them (noteBlocked).
@@ -304,7 +307,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// a session for silent hooks stops the next one too while they stay
 		// silent.
 		b.silentSince, b.silenceSent = time.Time{}, false
-		b.closedPorts = nil
+		b.closedPorts, b.opens = nil, nil
 		// The new session's hooks name its session.
 		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {

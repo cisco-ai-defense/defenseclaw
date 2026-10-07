@@ -127,11 +127,13 @@ func (m *Manager) hostPortAllowed(ctx context.Context, b *box, r ocsf.Record, at
 	m.mu.Lock()
 	id := b.identity()
 	m.mu.Unlock()
-	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
-		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: r.Port,
-		DecisionCode: "SANDBOX_EGRESS_ALLOWED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
-		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
-	})
+	if !m.connectionRequest(b, r, openshellHostAlias, at) {
+		m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: r.Port,
+			DecisionCode: "SANDBOX_EGRESS_ALLOWED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
+			PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+		})
+	}
 	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: r.Port, at: at, rule: r.Policy,
 		binary: r.Binary, pid: ocsfPID(r)})
 }

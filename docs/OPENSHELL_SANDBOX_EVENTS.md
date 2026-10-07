@@ -127,9 +127,13 @@ network boundary (`openshell`). It carries the destination as
 dialed address (`defenseclaw.network.resolved_ip`), `url.scheme` when known,
 `defenseclaw.network.decision` (`allow` or `block`) with `.blocked`, a stable
 `.decision_code`, a bounded `.reason`, and the source policy summary
-(`.policy_outcome`). Only OpenShell's HTTP events can add the origin-form
-path of a plain-HTTP request (`defenseclaw.network.target_path`); the
-DefenseClaw proxy never records URL paths. Blocked decisions default to
+(`.policy_outcome`). OpenShell reports an allowed connection (naming the
+process) and then each HTTP request it inspects on it: the connection and
+its first request are one record, each later request on it a record of its
+own, and every denied request is recorded. Only OpenShell's HTTP events can
+add the origin-form path of a plain-HTTP request
+(`defenseclaw.network.target_path`); the DefenseClaw proxy never records
+URL paths. Blocked decisions default to
 MEDIUM, allowed ones to INFO. Each record also increments
 `defenseclaw.egress.events`.
 
