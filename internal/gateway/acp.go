@@ -588,43 +588,49 @@ func acpEnterpriseCredentialFromContext(ctx context.Context) (acp.EnterpriseCred
 // its protected state and only the bearer copy is in that user's private
 // ACP runtime, so presenting it proves the account as a per-user hook
 // credential does (GAP-0200, GAP-0206). A home: principal names no account
-// and binds none. A per-user gateway's caller is its own account. Under
-// the Secure Client integration identity facts are off and nothing is bound.
+// and binds none: the user the caller claimed is dropped too, so its records
+// name no one. A per-user gateway's caller is its own account. Under the
+// Secure Client integration identity facts are off and nothing changes.
 func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
 	ctx = PromoteSessionIfAuthenticated(ctx)
 	credential, enrolled := acpEnterpriseCredentialFromContext(ctx)
 	if !enrolled {
 		return a.attachProcessOwnerSubject(ctx)
 	}
-	identity := acpPrincipalIdentity(credential.Principal)
-	if identity == "" || !identityFactsEnabled.Load() {
+	if !identityFactsEnabled.Load() {
 		return ctx
+	}
+	identity := acpPrincipalIdentity(credential.Principal)
+	if identity == "" {
+		claimed := AgentIdentityFromContext(ctx)
+		claimed.UserID, claimed.UserIDKind, claimed.UserName = "", "", ""
+		return ContextWithAgentIdentity(ctx, claimed)
 	}
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
 	return attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity,
 		sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
 }
 
-// acpPrincipalIdentity is the canonical uid or SID of an enrollment
-// principal (uid:1001, sid:S-1-5-21-...), or "" for any other one, such as
-// the home-directory fallback, which names no account.
+// acpPrincipalIdentity is the canonical account of an enrollment principal
+// in this platform's kind: a uid (uid:1001) on Linux and macOS, a SID
+// (sid:S-1-5-21-...) on Windows. Those are the accounts enrollment proves
+// own the home the bearer is published to. Any other principal, such as the
+// home-directory fallback or the other platform's kind, names no account
+// and gives "".
 func acpPrincipalIdentity(principal string) string {
 	kind, value, _ := strings.Cut(strings.TrimSpace(principal), ":")
 	identity, ok := connector.CanonicalUserScopedIdentity(value)
 	if !ok {
 		return ""
 	}
-	switch useridentity.KindForID(identity) {
-	case useridentity.KindPOSIXUID:
-		if kind == "uid" {
-			return identity
-		}
-	case useridentity.KindWindowsSID:
-		if kind == "sid" {
-			return identity
-		}
+	want, wantKind := "uid", useridentity.KindPOSIXUID
+	if runtime.GOOS == "windows" {
+		want, wantKind = "sid", useridentity.KindWindowsSID
 	}
-	return ""
+	if kind != want || useridentity.KindForID(identity) != wantKind {
+		return ""
+	}
+	return identity
 }
 
 // authenticateACPToken applies different custody models without widening the
