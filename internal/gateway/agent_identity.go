@@ -374,6 +374,12 @@ func agentIdentityIDForSession(ctx context.Context, identity AgentIdentity, sess
 	if identity.IdentityID != "" {
 		return identity.IdentityID
 	}
+	// A session id is caller supplied. The registry has no verified owner
+	// mapping for a session-only join, so a shared gateway cannot attribute
+	// its hook identity to another request by that id alone.
+	if serviceAccountGatewayFromContext(ctx) || gatewayRunsAsServiceAccount() {
+		return ""
+	}
 	reg := SharedAgentRegistry()
 	if reg == nil {
 		return ""
