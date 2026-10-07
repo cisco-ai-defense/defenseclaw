@@ -27,9 +27,9 @@ import (
 
 // TestCopilotVSCodeLocalAndManagedSettings covers the per-user Local hook
 // file and plugin (written, recognized as DefenseClaw's by the guard) and
-// the managed-settings keys (plugin enabled,
-// the managed-only lock only once its gate passes, removal keeping the
-// administrator's keys).
+// the managed-settings keys (plugin enabled and the managed-only lock only
+// while a VS Code in the plugin store window is installed, removal keeping
+// the administrator's keys).
 func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 	home := t.TempDir()
 	ensure := func(hookFile, plugin bool) CopilotVSCodeUserResult {
@@ -69,13 +69,21 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 		}
 		return readFile(t, settings)
 	}
-	if got := reconcile(); !strings.Contains(got, CopilotPluginKey) || strings.Contains(got, copilotSettingHooksOnly) {
-		t.Fatalf("without a VS Code in the lock window: %s", got)
+	// No VS Code reads the plugin, and the Copilot CLI reads this file too
+	// and waits on a marketplace it does not know (GAP-0192): no keys.
+	if got := reconcile(); strings.Contains(got, CopilotPluginKey) || strings.Contains(got, copilotSettingHooksOnly) {
+		t.Fatalf("without a VS Code in the plugin store window: %s", got)
 	}
 	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
-	if got := reconcile(); !strings.Contains(got, copilotSettingHooksOnly) || !strings.Contains(got, `"admin"`) {
-		t.Fatalf("lock not set once the gate passed: %s", got)
+	if got := reconcile(); !strings.Contains(got, CopilotPluginKey) || !strings.Contains(got, copilotSettingHooksOnly) || !strings.Contains(got, `"admin"`) {
+		t.Fatalf("keys not set once the gate passed: %s", got)
 	}
+	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.141.0"}`)
+	if got := reconcile(); strings.Contains(got, CopilotPluginKey) || strings.Contains(got, copilotSettingHooksOnly) || !strings.Contains(got, `"admin"`) {
+		t.Fatalf("keys left after VS Code left the window: %s", got)
+	}
+	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
+	reconcile()
 	if err := removeCopilotManagedSettings(opts, &State{}); err != nil {
 		t.Fatal(err)
 	}

@@ -351,6 +351,50 @@ func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 	}
 }
 
+// A managed ACP request is attributed to the account its enrollment
+// credential belongs to (uid:N, sid:S-...), so its decision records carry the
+// verified user and agent identity; only a per-user gateway's did before
+// (GAP-0206). The home-directory fallback principal names no account.
+func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
+	}
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	dataDir := t.TempDir()
+	credential, err := acp.EnsureEnterpriseCredential(dataDir, "uid:501", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "managed_enterprise")}
+	var subject VerifiedSubject
+	var attached bool
+	server := httptest.NewServer(api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/acp/evaluate" {
+			subject, attached = verifiedSubjectFromContext(r.Context())
+			api.handleACPEvaluate(w, r)
+			return
+		}
+		api.handleACPChallenge(w, r)
+	}))))
+	defer server.Close()
+	evaluator, err := acp.NewHTTPEvaluator(server.URL, credential.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err != nil {
+		t.Fatal(err)
+	}
+	if !attached || subject.UserID != "501" || subject.Source != subjectSourceUserCredential {
+		t.Fatalf("verified subject = %+v (attached %v), want uid 501 from the enrollment credential", subject, attached)
+	}
+	for principal, want := range map[string]string{"uid:7": "7", "sid:S-1-5-21-1-2-3-1001": "S-1-5-21-1-2-3-1001", "home:abc": "", "uid:x": ""} {
+		if got := acpPrincipalIdentity(principal); got != want {
+			t.Fatalf("acpPrincipalIdentity(%q) = %q, want %q", principal, got, want)
+		}
+	}
+}
+
 func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
 	return api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
