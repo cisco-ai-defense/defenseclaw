@@ -112,6 +112,11 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 	if err != nil {
 		return fmt.Errorf("scan %s: %w", kind, err)
 	}
+	// A scan carries both gateway token headers. Check the configured listener
+	// before sending either header, as policy reload does.
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		return fmt.Errorf("scan %s: %s; the gateway token was not sent. %s", kind, problem, foreignGatewayListenerFix(cfg))
+	}
 	body, _ := json.Marshal(map[string]string{"target": target})
 	request, err := http.NewRequest(http.MethodPost, base+"/v1/"+kind+"/scan", bytes.NewReader(body))
 	if err != nil {
@@ -121,7 +126,10 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 	request.Header.Set("X-DefenseClaw-Client", "cli")
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-DefenseClaw-Token", token)
-	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
+	response, err := (&http.Client{
+		Timeout:       5 * time.Minute,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}).Do(request)
 	if err != nil {
 		return fmt.Errorf("scan %s: the gateway at %s did not answer: %w", kind, base, err)
 	}
