@@ -1025,7 +1025,6 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
         # holds it ("$.no.such", not "$").
         parts += _first_unexpected_key(error)
     path = _json_path(parts)
-    label = "v9" if v9 else "v8"
     action = {
         "additionalProperties": "remove unsupported fields; see the configuration reference",
         "const": "use the exact value from the configuration reference",
