@@ -9016,6 +9016,23 @@ def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
     _emit("skip", label, "no regional provider in use", r=r)
 
 
+def _check_ignored_dotenv_keys(cfg, r: _DoctorResult) -> None:
+    """WARN for a .env line that sets a variable .env may not set (GAP-0387)."""
+    from defenseclaw.config import ignored_dotenv_control_keys
+
+    keys = ignored_dotenv_control_keys(cfg.data_dir)
+    if not keys:
+        return
+    env_path = os.path.join(cfg.data_dir, ".env")
+    _emit(
+        "warn",
+        ".env",
+        f"{env_path} sets variable(s) DefenseClaw does not read from .env: {'; '.join(keys)}",
+        r=r,
+        remediation=f"Do as each one says, then remove those lines from {env_path}",
+    )
+
+
 def _short_policy_digest(digest: str) -> str:
     """``sha256:`` plus the first 12 hex digits, as status and the TUI show it."""
     return digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
@@ -10886,6 +10903,7 @@ def doctor(
 
     r.set_section("configuration")
     _check_config(cfg, r)
+    _check_ignored_dotenv_keys(cfg, r)
     _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
