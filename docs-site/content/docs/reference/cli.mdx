@@ -296,7 +296,11 @@ defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 ```
 
 The prompt warns that earlier pairings cannot be recovered. Doctor refuses
-`--yes`, an existing key, and any sign that an earlier key might still exist.
+`--yes` and an existing key. When only `device.key` was deleted and its
+provenance files (`device.key.provenance`, `device.provenance.secret`) remain,
+restore the key from a backup if you have one; otherwise the same repair names
+those files, asks first, moves them aside as `*.orphaned-<time>` and mints a
+new key.
 
 **Versions.** An unsupported or untested connector version is a health
 finding, listed as `doctor.connector.compatibility.review` in the repair plan

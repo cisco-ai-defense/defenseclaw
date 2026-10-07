@@ -1064,3 +1064,27 @@ def test_device_identity_requires_explicit_attended_repair(tmp_path) -> None:
     cmd_doctor._check_device_identity(cfg, repaired_health)
     assert repaired_health.checks[-1]["status"] == "pass"
     assert repaired_health.checks[-1]["reason_code"] == "device-key-provenance-valid"
+
+
+def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_path) -> None:
+    # GAP-0323: only device.key was deleted; its provenance files remain.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    attended = (
+        patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value=""),
+        patch("click.confirm", return_value=True),
+    )
+    with attended[0], attended[1]:
+        assert cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)[0] == "pass"
+    os.remove(cfg.gateway.device_key_file)
+
+    health = _DoctorResult()
+    cmd_doctor._check_device_identity(cfg, health)
+    assert "doctor.identity.device-key.initialize" in health.checks[-1]["remediation"]
+    with attended[0], attended[1]:
+        tag, detail = cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)
+    assert tag == "pass", detail
+    status = inspect_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir).status
+    assert status is DeviceKeyHealthStatus.VALID
+    kept = [name for _root, _dirs, files in os.walk(data_dir) for name in files if ".orphaned-" in name]
+    assert len(kept) == 2, kept
