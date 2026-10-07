@@ -662,7 +662,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				if w.onAdmit != nil {
 					w.onAdmit(res)
 				}
-				w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
+				if !res.Interrupted {
+					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
+				}
 				return rescanScanned
 			}
 			if w.admitsAtStartup(evt) {
@@ -673,7 +675,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				if w.onAdmit != nil {
 					w.onAdmit(res)
 				}
-				if _, statErr := os.Lstat(evt.Path); statErr == nil {
+				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
 					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)

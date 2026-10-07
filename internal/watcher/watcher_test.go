@@ -1219,3 +1219,40 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 		}
 	})
 }
+
+// blockingScanner waits until its scan context ends and reports that.
+type blockingScanner struct{ countingScanner }
+
+func (s *blockingScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// GAP-0335: a watcher restart (config reload) or a gateway stop cancels the
+// watcher's context; the in-flight install scan failed closed as a scanner
+// failure and quarantined a clean skill. A scan that times out still does.
+func TestScanCutOffByTheWatcherStoppingDoesNotQuarantine(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &blockingScanner{} }
+	skillPath := filepath.Join(skillDir, "slow-scan")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	evt := InstallEvent{Type: InstallSkill, Name: "slow-scan", Path: skillPath, Timestamp: time.Now()}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	res := w.runAdmission(ctx, evt)
+	if !res.Interrupted || res.Verdict == VerdictBlocked {
+		t.Fatalf("watcher stop: result %+v, want interrupted and not blocked", res)
+	}
+	if _, err := os.Lstat(skillPath); err != nil {
+		t.Fatalf("watcher stop quarantined the skill: %v", err)
+	}
+
+	cfg.Scanners.SkillScanner.Timeouts.ScanS = 1
+	res = w.runAdmission(context.Background(), evt)
+	if res.Interrupted || res.Verdict != VerdictBlocked {
+		t.Fatalf("scan timeout: result %+v, want blocked (fail-closed)", res)
+	}
+}

@@ -96,6 +96,9 @@ type AdmissionResult struct {
 	// ScanID is the scan_results row admission recorded, or "" when no
 	// scan was logged. It becomes the rescan baseline's scan (GAP-2507).
 	ScanID string
+	// Interrupted is a scan the watcher's own stop cut off: nothing was
+	// decided, no baseline is kept, and the next start admits the asset.
+	Interrupted bool
 }
 
 // OnAdmission is called after each install event is processed.
@@ -340,7 +343,9 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 				if w.onAdmit != nil {
 					w.onAdmit(res)
 				}
-				w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
+				if !res.Interrupted {
+					w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
+				}
 			}
 		}
 		w.mcpMu.Unlock()
@@ -961,6 +966,21 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 	if err == nil && !w.secureClientActive() {
 		err = scanner.JudgeFailure(result)
+	}
+	if err != nil && ctx.Err() != nil && !w.secureClientActive() {
+		// The watcher itself is stopping (a config reload restarts it, or
+		// the gateway stops), not the scanner failing: the scan was cut off
+		// with nothing known about the asset. It is not blocked, and with no
+		// baseline the next start admits it (GAP-0335). A scan that times
+		// out or fails while the watcher runs still fails closed below.
+		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
+			fmt.Sprintf("type=%s scanner=%s error=interrupted: the watcher is stopping", targetType, s.Name()))
+		fmt.Fprintf(os.Stderr, "[watch] %s %s: scan interrupted because the watcher is stopping; the next start admits it\n",
+			evt.Type, evt.Name)
+		w.recordAdmission(ctx, "scan-error", targetType)
+		res = AdmissionResult{Event: evt, Verdict: VerdictScanError, Interrupted: true,
+			Reason: "scan interrupted: the watcher is stopping; the next start admits it"}
+		return res
 	}
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
