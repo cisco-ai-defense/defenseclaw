@@ -66,8 +66,6 @@ VLLM_SERVE_HINT = (
     "--structured-outputs-config '{\"backend\": \"xgrammar\", \"disable_any_whitespace\": true}'"
 )
 
-_SEVERITY_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
-
 # DefenseClaw provider names the scanner reaches through its
 # openai-compatible route (a base URL and the served model name).
 OPENAI_COMPATIBLE_PROVIDERS = frozenset(
@@ -118,26 +116,6 @@ def virustotal_key_env(sc: Any) -> str:
         or (getattr(sc, "virustotal_api_key_env", "") or "").strip()
         or "VIRUSTOTAL_API_KEY"
     )
-
-
-def derived_admission_actions(sc: Any) -> dict[str, str]:
-    """admission.skill.actions when unset: derived from the scanner gate.
-
-    Severities at or above fail_on_severity quarantine, the review band
-    [review_queue_min, fail_on_severity) warns, and anything below is
-    allowed. An explicit admission.skill.actions wins.
-    """
-    gate = _SEVERITY_RANK[effective_fail_on_severity(sc)]
-    review = _SEVERITY_RANK[effective_review_queue_min(sc)]
-    out: dict[str, str] = {}
-    for severity, rank in _SEVERITY_RANK.items():
-        if rank >= gate:
-            out[severity.lower()] = "quarantine"
-        elif rank >= review:
-            out[severity.lower()] = "warn"
-        else:
-            out[severity.lower()] = "allow"
-    return out
 
 
 def normalize_mcp_analyzers(raw: Any) -> list[str]:

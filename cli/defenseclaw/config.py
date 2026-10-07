@@ -3704,11 +3704,6 @@ def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> No
     This maps them the way the Go migration does; it goes away as each caller
     moves to the v9 key.
     """
-    watch = merged.get("watch")
-    if isinstance(watch, dict):
-        watch.pop("allow_list_bypass_scan", None)
-        if not watch:
-            merged.pop("watch")
     guardrail = merged.get("guardrail")
     if isinstance(guardrail, dict):
         scopes = [guardrail]
