@@ -49,6 +49,15 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	}
 	result.Enrollment.Pending = 4
 
+	// GAP-0223: a deployment that enrolled nobody for Codex, Claude Code or
+	// Cursor names that, not a guardian log that names no cause.
+	empty := &enterprisestatus.Result{Readiness: enterprisestatus.Readiness{Guardian: true}}
+	addEnterpriseSecurityIncompleteReasons(empty, false)
+	if message := empty.Warnings[0].Message; !strings.Contains(message, "no account is enrolled for Codex, Claude Code or Cursor") ||
+		strings.Contains(message, "guardian log") {
+		t.Fatalf("no enabled target, message = %q", message)
+	}
+
 	result.SecurityComplete = true
 	result.Warnings = nil
 	addEnterpriseSecurityIncompleteReasons(result, false)

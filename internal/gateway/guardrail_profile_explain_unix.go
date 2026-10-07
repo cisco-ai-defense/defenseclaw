@@ -21,7 +21,7 @@ const profileExplainLookupTimeout = 10 * time.Second
 // resolver the hook path uses: NSS on Linux, so directory accounts resolve
 // even where os/user reads only the local files, and Open Directory on macOS,
 // which has no getent.
-var profileExplainAccount = func(name string) (id, userName string, ok bool) {
+var profileExplainAccount = func(name string) (id, userName string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
 	resolver := unixidentity.Default(ctx)
@@ -29,13 +29,19 @@ var profileExplainAccount = func(name string) (id, userName string, ok bool) {
 	if err != nil {
 		uid, convErr := strconv.Atoi(name)
 		if convErr != nil {
-			return "", "", false
+			return "", "", err
 		}
 		if account, err = resolver.LookupUID(uid); err != nil {
-			return "", "", false
+			return "", "", err
 		}
 	}
-	return strconv.Itoa(account.UID), sanitizeLLMEventUser(account.Name), true
+	return strconv.Itoa(account.UID), sanitizeLLMEventUser(account.Name), nil
+}
+
+// profileExplainUnresolved resolves an account the platform resolver cannot
+// name through the OS account database (os/user), with its error.
+func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
+	return lookupLocalProfileSubject(name)
 }
 
 // profileExplainDirectoryFacts resolves the facts a verified request from
