@@ -52,16 +52,16 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 
 	entra := resolveWindowsDirectoryFacts(reader, entraSID, nil, now)
 	if entra.Directory != DirectoryEntraID || entra.UPN != "alice@contoso.com" || entra.TenantID != tenant ||
-		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified {
+		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified || entra.AccountDomain != "AzureAD" {
 		t.Fatalf("entra facts = %+v", entra)
 	}
 	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string) string { return "ignored@corp.example.com" }, now)
 	if hybrid.Directory != DirectoryActiveDirectory || hybrid.Domain != "corp.example.com" || hybrid.Realm != "CORP.EXAMPLE.COM" ||
-		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant {
+		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" {
 		t.Fatalf("hybrid AD facts = %+v", hybrid)
 	}
 	local := resolveWindowsDirectoryFacts(reader, localSID, nil, now)
-	if local.Directory != DirectoryLocal || local.Principal != "" || local.UPN != "" {
+	if local.Directory != DirectoryLocal || local.Principal != "" || local.UPN != "" || local.AccountDomain != "WS01" {
 		t.Fatalf("local facts = %+v", local)
 	}
 }

@@ -58,8 +58,9 @@ type profileSubject struct {
 	UPN       string
 	// Directory and Domain say where the account lives (explain's short-name
 	// note); an empty Domain is an account the host knows by a bare name.
-	Directory useridentity.Directory
-	Domain    string
+	Directory     useridentity.Directory
+	Domain        string
+	AccountDomain string
 	// Groups are verified directory group names and SIDs.
 	Groups []string
 	// LookupFailed is set when the directory lookup for this subject failed
@@ -552,7 +553,7 @@ var processOwnerProfileSubject = func() (profileSubject, bool) {
 			return profileSubjectFromVerified(VerifiedSubject{
 				UserID: id, IDKind: useridentity.KindForID(id), UserName: name,
 				Directory: facts, Source: subjectSourceProcessOwner,
-			}, true), true
+			}, identityLookupBlocking.Load()), true
 		}
 	}
 	return processOwnerAccountSubject()
@@ -579,16 +580,25 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // build their subject through this function, so a users entry cannot match
 // one and not the other (GAP-0182).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
+	accountDomain := s.Directory.AccountDomain
+	if accountDomain == "" {
+		if domain, _, qualified := strings.Cut(s.UserName, `\`); qualified {
+			accountDomain = domain
+		}
+	}
 	return profileSubject{
-		UserID:          s.UserID,
-		IDKind:          s.IDKind,
-		UserName:        useridentity.BareAccountName(s.UserName),
-		Principal:       s.Directory.Principal,
-		UPN:             s.Directory.UPN,
-		Directory:       s.Directory.Directory,
-		Domain:          s.Directory.Domain,
-		Groups:          s.Directory.Groups,
-		LookupFailed:    lookupAttempted && s.Directory.ResolvedAt.IsZero(),
+		UserID:        s.UserID,
+		IDKind:        s.IDKind,
+		UserName:      useridentity.BareAccountName(s.UserName),
+		Principal:     s.Directory.Principal,
+		UPN:           s.Directory.UPN,
+		Directory:     s.Directory.Directory,
+		Domain:        s.Directory.Domain,
+		AccountDomain: accountDomain,
+		Groups:        s.Directory.Groups,
+		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
+			(s.Directory.Source == useridentity.SourceWindowsLSA ||
+				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory)),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
 	}
 }
@@ -609,27 +619,29 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 	}
 	facts, err := profileExplainDirectoryFacts(id)
 	if err != nil {
-		// The lookup the hook path would run failed, so a request from this
-		// account gets default_lookup_failed. Answering from the OS account
-		// database instead would explain a profile no request receives, and
-		// hide why (GAP-0124).
+		// A required lookup failure selects default_lookup_failed. With
+		// agent- or connector-only assignments, live requests can still match
+		// without directory facts. Keep the error for explain (GAP-0124).
 		return profileSubject{
 			UserID: id, IDKind: useridentity.KindForID(id), UserName: userName,
-			LookupFailed: true, LookupError: err.Error(),
+			LookupFailed: identityLookupBlocking.Load(), LookupError: err.Error(),
 		}, nil
 	}
 	if facts.ResolvedAt.IsZero() {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
+			if !identityLookupBlocking.Load() {
+				local.LookupFailed = false
+			}
 			return local, nil
 		}
 		// The account is named, so explain shows it with the reason, not a
 		// bare default_lookup_failed.
-		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true},
+		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: identityLookupBlocking.Load()},
 			fmt.Errorf("the operating system returned no directory facts for %s", id)
 	}
 	return profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
-	}, true), nil
+	}, identityLookupBlocking.Load()), nil
 }
 
 // lookupLocalProfileSubject resolves an account name or uid/SID through the
@@ -810,25 +822,12 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 	return qualified && account != "" && useridentity.EqualFold(account, subject.UserName) && subjectInDomain(subject, domain)
 }
 
-// subjectInDomain reports whether domain, the DOMAIN of a DOMAIN\user entry,
-// names the subject's domain: by the name the directory reported (winbind
-// reports the NetBIOS name) or the first label of a DNS name, of that domain
-// or of the realm of the subject's principal (Windows reports the DNS name of
-// the computer's own domain).
+// subjectInDomain compares only verified account namespaces. Guessing a
+// NetBIOS name from a DNS first label can select a different trusted domain.
 func subjectInDomain(subject *profileSubject, domain string) bool {
-	if domain = strings.TrimSpace(domain); domain == "" {
-		return false
-	}
-	for _, have := range []string{subject.Domain, useridentity.RealmOf(subject.Principal)} {
-		if have == "" {
-			continue
-		}
-		label, _, _ := strings.Cut(have, ".")
-		if useridentity.EqualFold(have, domain) || useridentity.EqualFold(label, domain) {
-			return true
-		}
-	}
-	return false
+	domain = strings.TrimSpace(domain)
+	return domain != "" && (useridentity.EqualFold(domain, subject.AccountDomain) ||
+		useridentity.EqualFold(domain, subject.Domain))
 }
 
 // subjectGroups answers whether one of a subject's groups is the group an
@@ -1218,7 +1217,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			if found.UserID == "" {
 				found = profileSubject{UserName: user}
 			}
-			found.LookupFailed = true
+			found.LookupFailed = identityLookupBlocking.Load()
 			out["lookup_error"] = err.Error()
 		} else if found.LookupError != "" {
 			out["lookup_error"] = found.LookupError

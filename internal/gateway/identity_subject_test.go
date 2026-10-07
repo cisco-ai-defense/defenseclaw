@@ -199,6 +199,9 @@ func TestProcessOwnerProfileSubjectUsesDirectoryFacts(t *testing.T) {
 		t.Fatalf("subject = %+v, ok %v; want the directory's groups", subject, ok)
 	}
 	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return useridentity.DirectoryFacts{}, false }
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	if subject, _ := processOwnerProfileSubject(); !subject.LookupFailed {
 		t.Fatalf("a directory that did not answer must read as a failed lookup: %+v", subject)
 	}
@@ -428,5 +431,33 @@ func TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails(t *testin
 		if id := AgentIdentityFromContext(ctx); id.UserID != uid || id.UserName != want || caller.ID != uid || caller.Name != want {
 			t.Errorf("uid %s: agent identity %+v, audit caller %+v, want the uid and the name %q", uid, id, caller, want)
 		}
+	}
+}
+
+// A process-owner fallback with only connector assignments must not treat a
+// failed optional directory lookup as a profile-selection failure.
+func TestProcessOwnerProfileSubjectKeepsConnectorWithoutIdentityLookup(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(false)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	original := managedHookPeerDirectory
+	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) {
+		return useridentity.DirectoryFacts{}, false
+	}
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+	subject, ok := processOwnerProfileSubject()
+	if !ok || subject.LookupFailed {
+		t.Fatalf("process owner = %+v, ok %v", subject, ok)
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		assignments: []config.ProfileAssignment{
+			{Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
+		},
+	}
+	if got := set.matchUncached(&subject, profileSubjectProcessOwner, "openclaw", ""); got.Match != profileMatchConnector {
+		t.Fatalf("optional lookup selected %+v", got)
 	}
 }

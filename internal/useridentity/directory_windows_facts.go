@@ -112,12 +112,18 @@ func resolveWindowsDirectoryFacts(
 	}
 	join := readWindowsJoinState(r)
 	account, domain, ok := r.LookupAccount(sid)
+	if ok {
+		facts.AccountDomain = domain
+	}
 	upn, provider := identityStoreUPN(r, sid)
 	switch {
 	case strings.HasPrefix(sid, entraUserSIDPrefix) || (strings.EqualFold(provider, entraProviderName) && !ok):
 		// An Entra ID account (S-1-12-1-...) has no domain account; its UPN
 		// is in the identity store.
 		facts.Directory = DirectoryEntraID
+		if facts.AccountDomain == "" {
+			facts.AccountDomain = "AzureAD"
+		}
 		facts.TenantID = join.TenantID
 		if upn != "" {
 			facts.UPN = upn
