@@ -47,6 +47,25 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "94401104.json")); !os.IsNotExist(err) {
 		t.Errorf("a record older than IdentitySpoolMaxAge was kept (stat error %v)", err)
 	}
+	const reassigned = "94401105"
+	data, err := MarshalIdentitySpoolRecord(IdentitySpoolRecord{
+		Key: reassigned, User: "alice", UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, reassigned+".json")
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("reassigned uid kept previous account record: %v", err)
+	}
 }
 
 // GAP-0284: a record that resolved no UPN (a signed-out Windows user) keeps
