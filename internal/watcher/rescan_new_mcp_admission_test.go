@@ -35,11 +35,17 @@ func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 	}
 	servers = append(servers, config.MCPServerEntry{Name: "added", URL: "https://added.example.test/mcp", Connector: "codex"})
 	before := scans.calls
-	w.runRescanCycle(context.Background())
+	// GAP-0254: the enrolled-MCP poll admits it at once, not after the cycle.
+	w.AdmitAddedMCPServers([]string{"added"})
+	w.admitAddedMCPServers(context.Background())
 	if len(admitted) != 1 || admitted[0].Event.Name != "added" || admitted[0].Verdict != VerdictAllowed {
-		t.Fatalf("second cycle admitted %#v, want added allowed", admitted)
+		t.Fatalf("poll admitted %#v, want added allowed", admitted)
 	}
 	if scans.calls != before {
 		t.Fatalf("scan_on_install false still scanned the new server (%d scans)", scans.calls-before)
+	}
+	w.runRescanCycle(context.Background())
+	if len(admitted) != 1 {
+		t.Fatalf("the next cycle admitted the server again: %#v", admitted)
 	}
 }

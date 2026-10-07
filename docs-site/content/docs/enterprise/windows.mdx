@@ -585,7 +585,9 @@ per-user install:
   blocks the asset. Its folder stays where the user put it
   (`file_action=none` in the audit row).
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
-  without a scan, and the audit row says `reason=scan-disabled`.
+  without a scan, and the audit row says `reason=scan-disabled`. A server a
+  user adds goes through admission within about 30 seconds, also while a
+  periodic rescan is running.
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
 
