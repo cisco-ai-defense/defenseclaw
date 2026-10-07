@@ -782,7 +782,7 @@ func (m *Manager) createFailed(ctx context.Context, b *box, name string, err err
 	if emitted {
 		m.lifecycle(context.WithoutCancel(ctx), b, audit.SandboxPhaseDeleted, audit.SandboxTriggerCreate, false, nil, nil)
 	}
-	_ = m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthFailed, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellSandboxFailed),
 		ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
@@ -1262,7 +1262,7 @@ func (m *Manager) recordMountTelemetry(ctx context.Context, b *box, plan *worksp
 	m.mu.Unlock()
 	if len(plan.Masked) > 0 {
 		n := int64(len(plan.Masked))
-		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{
+		m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{
 			Sandbox: id, Operation: audit.SandboxWorkspaceMask, Initiator: "operator", FileCount: &n,
 			Paths: plan.MaskedRels(), Timestamp: m.now(),
 		})
@@ -1279,7 +1279,7 @@ func (m *Manager) recordMountTelemetry(ctx context.Context, b *box, plan *worksp
 	if snap.Git != nil {
 		ev.SnapshotRef = snap.Git.Ref
 	}
-	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
+	m.tel.RecordSandboxWorkspace(ctx, ev)
 }
 
 func snapshotKind(k workspace.SnapshotKind) string {

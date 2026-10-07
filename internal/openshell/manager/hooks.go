@@ -417,13 +417,11 @@ func (m *Manager) raiseTamper(b *box, a tamperAlarm) {
 		evidence += " tool_use_id=" + a.toolUseID
 	}
 	now := m.now()
-	if err := m.tel.RecordSandboxFinding(context.Background(), audit.SandboxFindingEvent{
+	m.tel.RecordSandboxFinding(context.Background(), audit.SandboxFindingEvent{
 		Sandbox: a.identity, Kind: audit.SandboxFindingHookTamper, Severity: "HIGH",
 		Title: title, Description: description, Evidence: evidence, Remediation: remediation,
 		TargetRef: a.name, Timestamp: now,
-	}); err != nil {
-		m.logf("hook tamper: record the finding for %s: %v", a.name, err)
-	}
+	})
 
 	msg := "⚠ hook tamper: " + tool + " ran without a DefenseClaw verdict"
 	if a.kind == tamperDenied {
@@ -647,15 +645,13 @@ func (m *Manager) raiseSilence(ctx context.Context, now time.Time, a silenceAlar
 		outcome = "; the sandbox keeps running"
 	}
 	quiet := now.Sub(a.since).Round(time.Minute)
-	if err := m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+	m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 		Sandbox: a.id, Kind: audit.SandboxFindingHookSilence, Severity: "HIGH",
 		Title:       "Sandboxed harness is active without DefenseClaw hook traffic",
 		Description: fmt.Sprintf("%s has been doing work for %s without a single hook request reaching DefenseClaw.", a.name, quiet),
 		Evidence:    "on_silence=" + a.response + " silence_after=" + after + " tier=" + firstNonEmpty(a.tier, "unknown"),
 		Remediation: remediation, TargetRef: a.name, Timestamp: now,
-	}); err != nil {
-		m.logf("silent hooks: record the finding for %s: %v", a.name, err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: a.name, Severity: "HIGH",
 		Reason: string(audit.SandboxFindingHookSilence), Message: "⚠ the harness is active but its hooks are silent" + outcome})
 	if a.stop {

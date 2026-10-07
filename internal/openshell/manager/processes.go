@@ -311,9 +311,7 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 			Executable: node.Exe, Name: node.Comm, CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
 			ExitCode: node.ExitCode, Lineage: lineage, Timestamp: at,
 		}
-		if err := m.tel.RecordSandboxProcess(ctx, ev); err != nil {
-			m.logf("sandbox %s: process telemetry: %v", id.Name, err)
-		}
+		m.tel.RecordSandboxProcess(ctx, ev)
 	}
 	for _, node := range started {
 		emit(node, audit.SandboxProcessStart, node.FirstSeen)

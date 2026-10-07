@@ -1056,7 +1056,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 	id := b.identity()
 	m.mu.Unlock()
 	if err != nil {
-		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
+		m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
 			Result: audit.SandboxWorkspaceFailed, FailureClass: "undo_failed", Initiator: "operator", Timestamp: m.now()})
 		if errors.Is(err, workspace.ErrSnapshotNotFound) {
 			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "sandbox %s has no undo point", name)
@@ -1070,7 +1070,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		if n == 0 {
 			result = audit.SandboxWorkspaceNoChange
 		}
-		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
+		m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
 			Result: result, Initiator: "operator", FileCount: &n, Timestamp: m.now()})
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: name, Reason: "undo",
 			Message: "the project folder was restored to its undo point"})
@@ -1136,7 +1136,7 @@ func (m *Manager) Review(ctx context.Context, name string, req sandboxapi.Review
 	for _, f := range report.Flags {
 		ev.Paths = append(ev.Paths, f.Path)
 	}
-	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
+	m.tel.RecordSandboxWorkspace(ctx, ev)
 	return resp, nil
 }
 
@@ -1155,7 +1155,7 @@ func (m *Manager) recordSnapshot(ctx context.Context, b *box) {
 	if snap.Git != nil {
 		ev.SnapshotRef = snap.Git.Ref
 	}
-	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
+	m.tel.RecordSandboxWorkspace(ctx, ev)
 }
 
 // ReportWorkspace records a copy-mode workspace step the CLI ran (upload,

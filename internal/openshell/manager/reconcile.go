@@ -402,7 +402,7 @@ func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) boo
 			" now, and one gateway runs one driver: the sandbox is not released while the gateway runs another driver"
 	}
 	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
-	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
 	return true
 }

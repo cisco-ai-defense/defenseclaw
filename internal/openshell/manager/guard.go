@@ -439,16 +439,12 @@ func (m *Manager) nestedRepo(ctx context.Context, b *box, d nestguard.Detection)
 		if d.Error != "" {
 			ev.Result, ev.FailureClass = audit.SandboxWorkspaceFailed, "rename_failed"
 		}
-		if err := m.tel.RecordSandboxWorkspace(ctx, ev); err != nil {
-			m.logf("sandbox %s: quarantine telemetry: %v", rec.Name, err)
-		}
+		m.tel.RecordSandboxWorkspace(ctx, ev)
 	}
-	if err := m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+	m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 		Sandbox: id, Kind: audit.SandboxFindingNestedRepo, Severity: severity, Title: title, Description: truncate(description, 1024),
 		Evidence: truncate(label, 1024), Remediation: truncate(remediation, 1024), TargetRef: d.Dir, Confidence: 1, Timestamp: d.At,
-	}); err != nil {
-		m.logf("sandbox %s: nested-repository finding telemetry: %v", rec.Name, err)
-	}
+	})
 	msg := "⚠ quarantined a new git repository at " + label + " → " + d.Quarantined
 	switch {
 	case d.Kind == nestguard.KindGitlink:

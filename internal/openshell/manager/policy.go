@@ -493,9 +493,7 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			if res != nil {
 				ev.PolicyHash = res.PolicyHash
 			}
-			if err := m.tel.RecordSandboxPolicy(ctx, ev); err != nil {
-				m.logf("policy telemetry for %s of %s: %v", rule, name, err)
-			}
+			m.tel.RecordSandboxPolicy(ctx, ev)
 		}
 	}
 	if len(removed) > 0 {
@@ -573,10 +571,8 @@ func (m *Manager) enforceProviderEndpoints(ctx context.Context, gw *Gateway, b *
 		if serr := m.saveRecord(b); serr != nil {
 			m.logf("record the detached provider of %s: %v", rec.Name, serr)
 		}
-		if terr := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove,
-			Actor: "policy", Origin: "internal", Target: provider, Reason: reason, ChangeCount: 1, Timestamp: m.now()}); terr != nil {
-			m.logf("policy telemetry for %s of %s: %v", provider, rec.Name, terr)
-		}
+		m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove,
+			Actor: "policy", Origin: "internal", Target: provider, Reason: reason, ChangeCount: 1, Timestamp: m.now()})
 		msg := "detached provider " + provider + ": its direct endpoint is on the egress block list now"
 		if admin {
 			msg = "detached provider " + provider + " " + sandboxapi.AdminMessage
@@ -749,12 +745,10 @@ func (m *Manager) recordAdminRefusal(ctx context.Context, sandbox string, op aud
 	if len(target) > 1024 || !policyTarget.MatchString(target) {
 		target = ""
 	}
-	if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+	m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
 		Sandbox: id, Operation: op, Actor: "operator", Origin: "api", Target: target, Reason: policyReasonAdminRefused,
 		NoChange: true, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("policy telemetry for the refusal of %s: %v", sandbox, err)
-	}
+	})
 }
 
 func wireViolation(v packs.Violation) sandboxapi.Violation {

@@ -335,9 +335,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	ev := audit.SandboxLifecycleEvent{
 		Sandbox: id, PreviousPhase: previous, Trigger: trigger, ExitCode: exit, Condition: cond, Timestamp: m.now(),
 	}
-	if err := m.tel.RecordSandboxLifecycle(ctx, ev); err != nil {
-		m.logf("lifecycle telemetry for %s: %v", rec.Name, err)
-	}
+	m.tel.RecordSandboxLifecycle(ctx, ev)
 	if phase != audit.SandboxPhaseDeleted {
 		if err := m.saveRecord(b); err != nil {
 			m.logf("save the record of %s: %v", rec.Name, err)
