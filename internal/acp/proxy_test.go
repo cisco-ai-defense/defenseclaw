@@ -104,6 +104,17 @@ func TestCopyFramesObserveFailsClosedOnRuntimeModeMismatch(t *testing.T) {
 	if !errors.Is(err, ErrModeMismatch) || forwarded.Len() != 0 {
 		t.Fatalf("mode mismatch did not fail closed: err=%v forwarded=%q", err, forwarded.String())
 	}
+	// The user is told what changed and which command to run, not "re-run
+	// managed setup" (GAP-0355).
+	state.peerProtocolFixes = true
+	err = copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeObserve, Profile: "p", Evaluator: modeMismatchEvaluator{}, Stderr: &stderr, Managed: true,
+		SetupCommand: "/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp setup --client zed --agent kiro --profile p",
+	}, state, ClientToAgent, bytes.NewBufferString(frame), &forwarded, &rejected)
+	if !errors.Is(err, ErrModeMismatch) || !strings.Contains(err.Error(), "changed the ACP mode of profile p to action") ||
+		!strings.Contains(err.Error(), "enterprise acp setup --client zed --agent kiro --profile p --activate") {
+		t.Fatalf("mode drift message = %v", err)
+	}
 }
 
 func TestCopyFramesActionBuffersOutputUntilPromptResponse(t *testing.T) {

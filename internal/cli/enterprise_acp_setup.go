@@ -157,14 +157,14 @@ func runEnterpriseACPSetup(cmd *cobra.Command, _ []string) error {
 func setupEnterpriseACPUserFiles(in enterpriseACPUserSetup) (result enterpriseACPUserSetupResult, err error) {
 	catalog, err := acp.LookupAgent(in.agent)
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("%w (the ACP agents are %s)", err, strings.Join(acp.AgentIDs(), ", "))
 	}
 	known := false
 	for _, client := range acp.BuiltinCatalog().Clients {
 		known = known || client.ID == in.client
 	}
 	if !known {
-		return result, fmt.Errorf("unknown ACP client: %s", in.client)
+		return result, fmt.Errorf("unknown ACP client: %s (the ACP clients are %s)", in.client, strings.Join(enterpriseACPClientIDs(), ", "))
 	}
 	if in.profile == "" {
 		return result, errors.New("enterprise ACP setup requires --client, --agent, and --profile")

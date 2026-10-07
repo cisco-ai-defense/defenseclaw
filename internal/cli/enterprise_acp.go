@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -155,6 +156,10 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 		return enterpriseACPEnrollment{}, errors.New("enterprise ACP enrollment requires --client, --agent, and --profile")
 	}
 	if _, err := acp.LookupAgent(agent); err != nil {
+		if !cfg.SecureClientIntegration() {
+			// Name the agents that exist (GAP-0355).
+			err = fmt.Errorf("%w (the ACP agents are %s)", err, strings.Join(acp.AgentIDs(), ", "))
+		}
 		return enterpriseACPEnrollment{}, err
 	}
 	clientKnown := false
@@ -165,6 +170,9 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 		}
 	}
 	if !clientKnown {
+		if !cfg.SecureClientIntegration() {
+			return enterpriseACPEnrollment{}, fmt.Errorf("unknown ACP client: %s (the ACP clients are %s)", client, strings.Join(enterpriseACPClientIDs(), ", "))
+		}
 		return enterpriseACPEnrollment{}, fmt.Errorf("unknown ACP client: %s", client)
 	}
 	if requireAuthorization && !cfg.SecureClientIntegration() {
@@ -225,6 +233,9 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 		enterpriseACPSID, enterpriseACPUserDataDir,
 	)
 	if err != nil {
+		if !cfg.SecureClientIntegration() {
+			return enterpriseACPEnrollment{}, enterpriseACPPlainError(err, enterpriseACPUser)
+		}
 		return enterpriseACPEnrollment{}, err
 	}
 	dataDir := strings.TrimSpace(enterpriseACPUserDataDir)
@@ -362,6 +373,39 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	return enterpriseACPResult(cmd, payload, nil)
 }
 
+// enterpriseACPClientIDs lists the catalog's ACP clients.
+func enterpriseACPClientIDs() []string {
+	var ids []string
+	for _, client := range acp.BuiltinCatalog().Clients {
+		ids = append(ids, client.ID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// enterpriseACPWho names the account of an enrollment in a message: the
+// --user given, else the principal.
+func enterpriseACPWho(enrollment enterpriseACPEnrollment) string {
+	if name := strings.TrimSpace(enterpriseACPUser); name != "" {
+		return name
+	}
+	return enrollment.principal
+}
+
+// enterpriseACPPlainError words a refusal of the shared account resolution
+// for the ACP commands: it named the enterprise hooks commands and gave an
+// unknown account as an os/user lookup error (GAP-0355).
+func enterpriseACPPlainError(err error, userName string) error {
+	var unknown user.UnknownUserError
+	if errors.As(err, &unknown) && strings.TrimSpace(userName) != "" {
+		return &enterpriseACPTargetRefusal{err: err, message: fmt.Sprintf("enterprise acp: no account named %s on this computer", strings.TrimSpace(userName))}
+	}
+	if rest, ok := strings.CutPrefix(err.Error(), "enterprise hooks: "); ok {
+		return &enterpriseACPTargetRefusal{err: err, message: "enterprise acp: " + rest}
+	}
+	return err
+}
+
 func enterpriseACPTargetCredentials(enrollment enterpriseACPEnrollment) enterprisehooks.TargetCredentials {
 	return enterprisehooks.TargetCredentials{
 		UserHome: enrollment.target.home, UID: enrollment.target.uid,
@@ -414,6 +458,11 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	credential, err := acp.LoadEnterpriseCredential(
 		cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
 	)
+	if err != nil && errors.Is(err, os.ErrNotExist) && !cfg.SecureClientIntegration() {
+		// The record path in an lstat error said nothing (GAP-0355).
+		err = fmt.Errorf("enterprise acp: no ACP enrollment for %s %s/%s in profile %s; enroll it with enterprise acp enroll",
+			enterpriseACPWho(enrollment), enrollment.client, enrollment.agent, enrollment.profile)
+	}
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
@@ -472,20 +521,31 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
+	found := true
 	if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		if !cfg.SecureClientIntegration() {
+			// A revoke of an enrollment that never existed said "revoked"
+			// (GAP-0355).
+			found = enterpriseACPRecordExists(cfg.DataDir, enrollment)
+		}
 		return acp.RemoveEnterpriseCredential(
 			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
 		)
 	}); err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	notFound := ""
+	if !found {
+		notFound = fmt.Sprintf("no ACP enrollment for %s %s/%s in profile %s was found; nothing was revoked",
+			enterpriseACPWho(enrollment), enrollment.client, enrollment.agent, enrollment.profile)
+	}
 	if enrollment.accountGone {
 		// No account, so no home to clean.
-		return enterpriseACPResult(cmd, map[string]any{
+		return enterpriseACPResult(cmd, enterpriseACPRevokePayload(map[string]any{
 			"ok": true, "principal": enrollment.principal, "client": enrollment.client,
 			"agent": enrollment.agent, "profile": enrollment.profile, "centrally_revoked": true,
 			"note": enrollment.principal + " no longer exists; its home was not touched",
-		}, nil)
+		}, notFound), nil)
 	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(enrollment.dataDir, enrollment.client, enrollment.agent)
 	if err != nil {
@@ -524,7 +584,30 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	if note != "" {
 		payload["note"] = note
 	}
-	return enterpriseACPResult(cmd, payload, err)
+	return enterpriseACPResult(cmd, enterpriseACPRevokePayload(payload, notFound), err)
+}
+
+// enterpriseACPRevokePayload marks a revoke that found no enrollment.
+func enterpriseACPRevokePayload(payload map[string]any, notFound string) map[string]any {
+	if notFound != "" {
+		payload["centrally_revoked"], payload["found"], payload["not_found"] = false, false, notFound
+	}
+	return payload
+}
+
+// enterpriseACPRecordExists reports whether the service record of an
+// enrollment, or the tombstone of an interrupted revocation, is present.
+func enterpriseACPRecordExists(dataDir string, enrollment enterpriseACPEnrollment) bool {
+	path, err := acp.EnterpriseCredentialPath(dataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile)
+	if err != nil {
+		return true
+	}
+	for _, candidate := range []string{path, path + ".revoked"} {
+		if _, statErr := os.Lstat(candidate); !errors.Is(statErr, os.ErrNotExist) {
+			return true
+		}
+	}
+	return false
 }
 
 func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) error {
@@ -554,6 +637,10 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 	if lock, ok := payload["contract_lock"].(string); ok {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s guarded %v entry written to %v (contract lock %s)\n",
 			Style("✓", "fg=green", "bold"), payload["agent"], payload["path"], lock)
+		return nil
+	}
+	if notFound, _ := payload["not_found"].(string); notFound != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), notFound)
 		return nil
 	}
 	if revoked, _ := payload["centrally_revoked"].(bool); revoked {

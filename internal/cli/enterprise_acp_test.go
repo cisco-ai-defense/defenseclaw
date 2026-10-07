@@ -186,6 +186,18 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Fatalf("user token survived revoke: %v", err)
 	}
+	// verify and revoke of an enrollment that does not exist say so, not a
+	// record path in an lstat error or "revoked" (GAP-0355).
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&output)
+	if err := runEnterpriseACPVerify(command, nil); err == nil || !strings.Contains(output.String(), "no ACP enrollment for") ||
+		strings.Contains(output.String(), "lstat") {
+		t.Fatalf("verify of a missing enrollment: err=%v output=%s", err, output.String())
+	}
+	if again := run(runEnterpriseACPRevoke); again["found"] != false || again["centrally_revoked"] != false {
+		t.Fatalf("revoke of a missing enrollment reported a revocation: %v", again)
+	}
 }
 
 // The Windows refusals named hook mutation and gave no next step; they now

@@ -764,6 +764,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			return nil
 		}
 		if evalErr != nil {
+			if errors.Is(evalErr, ErrModeMismatch) && state.peerProtocolFixes {
+				return modeDriftError(opts)
+			}
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
 			}
@@ -798,6 +801,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					Payload: aggregate, Aggregate: true,
 				})
 				if turnErr != nil {
+					if errors.Is(turnErr, ErrModeMismatch) && state.peerProtocolFixes {
+						return modeDriftError(opts)
+					}
 					if errors.Is(turnErr, ErrModeMismatch) {
 						return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
 					}
@@ -825,6 +831,32 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 	}
 	return nil
 }
+
+// modeDriftError ends a session whose profile changed mode centrally. Its
+// text named "managed setup", a command no host has, and the editor showed
+// only "Agent failed to run" (GAP-0355): it now names the setup command to
+// run, with --activate when the profile moved to action mode.
+func modeDriftError(opts ProxyOptions) error {
+	now, command := "action", strings.TrimSuffix(opts.SetupCommand, " --activate")+" --activate"
+	if opts.Mode == ModeAction {
+		now, command = "observe", strings.TrimSuffix(opts.SetupCommand, " --activate")
+	}
+	who := "the ACP mode of profile " + opts.Profile + " changed to " + now
+	if opts.Managed {
+		who = "your administrator changed the ACP mode of profile " + opts.Profile + " to " + now
+	}
+	next := "run the setup command of this editor entry again"
+	if strings.TrimSpace(opts.SetupCommand) != "" {
+		next = "run '" + command + "' to set this editor entry up again"
+	}
+	return &modeDrift{message: "DefenseClaw ended this ACP session because " + who + "; " + next}
+}
+
+// modeDrift is ErrModeMismatch in words for the user.
+type modeDrift struct{ message string }
+
+func (e *modeDrift) Error() string { return e.message }
+func (e *modeDrift) Unwrap() error { return ErrModeMismatch }
 
 // acpPeerName names the peer that sent a frame travelling in direction.
 func acpPeerName(direction Direction) string {
