@@ -301,6 +301,18 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 			updated = true
 		}
 	}
+	// And the instance (ais-) of the ACP session the frame belongs to,
+	// derived from that identity as the hook path derives one per session; a
+	// frame that names no session has none (GAP-0252).
+	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && session != "" {
+		if registry := SharedAgentRegistry(); registry != nil {
+			resolved, _ := registry.ResolveForAgentIdentity(ctx, identity.IdentityID, session, "")
+			if resolved.AgentInstanceID != "" {
+				identity.AgentInstanceID = resolved.AgentInstanceID
+				updated = true
+			}
+		}
+	}
 	if updated {
 		ctx = ContextWithAgentIdentity(ctx, identity)
 	}

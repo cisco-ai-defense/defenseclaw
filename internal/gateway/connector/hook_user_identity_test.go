@@ -361,6 +361,53 @@ func TestManagedShellHookTakesSessionFactsFromTheAdministratorBinary(t *testing.
 	}
 }
 
+// Every connector shell hook of a standalone install names the
+// administrator-owned hook binary for the session facts, not only the Hermes
+// and Devin hooks that run the foreign-hook guard: OpenHands, Kiro,
+// Antigravity and Cursor were rendered without it, so their records lost the
+// Kerberos principal that Claude Code's carried in the same login (GAP-0194).
+// A socketless managed render (Secure Client) and a per-user render name none.
+func TestStandaloneShellHooksNameTheAdministratorHookBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
+	}
+	const hookBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
+	standalone := SetupOpts{
+		APIAddr: "127.0.0.1:18970", APIToken: "tok", HookFailMode: "closed", ManagedEnterprise: true,
+		ManagedHookSocket: "/var/run/defenseclaw/hook.sock", ManagedServiceUID: 461, ManagedHookBinary: hookBinary,
+	}
+	render := func(opts SetupOpts, conn Connector, script string) string {
+		t.Helper()
+		opts.DataDir = filepath.Join(t.TempDir(), ".defenseclaw")
+		hookDir := filepath.Join(opts.DataDir, "hooks")
+		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(hookDir, script))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	line := "DEFENSECLAW_SESSION_FACTS_BIN='" + hookBinary + "'\n"
+	secureClient, perUser := standalone, standalone
+	secureClient.ManagedHookSocket, secureClient.ManagedHookBinary = "", ""
+	perUser.ManagedEnterprise, perUser.ManagedHookSocket, perUser.ManagedHookBinary = false, "", ""
+	for script, conn := range map[string]Connector{
+		"openhands-hook.sh": NewOpenHandsConnector(), "hermes-hook.sh": NewHermesConnector(),
+		"cursor-hook.sh": NewCursorConnector(), "antigravity-hook.sh": NewAntigravityConnector(),
+	} {
+		if !strings.Contains(render(standalone, conn, script), line) {
+			t.Errorf("%s of a standalone install does not name the administrator hook binary", script)
+		}
+		for name, opts := range map[string]SetupOpts{"secure client": secureClient, "per-user": perUser} {
+			if strings.Contains(render(opts, conn, script), "DEFENSECLAW_SESSION_FACTS_BIN") {
+				t.Errorf("%s of a %s install names a session facts binary", script, name)
+			}
+		}
+	}
+}
+
 // The in-agent plugins cannot read a Kerberos credential cache, so a
 // per-user plugin asks the user's gateway binary (hook session-facts), as the
 // shell hooks do, and sends the whole value: the OpenCode plugin used to send

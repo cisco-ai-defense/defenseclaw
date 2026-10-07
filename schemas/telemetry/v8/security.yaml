@@ -2219,7 +2219,13 @@ groups:
   - correlation.guardrail.profile
   - correlation.policy.effective
   - security.guardrail
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.evaluation.id
     requirement_level: required
