@@ -173,6 +173,21 @@ groups:
             "Verdict funnel (hook event x action)" and
             "Per-connector verdict summary (1h)".
 
+      - alert: DefenseClawSandboxEgressBlocksSustained
+        expr: sum by (source) (rate(defenseclaw_egress_events_total{decision="block"}[5m])) * 60 > 30
+        for: 10m
+        labels:
+          severity: warning
+          surface: sandbox
+        annotations:
+          summary: "Sandbox egress blocks above 30/min from {{ $labels.source }}"
+          description: |
+            A sandbox keeps reaching destinations its policy refuses: a missing
+            allow rule or an agent probing. source is openshell (OpenShell's own
+            network boundary) or dc-egress-proxy (the DefenseClaw egress proxy).
+            Open Sandboxes -> "Top blocked hosts" and "Egress by source and
+            decision".
+
       - alert: DefenseClawJudgeErrorRate
         expr: |
           sum(rate(defenseclaw_gateway_judge_errors_total[5m]))

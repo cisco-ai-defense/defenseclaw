@@ -84,6 +84,11 @@ locals {
       { property = "target_type", alias = "target type" },
       { property = "severity", alias = "severity" },
     ])
+    sandboxes = concat(local.common_dashboard_variables, [
+      { property = "connector", alias = "harness connector" },
+      { property = "source", alias = "egress source" },
+      { property = "decision", alias = "egress decision" },
+    ])
   }
 
   single_value_charts = {
@@ -325,13 +330,13 @@ locals {
       EOT
     }
     security_total_egress_blocks = {
-      name        = "Egress blocks"
-      description = "Egress events where decision is block in the selected time range."
+      name        = "Egress blocks by source"
+      description = "Egress events where decision is block in the selected time range, one value per egress source: openshell (OpenShell's own network boundary) and dc-egress-proxy (the DefenseClaw egress proxy)."
       program     = <<-EOT
         A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='delta')
         B = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='latest')
         C = A.delta()
-        D = (A if C is not None else B).sum().sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress blocks')
+        D = (A if C is not None else B).sum(by=['source']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress blocks')
       EOT
     }
     security_total_runtime_alerts = {
@@ -627,11 +632,41 @@ locals {
         A = data('defenseclaw.quarantine.actions', rollup='rate').sum().scale(60).publish(label='Quarantine actions / min')
       EOT
     }
-    egress_blocks_per_min = {
-      name        = "Egress blocks / min"
-      description = "Egress events where decision is block."
+    sandbox_active_total = {
+      name        = "Active sandboxes"
+      description = "Sandboxes provisioning, starting, ready, or stopping, summed over harness connectors (latest value)."
       program     = <<-EOT
-        A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), rollup='rate').sum().scale(60).publish(label='Egress blocks / min')
+        A = data('defenseclaw.sandbox.active', rollup='latest').sum().publish(label='Active sandboxes')
+      EOT
+    }
+    sandbox_transitions_31d = {
+      name        = "Phase transitions"
+      description = "Sandbox lifecycle phase changes in the selected time range."
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.transitions', extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.sandbox.transitions', extrapolation='zero', rollup='latest')
+        C = A.delta()
+        D = (A if C is not None else B).sum().sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Phase transitions')
+      EOT
+    }
+    sandbox_egress_allowed_31d = {
+      name        = "Egress allowed by source"
+      description = "Allowed egress decisions in the selected time range, one value per egress source."
+      program     = <<-EOT
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'allow'), extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.egress.events', filter=filter('decision', 'allow'), extrapolation='zero', rollup='latest')
+        C = A.delta()
+        D = (A if C is not None else B).sum(by=['source']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress allowed')
+      EOT
+    }
+    sandbox_egress_blocked_31d = {
+      name        = "Egress blocked by source"
+      description = "Blocked egress decisions in the selected time range, one value per egress source."
+      program     = <<-EOT
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='latest')
+        C = A.delta()
+        D = (A if C is not None else B).sum(by=['source']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress blocked')
       EOT
     }
     alerts_per_min = {
@@ -1032,6 +1067,56 @@ locals {
       axis_label  = "findings"
       program     = <<-EOT
         A = data('defenseclaw.scan.findings').sum(by=['scanner']).publish(label='Findings')
+      EOT
+    }
+    egress_blocks_by_source = {
+      name        = "Egress blocks by source"
+      description = "Blocked egress event rate grouped by source: openshell (OpenShell's own network boundary) or dc-egress-proxy (the DefenseClaw egress proxy)."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "blocks / min"
+      program     = <<-EOT
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), rollup='rate').sum(by=['source']).scale(60).publish(label='Egress blocks / min')
+      EOT
+    }
+    sandbox_active_by_connector = {
+      name        = "Active sandboxes by connector"
+      description = "Active sandbox gauge grouped by harness connector. Sandbox identities are never metric dimensions."
+      plot_type   = "LineChart"
+      stacked     = false
+      axis_label  = "sandboxes"
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.active', rollup='latest').sum(by=['connector']).publish(label='Active sandboxes')
+      EOT
+    }
+    sandbox_transitions_by_phase = {
+      name        = "Phase transitions by new phase"
+      description = "Sandbox lifecycle transitions per minute grouped by the phase entered (defenseclaw.sandbox.phase.to)."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "transitions / min"
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.transitions', rollup='rate').sum(by=['defenseclaw.sandbox.phase.to']).scale(60).publish(label='Transitions / min')
+      EOT
+    }
+    sandbox_egress_source_decision = {
+      name        = "Egress by source and decision"
+      description = "Sandbox egress decisions per minute grouped by source (openshell, dc-egress-proxy) and decision (allow, block)."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "events / min"
+      program     = <<-EOT
+        A = data('defenseclaw.egress.events', rollup='rate').sum(by=['source', 'decision']).scale(60).publish(label='Egress events / min')
+      EOT
+    }
+    sandbox_blocks_by_connector = {
+      name        = "Egress blocks by connector"
+      description = "Blocked sandbox egress per minute grouped by harness connector."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "blocks / min"
+      program     = <<-EOT
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), rollup='rate').sum(by=['connector']).scale(60).publish(label='Egress blocks / min')
       EOT
     }
     egress_by_decision = {
@@ -1477,6 +1562,11 @@ locals {
     findings_by_severity            = "severity"
     findings_by_scanner             = "scanner"
     egress_by_decision              = "decision"
+    egress_blocks_by_source         = "source"
+    sandbox_active_by_connector     = "connector"
+    sandbox_transitions_by_phase    = "defenseclaw.sandbox.phase.to"
+    sandbox_egress_source_decision  = "source"
+    sandbox_blocks_by_connector     = "connector"
     alerts_by_type_severity         = "alert.severity"
     judge_errors_by_reason          = "judge.reason"
     guardrail_cache                 = "plot_label"
@@ -1505,6 +1595,17 @@ locals {
   }
 
   table_charts = {
+    sandbox_egress_mix = {
+      name        = "Sandbox egress by connector, source and decision"
+      description = "Sandbox egress decision totals by harness connector, egress source, and decision in the selected time range."
+      group_by    = ["connector", "source", "decision"]
+      program     = <<-EOT
+        A = data('defenseclaw.egress.events', extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.egress.events', extrapolation='zero', rollup='latest')
+        C = A.delta()
+        D = (A if C is not None else B).sum(by=['connector', 'source', 'decision']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress events')
+      EOT
+    }
     verdict_breakdown = {
       name        = "Verdict breakdown"
       description = "Gateway verdict totals by action in the selected time range."
@@ -1602,6 +1703,18 @@ locals {
   }
 
   dashboard_layouts = {
+    sandboxes = [
+      { type = "single", key = "sandbox_active_total", row = 0, column = 0, width = 3, height = 1 },
+      { type = "single", key = "sandbox_transitions_31d", row = 0, column = 3, width = 3, height = 1 },
+      { type = "single", key = "sandbox_egress_allowed_31d", row = 0, column = 6, width = 3, height = 1 },
+      { type = "single", key = "sandbox_egress_blocked_31d", row = 0, column = 9, width = 3, height = 1 },
+      { type = "time", key = "sandbox_active_by_connector", row = 1, column = 0, width = 6, height = 2 },
+      { type = "time", key = "sandbox_transitions_by_phase", row = 1, column = 6, width = 6, height = 2 },
+      { type = "time", key = "sandbox_egress_source_decision", row = 3, column = 0, width = 6, height = 2 },
+      { type = "time", key = "egress_blocks_by_source", row = 3, column = 6, width = 6, height = 2 },
+      { type = "time", key = "sandbox_blocks_by_connector", row = 5, column = 0, width = 6, height = 2 },
+      { type = "table", key = "sandbox_egress_mix", row = 5, column = 6, width = 6, height = 2 },
+    ]
     executive = [
       { type = "single", key = "executive_verdicts_31d", row = 0, column = 0, width = 2, height = 1 },
       { type = "single", key = "executive_blocks_31d", row = 0, column = 2, width = 2, height = 1 },
@@ -1669,6 +1782,7 @@ locals {
       { type = "table", key = "findings_by_rule", row = 7, column = 4, width = 4, height = 2 },
       { type = "time", key = "egress_by_decision", row = 7, column = 8, width = 4, height = 2 },
       { type = "time", key = "alerts_by_type_severity", row = 9, column = 0, width = 4, height = 2 },
+      { type = "time", key = "egress_blocks_by_source", row = 9, column = 4, width = 4, height = 2 },
     ]
     token_economics = [
       { type = "single", key = "token_records", row = 0, column = 0, width = 2, height = 1 },
@@ -2029,6 +2143,42 @@ resource "signalfx_dashboard" "scanners_findings" {
   }
 }
 
+resource "signalfx_dashboard" "sandboxes" {
+  name            = "Sandboxes${local.display_name_suffix}"
+  description     = "OpenShell sandboxes: active sandboxes by connector, phase transitions, and egress decisions by source (OpenShell vs the DefenseClaw egress proxy). Hosts, bytes, findings and health are in the Grafana Sandboxes dashboard."
+  dashboard_group = signalfx_dashboard_group.defenseclaw_o11y.id
+  time_range      = "-1h"
+  tags            = ["defenseclaw", "sandbox", "openshell", "egress", "otel"]
+
+  dynamic "variable" {
+    for_each = local.dashboard_variables.sandboxes
+    iterator = dashboard_var
+
+    content {
+      property       = dashboard_var.value.property
+      alias          = dashboard_var.value.alias
+      apply_if_exist = true
+    }
+  }
+
+  dynamic "chart" {
+    for_each = local.dashboard_layouts.sandboxes
+    iterator = dashboard_chart
+
+    content {
+      chart_id = (
+        dashboard_chart.value.type == "single" ? signalfx_single_value_chart.single[dashboard_chart.value.key].id :
+        dashboard_chart.value.type == "time" ? signalfx_time_chart.time[dashboard_chart.value.key].id :
+        signalfx_table_chart.table[dashboard_chart.value.key].id
+      )
+      width  = dashboard_chart.value.width
+      height = dashboard_chart.value.height
+      row    = dashboard_chart.value.row
+      column = dashboard_chart.value.column
+    }
+  }
+}
+
 output "dashboard_urls" {
   description = "Created Splunk Observability dashboard URLs."
   value = {
@@ -2039,5 +2189,6 @@ output "dashboard_urls" {
     token_economics      = signalfx_dashboard.token_economics.url
     runtime_reliability  = signalfx_dashboard.runtime_reliability.url
     scanners_findings    = signalfx_dashboard.scanners_findings.url
+    sandboxes            = signalfx_dashboard.sandboxes.url
   }
 }

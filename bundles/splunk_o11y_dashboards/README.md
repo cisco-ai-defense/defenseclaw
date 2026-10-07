@@ -8,7 +8,8 @@ This directory contains the Terraform source imported by
 `defenseclaw setup splunk dashboards apply`:
 
 - [`terraform/main.tf`](terraform/main.tf) defines the dashboard group,
-  dashboard variables, charts, and seven dashboard layouts.
+  dashboard variables, charts, and eight dashboard layouts (the Sandboxes layout covers the
+  OpenShell sandbox gauges and the egress counter by source).
 - [`terraform/detectors.tf`](terraform/detectors.tf) defines the optional
   detector catalog, notification inputs, and detector URL outputs.
 

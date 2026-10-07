@@ -169,6 +169,18 @@ locals {
         detect(when(R > 0.10, '10m')).publish('DefenseClawJudgeErrorRate')
       EOT
     }
+    sandbox_egress_blocks_sustained = {
+      name             = "DefenseClaw - Sandbox egress blocks sustained"
+      severity         = "Warning"
+      detect_label     = "DefenseClawSandboxEgressBlocksSustained"
+      description      = "Sandbox egress blocks are above 30/min for 10 minutes."
+      rule_description = "A sandbox keeps reaching destinations its policy refuses: a missing allow rule or an agent probing. Open Sandboxes -> Egress blocks by source, then the Grafana Sandboxes dashboard -> Top blocked hosts."
+      tags             = ["security", "sandbox"]
+      program          = <<-EOT
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), rollup='rate').sum(by=['source']).scale(60).publish(label='Sandbox egress blocks / min')
+        detect(when(A > 30, '10m')).publish('DefenseClawSandboxEgressBlocksSustained')
+      EOT
+    }
     webhook_failures = {
       name             = "DefenseClaw - Webhook failures sustained"
       severity         = "Warning"
