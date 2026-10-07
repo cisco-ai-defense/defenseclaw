@@ -299,6 +299,13 @@ var cachedDirectoryFacts = func(id string) (useridentity.DirectoryFacts, time.Ti
 	return peerDirectoryCache().peek(id)
 }
 
+// cachedDirectoryLifetime is how long the cache serves facts before it
+// refreshes them: shorter for an answer it calls incomplete, such as one with
+// a group no name answered for (GAP-0326). Tests replace it.
+var cachedDirectoryLifetime = func(facts useridentity.DirectoryFacts) time.Duration {
+	return peerDirectoryCache().lifetime(facts)
+}
+
 // cachedDirectoryFailure reports an account the gateway's own lookups fail
 // for and holds no facts of. Tests replace it.
 var cachedDirectoryFailure = func(id string) (time.Time, string, bool) {
@@ -342,7 +349,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	if age < 0 {
 		age = 0
 	}
-	refresh := max(identityDirectoryTTL-age, 0)
+	refresh := max(cachedDirectoryLifetime(facts)-age, 0)
 	cached := profileSubjectFromVerified(VerifiedSubject{
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, true)

@@ -74,6 +74,33 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 	t.Fatal("incomplete facts were not refreshed after identityDirectoryIncompleteTTL")
 }
 
+// TestIdentityDirectoryCacheBlockingRequestWaitsForIncompleteRefresh pins
+// GAP-0326: once incomplete facts (a group no name answered for, as a
+// directory outage leaves) pass their short lifetime, a blocking request
+// waits for the refresh instead of using them once more, and explain's
+// refresh time follows the short lifetime.
+func TestIdentityDirectoryCacheBlockingRequestWaitsForIncompleteRefresh(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		if calls == 1 {
+			return useridentity.DirectoryFacts{Groups: []string{"940190439"}, ResolvedAt: now}, nil
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"entra-alice", "dc-entra-ml"}, ResolvedAt: now}, nil
+	})
+	cache.now = func() time.Time { return now }
+	cache.incomplete = func(facts useridentity.DirectoryFacts) bool { return len(facts.Groups) == 1 }
+	facts, ok := cache.get("1608906209", true)
+	if !ok || cache.lifetime(facts) != identityDirectoryIncompleteTTL {
+		t.Fatalf("first facts = %+v, %v; want unnamed facts with the short lifetime", facts, ok)
+	}
+	now = now.Add(identityDirectoryIncompleteTTL)
+	if facts, ok := cache.get("1608906209", true); !ok || len(facts.Groups) != 2 || cache.lifetime(facts) != identityDirectoryTTL {
+		t.Fatalf("blocking request after the short lifetime got %+v, %v; want the refreshed groups", facts, ok)
+	}
+}
+
 // TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce pins GAP-0124: an
 // account whose lookup cannot finish (in more groups than are named, a
 // directory that never answers) leaves one line with the reason in the

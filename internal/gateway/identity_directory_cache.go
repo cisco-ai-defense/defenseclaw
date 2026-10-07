@@ -138,14 +138,33 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 				"(default_lookup_failed) until a lookup succeeds", key, age.Round(time.Minute))
 		}
 	}
-	stale := !entry.ok || age >= identityDirectoryTTL ||
-		(age >= identityDirectoryIncompleteTTL && c.incomplete != nil && c.incomplete(entry.facts))
-	if stale && entry.inflight == nil && !now.Before(entry.nextAttempt) {
+	expired := age >= c.lifetime(entry.facts)
+	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
 	}
 	if entry.ok {
-		facts := entry.facts
+		facts, wait := entry.facts, entry.inflight
+		// An incomplete answer past its lifetime (a group no name answered
+		// for, as a directory outage leaves) is replaced before a blocking
+		// caller uses it again, so a group that answers again applies at the
+		// next request rather than the one after (GAP-0326).
+		if !block || wait == nil || !expired || c.lifetime(facts) == identityDirectoryTTL {
+			c.mu.Unlock()
+			return facts, true
+		}
 		c.mu.Unlock()
+		timer := time.NewTimer(identityDirectoryBudget)
+		defer timer.Stop()
+		select {
+		case <-wait:
+		case <-timer.C:
+			return facts, true
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if entry.ok {
+			return entry.facts, true
+		}
 		return facts, true
 	}
 	wait := entry.inflight
@@ -163,6 +182,16 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return entry.facts, entry.ok
+}
+
+// lifetime is how long facts are served before a refresh: the full TTL, or
+// identityDirectoryIncompleteTTL for an answer the resolver calls
+// incomplete.
+func (c *identityCache[T]) lifetime(facts T) time.Duration {
+	if c != nil && c.incomplete != nil && c.incomplete(facts) {
+		return identityDirectoryIncompleteTTL
+	}
+	return identityDirectoryTTL
 }
 
 // failing reports a key whose lookups fail and that has no facts to serve:
