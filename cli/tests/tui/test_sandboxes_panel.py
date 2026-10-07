@@ -879,9 +879,10 @@ def test_no_asks_text_holds_for_every_pack() -> None:
     assert text.startswith("No asks are waiting.") and "Only" not in text
     assert "private-network address" in text and "balanced" in text and "strict" in text
     # A port on this machine drafts no proposal (OpenShell denies the mapping
-    # itself), so the text must not promise that one asks (R2-47).
-    assert "localhost ports" not in text and "Ports on this machine never ask" in text
-    assert "--host-port" in text
+    # itself), so only a port the run named with --host-port asks (R2-47,
+    # GAP-0102: the text said no port ever asks).
+    assert "localhost ports" not in text and "never ask" not in text
+    assert "asks only if the run named it with --host-port PORT" in text
 
 
 @pytest.mark.parametrize(
@@ -1120,6 +1121,20 @@ def fetch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(DefenseClawTUI, "_fetch_sandbox_destinations", destinations)
     monkeypatch.setattr(sandbox_panel, "openshell_sandboxes_supported", lambda os_name=None: True)
     return payload
+
+
+@pytest.mark.asyncio
+async def test_windows_shows_only_the_unsupported_message(monkeypatch) -> None:
+    # GAP-0073: Windows kept the sandbox keys, the button bar and a t that cycled the hints.
+    monkeypatch.setattr(sandbox_panel, "openshell_sandboxes_supported", lambda os_name=None: False)
+    monkeypatch.setattr(sandbox_panel, "fetch_sandbox_snapshot", lambda _config: pytest.fail("polled"))
+    app = DefenseClawTUI(config=_config())
+    async with app.run_test(size=(160, 44)) as pilot:
+        await pilot.press("7", "t")
+        await pilot.pause()
+        assert app.sandbox_model.view == "sandboxes"
+        assert "t view" not in app.hint_text and "? help" in app.hint_text
+        assert app.query_one("#sandboxes-controls").has_class("hidden")
 
 
 @pytest.mark.asyncio

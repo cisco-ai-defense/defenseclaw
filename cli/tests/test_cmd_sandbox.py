@@ -321,6 +321,9 @@ def test_an_unstartable_gateway_binary_is_a_plain_error(monkeypatch: pytest.Monk
         (["sandbox", "pack", "show", "strict"], {}, True),
         (["sandbox", "pack", "validate", "pack.yaml"], {}, True),
         (["sandbox", "pack"], {}, False),
+        # GAP-0124: the CI mode the policy-packs page documents needs no install.
+        (["sandbox", "policy", "test", "--pack", "balanced", "--fixture", "f.yaml"], {}, True),
+        (["sandbox", "policy", "show"], {}, False),
         (["sandbox", "run", "claude"], {"DEFENSECLAW_SANDBOX_ID": "sb-1"}, True),
         (["sandbox", "run", "claude"], {}, False),
         (["sandbox", "list"], {}, False),

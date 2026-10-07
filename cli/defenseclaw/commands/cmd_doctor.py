@@ -2430,6 +2430,16 @@ def _check_component_connector_compatibility(
         else:
             tag = "warn"
         remediation = _health_remediation_text(finding.remediations)
+        if finding.reason_code == "connector-agent-unavailable":
+            from defenseclaw.inventory import agent_discovery
+
+            on_path = agent_discovery.binary_on_path(finding.connector)
+            if on_path:
+                # Installed after the last agent discovery: refresh the
+                # evidence rather than install it again (GAP-0052).
+                tag = "warn"
+                detail += f"; {on_path} is installed now, after the last agent discovery"
+                remediation = _health_remediation_text(finding.remediations[1:])
         if finding.reason_code in {"connector-version-not-observed", "connector-version-unparseable"}:
             # A slow or failed version probe leaves the connector in observe.
             # Refreshing discovery and rerunning setup restores the mode.

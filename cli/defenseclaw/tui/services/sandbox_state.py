@@ -93,11 +93,13 @@ HOOKS_UNREACHABLE_WARNING = "DefenseClaw hooks are not reaching the daemon; ever
 # decide on its own (triage.judgeEndpoint): a private-network address with
 # every pack, a host off the allowlist with balanced, and every new
 # destination with strict. A port on this machine drafts none (OpenShell
-# denies the mapping itself), so it is opened with --host-port instead.
+# denies the mapping itself): DefenseClaw raises the ask for a port the run
+# named with --host-port (manager.hostPortAsk), and refuses every other one.
 NO_ASKS_TEXT = (
     "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
     "to a private-network address with any pack, to a host off the allowlist with balanced, "
-    "and to every new destination with strict. Ports on this machine never ask; run with --host-port PORT."
+    "and to every new destination with strict. A port on this machine asks only if the run named it "
+    "with --host-port PORT."
 )
 
 # sandboxcli.reasonTexts, plus the triage reasons of rejected proposals: the

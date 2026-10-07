@@ -82,7 +82,6 @@ def test_configured_harnesses_seed_the_toggles() -> None:
 @pytest.mark.parametrize(
     ("changes", "expected_tail"),
     [
-        ({"Install OpenShell": "yes"}, ("--install-openshell", "--no-wrappers")),
         ({"Mount Project Folder": "no"}, ("--no-mounts", "--no-wrappers")),
         ({"OpenShell Telemetry Off": "no"}, ("--upstream-telemetry", "--no-wrappers")),
         ({"Shell Wrappers": "yes"}, ("--wrappers",)),
@@ -408,19 +407,20 @@ def test_an_older_openshell_is_offered_the_upgrade_with_the_install_off() -> Non
     model.apply_sandbox_machine_check(check)
     install = _row(model, "Install OpenShell")
     assert install.value == "no"
+    # GAP-0085: the field hint shows two lines, so the restart leads and the
+    # flag comes first on the Will run line.
     assert install.hint == (
-        f"OpenShell 0.1.1 is installed; {why}. Yes upgrades it in place to OpenShell 0.1.2 with NVIDIA's pinned, "
-        "sha256-verified installer (uses sudo; the terminal asks for your password); that restarts the OpenShell "
-        "gateway, which drops the connections of every sandbox on it (Docker first pulls the new supervisor images "
-        "from ghcr.io)."
+        "Yes upgrades in place to OpenShell 0.1.2 (sudo); the gateway restart drops every running sandbox's "
+        f"connections. OpenShell 0.1.1 is installed; {why}. Docker first pulls the new supervisor images from "
+        "ghcr.io. It runs NVIDIA's pinned, sha256-verified installer (uses sudo; the terminal asks for your password)."
     )
     mac = sandbox_wizard_fields({}, machine=check, os_name="darwin")
-    assert "so stop the MicroVM sandboxes running on it first (setup does not upgrade while one runs)" in next(
-        f for f in mac if f.label == "Install OpenShell"
-    ).hint
+    assert next(f for f in mac if f.label == "Install OpenShell").hint.startswith(
+        "Yes upgrades in place to OpenShell 0.1.2 (Homebrew), only while no MicroVM sandbox runs."
+    )
     assert "--install-openshell" not in model.wizard_command_preview()
     model.form_fields = _set(model.form_fields, "Install OpenShell", "yes")
-    assert "--install-openshell" in model.wizard_command_preview()
+    assert model.wizard_command_preview().startswith("defenseclaw sandbox setup --install-openshell ")
 
 
 @pytest.mark.parametrize(
