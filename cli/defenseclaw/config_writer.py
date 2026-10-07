@@ -84,6 +84,13 @@ MANAGED_REFUSAL = (
     "(MDM or management plane), not on the device"
 )
 
+#: Shown instead of "run defenseclaw init" on a managed (standalone) device.
+MANAGED_NOT_INITIALIZED = (
+    "This device is managed: DefenseClaw is configured by your administrator (MDM or management "
+    "plane), so there is no per-user config to create and 'defenseclaw init' does not apply. "
+    "Nothing was changed."
+)
+
 # Keys a running gateway applies only after a restart: the process-level
 # keys, plus what its reload still treats as restart-required (claw, agent
 # and routing, read once at start; the guardrail listener and enablement;
@@ -303,6 +310,7 @@ def write_with(
     if not str(actor or "").strip():
         raise ConfigWriteError("a config writer actor is required")
     target = _resolve(path)
+    refuse_when_managed(target, actor)
     with hold_lock(target, timeout_s=timeout_s):
         return _transact(target, mutate, actor, reason, expect_sha256, verify)
 
@@ -310,7 +318,6 @@ def write_with(
 _held = threading.local()
 
 
-    refuse_when_managed(target, actor)
 @contextmanager
 def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT_LOCK_TIMEOUT_S) -> Iterator[None]:
     """Hold ``config.yaml.lock``; reentrant in the thread that holds it.
@@ -590,13 +597,6 @@ def managed_refuses(current: bytes, actor: str) -> bool:
     return standalone_managed(current)
 
 
-# ---------------------------------------------------------------------------
-# Validation
-
-
-_warned_python_only = False
-
-
 def refuse_when_managed(path: str | os.PathLike[str], actor: str | None = None) -> None:
     """Raise :class:`ManagedConfigWriteError` when the managed gate would refuse
     this writer, before it takes ``config.yaml.lock`` or touches the folder: a
@@ -608,6 +608,13 @@ def refuse_when_managed(path: str | os.PathLike[str], actor: str | None = None) 
         return  # the locked transaction reports it
     if managed_refuses(current, actor or current_actor(ACTOR_PREFIX_CLI)):
         raise ManagedConfigWriteError(MANAGED_REFUSAL)
+
+
+# ---------------------------------------------------------------------------
+# Validation
+
+
+_warned_python_only = False
 
 
 def _use_go_validator() -> bool:

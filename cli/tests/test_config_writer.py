@@ -150,6 +150,25 @@ def test_machine_marker_makes_a_standard_users_writers_managed(tmp_path, monkeyp
     config_writer.apply([Change("guardrail.mode", "action")], config_writer.ACTOR_LIFECYCLE, "t", path=path)
 
 
+def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path, monkeypatch):
+    # GAP-0172: a standard user with no per-user config was sent to init, whose
+    # wizard would create a config the device ignores.
+    from click.testing import CliRunner
+    from defenseclaw import upgrade_shim
+    from defenseclaw.main import cli
+
+    home = tmp_path / ".defenseclaw"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    for argv in (["skill", "block", "x"], ["guardrail", "protection", "enable", "x"], ["setup", "codex", "--yes"], ["init"]):
+        result = CliRunner().invoke(cli, argv)
+        assert result.exit_code == 3, (argv, result.output)
+        assert "This device is managed" in result.output and "run 'defenseclaw init'" not in result.output
+    assert not home.exists()
+
+
 def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
     # `config` skips the startup load, so the refusal opens its own logger.
     from unittest.mock import MagicMock

@@ -126,6 +126,26 @@ VALID_DEPLOYMENT_MODES = {
 class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
+    #: Process exit code when this error stops a command.
+    exit_code = 1
+
+
+class ManagedNotInitializedError(ConfigVersionError):
+    """No per-user config on a managed device: the administrator's config rules."""
+
+    exit_code = 3  # as a refused write on a managed device
+
+
+def not_initialized_error() -> ConfigVersionError:
+    """The error for a missing config.yaml. On a managed standalone device
+    nothing is initialized per user, so it says the device is managed instead
+    of sending the user to ``defenseclaw init``."""
+    from defenseclaw.config_writer import MANAGED_NOT_INITIALIZED, machine_managed_standalone
+
+    if machine_managed_standalone():
+        return ManagedNotInitializedError(MANAGED_NOT_INITIALIZED)
+    return ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+
 
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
@@ -305,7 +325,7 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
     if version is None and allow_missing:
         return
     if version is None:
-        raise ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+        raise not_initialized_error()
     if version > CURRENT_CONFIG_VERSION:
         raise ConfigVersionError(
             f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
@@ -3628,6 +3648,7 @@ def locked_config_yaml(path: str):
     """
     from defenseclaw import config_writer
 
+    config_writer.refuse_when_managed(path)
     with config_writer.hold_lock(path, timeout_s=None):
         yield
 
@@ -3648,7 +3669,6 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
             # A writer creating config.yaml writes a current-schema document.
             document = {"config_version": CURRENT_CONFIG_VERSION, **document}
             document.setdefault("observability", {})
-    config_writer.refuse_when_managed(path)
         candidate = config_writer.render_document(current, document, source_name)
         return candidate, config_writer.diff_documents(current, candidate)
 

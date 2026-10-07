@@ -526,11 +526,7 @@ def setup(
         and app.preinit_setup_bootstrap
         and ctx.invoked_subcommand != "trusted-paths"
     ):
-        ux.echo(
-            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
-            err=True,
-        )
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
     if (
         ctx.invoked_subcommand != "trusted-paths"
@@ -574,6 +570,16 @@ def setup(
     )
 
 
+def _exit_not_initialized(ctx: click.Context) -> None:
+    """Stop with the missing-config message: run init, or on a managed
+    device that it is managed (exit 3)."""
+    from defenseclaw.config import not_initialized_error
+
+    error = not_initialized_error()
+    ux.echo(str(error), err=True)
+    ctx.exit(error.exit_code)
+
+
 def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> None:
     """Validate and initialize every setup path except trusted-paths.
 
@@ -584,8 +590,7 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     """
 
     if app is None or app.cfg is None:
-        ux.echo("DefenseClaw is not initialized — run 'defenseclaw init' first.", err=True)
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
     from defenseclaw.commands.cmd_config import validate_config
 
@@ -2535,11 +2540,7 @@ def trusted_paths(ctx: click.Context) -> None:
         and app.preinit_setup_bootstrap
         and ctx.invoked_subcommand not in {"add", "list", "remove"}
     ):
-        ux.echo(
-            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
-            err=True,
-        )
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
 
 @trusted_paths.command("list")
