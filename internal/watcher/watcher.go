@@ -1707,6 +1707,13 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 		if entry.Actions.File != "" {
 			return false
 		}
+		// A block whose quarantine move failed, or whose link the watcher
+		// removed, was never restored by an operator: a copy that shows up
+		// again is quarantined (GAP-0394 keeps file=quarantine off the
+		// journal until the move succeeds).
+		if strings.HasPrefix(entry.Reason, quarantineFailedReason) || strings.HasPrefix(entry.Reason, errLinkRemoved.Error()) {
+			return false
+		}
 		if entry.SourcePath != "" && sameWatcherPath(entry.SourcePath, evt.Path) {
 			restored = true
 		}
