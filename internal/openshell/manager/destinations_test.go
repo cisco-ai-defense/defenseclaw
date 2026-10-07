@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -139,6 +140,26 @@ func TestDestinationsAreClassified(t *testing.T) {
 	proxy(egress.EventAllowed, "api.openai.com", "")
 	if n := len(e.tel.findingsOf(audit.SandboxFindingShadowAI)); n != 4 {
 		t.Fatalf("shadow AI findings after a restart = %d", n)
+	}
+}
+
+// A --credential binding's endpoint, which a provider rule opens as it does
+// the model endpoint, is a credential destination: no model provider (the
+// status counts one model API) and no shadow AI.
+func TestDestinationsTellCredentialEndpointsFromTheModelProvider(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "credbox",
+		LLM:         &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-dccert"}},
+		Credentials: []sandboxapi.CredentialBinding{{Name: "STRIPE_API_KEY", Value: "dccert-block-marker", Host: "api.stripe.com"}}})
+	now := time.Now()
+	e.ocsf("credbox", "NET:OPEN [INFO] ALLOWED "+testClaudeBin+"(7) -> api.anthropic.com:443/tcp [policy:_provider_credbox-llm engine:opa]", now)
+	e.ocsf("credbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(8) -> api.stripe.com:443/tcp [policy:_provider_credbox-cred-0 engine:opa]", now)
+	rows := destinationKinds(t, e, "credbox")
+	if rows["api.anthropic.com"].Kind != sandboxapi.DestinationModelProvider || rows["api.stripe.com"].Kind != sandboxapi.DestinationCredential {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if v := e.get("credbox"); v.Egress.ModelAPIs != 1 || v.Egress.ShadowAI != 0 {
+		t.Fatalf("egress summary = %+v", v.Egress)
 	}
 }
 

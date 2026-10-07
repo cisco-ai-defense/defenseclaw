@@ -394,9 +394,13 @@ type EgressStats struct {
 // A row that is none of the AI kinds takes the egress category the proxy
 // gave it (a feed category such as package_registry), else blocked or other.
 const (
-	// DestinationModelProvider: reached under one of the sandbox's
-	// provider rules (its model endpoint, a --credential binding).
+	// DestinationModelProvider: reached under the provider rule of the
+	// sandbox's model provider (its model endpoint).
 	DestinationModelProvider = "model_provider"
+	// DestinationCredential: reached under the provider rule of one of the
+	// sandbox's --credential bindings, its endpoint. The user bound a
+	// credential there, so it is no shadow AI either.
+	DestinationCredential = "credential"
 	// DestinationHarnessVendor: an AI API of the harness's own vendor.
 	DestinationHarnessVendor = "harness_vendor"
 	// DestinationOtherAI: another catalogued AI provider (shadow AI).

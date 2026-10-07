@@ -49,7 +49,8 @@ import (
 // removes it).
 //
 // A host is told apart in this order: one OpenShell allowed under a
-// provider rule is the sandbox's model provider; a catalogued AI provider
+// provider rule is the sandbox's model provider, or the endpoint of one of
+// its --credential bindings (credential); a catalogued AI provider
 // (internal/sensor/catalog) whose signature is the harness's own connector
 // is its vendor's; any other catalogued AI provider is shadow AI, and so is
 // a host shaped like an inference endpoint the catalog does not know; any
@@ -131,13 +132,17 @@ type destRow struct {
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 	// Reached marks a host either boundary let the sandbox reach.
-	Reached      bool     `json:"reached,omitempty"`
-	Sources      []string `json:"sources,omitempty"`
-	Connections  int64    `json:"connections,omitempty"`
-	Refused      int64    `json:"refused,omitempty"`
-	ModelTurns   int64    `json:"model_turns,omitempty"`
-	Rule         string   `json:"rule,omitempty"`
-	ProviderRule bool     `json:"provider_rule,omitempty"`
+	Reached     bool     `json:"reached,omitempty"`
+	Sources     []string `json:"sources,omitempty"`
+	Connections int64    `json:"connections,omitempty"`
+	Refused     int64    `json:"refused,omitempty"`
+	ModelTurns  int64    `json:"model_turns,omitempty"`
+	Rule        string   `json:"rule,omitempty"`
+	// ProviderRule marks a host OpenShell allowed under a provider rule of
+	// the sandbox's model provider, CredentialRule under one of a
+	// --credential binding (its endpoint).
+	ProviderRule   bool `json:"provider_rule,omitempty"`
+	CredentialRule bool `json:"credential_rule,omitempty"`
 	// Category is the egress category of the proxy's last allowed request
 	// (a feed's, such as package_registry), Refusal that of its last
 	// refusal (not_allowlisted, paste_site, ...).
@@ -187,6 +192,9 @@ type destinationSighting struct {
 	pid            int
 	// turn marks a model call among OpenShell's requests.
 	turn bool
+	// credential marks a host one of the sandbox's --credential bindings
+	// names (and its model provider does not).
+	credential bool
 }
 
 // destinationInfo is what classifying and reporting a sandbox's
@@ -196,13 +204,28 @@ type destinationInfo struct {
 	session                  int
 	id                       audit.SandboxIdentity
 	gone                     bool
+	// credentialHosts are the endpoints of the sandbox's --credential
+	// bindings that are not also its model provider's.
+	credentialHosts []string
 }
 
 func (m *Manager) destinationInfo(b *box) destinationInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return destinationInfo{name: b.rec.Name, harness: b.rec.Harness, bindingID: b.rec.BindingID, session: b.rec.Sessions,
+	info := destinationInfo{name: b.rec.Name, harness: b.rec.Harness, bindingID: b.rec.BindingID, session: b.rec.Sessions,
 		id: b.identity(), gone: b.deleted || b.retained}
+	var modelHosts []string
+	for _, ep := range b.rec.ProviderEndpoints {
+		if ep.Role == roleLLM {
+			modelHosts = append(modelHosts, ep.Host)
+		}
+	}
+	for _, ep := range b.rec.ProviderEndpoints {
+		if ep.Role == roleCredential && !slices.Contains(modelHosts, ep.Host) {
+			info.credentialHosts = append(info.credentialHosts, ep.Host)
+		}
+	}
+	return info
 }
 
 // destinationCatalog is the shared AI provider catalog; nil (logged once)
@@ -322,7 +345,10 @@ func (r *destRow) note(s destinationSighting) {
 		}
 		if s.rule != "" {
 			r.Rule = truncate(s.rule, maxDestinationText)
-			r.ProviderRule = r.ProviderRule || strings.HasPrefix(s.rule, providerRulePrefix)
+			if strings.HasPrefix(s.rule, providerRulePrefix) {
+				r.CredentialRule = r.CredentialRule || s.credential
+				r.ProviderRule = r.ProviderRule || !s.credential
+			}
 		}
 	}
 	if s.binary != "" {
@@ -348,6 +374,11 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
 		return sandboxapi.DestinationModelProvider, provider, vendor
+	case r.CredentialRule:
+		if hit != nil {
+			provider, vendor = catalogProviderName(hit), hit.Vendor
+		}
+		return sandboxapi.DestinationCredential, provider, vendor
 	case hit != nil && hit.SupportedConnector != "" && hit.SupportedConnector == harnessName:
 		return sandboxapi.DestinationHarnessVendor, hit.DisplayName, hit.Vendor
 	case hit != nil:
@@ -398,6 +429,7 @@ func (m *Manager) observeDestination(ctx context.Context, b *box, s destinationS
 	if info.gone {
 		return
 	}
+	s.credential = slices.Contains(info.credentialHosts, host)
 	m.destMu.Lock()
 	t := m.tableLocked(info.name)
 	var r *destRow

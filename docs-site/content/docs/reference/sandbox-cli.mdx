@@ -955,8 +955,10 @@ Lists every host the sandbox reached or tried to reach since it was
 created, through the DefenseClaw egress proxy or OpenShell's own network
 boundary, and says what each one is:
 
-- **model provider**: reached under one of the sandbox's provider rules
-  (its model endpoint, a `--credential` binding);
+- **model provider**: its model endpoint, reached under the model
+  provider's rule;
+- **credential**: the endpoint of a `--credential` binding (never shadow
+  AI: you bound a credential there);
 - **harness vendor**: an AI API of the harness's own vendor (for example
   `api.openai.com` in a Codex sandbox);
 - **shadow AI**: another AI provider DefenseClaw's provider catalog knows,

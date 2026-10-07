@@ -2762,8 +2762,9 @@ reference is [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
 Each sandbox's destinations (`manager/destinations.go`, `GET
 /api/v1/sandbox/sandboxes/{name}/destinations`, `defenseclaw sandbox
 destinations NAME`) merge the egress proxy counter's rows with OpenShell's
-NET, HTTP and API records per host, classify each host (model provider by
-its provider rule, the harness's vendor, shadow AI by the AI provider
+NET, HTTP and API records per host, classify each host (model provider or
+a `--credential` endpoint by their provider rules and the record's
+`ProviderEndpoints`, the harness's vendor, shadow AI by the AI provider
 catalog in `internal/sensor/catalog` or an inference-shaped name, else the
 proxy's category, blocked or other), keep at most 512 hosts in
 `<data_dir>/sandboxes/<name>/destinations.json` across restarts. The proxy
