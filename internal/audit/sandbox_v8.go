@@ -410,7 +410,10 @@ type SandboxHealthEvent struct {
 	// OPENSHELL_WATCH_FAILED, which the recorder refuses.
 	ErrorCode    string
 	ErrorSummary string
-	Timestamp    time.Time
+	// Severity overrides the state's default (HIGH when degraded or failed,
+	// else INFO).
+	Severity  string
+	Timestamp time.Time
 }
 
 // SandboxFindingKind classifies sandbox findings.
@@ -1146,6 +1149,10 @@ func (recorder *SandboxRecorder) RecordSandboxHealth(ctx context.Context, input 
 		eventName, outcome, severity, healthState = observability.TelemetryEventSubsystemDegraded, observability.OutcomeFailed, "HIGH", "failed"
 	default:
 		return fmt.Errorf("audit: sandbox health state %q is not registered", input.State)
+	}
+	severity, err := sandboxSeverity(input.Severity, severity)
+	if err != nil {
+		return err
 	}
 	subsystem := string(gatewaylog.SubsystemOpenShell)
 	fields := sandboxV8FieldsFor(identity)

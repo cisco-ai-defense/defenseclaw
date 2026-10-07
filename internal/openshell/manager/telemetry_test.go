@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
 
 // refusingTelemetry refuses egress records while refuse is set and keeps
@@ -324,5 +325,27 @@ func TestAllowedHostPortConnectionsAreRecorded(t *testing.T) {
 	d, _ := e.m.Destinations(context.Background(), "portbox")
 	if len(d.Destinations) != 1 || d.Destinations[0].Host != openshellHostAlias || d.Destinations[0].Ports[0] != 8080 {
 		t.Fatalf("destinations = %+v", d.Destinations)
+	}
+}
+
+// TestStreamGapAfterAGatewayRestart (GAP-0137): each planned OpenShell
+// gateway restart raised a HIGH alert per sandbox, deleted ones included,
+// reading "sandbox events were lost: cursor_out_of_range". The gap reads
+// in words at MEDIUM (no alert), and a deleted sandbox reports none.
+func TestStreamGapAfterAGatewayRestart(t *testing.T) {
+	e := liveEnv(t, "gapbox", nil)
+	gap := stream.Event{Kind: stream.KindGap, Gap: &stream.Gap{Reason: stream.GapCursorOutOfRange}}
+	e.m.handleEvent(t.Context(), e.boxOf("gapbox"), gap)
+	got := where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool { return h.State == audit.SandboxHealthDegraded })
+	if len(got) != 1 || got[0].Severity != "MEDIUM" || !strings.Contains(got[0].ErrorSummary, "gateway restarted") {
+		t.Fatalf("health = %+v", got)
+	}
+	b := e.boxOf("gapbox")
+	e.m.mu.Lock()
+	b.deleted = true
+	e.m.mu.Unlock()
+	e.m.handleEvent(t.Context(), b, gap)
+	if n := len(where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool { return h.State == audit.SandboxHealthDegraded })); n != 1 {
+		t.Fatalf("a deleted sandbox reported its gap: %d records", n)
 	}
 }

@@ -286,6 +286,14 @@ Two `degraded` records are the manager's own:
   counted in `GET /api/v1/sandbox/status` (`telemetry_failures`,
   `telemetry_error`) and on `defenseclaw sandbox status`.
 
+Events lost on a sandbox's stream are a `degraded` record of that sandbox
+(`openshell_watch_failed`) whose summary says what happened, with the
+stream's reason in brackets. A cursor out of range (`cursor_out_of_range`:
+the gateway restarted, as an upgrade or `sandbox setup --install-openshell`
+does, or trimmed its event log) is MEDIUM, which is no alert; a cursor the
+gateway could not have issued (`cursor_rejected`) stays HIGH. A deleted
+sandbox reports none.
+
 ### Findings
 
 `defenseclaw.finding.category` is `sandbox.<kind>`:
