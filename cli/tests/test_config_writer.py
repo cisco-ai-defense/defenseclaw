@@ -172,6 +172,10 @@ def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
     monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
     monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    from defenseclaw.enforce import asset_lists
+
+    audited: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(asset_lists, "audit_managed_refusal", lambda *row: audited.append(row))
     for argv in (
         ["skill", "block", "x"],
         ["guardrail", "protection", "enable", "x"],
@@ -182,12 +186,21 @@ def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path
         # GAP-0172: doctor said "not initialized, run init" on a managed device.
         ["doctor"],
     ):
+        monkeypatch.setattr("sys.argv", ["defenseclaw", *argv])
         result = CliRunner().invoke(cli, argv)
         assert result.exit_code == 3, (argv, result.output)
         assert "This device is managed" in result.output and "run 'defenseclaw init'" not in result.output
+    # GAP-0205: the refused writers leave the audit row an initialized user's refusal leaves.
+    assert audited == [
+        ("skill-block", "x", "type=skill"),
+        ("action", "guardrail protection enable", "command=guardrail protection enable"),
+    ]
     # config get names no init step either (it has no write to refuse, so exit 1).
     result = CliRunner().invoke(cli, ["config", "get", "guardrail.mode", "--effective"])
     assert "device is managed" in result.output and "defenseclaw init" not in result.output
+    # GAP-0207: config show prints the built-in defaults, so it says they are not what is enforced.
+    result = CliRunner().invoke(cli, ["config", "show", "--section", "guardrail"])
+    assert "gateway enforces the administrator's config" in result.output
     assert not home.exists()
 
 
@@ -453,3 +466,17 @@ def test_a_connector_flip_back_to_the_running_value_prints_no_restart_hint(tmp_p
             out = CliRunner().invoke(cmd_config.config_cmd, ["set", "guardrail.connectors.codex.enabled", "true"])
         assert out.exit_code == 0, out.output
         assert ("Restart the gateway to apply guardrail.connectors.codex.enabled" in out.output) is hint
+
+
+def test_a_global_mode_change_names_the_connectors_that_keep_their_own_mode(tmp_path, monkeypatch):
+    # GAP-0259: guardrail.connectors.<C>.mode wins over guardrail.mode, so the change must say so.
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_config
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    _config(tmp_path, "guardrail:\n  mode: observe\n  connectors:\n    codex: {mode: observe, enabled: true}\n")
+    out = CliRunner().invoke(cmd_config.config_cmd, ["set", "guardrail.mode", "action"])
+    assert out.exit_code == 0, out.output
+    assert "keeps its own mode (observe)" in out.output
+    assert "defenseclaw guardrail mode action --connector codex" in out.output

@@ -189,6 +189,7 @@ def config_show(
     config.yaml sets. Read one value with 'defenseclaw config get KEY', for
     example asset_policy.enabled.
     """
+    _managed_view_note()
     data = _show_data(app, source=source, effective=effective, provenance=provenance)
     if section:
         view = "effective" if (effective or provenance) else ("source" if source else "full")
@@ -244,6 +245,7 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         parts = list(parse_path(key.strip()))
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
+    _managed_view_note()
     if parts[:2] == ["admission", "defaults"] and not _written_in_source(app, parts):
         raise click.ClickException(
             f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
@@ -280,6 +282,22 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         elif effective:
             click.echo(f"(source: {config_module.config_path()})", err=True)
     _echo_value(value, fmt)
+
+
+def _managed_view_note() -> None:
+    """Say, on a managed device, that the gateway enforces the administrator's config.
+
+    A per-user config.yaml (or the built-in defaults when there is none) is not what
+    the managed gateway runs, so reading it must not look like the enforced value
+    (GAP-0207)."""
+    from defenseclaw.config_writer import machine_managed_standalone
+
+    if machine_managed_standalone():
+        click.echo(
+            "(this device is managed: the gateway enforces the administrator's config, "
+            "not a per-user config.yaml)",
+            err=True,
+        )
 
 
 def _is_destination_key(parts: list) -> bool:
@@ -485,6 +503,37 @@ def _restart_still_pending(cfg: object, paths: list[str], local_digest: str) -> 
     return [path for path in paths if path not in flips]
 
 
+def _shadowed_mode_notes(changes: list) -> list[str]:
+    """Connectors that keep their own mode after a ``guardrail.mode`` change.
+
+    ``guardrail.connectors.<C>.mode`` wins over the global mode, so a change to
+    ``guardrail.mode`` does not reach those connectors. Name each one and the
+    command that does (GAP-0259), as ``guardrail mode`` already does."""
+    if not any(getattr(change, "path", "") == "guardrail.mode" for change in changes):
+        return []
+    try:
+        from defenseclaw import policy_catalog
+        from defenseclaw.commands.cmd_guardrail import _connector_label
+
+        cfg = config_module.load()
+        gc = cfg.guardrail
+        new_mode = policy_catalog.mode_label(gc.mode)
+        notes = []
+        for connector in (str(c) for c in cfg.active_connectors()):
+            own = gc._connector_override(connector)
+            if own is None or not (own.mode or "").strip():
+                continue
+            kept = policy_catalog.mode_label(own.mode)
+            if kept != new_mode:
+                notes.append(
+                    f"{_connector_label(connector)} keeps its own mode ({kept}); "
+                    f"change it with: defenseclaw guardrail mode {new_mode} --connector {connector}"
+                )
+        return notes
+    except Exception:  # noqa: BLE001 - the change is committed; the hint is best effort
+        return []
+
+
 def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
@@ -521,6 +570,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     if digest:
         click.echo(f"Effective policy digest: {digest['effective_digest']}")
     local_digest = digest["effective_digest"] if digest else ""
+    for note in _shadowed_mode_notes(changes):
+        click.echo(note)
     pending = _restart_still_pending(cfg, result.restart_required, local_digest)
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")

@@ -216,6 +216,52 @@ def audit_managed_refusal(action: str, target: str, details: str = "") -> None:
         pass
 
 
+#: ``guardrail`` verbs that write policy (the rest read: status, list-packs, validate-pack).
+_GUARDRAIL_WRITERS = frozenset({
+    "alert-at", "allow-private-upstream", "block-at", "block-message", "disable", "enable", "fail-mode", "hilt",
+    "judge", "mode", "protection", "rule", "suppress", "use-pack",
+})
+_POLICY_WRITERS = frozenset({"activate", "create", "delete", "edit"})
+
+
+def _first_argument(command: click.Command, name: str, args: list[str]) -> str:
+    """The value of the command's first positional argument ("" when it has none)."""
+    try:
+        with command.make_context(name, list(args), resilient_parsing=True) as ctx:
+            for param in command.params:
+                if isinstance(param, click.Argument):
+                    return str(ctx.params.get(param.name) or "")
+    except Exception:  # noqa: BLE001 - the target is a nicety; the refusal stands without it
+        pass
+    return ""
+
+
+def audit_first_run_refusal(root: click.Command, argv: list[str]) -> None:
+    """Audit a policy write that a managed device refused before the command ran.
+
+    An account with no per-user config is stopped at startup (exit 3), ahead of
+    the command's own managed gate that audits, so its refusals left no row
+    (GAP-0205). Resolve *argv* against the command tree and record the row the
+    gate would: the block/allow/unblock action for skill, mcp, plugin and tool,
+    the generic action row for the guardrail and policy writers. Reads and
+    unknown commands record nothing."""
+    command, path, rest = root, [], list(argv)
+    while isinstance(command, click.Group) and rest and not rest[0].startswith("-"):
+        child = command.commands.get(rest[0])
+        if child is None:
+            break
+        command, path, rest = child, [*path, rest[0]], rest[1:]
+    group, verb = (path + ["", ""])[:2]
+    if len(path) == 2 and group in TARGET_TYPES and verb in (OP_BLOCK, OP_ALLOW, OP_UNBLOCK):
+        target = _first_argument(command, verb, rest) or group
+        audit_managed_refusal(_REFUSAL_ACTIONS[(group, verb)], target, f"type={group}")
+    elif (group == "guardrail" and verb in _GUARDRAIL_WRITERS and path[2:3] != ["list"]) or (
+        group == "policy" and verb in _POLICY_WRITERS
+    ):
+        words = " ".join(path)
+        audit_managed_refusal(ACTION_ACTION, words, f"command={words}")
+
+
 def _type_policy(asset_policy: Any, target_type: str) -> Any | None:
     if asset_policy is None or target_type not in ("skill", "mcp", "plugin"):
         return None

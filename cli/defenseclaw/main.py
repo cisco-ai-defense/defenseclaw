@@ -321,6 +321,10 @@ def cli(ctx: click.Context) -> None:
             cfg_mod.require_v8_config()
         except cfg_mod.ConfigVersionError as exc:
             ux.echo(str(exc), err=True)
+            if isinstance(exc, cfg_mod.ManagedNotInitializedError):
+                from defenseclaw.enforce.asset_lists import audit_first_run_refusal
+
+                audit_first_run_refusal(ctx.command, sys.argv[1:])
             raise SystemExit(exc.exit_code) from exc
 
     if invoked == "doctor" and cfg_mod.config_is_empty():
