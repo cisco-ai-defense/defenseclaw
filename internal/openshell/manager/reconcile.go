@@ -137,7 +137,12 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		b.op.Unlock()
 	}
 
-	// Bindings without a sandbox.
+	// Bindings without a sandbox. The bindings are listed before the boxes
+	// are: a create reserves its box (creating) before it mints its
+	// binding, so each binding listed belongs to a box seen below, known or
+	// creating. Listed after, a binding minted between the two reads looked
+	// vanished and was revoked under the create.
+	bindings := m.opts.Bindings.List()
 	m.mu.Lock()
 	known := map[string]bool{}
 	creating := map[string]bool{}
@@ -148,7 +153,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		}
 	}
 	m.mu.Unlock()
-	for _, binding := range m.opts.Bindings.List() {
+	for _, binding := range bindings {
 		if known[binding.ID] || creating[binding.SandboxName] {
 			continue
 		}
