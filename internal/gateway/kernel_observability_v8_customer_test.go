@@ -291,7 +291,8 @@ func TestKernelPolicyRecordsCarryBurnInProgress(t *testing.T) {
 func TestKernelMetrics(t *testing.T) {
 	t.Parallel()
 	emitter := &kernelMetricEmitter{kernelTestEmitter: kernelTestEmitter{admission: router.AdmissionOrdinary}}
-	adapter := &aiRuntimeV8Adapter{runtime: emitter, kernelCursor: &kernelChangeCursor{}, kernelDeltas: &kernelDeltaCursor{}}
+	adapter := &aiRuntimeV8Adapter{runtime: emitter, kernelCursor: &kernelChangeCursor{}, kernelDeltas: &kernelDeltaCursor{},
+		kernelState: &kernelStateCursor{}}
 	snapshot := fleetSnapshot(1, 1, 1)
 	snapshot.KernelEvents = []sensor.KernelEvent{
 		{Outcome: plane.OutcomeBlocked, Control: "kernel.ssh_private_key_read", Policy: "defenseclaw-controls-0a1b2c3d"},
@@ -343,6 +344,34 @@ func TestKernelMetrics(t *testing.T) {
 		if !sameJSONValue(state[key], want) {
 			t.Errorf("state %s = %v, want %v (%v)", key, state[key], want, state)
 		}
+	}
+}
+
+// TestKernelStateGaugeZeroesTheSeriesItLeaves: when the state changes the
+// previous label set is recorded at 0, so an alert on the old state stops.
+func TestKernelStateGaugeZeroesTheSeriesItLeaves(t *testing.T) {
+	t.Parallel()
+	cursor := &kernelStateCursor{}
+	stale := &observability.MetricDefenseClawKernelStateInput{Value: 1, DefenseClawAIRuntimeKernelApproval: observability.Present("stale")}
+	approved := &observability.MetricDefenseClawKernelStateInput{Value: 1, DefenseClawAIRuntimeKernelApproval: observability.Present("approved")}
+	if got := cursor.next(stale); len(got) != 1 || got[0].Value != 1 {
+		t.Fatalf("first %+v", got)
+	}
+	if got := cursor.next(stale); len(got) != 1 || got[0].Value != 1 {
+		t.Fatalf("unchanged %+v", got)
+	}
+	got := cursor.next(approved)
+	if len(got) != 2 || got[0].Value != 0 || got[1].Value != 1 {
+		t.Fatalf("changed %+v", got)
+	}
+	if approval, _ := got[0].DefenseClawAIRuntimeKernelApproval.Get(); approval != "stale" {
+		t.Fatalf("zeroed %q", approval)
+	}
+	if got := cursor.next(nil); len(got) != 1 || got[0].Value != 0 {
+		t.Fatalf("gone %+v", got)
+	}
+	if got := cursor.next(nil); len(got) != 0 {
+		t.Fatalf("still gone %+v", got)
 	}
 }
 

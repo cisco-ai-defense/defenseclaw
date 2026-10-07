@@ -66,8 +66,10 @@ type aiRuntimeV8Adapter struct {
 	directories   map[string]*llmEventIdentity
 	directoriesMu sync.Mutex
 	// kernelDeltas remembers the helper's counters for the per-cycle
-	// growth on plane_health; nil means the process-wide cursor.
+	// growth on plane_health, and kernelState the kernel state gauge's last
+	// label set; nil means the process-wide cursors.
 	kernelDeltas *kernelDeltaCursor
+	kernelState  *kernelStateCursor
 }
 
 func newAIRuntimeV8Adapter(emitter sidecarRuntimeEmitter) *aiRuntimeV8Adapter {
@@ -144,24 +146,6 @@ func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot se
 		firstErr = err
 	}
 	return firstErr
-}
-
-// planeHealthReason is what a plane-health record says happened.
-//
-// A running plane names its mechanism; a stopped or blind one names its
-// reason. One of the two is always present, so a reader never has to go to
-// the source to find out what happened.
-//
-// Exported to the test rather than restated there: a test that re-implements
-// this rule asserts against itself and keeps passing when the rule changes.
-func planeHealthReason(health sensor.PlaneHealth) string {
-	if health.Reason != "" {
-		return health.Reason
-	}
-	if health.Running {
-		return health.Mechanism
-	}
-	return ""
 }
 
 // runtimePlaneBackend is the process backend Plane C ran on; absent off the
@@ -276,10 +260,10 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 			DefenseClawAIRuntimePlane:                   string(health.Plane),
 			DefenseClawAIRuntimePlaneAvailable:          health.Available,
 			DefenseClawAIRuntimePlaneRunning:            health.Running,
-			DefenseClawAIRuntimePlaneReason:             aiDiscoveryV8OptionalText(planeHealthReason(health)),
-			// The mechanism is its own field: plane_reason drops it on a
-			// partial cycle, which is when a reader most needs to know which
-			// backend ran.
+			// A running plane names its mechanism on every cycle, and a
+			// stopped, blind or partial one its reason, so a reader never has
+			// to go to the source to find out what a plane is doing.
+			DefenseClawAIRuntimePlaneReason:     aiDiscoveryV8OptionalText(health.Reason),
 			DefenseClawAIRuntimePlaneMechanism:  runtimeBoundedText(health.Mechanism, runtimeMechanismMaxBytes),
 			DefenseClawAIRuntimePlaneBackend:    runtimePlaneBackend(health),
 			DefenseClawAIRuntimeEventsLost:      runtimePlaneEventsLost(health),

@@ -85,6 +85,23 @@
 
   <row>
     <panel>
+      <title>Fleet: kernel controls per host</title>
+      <html>
+        <p>The latest plane c record of each host: the Tetragon version, the Plane C backend, the enterprise.tetragon mode, the approval of the build's kernel controls, how many enrolled users enforce or are still in burn-in, the pause and the control-set digest. A host on the <b>native</b> backend with Tetragon installed enforces nothing.</p>
+      </html>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" AND runtime_plane="c" AND runtime_kernel_helper_mode!="" | stats latest(runtime_tetragon_version) as tetragon, latest(runtime_plane_backend) as backend, latest(runtime_kernel_helper_mode) as mode, latest(runtime_kernel_approval) as approval, latest(runtime_kernel_users_enforced) as enforcing, latest(runtime_kernel_users_enrolled) as enrolled, latest(runtime_kernel_users_burn_in) as "in burn-in", latest(runtime_kernel_paused) as paused, latest(runtime_policy_version) as digest, sum(runtime_kernel_blocked_delta) as denials, sum(runtime_kernel_would_block_delta) as "would-block", latest(_time) as last_seen by host | eval last_seen=strftime(last_seen, "%Y-%m-%d %H:%M:%S") | sort host</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
       <title>Findings by severity</title>
       <chart>
         <search>
@@ -166,7 +183,7 @@
 
   <row>
     <panel>
-      <title>Kernel floor (Linux) — what DefenseClaw's kernel controls did</title>
+      <title>Kernel controls (Linux) — what DefenseClaw's kernel controls did</title>
       <html>
         <p>Managed Linux hosts only, and only when the enterprise Tetragon mode is <b>observe</b> or <b>enforce</b>. A control in monitor mode counts; in enforce mode it refuses the access with EPERM. A user enters the enforcing scope after a per-user burn-in with no would-block hits.</p>
       </html>
@@ -192,7 +209,7 @@
       <title>Would-block (monitor mode)</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND runtime_kernel_outcome="would_block" | stats count as would_block</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" AND runtime_plane="c" | stats sum(runtime_kernel_would_block_delta) as would_block</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -271,13 +288,13 @@
       </table>
     </panel>
     <panel>
-      <title>Burn-in readiness per user</title>
+      <title>Burn-in progress per user</title>
       <html>
-        <p><b>uid_ready</b> is a user entering the enforcing scope after a clean burn-in; <b>uid_burnin</b> is one that started, restarted (new connector, changed control set) or was held back by hits.</p>
+        <p>Covered agent hours with the event stream lossless, out of the hours burn_in needs (uid_progress every six hours; uid_ready and uid_burnin when the state changes). A would-block hit restarts the count. Covered time is agent use, not wall-clock time: 168h is about five to six working weeks for a full-time user.</p>
       </html>
       <table>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.kernel_policy" AND runtime_kernel_event IN ("uid_ready","uid_burnin") | stats latest(runtime_kernel_event) as state, latest(runtime_kernel_reason) as reason, latest(_time) as last_change by host, runtime_user | eval last_change=strftime(last_change, "%Y-%m-%d %H:%M:%S") | rename runtime_user as "user (uid)" | sort host "user (uid)"</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.kernel_policy" AND runtime_kernel_event IN ("uid_progress","uid_ready","uid_burnin") | stats latest(runtime_kernel_event) as state, latest(runtime_kernel_covered_hours) as covered_hours, latest(runtime_kernel_needed_hours) as needed_hours, latest(runtime_kernel_reason) as reason, latest(_time) as last_change by host, runtime_user | eval progress=if(needed_hours>0, round(100*covered_hours/needed_hours, 1)."%", "") | eval last_change=strftime(last_change, "%Y-%m-%d %H:%M:%S") | rename runtime_user as "user (uid)" | sort host "user (uid)"</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -290,11 +307,90 @@
     <panel>
       <title>Kernel denials — one record per refused access</title>
       <html>
-        <p>The path and the command line are not exported. The rule is the guardrail rule the control mirrors, so a denial joins the hook record of the same intent.</p>
+        <p>The process and the file, relative to the user's home, travel in content fields: each destination's redaction profile decides whether they leave the host. The command line is never exported. The rule is the guardrail rule the control mirrors, so a denial joins the hook record of the same intent.</p>
       </html>
       <table>
         <search>
-          <query>`defenseclaw_demo_kernel_denials` | table _time, host, connector, runtime_user, runtime_kernel_control, runtime_kernel_rule, runtime_kernel_policy | rename runtime_user as "user (uid)", runtime_kernel_control as control, runtime_kernel_rule as rule, runtime_kernel_policy as policy | sort - _time</query>
+          <query>`defenseclaw_demo_kernel_denials` | table _time, host, connector, runtime_user, runtime_process, runtime_kernel_target, runtime_kernel_control, runtime_kernel_rule, runtime_kernel_policy | rename runtime_user as "user (uid)", runtime_process as process, runtime_kernel_target as target, runtime_kernel_control as control, runtime_kernel_rule as rule, runtime_kernel_policy as policy | sort - _time</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Your Tetragon policies: events from AI agents</title>
+      <html>
+        <p>Events of the organization's own Tetragon policies (kprobe and LSM) whose process runs below an AI agent, attributed to the agent, the user and the managed hook decision of the tool call. DefenseClaw reads these events and never adds, changes or deletes the policies. Events outside an AI agent's process tree are counted on the sensor helper, never exported one by one.</p>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Agent events</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_kernel_events` | stats sum(runtime_kernel_count) as agent_events</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Blocked by your policies</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_kernel_events` | where runtime_kernel_outcome="blocked" | stats sum(runtime_kernel_count) as blocked</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="rangeColors">["0x53a051","0xf8be34"]</option>
+        <option name="rangeValues">[0]</option>
+        <option name="useColors">1</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Events your policies saw (every process)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" AND runtime_plane="c" | stats sum(runtime_kernel_customer_events_delta) as events</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Policy, agent, action, outcome and hook join</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_kernel_events` | stats sum(runtime_kernel_count) as events by runtime_kernel_policy_name, runtime_agent, runtime_kernel_action, runtime_kernel_outcome, runtime_hook_join | rename runtime_kernel_policy_name as policy, runtime_agent as agent, runtime_kernel_action as action, runtime_kernel_outcome as outcome, runtime_hook_join as "hook join" | sort - events</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Events of your Tetragon policies from AI agents</title>
+      <html>
+        <p>The target (a path or a peer) is a content field: each destination's redaction profile decides whether it leaves the host.</p>
+      </html>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_kernel_events` | table _time, host, runtime_kernel_policy_name, runtime_kernel_hook_type, runtime_kernel_function, runtime_kernel_action, runtime_kernel_policy_mode, runtime_kernel_outcome, runtime_kernel_target, runtime_kernel_count, runtime_agent, runtime_process, runtime_user, runtime_hook_join, runtime_hook_action | rename runtime_kernel_policy_name as policy, runtime_kernel_hook_type as hook, runtime_kernel_function as function, runtime_kernel_action as action, runtime_kernel_policy_mode as mode, runtime_kernel_outcome as outcome, runtime_kernel_target as target, runtime_kernel_count as count, runtime_agent as agent, runtime_process as process, runtime_user as "user (uid)", runtime_hook_join as "hook join", runtime_hook_action as "hook action" | sort - _time</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>

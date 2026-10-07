@@ -1003,6 +1003,7 @@ func (adapter *aiRuntimeV8Adapter) emitKernelMetrics(ctx context.Context, snapsh
 			})
 		})
 	}
+	var current *observability.MetricDefenseClawKernelStateInput
 	if fleet.present {
 		backend := ""
 		for _, health := range snapshot.Planes {
@@ -1010,7 +1011,7 @@ func (adapter *aiRuntimeV8Adapter) emitKernelMetrics(ctx context.Context, snapsh
 				backend = health.Backend.Kind
 			}
 		}
-		input := observability.MetricDefenseClawKernelStateInput{
+		current = &observability.MetricDefenseClawKernelStateInput{
 			Value:                                 1,
 			DefenseClawAIRuntimeKernelHelperMode:  fleet.helperMode,
 			DefenseClawAIRuntimeKernelApproval:    fleet.approval,
@@ -1018,12 +1019,67 @@ func (adapter *aiRuntimeV8Adapter) emitKernelMetrics(ctx context.Context, snapsh
 			DefenseClawAIRuntimePlaneBackend:      runtimeEnum(backend, runtimePlaneBackends),
 			DefenseClawAIRuntimeTetragonInstalled: fleet.installed,
 		}
+	}
+	cursor := adapter.kernelState
+	if cursor == nil {
+		cursor = defaultKernelStateCursor
+	}
+	for _, input := range cursor.next(current) {
+		input := input
 		record(observability.TelemetryInstrumentDefenseClawKernelState, func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			input.Envelope = envelope
 			return builder.BuildMetricDefenseClawKernelState(input)
 		})
 	}
 	return firstErr
+}
+
+// kernelStateCursor remembers the kernel state gauge's last label set: a
+// gauge keeps its last value per label set, so when the state changes (an
+// approval goes from stale to approved) the old series is set to 0 instead of
+// staying at 1 and keeping an alert firing. Process-wide, like the other
+// cursors.
+type kernelStateCursor struct {
+	mu   sync.Mutex
+	last *observability.MetricDefenseClawKernelStateInput
+}
+
+var defaultKernelStateCursor = &kernelStateCursor{}
+
+// next returns what to record this cycle: the previous label set at 0 when it
+// changed or went away, then the current one at 1.
+func (cursor *kernelStateCursor) next(current *observability.MetricDefenseClawKernelStateInput) []observability.MetricDefenseClawKernelStateInput {
+	cursor.mu.Lock()
+	defer cursor.mu.Unlock()
+	var out []observability.MetricDefenseClawKernelStateInput
+	if cursor.last != nil && (current == nil || kernelStateKey(*cursor.last) != kernelStateKey(*current)) {
+		zero := *cursor.last
+		zero.Value = 0
+		out = append(out, zero)
+	}
+	cursor.last = nil
+	if current != nil {
+		out = append(out, *current)
+		copied := *current
+		cursor.last = &copied
+	}
+	return out
+}
+
+func kernelStateKey(input observability.MetricDefenseClawKernelStateInput) string {
+	text := func(value observability.Optional[string]) string {
+		v, ok := value.Get()
+		return strconv.FormatBool(ok) + ":" + v
+	}
+	flag := func(value observability.Optional[bool]) string {
+		v, ok := value.Get()
+		return strconv.FormatBool(ok) + ":" + strconv.FormatBool(v)
+	}
+	return strings.Join([]string{
+		text(input.DefenseClawAIRuntimeKernelHelperMode), text(input.DefenseClawAIRuntimeKernelApproval),
+		flag(input.DefenseClawAIRuntimeKernelPaused), text(input.DefenseClawAIRuntimePlaneBackend),
+		flag(input.DefenseClawAIRuntimeTetragonInstalled),
+	}, "|")
 }
 
 // homeRelativeTarget names a file without the account's home directory: ~/...
