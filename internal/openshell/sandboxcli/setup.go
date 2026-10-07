@@ -242,6 +242,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
 		}
+		if errors.Is(err, openshell.ErrSudo) {
+			a.bad("install OpenShell: " + strings.TrimPrefix(err.Error(), "openshell: ") + "; nothing was installed")
+			a.note("→ an administrator installs the openshell package (`" + CommandName + " setup --install-openshell` from an account with sudo), then run `" +
+				CommandName + " setup` here")
+			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
+		}
 		if err != nil {
 			return fmt.Errorf("install OpenShell: %w", err)
 		}
@@ -793,6 +799,12 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		// Nothing ran (openshell.PrepareUpgrade): the release installed
 		// goes on working.
 		a.warn("OpenShell " + rep.CLIVersion + " is kept: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		return rep, nil
+	case errors.Is(err, openshell.ErrSudo):
+		// Nothing ran: the release installed goes on working.
+		a.warn("OpenShell " + rep.CLIVersion + " is kept, the upgrade did not run: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		a.note("→ an administrator upgrades the machine's openshell package (`" + CommandName + " setup --install-openshell` from an account with sudo), then `" +
+			CommandName + " doctor --fix` here restarts your gateway on it")
 		return rep, nil
 	case errors.Is(err, openshell.ErrHomebrewInstall):
 		a.bad("upgrade OpenShell: Homebrew could not install the nvidia/openshell formula")

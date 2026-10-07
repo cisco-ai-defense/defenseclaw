@@ -69,6 +69,10 @@ var (
 	// release's supervisor images (Installer.PrepareUpgrade), without which
 	// the restarted gateway's docker driver does not start.
 	ErrRuntimeImages = errors.New("openshell: Docker could not pull the images the upgraded gateway starts with")
+	// ErrSudo means the install could not use sudo, which NVIDIA's
+	// installer needs on Linux to install the openshell package. Nothing
+	// was installed or downloaded by the script.
+	ErrSudo = errors.New("openshell: the install needs sudo")
 )
 
 // linuxPackageCLI is where the deb and rpm packages install the CLI.
@@ -238,6 +242,8 @@ type Installer struct {
 	// discover the Discover registration, dial it and PrepareUpgrade, with
 	// the images gateway.toml leaves to the release: RuntimeImages).
 	PrepareUpgrade func(ctx context.Context, release Version) error
+	// Geteuid is the caller's uid (default os.Geteuid): root needs no sudo.
+	Geteuid func() int
 }
 
 func (i *Installer) defaults() {
@@ -297,6 +303,35 @@ func (i *Installer) defaults() {
 	if i.PrepareUpgrade == nil {
 		i.PrepareUpgrade = i.prepareUpgrade
 	}
+	if i.Geteuid == nil {
+		i.Geteuid = os.Geteuid
+	}
+}
+
+// checkSudo makes sure, before the script runs, that sudo will let it
+// install the openshell package (Linux): at once when sudo needs no
+// password, else with sudo's own password prompt now, which then lasts
+// for the script. A refused or cancelled prompt, or no sudo, is ErrSudo,
+// with nothing installed.
+func (i *Installer) checkSudo(ctx context.Context) error {
+	if i.GOOS != "linux" || i.Geteuid() == 0 {
+		return nil
+	}
+	_, err := i.Runner.Output(ctx, Command{Name: "sudo", Args: []string{"-n", "true"}, Timeout: 15 * time.Second})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, exec.ErrNotFound):
+		return fmt.Errorf("%w, which is not installed here", ErrSudo)
+	}
+	fmt.Fprintln(i.Out, "  sudo asks for your password now, before anything is installed:")
+	if err := i.Runner.Run(ctx, Command{Name: "sudo", Args: []string{"-v"}}); err != nil {
+		if errors.Is(err, ErrInterrupted) || ctx.Err() != nil {
+			return fmt.Errorf("%w: cancelled at sudo's password prompt", ErrSudo)
+		}
+		return fmt.Errorf("%w, which did not accept this account (%v)", ErrSudo, err)
+	}
+	return nil
 }
 
 // Install runs the flow: detect an existing CLI, download the pinned
@@ -426,6 +461,9 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	if !ok {
 		return nil, ErrInstallDeclined
 	}
+	if err := i.checkSudo(ctx); err != nil {
+		return nil, err
+	}
 	if upgrading {
 		if err := i.PrepareUpgrade(ctx, target); err != nil {
 			return nil, err
@@ -433,6 +471,10 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	}
 
 	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}); err != nil {
+		if errors.Is(err, ErrInterrupted) {
+			return nil, fmt.Errorf("openshell: the installer was interrupted and may have done part of its work; "+
+				"`defenseclaw sandbox doctor` shows what is there, and `defenseclaw sandbox setup` runs it again: %w", err)
+		}
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
 			// formula (NVIDIA's tap has no bottle for this macOS) with an

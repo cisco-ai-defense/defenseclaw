@@ -419,6 +419,10 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: no sandbox runs on it now"}},
 		{"a MicroVM started meanwhile", "", false, flag, openshell.DriverVM, 0, fmt.Errorf("%w (dc-late): stop them first", openshell.ErrSandboxesRunning), true,
 			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush (dc-late): stop them first"}},
+		// GAP-0056, GAP-0064: sudo refused or cancelled before the script.
+		{"no sudo", "", false, flag, "", 0, fmt.Errorf("%w: cancelled at sudo's password prompt", openshell.ErrSudo), true,
+			[]string{"⚠ OpenShell 0.1.1 is kept, the upgrade did not run: the install needs sudo: cancelled at sudo's password prompt",
+				"→ an administrator upgrades the machine's openshell package (`defenseclaw sandbox setup --install-openshell` from an account with sudo)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := setupApp(t, tc.input, "", true)
