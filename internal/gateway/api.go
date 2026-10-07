@@ -3913,7 +3913,8 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 		TargetType: input.TargetType, Name: input.TargetName, SourcePath: input.Path,
 	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
-	if cfg != nil && cfg.SecureClientIntegration() {
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	if secureClient {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
 	}
 	if a.generationSource != nil || (a.scannerCfg != nil && a.scannerCfg.PolicyDir != "") {
@@ -3923,7 +3924,19 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 			}
 		}
 	}
+	if secureClient {
+		// Secure Client keeps the admission fallback of main (issue #1092).
+		return policy.EvaluateSecureClientAdmission(input, a.startPolicyDir()), nil
+	}
 	return policy.EvaluateAdmissionFallback(input), nil
+}
+
+// startPolicyDir is the policy_dir of the start-time configuration.
+func (a *APIServer) startPolicyDir() string {
+	if a.scannerCfg == nil {
+		return ""
+	}
+	return a.scannerCfg.PolicyDir
 }
 
 // legacyPolicyListEntries is the Secure Client block/allow list read from

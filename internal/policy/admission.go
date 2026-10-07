@@ -128,6 +128,7 @@ type secureClientDataJSON struct {
 	FirstPartyAllowList []struct {
 		TargetType         string   `json:"target_type"`
 		TargetName         string   `json:"target_name"`
+		Reason             string   `json:"reason"`
 		SourcePathContains []string `json:"source_path_contains"`
 	} `json:"first_party_allow_list"`
 	Guardrail struct {
