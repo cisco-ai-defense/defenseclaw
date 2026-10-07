@@ -76,6 +76,9 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   its first hook only with your first prompt (Kiro CLI, Hermes Agent,
   Antigravity, OpenHands, OmniGent, GitHub Copilot CLI) and was never
   prompted is not counted, unless the daemon saw it work without hooks.
+  Neither is an interactive session given harness arguments after `--`
+  that may start no session (`connect NAME -- --version`), unless the
+  daemon or the live check flagged it: it ends with a note instead.
   `logs` does the same when it reports a finished detached run none of
   whose hooks reached DefenseClaw. `pull --apply` exits `4` when it could not
   merge in place (a conflict, or git older than 2.38) and left your working

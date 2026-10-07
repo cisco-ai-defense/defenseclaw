@@ -870,6 +870,21 @@ func TestSessionHookWarnings(t *testing.T) {
 			not:  []string{"hooks are not reaching"}, notLive: []string{"hooks are not reaching"}},
 		{name: "kiro the daemon found unreachable", opts: kiro, setup: quiet(0), exit: ExitHooksUnreachable,
 			during: unreachable("r2c1-kiro", "no hook request")},
+		// GAP-0157: `-- --version` prints and exits without a session; it
+		// sent no hook and nothing showed a session at work without them.
+		{name: "a connect that only asks the version", do: func(ta *testApp) error {
+			return ta.Connect(bg, ConnectOptions{Name: "verbox", Args: []string{"--version"}})
+		}, setup: func(ta *testApp) {
+			quiet(time.Hour)(ta)
+			sb := sampleSandbox("verbox")
+			sb.Phase = "stopped"
+			ta.daemon.add(sb)
+		}, want: []string{"no hook of this session reached DefenseClaw: Claude Code ran with the arguments after -- and may not have started a session; " +
+			"if it did, run: defenseclaw sandbox doctor"},
+			not: []string{"hooks are not reaching"}},
+		{name: "a pass-through run the daemon found unreachable", opts: RunOptions{Harness: "claude", Args: []string{"--model", "m"}}, setup: quiet(time.Hour),
+			exit: ExitHooksUnreachable, during: unreachable(sbName, "the hook token was refused"),
+			want: []string{"✗ " + hooksWarningText("the hook token was refused")}},
 		// PR 1022 review of N1: a daemon restart during the session left
 		// the new daemon's counters at zero, and the session said none of
 		// its hooks reached DefenseClaw (Copilot CLI, after 7 allowed tool

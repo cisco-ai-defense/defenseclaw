@@ -330,6 +330,18 @@ func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool)
 		a.note("no hook of this session reached DefenseClaw: " + s.harnessName() + " sends its first one with your first prompt")
 		return
 	}
+	s.hooksMu.Lock()
+	warned := s.hooksWarned
+	s.hooksMu.Unlock()
+	if s.passArgs && !s.headless && !warned && !after.Hooks.Unreachable {
+		// Arguments the harness may answer without starting a session
+		// (`connect NAME -- --version`), and nothing showed a session at work
+		// without its hooks: no live warning, no verdict of the daemon's
+		// (GAP-0157). A headless prompt always starts one.
+		a.note("no hook of this session reached DefenseClaw: " + s.harnessName() + " ran with the arguments after -- and may not have started a session; " +
+			"if it did, run: " + CommandName + " doctor")
+		return
+	}
 	s.noHooks = true
 	reason := firstNonEmpty(after.Hooks.UnreachableReason, "not one hook request of this session reached DefenseClaw")
 	a.println(a.style("✗ "+hooksWarningText(reason), ansiRed, ansiBold))

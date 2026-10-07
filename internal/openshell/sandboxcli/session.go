@@ -96,6 +96,9 @@ type session struct {
 	// shell marks a `connect --shell` session: no harness, so no hooks to
 	// expect.
 	shell bool
+	// passArgs is set when the command was given arguments for the harness
+	// (after --), which it may answer without a session (--version).
+	passArgs bool
 	// startedAt is when the harness (or shell) was attached; harnessCode
 	// its exit status.
 	startedAt   time.Time
