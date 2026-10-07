@@ -25,7 +25,7 @@ model behind this page: what is configuration, what is derived from it, and
 what only records what happened.
 
 The current contract is `config_version: 9`. A version 8 file, which is what
-DefenseClaw 1.0.x writes, still loads: the gateway migrates it in memory.
+DefenseClaw 0.8.5 to 0.8.10 write, still loads: the gateway migrates it in memory.
 `defenseclaw upgrade` or `defenseclaw migrate` rewrites it as version 9 and
 keeps the old file as `config.yaml.v8.bak`. See
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) for what moved
@@ -1268,7 +1268,7 @@ An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching it
 
 The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
 
-`~/.defenseclaw/custom-providers.json` is **derived** from this section on every config write, for tools that read the file, and carries a `_derived_from` hash. Do not edit it: a hand edit is never read back, and `defenseclaw doctor` fails the **Custom-provider overlay** row (`was edited by hand; the gateway ignores those edits`). `defenseclaw doctor --fix` rewrites it from `llm_providers`. A hand-written `custom-providers.json` from 1.0.x, which has no `_derived_from` hash, is still merged until the next `setup provider add` or `remove` moves its entries into `llm_providers`. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
+`~/.defenseclaw/custom-providers.json` is **derived** from this section on every config write, for tools that read the file, and carries a `_derived_from` hash. Do not edit it: a hand edit is never read back, and `defenseclaw doctor` fails the **Custom-provider overlay** row (`was edited by hand; the gateway ignores those edits`). `defenseclaw doctor --fix` rewrites it from `llm_providers`. A hand-written `custom-providers.json` from 0.8.x, which has no `_derived_from` hash, is still merged until the next `setup provider add` or `remove` moves its entries into `llm_providers`. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
 
 ## Environment variables
 

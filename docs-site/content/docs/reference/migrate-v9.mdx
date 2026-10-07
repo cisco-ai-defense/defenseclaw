@@ -1,6 +1,6 @@
 ---
 title: Migrate config.yaml from v8 to v9
-description: What the config_version 8 to 9 migration moves into config.yaml, which commands run it, before and after examples for every moved key, how conflicts are recorded in migration-v9.json, and how to go back to DefenseClaw 1.0.x.
+description: What the config_version 8 to 9 migration moves into config.yaml, which commands run it, before and after examples for every moved key, how conflicts are recorded in migration-v9.json, and how to go back to DefenseClaw 0.8.x.
 keywords:
   - DefenseClaw config migration
   - DefenseClaw config_version 9
@@ -13,7 +13,7 @@ keywords:
 
 `config_version: 9` makes `config.yaml` the only place an administrator's
 decisions live (see [Configuration: one source of truth](/docs/reference/source-of-truth)).
-DefenseClaw 1.0.x kept some of those decisions elsewhere: admission actions and
+DefenseClaw 0.8.x kept some of those decisions elsewhere: admission actions and
 thresholds in `policies/rego/data.json`, operator block and allow entries in
 `audit.db`, scanner switches in loose keys. The migration copies each of them
 into `config.yaml`, keeps the old files, and records every value it moved and
@@ -26,13 +26,13 @@ result.
 
 | Install | What happens |
 | --- | --- |
-| Per-user install on 1.0.x (`config_version: 8`) | `defenseclaw upgrade` runs the migration. Until it has run, the gateway reads your v8 file as if it were migrated, in memory only, so nothing you configured stops applying. CLI reads such as `defenseclaw config get --effective` still show what the v8 file itself says. |
+| Per-user install of 0.8.5 or later (`config_version: 8`) | The upgrade runs the migration: `defenseclaw upgrade`, or the install command on 0.8.7 and older and on Windows ([Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10)). Until it has run, the gateway reads your v8 file as if it were migrated, in memory only, so nothing you configured stops applying. CLI reads such as `defenseclaw config get --effective` still show what the v8 file itself says. |
+| Per-user install of 0.8.4 or older (`config_version: 7`) | The same upgrade first converts the file to version 8 (the one-time 0.x import), then runs this migration. |
 | Managed standalone host (`deployment_mode: managed_enterprise`, `enterprise.profile: standalone`) | The lifecycle (`ensure` or `upgrade`) migrates a version 8 admin config in place and keeps `config.yaml.v8.bak`. Operator rows in `audit.db` are not moved: the admin config is the policy. See [Lifecycle](/docs/enterprise/lifecycle). |
 | Secure Client profile | No change. It keeps its existing path: the gateway does not migrate its config in memory. |
 | A fresh `defenseclaw init` | `init` writes `config_version: 9`. There is nothing to migrate. |
-| DefenseClaw 0.x | Take the 1.0 upgrade first ([Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10)). |
 
-An unmodified 1.0.x install moves one value (`scanners.skill_scanner.policy:
+An unmodified 0.8.x install moves one value (`scanners.skill_scanner.policy:
 quiet`) and no conflicts. The rest of this page covers customised installs.
 
 ## What runs it
@@ -62,7 +62,7 @@ defenseclaw migrate --check
 
 ## Try it first
 
-`--dry-run` shows what would move. The example below is a customised 1.0.x
+`--dry-run` shows what would move. The example below is a customised v8
 install: `data.json` with stricter actions and thresholds, a custom rule pack,
 the old scanner switches, `update_check: false`, and four operator block and
 allow entries in `audit.db`. Paths are shortened.
@@ -137,7 +137,7 @@ migrated file stays short.
 
 ### Admission and thresholds from data.json
 
-In 1.0.x, `policies/rego/data.json` decided what happens to a skill, MCP server
+In 0.8.x, `policies/rego/data.json` decided what happens to a skill, MCP server
 or plugin by scan severity, the first-party allow list, and the LLM proxy's
 guardrail thresholds. In v9 that is `admission:` and the `guardrail`
 thresholds, and `data.json` is no longer read.
@@ -197,19 +197,19 @@ admission:
 - An action becomes the shorthand `block`, `quarantine` or `warn` when it
   matches one; any other combination is written as the exact `install`, `file`
   and `runtime` triple, as the MCP `low` entry shows. The MCP entries appear
-  because 1.0.x shipped stricter MCP overrides in `scanner_overrides`; the
+  because 0.8.x shipped stricter MCP overrides in `scanner_overrides`; the
   migration keeps what enforcement did. See
   [Admission](/docs/policies/admission) for the shorthands.
 - When any severity of a type differs from the built-in, all five severities of
   that type are written.
 - `scan_on_install` and `allow_list_bypass_scan` are written to
   `admission.defaults` only when `data.json` turned them off (for
-  `allow_list_bypass_scan`, also when it left the key out, because 1.0.x
+  `allow_list_bypass_scan`, also when it left the key out, because 0.8.x
   bypassed the scan only for an explicit `true`).
 - `first_party_allow_list` is written for a type only when it differs from the
   built-in list.
 - `cisco_trust_level` is written when it is not `full`.
-- Keys with no reader in 1.0.x (`config.policy_name`,
+- Keys that v9 does not read (`config.policy_name`,
   `config.max_enforcement_delay_seconds`, `severity_ranking`, `audit`,
   `guardrail.hilt`, `guardrail.patterns`, `guardrail.severity_mappings`,
   `guardrail.severity_rank`) are dropped and listed under `removed` in the record.
@@ -323,7 +323,7 @@ guardrail:
 | `rule_pack_dir` in v8 | `rule_pack` in v9 |
 | --- | --- |
 | `<policy_dir>/guardrail/default`, `strict` or `permissive` (`balanced` counts as `default`) | The preset name. |
-| A `protected-<scope>/<preset>` folder that 1.0.x composed from protections | The preset name, plus the folder's `protection` list as `rules.protections`. The `protected-*` folders are not used in v9 and are composed in memory. |
+| A `protected-<scope>/<preset>` folder composed from protections (only pre-release builds wrote these) | The preset name, plus the folder's `protection` list as `rules.protections`. The `protected-*` folders are not used in v9 and are composed in memory. |
 | Any other folder | A new `custom_packs` entry named after the folder, with the pack's digest pinned. A name that is taken gets a `-2`, `-3` suffix. |
 
 A custom pack that cannot be loaded stops the migration with an error that
@@ -420,12 +420,13 @@ update:
   check: false
 ```
 
+Only pre-release builds wrote `update_check`; a 0.8.x install does not have it.
 `update.channel` (only `stable`) and `update.source` are new; see
 [Upgrade DefenseClaw](/docs/get-started/upgrade#update-notices).
 
 ### Operator block and allow entries from audit.db
 
-In 1.0.x, `defenseclaw skill block`, `mcp block`, `plugin block` and the
+In 0.8.x, `defenseclaw skill block`, `mcp block`, `plugin block` and the
 matching allow commands wrote rows into the `actions` table of `audit.db`. In
 v9 those commands write `asset_policy.<type>.denied` and `allowed` in
 `config.yaml`, and the gateway hot-applies the change. The migration copies the
@@ -469,7 +470,7 @@ asset_policy:
   row left with no state is deleted. If anything fails first, the row is still
   in the table: an entry is never lost.
 - An allow entry is pinned to the path it was recorded for
-  (`source_path_contains`). A block entry matches by name, as in 1.0.x.
+  (`source_path_contains`). A block entry matches by name, as in 0.8.x.
 - Tool names recorded as `@<connector>/<tool>` become a `connector` and a
   `name`.
 - On a managed standalone host the rows are not moved. The record counts them
@@ -481,7 +482,7 @@ allow entries are matched.
 
 ### AI discovery signature packs
 
-1.0.x loaded every `*.json` file in `<data_dir>/signature-packs/` implicitly.
+0.8.x loaded every `*.json` file in `<data_dir>/signature-packs/` implicitly.
 In v9 only configured packs load, so the migration lists the installed ones:
 
 ```yaml title="config.yaml (v9, excerpt)"
@@ -503,7 +504,7 @@ config-driven policy.
 ### Custom providers (not part of this migration)
 
 The migration does not touch `custom-providers.json`. A hand-written file from
-1.0.x keeps working. The next `defenseclaw setup provider add` or `remove`
+0.8.x keeps working. The next `defenseclaw setup provider add` or `remove`
 moves its entries into `llm_providers.custom` and `llm_providers.ollama_ports`
 in `config.yaml`, and from then on `custom-providers.json` is derived from them
 and never read back. See
@@ -600,7 +601,7 @@ it with `defenseclaw config set` as shown above.
 | `policies/rego/<name>.rego.migrated-v9` | A pre-9 Rego module that was replaced. |
 
 These are evidence, not policy: nothing reads them back. Keep them until you
-are sure you will not go back to 1.0.x, then delete them.
+are sure you will not go back to 0.8.x, then delete them.
 
 ## Doctor
 
@@ -642,25 +643,25 @@ did not set prints the rule pack's default and names the pack as its source.
 `defenseclaw doctor` reports the **Policy** row once the gateway runs, with the
 generation and digest it applied.
 
-## Going back to 1.0.x
+## Going back to 0.8.x
 
 Use `defenseclaw rollback` ([Rollback](/docs/get-started/upgrade#rollback)).
-It restores the whole 1.0.x install together with the data as it was when the
+It restores the whole 0.8.x install together with the data as it was when the
 upgrade started: the version 8 `config.yaml`, `data.json` and `audit.db`
 including the operator block and allow rows. Anything you changed since the
 upgrade stays in `~/.defenseclaw/previous` and returns if you roll forward.
 
-If you reinstall 1.0.x yourself instead, it refuses the migrated file:
+If you reinstall 0.8.x yourself instead, it refuses the migrated file. The
+0.8.x CLI prints:
 
 ```text
-Configuration was written by a newer DefenseClaw (config_version 9) — run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install.
+Configuration schema v8 is required — run 'defenseclaw upgrade' first.
 ```
 
-`defenseclaw migrate --check` on 1.0.0 says the same thing
-(`has config_version 9, but DefenseClaw 1.0.0 reads up to 8`), and the 1.0.x
-gateway will not load the file (`config was written by a newer DefenseClaw
-(config_version 9); upgrade DefenseClaw or restore ~/.defenseclaw/previous`).
-To go back by hand:
+and the 0.8.x gateway will not load it (`[config_version_unsupported]
+$.config_version: this configuration version is newer than the supported v8
+contract`). Both messages point at `defenseclaw upgrade`, which would take you
+forward again. To stay on 0.8.x, go back by hand:
 
 1. Stop the gateway: `defenseclaw-gateway stop`.
 2. Copy `config.yaml.v8.bak` over `config.yaml`.
@@ -668,10 +669,10 @@ To go back by hand:
 4. Add back any block and allow entries that were moved out of `audit.db`.
    `migration-v9.json` lists them as `audit.db` entries under `moved`; this
    step is why `defenseclaw rollback` is the better way back.
-5. Start the 1.0.x gateway.
+5. Start the 0.8.x gateway.
 
-After step 2, `defenseclaw migrate --check` on 1.0.x reports
-`Configuration is current (config_version 8).`
+After step 2 the file says `config_version: 8` again, the only version 0.8.x
+reads.
 
 For a managed host, the older release must be given the version 8 admin config
 explicitly; see [Lifecycle](/docs/enterprise/lifecycle).
