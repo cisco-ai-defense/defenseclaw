@@ -66,7 +66,7 @@ deployment does not run the skill or MCP scanners.`,
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&user, "user", "", "list one account's signals (account name, DOMAIN\\name or SID)")
+	addWindowsDiscoveryUserFlag(cmd, &user)
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print every record as JSON")
 	return cmd
 }
