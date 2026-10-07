@@ -631,7 +631,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// readiness, before this single retry.
 			resp, err = sendHookRequest(ctx, opts, sp, payload, token)
 		} else {
-			return failUnreachable(opts, sp, failMode, "gateway cold start failed")
+			// Keep the cause: hook-failures.jsonl is the only record of why a
+			// hook could not start the gateway (GAP-0480).
+			reason := coldStartFailedReason
+			if !opts.ManagedEnterprise {
+				reason = coldStartFailureReason(recoveryErr)
+			}
+			return failUnreachable(opts, sp, failMode, reason)
 		}
 	}
 	// A gateway that has taken all it can answer in time (or an account over
@@ -1192,7 +1198,63 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
+		// Claude Code and Codex do not show the stderr of a hook that exits 0,
+		// so the shell hooks print this systemMessage (GAP-0037); the native
+		// Windows hook printed nothing and the call ran silently (GAP-0480).
+		return emit(opts.Stdout, failResult{body: `{"systemMessage":` + mustJSONString(notice) + `}`})
+	}
 	return emitHookResult(opts, sp, sp.openAllow)
+}
+
+const coldStartFailedReason = "gateway cold start failed"
+
+// coldStartFailureReason is the logged reason of a failed hook cold start,
+// with the first line of its cause, bounded.
+func coldStartFailureReason(err error) string {
+	if err == nil {
+		return coldStartFailedReason
+	}
+	// The cause names local paths only; Secure Client keeps the bare reason.
+	cause, _, _ := strings.Cut(strings.TrimSpace(err.Error()), "\n")
+	if len(cause) > 300 {
+		cause = cause[:300]
+	}
+	return coldStartFailedReason + ": " + cause
+}
+
+// perUserGatewayDownNotice is the systemMessage a fail-open per-user Claude
+// Code or Codex hook shows when this account gateway is down, for the events
+// those agents display it on.
+func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+		return ""
+	}
+	switch sp.connector {
+	case "claudecode":
+		switch strings.TrimSpace(opts.Event) {
+		case "SessionStart", "UserPromptSubmit", "PreToolUse":
+		default:
+			return ""
+		}
+	case "codex":
+		switch strings.TrimSpace(opts.Event) {
+		case "SessionStart", "PreToolUse":
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+	switch {
+	case reason == "gateway unreachable":
+		return "DefenseClaw is not checking this session: the gateway is not running or not answering. " +
+			"Check it with `defenseclaw-gateway status`, or start it with `defenseclaw-gateway start`."
+	case strings.HasPrefix(reason, coldStartFailedReason):
+		return "DefenseClaw is not checking this session: the gateway is not running and the hook could not " +
+			"start it. Run `defenseclaw-gateway start` to resume protection."
+	}
+	return ""
 }
 
 // unreachableLead starts the unreachable line. Another account's process on
