@@ -319,6 +319,7 @@
     },
     "boundedString": {
       "type": "string",
+      "description": "At most 4096 characters.",
       "maxLength": 4096
     },
     "stringList": {

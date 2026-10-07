@@ -3310,6 +3310,21 @@ def _refuse_if_managed_device(app: AppContext, reason: str, fail) -> None:
         _refuse_managed_write("guardrail", reason, fail)
 
 
+def _guardrail_write_error(exc: BaseException) -> str:
+    """Keep a busy validator refusal short and actionable."""
+    from defenseclaw import config_writer
+    from defenseclaw.config_inspect import ConfigInspectTimeoutError
+
+    cause = exc.__cause__
+    if isinstance(exc, ConfigInspectTimeoutError) or isinstance(cause, ConfigInspectTimeoutError):
+        return (
+            "Config check did not finish:\n"
+            "  ✗ The configuration check timed out.\n"
+            "  Nothing was changed; re-run the command."
+        )
+    return f"Failed to save config: {config_writer.plain_error(exc)}"
+
+
 def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
     reports a refused or failed write and exits."""
@@ -3321,8 +3336,14 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
         )
     except config_writer.ManagedConfigWriteError:
         _refuse_managed_write(getattr(changes[0], "path", "") or "guardrail", reason, fail)
-    except config_writer.ConfigWriteError as exc:
-        fail(1, f"Failed to save config: {config_writer.plain_error(exc)}")
+    except (config_writer.ConfigWriteError, OSError) as exc:
+        detail = _guardrail_write_error(exc)
+        if "unknown rule" in detail and all(
+            not str(change.path).startswith(("guardrail.connectors.", "guardrail.profiles."))
+            for change in changes
+        ):
+            detail += " The global rule pack was checked; use --connector or --profile for another scope."
+        fail(1, detail)
     return None
 
 
@@ -4448,8 +4469,8 @@ def mode_cmd(
 
     try:
         app.cfg.save()
-    except (OSError, ValueError) as exc:
-        _finish(ok=False, exit_code=1, new_mode=previous, previous=previous, message=f"Failed to save config: {exc}")
+    except (OSError, ValueError, ConfigWriteError) as exc:
+        _finish(ok=False, exit_code=1, new_mode=previous, previous=previous, message=_guardrail_write_error(exc))
     _log_guardrail_change(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
@@ -4633,9 +4654,9 @@ def _set_tool_call_level(app: AppContext, setting: str, level: str, connector: s
     setattr(target, setting, value)
     try:
         app.cfg.save()
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ConfigWriteError) as exc:
         setattr(target, setting, previous)
-        _finish(ok=False, exit_code=1, message=f"Failed to save config: {exc}", previous=previous, requested=True)
+        _finish(ok=False, exit_code=1, message=_guardrail_write_error(exc), previous=previous, requested=True)
     _log_guardrail_change(
         app,
         f"guardrail-{words['command']}",

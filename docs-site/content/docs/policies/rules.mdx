@@ -83,7 +83,8 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
     Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/acme-rules"
       rules: 240/244 enabled across 8 files
       components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-      digest: 4201916150bb32dd7895b604c2f9b36a9bbe0d09d14a93658a5f63179d9f4454
+      digest: <compiled pack digest>
+      files digest: <SHA-256 of the pack files>
     ```
 
     Your counts and digest will differ from these. See [Validate rule packs](/docs/policies/rulepack-validation) for the exit codes and the `--json` form.
@@ -103,7 +104,7 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
       custom_packs:
         acme-rules:
           path: /home/alice/.defenseclaw/policies/guardrail/acme-rules
-          digest: sha256:4201916150bb32dd7895b604c2f9b36a9bbe0d09d14a93658a5f63179d9f4454
+          digest: sha256:<files digest>
     ```
 
     `use-pack` takes a pack name under `~/.defenseclaw/policies/guardrail/` or a directory path (`./NAME` for a folder in the current directory). Add `--connector X` to select the pack for one connector only.
@@ -123,7 +124,7 @@ On a managed host the Python CLI is not installed. Validate with `defenseclaw-ga
 
 ### What the digest covers
 
-The digest is the SHA-256 of the loaded pack: its rules, judge files, suppressions, sensitive tools and local patterns, with the compiled baseline filled in for any component your directory leaves out. Comments, key order and the pack's location do not change it, and any change to a rule, a pattern or a severity does. The optional `defenseclaw-pack.json` posture file is read separately and is not part of the digest. The config format is `sha256:` followed by the 64 hex characters that `validate-pack` prints.
+The `digest:` line describes the loaded pack after compilation. The `files digest:` line is the pin in `guardrail.custom_packs.NAME.digest`: it hashes the pack files byte for byte. Comments, key order, line endings and a UTF-8 BOM change the files digest even when the loaded rules stay the same. The config format is `sha256:` followed by the 64 hex characters on the `files digest:` line.
 
 ### Change a pinned pack
 
@@ -149,7 +150,7 @@ The second re-pins the edited directory in place. `use-pack` validates the direc
 defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/acme-rules
 ```
 
-The running gateway applies the new digest on its next reload; nothing is restarted. To pin a digest yourself, run `defenseclaw guardrail validate-pack` on the directory and write the digest it prints with `defenseclaw config set guardrail.custom_packs.acme-rules.digest sha256:<digest>`.
+The running gateway applies the new digest on its next reload; nothing is restarted. To pin a digest yourself, run `defenseclaw guardrail validate-pack` on the directory and write its `files digest:` value with `defenseclaw config set guardrail.custom_packs.acme-rules.digest sha256:<files digest>`.
 
 ## Customise a pack with guardrail.rules
 

@@ -54,7 +54,8 @@ type V8SchemaError struct {
 	// Value is the rejected scalar of an enum violation (at most 60 bytes),
 	// so the CLI can say 'mode is "x"; allowed values: ...' as config validate
 	// does (GAP-1914). Error() never prints it.
-	Value string
+	Value   string
+	Version int
 }
 
 func (e *V8SchemaError) Error() string {
@@ -70,6 +71,21 @@ func (e *V8SchemaError) Error() string {
 		if e.Column > 0 {
 			source += ":" + strconv.Itoa(e.Column)
 		}
+	}
+	if e.Version >= 9 {
+		key := strings.TrimPrefix(e.Path, "$.")
+		key = regexp.MustCompile(`\[[^]]+\]`).ReplaceAllString(key, "")
+		if key == "" || key == "$" {
+			key = "config.yaml"
+		}
+		message := fmt.Sprintf("config_version %d: %s is invalid", e.Version, key)
+		if e.Expected != "" && !strings.Contains(e.Expected, "canonical v8") {
+			message += "; expected " + e.Expected
+		}
+		if e.Suggestion != "" {
+			message += "; did you mean " + e.Suggestion + "?"
+		}
+		return message + "; see defenseclaw config reference --format json-schema."
 	}
 	message := fmt.Sprintf("%s: [config_schema_invalid]", source)
 	if e.Path != "" {
@@ -118,6 +134,7 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 				Source:  source,
 				Path:    "$",
 				Summary: "configuration does not satisfy the canonical v8 schema",
+				Version: v8SchemaDocumentVersion(document),
 				Action:  "correct the configuration and retry",
 			}
 		}
@@ -148,6 +165,7 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			Suggestion:    suggestion,
 			Summary:       "configuration violates the " + keyword + " constraint",
 			Action:        "inspect the canonical v8 schema or generated reference and correct this field",
+			Version:       v8SchemaDocumentVersion(document),
 		}
 		if key := v8SchemaUnknownKeyNode(document.Document, leaf.InstanceLocation, unknown); key != nil {
 			// The line of the key itself: an unknown section's value
@@ -517,4 +535,12 @@ func v8SchemaNodeClass(node *yaml.Node) string {
 	default:
 		return "value"
 	}
+}
+
+func v8SchemaDocumentVersion(document *V8YAMLDocument) int {
+	if document == nil {
+		return 0
+	}
+	version, _ := strconv.Atoi(fmt.Sprint(document.Plain["config_version"]))
+	return version
 }

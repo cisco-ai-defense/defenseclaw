@@ -8804,6 +8804,12 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         return
     with _capture_stdout_when_json():
         ok, msg = _llm.ping(llm, timeout=5)
+    if not ok and getattr(llm, "base_url", ""):
+        from urllib.parse import urlsplit, urlunsplit
+
+        parsed = urlsplit(llm.base_url)
+        safe_url = urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
+        msg += f" (configured llm.base_url: {safe_url})"
     if ok:
         _emit("pass", "LLM reachable", prefix + msg, r=r)
     elif bool(getattr(judge, "enabled", False)) and f" {_llm._PING_FAILURE_WORDS['auth_failed']}:" in msg:
@@ -9042,6 +9048,21 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     applied = f"generation {generation}, digest {_short_policy_digest(digest)}"
     reload_error = str(policy.get("last_reload_error") or "").strip()
     if reload_error:
+        from defenseclaw.config_writer import pack_pin_repair
+
+        schema_issue = re.search(r"\[config_schema_invalid\]\s+(\$\.[^:\s]+):\s*(.*)", reload_error)
+        if schema_issue:
+            from defenseclaw.commands.cmd_config import _plain_v8_issue
+
+            reload_error = _plain_v8_issue(
+                None, schema_issue.group(1), f"[config_schema_invalid] {schema_issue.group(2)}"
+            )
+        repair = pack_pin_repair(reload_error)
+        if repair:
+            reload_error += f"; re-pin the edited pack: {repair}"
+        reload_error = reload_error.replace(
+            "; inspect the canonical v8 schema or generated reference and correct this field", ""
+        )
         _emit(
             "fail",
             label,
@@ -12931,7 +12952,10 @@ def _emit_rule_pack_row(
             f"(pinned {pinned.lower().removeprefix('sha256:')[:12]}, files {files_digest[:12]}); "
             "the gateway keeps enforcing the pack it loaded before the edit",
             r=r,
-            remediation=f"defenseclaw guardrail use-pack {shown_path}",
+            remediation=(
+                f"defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
+                f"sha256:{files_digest}"
+            ),
         )
         return
     enabled_rule_count = summary.get("enabled_rule_count", 0)

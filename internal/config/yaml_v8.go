@@ -377,6 +377,7 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 		return nil
 	}
 	for _, removed := range []struct{ key, target string }{
+		{"otel", "observability.destinations"},
 		{"skill_actions", "admission.skill.actions"},
 		{"mcp_actions", "admission.mcp.actions"},
 		{"plugin_actions", "admission.plugin.actions"},
