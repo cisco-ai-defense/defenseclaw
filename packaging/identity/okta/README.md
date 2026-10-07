@@ -39,7 +39,7 @@ Active Directory are covered by the identity docs, not by this kit).
 
 | File | What it does |
 | --- | --- |
-| `okta-ldap-setup.py` | Okta side, through the Okta API: `check`, `posix-schema`, `assign-posix`, `bind-role`, `signon-policy`. Needs `OKTA_ORG_URL` and `OKTA_API_TOKEN`. Write commands take `--dry-run`. |
+| `okta-ldap-setup.py` | Okta side, through the Okta API: `check`, `posix-schema`, `assign-posix`, `bind-role`, `signon-policy`. Needs `OKTA_ORG_URL` and `OKTA_API_TOKEN`. Commands that write print a plan and change nothing until you add `--apply`. |
 | `sssd-okta.conf.tmpl` | The SSSD config that was run against Okta, with placeholders. |
 | `install-sssd-okta.sh` | Host side: renders the template, checks it, installs `sssd.conf`, selects the authselect profile, writes the sshd drop-in, restarts SSSD. `--dry-run`, `--render-only`. |
 | `verify-okta-identity.sh` | Read-only check of SSSD, `getent`, `id`, the InfoPipe UPN, and the profile DefenseClaw picks for each user. |
@@ -52,19 +52,19 @@ Active Directory are covered by the identity docs, not by this kit).
 1. In the Okta Admin Console, turn on the LDAP Interface (Directory, Directory
    Integrations, Add LDAP Interface). Okta has no API for this step. Create the bind
    user, the Linux users and the groups, and an API token.
-2. Prepare the org (set `OKTA_ORG_URL` and `OKTA_API_TOKEN` first):
+2. Prepare the org (set `OKTA_ORG_URL` and `OKTA_API_TOKEN` first). Run each
+   command without `--apply` to read its plan, then with it:
 
    ```bash
-   ./okta-ldap-setup.py posix-schema
+   ./okta-ldap-setup.py posix-schema --apply
    ./okta-ldap-setup.py assign-posix --users-from engineering --primary-group linux-users \
-       --group contractors --group ml-research --dry-run
-   ./okta-ldap-setup.py bind-role --bind-login ldap-bind@example.com
-   ./okta-ldap-setup.py signon-policy --bind-login ldap-bind@example.com --group linux-users
+       --group contractors --group ml-research --apply
+   ./okta-ldap-setup.py bind-role --bind-login ldap-bind@example.com --apply
+   ./okta-ldap-setup.py signon-policy --bind-login ldap-bind@example.com --group linux-users --apply
    ./okta-ldap-setup.py check --bind-login ldap-bind@example.com --group linux-users
    ```
 
-   Drop `--dry-run` to apply. Every command can be run again; it changes only what
-   differs.
+   Every command can be run again; it changes only what differs.
 3. On the host, use an SSSD that has `ldap_use_ppolicy` (SSSD 2.10 or later, or the
    backport build), then, as root:
 
@@ -80,7 +80,7 @@ Active Directory are covered by the identity docs, not by this kit).
 
    ```bash
    sudo ./verify-okta-identity.sh --user alice --expect-group ml-research \
-       --expect-profile okta-observe --connector claudecode
+       --allow-group linux-users --expect-profile okta-observe --connector claudecode
    ```
 
 5. Install DefenseClaw and deliver the profiles: `admin-config.example.yaml` for the

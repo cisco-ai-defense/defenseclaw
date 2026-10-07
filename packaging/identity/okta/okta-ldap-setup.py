@@ -16,8 +16,8 @@ Credentials come from the environment, never from arguments:
   OKTA_ORG_URL    the org URL without a path, for example https://example.okta.com
   OKTA_API_TOKEN  an API token of a super administrator (asked on a terminal when unset)
 
-The write commands take --dry-run, which prints the plan and changes nothing. Every command can be run
-again: it changes only what differs. The LDAP Interface itself can only be turned on in the Admin
+The write commands change nothing unless you add --apply: without it they print the plan. Every command
+can be run again: it changes only what differs. The LDAP Interface itself can only be turned on in the Admin
 Console (Directory, Directory Integrations, Add LDAP Interface); Okta has no API for it. DefenseClaw
 never calls Okta: this script is for the administrator who prepares the org.
 
@@ -183,7 +183,7 @@ class Report:
 
     def finish(self) -> int:
         if self.dry_run:
-            print("\nDry run: nothing was changed.")
+            print("\nPlan only: nothing was changed. Add --apply to make these changes.")
         return 1 if self.problems else 0
 
 
@@ -361,7 +361,7 @@ def ensure_attributes(client: Okta, report: Report, kind: str, wanted: dict[str,
 
 
 def cmd_posix_schema(client: Okta, args: argparse.Namespace) -> int:
-    report = Report(args.dry_run)
+    report = Report(dry_run=not args.apply)
     print("Profile attributes")
     ensure_attributes(client, report, "user", USER_ATTRIBUTES)
     ensure_attributes(client, report, "group", GROUP_ATTRIBUTES)
@@ -420,7 +420,7 @@ def unix_name(login: str) -> str:
 
 
 def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
-    report = Report(args.dry_run)
+    report = Report(dry_run=not args.apply)
     if not args.user and not args.users_from:
         raise OktaError("name the users: --user LOGIN (repeatable) or --users-from OKTA_GROUP")
 
@@ -507,7 +507,7 @@ def collect_users(client: Okta, report: Report, args: argparse.Namespace) -> lis
 
 
 def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
-    report = Report(args.dry_run)
+    report = Report(dry_run=not args.apply)
     print("Bind user role")
     user = find_user(client, args.bind_login)
     if user is None:
@@ -592,7 +592,7 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
 
 
 def cmd_signon_policy(client: Okta, args: argparse.Namespace) -> int:
-    report = Report(args.dry_run)
+    report = Report(dry_run=not args.apply)
     print("LDAP Interface sign-on policy")
     app = find_ldap_app(client)
     if app is None:
@@ -641,12 +641,13 @@ def cmd_signon_policy(client: Okta, args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
+    common.add_argument("--apply", action="store_true",
+                        help="make the changes; without it the command only prints what it would do")
 
     parser = argparse.ArgumentParser(
         description="Prepare an Okta org for Linux hosts that read it through the Okta LDAP Interface and SSSD.",
-        epilog="Environment: OKTA_ORG_URL (https://example.okta.com) and OKTA_API_TOKEN. "
-               "Run COMMAND --help for options.",
+        epilog="Credentials come from the environment, never from arguments: OKTA_ORG_URL "
+               "(https://example.okta.com) and OKTA_API_TOKEN. Run COMMAND --help for options.",
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
@@ -720,8 +721,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         org_url, token = read_credentials()
-        if getattr(args, "dry_run", False):
-            print("Dry run: nothing will be changed.")
+        if hasattr(args, "apply") and not args.apply:
+            print("Plan only: nothing will be changed. Add --apply to make the changes.")
         return args.func(Okta(org_url, token), args)
     except OktaError as err:
         print(f"okta-ldap-setup.py: error: {err}", file=sys.stderr)

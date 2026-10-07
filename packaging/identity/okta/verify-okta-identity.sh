@@ -28,7 +28,7 @@ SELF=$(basename "$0")
 CFG_RULES=${OKTA_KIT_SSSD_CFG_RULES:-/usr/share/sssd/cfg_rules.ini}
 MANAGED_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway
 
-USERS=() EXPECT_GROUP="" EXPECT_PROFILE="" CONNECTOR="" DOMAIN="okta" EXPECT_UPN=0
+USERS=() EXPECT_GROUP="" EXPECT_PROFILE="" CONNECTOR="" DOMAIN="okta" EXPECT_UPN=0 ALLOW_GROUP=""
 SKIP_DC=0 DC_CMD=""
 PASS=0 FAILED=0 SKIPPED=0
 
@@ -43,6 +43,8 @@ Options:
   --expect-group GROUP   A group every --user must be in, as id -Gn prints it
   --expect-profile NAME  The guardrail profile DefenseClaw must pick for every --user
   --connector NAME       Connector for the profile check, for example claudecode
+  --allow-group GROUP    The group that may sign in (install-sssd-okta.sh --allow-group):
+                         check that it resolves
   --domain NAME          SSSD domain name (default okta)
   --expect-upn           Check that SSSD InfoPipe returns a userPrincipalName
                          (standalone enterprise; needs root)
@@ -68,6 +70,7 @@ parse_args() {
       --expect-group) [[ $# -ge 2 && -n $2 ]] || die "--expect-group needs a value"; EXPECT_GROUP=$2; shift 2 ;;
       --expect-profile) [[ $# -ge 2 && -n $2 ]] || die "--expect-profile needs a value"; EXPECT_PROFILE=$2; shift 2 ;;
       --connector) [[ $# -ge 2 && -n $2 ]] || die "--connector needs a value"; CONNECTOR=$2; shift 2 ;;
+      --allow-group) [[ $# -ge 2 && -n $2 ]] || die "--allow-group needs a value"; ALLOW_GROUP=$2; shift 2 ;;
       --domain) [[ $# -ge 2 && -n $2 ]] || die "--domain needs a value"; DOMAIN=$2; shift 2 ;;
       --defenseclaw) [[ $# -ge 2 && -n $2 ]] || die "--defenseclaw needs a value"; DC_CMD=$2; shift 2 ;;
       --expect-upn) EXPECT_UPN=1; shift ;;
@@ -85,6 +88,7 @@ parse_args() {
   [[ -z $EXPECT_GROUP || $EXPECT_GROUP =~ ^[A-Za-z0-9._@-]+$ ]] || die "unsafe --expect-group"
   [[ -z $EXPECT_PROFILE || $EXPECT_PROFILE =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "unsafe --expect-profile"
   [[ -z $CONNECTOR || $CONNECTOR =~ ^[A-Za-z0-9_-]+$ ]] || die "unsafe --connector"
+  [[ -z $ALLOW_GROUP || $ALLOW_GROUP =~ ^[A-Za-z0-9._-]+$ ]] || die "unsafe --allow-group"
 }
 
 check_sssd() {
@@ -105,6 +109,13 @@ check_sssd() {
     skip "ldap_use_ppolicy probe: $CFG_RULES is not readable"
   fi
 
+  if [[ -n $ALLOW_GROUP ]]; then
+    if getent group "$ALLOW_GROUP" > /dev/null 2>&1; then
+      pass "the allowed group $ALLOW_GROUP resolves"
+    else
+      fail "the allowed group $ALLOW_GROUP does not resolve, so nobody can sign in: the Okta group needs a gidNumber and members"
+    fi
+  fi
   if ((EUID != 0)); then
     skip "domain status and sssd.conf checks need root"
     return

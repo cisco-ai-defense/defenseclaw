@@ -86,15 +86,16 @@ first if you are new to how DefenseClaw uses identity.
 
 4. Prepare the org with the setup script. Run it from the kit folder of a
    checkout or source archive of the DefenseClaw repository, on any machine that
-   can reach your Okta org over HTTPS; it does not have to be the Linux host. Add
-   `--dry-run` to any command that writes to see the plan first.
+   can reach your Okta org over HTTPS; it does not have to be the Linux host. A
+   command that writes prints its plan and changes nothing until you add
+   `--apply`, so run each one without it first.
 
    ```bash
-   ./okta-ldap-setup.py posix-schema
+   ./okta-ldap-setup.py posix-schema --apply
    ./okta-ldap-setup.py assign-posix --users-from engineering --primary-group linux-users \
-       --group contractors --group ml-research
-   ./okta-ldap-setup.py bind-role --bind-login ldap-bind@example.com
-   ./okta-ldap-setup.py signon-policy --bind-login ldap-bind@example.com --group linux-users
+       --group contractors --group ml-research --apply
+   ./okta-ldap-setup.py bind-role --bind-login ldap-bind@example.com --apply
+   ./okta-ldap-setup.py signon-policy --bind-login ldap-bind@example.com --group linux-users --apply
    ./okta-ldap-setup.py check --bind-login ldap-bind@example.com --group linux-users \
        --group contractors --group ml-research
    ```
@@ -245,13 +246,14 @@ The names are bare (`alice`, `ml-research`) unless you set
 or as a normal user for the account checks:
 
 ```bash
-sudo ./verify-okta-identity.sh --user alice --expect-group ml-research
+sudo ./verify-okta-identity.sh --user alice --expect-group ml-research --allow-group linux-users
 ```
 
 ```text
 SSSD
 PASS  sssd service is active
 PASS  this SSSD knows ldap_use_ppolicy (it can bind to Okta)
+PASS  the allowed group linux-users resolves
 PASS  SSSD domain okta is Online
 PASS  /etc/sssd/sssd.conf is root:root 0600
 User alice

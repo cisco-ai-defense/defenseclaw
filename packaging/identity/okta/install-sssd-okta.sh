@@ -467,6 +467,15 @@ wait_online() {
   return 1
 }
 
+# check_allow_group warns when nobody could sign in because the allowed group does not resolve.
+check_allow_group() {
+  if getent group "$ALLOW_GROUP" > /dev/null 2>&1; then
+    log "  ok: the allowed group $ALLOW_GROUP resolves"
+  else
+    warn "the allowed group $ALLOW_GROUP does not resolve, so nobody can sign in: give the Okta group a gidNumber and members (okta-ldap-setup.py assign-posix)"
+  fi
+}
+
 restart_sssd() {
   if ((DRY_RUN)); then
     if ((${CONF_CHANGED:-0})); then log "  would restart sssd and wait for the $DOMAIN domain to be Online"; fi
@@ -479,12 +488,14 @@ restart_sssd() {
     sss_cache -E > /dev/null 2>&1 || true
     if wait_online; then
       log "  ok: sssd restarted, domain $DOMAIN is Online"
+      check_allow_group
     else
       sssctl domain-status "$DOMAIN" -o 2>&1 | head -5 >&2 || true
       fail 1 "sssd restarted but the $DOMAIN domain is not Online. Read: journalctl -u sssd -n 50. The previous config is the newest $CONF.bak-* file."
     fi
   elif wait_online; then
     log "  ok: sssd is running and the $DOMAIN domain is Online"
+    check_allow_group
   else
     warn "sssd is running but the $DOMAIN domain is not Online"
   fi
