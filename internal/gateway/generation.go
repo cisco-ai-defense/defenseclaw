@@ -65,6 +65,11 @@ type Generation struct {
 	// active is the pack the shared scanners and the judge use: the single
 	// enabled connector's, else the global one.
 	active *guardrail.RulePack
+	// Router enforcement uses these immutable companions from the same
+	// generation as the pack and policy stamp.
+	activeRules    *compiledRulePackCategories
+	activePatterns *localPatternsActivation
+	judge          *LLMJudge
 	// opaError is why a non-strict build has no OPA ("" when it has one).
 	opaError string
 	// assetDirs are the directories the config watcher follows for this

@@ -85,6 +85,8 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 			g.RulePacks["conn:"+name] = pack
 		}
 		g.active = rp.active
+		g.activeRules = rp.activeRules
+		g.activePatterns = rp.activePatterns
 	}
 	if in.profiles != nil {
 		for name, derived := range in.profiles.profiles {

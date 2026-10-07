@@ -1710,6 +1710,10 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
+	return scanLocalPatternsWithActivation(direction, content, rules, nil)
+}
+
+func scanLocalPatternsWithActivation(direction, content string, rules *compiledRulePackCategories, activation *localPatternsActivation) *ScanVerdict {
 	// managed_enterprise: local regex detection is disabled — Cisco AI
 	// Defense is authoritative. Return an allow verdict so any residual
 	// call site (router lane, etc.) produces no local signal.
@@ -1729,6 +1733,14 @@ func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePa
 	secPatterns := secretPatterns
 	exfPatterns := exfilPatterns
 	localPatternsMu.RUnlock()
+	if activation != nil {
+		injPatterns = activation.injectionPatterns
+		injRegexes = activation.injectionRegexes
+		piiPatterns = activation.piiRequestPatterns
+		piiDRegexes = activation.piiDataRegexes
+		secPatterns = activation.secretPatterns
+		exfPatterns = activation.exfilPatterns
+	}
 
 	// normalized defeats whitespace/slash-run evasions (Phase 7 of the
 	// multi-provider-adapters PR). Substring and regex matches use the

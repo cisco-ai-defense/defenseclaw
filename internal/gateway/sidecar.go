@@ -277,6 +277,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: build configuration generation: %w", err)
 	}
+	bootGen.activeRules = initialRules
+	bootGen.activePatterns = initialPatterns
 	// The boot judge and proxy read the provider registry before the
 	// generation is published.
 	applyGenerationProviders(bootGen.Providers)
@@ -520,6 +522,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		judgeBodiesReadyDetails: judgeBodiesReadyDetails,
 		startRulePacks:          startRulePacks,
 	}
+	bootGen.judge = hookJudge
 	// Commit the already-validated cold-start policy candidate only after every
 	// fallible constructor has succeeded. A rejected candidate must leave the
 	// process-global scanners unchanged, and must not publish a rule pack to
@@ -1969,6 +1972,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		}
 	}
 
+	if judgeChanged {
+		nextGen.judge = nextJudge
+	} else {
+		nextGen.judge = s.sharedJudge()
+	}
+
 	// Application-protection observer attachment must be infallible after the
 	// commit point below. Resolve the only fallible dependency (the gateway
 	// token) while all old resources and the published config are still live.
@@ -3022,6 +3031,7 @@ func (s *Sidecar) setEventRouter(router *EventRouter) {
 			lifecycle = nil
 		}
 		router.bindObservabilityV8Capabilities(emitter, lifecycle)
+		router.generationSource = s.Generation
 		// Operator tool and MCP blocks come from the live config.
 		if router.policy != nil {
 			router.policy = router.policy.WithConfig(s.currentConfig)

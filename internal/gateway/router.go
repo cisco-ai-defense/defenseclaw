@@ -56,6 +56,7 @@ type EventRouter struct {
 	notify                       *NotificationQueue
 	judge                        *LLMJudge
 	rp                           *guardrail.RulePack
+	generationSource             func() *Generation
 	guardrailCfg                 *config.GuardrailConfig
 	hilt                         *HILTApprovalManager
 	judgeSem                     chan struct{} // bounds concurrent active tool-judge executions
@@ -358,6 +359,27 @@ func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
 	r.rulePackMu.Lock()
 	r.rp = rp
 	r.rulePackMu.Unlock()
+}
+
+// policyGeneration gives one event the pack, patterns, and judge that
+// belong to the generation whose digest it reports. Detached routers and
+// Secure Client retain their existing mutable wiring.
+func (r *EventRouter) policyGeneration() *Generation {
+	if r == nil || r.generationSource == nil {
+		return nil
+	}
+	g := r.generationSource()
+	if g == nil || g.Config == nil || g.Config.SecureClientIntegration() {
+		return nil
+	}
+	return g
+}
+
+func (r *EventRouter) inspectionPolicy() (*guardrail.RulePack, *LLMJudge, *compiledRulePackCategories, *localPatternsActivation) {
+	if g := r.policyGeneration(); g != nil {
+		return g.active, g.judge, g.activeRules, g.activePatterns
+	}
+	return r.rulePack(), r.judge, nil, nil
 }
 
 func (r *EventRouter) rulePack() *guardrail.RulePack {
@@ -1433,7 +1455,7 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 //     logged once per call so the operator can see the degraded state —
 //     the deterministic scan still runs.
 func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
-	rp := r.rulePack()
+	rp, judge, rules, patterns := r.inspectionPolicy()
 	if rp == nil || payload.Output == "" {
 		return
 	}
@@ -1443,17 +1465,17 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] inspecting sensitive tool result: %s (output_len=%d judge=%t)\n",
-		payload.Tool, len(payload.Output), stool.JudgeResult && r.judge != nil)
+		payload.Tool, len(payload.Output), stool.JudgeResult && judge != nil)
 
 	// Stage 1: deterministic regex scan. Always runs.
-	verdict := scanLocalPatterns("completion", payload.Output)
+	verdict := scanLocalPatternsWithActivation("completion", payload.Output, rules, patterns)
 
 	// Stage 2: LLM judge, if requested and available. Merge into verdict.
 	// managed_enterprise: the judge is a local decision-maker — disabled so
 	// AID stays authoritative. Combined with the inert scanLocalPatterns
 	// above, the verdict stays allow and this lane no-ops (fail open).
 	if stool.JudgeResult && !ManagedEnterpriseActive() {
-		if r.judge == nil {
+		if judge == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] tool %s requests judge_result but judge unavailable; using regex-only verdict\n",
 				payload.Tool)
 		} else {
@@ -1463,7 +1485,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 					defer func() { <-r.judgeSem }()
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
-					if jv := r.judge.RunJudges(ctx, "completion", payload.Output, payload.Tool); jv != nil {
+					if jv := judge.RunJudges(ctx, "completion", payload.Output, payload.Tool); jv != nil {
 						verdict = mergeWithJudge(verdict, jv)
 					}
 				}()
