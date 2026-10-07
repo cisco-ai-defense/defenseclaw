@@ -581,16 +581,18 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		}
 	}
 	return profileSubject{
-		UserID:          s.UserID,
-		IDKind:          s.IDKind,
-		UserName:        useridentity.BareAccountName(s.UserName),
-		Principal:       s.Directory.Principal,
-		UPN:             s.Directory.UPN,
-		Directory:       s.Directory.Directory,
-		Domain:          s.Directory.Domain,
-		AccountDomain:   accountDomain,
-		Groups:          s.Directory.Groups,
-		LookupFailed:    lookupAttempted && s.Directory.ResolvedAt.IsZero(),
+		UserID:        s.UserID,
+		IDKind:        s.IDKind,
+		UserName:      useridentity.BareAccountName(s.UserName),
+		Principal:     s.Directory.Principal,
+		UPN:           s.Directory.UPN,
+		Directory:     s.Directory.Directory,
+		Domain:        s.Directory.Domain,
+		AccountDomain: accountDomain,
+		Groups:        s.Directory.Groups,
+		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
+			(s.Directory.Source == useridentity.SourceWindowsLSA ||
+				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory)),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
 	}
 }

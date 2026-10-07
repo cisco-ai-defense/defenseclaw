@@ -840,3 +840,28 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 		t.Fatal("a DNS first label selected another account domain")
 	}
 }
+
+// Windows LSA facts do not establish group membership until the guardian's
+// current identity record supplies its token groups.
+func TestProfileWindowsAwaitingSpoolUsesLookupFailed(t *testing.T) {
+	previous := currentIdentitySpoolDir()
+	setIdentitySpoolDir(t.TempDir())
+	t.Cleanup(func() { setIdentitySpoolDir(previous) })
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "S-1-5-21-1-2-3-1001", UserName: "alice",
+		Directory: useridentity.DirectoryFacts{
+			Source: useridentity.SourceWindowsLSA, Domain: "corp.example.com",
+			Directory: useridentity.DirectoryActiveDirectory, ResolvedAt: time.Now(),
+		},
+	}, true)
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		assignments: []config.ProfileAssignment{
+			{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\\Contractors`}}},
+			{Profile: "tooling", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+		},
+	}
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("missing spool groups selected %+v", got)
+	}
+}
