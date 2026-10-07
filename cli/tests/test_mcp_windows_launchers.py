@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -155,18 +156,35 @@ def test_untrusted_launcher_path_is_rejected(
     _which_map(monkeypatch, {"npx": npx, "npx.cmd": npx})
     _trusted(monkeypatch, set())
 
-    with pytest.raises(mcp.MCPStdioLaunchError, match="untrusted Windows path"):
+    with pytest.raises(mcp.MCPStdioLaunchError, match="untrusted Windows path.*setup trusted-paths add"):
         mcp._resolve_trusted_windows_launcher("npx", ".cmd", {"PATH": os.fspath(Path(npx).parent)})
+
+
+def test_failed_start_prints_the_server_stderr_tail(capsys: pytest.CaptureFixture[str]) -> None:
+    # GAP-0385: a server that exits at once (a folder that does not exist)
+    # showed only "exited before completing"; its stderr was withheld.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errlog:
+        errlog.write("Error: None of the specified directories are accessible\n")
+        mcp._echo_server_stderr_tail(errlog, "npx")
+    assert "[npx stderr] Error: None of the specified directories are accessible" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     "command",
-    ["npx.cmd", "npx.bat", "npx.ps1", r"C:\tools\npx"],
+    ["npx.bat", "npx.ps1", r"C:\tools\npx", "node"],
 )
 def test_unsupported_npx_spellings_remain_outside_allowlist(command: str) -> None:
-    error = mcp._stdio_scan_command_error(command, ["package"])
+    with patch.object(mcp.os, "name", "nt"):
+        error = mcp._stdio_scan_command_error(command, ["package"])
+        # GAP-0385: npx.cmd and uvx.exe name the same launchers on Windows
+        # and go through the same trusted-path resolution as npx and uvx.
+        assert mcp._stdio_scan_command_error("npx.cmd", ["package"]) is None
+        assert mcp._stdio_scan_command_error("UVX.EXE", ["package"]) is None
     assert error is not None
     assert "allowlisted stdio launcher" in error
+    if command == "node":
+        # GAP-0406: the refusal names the allowlist and the supported ways in.
+        assert "(allowed: npx, uvx)" in error and "use its URL" in error and "mcp allow" in error
 
 
 def test_uvx_resolves_to_trusted_exe_and_keeps_literal_arguments(
@@ -810,7 +828,7 @@ def test_error_boundaries_are_distinct_and_stderr_safe(
     assert expected in message
     assert "Connection closed" not in message
     assert "do-not-disclose-this-marker" not in message
-    assert "captured and withheld" in message
+    assert "printed above and not stored" in message
 
 
 def test_windows_scan_preserves_cancellation() -> None:
