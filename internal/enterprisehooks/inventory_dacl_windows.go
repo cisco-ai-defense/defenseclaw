@@ -162,6 +162,12 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 		// keeps the grants it always made.
 		grants := inventoryDACLAgentGrants(home, guardianOwned[key], ideInventory)
 		if ideInventory {
+			for _, rel := range ideplugins.WindowsLegacyBroadGrantPaths(home) {
+				if err := revokeLegacyIDEReadACE(home, rel, sid); err != nil {
+					failed++
+					logfSafely(logf, target.SID, fmt.Sprintf("inventory-DACL narrow dotdir=%s: %s", rel, sanitizeInventoryDACLError(err)))
+				}
+			}
 			grants = append(grants, inventoryDACLIDEGrants(home)...)
 		}
 		for _, g := range grants {
@@ -251,6 +257,48 @@ func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, re
 	return grants
 }
 
+// revokeLegacyIDEReadACE removes only the old inherited service read grant.
+// The following grant pass restores required self and narrow subtree rights.
+func revokeLegacyIDEReadACE(home, rel string, sid *windows.SID) error {
+	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+		return err
+	}
+	path := filepath.Join(home, rel)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	acl, _, err := sd.DACL()
+	if err != nil || acl == nil {
+		return err
+	}
+	if !daclContainsInventoryReadACE(acl, sid) {
+		return nil
+	}
+	entry := windows.EXPLICIT_ACCESS{
+		AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+	narrowed, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, acl)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, narrowed, nil)
+}
+
 // inventoryDACLIDEGrants lists the IDE folders and files of one profile that
 // the gateway's IDE plugin inventory reads (ideplugins.WindowsHomeGrants):
 // the same sources a per-user scan reads, Remote-SSH servers,
@@ -268,6 +316,8 @@ func inventoryDACLIDEGrants(home string) []inventoryDACLGrant {
 		ensure := ensureInventorySelfACE
 		if g.Tree {
 			ensure = ensureInventoryReadACE
+		} else if g.Attributes {
+			ensure = ensureInventoryAttributesACE
 		}
 		rel := g.Path
 		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
@@ -335,6 +385,11 @@ var (
 		mask: inventoryListMask, inheritance: windows.NO_INHERITANCE,
 		present: daclContainsInventoryListACE,
 	}
+	inventoryAttributesACE = inventoryACE{
+		mask:        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE,
+		inheritance: windows.NO_INHERITANCE,
+		present:     daclContainsInventoryAttributesACE,
+	}
 	inventorySelfACE = inventoryACE{
 		mask: inventorySelfMask, inheritance: windows.NO_INHERITANCE, files: true,
 		present: daclContainsInventorySelfACE,
@@ -357,6 +412,12 @@ const inventoryListMask = windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIB
 // (inventoryDACLListOnlyDirs).
 func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
 	return ensureInventoryACE(path, sid, inventoryListACE)
+}
+
+// ensureInventoryAttributesACE permits Lstat on an intermediate folder,
+// without a list or content right and without inheritance.
+func ensureInventoryAttributesACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, inventoryAttributesACE)
 }
 
 // inventorySelfMask lets the service read one folder's own listing or one
@@ -499,6 +560,27 @@ func daclContainsInventoryListACE(acl *windows.ACL, sid *windows.SID) bool {
 		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if aceSID != nil && windows.EqualSid(aceSID, sid) &&
 			uint32(ace.Mask)&uint32(inventoryListMask) == uint32(inventoryListMask) {
+			return true
+		}
+	}
+	return false
+}
+
+func daclContainsInventoryAttributesACE(acl *windows.ACL, sid *windows.SID) bool {
+	if acl == nil || sid == nil {
+		return false
+	}
+	want := windows.ACCESS_MASK(windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if aceSID != nil && windows.EqualSid(aceSID, sid) && mapWindowsUserPathGenericMask(ace.Mask)&want == want {
 			return true
 		}
 	}

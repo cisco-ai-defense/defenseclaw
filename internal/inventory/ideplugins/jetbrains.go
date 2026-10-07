@@ -7,6 +7,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
 	"io"
@@ -16,12 +17,14 @@ import (
 )
 
 const (
-	jetbrainsMaxProducts   = 128
-	jetbrainsMaxPlugins    = 1024
-	jetbrainsMaxJars       = 32
-	jetbrainsMaxJarBytes   = 256 << 20
-	jetbrainsMaxXMLBytes   = 1 << 20
-	jetbrainsMaxRemoteDist = 32
+	jetbrainsMaxProducts       = 128
+	jetbrainsMaxPlugins        = 1024
+	jetbrainsMaxJars           = 32
+	jetbrainsMaxJarBytes       = 64 << 20
+	jetbrainsMaxJarEntries     = 1 << 14
+	jetbrainsMaxDirectoryBytes = 8 << 20
+	jetbrainsMaxXMLBytes       = 1 << 20
+	jetbrainsMaxRemoteDist     = 32
 )
 
 // jetbrainsProductDir matches a versioned product directory such as
@@ -276,11 +279,11 @@ func (s *scanner) readJetBrainsJar(path string) (jetbrainsPluginXML, bool) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > jetbrainsMaxJarBytes {
 		return jetbrainsPluginXML{}, false
 	}
-	if !s.charge(0) {
+	if !s.charge(info.Size()) || !jetbrainsJarDirectoryBounded(f, info.Size()) {
 		return jetbrainsPluginXML{}, false
 	}
 	zr, err := zip.NewReader(f, info.Size())
-	if err != nil || len(zr.File) > 1<<16 {
+	if err != nil || len(zr.File) > jetbrainsMaxJarEntries {
 		return jetbrainsPluginXML{}, false
 	}
 	for _, entry := range zr.File {
@@ -298,6 +301,35 @@ func (s *scanner) readJetBrainsJar(path string) (jetbrainsPluginXML, bool) {
 		return parseJetBrainsPluginXML(io.LimitReader(rc, jetbrainsMaxXMLBytes))
 	}
 	return jetbrainsPluginXML{}, false
+}
+
+// jetbrainsJarDirectoryBounded checks the end-of-central-directory record
+// before archive/zip allocates one File for every entry. ZIP64 and oversized
+// directories are skipped; inventory can still report the jar filename.
+func jetbrainsJarDirectoryBounded(f io.ReaderAt, size int64) bool {
+	const maxTail = 22 + 65535
+	tailSize := size
+	if tailSize > maxTail {
+		tailSize = maxTail
+	}
+	tail := make([]byte, int(tailSize))
+	if _, err := f.ReadAt(tail, size-tailSize); err != nil {
+		return false
+	}
+	for i := len(tail) - 22; i >= 0; i-- {
+		if !bytes.Equal(tail[i:i+4], []byte("PK\x05\x06")) {
+			continue
+		}
+		if i+22+int(binary.LittleEndian.Uint16(tail[i+20:i+22])) != len(tail) {
+			continue
+		}
+		entries := binary.LittleEndian.Uint16(tail[i+10 : i+12])
+		directoryBytes := binary.LittleEndian.Uint32(tail[i+12 : i+16])
+		return entries != 0xffff && int(entries) <= jetbrainsMaxJarEntries &&
+			directoryBytes != 0xffffffff && directoryBytes <= jetbrainsMaxDirectoryBytes &&
+			int64(directoryBytes) <= size
+	}
+	return false
 }
 
 // parseJetBrainsPluginXML reads the id, name, version and vendor children

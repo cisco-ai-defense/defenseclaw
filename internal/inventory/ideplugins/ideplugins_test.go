@@ -6,6 +6,7 @@ package ideplugins
 import (
 	"archive/zip"
 	"database/sql"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,23 @@ func writeStateDB(t *testing.T, path, disabled string) {
 	}
 }
 
+func TestStateDBRejectsView(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.vscdb")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE VIEW ItemTable AS SELECT 'extensionsIdentifiers/disabled' AS key, '[]' AS value`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readStateDBValue(path, "extensionsIdentifiers/disabled", DefaultStateDBTimeout); ok {
+		t.Fatal("a state database view must not be evaluated")
+	}
+}
+
 func writeJar(t *testing.T, path, pluginXML string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -64,6 +82,19 @@ func writeJar(t *testing.T, path, pluginXML string) {
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestJetBrainsJarChargesCompressedBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plugin.jar")
+	writeJar(t, path, `<idea-plugin><id>example.plugin</id></idea-plugin>`)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newScanner("linux", Limits{MaxBytes: info.Size() - 1})
+	if _, ok := s.readJetBrainsJar(path); ok {
+		t.Fatal("jar exceeded scan byte budget")
 	}
 }
 
@@ -241,6 +272,32 @@ func TestScanOtherEditors(t *testing.T) {
 // servers, %LOCALAPPDATA%\JetBrains and Android Studio included, must be
 // granted, while the caches and other data beside those folders and a
 // linked folder are not (GAP-0042).
+func TestWindowsHomeGrantsIncludeTraversalAttributes(t *testing.T) {
+	grants := WindowsHomeGrants(t.TempDir())
+	byPath := make(map[string]WindowsGrant, len(grants))
+	for _, g := range grants {
+		byPath[g.Path] = g
+	}
+	for _, path := range []string{`.vscode`, `AppData`, `AppData\Roaming`, `AppData\Roaming\Code`, `AppData\Roaming\Code\User`, `AppData\Local\Microsoft`} {
+		g, ok := byPath[path]
+		if !ok || g.Tree {
+			t.Errorf("missing narrow traversal grant: %s", path)
+		}
+	}
+}
+
+func TestVisualStudioEnabledNamesAcceptsShortEnumeration(t *testing.T) {
+	enabled, ok := visualStudioEnabledNames(func(limit int) ([]string, error) {
+		if limit != visualStudioMaxExtensions {
+			t.Fatalf("limit = %d", limit)
+		}
+		return []string{"Example.Tool,1.0"}, io.EOF
+	})
+	if !ok || !enabled["example.tool"] {
+		t.Fatalf("short registry enumeration: %v, %v", enabled, ok)
+	}
+}
+
 func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 	home := t.TempDir()
 	local, roaming := filepath.Join(home, "AppData", "Local"), filepath.Join(home, "AppData", "Roaming")
