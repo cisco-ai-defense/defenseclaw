@@ -1466,6 +1466,17 @@ func TestRefreshNamesAWayOn(t *testing.T) {
 		strings.Contains(err.Error(), "--force") {
 		t.Fatalf("Connect = %v", err)
 	}
+	// GAP-0131: work never pulled read "refresh the copy: the sandbox has
+	// changes that were not pulled: pull or discard them first (sandbox
+	// copybox); bring the work back first (...)": twice, and a discard no
+	// command offers. It is one sentence now.
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.refreshErr = fmt.Errorf("%w, and a refresh would discard them (sandbox copybox)", workspace.ErrUnpulledChanges)
+	err = ta.Connect(bg, ConnectOptions{Name: "copybox", Refresh: true})
+	if want := "copybox has work that was not pulled: bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch, " +
+		"or --patch-out FILE), or connect without --refresh to go on with the copy as it is"; err == nil || err.Error() != want {
+		t.Fatalf("Connect = %v, want %q", err, want)
+	}
 }
 
 // Manual R2-101: a stopped sandbox the policy would not start is not
