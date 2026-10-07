@@ -3448,3 +3448,10 @@ def test_a_signature_pack_that_fails_its_pin_is_a_doctor_warning(tmp_path):
     result = _DoctorResult()
     cmd_doctor._check_signature_packs(cfg, result)
     assert [c["status"] for c in result.checks] == ["pass"]
+
+    # GAP-0220: a configured pack whose file is gone is not "0 loaded" PASS.
+    pack.unlink()
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    [check] = result.checks
+    assert check["status"] == "warn" and f"{pack}: file not found" in check["detail"]

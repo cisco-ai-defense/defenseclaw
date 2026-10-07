@@ -128,8 +128,9 @@ class AISignature:
 @dataclass(frozen=True)
 class RefusedPack:
     """A configured pack the gateway does not load: its digest is not the
-    one ``ai_discovery.signature_pack_digests`` pins for it, or a managed
-    device has no pin for it (internal/inventory/ai_catalog.go pinRefusal)."""
+    one ``ai_discovery.signature_pack_digests`` pins for it, a managed
+    device has no pin for it (internal/inventory/ai_catalog.go pinRefusal), or
+    its file is gone."""
 
     path: str
     reason: str
@@ -165,8 +166,8 @@ def load_ai_signature_catalog(
     require_digests: bool = False,
 ) -> tuple[list[AISignature], list[RefusedPack]]:
     """:func:`load_ai_signatures` as the gateway loads it: a pack that fails
-    its pin is left out and returned as refused, the rest of the catalog
-    still loads."""
+    its pin, or whose file is gone, is left out and returned as refused, the
+    rest of the catalog still loads."""
     builtins = _parse_catalog_text(_catalog_text(), source="builtin")
     disabled = {_normalize_id(s) for s in disabled_signature_ids if _normalize_id(s)}
     merged: list[AISignature] = []
@@ -177,7 +178,7 @@ def load_ai_signature_catalog(
         merged.append(sig)
         seen[sig.id] = sig.source
 
-    pack_paths = _signature_pack_paths(
+    pack_paths, refused = _signature_pack_paths(
         signature_packs=signature_packs,
         allow_workspace_signatures=allow_workspace_signatures,
         scan_roots=scan_roots,
@@ -185,7 +186,6 @@ def load_ai_signature_catalog(
     if len(pack_paths) > MAX_SIGNATURE_PACKS:
         raise SignaturePackError(f"too many signature packs ({len(pack_paths)} > {MAX_SIGNATURE_PACKS})")
     pins = _pinned_digests(pack_digests)
-    refused: list[RefusedPack] = []
     for pack_path in pack_paths:
         pack, raw = _read_pack(pack_path)
         if (refusal := _pin_refusal(pack, raw, pins, require_digests)) is not None:
@@ -218,20 +218,18 @@ def pack_pins(cfg: Any) -> tuple[dict[str, str], bool]:
 
 
 def refused_packs(cfg: Any) -> tuple[int, list[RefusedPack]]:
-    """How many packs ``ai_discovery`` configures and which of them the gateway
-    refuses to load (pin mismatch). A pack that cannot be read is not counted
-    as refused: the loader reports it."""
+    """How many packs ``ai_discovery`` configures and which of them are not
+    loaded: a pin mismatch, or a file that is gone. A pack that cannot be read
+    is not counted as refused: the loader reports it."""
     discovery = cfg.ai_discovery
     pins, require = pack_pins(cfg)
-    try:
-        paths = _signature_pack_paths(
-            signature_packs=discovery.signature_packs,
-            allow_workspace_signatures=discovery.allow_workspace_signatures,
-            scan_roots=discovery.scan_roots,
-        )
-    except SignaturePackError:
-        return 0, []
-    pinned, refused = _pinned_digests(pins), []
+    paths, refused = _signature_pack_paths(
+        signature_packs=discovery.signature_packs,
+        allow_workspace_signatures=discovery.allow_workspace_signatures,
+        scan_roots=discovery.scan_roots,
+    )
+    total = len(paths) + len(refused)
+    pinned = _pinned_digests(pins)
     for path in paths:
         try:
             pack, raw = _read_pack(path)
@@ -239,7 +237,7 @@ def refused_packs(cfg: Any) -> tuple[int, list[RefusedPack]]:
             continue
         if (refusal := _pin_refusal(pack, raw, pinned, require)) is not None:
             refused.append(refusal)
-    return len(paths), refused
+    return total, refused
 
 
 def _pinned_digests(pins: Mapping[str, str] | None) -> dict[str, str]:
@@ -494,7 +492,10 @@ def _signature_pack_paths(
     signature_packs: list[str] | tuple[str, ...],
     allow_workspace_signatures: bool,
     scan_roots: list[str] | tuple[str, ...],
-) -> list[Path]:
+) -> tuple[list[Path], list[RefusedPack]]:
+    """The pack files the configuration names, and the configured entries that
+    match no file (the gateway rejects that change; the CLI says so and reads
+    the rest)."""
     candidates: list[tuple[str, bool]] = []
     for pack in signature_packs:
         candidates.append((str(pack), True))
@@ -504,17 +505,19 @@ def _signature_pack_paths(
                 candidates.append((str(Path(root).expanduser() / WORKSPACE_PACK_PATH), False))
 
     out: list[Path] = []
+    missing: list[RefusedPack] = []
     seen: set[Path] = set()
     for pattern, required in candidates:
         matches = _expand_pack_candidate(pattern)
         if not matches and required:
-            raise SignaturePackError(f"signature pack path matched nothing: {pattern}")
+            gone = any(ch in pattern for ch in "*?[") or Path(pattern).expanduser().is_dir()
+            missing.append(RefusedPack(pattern, "no pack file matches" if gone else "file not found"))
         for path in matches:
             resolved = path.resolve()
             if resolved not in seen:
                 seen.add(resolved)
                 out.append(resolved)
-    return sorted(out)
+    return sorted(out), missing
 
 
 def _expand_pack_candidate(pattern: str) -> list[Path]:

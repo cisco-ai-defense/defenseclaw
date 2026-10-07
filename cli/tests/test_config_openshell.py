@@ -362,6 +362,10 @@ class TestOpenShellValidation(unittest.TestCase):
             ({"admission": {"skill": {"actions": {"high": "explode"}}}}, "$.admission.skill.actions.high",
              "use one of block, quarantine, warn, allow or a mapping with file, runtime, install"),
             ({"gateway": {"api_port": "abc"}}, "$.gateway.api_port", "use a value of type integer"),
+            # GAP-0222: a number typed for a pattern or enum key names the words it takes.
+            ({"guardrail": {"block_at": 12}}, "$.guardrail.block_at",
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
+            ({"guardrail": {"mode": 5}}, "$.guardrail.mode", "use one of observe, action"),
             ({"guardrail": {"hilt": {"min_severity": "bogus"}}}, "$.guardrail.hilt.min_severity",
              "use one of LOW, MEDIUM, HIGH, CRITICAL (empty inherits)"),
         ):
