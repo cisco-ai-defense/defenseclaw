@@ -662,6 +662,14 @@ func kernelPolicyHealth(state *sensor.KernelState, now time.Time) map[string]int
 	if !status.Available && status.Reason != "" {
 		section["reason"] = status.Reason
 	}
+	if status.IntentMode != "" {
+		// The drop-in's mode before the enforce caps, and whether
+		// enforce_ack approves this build's controls.
+		section["intent_mode"] = status.IntentMode
+	}
+	if status.Approval != "" {
+		section["approval"] = status.Approval
+	}
 	if counts := kernelModeCounts(status.Users); len(counts) > 0 {
 		section["mode_by_uid_count"] = counts
 	}

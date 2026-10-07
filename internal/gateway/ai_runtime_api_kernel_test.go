@@ -248,6 +248,13 @@ func TestKernelPolicyHealthIsOmittedUnlessItApplies(t *testing.T) {
 	if kernelPolicyHealth(state, now)["paused_until"] != "reboot" {
 		t.Fatal("an until-reboot pause was not rendered")
 	}
+	if _, ok := section["approval"]; ok {
+		t.Fatal("approval rendered by a helper that predates it")
+	}
+	state.Status.IntentMode, state.Status.Approval = "enforce", "stale"
+	if section := kernelPolicyHealth(state, now); section["approval"] != "stale" || section["intent_mode"] != "enforce" {
+		t.Fatalf("approval %v intent %v", section["approval"], section["intent_mode"])
+	}
 }
 
 // TestKernelOrphansFollowSpec78 pins the orphan rules doctor fails on.
