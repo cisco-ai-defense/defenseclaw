@@ -3203,7 +3203,6 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 	return filtered
 }
 
-// runWatcher starts the skill/MCP install watcher if enabled in config.
 // watcherUsesConnectorDirs reports whether the watcher may watch the
 // connector's (or the OpenClaw default's) folders in the gateway's own home.
 // Not when no connector is configured (init --connector none, or setup remove
@@ -3229,6 +3228,8 @@ func WatcherWatchesDirs(cfg *config.Config) bool {
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
+// runWatcher starts the skill/MCP install watcher if enabled in config,
+// and restarts it when a managed gateway's enrolled folders change.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
 	for {
 		restart, err := s.runWatcherOnce(ctx)
