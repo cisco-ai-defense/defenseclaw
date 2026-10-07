@@ -55,10 +55,12 @@ them. Treat every "would" below as untested until then.
 
 ## 2. Admin center settings that need a person
 
-Microsoft Graph refuses an app-only token for these: reading the MDM policies
-returned `Unsupported app-only call`, and writing the enrollment defaults
-returned 403 (`Tenant is not Global Admin or Intune Service Admin`). Set them in
-the admin center as an Intune administrator.
+Set these in the admin center as an Intune administrator. Microsoft Graph refused
+an app-only token for the first two: reading the MDM policies returned
+`Unsupported app-only call`, and writing the enrollment defaults returned 403
+(`Tenant is not Global Admin or Intune Service Admin`). The test tenant uploaded
+the Apple push certificate in the admin center; uploading it with Graph was not
+tested.
 
 1. **MDM user scope.** In **Devices** > **Windows** > **Enrollment** >
    **Automatic Enrollment**, set **Microsoft Intune MDM user scope** to **All**,
@@ -203,8 +205,9 @@ ai_discovery:
   include_user_principal: true
 ```
 
-`ensure` validates the file before it applies it, and a config with an unknown
-profile fails with `config_invalid` and leaves the installed config in force
+`ensure` validates the file before it applies it. A config with an unknown
+profile fails, on Linux and macOS with `config_invalid` and on Windows with
+Setup exit code `1603`, and leaves the installed config in force
 ([Deliver it to managed hosts](/docs/guardrail/user-and-group-policies#deliver-it-to-managed-hosts)).
 A complete starting point is `admin-config.windows.example.yaml` in
 `packaging/identity/entra`.

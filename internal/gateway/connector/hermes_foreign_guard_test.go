@@ -185,7 +185,10 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 	if err := os.Mkdir(filepath.Dir(guardBinary), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A managed hook also runs this binary for `hook session-facts` (on macOS
+	// always); that read is not a guard run, so the stub records only guard runs.
 	script := "#!/bin/bash\n" +
+		"[ \"$*\" = \"hook session-facts\" ] && exit 0\n" +
 		"printf '%s' \"$HOME\" > " + shellSingleQuoteForTest(filepath.Join(stub, "home")) + "\n" +
 		"printf '%s' \"$*\" > " + shellSingleQuoteForTest(filepath.Join(stub, "args")) + "\n" +
 		"{ ulimit -S -v; ulimit -H -v; } > " + shellSingleQuoteForTest(filepath.Join(stub, "vlimit")) + "\n" +

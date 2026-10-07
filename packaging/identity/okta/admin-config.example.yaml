@@ -39,8 +39,11 @@ guardrail:
   enabled: true
   mode: observe
   connectors:
-    claudecode: {}
-    codex: {}
+    # Give every connector at least one key. An empty entry such as
+    # `claudecode: {}` is dropped when the config loads, and then the
+    # enumerator enrolls nobody for that connector.
+    claudecode: {enabled: true}
+    codex: {enabled: true}
   profiles:
     okta-strict:
       description: Contractors - block at MEDIUM and above

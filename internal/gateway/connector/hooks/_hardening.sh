@@ -155,6 +155,11 @@ defenseclaw_harden_env() {
   export HOME="$DEFENSECLAW_HOOK_HOME"
   trap '_defenseclaw_hook_cleanup' EXIT
 
+  # A managed hook's socket transport names the session-facts binary after
+  # this point. An inherited one would let the agent pick a binary for the
+  # hook to run, and would make a Secure Client hook send session facts.
+  unset DEFENSECLAW_SESSION_FACTS_BIN
+
   export GIT_CONFIG_NOSYSTEM=1
   export GIT_CONFIG_GLOBAL=/dev/null
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
