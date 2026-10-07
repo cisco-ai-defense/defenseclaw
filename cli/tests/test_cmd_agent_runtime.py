@@ -532,7 +532,7 @@ def test_grant_commands_are_scoped_and_reversible():
     granted = _linux_grant_commands("/opt/defenseclaw/bin/defenseclaw-gateway", False)
     reverted = _linux_grant_commands("/opt/defenseclaw/bin/defenseclaw-gateway", True)
     assert granted == [[
-        "setcap", "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep",
+        "setcap", "cap_dac_read_search,cap_net_admin,cap_net_raw,cap_sys_admin+ep",
         "/opt/defenseclaw/bin/defenseclaw-gateway",
     ]]
     assert reverted == [["setcap", "-r", "/opt/defenseclaw/bin/defenseclaw-gateway"]]
@@ -551,6 +551,52 @@ def test_grant_commands_are_scoped_and_reversible():
     # Nothing here touches an ACL.
     joined = " ".join(" ".join(c) for c in win_grant)
     assert "SACL" not in joined and "Set-Acl" not in joined and "icacls" not in joined
+
+
+def test_linux_process_events_need_cap_net_admin(monkeypatch):
+    """The cn_proc truth fix: the process connector is not unprivileged.
+
+    An ordinary uid's bind to the cn_proc multicast group fails with EPERM
+    (RHEL 9, kernel 5.14), so the row names CAP_NET_ADMIN, probes it, and
+    --grant sets it; before the fix it read "needs: nothing" and even a
+    granted gateway still could not subscribe.
+    """
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    result = CliRunner().invoke(runtime_permissions, ["--os", "linux", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = {entry["plane"]: entry for entry in json.loads(result.output)["grants"]}
+    process = rows["agent actions (C), process events"]
+    assert process["needs"] == "CAP_NET_ADMIN"
+    assert process["probe"] == "cap_net_admin"
+    assert process["how"]
+    assert "cap_net_admin" in cmd_agent._LINUX_GRANT_CAPS.split("+")[0].split(",")
+    assert cmd_agent._LINUX_CAPABILITY_BITS["CAP_NET_ADMIN"] == 12
+
+    asked: list[str] = []
+    monkeypatch.setattr(cmd_agent, "_probe_linux_capability", lambda name: asked.append(name) or False)
+    assert cmd_agent._evaluate_grant("cap_net_admin", True) is False
+    assert asked == ["CAP_NET_ADMIN"]
+
+
+def test_linux_permissions_explain_tetragon_without_asking_for_it():
+    """Per-user installs never connect to Tetragon; the row says so and why."""
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    as_json = CliRunner().invoke(runtime_permissions, ["--os", "linux", "--json"])
+    assert as_json.exit_code == 0, as_json.output
+    rows = {entry["plane"]: entry for entry in json.loads(as_json.output)["grants"]}
+    tetragon = rows["agent actions (C), Tetragon"]
+    assert tetragon["info"] is True
+    assert tetragon["needs"] == "nothing" and tetragon["granted"] is True
+    assert "root-only" in tetragon["why"] and "sensor helper" in tetragon["why"]
+
+    text = CliRunner().invoke(runtime_permissions, ["--os", "linux"])
+    assert text.exit_code == 0, text.output
+    assert "[info] agent actions (C), Tetragon" in text.output
+    assert "[granted] agent actions (C), Tetragon" not in text.output
 
 
 def test_grant_refuses_to_act_on_another_host_os():
