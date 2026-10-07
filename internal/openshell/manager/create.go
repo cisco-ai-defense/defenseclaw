@@ -99,6 +99,10 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	repo, err := m.repoPolicy(project, req.RepoPolicyDigest)
+	if err != nil {
+		return nil, err
+	}
 	// What the sandbox is sent depends on the driver the gateway runs
 	// now, which a restart since the connection may have changed.
 	gw, err := m.driverGateway(ctx)
@@ -108,7 +112,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	flags := runFlags{
 		Pack: req.Pack, Profile: req.Profile, Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo,
 		Unmask: req.Unmask, HostPorts: req.HostPorts, NoMCP: req.NoMCP, Learn: req.Learn,
-		CPU: req.CPU, Memory: req.Memory, Context: req.Context,
+		CPU: req.CPU, Memory: req.Memory, Context: req.Context, RepoPolicy: repo,
 	}
 	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
@@ -1143,6 +1147,29 @@ func (m *Manager) release(name string, b *box) {
 	}
 	m.mu.Unlock()
 	_ = m.removeRecord(b)
+}
+
+// repoPolicy reads a project's repository policy (packs.LoadRepoPolicy)
+// for a new sandbox. want is the digest the client resolved the run with
+// (sandboxapi.NoRepoPolicy when the project had none, "" when the client
+// does not say): a policy that changed since refuses the create, since the
+// client staged a copy with the one it read.
+func (m *Manager) repoPolicy(project, want string) (*packs.RepoPolicy, error) {
+	rp, err := packs.LoadRepoPolicy(project)
+	if err != nil {
+		m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodePackInvalid,
+			Message: "the repository policy " + packs.RepoPolicyPath + " of this project cannot be used", Detail: err.Error()}
+	}
+	got := sandboxapi.NoRepoPolicy
+	if rp != nil {
+		got = rp.Digest
+	}
+	if want != "" && want != got {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"the repository policy %s of this project changed while the run started; run it again", packs.RepoPolicyPath)
+	}
+	return rp, nil
 }
 
 func realProject(p string) (string, error) {

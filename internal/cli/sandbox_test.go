@@ -116,7 +116,7 @@ func TestSandboxCommandTreeCoversThePlan(t *testing.T) {
 	for _, want := range []string{
 		"setup", "doctor", "run", "list", "status", "connect", "exec", "stop", "start", "delete", "logs", "activity",
 		"undo", "review", "approvals", "approve", "reject", "unblock", "pull", "policy show", "policy explain",
-		"policy suggest", "policy allow", "policy block", "pack list", "pack show", "pack validate", "image build",
+		"policy suggest", "policy test", "policy allow", "policy block", "pack list", "pack show", "pack validate", "image build",
 		"image list", "image prune", "image rm", "enable", "disable", "teardown",
 	} {
 		if !slices.Contains(paths, want) {

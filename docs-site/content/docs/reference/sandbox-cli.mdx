@@ -1259,8 +1259,14 @@ defenseclaw sandbox policy show
 | [`sandbox policy block`](#sandbox-policy-block) | Add hosts to openshell.egress.block. |
 | [`sandbox policy explain`](#sandbox-policy-explain) | Show every resolved setting and where it comes from (pack, config, flag, organization). |
 | [`sandbox policy show`](#sandbox-policy-show) | Show the effective sandbox policy. |
-| [`sandbox policy suggest`](#sandbox-policy-suggest) | Suggest an egress allowlist from the destinations sandboxes reached. |
+| [`sandbox policy suggest`](#sandbox-policy-suggest) | Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations. |
+| [`sandbox policy test`](#sandbox-policy-test) | Show what the egress policy decides for a destination, the rule and where it comes from. |
 {/* AUTOGEN-END: sandbox-flags */}
+
+The policy can also come from the project itself: a `.defenseclaw/sandbox.yaml`
+repository policy may only tighten it, and a run is refused when it asks for
+anything looser. See
+[Repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml).
 
 ### `sandbox policy show`
 
@@ -1291,9 +1297,11 @@ defenseclaw sandbox policy show --harness codex --profile balanced --copy
 ### `sandbox policy explain`
 
 Shows every resolved setting with its value, the layer that set it (`pack`,
-`user`, `flag`, `admin`, or `default`), and its precise origin, such as
-`openshell.admin.min_profile`. A clamped setting also shows the value that
-was asked for.
+`user`, `flag`, `repo`, `admin`, `gateway`, or `default`), and its precise
+origin, such as `openshell.admin.min_profile`. A clamped setting also shows
+the value that was asked for, and a setting the project's repository policy
+tightened shows the value it replaced. The header names the pack and its
+digest, every pack it extends, and the repository policy the run applies.
 
 ```bash
 defenseclaw sandbox policy explain
@@ -1316,22 +1324,80 @@ defenseclaw sandbox policy explain --sandbox myapp-7f3a --output json
 
 ### `sandbox policy suggest`
 
-Prints an `openshell.egress.allow` list, as YAML, of the destinations your
-sandboxes reached in the daemon's activity buffer, with a count for each and
-the blocked ones listed apart. Use it before you move to the default-deny
-`balanced` profile.
+Record, then lock. Reads the destinations your sandboxes reached (the same
+view as [`sandbox destinations`](#sandbox-destinations), kept across daemon
+restarts and stops) and suggests a pack that extends `balanced` with every
+host they reached that the balanced pack's curated allowlist doesn't cover.
+Each host carries a comment with its request count and the programs that
+reached it. Hosts that were only ever refused, shadow AI, hosts on the
+blocklist feed, and the sandbox's own model provider are listed apart as
+comments, not suggested. Without `--pack-out` it prints the pack.
+
+`--pack-out FILE` writes the pack to a new file (never over an existing one)
+and checks it as `sandbox pack validate` would. `--diff` prints what the pack
+changes against the effective policy (the sandbox's, or a run's in this
+folder): the settings that differ, and every reached destination the pack
+would block. Nothing is applied: lock a project to the pack with
+`sandbox run --pack FILE`. See
+[Record, then lock](/docs/sandboxes/policy-packs#record-then-lock).
 
 ```bash
-defenseclaw sandbox policy suggest
-defenseclaw sandbox policy suggest --sandbox myapp-7f3a --output json
+defenseclaw sandbox policy suggest --sandbox myapp-7f3a --diff
+defenseclaw sandbox policy suggest --sandbox myapp-7f3a --pack-out ~/.defenseclaw/policies/sandbox/myapp/pack.yaml
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags policy suggest */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--diff` | switch |  | Show what the suggested pack changes against the effective policy. |
 | `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--pack-out` | text |  | Write the suggested pack (extends balanced) to this new file. |
 | `--sandbox` | text |  | Only this sandbox's destinations. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox policy test`
+
+Shows what the egress policy decides for a destination: allowed or blocked,
+the rule of the egress proxy's decision order that decides (`allow`, `block`,
+`feed`, `admin_block`, `network_allowlist`, and so on), the pattern or feed
+entry that matched, and the setting that holds it (the pack, your
+`openshell` keys, the repository policy, or the organization). It asks the
+same decider the egress proxy uses, so it can't disagree with it.
+
+`--sandbox NAME` tests that sandbox's policy, its unblocks included, through
+the daemon, and names a provider of the sandbox (its model endpoint, a
+`--credential` binding) that opens the destination directly around the proxy.
+Without it, `--pack`, `--profile`, and `--harness` resolve the policy a run in
+this folder would get, with this machine's `config.yaml` (or the defaults)
+and the folder's repository policy, and no daemon is needed, so CI can check
+a pack. The proxy decides by destination, the same for every program in the
+sandbox; `--binary` names the program in the report.
+
+`--fixture FILE` checks a YAML or JSON list of destinations, each
+`{host, port, binary, expect: allow|block, rule}` (`port` and `rule` are
+optional; `rule` pins the deciding rule), and exits 1 when any decision
+doesn't match. `--output json` reports every decision and whether it passed.
+
+```bash
+defenseclaw sandbox policy test --pack balanced --host registry.npmjs.org --port 443
+defenseclaw sandbox policy test --sandbox myapp-7f3a --host api.example.com:443 --binary /usr/bin/curl
+defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pack.yaml --fixture egress-expectations.yaml
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags policy test */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--binary` | text |  | The program that connects (shown in the report). |
+| `--fixture` | text |  | Check every destination of this YAML or JSON list; exit 1 on a mismatch. |
+| `--harness` | text |  | Resolve for this harness. |
+| `--host` | text |  | The destination host (or host:port). |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--pack` | text |  | Resolve with this pack. |
+| `--port` | number | `0` | The destination port (0: any port the policy carries). |
+| `--profile` | text |  | Resolve with this profile. |
+| `--sandbox` | text |  | Test this sandbox's policy (its unblocks included). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox policy allow`
@@ -1410,6 +1476,8 @@ defenseclaw sandbox pack list
 Prints a pack, normalized, with its source and digest. The digest is the one
 `openshell.admin.required_pack_digest` pins. It takes the same references as
 `openshell.pack`: a built-in name, a custom pack name, or an absolute path.
+For a pack that extends another, it names each pack of the chain with its
+source and digest, and prints the merged settings.
 
 ```bash
 defenseclaw sandbox pack show balanced
@@ -1426,8 +1494,9 @@ defenseclaw sandbox pack show ~/.defenseclaw/policies/sandbox/team-web
 ### `sandbox pack validate`
 
 Loads a custom pack file strictly, with the same checks a run applies, and
-prints its name, profile, and digest. It takes an absolute path (or one
-starting with `~/`) to a `pack.yaml` or its directory.
+prints its name, profile, digest, and the packs it extends. It takes an
+absolute path (or one starting with `~/`) to a `pack.yaml` or its directory;
+a custom pack it extends is looked up in `openshell.pack_dir`.
 
 ```bash
 defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.yaml

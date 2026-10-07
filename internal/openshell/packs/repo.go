@@ -56,7 +56,7 @@ type RepoPolicy struct {
 	// Content holds.
 	Source  string `json:"source"`
 	Digest  string `json:"digest"`
-	Content []byte `json:"-"`
+	Content []byte `json:"content,omitempty"`
 
 	// NetworkMode is allowlist or deny ("" unset), and Approvals triage or
 	// manual: floors.

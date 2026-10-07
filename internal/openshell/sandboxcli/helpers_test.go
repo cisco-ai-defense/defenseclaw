@@ -107,6 +107,8 @@ type fakeDaemon struct {
 	stopRunLogs map[string]*sandboxapi.RunLog
 	// destinations are the sandboxes' destinations views.
 	destinations map[string]*sandboxapi.Destinations
+	// policyTest answers POST /policy/test.
+	policyTest func(req sandboxapi.PolicyTestRequest) *sandboxapi.PolicyTestResult
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -239,6 +241,10 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			d.onExplain(sandboxapi.ParseExplainQuery(r.URL.Query()), &ex)
 		}
 		reply(ex)
+	case path == sandboxapi.PathPolicyTest && d.policyTest != nil:
+		var req sandboxapi.PolicyTestRequest
+		_ = json.Unmarshal(body, &req)
+		reply(d.policyTest(req))
 	case path == sandboxapi.PathApprovals && r.Method == http.MethodGet:
 		var out []sandboxapi.Approval
 		for _, a := range d.approvals {

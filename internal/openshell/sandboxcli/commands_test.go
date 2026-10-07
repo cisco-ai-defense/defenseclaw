@@ -1316,12 +1316,6 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{Harness: "claude", Profile: "open"}))
 	has(t, ta.output(), "1 (instead of unlimited)", "strict (asked for open)")
 	lacks(t, ta.output(), "asked for (unlimited)")
-	ta.daemon.events = []sandboxapi.ActivityEvent{
-		{Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"}, {Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"},
-		{Kind: sandboxapi.ActivityEgressAllowed, Host: "docs.python.org"}, {Kind: sandboxapi.ActivityEgressBlocked, Host: "webhook.site"},
-	}
-	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{}))
-	has(t, ta.output(), "      - docs.python.org  # 1\n      - registry.npmjs.org  # 2", "Blocked (not suggested): webhook.site")
 }
 
 // `policy show` sizes its key column to the longest key; `policy explain`

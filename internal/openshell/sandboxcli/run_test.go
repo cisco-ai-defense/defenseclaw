@@ -308,6 +308,13 @@ func TestRunRefusals(t *testing.T) {
 				Message: "blocked by your organization's DefenseClaw policy: harness", Detail: "your organization allows only claudecode"}}
 		}, want: []string{"blocked by your organization's DefenseClaw policy: harness — your organization allows only claude " +
 			"(openshell.admin.allowed_harnesses); ask your administrator if you need it"}, not: "there is none"},
+		// A repository policy that would loosen names every key, one per line.
+		{name: "a repository policy that loosens", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
+			ta.daemon.explain.Violations = []sandboxapi.Violation{
+				{Key: "harness.yolo", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: harness.yolo true"},
+				{Key: "egress.allow", Source: "repo", Fatal: true, Message: "the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"},
+			}
+		}, want: []string{"harness.yolo true\nthe repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"}},
 		{name: "daemon down", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x") },
 			want: []string{"daemon is not running"}},
 		{name: "windows", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS = "windows" }, want: []string{"Windows and WSL2 are not supported"}},
@@ -1317,7 +1324,12 @@ func TestRunAsksAboutTheFirstBootOfItsOwnRunFiles(t *testing.T) {
 		}
 		return ta
 	}
-	explains := func(ta *testApp) []call { return ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain) }
+	// The explains of the run (the end-of-session pull asks for the
+	// sandbox's own, for the review globs of its repository policy).
+	explains := func(ta *testApp) []call {
+		return slices.DeleteFunc(ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain),
+			func(c call) bool { return strings.HasPrefix(c.Query, "sandbox=") })
+	}
 
 	ta := setup(t, "vm")
 	ta.ok(t, ta.Run(bg, run))

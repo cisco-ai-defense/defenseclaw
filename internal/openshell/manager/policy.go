@@ -803,10 +803,14 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 				project = real
 			}
 		}
+		repo, err := m.repoPolicy(project, "")
+		if err != nil {
+			return nil, err
+		}
 		flags = packs.Flags{
 			Harness: config.NormalizeConnectorName(req.Harness), Pack: req.Pack, Profile: req.Profile, Project: project,
 			Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo, Unmask: req.Unmask, OpenShellGatewayPort: m.gatewayPort(),
-			MountUnsupported: m.gatewayDriver().MountRefusal,
+			MountUnsupported: m.gatewayDriver().MountRefusal, RepoPolicy: repo,
 		}
 	}
 	eff, violations, err := m.resolve(cfg, flags)
@@ -823,6 +827,9 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 			out.PackChain = append(out.PackChain, sandboxapi.PackLink{Name: link.Name, Builtin: link.Builtin, Source: link.Source, Digest: link.Digest})
 		}
 	}
+	if rp := eff.RepoPolicy; rp != nil {
+		out.RepoPolicy = &sandboxapi.RepoPolicy{Path: rp.Source, Digest: rp.Digest, Tightened: eff.RepoTightened, Content: rp.Content}
+	}
 	for _, s := range eff.Explain() {
 		out.Settings = append(out.Settings, sandboxapi.Setting{
 			Key: s.Key, Value: s.Value, Source: string(s.Source), Origin: s.Origin, Requested: s.Requested,
@@ -833,6 +840,66 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 		out.VMFirstBoot = m.vmFirstBoot(ctx, cfg, m.gatewayDriver(), flags, eff, req.Run)
 	}
 	return out, nil
+}
+
+// PolicyTest judges destinations with a sandbox's egress policy as its
+// proxy does: the policy resolved against the current configuration, with
+// the sandbox's own decider and principal, so its unblocks count. The
+// decision walks the proxy's order (packs.Effective.CheckEgress, which asks
+// the egress decider). A destination one of the sandbox's providers opens
+// directly, around the proxy, is named as well.
+func (m *Manager) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
+	switch {
+	case len(req.Checks) == 0:
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name at least one destination to test")
+	case len(req.Checks) > sandboxapi.MaxPolicyChecks:
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a policy test takes at most %d destinations", sandboxapi.MaxPolicyChecks)
+	}
+	for _, c := range req.Checks {
+		if c.Port < 0 || c.Port > 65535 {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "port %d must be between 1 and 65535 (0: any port)", c.Port)
+		}
+	}
+	b, err := m.box(req.Sandbox)
+	if err != nil {
+		return nil, err
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		return nil, err
+	}
+	pol := m.triagePolicy(b, eff)
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	out := &sandboxapi.PolicyTestResult{Sandbox: rec.Name, Profile: eff.Profile, NetworkMode: eff.NetworkMode}
+	if eff.Pack != nil {
+		out.Pack = eff.Pack.Name
+	}
+	for _, c := range req.Checks {
+		chk := eff.CheckEgress(pol.Decider, pol.Principal, c.Host, c.Port)
+		out.Decisions = append(out.Decisions, sandboxapi.PolicyDecision{
+			PolicyCheck: c, Allowed: chk.Allowed, Rule: string(chk.Rule), Match: chk.Match, Source: chk.Source,
+			Reason: chk.Reason, Unblockable: chk.Unblockable, Direct: directProvider(rec.ProviderEndpoints, c.Host, c.Port),
+		})
+	}
+	return out, nil
+}
+
+// directProvider names the provider of the sandbox whose OpenShell rule
+// opens host (on port, 0 any) around the egress proxy, or "".
+func directProvider(endpoints []providerEndpoint, host string, port int) string {
+	host = triage.NormalizeHost(host)
+	for _, ep := range endpoints {
+		if ep.Host != host || (port != 0 && ep.Port != 0 && ep.Port != port) {
+			continue
+		}
+		if ep.Role == roleCredential {
+			return "the --credential " + ep.Name + " provider (" + ep.Provider + ") opens it directly for the programs it binds"
+		}
+		return "the model provider (" + ep.Provider + ") opens it directly for the harness's own programs"
+	}
+	return ""
 }
 
 // baseEffective is the configured posture without run flags; the egress

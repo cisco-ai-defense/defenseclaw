@@ -35,6 +35,9 @@ const (
 	PathActivity      = "/api/v1/sandbox/activity"
 	PathEgressUnblock = "/api/v1/sandbox/egress/unblock"
 	PathPolicyExplain = "/api/v1/sandbox/policy/explain"
+	// PathPolicyTest is POST: what a sandbox's egress policy decides for
+	// destinations (PolicyTestRequest).
+	PathPolicyTest = "/api/v1/sandbox/policy/test"
 )
 
 // ClientHeader is the CSRF header every mutating request carries, and
@@ -153,7 +156,16 @@ type CreateRequest struct {
 	// where the image has its zone file (openshell.EnvHostTimeZone), and
 	// on UTC without it.
 	TimeZone string `json:"time_zone,omitempty"`
+	// RepoPolicyDigest is the digest of the project's repository policy
+	// (Explain.RepoPolicy) the client resolved the run with, NoRepoPolicy
+	// when it had none. The daemon reads the file itself and refuses the
+	// create when it changed since; empty skips the check.
+	RepoPolicyDigest string `json:"repo_policy_digest,omitempty"`
 }
+
+// NoRepoPolicy is CreateRequest.RepoPolicyDigest for a project without a
+// repository policy.
+const NoRepoPolicy = "none"
 
 // LLMCredential selects one of the harness's provider profiles and carries
 // its secret values keyed by the profile's environment variable names.
@@ -866,6 +878,53 @@ type Explain struct {
 	// image prepares its MicroVM disk, which takes about a minute. Always
 	// false on the docker driver.
 	VMFirstBoot bool `json:"vm_first_boot,omitempty"`
+}
+
+// MaxPolicyChecks bounds the destinations of one policy test.
+const MaxPolicyChecks = 1024
+
+// PolicyTestRequest is POST /policy/test: the destinations to judge with a
+// sandbox's egress policy, its unblocks included.
+type PolicyTestRequest struct {
+	Sandbox string        `json:"sandbox"`
+	Checks  []PolicyCheck `json:"checks"`
+}
+
+// PolicyCheck is one destination of a policy test. Port 0 judges the host
+// on any port the policy carries; Binary names the program, which the
+// egress proxy does not tell apart (every program in the sandbox reaches
+// the web through it).
+type PolicyCheck struct {
+	Host   string `json:"host"`
+	Port   int    `json:"port,omitempty"`
+	Binary string `json:"binary,omitempty"`
+}
+
+// PolicyTestResult is a policy test's answer.
+type PolicyTestResult struct {
+	Sandbox     string           `json:"sandbox,omitempty"`
+	Pack        string           `json:"pack"`
+	Profile     string           `json:"profile"`
+	NetworkMode string           `json:"network_mode"`
+	Decisions   []PolicyDecision `json:"decisions"`
+}
+
+// PolicyDecision is what the egress policy decides for one destination,
+// walking the egress proxy's order: Rule is the step that decided (a
+// packs.EgressRule), Match the pattern, feed entry or port, and Source the
+// setting that holds it.
+type PolicyDecision struct {
+	PolicyCheck
+	Allowed     bool   `json:"allowed"`
+	Rule        string `json:"rule"`
+	Match       string `json:"match,omitempty"`
+	Source      string `json:"source"`
+	Reason      string `json:"reason,omitempty"`
+	Unblockable bool   `json:"unblockable"`
+	// Direct names a provider of the sandbox (its --llm model endpoint, a
+	// --credential binding) whose OpenShell rule opens the destination to
+	// that provider's programs around the egress proxy.
+	Direct string `json:"direct,omitempty"`
 }
 
 // PackLink is one pack of an extends chain.

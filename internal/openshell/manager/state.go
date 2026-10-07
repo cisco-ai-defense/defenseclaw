@@ -60,6 +60,10 @@ type runFlags struct {
 	CPU       string   `json:"cpu,omitempty"`
 	Memory    string   `json:"memory,omitempty"`
 	Context   []string `json:"context,omitempty"`
+	// RepoPolicy is the project's repository policy as the create read it:
+	// the sandbox keeps it, so an edit made during a session applies from
+	// the next run on.
+	RepoPolicy *packs.RepoPolicy `json:"repo_policy,omitempty"`
 }
 
 // gatewayFacts are what the gateway a sandbox runs on adds to its policy
@@ -75,6 +79,7 @@ func (f runFlags) packs(harness, project string, gw gatewayFacts) packs.Flags {
 		Pack: f.Pack, Harness: harness, Project: project, Profile: f.Profile, Copy: f.Copy, Safe: f.Safe,
 		Yolo: f.Yolo, Unmask: f.Unmask, HostPorts: f.HostPorts, NoMCP: f.NoMCP, Learn: f.Learn,
 		CPU: f.CPU, Memory: f.Memory, OpenShellGatewayPort: gw.Port, MountUnsupported: gw.Driver.MountRefusal,
+		RepoPolicy: f.RepoPolicy,
 	}
 }
 

@@ -348,6 +348,13 @@ func parse(data []byte, source string, parent parentLoader) (*Pack, error) {
 	return pack, nil
 }
 
+// ParseIn is Parse for a pack that may extend another: a custom parent is
+// looked up in packDir (`sandbox policy suggest` checks the pack it writes).
+func ParseIn(data []byte, source, packDir string) (*Pack, error) {
+	l := &loader{packDir: packDir, chain: []string{source}}
+	return parse(data, source, l.parent)
+}
+
 // loadParent loads the parent of the pack at source: a built-in pack or a
 // custom pack in openshell.pack_dir, by name.
 func loadParent(source, ref string, parent parentLoader) (*Pack, error) {

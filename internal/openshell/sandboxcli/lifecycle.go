@@ -426,10 +426,11 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	// The policy the sandbox runs under, for the banner's Uploads line; a
 	// daemon that cannot say leaves the line out.
 	var policy []sandboxapi.Setting
+	var repo *sandboxapi.RepoPolicy
 	if ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name}); err == nil {
-		policy = ex.Settings
+		policy, repo = ex.Settings, ex.RepoPolicy
 	}
-	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy})
+	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy, repo: repo})
 	var code int
 	if o.Shell {
 		// A shell in the project, reviewed at its end like a harness
@@ -457,8 +458,14 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 
 // refreshCopy re-stages a copy-mode sandbox's project and uploads it.
 func (a *App) refreshCopy(ctx context.Context, s *session) error {
-	// The sandbox's own policy decides what is held back, as at its run.
-	stage, err := a.copyStageOptions(packs.Flags{Pack: s.sb.Pack, Harness: s.sb.Harness, Project: s.sb.Project, Profile: s.sb.Profile}, s.sb.Name)
+	// The sandbox's own policy decides what is held back, as at its run,
+	// its repository policy (the one its run read) included.
+	repo, err := a.sandboxRepoPolicy(ctx, s.api, s.sb.Name)
+	if err != nil {
+		return err
+	}
+	stage, err := a.copyStageOptions(packs.Flags{Pack: s.sb.Pack, Harness: s.sb.Harness, Project: s.sb.Project, Profile: s.sb.Profile,
+		RepoPolicy: repo}, s.sb.Name)
 	if err != nil {
 		return err
 	}
