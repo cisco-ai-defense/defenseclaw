@@ -39,18 +39,6 @@ func (reporter *retentionTestHealthReporter) ReportRetentionHealth(transition Re
 		reporter.store.db.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&count))
 }
 
-type retentionScriptScheduler struct {
-	wait func(context.Context, time.Duration, <-chan struct{}) (RetentionScheduleWake, error)
-}
-
-func (scheduler retentionScriptScheduler) Wait(
-	ctx context.Context,
-	interval time.Duration,
-	reload <-chan struct{},
-) (RetentionScheduleWake, error) {
-	return scheduler.wait(ctx, interval, reload)
-}
-
 func (reporter *retentionTestReporter) ReportRetentionRun(report RetentionRunReport) {
 	reporter.mu.Lock()
 	defer reporter.mu.Unlock()
@@ -124,9 +112,6 @@ func TestRetentionPolicyValidationAndZeroDisablesScheduleAndDeletion(t *testing.
 		checkpointCalls++
 		return nil
 	}})
-	if interval, enabled := reaper.ScheduleInterval(); enabled || interval != 0 {
-		t.Fatalf("zero-day schedule=(%s,%t), want disabled", interval, enabled)
-	}
 	result, err := reaper.Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -157,9 +142,6 @@ func TestRetentionReapsEveryHistoryClassAtStrictUTCBoundaryAndPreservesState(t *
 
 	reporter := &retentionTestReporter{}
 	reaper := newRetentionReaperAt(t, store, judge, 90, now, RetentionOptions{Reporter: reporter}, retentionHooks{})
-	if interval, enabled := reaper.ScheduleInterval(); !enabled || interval != 6*time.Hour {
-		t.Fatalf("schedule=(%s,%t)", interval, enabled)
-	}
 	result, err := reaper.Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -1206,7 +1188,7 @@ func TestRetentionScanParentGuardPreventsOrphansAcrossBatchInterleave(t *testing
 	}
 }
 
-func TestRetentionSchedulerReloadAndHealthTransitionCoalescing(t *testing.T) {
+func TestRetentionReloadAndHealthTransitionCoalescing(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	rowTime := now.Add(-60 * 24 * time.Hour)
@@ -1217,28 +1199,14 @@ func TestRetentionSchedulerReloadAndHealthTransitionCoalescing(t *testing.T) {
 		t.Fatal(err)
 	}
 	reaper := newRetentionReaperAt(t, store, judge, 90, now, RetentionOptions{}, retentionHooks{})
-	stop := errors.New("script complete")
-	waits := 0
-	scheduler := retentionScriptScheduler{wait: func(
-		_ context.Context, interval time.Duration, _ <-chan struct{},
-	) (RetentionScheduleWake, error) {
-		waits++
-		if interval != 6*time.Hour {
-			t.Fatalf("scheduler interval=%s", interval)
-		}
-		if waits == 1 {
-			if err := reaper.UpdateRetentionDays(30); err != nil {
-				t.Fatal(err)
-			}
-			return RetentionScheduleReload, nil
-		}
-		return 0, stop
-	}}
-	if err := reaper.RunScheduled(t.Context(), scheduler); !errors.Is(err, stop) {
-		t.Fatalf("scheduler error=%v", err)
+	if _, err := reaper.Run(t.Context()); err != nil || countRetentionLike(t, store.db, "activity_events", "reload-row") != 1 {
+		t.Fatalf("a 60-day-old row went under a 90-day policy (err %v)", err)
 	}
-	if countRetentionLike(t, store.db, "activity_events", "reload-row") != 0 {
-		t.Fatal("90-to-30 reload did not trigger prompt run with new age")
+	if err := reaper.UpdateRetentionDays(30); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reaper.Run(t.Context()); err != nil || countRetentionLike(t, store.db, "activity_events", "reload-row") != 0 {
+		t.Fatalf("the next run after a 90-to-30 reload kept the row (err %v)", err)
 	}
 	if err := reaper.UpdateRetentionDays(-1); err == nil || reaper.RetentionDays() != 30 {
 		t.Fatalf("invalid reload changed active days to %d, err=%v", reaper.RetentionDays(), err)
@@ -1471,9 +1439,9 @@ func seedRetentionCorrelationHistory(t *testing.T, store *Store, old time.Time) 
 	}})
 }
 
-// A run that stopped at its time budget with work left is followed by another
-// one a minute later, not six hours later; a run that finished waits the
-// usual interval.
+// A run that stopped at its time budget with work left reports a backlog, on
+// which the runtime's retention controller runs again a minute later; a run
+// that finished reports none.
 func TestRetentionRunsAgainSoonWhileWorkIsLeft(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -1494,23 +1462,12 @@ func TestRetentionRunsAgainSoonWhileWorkIsLeft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stop := errors.New("script complete")
-	var intervals []time.Duration
-	scheduler := retentionScriptScheduler{wait: func(
-		_ context.Context, interval time.Duration, _ <-chan struct{},
-	) (RetentionScheduleWake, error) {
-		intervals = append(intervals, interval)
-		if len(intervals) == 2 {
-			return 0, stop
-		}
-		limited, budgetExpired = false, false // the next run has the time it needs
-		return RetentionScheduleTick, nil
-	}}
-	if err := reaper.RunScheduled(t.Context(), scheduler); !errors.Is(err, stop) {
-		t.Fatalf("scheduler error=%v", err)
+	if result, err := reaper.Run(t.Context()); err != nil || !result.Backlog {
+		t.Fatalf("budget-limited run backlog=%t err=%v, want a backlog", result.Backlog, err)
 	}
-	if want := []time.Duration{RetentionFollowUpInterval, RetentionScheduleInterval}; !reflect.DeepEqual(intervals, want) {
-		t.Fatalf("waits=%v, want %v", intervals, want)
+	limited, budgetExpired = false, false // the next run has the time it needs
+	if result, err := reaper.Run(t.Context()); err != nil || result.Backlog {
+		t.Fatalf("unlimited run backlog=%t err=%v, want none", result.Backlog, err)
 	}
 }
 
