@@ -399,17 +399,17 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	if err != nil {
 		return err
 	}
-	allowed := make(map[string]bool, len(requiredPayloadFiles)+1)
-	for _, name := range requiredPayloadFiles {
+	stagedNames := append(append(append([]string{}, requiredPayloadFiles...), standalonePayloadFiles...), standalonePayloadTrustName)
+	allowed := make(map[string]bool, len(stagedNames))
+	for _, name := range stagedNames {
 		allowed[name] = true
 	}
-	allowed[standalonePayloadTrustName] = true
 	for _, entry := range entries {
 		if !allowed[entry.Name()] || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("refusing enterprise Setup cleanup with unexpected staged object: %s", entry.Name())
 		}
 	}
-	for _, name := range append(append([]string{}, requiredPayloadFiles...), standalonePayloadTrustName) {
+	for name := range allowed {
 		path := filepath.Join(cleanStage, name)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err

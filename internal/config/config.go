@@ -1081,6 +1081,13 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.APIKeyEnv = c.DefaultLLMAPIKeyEnv
 	}
 
+	// A standalone deployment that names enterprise.inspection.llm.credential
+	// takes every role's key from that protected credential.
+	if key, configured := c.standaloneLLMKey(); configured {
+		out.APIKey = key
+		out.APIKeyEnv = ""
+	}
+
 	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
 	return out
 }
