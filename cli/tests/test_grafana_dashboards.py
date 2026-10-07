@@ -3418,3 +3418,13 @@ def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
         "Rule activity — rule_id (rows) × time (cols)",
     ):
         assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")
+
+def test_identity_assurance_pie_assigns_each_host_user_once() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    panel = _panel(dashboard, "Verified vs claimed identity")
+    expression = panel["targets"][0]["expr"]
+
+    assert "unless on (host_name, user_id)" in expression
+    assert 'body_defenseclaw_user_principal_assurance="verified"' in expression
+    assert 'body_defenseclaw_user_principal_assurance="claimed"' in expression
+    assert "sum by (host_name, user_id, assurance)" in expression

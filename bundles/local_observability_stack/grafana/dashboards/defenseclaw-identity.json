@@ -353,7 +353,7 @@
     {
       "type": "piechart",
       "title": "Verified vs claimed identity",
-      "description": "Distinct users by the assurance of the identity facts on their hook decisions and tool calls. `claimed` means the gateway resolved no directory facts and the record carries what the hook reported.",
+      "description": "Distinct host users by their strongest identity assurance in the selected range. A user with both claimed and verified records is counted as verified.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -366,7 +366,7 @@
       },
       "targets": [
         {
-          "expr": "count by (assurance) (sum by (assurance, user_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_user_id!=\"\" | body_defenseclaw_user_principal_assurance=~\"verified|claimed\" | label_format assurance=\"{{.body_defenseclaw_user_principal_assurance}}\", user_id=\"{{.body_user_id}}\" [$__range])))",
+          "expr": "count by (assurance) ((sum by (host_name, user_id, assurance) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_user_id!=\"\" | body_defenseclaw_user_principal_assurance=\"verified\" | label_format assurance=\"verified\", user_id=\"{{.body_user_id}}\" [$__range]))) or ((sum by (host_name, user_id, assurance) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_user_id!=\"\" | body_defenseclaw_user_principal_assurance=\"claimed\" | label_format assurance=\"claimed\", user_id=\"{{.body_user_id}}\" [$__range]))) unless on (host_name, user_id) (sum by (host_name, user_id, assurance) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_user_id!=\"\" | body_defenseclaw_user_principal_assurance=\"verified\" | label_format assurance=\"verified\", user_id=\"{{.body_user_id}}\" [$__range])))))",
           "datasource": {
             "type": "loki",
             "uid": "defenseclaw-loki"
