@@ -1617,6 +1617,32 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 }
 
+// TestDoctorFixWaitsForTheDaemonAfterARestart (GAP-0074): a fix that
+// restarted the gateway was followed at once by the checks again, whose
+// report ended with a failed DefenseClaw daemon row (sandboxes unavailable,
+// connection refused) seconds before the daemon reconnected. The doctor now
+// waits for the daemon first.
+func TestDoctorFixWaitsForTheDaemonAfterARestart(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.Checks = append(r.Checks, openshell.Check{ID: openshell.CheckIDTelemetry, Title: "OpenShell telemetry", Status: openshell.StatusWarn,
+			Detail: "on", Fix: &openshell.Fix{Summary: "set it off and restart the gateway", Automatic: true, RestartsGateway: true,
+				Apply: func(context.Context) error { return nil }}})
+	})
+	runningOn(t, ta, 0)
+	calls := 0
+	ta.daemon.mu.Lock()
+	ta.daemon.status.Available, ta.daemon.status.Reason = false, "connection refused"
+	ta.daemon.onStatus = func(st *sandboxapi.Status) {
+		calls++
+		st.Available = calls >= 3
+	}
+	ta.daemon.mu.Unlock()
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+	has(t, ta.output(), "waiting for the DefenseClaw daemon to reconnect to the restarted gateway", `fixed "OpenShell telemetry"`)
+	lacks(t, ta.output(), "sandboxes are unavailable")
+}
+
 // TestDoctorFixNamesChecksAsItAsked: `doctor --fix` asked `Fix "Gateway":
 // start the gateway?` and then reported "✗ gateway-version: brew services
 // start …", naming the check by its id; the outcome lines name it by the
