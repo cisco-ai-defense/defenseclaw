@@ -61,6 +61,14 @@ from those files by DefenseClaw with protoc-gen-go and protoc-gen-go-grpc; the
 only change from upstream's generation is the Go package path. Tetragon ships no
 NOTICE file. third_party/tetragon/README.md records the provenance checks.
 
+internal/sensor/kernelpolicy/testdata/tracingpolicy-v1.7.0.schema.json is the
+openAPIV3Schema of Tetragon's TracingPolicy CRD from cilium/tetragon v1.7.0
+(pkg/k8s/apis/cilium.io/client/crds/v1alpha1/cilium.io_tracingpolicies.yaml,
+Apache-2.0, same copyright), with its descriptions removed. It is test data
+only: a unit test checks that the kernel policies DefenseClaw renders use only
+fields the lowest supported Tetragon accepts. It is not shipped in any binary
+or package.
+
 Declared third-party dependencies are listed in go.mod/go.sum (Go) and
 pyproject.toml/uv.lock (Python). The shipped OpenClaw TypeScript plugin is built
 from extensions/defenseclaw/package.json and

@@ -4256,7 +4256,7 @@
     {
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
       "category": "runtime_path",
-      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on and the gateway dials. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. Managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
+      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on outside managed deployments. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. A gateway brokers through the helper only on a managed host, and managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
       "default": "unset (managed_enterprise: Windows Secure Client uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock and Windows standalone uses <TrustedProgramFiles>\\Cisco\\DefenseClaw\\ipc\\sensor-helper.sock; Linux uses /run/defenseclaw-sensor/sensor-helper.sock; macOS standalone uses /var/run/defenseclaw-sensor/sensor-helper.sock; macOS Secure Client keeps /var/run/defenseclaw/sensor-helper.sock. Other modes use <data_dir>/ipc/sensor-helper.sock)",
       "accepted_values": [
         "any-absolute-path",
