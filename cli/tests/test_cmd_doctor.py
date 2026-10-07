@@ -43,7 +43,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_hook_health,
     _check_llm_api_key,
-    _check_openclaw_transport_advisory,
     _check_openhands_hooks,
     _check_proxy_interception,
     _check_scanners,
@@ -355,6 +354,33 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("self-test", result.checks[0]["detail"])
         self.assertIn("agent traffic", result.checks[0]["detail"])
 
+    def test_proxy_interception_warns_when_a_model_call_missed_the_proxy(self):
+        # GAP-0190: a passing self-test is not proof that real model calls take the proxy.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        now = datetime.now(timezone.utc)
+
+        def stamp(minutes_ago: int) -> str:
+            return (now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        for traffic, missed in ((None, True), (stamp(30), True), (stamp(1), False)):
+            info = {"verified": True, "last_verified_at": stamp(0), "last_agent_model_activity_at": stamp(0)}
+            if traffic:
+                info["last_agent_traffic_at"] = traffic
+            result = _DoctorResult()
+            _check_proxy_interception(cfg, result, live_health={"interception": info})
+            self.assertEqual((result.passed, result.warned), (0, 1) if missed else (1, 0), result.checks)
+            if missed:
+                self.assertIn("did not go through the guardrail proxy", result.checks[0]["detail"])
+
     def test_proxy_interception_fails_when_self_test_is_stale(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
@@ -424,7 +450,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.to_dict()["exit_code"], 1)
         self.assertIn("has not reported an interceptor self-test", result.checks[0]["detail"])
 
-    def test_disabled_openclaw_is_skipped_by_interception_and_transport_checks(self):
+    def test_disabled_openclaw_is_skipped_by_the_interception_check(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -448,36 +474,6 @@ class DoctorGuardrailTests(unittest.TestCase):
             live_health={"interception": {"verified": False}},
         )
         self.assertEqual(interception.checks, [])
-
-        advisory = _DoctorResult()
-        signal = SimpleNamespace(version="2026.6.8", installed=True)
-        with patch(
-            "defenseclaw.inventory.agent_discovery.discover_agents",
-            return_value=SimpleNamespace(agents={"openclaw": signal}),
-        ):
-            _check_openclaw_transport_advisory(cfg, advisory)
-        self.assertEqual(advisory.checks, [])
-
-    def test_openclaw_transport_advisory_for_2026_6(self):
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, connector="openclaw"),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        result = _DoctorResult()
-        signal = SimpleNamespace(version="2026.6.8", installed=True)
-        with patch(
-            "defenseclaw.inventory.agent_discovery.discover_agents",
-            return_value=SimpleNamespace(agents={"openclaw": signal}),
-        ):
-            _check_openclaw_transport_advisory(cfg, result)
-        self.assertEqual(result.warned, 1, result.checks)
-        self.assertIn("2026.6.8", result.checks[0]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_check_surfaces_disabled_summary(self, mock_probe):
@@ -3448,3 +3444,10 @@ def test_a_signature_pack_that_fails_its_pin_is_a_doctor_warning(tmp_path):
     result = _DoctorResult()
     cmd_doctor._check_signature_packs(cfg, result)
     assert [c["status"] for c in result.checks] == ["pass"]
+
+    # GAP-0220: a configured pack whose file is gone is not "0 loaded" PASS.
+    pack.unlink()
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    [check] = result.checks
+    assert check["status"] == "warn" and f"{pack}: file not found" in check["detail"]

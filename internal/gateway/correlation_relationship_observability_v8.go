@@ -57,7 +57,7 @@ func (a *APIServer) contextWithSessionAgentV8(ctx context.Context, connector str
 	if meta, found := a.hookLifecycleSnapshot(connector, envelope.SessionID, ""); found && meta.AgentID != "" {
 		envelope.AgentID = meta.AgentID
 	} else {
-		envelope.AgentID = stableLLMEventID("agent", connector, envelope.SessionID, "root")
+		envelope.AgentID = agentNodeID(agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), envelope.SessionID), connector, envelope.SessionID, "root")
 	}
 	return audit.ContextWithEnvelope(ctx, envelope)
 }

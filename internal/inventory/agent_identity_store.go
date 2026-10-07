@@ -75,6 +75,18 @@ func (r *AgentIdentityRecord) NoteSession(id string) {
 	r.SessionsSeen++
 }
 
+// ForgetSession takes back a session NoteSession counted in this batch: it
+// turned out to be a sub-agent's, not a chat of the agent.
+func (r *AgentIdentityRecord) ForgetSession(id string) {
+	if i := slices.Index(r.SessionIDs, id); i >= 0 {
+		r.SessionIDs = slices.Delete(r.SessionIDs, i, i+1)
+		r.SessionsSeen = max(r.SessionsSeen-1, 0)
+	}
+	if r.LastSessionID == id {
+		r.LastSessionID = ""
+	}
+}
+
 // AgentIdentityFilter narrows ListAgentIdentities. Empty fields match
 // everything.
 type AgentIdentityFilter struct {

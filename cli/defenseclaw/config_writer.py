@@ -372,8 +372,12 @@ def _transact(
     if exists and candidate == current:
         return WriteResult(_current_generation(target), digest, [], [])
     validate_candidate(target, candidate)
-    _write_durable(target, candidate, mode)
-    state = record_generation(target, hashlib.sha256(candidate).hexdigest(), actor, reason)
+    try:
+        _write_durable(target, candidate, mode)
+        state = record_generation(target, hashlib.sha256(candidate).hexdigest(), actor, reason)
+    except Exception:
+        _undo_failed_commit(target, candidate, current, mode, exists)
+        raise
     if verify is not None:
         try:
             verify(target)
@@ -386,6 +390,23 @@ def _transact(
             raise
     _refresh_derived_files(target, candidate)
     return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed, current, candidate))
+
+
+def _undo_failed_commit(target: str, candidate: bytes, previous: bytes, mode: int, existed: bool) -> None:
+    """Put the previous config.yaml back when the new bytes reached disk but
+    the commit then failed (a directory fsync, a full disk before the
+    generation file), so the error means nothing changed."""
+    try:
+        if Path(target).read_bytes() != candidate:
+            return
+        if existed:
+            _write_durable(target, previous, mode)
+        else:
+            os.unlink(target)
+    except OSError as exc:
+        _log.warning(
+            "config writer: config.yaml holds the new bytes after a failed write and could not be restored: %s", exc
+        )
 
 
 def _refresh_derived_files(target: str, candidate: bytes) -> None:
@@ -704,7 +725,8 @@ def plain_error(exc: BaseException) -> str:
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.
         allowed = text if text.startswith("use one of ") else ""
-        return f"{name} is not in the expected format{hint}." + (f" {allowed[:1].upper()}{allowed[1:]}." if allowed else "")
+        sentence = f"{name} is not in the expected format{hint}."
+        return sentence + (f" {allowed[:1].upper()}{allowed[1:]}." if allowed else "")
     from defenseclaw.commands.cmd_config import _plain_v8_issue
 
     return _plain_v8_issue(None, path, reason)

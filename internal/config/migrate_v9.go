@@ -544,7 +544,10 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	written = append(written, m.configPath)
 	// On a managed host the admin owns policy_dir (as planRegoRefresh
 	// reports): its data.json stays, so a rollback to the v8 config finds it.
-	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed {
+	// A file outside the data home stays too: the installer's rollback copy
+	// does not cover it, so renaming it would leave a rolled-back 1.0.0 gateway
+	// without its policy data (see leftOutsideRollbackCopy).
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed && !m.leftOutsideRollbackCopy(dj) {
 		if _, statErr := os.Stat(dj); statErr == nil {
 			if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
 				m.note("could not rename %s: %v", dj, err)
@@ -554,13 +557,16 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 	}
 	for _, module := range m.rego {
+		if m.leftOutsideRollbackCopy(module.path) {
+			continue
+		}
 		if err := m.refreshRegoModule(module); err != nil {
 			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
 			continue
 		}
 		written = append(written, module.path+DataJSONMigratedSuffix)
 	}
-	if m.providersOverlay != "" {
+	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
 		m.retireProvidersOverlay(&written)
 	}
 	for _, path := range m.retired {
@@ -570,7 +576,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
-	if len(m.rows) > 0 {
+	if len(m.rows) > 0 && !m.leftOutsideRollbackCopy(m.in.AuditDBPath) {
 		if err := clearV9ActionRows(m.in.AuditDBPath, m.rows); err != nil {
 			m.note("audit.db rows were copied to asset_policy but not cleared: %v", err)
 		}
@@ -581,6 +587,29 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	written = append(written, recordPath)
 	return written, nil
+}
+
+// leftOutsideRollbackCopy reports whether commit must leave path as it is. The
+// installer saves a rollback copy of the data home only (the directory holding
+// config.yaml, and DEFENSECLAW_HOME), so a failed upgrade or `defenseclaw
+// rollback` puts config.yaml back but not a data.json, Rego module,
+// custom-providers.json or audit.db that policy_dir, data_dir or
+// observability.local.path place elsewhere. Those stay as they are (their
+// content is already in config.yaml, and a 1.0 gateway still finds them) and a
+// note says so. Managed hosts follow the lifecycle's own rollback and are
+// not affected.
+func (m *v9Migrator) leftOutsideRollbackCopy(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || m.in.Managed {
+		return false
+	}
+	for _, home := range []string{filepath.Dir(m.configPath), DefaultDataPath()} {
+		if rel, err := filepath.Rel(home, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
+		}
+	}
+	m.note("%s is outside the data home, so the upgrade's rollback copy does not cover it; it was left as it is", path)
+	return true
 }
 
 // dataDir is the data_dir the runtime uses for this config.

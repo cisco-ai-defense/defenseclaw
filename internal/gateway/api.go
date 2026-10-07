@@ -2047,9 +2047,12 @@ type policyEvaluateRequest struct {
 }
 
 type policyEvaluateInput struct {
-	TargetType string                    `json:"target_type"`
-	TargetName string                    `json:"target_name"`
-	Path       string                    `json:"path"`
+	TargetType string `json:"target_type"`
+	TargetName string `json:"target_name"`
+	Path       string `json:"path"`
+	// Connector is the connector asking (the OpenClaw plugin sends
+	// "openclaw"); asset_policy rules scoped to a connector match only it.
+	Connector  string                    `json:"connector,omitempty"`
 	ScanResult *policyEvaluateScanResult `json:"scan_result,omitempty"`
 }
 
@@ -2537,7 +2540,7 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	out, err := a.evaluateAdmissionPolicy(ctx, input)
+	out, err := a.evaluateAdmissionPolicy(ctx, input, config.NormalizeConnectorName(req.Input.Connector))
 	if err != nil {
 		_ = observation.complete("error", "", "", err)
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -3936,10 +3939,10 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 // live config: the compiled admission: and the asset_policy lists. The
 // built-in Go twin runs only when OPA fails. OPA is the live generation's
 // prepared query (prepared once for an API server without a generation).
-func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput) (*policy.AdmissionOutput, error) {
+func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
 	cfg := a.liveConfig()
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
-		TargetType: input.TargetType, Name: input.TargetName, SourcePath: input.Path,
+		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
 	if cfg != nil && cfg.SecureClientIntegration() {
@@ -4051,10 +4054,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.writeJSON(w, http.StatusOK, map[string]string{
+	reloaded := map[string]any{
 		"status":     "reloaded",
 		"policy_dir": a.scannerCfg.PolicyDir,
-	})
+	}
+	// The live generation after the rebuild, so a caller can say which policy is enforcing now.
+	if g := livePolicyGeneration(); g != nil {
+		reloaded["generation"] = g.N
+		reloaded["digest"] = g.Digest
+	}
+	a.writeJSON(w, http.StatusOK, reloaded)
 }
 
 // codeScanRequest is the payload for POST /api/v1/scan/code.

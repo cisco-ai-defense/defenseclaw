@@ -22,6 +22,7 @@
 package cfgtxn
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -188,15 +189,45 @@ func (t *Txn) Read() (raw []byte, mode os.FileMode, exists bool, err error) {
 }
 
 // Commit replaces config.yaml with candidate (durably) and then advances
-// config.generation.json. The lock must still be held.
+// config.generation.json. The lock must still be held. When either step
+// fails after the new bytes reached config.yaml (a failed directory fsync, a
+// full disk before the generation file), the previous bytes are put back so
+// the error means nothing changed; if that restore fails too, the error says
+// config.yaml holds the new bytes.
 func (t *Txn) Commit(candidate []byte, mode os.FileMode, actor, reason string) (GenerationState, error) {
 	if t == nil || t.lock == nil {
 		return GenerationState{}, errors.New("configwrite: commit without the writer lock")
 	}
+	previous, readErr := os.ReadFile(t.path)
+	existed := readErr == nil
 	if err := WriteFileDurable(t.path, candidate, mode); err != nil {
-		return GenerationState{}, err
+		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
 	}
-	return t.RecordGeneration(SHA256Hex(candidate), actor, reason)
+	state, err := t.RecordGeneration(SHA256Hex(candidate), actor, reason)
+	if err != nil {
+		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
+	}
+	return state, nil
+}
+
+// undoCommit restores the previous config.yaml after a failed Commit when the
+// candidate bytes are on disk, and returns cause (annotated if the restore
+// failed too).
+func (t *Txn) undoCommit(cause error, candidate, previous []byte, existed bool, mode os.FileMode) error {
+	onDisk, err := os.ReadFile(t.path)
+	if err != nil || !bytes.Equal(onDisk, candidate) {
+		return cause
+	}
+	var restoreErr error
+	if existed {
+		restoreErr = WriteFileDurable(t.path, previous, mode)
+	} else {
+		restoreErr = os.Remove(t.path)
+	}
+	if restoreErr != nil {
+		return fmt.Errorf("%w; config.yaml now holds the new bytes and the previous ones could not be restored: %v", cause, restoreErr)
+	}
+	return cause
 }
 
 // RecordGeneration advances config.generation.json for bytes that are

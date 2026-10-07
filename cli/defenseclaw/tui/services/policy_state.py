@@ -384,7 +384,7 @@ def level_intent(kind: str, level: str, connector: str = "") -> PolicyCommandInt
     return PolicyCommandIntent(
         label=f"guardrail {args[1]} {name}{scope}",
         args=args,
-        hint=f"Set the tool-call {what} level{scope} to {name}.",
+        hint=f"Set the {what} level for prompts, completions and tool calls{scope} to {name}.",
     )
 
 

@@ -251,6 +251,15 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	if strings.TrimSpace(path) == "" {
 		path = config.ConfigPath()
 	}
+	// Refuse a managed host before the lock opens: taking it creates the
+	// lock file and, on a read-only or admin-owned directory, would fail
+	// with a permission error that hides the managed refusal. The check is
+	// repeated under the lock below.
+	if unlocked, readErr := os.ReadFile(path); readErr == nil || os.IsNotExist(readErr) {
+		if managedRefuses(unlocked, opt.Actor) {
+			return Result{}, ErrManaged
+		}
+	}
 	txn, err := cfgtxn.Begin(ctx, path, opt.Timeout)
 	if err != nil {
 		return Result{}, err

@@ -1324,15 +1324,24 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 // failure/timeout is logged LOUDLY to stderr; the lane never silently
 // substitutes a clean pass.
 func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
-	if a == nil || a.hookJudge == nil || a.scannerCfg == nil || content == "" {
+	if a == nil || a.hookJudge == nil || content == "" {
 		return nil
 	}
-	jcfg := &a.scannerCfg.Guardrail.Judge
+	// Gate on the live configuration, like every other decision site. A hot
+	// reload swaps the judge (SetHookJudge) but leaves a.scannerCfg at the
+	// start-time snapshot, so reading it here kept a judge that a reload had
+	// enabled, or pointed at another connector, wired but never asked
+	// (GAP-0216: judge ready was logged, no prompt was ever judged).
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil {
+		return nil
+	}
+	jcfg := &cfg.Guardrail.Judge
 	if !jcfg.HookConnectorEnabled(connector) {
 		return nil
 	}
 
-	switch a.scannerCfg.Guardrail.EffectiveStrategy(strategyDirection) {
+	switch cfg.Guardrail.EffectiveStrategy(strategyDirection) {
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":

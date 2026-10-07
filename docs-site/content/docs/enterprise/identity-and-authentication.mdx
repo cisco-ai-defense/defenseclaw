@@ -167,11 +167,14 @@ and upgrades.
 The machine ID comes from `/etc/machine-id`, the Windows `MachineGuid` or the
 macOS `IOPlatformUUID`. A config root the agent claims, such as a
 `CLAUDE_CONFIG_DIR` override, is recorded as a hint and never changes the ID.
-Two users who reuse the same session ID get different session IDs, and a
+Two users who reuse the same session ID get different `ais-` IDs and different
+agents: the main agent's ID is made from the user's `agt-`, the connector and
+the session ID, so `gen_ai.agent.id` and the lineage IDs below differ too. A
 chat that resumes after a gateway restart keeps its `ais-` ID and is not
 counted again in the Sessions column of `defenseclaw agent identities`, however
-many chats were open at the restart. The Secure Client profile keeps its
-existing agent IDs and gets no new attributes.
+many chats were open at the restart. The column counts chats: a sub-agent that
+runs in a session of its own, as a Codex 0.160 thread does, is not counted. The
+Secure Client profile keeps its existing agent IDs and gets no new attributes.
 
 Claude Code and Codex name a sub-agent on every hook it makes, so each of those
 hooks carries the sub-agent's `ais-` at depth one with the main agent as its
@@ -182,7 +185,9 @@ at depth one with the parent session named, under the `ais-` of its own session.
 
 A sub-agent has no `agt-` of its own: it runs in its parent's install, so it
 shares the parent's `agt-` and has its own `ais-`. The lineage attributes link
-it to its parent and hold the IDs the connector reports, not DefenseClaw's.
+it to its parent and hold the IDs the connector reports. A main agent that
+reports none, as Claude Code's and Codex's do, gets one DefenseClaw makes
+(`agent-` and 16 hex digits) from the `agt-`, the connector and the session ID.
 `defenseclaw.agent.parent.id` and `defenseclaw.agent.root.id` name the
 connector agent ID of the parent and the root (`gen_ai.agent.id` on their own
 records), and `defenseclaw.session.parent.id` and

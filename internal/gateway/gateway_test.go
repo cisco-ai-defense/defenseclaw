@@ -243,6 +243,13 @@ func TestSidecarHealthInterceptionSnapshot(t *testing.T) {
 	if snap.Interception.LastAgentTrafficAt == "" {
 		t.Fatal("expected last_agent_traffic_at after an X-DC-Target-URL hop")
 	}
+	if snap.Interception.LastAgentModelActivityAt != "" {
+		t.Fatal("no model call was reported yet")
+	}
+	h.RecordAgentModelActivity()
+	if h.Snapshot().Interception.LastAgentModelActivityAt == "" {
+		t.Fatal("expected last_agent_model_activity_at after a completed model call")
+	}
 
 	h.RecordInterceptionResult(false)
 	if h.Snapshot().Interception.Verified {
@@ -1298,6 +1305,20 @@ func TestPromptInspectText(t *testing.T) {
 		}
 		if got := promptInspectText([]ChatMessage{{Role: "assistant", Content: "prior reply"}}); got != "" {
 			t.Fatalf("assistant-only = %q, want empty", got)
+		}
+	})
+
+	t.Run("inspects the prompt before a trailing context message", func(t *testing.T) {
+		// OpenClaw 2026.9 appends its own context as a second user message (GAP-0190).
+		got := promptInspectText([]ChatMessage{
+			{Role: "system", Content: "You are helpful."},
+			{Role: "user", Content: "first turn"},
+			{Role: "assistant", Content: "first reply"},
+			{Role: "user", Content: "the current prompt"},
+			{Role: "user", Content: "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>none<<<END_OPENCLAW_INTERNAL_CONTEXT>>>"},
+		})
+		if want := "the current prompt\n<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>none<<<END_OPENCLAW_INTERNAL_CONTEXT>>>"; got != want {
+			t.Fatalf("promptInspectText() = %q, want %q", got, want)
 		}
 	})
 
@@ -3643,6 +3664,37 @@ func TestAPIPolicyEvaluateFallback(t *testing.T) {
 	}
 	if resp.Data.Verdict != "rejected" {
 		t.Errorf("plugin-scanner LOW override verdict = %q, want rejected", resp.Data.Verdict)
+	}
+}
+
+// A block scoped to one connector reaches /policy/evaluate when the caller names it.
+func TestAPIPolicyEvaluateHonoursConnectorScopedBlocks(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger, scannerCfg: &config.Config{}}
+	runtime, _ := newProxyGeneratedTraceRuntime(t)
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+	denyAsset(api.scannerCfg, "plugin", "scoped-plugin", "openclaw", "malicious")
+
+	verdict := func(connector string) string {
+		body := []byte(`{"domain":"admission","input":{"target_type":"plugin","target_name":"scoped-plugin","path":"/tmp/p"` +
+			connector + `}}`)
+		w := httptest.NewRecorder()
+		api.handlePolicyEvaluate(w, httptest.NewRequest(http.MethodPost, "/policy/evaluate", bytes.NewReader(body)))
+		var resp struct {
+			Data struct {
+				Verdict string `json:"verdict"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+			t.Fatalf("decode policy response: %v", err)
+		}
+		return resp.Data.Verdict
+	}
+	if got := verdict(`,"connector":"openclaw"`); got != "blocked" {
+		t.Errorf("verdict for the scoped connector = %q, want blocked", got)
+	}
+	if got := verdict(`,"connector":"codex"`); got == "blocked" {
+		t.Errorf("verdict for another connector = %q, want it not blocked", got)
 	}
 }
 

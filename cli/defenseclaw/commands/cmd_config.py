@@ -240,7 +240,12 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         parts = list(parse_path(key.strip()))
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
-    if effective or (parts[0] == "admission" and not _written_in_source(app, parts)):
+    if parts[:2] == ["admission", "defaults"] and not _written_in_source(app, parts):
+        raise click.ClickException(
+            f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
+            "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
+        )
+    if effective or (parts[0] in ("admission", "update") and not _written_in_source(app, parts)):
         resolved = _effective_value(app, parts)
         if resolved is not None:
             value, source = resolved
@@ -403,6 +408,24 @@ def _whole_source(sources: dict[str, str]) -> str:
     return ", ".join(labels) or "builtin"
 
 
+_ADMISSION_FIELDS = (
+    "actions",
+    "scan_on_install",
+    "allow_list_bypass_scan",
+    "scanner_overrides",
+    "first_party_allow_list",
+)
+
+
+def _admission_layer_key(parts: list) -> bool:
+    """Whether *parts* name a field of admission.defaults or admission.<type>."""
+    if len(parts) < 2 or parts[0] != "admission" or parts[1] not in ("defaults", *_ADMISSION_TYPES):
+        return False
+    if len(parts) > 3 and parts[2] == "actions":
+        return str(parts[3]).lower() in ("critical", "high", "medium", "low", "info")
+    return len(parts) == 2 or parts[2] in _ADMISSION_FIELDS
+
+
 def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]]:
     """The admission policy of one asset type as the gateway enforces it, and
     where each field comes from."""
@@ -437,6 +460,27 @@ def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]
 MANAGED_EXIT_CODE = 3
 
 
+_CONNECTOR_ENABLED_PATH = re.compile(r"guardrail\.connectors\.[^.\[\]]+\.enabled")
+
+
+def _restart_still_pending(cfg: object, paths: list[str], local_digest: str) -> list[str]:
+    """The restart-required paths the running gateway does not already enforce.
+
+    A connector enabled flag is part of the effective policy digest, and the
+    gateway keeps its running value until it restarts. When it already reports
+    the digest config.yaml now computes to, the key is back at the running
+    value and nothing is pending (GAP-0221). Other keys keep their hint: some
+    are not part of the digest at all."""
+    flips = [path for path in paths if _CONNECTOR_ENABLED_PATH.fullmatch(path)]
+    if not flips or not local_digest:
+        return paths
+    from defenseclaw.gateway import running_policy_digest
+
+    if running_policy_digest(cfg) != local_digest:
+        return paths
+    return [path for path in paths if path not in flips]
+
+
 def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
@@ -468,13 +512,14 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     click.echo(f"{verb.capitalize()} {key} (config generation {result.generation}, sha256 {result.sha256[:12]}).")
     from defenseclaw.gateway import local_policy_digest
 
-    digest = local_policy_digest(app.cfg if app.cfg is not None else config_module.load(), timeout=20)
+    cfg = app.cfg if app.cfg is not None else config_module.load()
+    digest = local_policy_digest(cfg, timeout=20)
     if digest:
         click.echo(f"Effective policy digest: {digest['effective_digest']}")
-    if result.restart_required:
-        click.echo(
-            f"Restart the gateway to apply {', '.join(result.restart_required)}: defenseclaw-gateway restart"
-        )
+    local_digest = digest["effective_digest"] if digest else ""
+    pending = _restart_still_pending(cfg, result.restart_required, local_digest)
+    if pending:
+        click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
     logger = getattr(app, "logger", None)
     if logger is not None:
         try:
@@ -534,7 +579,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
     # else is not a configuration key (a typo must not look like success).
     for key, parts in parsed:
         view = _key_view(app, parts)
-        if not _lookup(view, parts)[0]:
+        if not _admission_layer_key(parts) and not _lookup(view, parts)[0]:
             if _is_destination_key(parts):
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
@@ -667,6 +712,29 @@ def _show_effective_scanner_settings(masked: dict) -> None:
         skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
 
 
+def _resolve_defaults(app: AppContext, view: dict, written: dict) -> None:
+    """Replace the placeholders of admission and update with what the gateway runs with.
+
+    The dataclass dump shows an unset admission or update key as null or {}, which
+    reads as "no policy". Each asset type shows its resolved policy, and update shows
+    the notice and channel it runs with. admission.defaults is shown only when
+    config.yaml sets it: it is an optional layer under the three types and has no
+    value of its own.
+    """
+    try:
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+    except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
+        cfg = config_module.default_config()
+    if isinstance(view.get("admission"), dict):
+        layer = written.get("admission") if isinstance(written.get("admission"), dict) else {}
+        resolved = {key: value for key, value in layer.items() if key not in _ADMISSION_TYPES}
+        for name in _ADMISSION_TYPES:
+            resolved[name] = _admission_view(cfg, name)[0]
+        view["admission"] = resolved
+    if isinstance(view.get("update"), dict):
+        view["update"] = _update_view(cfg)[0]
+
+
 def _merge_defaults(written: dict, defaults: dict) -> dict:
     merged = dict(defaults)
     for key, value in written.items():
@@ -702,7 +770,9 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
             raise click.ClickException(str(exc)) from exc
         if source:
             return masked
-        masked = _merge_defaults(masked, _v8_defaults(app))
+        written = masked
+        masked = _merge_defaults(written, _v8_defaults(app))
+        _resolve_defaults(app, masked, written)
     try:
         result = inspect_v8_config("effective", config_path=cfg_path)
     except ConfigInspectError as exc:

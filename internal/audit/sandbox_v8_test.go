@@ -967,6 +967,26 @@ func TestSandboxFamilies(t *testing.T) {
 	})
 }
 
+// Sandbox decision events carry the live effective policy digest and generation.
+func TestSandboxDecisionEventsCarryThePolicyStamp(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return observability.Present(digest), observability.Present(int64(9))
+	})
+	t.Cleanup(func() { SetPolicyStamp(nil) })
+	harness := newSandboxHarness(t)
+	for _, event := range []any{
+		SandboxEgressEvent{Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.com", Blocked: true},
+		SandboxEgressEvent{Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.com"},
+	} {
+		_, record := harness.recordOne(t, router.AdmissionOrdinary, event)
+		assertSandboxFields(t, sandboxBody(t, record), map[string]any{
+			"defenseclaw.policy.effective_digest": digest,
+			"defenseclaw.policy.generation":       int64(9),
+		})
+	}
+}
+
 func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	t.Run("blocked floor is content free", func(t *testing.T) {
 		const canary = "sandbox-egress-canary-3e1f"

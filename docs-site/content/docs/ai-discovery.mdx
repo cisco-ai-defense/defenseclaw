@@ -380,8 +380,11 @@ rather than `unknown`.
 A pack whose sha256 is not the one pinned in `ai_discovery.signature_pack_digests` (or, on a
 managed standalone device, a pack with no pin) is not loaded. `signatures list` prints a
 `Not loaded:` line with both digests and leaves its signatures out, `agent discovery status`
-counts it, and `defenseclaw doctor` warns. A pack edited on disk while the gateway runs is
-checked again within a few seconds.
+counts it, and `defenseclaw doctor` warns. A configured pack whose file is gone is reported the same
+way (`file not found`); `signatures list` still prints the rest of the catalog, and the gateway keeps
+enforcing the last catalog it built until the file is restored or removed from
+`ai_discovery.signature_packs`. A pack edited on disk while the gateway runs is checked again within
+a few seconds.
 
 ## IDE plugin inventory
 

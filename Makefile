@@ -13,6 +13,11 @@ GOFLAGS     := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
+# Packages the OpenClaw plugin loads from its own node_modules: each "dependencies" entry of
+# its package.json plus js-yaml's dependency argparse. OpenClaw refuses to load a plugin whose
+# declared dependency is missing, so the embed and the source install copy all of them, and
+# cli/defenseclaw/extension_fingerprint.py allows exactly these (GAP-0189).
+PLUGIN_RUNTIME_DEPS := js-yaml argparse undici
 EXTENSION_FINGERPRINT := cli/defenseclaw/_data/plugin/extension-runtime-fingerprint.json
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
@@ -550,10 +555,11 @@ sync-openclaw-extension: _checkout-write-preflight
 	        cp "$$f" "../../../$$embed_dir/dist/$$f"; \
 	      done); \
 	fi; \
-	for dep in js-yaml argparse; do \
-	  if [ -d "$(PLUGIN_DIR)/node_modules/$$dep" ]; then \
-	    cp -R "$(PLUGIN_DIR)/node_modules/$$dep" "$$embed_dir/node_modules/"; \
-	  fi; \
+	for dep in $(PLUGIN_RUNTIME_DEPS); do \
+	  [ -d "$(PLUGIN_DIR)/node_modules/$$dep" ] || { \
+	    echo "OpenClaw extension dependency $$dep is not installed under $(PLUGIN_DIR)/node_modules — run 'make plugin'" >&2; \
+	    exit 1; }; \
+	  cp -R "$(PLUGIN_DIR)/node_modules/$$dep" "$$embed_dir/node_modules/"; \
 	done; \
 	echo "  • Synced OpenClaw extension → $$embed_dir/"
 
@@ -782,14 +788,13 @@ plugin-install: _source-install-preflight gateway-install
 	@cp $(PLUGIN_DIR)/package.json $(DC_EXT_DIR)/
 	@test -f $(PLUGIN_DIR)/openclaw.plugin.json && cp $(PLUGIN_DIR)/openclaw.plugin.json $(DC_EXT_DIR)/ || true
 	@cp -r $(PLUGIN_DIR)/dist $(DC_EXT_DIR)/
-	@if [ -d $(PLUGIN_DIR)/node_modules ]; then \
-		mkdir -p $(DC_EXT_DIR)/node_modules; \
-		for dep in js-yaml argparse; do \
-			if [ -d $(PLUGIN_DIR)/node_modules/$$dep ]; then \
-				cp -r $(PLUGIN_DIR)/node_modules/$$dep $(DC_EXT_DIR)/node_modules/; \
-			fi; \
-		done; \
-	fi
+	@mkdir -p $(DC_EXT_DIR)/node_modules
+	@for dep in $(PLUGIN_RUNTIME_DEPS); do \
+		[ -d $(PLUGIN_DIR)/node_modules/$$dep ] || { \
+			echo "OpenClaw extension dependency $$dep is not installed under $(PLUGIN_DIR)/node_modules — run 'make plugin'" >&2; \
+			exit 1; }; \
+		cp -r $(PLUGIN_DIR)/node_modules/$$dep $(DC_EXT_DIR)/node_modules/; \
+	done
 	@if [ -d $(OC_EXT_DIR) ]; then \
 		rm -rf $(OC_EXT_DIR)/dist; \
 		cp $(PLUGIN_DIR)/package.json $(OC_EXT_DIR)/; \
