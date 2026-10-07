@@ -19,6 +19,7 @@
 extern dclaw_state_t *dclaw_get_state(void);
 extern uint8_t dclaw_config_active_policy_partition(void);
 extern void dclaw_config_switch_policy_partition(void);
+extern void dclaw_config_persist_policy_version(uint16_t version);
 extern void dclaw_cache_flush_all(void);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint16_t target_hash, uint16_t session_id);
@@ -278,6 +279,9 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
     /* Switch to new partition */
     dclaw_config_switch_policy_partition();
     s->device.policy_version = hdr.version;
+    /* P1-10 fix: Persist the new policy version to flash so anti-rollback
+     * (REQ-36) works correctly after restart. */
+    dclaw_config_persist_policy_version(hdr.version);
 
     /* Flush verdict cache — policy changed, cached verdicts may be stale */
     dclaw_cache_flush_all();

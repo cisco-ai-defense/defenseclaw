@@ -668,6 +668,20 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     # Build payload
     payload = bytearray()
 
+    # Sections-present bitmask (first byte of payload).
+    # Bit 7 (0x80) = always set (marker so ota_receiver.c knows this byte exists)
+    # Bit 0 = severity rules section present
+    # Bit 1 = sequence rules section present
+    # Bit 2 = destination allowlist section present
+    sections_bitmask = 0x80
+    if severity_rules is not None:
+        sections_bitmask |= 0x01
+    if sequence_rules is not None:
+        sections_bitmask |= 0x02
+    if dest_allowlist is not None:
+        sections_bitmask |= 0x04
+    payload.append(sections_bitmask)
+
     # Severity rules
     payload.append(len(severity_rules))
     for sev, act in severity_rules:

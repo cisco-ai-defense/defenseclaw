@@ -4,6 +4,7 @@
 #include "content_scanner.h"
 #include "sha256.h"
 #include <string.h>
+#include <stdio.h>
 
 #if DCLAW_MQTT_ENABLED
 extern int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
@@ -27,6 +28,7 @@ extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
 extern bool dclaw_rate_limit_check(uint8_t cap_flags);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint16_t target_hash, uint16_t session_id);
+extern bool dclaw_audit_key_provisioned(void);
 extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_config_load_brokers(void);
 #if DCLAW_MQTT_ENABLED
@@ -51,6 +53,17 @@ int dclaw_init(const dclaw_device_info_t *info) {
     g_state.initialized = true;
     dclaw_policy_tables_init();
 
+    /* P1-10 fix: Load broker config (and restore the active partition pointer
+     * + policy version from flash) BEFORE reloading policy from flash.
+     * Previously, dclaw_policy_reload_from_flash() ran first while the active
+     * partition pointer was still at the default (partition A). If the last OTA
+     * had written to partition B and switched the pointer, the reload would
+     * read stale/empty partition A instead of the correct partition B.
+     * dclaw_config_load_brokers() calls load_active_partition_from_flash()
+     * internally, which restores the persisted partition indicator and the
+     * policy version needed for anti-rollback checks (REQ-36). */
+    dclaw_config_load_brokers();
+
 #if DCLAW_MQTT_ENABLED
     /* P1-07 fix: After loading compiled-in defaults, attempt to reload
      * OTA'd policy tables from the active flash partition. This restores
@@ -60,8 +73,6 @@ int dclaw_init(const dclaw_device_info_t *info) {
      * Only available when MQTT/OTA is enabled (ota_receiver.c compiled). */
     dclaw_policy_reload_from_flash();
 #endif
-
-    dclaw_config_load_brokers();
 
 #if DCLAW_MQTT_ENABLED
     /* P1-09 fix: Restore emergency lockdown state from flash so that
@@ -85,6 +96,18 @@ int dclaw_init(const dclaw_device_info_t *info) {
     g_state.rate_limiters[2].refill_rate = 10;
     g_state.rate_limiters[2].tokens = 10;
     g_state.rate_limiters[2].last_refill_tick = now;
+
+    /* P1-18 fix: In production builds (DCLAW_DEV_MODE=OFF), refuse to start
+     * if no valid DCLAW_AUDIT_KEY is provisioned. Triggering the lazy key
+     * load and checking the result prevents the daemon from running with
+     * silently dropped audit entries — a tamper-evidence gap. */
+#if !DCLAW_DEV_MODE
+    if (!dclaw_audit_key_provisioned()) {
+        fprintf(stderr, "[DCLAW] ERROR: Cannot start without DCLAW_AUDIT_KEY in "
+                "production mode. Provide a valid 64-hex-char audit key.\n");
+        return -2;
+    }
+#endif
 
     return 0;
 }

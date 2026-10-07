@@ -6,6 +6,9 @@
 
 static char broker_urls[DCLAW_BROKER_FALLBACK_LIST_SIZE][DCLAW_BROKER_URL_MAX];
 static uint8_t active_policy_partition = 0; /* 0 = A, 1 = B */
+static uint16_t persisted_policy_version = 0;
+
+extern dclaw_state_t *dclaw_get_state(void);
 
 /*
  * P1-07 fix: Persist the active policy partition indicator to the config
@@ -13,14 +16,22 @@ static uint8_t active_policy_partition = 0; /* 0 = A, 1 = B */
  * always boots reading partition A (default), losing any OTA that wrote
  * to partition B.
  *
+ * P1-10 fix: Extended to also persist the policy version (uint16, big-endian)
+ * so that anti-rollback checks (REQ-36) work correctly across restarts.
+ * Without persisting the version, the daemon boots with policy_version=0
+ * and accepts any OTA version > 0, even if the device previously ran a
+ * higher version — defeating the monotonic version requirement.
+ *
  * Layout in config flash (at CONFIG_OFFSET + 8, after the emergency state):
  *   [8]  magic marker 0xDC
  *   [9]  magic marker 0xAB  ("DC Active B")
  *   [10] active_partition (0x00 or 0x01)
  *   [11] reserved (0x00)
+ *   [12] policy_version high byte
+ *   [13] policy_version low byte
  */
 #define PARTITION_FLASH_OFFSET   (HAL_FLASH_CONFIG_OFFSET + 8)
-#define PARTITION_FLASH_SIZE     4
+#define PARTITION_FLASH_SIZE     6
 #define PARTITION_MAGIC_0        0xDC
 #define PARTITION_MAGIC_1        0xAB
 
@@ -30,6 +41,8 @@ static void persist_active_partition(void) {
     buf[1] = PARTITION_MAGIC_1;
     buf[2] = active_policy_partition;
     buf[3] = 0x00;
+    buf[4] = (uint8_t)(persisted_policy_version >> 8);
+    buf[5] = (uint8_t)(persisted_policy_version);
     if (hal_flash_write(PARTITION_FLASH_OFFSET, buf, PARTITION_FLASH_SIZE) != 0) {
         fprintf(stderr, "[DCLAW] WARNING: Failed to persist active partition to flash.\n");
     }
@@ -47,6 +60,17 @@ static void load_active_partition_from_flash(void) {
         active_policy_partition = buf[2];
         fprintf(stderr, "[DCLAW] Restored active policy partition %c from flash.\n",
                 active_policy_partition == 0 ? 'A' : 'B');
+    }
+    /* P1-10 fix: Restore persisted policy version for anti-rollback (REQ-36).
+     * Also write it into g_state.device.policy_version so the OTA receiver's
+     * version check (hdr.version <= s->device.policy_version) uses the real
+     * last-applied version instead of 0. */
+    persisted_policy_version = ((uint16_t)buf[4] << 8) | buf[5];
+    if (persisted_policy_version > 0) {
+        dclaw_state_t *s = dclaw_get_state();
+        s->device.policy_version = persisted_policy_version;
+        fprintf(stderr, "[DCLAW] Restored policy version %u from flash.\n",
+                persisted_policy_version);
     }
 }
 
@@ -78,5 +102,15 @@ uint8_t dclaw_config_active_policy_partition(void) {
 void dclaw_config_switch_policy_partition(void) {
     active_policy_partition = (active_policy_partition == 0) ? 1 : 0;
     /* P1-07 fix: Persist the new active partition to flash */
+    persist_active_partition();
+}
+
+/*
+ * P1-10 fix: Persist the policy version alongside the active partition.
+ * Called from ota_receiver.c after a successful OTA apply so the version
+ * survives restarts and the anti-rollback check (REQ-36) works correctly.
+ */
+void dclaw_config_persist_policy_version(uint16_t version) {
+    persisted_policy_version = version;
     persist_active_partition();
 }

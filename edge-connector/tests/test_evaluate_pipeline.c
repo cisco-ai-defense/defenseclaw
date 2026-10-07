@@ -30,6 +30,7 @@ static void test_allowed_local_decision(void) {
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
     printf("  PASS: sensor_read with no cloud -> BLOCK (no speculative)\n");
 #endif
+    (void)v;
 }
 
 static void test_sync_block_cap_blocks(void) {
@@ -39,6 +40,7 @@ static void test_sync_block_cap_blocks(void) {
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
     assert(v.mode == DCLAW_VERDICT_SYNC);
+    (void)v;
     printf("  PASS: actuate cap (sync_block) with no cloud -> BLOCK\n");
 }
 
@@ -47,6 +49,7 @@ static void test_destination_deny(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_DEST_DENY);
+    (void)v;
     printf("  PASS: blocked destination -> BLOCK with DEST_DENY\n");
 }
 
@@ -61,6 +64,7 @@ static void test_allowed_destination(void) {
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
     printf("  PASS: allowed destination + no cloud -> BLOCK (no speculative)\n");
 #endif
+    (void)v;
 }
 
 static void test_capability_sequence_block(void) {
@@ -75,6 +79,7 @@ static void test_capability_sequence_block(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req2);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CAP_SEQUENCE);
+    (void)v;
     printf("  PASS: NET_FETCH -> EXEC_SHELL sequence -> BLOCK\n");
 }
 
@@ -86,6 +91,7 @@ static void test_rate_limit_triggers(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_RATE_LIMIT);
+    (void)v;
     printf("  PASS: rate limit exhaustion -> BLOCK\n");
 
     s->rate_limiters[0].tokens = 60;
@@ -97,6 +103,7 @@ static void test_invalid_input_blocks(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_INVALID_INPUT);
+    (void)v;
     printf("  PASS: invalid cap_flags -> BLOCK with INVALID_INPUT\n");
 }
 
@@ -114,6 +121,7 @@ static void test_content_scan_blocks_secret_in_pipeline(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CONTENT_BLOCK);
+    (void)v;
     printf("  PASS: content scan blocks secret in pipeline\n");
 }
 
@@ -129,6 +137,7 @@ static void test_ssrf_blocks_private_ip_in_pipeline(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_SSRF_BLOCK);
+    (void)v;
     printf("  PASS: SSRF blocks metadata IP in pipeline\n");
 }
 
@@ -142,6 +151,7 @@ static void test_no_content_field_backward_compat(void) {
 
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.reason != DCLAW_REASON_CONTENT_BLOCK);
+    (void)v;
     printf("  PASS: no content field = backward compatible (no content block)\n");
 }
 #endif
@@ -160,6 +170,7 @@ static void test_hash_mismatch_blocks(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req);
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_HASH_MISMATCH);
+    (void)v;
     printf("  PASS: hash-name mismatch -> BLOCK with HASH_MISMATCH\n");
 }
 

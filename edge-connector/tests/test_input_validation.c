@@ -21,6 +21,7 @@ static dclaw_tool_request_t make_valid_request(void) {
 static void test_valid_request_passes(void) {
     dclaw_tool_request_t req = make_valid_request();
     assert(dclaw_ipc_validate_request(&req) == 0);
+    (void)req;
     printf("  PASS: valid request accepted\n");
 }
 
@@ -92,6 +93,7 @@ static void test_json_parse_valid(void) {
     assert(strcmp(out.destination, "api.openai.com") == 0);
     assert(out.tool_hash[0] == 0xab);
     assert(out.tool_hash[1] == 0xcd);
+    (void)rc; (void)out;
     printf("  PASS: valid JSON-RPC parsed correctly\n");
 }
 
@@ -104,6 +106,7 @@ static void test_json_parse_missing_field(void) {
         "},\"id\":1}";
     dclaw_tool_request_t out;
     assert(dclaw_ipc_parse_request(json, strlen(json), &out) == -1);
+    (void)json; (void)out;
     printf("  PASS: missing tool_hash field rejected\n");
 }
 
@@ -117,6 +120,7 @@ static void test_json_parse_bad_hash_length(void) {
         "},\"id\":1}";
     dclaw_tool_request_t out;
     assert(dclaw_ipc_parse_request(json, strlen(json), &out) == -1);
+    (void)json; (void)out;
     printf("  PASS: short tool_hash string rejected\n");
 }
 
@@ -126,6 +130,7 @@ static void test_json_parse_oversized_rejected(void) {
     big[sizeof(big) - 1] = '\0';
     dclaw_tool_request_t out;
     assert(dclaw_ipc_parse_request(big, sizeof(big) - 1, &out) == -1);
+    (void)out;
     printf("  PASS: oversized payload (>512B) rejected\n");
 }
 
@@ -143,6 +148,7 @@ static void test_parse_with_direction_and_content(void) {
     assert(req.direction == 0);
     assert(req.content_len == 16);
     assert(memcmp(req.content, "temperature=72.5", 16) == 0);
+    (void)rc; (void)req;
     printf("  PASS: parse with direction and content\n");
 }
 
@@ -158,6 +164,7 @@ static void test_parse_without_new_fields_backward_compat(void) {
     assert(req.direction == 0);
     assert(req.content == NULL);
     assert(req.content_len == 0);
+    (void)rc; (void)req;
     printf("  PASS: backward compat without new fields\n");
 }
 
@@ -172,6 +179,7 @@ static void test_parse_direction_response(void) {
     int rc = dclaw_ipc_parse_request(json, strlen(json), &req);
     assert(rc == 0);
     assert(req.direction == 1);
+    (void)rc; (void)req;
     printf("  PASS: parse direction=1 (response)\n");
 }
 

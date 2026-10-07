@@ -9,6 +9,7 @@ static void test_empty_content_yields_zero_findings(void) {
     int result = dclaw_content_scan("", 0, DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result == 0);
     assert(ctx.finding_count == 0);
+    (void)result;
     printf("  PASS: empty content yields zero findings\n");
 }
 
@@ -17,6 +18,7 @@ static void test_null_content_yields_zero_findings(void) {
     int result = dclaw_content_scan(NULL, 100, DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result == 0);
     assert(ctx.finding_count == 0);
+    (void)result;
     printf("  PASS: NULL content yields zero findings\n");
 }
 
@@ -27,6 +29,7 @@ static void test_no_findings_returns_allow(void) {
 
     dclaw_action_t action = dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_USER_INPUT);
     assert(action == DCLAW_ACTION_ALLOW);
+    (void)action;
     printf("  PASS: no findings returns ALLOW\n");
 }
 
@@ -41,6 +44,7 @@ static void test_detect_api_key_secret(void) {
     assert(ctx.finding_count >= 1);
     assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_SECRET);
     assert(ctx.findings[0].severity == DCLAW_SEV_HIGH);
+    (void)result;
     printf("  PASS: detect API key secret\n");
 }
 
@@ -52,6 +56,7 @@ static void test_detect_private_key_secret(void) {
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
     assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_SECRET);
+    (void)result;
     printf("  PASS: detect private key secret\n");
 }
 
@@ -64,6 +69,7 @@ static void test_detect_ssn_pii(void) {
     assert(ctx.finding_count >= 1);
     assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_PII);
     assert(ctx.findings[0].severity == DCLAW_SEV_CRITICAL);
+    (void)result;
     printf("  PASS: detect SSN PII\n");
 }
 
@@ -76,6 +82,7 @@ static void test_detect_email_pii(void) {
     assert(ctx.finding_count >= 1);
     assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_PII);
     assert(ctx.findings[0].severity == DCLAW_SEV_MEDIUM);
+    (void)result;
     printf("  PASS: detect email PII\n");
 }
 
@@ -88,6 +95,7 @@ static void test_detect_credit_card_pii(void) {
     assert(ctx.finding_count >= 1);
     assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_PII);
     assert(ctx.findings[0].severity == DCLAW_SEV_HIGH);
+    (void)result;
     printf("  PASS: detect credit card PII\n");
 }
 
@@ -99,6 +107,7 @@ static void test_detect_username_credential(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
+    (void)result;
     /* Find the credential finding (may not be first due to DFA ordering) */
     bool found_cred = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
@@ -109,6 +118,7 @@ static void test_detect_username_credential(void) {
         }
     }
     assert(found_cred);
+    (void)found_cred;
     printf("  PASS: detect username credential\n");
 }
 
@@ -126,6 +136,7 @@ static void test_bare_username_no_false_positive(void) {
         }
     }
     assert(!found_cred);
+    (void)found_cred; (void)result;
     printf("  PASS: bare 'username' does not trigger credential (false-positive reduction)\n");
 }
 
@@ -143,6 +154,7 @@ static void test_bare_login_no_false_positive(void) {
         }
     }
     assert(!found_cred);
+    (void)found_cred; (void)result;
     printf("  PASS: bare 'login' does not trigger credential (false-positive reduction)\n");
 }
 
@@ -153,6 +165,7 @@ static void test_detect_bearer_token_credential(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
+    (void)result;
     /* Find credential finding (DFA may reorder) */
     bool found_cred = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
@@ -162,6 +175,7 @@ static void test_detect_bearer_token_credential(void) {
         }
     }
     assert(found_cred);
+    (void)found_cred;
     printf("  PASS: detect bearer token credential\n");
 }
 
@@ -173,6 +187,7 @@ static void test_detect_phone_dash_format(void) {
     int result = dclaw_content_scan(content, (uint16_t)strlen(content),
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
+    (void)result;
     bool found_phone = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
         if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_PII) {
@@ -181,6 +196,7 @@ static void test_detect_phone_dash_format(void) {
         }
     }
     assert(found_phone);
+    (void)found_phone;
     printf("  PASS: detect phone number (XXX-XXX-XXXX)\n");
 }
 
@@ -190,6 +206,7 @@ static void test_detect_phone_paren_format(void) {
     int result = dclaw_content_scan(content, (uint16_t)strlen(content),
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
+    (void)result;
     bool found_phone = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
         if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_PII) {
@@ -198,6 +215,7 @@ static void test_detect_phone_paren_format(void) {
         }
     }
     assert(found_phone);
+    (void)found_phone;
     printf("  PASS: detect phone number ((XXX) XXX-XXXX)\n");
 }
 
@@ -207,6 +225,7 @@ static void test_detect_phone_dot_format(void) {
     int result = dclaw_content_scan(content, (uint16_t)strlen(content),
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
+    (void)result;
     bool found_phone = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
         if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_PII) {
@@ -215,6 +234,7 @@ static void test_detect_phone_dot_format(void) {
         }
     }
     assert(found_phone);
+    (void)found_phone;
     printf("  PASS: detect phone number (XXX.XXX.XXXX)\n");
 }
 
@@ -228,6 +248,7 @@ static void test_detect_base64_exfil(void) {
     assert(ctx.finding_count >= 1);
     assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_EXFIL);
     assert(ctx.findings[0].severity == DCLAW_SEV_MEDIUM);
+    (void)result;
     printf("  PASS: detect base64 exfil\n");
 }
 
@@ -238,6 +259,7 @@ static void test_detect_sql_injection(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
+    (void)result;
     bool found_inj = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
         if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_INJECTION) {
@@ -247,6 +269,7 @@ static void test_detect_sql_injection(void) {
         }
     }
     assert(found_inj);
+    (void)found_inj;
     printf("  PASS: detect SQL injection\n");
 }
 
@@ -264,6 +287,7 @@ static void test_sql_keyword_no_false_positive(void) {
         }
     }
     assert(!found_inj);
+    (void)found_inj; (void)result;
     printf("  PASS: 'selected' does not trigger injection (false-positive reduction)\n");
 }
 
@@ -274,6 +298,7 @@ static void test_detect_xss_injection(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
+    (void)result;
     bool found_inj = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
         if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_INJECTION) {
@@ -282,6 +307,7 @@ static void test_detect_xss_injection(void) {
         }
     }
     assert(found_inj);
+    (void)found_inj;
     printf("  PASS: detect XSS injection\n");
 }
 
@@ -292,6 +318,7 @@ static void test_detect_path_traversal_injection(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
+    (void)result;
     bool found_inj = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
         if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_INJECTION) {
@@ -300,6 +327,7 @@ static void test_detect_path_traversal_injection(void) {
         }
     }
     assert(found_inj);
+    (void)found_inj;
     printf("  PASS: detect path traversal injection\n");
 }
 
@@ -310,6 +338,7 @@ static void test_detect_shell_command(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
+    (void)result;
     bool found_cmd = false;
     for (uint8_t i = 0; i < ctx.finding_count; i++) {
         if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_COMMAND) {
@@ -319,6 +348,7 @@ static void test_detect_shell_command(void) {
         }
     }
     assert(found_cmd);
+    (void)found_cmd;
     printf("  PASS: detect shell command\n");
 }
 
@@ -365,6 +395,7 @@ static void test_high_severity_returns_block(void) {
 
     dclaw_action_t action = dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_TOOL_OUTPUT);
     assert(action == DCLAW_ACTION_BLOCK);
+    (void)action;
     printf("  PASS: HIGH severity returns BLOCK\n");
 }
 
@@ -378,6 +409,7 @@ static void test_medium_severity_returns_warn(void) {
 
     dclaw_action_t action = dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_TOOL_OUTPUT);
     assert(action == DCLAW_ACTION_WARN);
+    (void)action;
     printf("  PASS: MEDIUM severity returns WARN (TOOL_OUTPUT scope)\n");
 }
 

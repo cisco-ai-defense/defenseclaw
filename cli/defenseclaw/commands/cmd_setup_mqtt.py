@@ -169,14 +169,11 @@ def _setup_docker(port: int) -> dict | bool:
     ux.ok(f"Image {_MOSQUITTO_IMAGE} ready")
 
     ux.echo("  Generating MQTT password file...")
-    # P1-10 fix: Run mosquitto_passwd as the current user so the file is
-    # created with correct ownership from the start, avoiding the problem
-    # where Docker creates the file as root:root 0600 and the non-root CLI
-    # user cannot chmod it. Inside the container, the current uid:gid owns
-    # the file, and the host-side file inherits that ownership via the bind
-    # mount. We then chmod to 0640 (owner rw, group r) which is secure
-    # (no world-read of hashes) while still readable by the mosquitto
-    # process (uid 1883) since the container's -v mount makes it accessible.
+    # Run mosquitto_passwd as the current user so the file is created with
+    # correct host-side ownership, avoiding the problem where Docker creates
+    # the file as root:root 0600 and the non-root CLI user cannot chmod it.
+    # After creation we chown the file to 1883:1883 (mosquitto's UID/GID)
+    # so the broker process can read it with the restrictive 0640 mode.
     import os as _os
     current_uid = _os.getuid()
     current_gid = _os.getgid()
@@ -195,14 +192,37 @@ def _setup_docker(port: int) -> dict | bool:
         ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
         return False
 
-    # P1-10 fix: Set permissions to 0640 — owner read/write, group read.
-    # This is more restrictive than the old 0644 (no world-readable hashes)
-    # while still allowing the Mosquitto broker process to read the file.
+    # Set permissions to 0640 — owner read/write, group read.
+    # This is more restrictive than 0644 (no world-readable password hashes).
     passwd_file = conf_dir / "passwd"
     try:
         passwd_file.chmod(0o640)
     except OSError:
         ux.warn("Could not chmod password file to 0640 — broker may fail to read it.")
+
+    # Fix ownership so Mosquitto (UID 1883) can read the file.
+    # The passwd file was created as the CLI user's UID/GID so that the
+    # host user has write access during generation.  Now we chown it to
+    # 1883:1883 (the mosquitto user inside eclipse-mosquitto:2).  With
+    # mode 0640 the owner (1883) gets rw and group (1883) gets r, which
+    # is exactly what the broker process needs.  We run the chown as
+    # root (--user 0) inside a throwaway Alpine container because the
+    # host user typically cannot chown to an arbitrary UID.
+    chown_result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "--user", "0",
+            "-v", f"{conf_dir}:/mosquitto/config",
+            _MOSQUITTO_IMAGE,
+            "chown", "1883:1883", "/mosquitto/config/passwd",
+        ],
+        capture_output=True, text=True,
+    )
+    if chown_result.returncode != 0:
+        ux.warn(
+            f"Could not chown passwd file to mosquitto (1883): {chown_result.stderr.strip()}\n"
+            "  The broker may fail to read the password file."
+        )
 
     ux.ok(f"MQTT user '{mqtt_user}' password file generated")
 

@@ -43,6 +43,7 @@ static void test_valid_verdict_accepted(void) {
 
     int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
     assert(rc == 0);
+    (void)rc;
     printf("  PASS: valid verdict response accepted\n");
 }
 
@@ -50,6 +51,7 @@ static void test_clock_synced_from_response(void) {
     dclaw_state_t *s = dclaw_get_state();
     assert(s->clock.time_trusted == true);
     assert(s->clock.cloud_epoch == 0x000F4240); /* 1000000 */
+    (void)s;
     printf("  PASS: clock synchronized from server_ts\n");
 }
 
@@ -65,6 +67,7 @@ static void test_duplicate_discarded(void) {
      * for reuse, so a duplicate is treated as "unknown request_id" (-1). */
     int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
     assert(rc == -1);
+    (void)rc;
     printf("  PASS: duplicate verdict response rejected (slot reclaimed)\n");
 }
 
@@ -83,6 +86,7 @@ static void test_invalid_hmac_rejected(void) {
 
     int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
     assert(rc == -1);
+    (void)rc;
     printf("  PASS: invalid HMAC tag rejected\n");
 }
 
@@ -95,6 +99,7 @@ static void test_unknown_request_id_rejected(void) {
 
     int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
     assert(rc == -1);
+    (void)rc;
     printf("  PASS: unknown request_id rejected\n");
 }
 
@@ -103,6 +108,7 @@ static void test_wrong_size_rejected(void) {
     uint8_t hash[32] = {0};
     int rc = dclaw_verdict_handle_response(resp, 8, hash);
     assert(rc == -1);
+    (void)rc;
     printf("  PASS: wrong response size (8 != 16) rejected\n");
 }
 

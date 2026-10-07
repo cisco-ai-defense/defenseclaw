@@ -52,6 +52,7 @@ static void test_non_network_doesnt_consume_network_tokens(void) {
     dclaw_rate_limit_check(DCLAW_CAP_READ_FS);
 
     assert(s->rate_limiters[1].tokens == net_tokens_before);
+    (void)net_tokens_before;
     printf("  PASS: READ_FS doesn't consume network tokens\n");
 }
 

@@ -81,6 +81,7 @@ static void test_policy_apply_valid(void) {
     assert(s->device.policy_version == 1);
     assert(s->canary.canary_active == true);
     assert(s->canary.baseline_blocks_per_min == 5);
+    (void)rc;
     printf("  PASS: valid policy OTA applied, canary active\n");
 }
 
@@ -94,6 +95,7 @@ static void test_policy_invalid_signature_rejected(void) {
 
     int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(rc == -1);
+    (void)rc;
     printf("  PASS: invalid signature rejected\n");
 }
 
@@ -110,6 +112,7 @@ static void test_policy_rollback_version_rejected(void) {
 
     int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(rc == -2);
+    (void)rc;
     printf("  PASS: downgrade (version 3 < 5) rejected\n");
 }
 
@@ -139,6 +142,7 @@ static void test_policy_canary_rollback(void) {
     /* Simulate dclaw_canary_tick detecting spike */
     uint16_t threshold = s->canary.baseline_blocks_per_min * DCLAW_CANARY_SPIKE_MULT;
     assert(s->canary.canary_blocks[0] > threshold);
+    (void)threshold;
 
     /* Manually trigger rollback path */
     s->canary.spike_streak = DCLAW_CANARY_SPIKE_CONSEC;
@@ -182,6 +186,7 @@ static void test_emergency_valid_applies(void) {
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == 0);
     assert(s->emergency.last_seen_seq == 1);
+    (void)rc;
     printf("  PASS: valid emergency broadcast applied\n");
 }
 
@@ -191,6 +196,7 @@ static void test_emergency_invalid_sig_rejected(void) {
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == -1);
+    (void)rc;
     printf("  PASS: emergency with invalid signature rejected\n");
 }
 
@@ -203,6 +209,7 @@ static void test_emergency_replay_rejected(void) {
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == -2);
+    (void)rc;
     printf("  PASS: replayed emergency (old sequence) rejected\n");
 }
 
@@ -215,6 +222,7 @@ static void test_emergency_jump_attack_rejected(void) {
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == -3);
+    (void)rc;
     printf("  PASS: emergency jump attack (delta > 1000) rejected\n");
 }
 
@@ -227,6 +235,7 @@ static void test_emergency_gap_detection(void) {
     assert(has_gap == true);
     assert(s->emergency.gap_start == 6);
     assert(s->emergency.replay_requested == true);
+    (void)has_gap;
     printf("  PASS: emergency sequence gap detected, replay requested\n");
 }
 
@@ -236,6 +245,7 @@ static void test_emergency_no_gap(void) {
 
     bool has_gap = dclaw_emergency_has_gap(11); /* exactly one ahead = no gap */
     assert(has_gap == false);
+    (void)has_gap;
     printf("  PASS: no gap when cloud is exactly 1 ahead\n");
 }
 
@@ -264,6 +274,7 @@ static void test_unprovisioned_key_rejects_valid_signature(void) {
     int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(rc == -1); /* Must reject — no key provisioned */
     assert(s->device.policy_version == saved_version); /* Version unchanged */
+    (void)rc; (void)saved_version;
     printf("  PASS: unprovisioned key rejects zero-key-signed update\n");
 
     /* Restore the test key for subsequent tests */

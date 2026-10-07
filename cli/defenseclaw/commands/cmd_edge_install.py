@@ -311,8 +311,10 @@ def _register_device_via_api(
         "device_id": int(device_id),
     })
 
+    # Include -w to capture the HTTP status code separately
     curl_cmd = [
-        "curl", "-s", "-X", "POST", url,
+        "curl", "-s", "-o", "-", "-w", "\n%{http_code}",
+        "-X", "POST", url,
         "-H", "Content-Type: application/json",
         "-H", "X-DefenseClaw-Client: true",
     ]
@@ -326,17 +328,54 @@ def _register_device_via_api(
                 "Register the device manually via: defenseclaw fleet register")
         return ""
 
+    # Split response body from HTTP status code (last line)
+    output_lines = result.stdout.rsplit("\n", 1)
+    resp_body = output_lines[0] if len(output_lines) > 1 else result.stdout
+    http_status = output_lines[-1].strip() if len(output_lines) > 1 else ""
+
     try:
-        resp = _json.loads(result.stdout)
-        device_key = resp.get("device_key", "")
-        if device_key:
-            ux.ok(f"Device registered, key obtained ({len(device_key)} hex chars)")
-        else:
-            ux.warn("Device registered but no device_key returned (key store may not be configured).")
-        return device_key
-    except (_json.JSONDecodeError, KeyError):
+        resp = _json.loads(resp_body)
+    except (_json.JSONDecodeError, ValueError):
         ux.warn("Could not parse registration response. Register the device manually.")
         return ""
+
+    device_key = resp.get("device_key", "")
+
+    # Handle duplicate registration (HTTP 200 vs 201)
+    if http_status == "200" and not device_key:
+        ux.warn("Device already registered (HTTP 200). The device key is only "
+                "returned on first registration.")
+        # Attempt to re-fetch the device record to check if a key is available
+        get_url = f"{api_base}/devices/{device_id}"
+        get_cmd = ["curl", "-s", get_url, "-H", "X-DefenseClaw-Client: true"]
+        if api_token:
+            get_cmd += ["-H", f"Authorization: Bearer {api_token}"]
+        get_result = subprocess.run(get_cmd, capture_output=True, text=True)
+        if get_result.returncode == 0:
+            try:
+                existing = _json.loads(get_result.stdout)
+                device_key = existing.get("device_key", "")
+                if device_key:
+                    ux.ok(f"Retrieved existing device key ({len(device_key)} hex chars)")
+                else:
+                    ux.err("No device key available. The key was only shown on "
+                           "first registration and cannot be recovered.\n"
+                           "  Re-register with a new device ID, or provision "
+                           "the key manually.")
+            except (_json.JSONDecodeError, ValueError):
+                ux.err("Could not parse device lookup response. "
+                       "Provision the device key manually.")
+        else:
+            ux.err("Could not fetch existing device record. "
+                   "Provision the device key manually.")
+        return device_key
+
+    if device_key:
+        ux.ok(f"Device registered, key obtained ({len(device_key)} hex chars)")
+    else:
+        ux.warn("Device registered but no device_key returned "
+                "(key store may not be configured).")
+    return device_key
 
 
 def _verify_remote_daemon(target: str, user: str) -> bool:
@@ -364,24 +403,33 @@ def _verify_remote_daemon(target: str, user: str) -> bool:
     return False
 
 
-def _start_remote_daemon(target: str, user: str) -> None:
+def _start_remote_daemon(target: str, user: str) -> bool:
     """Install the systemd unit and start the service on the remote device.
 
     Falls back to printing manual instructions if the unit file is missing
     or the install fails.
+
+    Returns True if the daemon was started and verified, False otherwise.
     """
     if _install_systemd_unit(target, user):
         # P1-15 fix: Verify the daemon is actually running after install
-        _verify_remote_daemon(target, user)
-        return
+        if _verify_remote_daemon(target, user):
+            return True
+        ux.err(
+            f"Daemon failed to start on {target}. Check logs with:\n"
+            f"  ssh {user}@{target} 'journalctl -u edge-connector -n 40'"
+        )
+        return False
 
     ux.echo()
     ux.section("Starting edge-connector daemon")
+    ux.err("Could not install systemd service on the remote device.")
     ux.echo("  Start the daemon manually on the device:")
     ux.echo(f"    ssh {user}@{target} 'sudo edge-connector &'")
     ux.echo()
     ux.echo("  Or to run in the foreground for debugging:")
     ux.echo(f"    ssh {user}@{target} 'sudo edge-connector'")
+    return False
 
 
 def _build_local(source: Path, profile: str) -> bool:
@@ -469,15 +517,25 @@ def edge_install(
 
         _configure_remote_env(target, user, tenant_id, fleet_id, device_id, broker_url,
                               device_key=device_key)
-        _start_remote_daemon(target, user)
+        daemon_ok = _start_remote_daemon(target, user)
 
         ux.echo()
-        ux.section("Done")
-        ux.ok(f"Edge connector installed on {target}")
-        ux.echo(f"  Device ID: {device_id}")
-        ux.echo(f"  Broker:    {broker_url}")
-        ux.echo()
-        ux.echo("  Verify with: defenseclaw fleet test")
+        if daemon_ok:
+            ux.section("Done")
+            ux.ok(f"Edge connector installed on {target}")
+            ux.echo(f"  Device ID: {device_id}")
+            ux.echo(f"  Broker:    {broker_url}")
+            ux.echo()
+            ux.echo("  Verify with: defenseclaw fleet test")
+        else:
+            ux.section("Install incomplete")
+            ux.err(f"Edge connector was built on {target} but the daemon "
+                   "failed to start.")
+            ux.echo(f"  Device ID: {device_id}")
+            ux.echo(f"  Broker:    {broker_url}")
+            ux.echo()
+            ux.echo("  Fix the issue and start manually, or re-run this command.")
+            raise SystemExit(1)
     else:
         # --- Local install ---
         for tool in ("cmake", "make"):

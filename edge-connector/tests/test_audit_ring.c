@@ -16,6 +16,7 @@ static void test_block_flushes_immediately(void) {
 
     assert(s->audit_writer.total_flash_writes > writes_before);
     assert(s->audit_writer.count == 0); /* buffer should be empty */
+    (void)writes_before;
     printf("  PASS: BLOCK event flushes immediately\n");
 }
 
@@ -28,6 +29,7 @@ static void test_warn_buffers(void) {
     /* Should be buffered, not flushed yet */
     assert(s->audit_writer.count == 1);
     assert(s->audit_writer.total_flash_writes == writes_before);
+    (void)writes_before;
     printf("  PASS: WARN event buffered (not flushed)\n");
 }
 
@@ -47,6 +49,7 @@ static void test_buffer_full_triggers_flush(void) {
 static void test_flash_writes_tracked(void) {
     dclaw_state_t *s = dclaw_get_state();
     assert(s->audit_writer.total_flash_writes > 0);
+    (void)s;
     printf("  PASS: total_flash_writes counter incremented\n");
 }
 

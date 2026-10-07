@@ -65,6 +65,7 @@ static void test_ac01(void) {
 
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CAP_SEQUENCE);
+    (void)v;
     /* Timing verified by bench_latency on target hardware (RPi4).
      * CI asserts correctness only; latency assertion lives in benchmark. */
     printf("  AC-01 PASS: NET_FETCH→EXEC_SHELL blocked in %llu ns (target: <5000)\n",
@@ -83,6 +84,7 @@ static void test_ac02(void) {
     /* ACTUATE is sync_block → cloud timeout → BLOCK */
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
+    (void)v;
     printf("  AC-02 PASS: unknown tool + sync_block cap → BLOCK (cloud_timeout)\n");
 }
 
@@ -99,6 +101,7 @@ static void test_ac03(void) {
     dclaw_evaluate(&req); /* will BLOCK → immediate flash write */
 
     assert(s->audit_writer.total_flash_writes > writes_before);
+    (void)writes_before;
     printf("  AC-03 PASS: BLOCK event triggered immediate flash write\n");
 }
 
@@ -129,6 +132,7 @@ static void test_ac05(void) {
     uint8_t bad_resp[16] = {0, 99, 0, 0, 0, 60, 6, 0, 0, 0, 1, 0, 0xFF, 0xFF, 0xFF, 0xFF};
     int rc = dclaw_verdict_handle_response(bad_resp, 16, hash);
     assert(rc == -1); /* HMAC mismatch */
+    (void)rc;
     printf("  AC-05 PASS: verdict with invalid HMAC rejected\n");
 }
 
@@ -142,6 +146,7 @@ static void test_ac06(void) {
 
     int rc = dclaw_apply_emergency(msg, sizeof(msg));
     assert(rc == -1);
+    (void)rc;
     printf("  AC-06 PASS: emergency with invalid signature rejected\n");
 }
 
@@ -171,6 +176,7 @@ static void test_ac07(void) {
     assert(rc == 0);
     assert(s->canary.canary_active == true);
     assert(s->canary.baseline_blocks_per_min == 3);
+    (void)rc;
     printf("  AC-07 PASS: policy OTA activates canary window\n");
 }
 
@@ -182,6 +188,7 @@ static void test_ac08(void) {
     big[599] = '\0';
     dclaw_tool_request_t out;
     assert(dclaw_ipc_parse_request(big, 599, &out) == -1);
+    (void)out;
 
     /* Non-ASCII tool name */
     dclaw_tool_request_t req = {0};
@@ -208,6 +215,7 @@ static void test_ac09(void) {
     uint64_t elapsed = clock_ns() - start;
 
     assert(v.mode == DCLAW_VERDICT_PENDING);
+    (void)v;
     printf("  AC-09 PASS: speculative PENDING returned in %llu ns (target: <10000)\n",
            (unsigned long long)elapsed);
 }
@@ -326,6 +334,7 @@ static void test_ac15_enriched_escalation(void) {
 
     assert(entry.category == DCLAW_CONTENT_CATEGORY_SECRET);
     assert(strlen(entry.evidence) > 0);
+    (void)entry;
 
     printf("  AC-15 PASS: enriched cache entry has category+evidence fields\n");
 }
@@ -357,6 +366,7 @@ static void test_ac17_backward_compat(void) {
     /* Should not trigger content or SSRF blocks */
     assert(v.reason != DCLAW_REASON_CONTENT_BLOCK);
     assert(v.reason != DCLAW_REASON_SSRF_BLOCK);
+    (void)v;
     printf("  AC-17 PASS: backward compatible with Phase 1\n");
 }
 

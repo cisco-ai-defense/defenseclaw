@@ -9,6 +9,7 @@ extern dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap
 static void test_single_cap_no_sequence(void) {
     dclaw_action_t r = dclaw_correlator_evaluate(1, DCLAW_CAP_READ_FS);
     assert(r == DCLAW_ACTION_ALLOW);
+    (void)r;
     printf("  PASS: single capability (no sequence) -> ALLOW\n");
 }
 
@@ -17,6 +18,7 @@ static void test_dangerous_sequence_blocks(void) {
     dclaw_correlator_evaluate(2, DCLAW_CAP_NET_FETCH);
     dclaw_action_t r = dclaw_correlator_evaluate(2, DCLAW_CAP_EXEC_SHELL);
     assert(r == DCLAW_ACTION_BLOCK);
+    (void)r;
     printf("  PASS: NET_FETCH -> EXEC_SHELL -> BLOCK\n");
 }
 
@@ -25,6 +27,7 @@ static void test_warn_sequence(void) {
     dclaw_correlator_evaluate(3, DCLAW_CAP_READ_FS);
     dclaw_action_t r = dclaw_correlator_evaluate(3, DCLAW_CAP_SEND_MSG);
     assert(r == DCLAW_ACTION_WARN);
+    (void)r;
     printf("  PASS: READ_FS -> SEND_MSG -> WARN\n");
 }
 
@@ -33,6 +36,7 @@ static void test_net_fetch_actuate_blocks(void) {
     dclaw_correlator_evaluate(4, DCLAW_CAP_NET_FETCH);
     dclaw_action_t r = dclaw_correlator_evaluate(4, DCLAW_CAP_ACTUATE);
     assert(r == DCLAW_ACTION_BLOCK);
+    (void)r;
     printf("  PASS: NET_FETCH -> ACTUATE -> BLOCK\n");
 }
 
@@ -41,6 +45,7 @@ static void test_different_sessions_independent(void) {
     /* Different session — should not trigger sequence */
     dclaw_action_t r = dclaw_correlator_evaluate(11, DCLAW_CAP_EXEC_SHELL);
     assert(r == DCLAW_ACTION_ALLOW);
+    (void)r;
     printf("  PASS: different sessions are independent\n");
 }
 
@@ -48,6 +53,7 @@ static void test_non_matching_sequence_allows(void) {
     dclaw_correlator_evaluate(5, DCLAW_CAP_READ_FS);
     dclaw_action_t r = dclaw_correlator_evaluate(5, DCLAW_CAP_READ_FS);
     assert(r == DCLAW_ACTION_ALLOW);
+    (void)r;
     printf("  PASS: READ_FS -> READ_FS (no rule match) -> ALLOW\n");
 }
 
@@ -59,6 +65,7 @@ static void test_session_reuse_after_eviction(void) {
     /* Session 100 should have been evicted; a new call should work */
     dclaw_action_t r = dclaw_correlator_evaluate(100, DCLAW_CAP_READ_FS);
     assert(r == DCLAW_ACTION_ALLOW);
+    (void)r;
     printf("  PASS: session eviction + reuse works\n");
 }
 

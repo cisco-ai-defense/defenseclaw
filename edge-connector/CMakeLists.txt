@@ -227,6 +227,20 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/policy_compiler.py
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
 )
 
+# Python adapter hooks (P2-21)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/generic_hook.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/mcp_proxy.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/langchain_hook.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/http_middleware.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+
 # Default policy
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/policies/strict.yaml
     DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/defenseclaw

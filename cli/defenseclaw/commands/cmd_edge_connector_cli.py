@@ -441,13 +441,13 @@ def policy_versions(app: AppContext, tenant_id: int, fleet_id: int, as_json: boo
 
 
 @edge_connector_group_policy.command("emergency")
-@click.argument("cmd", type=click.Choice(["block-all", "enter-lockdown", "revoke-sessions", "force-sync"]))
+@click.argument("cmd", type=click.Choice(["block-all", "enter-lockdown", "release-lockdown", "revoke-sessions", "force-sync"]))
 @click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
 @click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
 @pass_ctx
 def policy_emergency(app: AppContext, cmd: str, tenant_id: int, fleet_id: int, assume_yes: bool) -> None:
-    """Send an emergency fleet command (block-all, enter-lockdown, revoke-sessions, force-sync)."""
+    """Send an emergency fleet command (block-all, enter-lockdown, release-lockdown, revoke-sessions, force-sync)."""
     if not assume_yes and not click.confirm(f"Send emergency command '{cmd}' to the entire fleet?"):
         ux.echo("Cancelled.")
         return
@@ -492,6 +492,9 @@ def _load_env_var(key: str) -> str:
 def _check_broker(url: str) -> bool:
     """Try a TCP connect to the MQTT broker; return True on success."""
     try:
+        # urlparse fails for bare host:port (no scheme) — prepend mqtt:// if needed
+        if "://" not in url:
+            url = f"mqtt://{url}"
         p = urlparse(url)
         with socket.create_connection((p.hostname or "127.0.0.1", p.port or 1883), timeout=5):
             return True

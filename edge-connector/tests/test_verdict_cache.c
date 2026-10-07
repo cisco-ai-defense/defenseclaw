@@ -33,6 +33,7 @@ static void test_miss_on_empty(void) {
     make_hash(hash, 0xAA);
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(hash, &v) == false);
+    (void)v;
     printf("  PASS: lookup on empty cache returns miss\n");
 }
 
@@ -48,6 +49,7 @@ static void test_store_and_hit(void) {
     assert(dclaw_cache_lookup(hash, &v) == true);
     assert(v.action == DCLAW_ACTION_ALLOW);
     assert(v.from_cache == true);
+    (void)v;
     printf("  PASS: store + lookup returns cached verdict\n");
 }
 
@@ -56,6 +58,7 @@ static void test_different_hash_misses(void) {
     make_hash(hash, 0xCC);
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(hash, &v) == false);
+    (void)v;
     printf("  PASS: different hash returns miss\n");
 }
 
@@ -66,6 +69,7 @@ static void test_invalidate_removes_entry(void) {
 
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(hash, &v) == false);
+    (void)v;
     printf("  PASS: invalidate removes entry\n");
 }
 
@@ -79,6 +83,7 @@ static void test_untrusted_clock_always_misses(void) {
 
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(hash, &v) == false);
+    (void)v;
     printf("  PASS: untrusted clock treats all entries as expired\n");
 
     s->clock.time_trusted = true;
@@ -92,6 +97,7 @@ static void test_flush_all_clears_cache(void) {
 
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(hash, &v) == false);
+    (void)v;
     printf("  PASS: flush_all clears all entries\n");
 }
 
@@ -114,6 +120,7 @@ static void test_lru_eviction(void) {
     dclaw_verdict_t v;
     assert(dclaw_cache_lookup(new_hash, &v) == true);
     assert(v.action == DCLAW_ACTION_BLOCK);
+    (void)v;
     printf("  PASS: LRU eviction works (new entry stored when full)\n");
 }
 
@@ -139,12 +146,14 @@ static void test_cache_stores_and_retrieves_category(void) {
         }
     }
     assert(found);
+    (void)found;
 
     /* Basic lookup still works */
     dclaw_verdict_t v;
     bool hit = dclaw_cache_lookup(hash, &v);
     assert(hit);
     assert(v.action == DCLAW_ACTION_BLOCK);
+    (void)hit; (void)v;
     printf("  PASS: cache stores and retrieves enriched verdict\n");
 }
 
@@ -173,6 +182,7 @@ static void test_cache_truncates_long_evidence(void) {
         }
     }
     assert(found);
+    (void)found;
     printf("  PASS: cache truncates long evidence to 63 bytes\n");
 }
 
