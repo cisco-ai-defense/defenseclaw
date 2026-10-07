@@ -4685,13 +4685,12 @@ function Assert-NoGatewayAutoStart {
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
 # operator piped to Out-Host in Constrained Language mode. It returns the
-# launcher, its arguments and the call-operator invocation, or $null when the
-# script is not exactly that bridge with the same launcher and arguments in
-# both branches.
+# launcher and its arguments, or $null when the script is not exactly that
+# bridge with the same launcher and arguments in both branches.
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
-        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
         '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
@@ -5909,7 +5908,7 @@ with open(os.path.join(sys.argv[1], ".migration_state.json"), "w", encoding="utf
 import sys
 import yaml
 document = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
-assert document.get("config_version") == 8
+assert document.get("config_version") == 9
 observability = document.get("observability") or {}
 assert (observability.get("metric_policy") or {}).get("temporality") == "delta"
 otlp = next(
@@ -5928,8 +5927,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
 '@
         Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath, $setupOtlpPort) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
-        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*8\s*$') {
-            throw 'seeded setup upgrade did not activate configuration schema v8'
+        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*9\s*$') {
+            throw 'seeded setup upgrade did not activate configuration schema v9'
         }
         $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
         $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot

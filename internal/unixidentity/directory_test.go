@@ -7,12 +7,14 @@
 package unixidentity
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,7 +75,9 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 	}
 
 	// 400 groups are all named (with the primary group), in several getent
-	// calls: one call for all of them outlasted a cold SSSD (GAP-0138). More
+	// calls: one call for all of them outlasted a cold SSSD (GAP-0138). The
+	// calls run one at a time, because SSSD answers one at a time and the
+	// later of several at once ran out of their five seconds (GAP-0230). More
 	// than the bound fail, and so does one batch that did not finish.
 	for _, tc := range []struct {
 		count   int
@@ -97,9 +101,23 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 				f.errs[key] = errors.New("getent timed out")
 			}
 		}
-		facts, err := newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
+		resolver := newFakeNSS(f)
+		run := resolver.runner
+		var inflight, peak atomic.Int32
+		resolver.runner = func(ctx context.Context, path string, args []string) (commandResult, error) {
+			n := inflight.Add(1)
+			defer inflight.Add(-1)
+			for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+			}
+			time.Sleep(time.Millisecond)
+			return run(ctx, path, args)
+		}
+		facts, err := resolver.DirectoryFactsForUID(1001, time.Now())
 		if (err != nil) != tc.fails || (err == nil && len(facts.Groups) != tc.count+1) {
 			t.Errorf("%d groups: %d named, err %v", tc.count, len(facts.Groups), err)
+		}
+		if peak.Load() != 1 {
+			t.Errorf("%d groups: %d getent calls at once, want one at a time", tc.count, peak.Load())
 		}
 	}
 }

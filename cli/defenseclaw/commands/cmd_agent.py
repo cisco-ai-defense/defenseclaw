@@ -444,7 +444,7 @@ def ide_plugins(
     if str(payload.get("scope") or "") == "off":
         click.echo(
             "The IDE plugin inventory is turned off (ai_discovery.ide_inventory: off). "
-            "Set it to all in the config file that 'defenseclaw config path' shows."
+            "Turn it on with: defenseclaw config set ai_discovery.ide_inventory all"
         )
         return
     plugins = payload.get("plugins") or []

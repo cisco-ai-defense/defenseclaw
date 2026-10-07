@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,17 +19,40 @@ import (
 )
 
 const (
-	RetentionBatchSize        = 1000
+	// RetentionBatchSize bounds the rows one delete transaction removes. The
+	// audit store has one writer connection and every audit row has 24
+	// indexes, so a batch of 1,000 held the writer for about 150 ms and the
+	// hooks queued behind it fell from 24 to 3 a second while a large prune
+	// ran (GAP-0233). A batch of 250 holds it for about 40 ms.
+	RetentionBatchSize        = 250
 	RetentionScheduleInterval = 6 * time.Hour
+	// RetentionFollowUpInterval is the wait after a run that stopped at one of
+	// its time budgets with work left, instead of RetentionScheduleInterval:
+	// a prune of a large backlog finishes in minutes, not over several days.
+	RetentionFollowUpInterval = time.Minute
 	// RetentionCorrelationRunBudget caps graph drain so a multi-million-row
-	// correlation ledger cannot starve the 7-day history window. The next
-	// scheduled run resumes in registry order.
-	RetentionCorrelationRunBudget = 30 * time.Second
-	// RetentionIncrementalVacuumBytes bounds page reclamation per successful
-	// run when auto_vacuum=INCREMENTAL. SQLite page sizes are configurable, so
-	// the page count is derived at runtime rather than assuming 4 KiB pages.
-	RetentionIncrementalVacuumBytes = 64 << 20
-	sqliteAutoVacuumIncremental     = 2
+	// correlation ledger cannot starve the 7-day history window. The run
+	// reports the backlog and the next one, RetentionFollowUpInterval later,
+	// resumes in registry order. It used to be 30 s per six-hourly run, so the
+	// 1.01 million observation rows 43,000 hooks leave took days to drain.
+	RetentionCorrelationRunBudget = 5 * time.Minute
+	// RetentionIncrementalVacuumBytes bounds page reclamation per step when
+	// auto_vacuum=INCREMENTAL: a step holds the writer while it moves pages.
+	// SQLite page sizes are configurable, so the page count is derived at
+	// runtime rather than assuming 4 KiB pages.
+	RetentionIncrementalVacuumBytes = 16 << 20
+	// RetentionVacuumRunBudget caps the steps one run takes.
+	RetentionVacuumRunBudget = 2 * time.Minute
+	// retentionVacuumReserveDivisor keeps one tenth of the file as free pages:
+	// the next inserts reuse them, so returning them would only make the file
+	// grow again. The pages beyond that go back to the file system.
+	retentionVacuumReserveDivisor = 10
+	sqliteAutoVacuumIncremental   = 2
+	// A run pauses after each batch for retentionPauseFactor times the time
+	// the batch took, at most retentionPauseMax: the hooks queued for the
+	// writer connection keep at least two thirds of it while a prune runs.
+	retentionPauseFactor = 2
+	retentionPauseMax    = 250 * time.Millisecond
 )
 
 // RetentionTableClass is a fixed metric/reporting label. Values can only come
@@ -95,11 +117,14 @@ const (
 // RetentionRunResult is bounded by the fixed class registry. RowsDeleted always
 // has exactly the registry's keys and contains counts only.
 type RetentionRunResult struct {
-	Disabled      bool
-	Cutoff        time.Time
-	CompletedAt   time.Time
-	Duration      time.Duration
-	BatchCount    int64
+	Disabled    bool
+	Cutoff      time.Time
+	CompletedAt time.Time
+	Duration    time.Duration
+	BatchCount  int64
+	// Backlog is set when a stage stopped at its time budget with work left;
+	// the scheduler then runs again after RetentionFollowUpInterval.
+	Backlog       bool
 	RowsDeleted   map[RetentionTableClass]int64
 	ProtectedRows map[RetentionProtectedClass]int64
 }
@@ -170,15 +195,6 @@ func (hooks retentionHooks) withDefaults() retentionHooks {
 	if hooks.now == nil {
 		hooks.now = time.Now
 	}
-	if hooks.yield == nil {
-		hooks.yield = func(ctx context.Context) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			runtime.Gosched()
-			return ctx.Err()
-		}
-	}
 	if hooks.checkpoint == nil {
 		hooks.checkpoint = passiveRetentionCheckpoint
 	}
@@ -194,6 +210,8 @@ type RetentionReaper struct {
 	passiveCheckpoint bool
 	hooks             retentionHooks
 	running           atomic.Bool
+	// paceFrom is when the batch in progress started; only Run touches it.
+	paceFrom          time.Time
 	reload            chan struct{}
 	promptRun         atomic.Bool
 	correlationStart  atomic.Uint32
@@ -234,8 +252,35 @@ func newRetentionReaperWithHooks(
 		passiveCheckpoint: options.PassiveCheckpoint,
 		hooks:             hooks.withDefaults(), reload: make(chan struct{}, 1),
 	}
+	if reaper.hooks.yield == nil {
+		reaper.hooks.yield = reaper.pace
+	}
 	reaper.retentionDays.Store(retentionDays)
 	return reaper, nil
+}
+
+// pace is the default pause between batches: it hands the writer connection
+// to the hooks queued behind the batch that just ran. A batch that waited for
+// a busy writer counts at its full length, so a loaded gateway slows the prune
+// down further.
+func (reaper *RetentionReaper) pace(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !reaper.paceFrom.IsZero() {
+		pause := min(retentionPauseFactor*time.Since(reaper.paceFrom), retentionPauseMax)
+		if pause > 0 {
+			timer := time.NewTimer(pause)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	reaper.paceFrom = time.Now()
+	return ctx.Err()
 }
 
 func (reaper *RetentionReaper) RetentionDays() int64 {
@@ -334,13 +379,21 @@ func (reaper *RetentionReaper) RunScheduled(ctx context.Context, scheduler Reten
 	if ctx == nil {
 		return errors.New("audit: retention scheduler context is required")
 	}
+	backlog := false
+	run := func() {
+		result, err := reaper.Run(ctx)
+		backlog = err == nil && result.Backlog
+	}
 	if reaper.retentionDays.Load() > 0 {
-		_, _ = reaper.Run(ctx)
+		run()
 	}
 	for {
 		interval, enabled := reaper.ScheduleInterval()
-		if !enabled {
+		switch {
+		case !enabled:
 			interval = 0
+		case backlog:
+			interval = RetentionFollowUpInterval
 		}
 		wake, err := scheduler.Wait(ctx, interval, reaper.reload)
 		if err != nil {
@@ -349,11 +402,11 @@ func (reaper *RetentionReaper) RunScheduled(ctx context.Context, scheduler Reten
 		switch wake {
 		case RetentionScheduleTick:
 			if reaper.retentionDays.Load() > 0 {
-				_, _ = reaper.Run(ctx)
+				run()
 			}
 		case RetentionScheduleReload:
 			if reaper.promptRun.Swap(false) && reaper.retentionDays.Load() > 0 {
-				_, _ = reaper.Run(ctx)
+				run()
 			}
 		default:
 			return errors.New("audit: retention scheduler returned an invalid wake reason")
@@ -518,6 +571,7 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 		return result, err
 	}
 	defer reaper.running.Store(false)
+	reaper.paceFrom = time.Now()
 
 	started := reaper.hooks.now().UTC()
 	days := reaper.retentionDays.Load()
@@ -582,7 +636,7 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 		}
 	}
 	if runErr == nil {
-		if err := reaper.reclaimFreedPages(ctx); err != nil {
+		if err := reaper.reclaimFreedPages(ctx, &result); err != nil {
 			runErr = retentionRunFailure(RetentionFailureCheckpoint, err)
 		}
 	}
@@ -775,6 +829,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 				return err
 			}
 			if !reaper.hooks.now().Before(deadline) {
+				result.Backlog = true
 				return nil
 			}
 			deleted, err := reaper.deleteCorrelationBatch(ctx, stage.class, stage.args...)
@@ -1926,40 +1981,76 @@ func (reaper *RetentionReaper) deleteAuthoritativeJudgeBatch(
 	return deleted, err
 }
 
-func (reaper *RetentionReaper) reclaimFreedPages(ctx context.Context) error {
+// reclaimFreedPages returns the pages a prune freed to the file system, in
+// steps of RetentionIncrementalVacuumBytes with a pause after each, until the
+// free pages are down to a tenth of the file or RetentionVacuumRunBudget is
+// spent. It used to return one step of 64 MB per run, so a database pruned
+// from 3.2 GB kept 51% of its pages free (GAP-0233).
+func (reaper *RetentionReaper) reclaimFreedPages(ctx context.Context, result *RetentionRunResult) error {
 	if reaper == nil || reaper.store == nil || reaper.store.db == nil {
 		return errors.New("audit retention reclaim store is unavailable")
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	deadline := reaper.hooks.now().Add(RetentionVacuumRunBudget)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		more, err := reaper.reclaimStep(ctx)
+		if err != nil || !more {
+			return err
+		}
+		if err := reaper.hooks.yield(ctx); err != nil {
+			return err
+		}
+		if !reaper.hooks.now().Before(deadline) {
+			result.Backlog = true
+			return nil
+		}
 	}
+}
+
+// reclaimStep returns one step of free pages and reports whether more than the
+// reserve is left.
+func (reaper *RetentionReaper) reclaimStep(ctx context.Context) (bool, error) {
 	release, err := reaper.store.acquireReady()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer release()
-	var mode, freelist, pageSize int
+	var mode, freelist, pageCount, pageSize int
 	if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
-		return err
+		return false, err
 	}
 	if mode != sqliteAutoVacuumIncremental {
-		return nil
+		return false, nil
 	}
 	if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
-		return err
+		return false, err
+	}
+	if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
+		return false, err
 	}
 	if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freelist); err != nil {
-		return err
+		return false, err
 	}
-	if freelist <= 0 {
-		return nil
+	pages := retentionVacuumStep(freelist, pageCount, pageSize)
+	if pages == 0 {
+		return false, nil
 	}
-	pages := retentionVacuumPageLimit(pageSize)
-	if freelist < pages {
-		pages = freelist
+	if _, err := reaper.store.db.ExecContext(ctx, "PRAGMA incremental_vacuum("+strconv.Itoa(pages)+")"); err != nil {
+		return false, err
 	}
-	_, err = reaper.store.db.ExecContext(ctx, "PRAGMA incremental_vacuum("+strconv.Itoa(pages)+")")
-	return err
+	return freelist-pages > (pageCount-pages)/retentionVacuumReserveDivisor, nil
+}
+
+// retentionVacuumStep is how many free pages to return next: none once the
+// free pages are down to the reserve.
+func retentionVacuumStep(freelist, pageCount, pageSize int) int {
+	reserve := pageCount / retentionVacuumReserveDivisor
+	if freelist <= reserve {
+		return 0
+	}
+	return min(retentionVacuumPageLimit(pageSize), freelist-reserve)
 }
 
 func retentionVacuumPageLimit(pageSize int) int {

@@ -585,7 +585,9 @@ function Test-FilesInUse {
 
 # A release whose gateway reports its version but does not start: the
 # install is undone. A start that exits 3 (a connector needs attention)
-# keeps the new version and exits 3.
+# keeps the new version and exits 3. The drill gateway hands every other
+# command to the real one, so the staged check, which runs the staged
+# gateway's config validator (GAP-0158), passes and the swap happens.
 function Test-FailureDrill {
     Enter-Lane failure-drill
     Check ((Install-Candidate $Assets) -eq 0) "install of $Target failed"
@@ -594,39 +596,31 @@ function Test-FailureDrill {
     $goodGateway = Get-Sha256 $gateway
     $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
     $source = Join-Path $Lane "DrillGateway.cs"
+    $realGateway = Join-Path $Lane "real-gateway.exe"
+    # The command line after the program name goes to the real gateway as is.
     [IO.File]::WriteAllText($source, @"
 public static class DrillGateway {
     public static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "--version") { System.Console.WriteLine("defenseclaw-gateway version $Target"); return 0; }
         if (args.Length > 0 && args[0] == "start") { return int.Parse(System.Environment.GetEnvironmentVariable("DC_DRILL_START_EXIT") ?? "1"); }
-        // The staged config check (config-v8) asks the staged gateway; answer it with the working one.
-        string real = System.Environment.GetEnvironmentVariable("DC_DRILL_REAL_GATEWAY");
-        if (args.Length > 0 && args[0] == "config-v8" && !string.IsNullOrEmpty(real)) {
-            var quoted = new System.Collections.Generic.List<string>();
-            foreach (string a in args) { quoted.Add("\"" + a.Replace("\"", "\\\"") + "\""); }
-            var info = new System.Diagnostics.ProcessStartInfo(real, string.Join(" ", quoted.ToArray()));
-            info.UseShellExecute = false;
-            info.RedirectStandardOutput = true;
-            using (var p = System.Diagnostics.Process.Start(info)) {
-                System.Console.Out.Write(p.StandardOutput.ReadToEnd());
-                p.WaitForExit();
-                return p.ExitCode;
-            }
-        }
-        return 0;
+        string line = System.Environment.CommandLine;
+        int end = line.StartsWith("\"") ? line.IndexOf('"', 1) + 1 : line.IndexOf(' ');
+        string rest = end > 0 && end < line.Length ? line.Substring(end) : "";
+        System.Diagnostics.ProcessStartInfo info = new System.Diagnostics.ProcessStartInfo(@"$realGateway", rest);
+        info.UseShellExecute = false;
+        using (System.Diagnostics.Process real = System.Diagnostics.Process.Start(info)) { real.WaitForExit(); return real.ExitCode; }
     }
 }
 "@)
     $drill = New-DrillAssets "drill-assets" {
         param([string]$Zip)
-        Remove-Item -LiteralPath (Join-Path $Zip "defenseclaw-gateway.exe")
+        Move-Item -LiteralPath (Join-Path $Zip "defenseclaw-gateway.exe") -Destination $realGateway
         # Only Windows PowerShell's Add-Type builds a standalone .exe.
         $built = Invoke-Exe $PowerShell @("-NoProfile", "-Command",
             "Add-Type -Path '$source' -OutputAssembly '$(Join-Path $Zip "defenseclaw-gateway.exe")' -OutputType ConsoleApplication")
         Check ($built -eq 0) "could not build the drill gateway"
     }
 
-    $env:DC_DRILL_REAL_GATEWAY = $gateway
     Write-Log "an install whose gateway does not start is undone"
     Check ((Install-Candidate $drill) -eq 1) "an install whose gateway does not start must exit 1"
     Check ((Get-Sha256 $gateway) -eq $goodGateway) "the working gateway was not put back"
@@ -642,7 +636,6 @@ public static class DrillGateway {
     try { Check ((Install-Candidate $drill) -eq 3) "an install whose gateway start exits 3 must exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
     Check ((Get-Sha256 $gateway) -ne $goodGateway) "exit 3 must keep the new version"
     Assert-DataKept
-    Remove-Item Env:DC_DRILL_REAL_GATEWAY -ErrorAction SilentlyContinue
 }
 
 # HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate stops install,

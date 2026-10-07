@@ -148,6 +148,8 @@ type guardrailProfileSet struct {
 	rules map[string]*compiledRulePackCategories
 	// packs are the composed packs behind rules, by the same key.
 	packs map[string]*guardrail.RulePack
+	// matches memoises match for repeated subjects.
+	matches *profileMatchCache
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -171,6 +173,7 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 		defaultProfile: strings.TrimSpace(cfg.Guardrail.DefaultProfile),
 		rules:          make(map[string]*compiledRulePackCategories),
 		packs:          make(map[string]*guardrail.RulePack),
+		matches:        newProfileMatchCache(),
 	}
 	cache := guardrail.NewRulePackCache()
 	names := make([]string, 0, len(derived))
@@ -602,6 +605,19 @@ func accountGroups(account *osuser.User) ([]string, error) {
 // directory lookup did not fail; a connector-only assignment matches any
 // request authenticated for that connector.
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	if set.matches == nil {
+		return set.matchUncached(subject, source, connectorName, agent)
+	}
+	key := profileMatchKey(subject, source, connectorName, agent)
+	if decision, ok := set.matches.get(key); ok {
+		return decision
+	}
+	decision := set.matchUncached(subject, source, connectorName, agent)
+	set.matches.put(key, decision)
+	return decision
+}
+
+func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	verified := subject != nil && source != "" && !subject.LookupFailed
 	groups := &subjectGroups{}
 	if verified {

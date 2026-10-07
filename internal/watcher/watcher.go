@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -176,6 +177,30 @@ type InstallWatcher struct {
 	// a connector's skills applies on top of the skill scanner, or nil when
 	// that connector's scope selects none. Nil applies no overlay.
 	rulePackSource func(connector string) *guardrail.RulePack
+
+	// rootConnectors tags each watched root with the connector that owns it,
+	// longest root first. A managed gateway watches every enrolled user's
+	// connector folders at once, so an event's connector comes from the root
+	// that holds it (GAP-0132). Empty means every root belongs to
+	// watcherConnectorName.
+	rootConnectors []rootConnector
+
+	// mcpServers lists the MCP servers admission and the rescan see. Nil
+	// reads the connector config in the gateway's own home.
+	mcpServers func() ([]config.MCPServerEntry, error)
+	// admitNewMCP runs install admission for an MCP server that appears
+	// after the first rescan cycle (set with SetMCPServerSource): a managed
+	// computer has no `mcp set`, so a user adding a server to their agent is
+	// its install.
+	admitNewMCP bool
+
+	// rescanNow asks the rescan loop for a cycle before its interval ends.
+	rescanNow chan struct{}
+}
+
+type rootConnector struct {
+	root      string
+	connector string
 }
 
 // newScanner resolves the scanner for evt via the injectable factory, falling
@@ -205,7 +230,79 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		debounce:   debounce,
 		onAdmit:    onAdmit,
 		pending:    make(map[string]time.Time),
+		rescanNow:  make(chan struct{}, 1),
 	}
+}
+
+// SetRootConnectors tags watched roots with the connector that owns each one
+// (root path -> connector name). Call it before Run.
+func (w *InstallWatcher) SetRootConnectors(roots map[string]string) {
+	w.rootConnectors = w.rootConnectors[:0]
+	for root, connectorName := range roots {
+		abs, err := filepath.Abs(filepath.Clean(root))
+		if err != nil || strings.TrimSpace(connectorName) == "" {
+			continue
+		}
+		w.rootConnectors = append(w.rootConnectors, rootConnector{root: abs, connector: strings.ToLower(strings.TrimSpace(connectorName))})
+	}
+	sort.Slice(w.rootConnectors, func(i, j int) bool {
+		return len(w.rootConnectors[i].root) > len(w.rootConnectors[j].root)
+	})
+}
+
+// SetMCPServerSource replaces where admission and the rescan read the MCP
+// servers (a managed gateway reads every enrolled user's). Call it before Run.
+func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEntry, error)) {
+	w.mcpServers = source
+	w.admitNewMCP = source != nil
+}
+
+// RequestRescan runs a rescan cycle soon, without waiting for the interval.
+// It never blocks; a request while one is pending is merged.
+func (w *InstallWatcher) RequestRescan() {
+	if w == nil || w.rescanNow == nil {
+		return
+	}
+	select {
+	case w.rescanNow <- struct{}{}:
+	default:
+	}
+}
+
+// readMCPServers is the MCP server list admission and the rescan use.
+func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
+	if w.mcpServers != nil {
+		return w.mcpServers()
+	}
+	return w.cfg.ReadMCPServers()
+}
+
+// connectorForPath is the connector that owns path: the tagged watched root
+// that holds it, else the watcher's own connector.
+func (w *InstallWatcher) connectorForPath(path string) string {
+	if len(w.rootConnectors) > 0 && strings.TrimSpace(path) != "" {
+		if abs, err := filepath.Abs(filepath.Clean(path)); err == nil {
+			for _, rc := range w.rootConnectors {
+				if pathWithinRoot(abs, rc.root) {
+					return rc.connector
+				}
+			}
+		}
+	}
+	return watcherConnectorName(w.cfg)
+}
+
+// pathWithinRoot reports whether path is root or below it (case-insensitive
+// on Windows).
+func pathWithinRoot(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.VolumeName(path), filepath.VolumeName(root)) {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // SetPolicySource binds the live generation's prepared OPA admission
@@ -373,7 +470,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			continue
 		}
 		w.watchExistingPluginFolders(dir)
-		if watcherConnectorName(w.cfg) == "claudecode" &&
+		if w.connectorForPath(dir) == "claudecode" &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
 			addClaudeCacheWatches(fsw, dir, watchedDirs)
 		}
@@ -408,7 +505,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
-			if watcherConnectorName(w.cfg) == "claudecode" {
+			if w.connectorForPath(event.Name) == "claudecode" {
 				if depth, inside := w.claudeCacheDepth(event.Name); inside {
 					if info, statErr := os.Stat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
@@ -572,7 +669,8 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 	installType := InstallSkill
 	name := filepath.Base(path)
-	if watcherConnectorName(w.cfg) == "claudecode" {
+	owner := w.connectorForPath(path)
+	if owner == "claudecode" {
 		if pluginID, isPlugin := w.claudePluginIdentity(path); isPlugin {
 			installType = InstallPlugin
 			name = pluginID
@@ -598,7 +696,7 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 		Type:      installType,
 		Name:      name,
 		Path:      path,
-		Connector: watcherConnectorName(w.cfg),
+		Connector: owner,
 		Timestamp: time.Now().UTC(),
 	}
 }
@@ -640,6 +738,9 @@ func (w *InstallWatcher) claudePluginIdentity(path string) (string, bool) {
 func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 	if c := strings.TrimSpace(evt.Connector); c != "" {
 		return c
+	}
+	if evt.Type != InstallMCP {
+		return w.connectorForPath(evt.Path)
 	}
 	return watcherConnectorName(w.cfg)
 }
@@ -1426,7 +1527,7 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 			return !skipPluginChildDir(filepath.Base(path))
 		}
 	}
-	if watcherConnectorName(w.cfg) == "claudecode" {
+	if w.connectorForPath(path) == "claudecode" {
 		if depth, inside := w.claudeCacheDepth(path); inside {
 			return depth == 3
 		}

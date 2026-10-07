@@ -162,7 +162,11 @@ in the operating system, and a group it definitely does not find is a warning in
 `guardrail profile explain`, `guardrail profile list`, `guardrail status` and
 `doctor`, and a line in the gateway log at start and at every reload
 (`[guardrail] assignment 1: group "..." is not known to this host`). A lookup
-that fails or times out says nothing. On Windows the SID of a group survives a
+that fails or times out says nothing. Neither does the check while the
+directory is unreachable: an SSSD that is offline with a cold cache answers
+"no such group" for groups that exist, so the warnings wait while the
+"Directory lookups" warning is showing, and for an account whose own lookup
+failed. On Windows the SID of a group survives a
 rename, so it is the spelling to use there; on Linux and macOS a group is
 matched by its name.
 
@@ -186,9 +190,9 @@ than one key, the reason names the most specific key, in the order
 
 The subject of a profile decision is the user the gateway authenticated the
 request as, with the directory facts it resolved for that user from the
-operating system: the hook socket's peer or a per-user credential on
-standalone enterprise, and the account the gateway runs as on a per-user
-install (see
+operating system: the hook socket's peer, a per-user credential or, for
+ACP, the user's enterprise ACP credential on standalone enterprise, and the
+account the gateway runs as on a per-user install (see
 [how the gateway learns who called](/docs/enterprise/identity-sources#how-the-gateway-learns-who-called)).
 An agent in a sandbox counts as the user who started the sandbox, with the
 same facts and refresh as that user's other agents, and its hooks always
@@ -211,8 +215,10 @@ What follows when the identity is missing:
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
   than 2,048 groups, has no facts rather than part of its membership. On
-  Linux the group names are looked up 64 at a time, so an account in several
-  hundred groups resolves in one background lookup even when SSSD starts cold.
+  Linux the group names are looked up 64 at a time, one batch after the other
+  because a cold SSSD answers one request at a time, so an account in several
+  hundred groups resolves in one background lookup even when SSSD starts cold
+  (about 30 ms per group, so 400 groups take around 12 seconds).
   Facts that still hold a group as a bare number (no group answered for that
   id) are served but refreshed after two minutes, not 15. The gateway log
   names the account and the reason once when its lookup starts failing (`[identity]
@@ -364,7 +370,7 @@ with the subject and the effective settings. `guardrail status`, `status` and
 
 ### Read the decision record
 
-Every hook and LLM proxy decision carries the profile and the reason:
+Every hook, ACP and LLM proxy decision carries the profile and the reason:
 
 | Attribute | Meaning |
 | --- | --- |

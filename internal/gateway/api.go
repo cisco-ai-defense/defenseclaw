@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -1447,6 +1448,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
+			if directory := directoryHealthSummary(directoryCacheHealth()); directory != nil {
+				body["directory"] = directory
+			}
 			// Non-secret fingerprints of the per-user credential keys that
 			// authenticate right now (a rotation's staged key included).
 			body["user_scoped_credentials"] = map[string]interface{}{
@@ -2635,6 +2639,29 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 	}
 }
 
+// withScannerSettings adds the scanner settings a scan ran with (policy,
+// analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
+// reports them as the per-user `skill scan` does. The Secure Client
+// integration keeps its response unchanged.
+func withScannerSettings(cfg *config.Config, kind string, envelope map[string]interface{}) map[string]interface{} {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return envelope
+	}
+	settings := map[string]interface{}{}
+	switch kind {
+	case "skill":
+		settings["policy"] = cfg.Scanners.SkillScanner.EffectivePolicy()
+		if cfg.Scanners.SkillScanner.UseLLM {
+			settings["judge_model"] = cfg.ResolveLLM("scanners.skill").Model
+		}
+	case "mcp":
+		settings["analyzers"] = cfg.Scanners.MCPScanner.AnalyzersArg()
+		settings["judge_model"] = cfg.ResolveLLM("scanners.mcp").Model
+	}
+	envelope["scanner_settings"] = settings
+	return envelope
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/skill/scan — run skill scanner on a local path (Option 2: remote scan)
 // ---------------------------------------------------------------------------
@@ -2686,11 +2713,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	// only for tests that still pass ``InspectLLMConfig``.
 	// The live config: scanner and llm edits reload hot.
 	cfg := a.liveConfig()
-	ss := scanner.NewSkillScannerFromLLM(
+	// The rule pack an install-time scan applies to a skill (none under the
+	// Secure Client integration), so a scan reports what admission sees.
+	ss := guardrail.NewArtifactOverlay(scanner.NewSkillScannerFromLLM(
 		cfg.Scanners.SkillScanner,
 		cfg.ResolveLLM("scanners.skill"),
 		cfg.CiscoAIDefense,
-	)
+	), installScanRulePack(""))
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -2707,7 +2736,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -2882,7 +2911,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
 }
 
 // ---------------------------------------------------------------------------
@@ -3434,9 +3463,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-			// Only the account the ACP token belongs to can read it, so that
-			// account is the verified subject; identity headers the caller
-			// sent stay claims.
+			// The ACP credential that signed the request names who sent it:
+			// the principal it was enrolled for on a managed gateway, the
+			// gateway's own account on a per-user one. Identity headers the
+			// caller sent stay claims.
 			authenticated = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
 			return
@@ -3565,7 +3595,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
 			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(authenticated.Context())))
+				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 				next.ServeHTTP(w, r)
 				return
 			}
