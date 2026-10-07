@@ -455,7 +455,28 @@ func profileProcessOwnerSubject() (profileSubject, bool) {
 	return processOwnerProfileSubject()
 }
 
-var processOwnerProfileSubject = sync.OnceValues(func() (profileSubject, bool) {
+// processOwnerProfileSubject is the process owner's subject; tests replace
+// it. It carries the directory facts the verified paths use (NSS and SSSD on
+// Linux and macOS, the identity store on Windows, cached and refreshed). The
+// OS account database read by processOwnerAccountSubject lists only the groups
+// /etc/group names when the binary has no cgo, so an AD account's group
+// assignments never selected a profile through this fallback (GAP-0174).
+var processOwnerProfileSubject = func() (profileSubject, bool) {
+	if identityFactsEnabled.Load() {
+		if id, name := localProcessUser(); id != "" {
+			facts, _ := verifiedIdentityDirectory(id, identityLookupBlocking.Load())
+			return profileSubjectFromVerified(VerifiedSubject{
+				UserID: id, IDKind: useridentity.KindForID(id), UserName: name,
+				Directory: facts, Source: subjectSourceProcessOwner,
+			}, true), true
+		}
+	}
+	return processOwnerAccountSubject()
+}
+
+// processOwnerAccountSubject is the process owner as the OS account database
+// lists it, for a gateway that does not collect identity facts.
+var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 	current, err := osuser.Current()
 	if err != nil || current == nil {
 		return profileSubject{}, false

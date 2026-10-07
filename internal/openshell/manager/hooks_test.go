@@ -732,6 +732,12 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	if n := silence(); n != 0 {
 		t.Fatalf("commands outside the harness raised %d hook_silence finding(s)", n)
 	}
+	// The native OTLP an idle harness keeps exporting at its prompt is no
+	// activity (GAP-0214).
+	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteOTLP)
+	if n := silence(); n != 0 {
+		t.Fatalf("an idle harness's OTLP export raised %d hook_silence finding(s)", n)
+	}
 	// The harness's own connection to the proxy is its activity.
 	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: openshellHostAlias, Port: testEgressPort,
 		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
