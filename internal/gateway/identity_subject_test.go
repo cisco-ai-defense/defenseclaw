@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -332,5 +334,45 @@ func TestProxyAndACPBindProcessOwnerOverClaimedUser(t *testing.T) {
 	// who sent it: it keeps neither the claim nor a verified owner.
 	if got := proxyUser(&GuardrailProxy{skipAuthForTest: true}, ""); got != "" {
 		t.Fatalf("credential-less proxy user.id = %q, want none", got)
+	}
+}
+
+// TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails pins
+// GAP-0231: with the domain controller down and a cold SSSD the uid of a hook
+// caller has no name, and the audit rows carried none. The uid is always on
+// the row; the name the guardian recorded for it (while it was current)
+// attributes the row too, and the name used for authorization is unchanged.
+func TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	dir := t.TempDir()
+	for uid, record := range map[string]enterprisehooks.IdentitySpoolRecord{
+		"94401115": {User: "dcad-frank@dclab.test", UpdatedAt: time.Now().UTC()},
+		"94401116": {User: "dcad-old@dclab.test", UpdatedAt: time.Now().UTC().Add(-2 * time.Hour)},
+	} {
+		record.Key = uid
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, uid+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restoreValidate, restoreDirectory := validateManagedGuardianAuthorization, managedHookPeerDirectory
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return useridentity.DirectoryFacts{}, false }
+	t.Cleanup(func() {
+		validateManagedGuardianAuthorization, managedHookPeerDirectory = restoreValidate, restoreDirectory
+		setIdentitySpoolDir("")
+	})
+	setIdentitySpoolDir(dir)
+	for uid, want := range map[string]string{"94401115": "dcad-frank", "94401116": "", "94401117": ""} {
+		ctx := attachVerifiedSubject(context.Background(), nil, uid, "", subjectSourcePeerCredentials)
+		pid, _ := strconv.Atoi(uid)
+		caller := auditCallerIdentity(withManagedHookPeer(ctx, managedHookPeer{UID: pid}))
+		if id := AgentIdentityFromContext(ctx); id.UserID != uid || id.UserName != want || caller.ID != uid || caller.Name != want {
+			t.Errorf("uid %s: agent identity %+v, audit caller %+v, want the uid and the name %q", uid, id, caller, want)
+		}
 	}
 }
