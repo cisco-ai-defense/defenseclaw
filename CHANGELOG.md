@@ -45,7 +45,8 @@ says otherwise. Per-user installs never connect to Tetragon.
     the user; IDE terminals, look-alike processes, other users and containers
     are observed, never denied. In this release enforcement denies only
     through a native agent binary, never by process ID, and for one user per
-    computer (the lowest uid with a native agent install): script-hosted
+    computer (the lowest uid of the users who finished burn-in and have a
+    native agent install): script-hosted
     agents and the other users stay in monitor mode, and status says so
     (`kernel_pid_anchor_monitor_only`, `kernel_binary_anchor_scope_limited`).
     An eligible account counts as enrolled for

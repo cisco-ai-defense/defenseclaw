@@ -232,8 +232,9 @@ const (
 //     script-hosted agent, such as an npm install run by node) is monitored,
 //     never denied, because a pid can be reused between two passes.
 //   - WarnBinaryScopeLimited: a controls policy's binary selector carries one
-//     uid, so when several users have native installs only the first (lowest
-//     uid) is denied and the others stay in monitor.
+//     uid, so when several users of the policy (in enforce, the users who
+//     finished burn-in) have native installs, only the lowest uid is denied
+//     and the others stay in monitor.
 
 // WarnCustomerEventsCapped:<policy> is one of the host's own Tetragon
 // policies whose events went over the helper's volume budget in the last

@@ -391,8 +391,9 @@ access. Status shows presence, modification time and a digest prefix only.
     (and reset that user's burn-in), never deny. Two coverage limits follow: a
     script-hosted agent (such as an npm install run by `node`) is monitored,
     never denied (`kernel_pid_anchor_monitor_only`), and one controls policy
-    denies for one user per computer, the lowest uid with a native agent
-    install, while the other users stay in monitor
+    denies for one user per computer, the lowest uid of the users who
+    finished burn-in and have a native agent install, while the other users
+    stay in monitor
     (`kernel_binary_anchor_scope_limited`).
 16. The arguments of Codex's notify program carry the turn's content
     (GAP-0045). The helper withholds them from its stream, but any other

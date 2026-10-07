@@ -1193,9 +1193,9 @@ limits of this release follow:
   `kernel_pid_anchor_monitor_only`, and a user whose agents are all of this
   kind stays in monitor with that reason after its burn-in.
 - **One user per computer is denied.** The controls policy carries the native
-  binaries of one user. When several enrolled users have a native agent
-  install, enforcement covers the first of them (the lowest uid); the other
-  users stay in monitor mode, and their would-block hits still count. Status
+  binaries of one user. When several users who finished burn-in have a native
+  agent install, enforcement covers the lowest uid of them; the other users
+  stay in monitor mode, and their would-block hits still count. Status
   warns `kernel_binary_anchor_scope_limited`, which is also each such user's
   reason, and `verify --ready-for enforce` says so when more than one user is
   ready.

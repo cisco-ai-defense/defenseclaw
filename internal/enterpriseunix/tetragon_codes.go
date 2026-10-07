@@ -359,8 +359,8 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
 	}},
 	kernelpolicy.WarnBinaryScopeLimited: {Message: func(tetragonFacts) string {
-		return "more than one enrolled user has a native agent install" +
-			" (the controls policy denies for one user, the lowest uid; the others stay in monitor mode);" +
+		return "more than one user of a controls policy has a native agent install" +
+			" (in enforce it denies for one of them, the lowest uid; the others stay in monitor mode);" +
 			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
 	}},
 	kernelpolicy.WarnReconcileFailed: {Message: func(tetragonFacts) string {
