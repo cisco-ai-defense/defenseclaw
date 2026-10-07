@@ -20,6 +20,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,11 +49,25 @@ func v9AutomaticInstallReason(reason string) bool {
 	return false
 }
 
+// auditDBDSN is the file: URI of the audit database. The path goes through
+// url.URL, so a '#', '?' or '%' in a directory name (all legal in a user
+// profile) stays part of the path instead of ending it.
+func auditDBDSN(path, query string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed // a Windows drive path: file:///C:/...
+	}
+	return (&url.URL{Scheme: "file", Path: slashed, RawQuery: query}).String()
+}
+
 // readV9ActionRows returns the operator block/allow rows of the actions
 // table: install=block or allow, excluding scan verdicts
 // (v9AutomaticInstallReasons), which stay as the journal.
 func readV9ActionRows(path string) ([]v9ActionRow, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", auditDBDSN(path, "mode=ro&_pragma=busy_timeout(5000)"))
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +110,7 @@ func readV9ActionRows(path string) ([]v9ActionRow, error) {
 // transaction, deleting rows left with no state. It runs after the config
 // commit, so the rows are never lost.
 func clearV9ActionRows(path string, moved []v9ActionRow) error {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", auditDBDSN(path, "_pragma=busy_timeout(5000)"))
 	if err != nil {
 		return err
 	}
