@@ -124,5 +124,8 @@ func TestParseEgressFixture(t *testing.T) {
 	} {
 		_, err := ParseEgressFixture([]byte(doc), "f")
 		wantPackError(t, err, code, "")
+		if !strings.HasPrefix(err.Error(), "egress fixture f") {
+			t.Errorf("%q: the error does not name the fixture: %v", doc, err)
+		}
 	}
 }

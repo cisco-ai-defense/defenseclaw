@@ -146,7 +146,7 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 	s.PackName = suggestPackName(o.PackOut, o.Sandbox)
 	s.fit(a.Now().Format("2006-01-02"), o.Sandbox)
 	// The pack must load as `pack validate` would load it.
-	if _, err := packs.ParseIn([]byte(s.Pack), "suggested pack "+s.PackName, a.packDir()); err != nil {
+	if _, err := packs.ParseIn([]byte(s.Pack), s.PackName, a.packDir()); err != nil {
 		return fmt.Errorf("the suggested pack does not validate (please report it): %w", err)
 	}
 	if o.Diff {

@@ -17,6 +17,7 @@
 package packs
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -58,9 +59,22 @@ var egressRules = []EgressRule{
 	RuleUnblock, RuleAllow, RuleFeed, RuleNetworkOpen, RuleIPLiteral, RuleNetworkAllowlist, RuleNetworkDeny,
 }
 
+// fixtureWhat names an egress fixture in its errors (Error.What).
+const fixtureWhat = "egress fixture"
+
 // ParseEgressFixture strictly decodes an egress fixture (YAML, or JSON,
-// which is YAML too).
+// which is YAML too). Its errors name the file an egress fixture, not a
+// sandbox pack.
 func ParseEgressFixture(data []byte, source string) ([]EgressCase, error) {
+	cases, err := parseEgressFixture(data, source)
+	var pe *Error
+	if errors.As(err, &pe) {
+		pe.What = fixtureWhat
+	}
+	return cases, err
+}
+
+func parseEgressFixture(data []byte, source string) ([]EgressCase, error) {
 	if len(data) > MaxFixtureBytes {
 		return nil, packErr(source, "", "too_large", "the fixture exceeds %d bytes", MaxFixtureBytes)
 	}
