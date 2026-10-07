@@ -547,27 +547,28 @@ func parseWindowsEnterprisePayloadManifest(body []byte) (map[string]string, erro
 }
 
 // verifyWindowsEnterpriseHashPinnedInstaller admits an unsigned installer
-// and module only when both digests are pinned. PowerShell 7 cannot verify
-// the script it is about to run, so the CLI does it before launching.
-func verifyWindowsEnterpriseHashPinnedInstaller(script, manifestPath string) error {
+// and module only when both digests are pinned, and returns the pins.
+// PowerShell 7 cannot verify the script it is about to run, so the CLI does
+// it before launching.
+func verifyWindowsEnterpriseHashPinnedInstaller(script, manifestPath string) (map[string]string, error) {
 	pins, err := loadWindowsEnterprisePayloadManifest(manifestPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, path := range []string{script, filepath.Join(filepath.Dir(script), "DefenseClawEnterprise.psm1")} {
 		want, ok := pins[strings.ToLower(filepath.Base(path))]
 		if !ok {
-			return fmt.Errorf("payload manifest does not pin %s", filepath.Base(path))
+			return nil, fmt.Errorf("payload manifest does not pin %s", filepath.Base(path))
 		}
 		got, err := windowsEnterpriseFileSHA256(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if got != want {
-			return fmt.Errorf("%s SHA-256 %s does not match the payload manifest", filepath.Base(path), got)
+			return nil, fmt.Errorf("%s SHA-256 %s does not match the payload manifest", filepath.Base(path), got)
 		}
 	}
-	return nil
+	return pins, nil
 }
 
 func windowsEnterpriseFileSHA256(path string) (string, error) {

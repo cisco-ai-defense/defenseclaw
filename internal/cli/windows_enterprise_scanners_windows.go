@@ -9,6 +9,7 @@ package cli
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unsafe"
@@ -43,6 +45,7 @@ var (
 	windowsScannerRuntimeDir     = managed.StandaloneWindowsScannerRuntimeDir
 	windowsScannerGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
 	windowsScannerPrepareTimeout = 15 * time.Minute
+	windowsScannerSourceCheck    = managed.ValidateTrustedFilePath
 )
 
 // windowsScannerRuntimeSDDL: Administrators own the root; LocalSystem and
@@ -145,7 +148,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			reprepareInstalledWindowsScannerRuntime(result)
 			return
 		}
-		if err := installWindowsScannerRuntime(source); err != nil {
+		if err := installWindowsScannerRuntime(source, opts); err != nil {
 			result.AddWarning("scanner_runtime_unavailable",
 				"the skill, MCP and plugin scanners could not be installed, so installs are blocked until they are: "+err.Error())
 		}
@@ -184,7 +187,8 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 
 // installWindowsScannerRuntime copies source into the protected root unless
 // the installed copy already matches, then unpacks and compiles the runtime.
-func installWindowsScannerRuntime(source string) error {
+// A new executable is admitted first, like every other payload file.
+func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycleOptions) error {
 	root, err := windowsScannerRuntimeDir()
 	if err != nil {
 		return err
@@ -202,6 +206,9 @@ func installWindowsScannerRuntime(source string) error {
 		return err
 	}
 	if got, err := windowsEnterpriseFileSHA256(target); err != nil || got != want {
+		if err := admitWindowsScannerRuntimePayload(source, want, opts); err != nil {
+			return err
+		}
 		if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
 			return err
 		}
@@ -217,6 +224,41 @@ func installWindowsScannerRuntime(source string) error {
 		}
 	}
 	return nil
+}
+
+// admitWindowsScannerRuntimePayload admits the staged scanner executable as
+// the installer module admits every other standalone payload file
+// (Get-DefenseClawSourceDescriptor), before this lifecycle copies it into the
+// protected root and runs it as an administrator, and the gateway service
+// runs it on every scan (GAP-0311). The source must be writable only by
+// administrators, and carry a valid Authenticode signature (from a signer
+// --allowed-signer pins, when any is given) or, in hash_pinned mode, the
+// SHA-256 the payload manifest pins. --allow-unsigned waives only the
+// signature, as it does there. digest is the SHA-256 of source.
+func admitWindowsScannerRuntimePayload(source, digest string, opts *windowsEnterpriseLifecycleOptions) error {
+	if err := windowsScannerSourceCheck(source, "scanner runtime payload"); err != nil {
+		return err
+	}
+	if opts.allowUnsigned {
+		return nil
+	}
+	status := "not valid"
+	if _, certificate, err := verifyWindowsAuthenticode(source); err == nil {
+		if len(opts.allowedSigners) == 0 {
+			return nil
+		}
+		thumbprint := sha256.Sum256(certificate)
+		if slices.Contains(opts.allowedSigners, hex.EncodeToString(thumbprint[:])) {
+			return nil
+		}
+		status = "valid, from a signer --allowed-signer does not pin"
+	} else if opts.trustMode == windowsEnterpriseTrustHashPinned {
+		if pin, ok := opts.payloadPins[strings.ToLower(filepath.Base(source))]; ok && pin == digest {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s is not admitted by the standalone payload trust policy (Authenticode %s; trust mode %s)",
+		source, status, opts.trustMode)
 }
 
 func windowsEnterpriseResultHasWarning(result *enterprisestatus.Result, code string) bool {

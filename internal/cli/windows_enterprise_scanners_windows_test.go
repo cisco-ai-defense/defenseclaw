@@ -8,12 +8,17 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -83,5 +88,54 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 		if !reported || result.Scanners == nil || result.Scanners.State != "missing" {
 			t.Fatalf("%s: errors=%+v warnings=%+v scanners=%+v", action, result.Errors, result.Warnings, result.Scanners)
 		}
+	}
+}
+
+// GAP-0311: the staged scanner executable is admitted like every other
+// payload file before the lifecycle copies it into the protected root and
+// runs it as an administrator. An unsigned one is refused in authenticode
+// mode, and in hash_pinned mode unless the payload manifest pins its digest.
+func TestWindowsScannerRuntimeIsAdmittedByThePayloadTrustPolicy(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the scanner runtime root is administrator-only; run elevated")
+	}
+	dirSeam, accountSeam, sourceSeam := windowsScannerRuntimeDir, windowsScannerGatewayAccount, windowsScannerSourceCheck
+	t.Cleanup(func() {
+		windowsScannerRuntimeDir, windowsScannerGatewayAccount, windowsScannerSourceCheck = dirSeam, accountSeam, sourceSeam
+	})
+	root := filepath.Join(t.TempDir(), "DefenseClaw-ScannerRuntime")
+	windowsScannerRuntimeDir = func() (string, error) { return root, nil }
+	// The gateway service is not installed here; any service SID will do.
+	windowsScannerGatewayAccount = `NT SERVICE\TrustedInstaller`
+	// The staged folder stands for an administrator-only payload folder.
+	windowsScannerSourceCheck = func(string, string) error { return nil }
+	payload := t.TempDir()
+	installer := filepath.Join(payload, "install-enterprise.ps1")
+	source := filepath.Join(payload, managed.StandaloneWindowsScannerRuntimeName)
+	for _, path := range []string{installer, source} {
+		if err := os.WriteFile(path, []byte("unsigned "+filepath.Base(path)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest, err := windowsEnterpriseFileSHA256(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, opts := range []*windowsEnterpriseLifecycleOptions{
+		{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustAuthenticode},
+		{resolvedInstaller: installer, trustMode: windowsEnterpriseTrustHashPinned,
+			payloadPins: map[string]string{managed.StandaloneWindowsScannerRuntimeName: strings.Repeat("0", 64)}},
+	} {
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.0")
+		applyWindowsStandaloneScannerRuntime(result, opts)
+		_, statErr := os.Lstat(filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName))
+		if !errors.Is(statErr, os.ErrNotExist) || !strings.Contains(fmt.Sprint(result.Warnings), "not admitted by the standalone payload trust policy") {
+			t.Fatalf("trust mode %s: installed=%v, warnings %+v", opts.trustMode, statErr == nil, result.Warnings)
+		}
+	}
+	pinned := &windowsEnterpriseLifecycleOptions{trustMode: windowsEnterpriseTrustHashPinned,
+		payloadPins: map[string]string{managed.StandaloneWindowsScannerRuntimeName: digest}}
+	if err := admitWindowsScannerRuntimePayload(source, digest, pinned); err != nil {
+		t.Fatalf("a pinned digest was refused: %v", err)
 	}
 }

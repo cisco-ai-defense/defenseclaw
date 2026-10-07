@@ -224,12 +224,25 @@ func windowsPowerShell7Home(location, programFiles string) (string, bool) {
 
 // verifyWindowsMicrosoftAuthenticode requires a valid embedded Authenticode
 // signature whose signer certificate's simple display name is publisher.
+func verifyWindowsMicrosoftAuthenticode(path, publisher string) error {
+	signer, _, err := verifyWindowsAuthenticode(path)
+	if err != nil {
+		return err
+	}
+	if signer != publisher {
+		return fmt.Errorf("%s is signed by %q, not %q", path, signer, publisher)
+	}
+	return nil
+}
+
+// verifyWindowsAuthenticode requires a valid embedded Authenticode signature
+// and returns its signer certificate's simple display name and DER encoding.
 // Revocation is not fetched so an offline MDM install works; the chain
 // must still build to a locally trusted root.
-func verifyWindowsMicrosoftAuthenticode(path, publisher string) error {
+func verifyWindowsAuthenticode(path string) (string, []byte, error) {
 	pathPointer, err := winpath.UTF16Ptr(path)
 	if err != nil {
-		return fmt.Errorf("encode Authenticode path: %w", err)
+		return "", nil, fmt.Errorf("encode Authenticode path: %w", err)
 	}
 	fileInfo := &windows.WinTrustFileInfo{
 		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
@@ -251,22 +264,15 @@ func verifyWindowsMicrosoftAuthenticode(path, publisher string) error {
 	data.StateAction = windows.WTD_STATEACTION_CLOSE
 	closeErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
 	if verifyErr != nil {
-		return fmt.Errorf("WinVerifyTrust rejected %s: %w", path, verifyErr)
+		return "", nil, fmt.Errorf("WinVerifyTrust rejected %s: %w", path, verifyErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("close WinVerifyTrust state: %w", closeErr)
+		return "", nil, fmt.Errorf("close WinVerifyTrust state: %w", closeErr)
 	}
-	signer, err := windowsAuthenticodeSignerName(pathPointer)
-	if err != nil {
-		return err
-	}
-	if signer != publisher {
-		return fmt.Errorf("%s is signed by %q, not %q", path, signer, publisher)
-	}
-	return nil
+	return windowsAuthenticodeSigner(pathPointer)
 }
 
-func windowsAuthenticodeSignerName(path *uint16) (string, error) {
+func windowsAuthenticodeSigner(path *uint16) (string, []byte, error) {
 	var (
 		encoding, contentType, formatType uint32
 		store, message                    windows.Handle
@@ -284,21 +290,21 @@ func windowsAuthenticodeSignerName(path *uint16) (string, error) {
 		&message,
 		nil,
 	); err != nil {
-		return "", fmt.Errorf("read the embedded Authenticode signature: %w", err)
+		return "", nil, fmt.Errorf("read the embedded Authenticode signature: %w", err)
 	}
 	defer windows.CertCloseStore(store, 0)
 	defer procCryptMsgClose.Call(uintptr(message))
 
 	var size uint32
 	if ok, _, err := procCryptMsgGetParam.Call(uintptr(message), windowsCMSGSignerInfoParam, 0, 0, uintptr(unsafe.Pointer(&size))); ok == 0 {
-		return "", fmt.Errorf("size the Authenticode signer: %w", windowsLastError(err))
+		return "", nil, fmt.Errorf("size the Authenticode signer: %w", windowsLastError(err))
 	}
 	if size < uint32(unsafe.Sizeof(windowsCMSGSignerInfo{})) || size > 1<<20 {
-		return "", errors.New("the Authenticode signer information has an invalid size")
+		return "", nil, errors.New("the Authenticode signer information has an invalid size")
 	}
 	buffer := make([]byte, size)
 	if ok, _, err := procCryptMsgGetParam.Call(uintptr(message), windowsCMSGSignerInfoParam, 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&size))); ok == 0 {
-		return "", fmt.Errorf("read the Authenticode signer: %w", windowsLastError(err))
+		return "", nil, fmt.Errorf("read the Authenticode signer: %w", windowsLastError(err))
 	}
 	signerInfo := (*windowsCMSGSignerInfo)(unsafe.Pointer(&buffer[0]))
 	certInfo := windows.CertInfo{Issuer: signerInfo.Issuer, SerialNumber: signerInfo.SerialNumber}
@@ -311,16 +317,20 @@ func windowsAuthenticodeSignerName(path *uint16) (string, error) {
 		nil,
 	)
 	if err != nil {
-		return "", fmt.Errorf("find the Authenticode signer certificate: %w", err)
+		return "", nil, fmt.Errorf("find the Authenticode signer certificate: %w", err)
 	}
 	defer windows.CertFreeCertificateContext(certificate)
 	chars := windows.CertGetNameString(certificate, windows.CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nil, nil, 0)
 	if chars <= 1 || chars > 1024 {
-		return "", errors.New("the Authenticode signer certificate has no display name")
+		return "", nil, errors.New("the Authenticode signer certificate has no display name")
 	}
 	name := make([]uint16, chars)
 	windows.CertGetNameString(certificate, windows.CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nil, &name[0], chars)
-	return windows.UTF16ToString(name), nil
+	if certificate.EncodedCert == nil || certificate.Length == 0 {
+		return "", nil, errors.New("the Authenticode signer certificate is empty")
+	}
+	encoded := append([]byte(nil), unsafe.Slice(certificate.EncodedCert, certificate.Length)...)
+	return windows.UTF16ToString(name), encoded, nil
 }
 
 func windowsLastError(err error) error {
