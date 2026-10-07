@@ -1439,8 +1439,10 @@ func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, inpu
 		}
 	case SandboxActivityInference:
 		eventName, bucket = observability.TelemetryEventSandboxInference, observability.BucketModelIO
+		// A record without a status (OpenShell's is optional) says nothing
+		// of a failure.
 		outcome = observability.OutcomeCompleted
-		if !strings.EqualFold(strings.TrimSpace(input.Status), "success") {
+		if status := strings.TrimSpace(input.Status); status != "" && !strings.EqualFold(status, "success") {
 			outcome = observability.OutcomeFailed
 		}
 	default:

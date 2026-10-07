@@ -167,7 +167,7 @@ held back. Model calls are not paced.
 | --- | --- | --- | --- |
 | `log.sandbox.process` | `PROC:LAUNCH`, `PROC:TERMINATE` | `defenseclaw.sandbox.process.event` (`start`, `exit`), `.source` (`openshell`; `sampled` is the opt-in process tree's), `.pid`, `.executable`, `.command_line` (start only), `.exit_code` (exit only) | `attempted` for a start, `completed` for exit code 0, `failed` otherwise |
 | `log.sandbox.ssh` | `SSH:*` (`sandbox connect`, `exec`, uploads and pulls) | `defenseclaw.sandbox.ssh.activity` (`LISTEN`, `OPEN`, ...), `.auth`, the peer address as `client.address` | `allowed`, `blocked` (OpenShell denied it) or `completed` |
-| `log.sandbox.inference` | `API:INFERENCE` | `gen_ai.provider.name`, `gen_ai.request.model`, `defenseclaw.sandbox.inference.status`, `.latency_ms`, `.operation`; never model content | `completed` for `Success`, `failed` otherwise |
+| `log.sandbox.inference` | `API:INFERENCE` | `gen_ai.provider.name`, `gen_ai.request.model`, `defenseclaw.sandbox.inference.status`, `.latency_ms`, `.operation`; never model content | `failed` for a status other than `Success`, else `completed` (the status is optional) |
 
 The command line is the agent's argument vector, so it is content class: each
 destination's redaction profile governs whether it leaves the host.

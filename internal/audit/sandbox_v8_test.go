@@ -1169,6 +1169,13 @@ func TestSandboxEgressEndsAndActivity(t *testing.T) {
 			},
 		},
 		{
+			name:      "inference without a status",
+			event:     SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivityInference, Provider: "anthropic", Model: "claude-haiku"},
+			eventName: observability.TelemetryEventSandboxInference, bucket: observability.BucketModelIO,
+			outcome: observability.OutcomeCompleted,
+			body:    map[string]any{"gen_ai.request.model": "claude-haiku", "defenseclaw.sandbox.inference.status": nil},
+		},
+		{
 			name:      "failed inference",
 			event:     SandboxActivityEvent{Sandbox: sb, Kind: SandboxActivityInference, Status: "Error", Model: "bad model name"},
 			eventName: observability.TelemetryEventSandboxInference, bucket: observability.BucketModelIO,

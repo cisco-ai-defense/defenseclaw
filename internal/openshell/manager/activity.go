@@ -91,5 +91,7 @@ func (m *Manager) inferenceEvent(ctx context.Context, b *box, id audit.SandboxId
 		Sandbox: id, Kind: audit.SandboxActivityInference, Provider: r.Provider, Model: r.Model, Status: r.Status,
 		Latency: time.Duration(r.LatencyMS) * time.Millisecond, Operation: r.Operation, Timestamp: at,
 	})
-	m.observeInference(b, r.Provider, r.Model, !strings.EqualFold(r.Status, "success"), at)
+	// A record without a status says nothing of a failure.
+	status := strings.TrimSpace(r.Status)
+	m.observeInference(b, r.Provider, r.Model, status != "" && !strings.EqualFold(status, "success"), at)
 }

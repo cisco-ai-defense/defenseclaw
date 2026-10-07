@@ -207,12 +207,17 @@ func TestOCSFActivityRecords(t *testing.T) {
 		"SSH:OPEN [INFO] ALLOWED 10.42.0.1:48201 [auth:NSSH1]",
 		"API:INFERENCE [INFO] Success claude-haiku via anthropic 812ms [messages:create]",
 		"API:INFERENCE [INFO] Error claude-haiku via anthropic 90ms [messages:create]",
+		// The status is optional: none is no failure.
+		"API:INFERENCE [INFO] claude-haiku via anthropic 90ms [messages:create]",
 	} {
 		e.ocsf("actbox", line, at)
 	}
 	acts := where(&e.tel.mu, &e.tel.activity, nil)
-	if len(acts) != 5 {
+	if len(acts) != 6 {
 		t.Fatalf("activity = %+v", acts)
+	}
+	if i := acts[5]; i.Kind != audit.SandboxActivityInference || i.Model != "claude-haiku" || i.Status != "" {
+		t.Fatalf("inference without a status = %+v", i)
 	}
 	if p := acts[0]; p.Kind != audit.SandboxActivityProcess || p.ProcessEvent != audit.SandboxProcessStart || p.PID != 42 ||
 		p.Executable != "python3" || p.CommandLine != "python3 /work/app/main.py dccert-block-marker" || p.UserName != "dev" {
@@ -229,7 +234,7 @@ func TestOCSFActivityRecords(t *testing.T) {
 		t.Fatalf("inference = %+v", i)
 	}
 	d, err := e.m.Destinations(context.Background(), "actbox")
-	if err != nil || len(d.Models) != 1 || d.Models[0].Calls != 2 || d.Models[0].Failed != 1 || d.Models[0].Model != "claude-haiku" {
+	if err != nil || len(d.Models) != 1 || d.Models[0].Calls != 3 || d.Models[0].Failed != 1 || d.Models[0].Model != "claude-haiku" {
 		t.Fatalf("models = %+v, %v", d, err)
 	}
 	for i := range activityBurst + 50 {
