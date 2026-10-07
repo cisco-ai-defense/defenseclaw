@@ -1042,7 +1042,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if err != nil {
 			message := err.Error()
 			if refusal := l.configRefusal(ctx); refusal != "" {
-				message += "; the restored deployment's gateway is refused the same way: " + refusal
+				message += "; the restored deployment's gateway refuses the configuration the same way: " + refusal
 			}
 			r.AddError(codeRollbackFailed, message)
 		} else {
@@ -1212,7 +1212,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
-	l.clearSupersededPackageFailure()
+	l.clearSupersededFailures()
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}

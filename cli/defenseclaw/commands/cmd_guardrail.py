@@ -4096,9 +4096,11 @@ def mode_cmd(
     pack and port are never touched. A connector without its own fail mode
     fails open in observe mode and uses the global hook fail mode
     (``guardrail fail-mode``) in action mode; the command says when that
-    changes. The running gateway applies a mode change on its next reload;
-    only a change of a hook's fail mode restarts it (``--no-restart`` to
-    skip; a stopped gateway is never started).
+    changes. The running gateway applies a mode change on its next reload.
+    A changed hook fail mode is re-rendered into the hook scripts of Claude
+    Code, Codex, Amp and OpenCode in place; the other hook connectors need a
+    gateway restart (``--no-restart`` to skip; a stopped gateway is never
+    started).
     """
     from defenseclaw import policy_catalog
 
@@ -4255,8 +4257,7 @@ def mode_cmd(
     fail_after = {c: gc.effective_hook_fail_mode(c) for c in affected}
     fail_flips = {c: fm for c, fm in fail_after.items() if fm != fail_before[c]}
     if fail_flips:
-        # Only hook connectors bake a fail mode into their registration; the
-        # gateway re-bakes it when it restarts.
+        # Only hook connectors bake a fail mode into their registration.
         from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
 
         fail_flips = {c: fm for c, fm in fail_flips.items() if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS}
@@ -4269,9 +4270,18 @@ def mode_cmd(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
     # Decisions read the gateway's live configuration generation, so a mode
-    # change reloads hot; only a hook fail mode setup bakes into a hook
-    # needs a restart to re-bake it.
-    outcome = _apply_to_running_gateway(app, needs_restart=bool(fail_flips), restart=restart, quiet=json_out)
+    # change reloads hot. A hook fail mode that flipped is baked into the hook
+    # script: connectors with a runtime registration are re-rendered in place,
+    # as ``guardrail fail-mode`` does, and only the rest (or a failed
+    # re-render) restart the gateway so it re-bakes them.
+    needs_restart = {c for c in fail_flips if normalize_connector(c) not in _RUNTIME_FAIL_MODE_CONNECTORS}
+    if fail_flips and gc.enabled:
+        for c in set(fail_flips) - needs_restart:
+            try:
+                reconcile_connector_registration(app.cfg, c)
+            except OSError:
+                needs_restart.add(c)
+    outcome = _apply_to_running_gateway(app, needs_restart=bool(needs_restart), restart=restart, quiet=json_out)
 
     plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
     if connector_key is None:

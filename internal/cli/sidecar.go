@@ -329,14 +329,14 @@ func sidecarDiagEnabled() bool {
 	return false
 }
 
+// tokenStatus says whether the gateway has a token, never any part of it: the
+// banner reaches the service journal and the lifecycle copies journal lines
+// into the package manager's log.
 func tokenStatus(token string) string {
 	if token == "" {
 		return "none (will use device identity only)"
 	}
-	if len(token) > 8 {
-		return token[:4] + "..." + token[len(token)-4:]
-	}
-	return "***"
+	return "set"
 }
 
 // fleetBannerLine names the OpenClaw gateway the sidecar dials, or says it

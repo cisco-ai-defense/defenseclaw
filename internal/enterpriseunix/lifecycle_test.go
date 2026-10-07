@@ -1370,17 +1370,3 @@ func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
 		t.Fatalf("vendor rule mode %04o under umask 077", got)
 	}
 }
-
-// GAP-1193: a connector that inherits the global rule pack is not checked
-// again, so a refusal names guardrail.rule_pack_dir.
-func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
-	got := rulePackCheckOrder(map[string]string{
-		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
-		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
-		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
-	})
-	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("order = %v, want %v", got, want)
-	}
-}

@@ -170,6 +170,10 @@ type PolicyState struct {
 	// gateway rejected its last reload. While it is set the gateway enforces
 	// an older policy than the installed config, so Applied is false.
 	LastReloadError string `json:"last_reload_error,omitempty"`
+	// ConfigUnrecorded is true when config.yaml was changed outside the
+	// lifecycle: its generation is not the one config.generation.json
+	// records, and the running gateway may already enforce it.
+	ConfigUnrecorded bool `json:"config_unrecorded,omitempty"`
 }
 
 // PolicyStateFileName is the lifecycle state file holding the last applied

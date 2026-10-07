@@ -36,9 +36,23 @@ func unlock(f *os.File) {
 	_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, new(windows.Overlapped))
 }
 
-// keepOwner is a no-op: the temp file inherits the directory's DACL, as the
-// previous Go writers did.
-func keepOwner(*os.File, string) {}
+// keepOwner gives the temp file the DACL of the file it replaces. A managed
+// config carries a DACL the lifecycle set (the gateway service account may
+// read it), and a temp file inherits the directory's instead, so a hot
+// replace while the gateway runs would leave it unable to read the new
+// config. A file that does not exist yet keeps the inherited DACL.
+func keepOwner(tmp *os.File, target string) {
+	descriptor, err := windows.GetNamedSecurityInfo(target, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return
+	}
+	_ = windows.SetNamedSecurityInfo(tmp.Name(), windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+}
 
 // replaceDurable is MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH), retried for
 // the short sharing locks that indexers and scanners take (bounded, about

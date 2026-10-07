@@ -307,7 +307,7 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("embedded vendor policies: %w", err)
 	}
-	for _, label := range rulePackCheckOrder(dirs) {
+	for _, label := range config.RulePackCheckOrder(dirs) {
 		dir := strings.TrimSpace(dirs[label])
 		if dir == "" {
 			continue
@@ -353,7 +353,7 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 // failed only when the gateway started; an unset rule_pack_dir resolves to
 // the same <policy_dir>/guardrail/default folder, so the rollback failed too.
 func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error {
-	for _, label := range rulePackCheckOrder(v.RulePacks) {
+	for _, label := range config.RulePackCheckOrder(v.RulePacks) {
 		dir := v.RulePacks[label]
 		if dir == e.Layout.VendorPolicyDir || strings.HasPrefix(dir, e.Layout.VendorPolicyDir+"/") {
 			continue
@@ -427,35 +427,6 @@ func accountMayAccess(uid, gid int, mode os.FileMode, account Account, need os.F
 		perm >>= 3
 	}
 	return perm&need == need
-}
-
-// rulePackCheckOrder orders the rule-pack settings for a check:
-// guardrail.rule_pack_dir first, then each connector setting whose pack
-// differs from it. A connector that only inherits the global pack is not
-// checked again, so a refusal names the key the administrator wrote: it
-// named guardrail.connectors.amp.rule_pack_dir, which sorts first, for a
-// config that set only guardrail.rule_pack_dir (GAP-1193).
-func rulePackCheckOrder(dirs map[string]string) []string {
-	global := "guardrail.rule_pack_dir"
-	if _, ok := dirs["guardrail.rule_pack"]; ok {
-		global = "guardrail.rule_pack"
-	}
-	globalDir, hasGlobal := dirs[global]
-	globalDir = strings.TrimSpace(globalDir)
-	order := []string{}
-	if hasGlobal {
-		order = append(order, global)
-	}
-	for _, label := range sortedKeys(dirs) {
-		if label == global {
-			continue
-		}
-		if dir := strings.TrimSpace(dirs[label]); hasGlobal && globalDir != "" && filepath.Clean(dir) == filepath.Clean(globalDir) {
-			continue
-		}
-		order = append(order, label)
-	}
-	return order
 }
 
 func vendorPolicyDirExists(files []policyassets.File, rel string) bool {
