@@ -254,8 +254,8 @@ These are the attributes per-user installs reported for one Entra ID user,
 | `defenseclaw.session.kind` | Not reported: a remote desktop session is only claimed | `ssh` with `client.address`, confirmed through logind |
 
 A `users` assignment that names the UPN selected the profile on both. On
-Windows, name an Entra user to `guardrail profile explain --user` by SID or as
-`AzureAD\<name>`: the computer cannot look up a UPN.
+Windows, name an Entra user to `guardrail profile explain --user` by SID, as
+`AzureAD\<name>`, by the bare name or by the UPN.
 
 ## Limits, stated plainly
 
