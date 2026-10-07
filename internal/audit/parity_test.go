@@ -190,7 +190,9 @@ func TestMultiConnectorSinkParity(t *testing.T) {
 	// Structured-logs sink (hook audit envelope). Standalone hook rows also
 	// carry the verified caller, and the envelope refuses undeclared keys.
 	hookProps := schemaProperties(t, filepath.Join(repoRoot, "schemas", "hook-audit-envelope.json"))
-	for _, f := range append(connectorFields, "user.id", "defenseclaw.user.id_kind", "defenseclaw.user.name") {
+	// The rule-pack directory is a path: it rides in the SQLite column and its own
+	// path-class field, not in the envelope text (GAP-0131).
+	for _, f := range []string{"connector", "step_idx", "enforced", "user.id", "defenseclaw.user.id_kind", "defenseclaw.user.name"} {
 		if _, ok := hookProps[f]; !ok {
 			t.Errorf("hook-audit-envelope.json missing property %q", f)
 		}
