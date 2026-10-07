@@ -103,6 +103,26 @@ def refuse_if_managed(cfg: Any, *, target_type: str = "", op: str = "", name: st
         raise ManagedDeviceError()
 
 
+def refuse_config_writer_on_managed_device(cfg: Any, command: str, target: str = "config") -> None:
+    """Refuse a local config writer (``registry``, ``setup redaction``) on a managed
+    standalone device: audited, plain and exit 3, before the command previews, prompts or
+    touches a file. Without it the same refusal came late, as exit 1 after a preview or
+    wrapped in 'previous configuration restored' (GAP-0052)."""
+    from defenseclaw import config_writer
+    from defenseclaw.config import config_path_for_data_dir
+
+    managed = is_managed_standalone(cfg)
+    if not managed and getattr(cfg, "data_dir", ""):
+        # The writer's own gate: the deployment pin in the environment counts too.
+        try:
+            config_writer.refuse_when_managed(config_path_for_data_dir(cfg.data_dir))
+        except config_writer.ManagedConfigWriteError:
+            managed = True
+    if managed:
+        audit_managed_config_refusal(target, command)
+        raise ManagedDeviceError(config_writer.MANAGED_REFUSAL)
+
+
 def refuse_on_managed_device(target_type: str, op: str, name_arg: str = "name"):
     """Decorator for a block, allow or unblock command (under ``@pass_ctx``).
 
