@@ -26,7 +26,12 @@ from click.testing import CliRunner
 from defenseclaw import config_writer, rulepack_validation
 from defenseclaw import policy_catalog as pc
 from defenseclaw.commands import cmd_guardrail
-from defenseclaw.config import GuardrailRulesConfig, PerConnectorGuardrailConfig, default_config
+from defenseclaw.config import (
+    GuardrailRulesConfig,
+    PerConnectorGuardrailConfig,
+    config_path_for_data_dir,
+    default_config,
+)
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
@@ -121,6 +126,13 @@ def test_rule_and_suppress_wrappers(env) -> None:
             [{"id": "SUPP-BUILD", "finding_pattern": "JUDGE-PII-IP", "reason": "build farm"}],
         )
     ]
+    # The list is read from config.yaml under the writer lock, so another writer's entry made
+    # after this process loaded its config is kept, not overwritten (GAP-0304).
+    config_path_for_data_dir(app.cfg.data_dir).write_text(
+        "config_version: 9\nguardrail:\n  rules:\n    disable: [OTHER-RULE]\n", encoding="utf-8"
+    )
+    assert _run(app, "rule", "disable", "SEC-AWS-KEY").exit_code == 0
+    assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", ["OTHER-RULE", "SEC-AWS-KEY"])]
 
 
 def test_rule_enable_of_a_rule_the_pack_ships_on_only_drops_its_disable_entry(env) -> None:

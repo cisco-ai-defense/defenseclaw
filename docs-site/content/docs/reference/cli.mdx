@@ -174,8 +174,8 @@ runs the comparison for you, in the **Policy** row below.
 | --- | --- | --- |
 | Policy | PASS | `generation N, digest sha256:... (applied by the gateway)`. The gateway applies what `config.yaml` and its assets compute to. |
 | Policy | FAIL | Either the last change was rejected (`... is still enforcing: the last change was rejected (<reason>)`; fix the change the reason names, and the gateway applies it once it builds) or the gateway applies a different digest than `config.yaml` and its assets compute to (stale; run `defenseclaw-gateway restart`, or read `defenseclaw-gateway status` for a rejected reload). |
-| Policy | WARN | `config.yaml was edited outside the DefenseClaw writer`: the edit is not yet in `config.generation.json`. On a per-user install the running gateway records a hand edit itself (actor `hand-edit:<user>`) and the row clears; make later changes with `defenseclaw config set`, the TUI or `defenseclaw setup`. |
-| Policy | SKIP | The gateway is not running, so there is nothing to compare. |
+| Policy | WARN | `config.yaml was edited outside the DefenseClaw writer`: the edit is not yet in `config.generation.json`. Doctor reads that file itself, so it warns with the gateway stopped too. On a per-user install the running gateway records a hand edit itself (actor `hand-edit:<user>`) and the row clears; make later changes with `defenseclaw config set`, the TUI or `defenseclaw setup`. |
+| Policy | SKIP | The gateway is not running and `config.yaml` is the file the writer last recorded, so there is nothing to compare. |
 | Config validation | FAIL | `config.yaml` is not valid, for example after a hand edit; the line names the field to fix. A running gateway keeps the config it started with. When the file does not parse or breaks the schema, doctor stops at the config checks until you fix it. |
 | Retired policy data | WARN | A leftover `policies/rego/data.json` (or `policies/data.json`) is ignored since `config_version` 9, because admission and thresholds live in `config.yaml`. Review `defenseclaw config get admission`, then remove the file. |
 | Config migration | PASS or WARN | `migrated to 9 on <date>: N value(s) moved, N conflict(s); details in .../migration-v9.json`. It shows until you acknowledge it with `defenseclaw config migrate --ack`, and is a WARN when the migration recorded conflicts. |
@@ -818,7 +818,7 @@ These commands are connector-aware because the same asset name can exist in more
 | `defenseclaw mcp set\|unset <name> [--connector X]` | Add, update or remove an MCP server in the connector's own MCP config. `mcp set` / `unset` write every configured connector source by default; `--connector X` writes one connector's MCP source. This edits the agent's config, not `config.yaml`. |
 | `defenseclaw plugin block\|allow\|unblock <name> [--reason R] [--connector X]` | The same for a plugin. |
 | `defenseclaw plugin remove\|disable\|enable\|quarantine\|restore\|info <name> [--connector X]` | Remove a plugin's files, disable or re-enable it, quarantine or restore it, or show its details, across configured connector copies by default or one connector when scoped. |
-| `defenseclaw tool block\|allow <name> [--connector X] [--source S] [--reason R]` | Put a tool on the block or allow list. Bare rules are the fallback tier for every configured connector. A connector-scoped rule (`--connector X`, or the name given as `@X/<name>`, the form `tool list` shows) is stored as the tool name with `connector: X` in `asset_policy.tool`. `--source` is recorded for audit only: hook payloads carry no tool source, so a source-scoped block is enforced as an unscoped block. |
+| `defenseclaw tool block\|allow <name> [--connector X] [--source S] [--reason R]` | Put a tool on the block or allow list. Bare rules are the fallback tier for every configured connector. A connector-scoped rule (`--connector X`, or the name given as `@X/<name>`, the form `tool list` shows) is stored as the tool name with `connector: X` in `asset_policy.tool`. `--source` is recorded for audit only: hook payloads carry no tool source, so a source-scoped block is enforced as an unscoped block, and a source-scoped allow, which would never apply, is refused. |
 | `defenseclaw tool unblock <name> [--connector X] [--source S]` | Remove a tool from the block/allow list. Without `--connector` or `--source` it removes the fallback entry and the connector-specific overrides for this tool. |
 | `defenseclaw tool status <name> [--connector X] [--source S] [--json]` | Show the effective policy for one tool. |
 | `defenseclaw tool list [--blocked\|--allowed] [--connector X] [--json]` | List tool policy entries. |
@@ -1009,7 +1009,8 @@ changes nothing and says so (`guardrail.block_at already has that value
 are booleans, so `off`, `on`, `yes` and `no` are text and
 `defenseclaw config set ai_discovery.ide_inventory off` sets that enum value. `config unset` of a key that is not set says its default
 already applies, and exits `1` for a key that does not exist, such as a
-misspelled one.
+misspelled one. Neither command changes `config_version`: only
+`defenseclaw migrate` does.
 
 - **A list item or a whole value as JSON.** Quote a path that has brackets in
   your shell, and use `--json` for anything that is not a single scalar:

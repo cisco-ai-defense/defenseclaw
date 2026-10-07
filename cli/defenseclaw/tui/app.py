@@ -1389,7 +1389,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.skills_model = skills_model or SkillsPanelModel(connector=connector)
         self.mcps_model = mcps_model or MCPsPanelModel(connector=connector)
         self.plugins_model = plugins_model or PluginsPanelModel(connector=connector)
-        self.tools_model = tools_model or ToolsPanelModel(audit_store)
+        self.tools_model = tools_model or ToolsPanelModel(audit_store, config=config)
         self.logs_model = logs_model or LogsPanelModel(self.data_dir, store=audit_store)
         self.audit_model = audit_model or AuditPanelModel(audit_store)
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
@@ -13715,6 +13715,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.setup_model.set_config(new_cfg, external=external)
         self.sandbox_model.set_config(new_cfg)
         self.policy_model.set_config(new_cfg)
+        self.tools_model.config = new_cfg
         if self.policy_model.loaded:
             # Scope postures (mode, approval, packs) come from config.yaml.
             self._schedule_policy_load()

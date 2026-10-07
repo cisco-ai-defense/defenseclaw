@@ -996,12 +996,14 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
 
 
 class ToolsPanelModel(CatalogListModel[ToolRow]):
-    """Pure Tools panel state backed by audit-store tool action rows."""
+    """Tools panel state: the asset_policy.tool rules in config.yaml (the
+    audit-store rows on Secure Client), as ``defenseclaw tool list`` shows them."""
 
-    def __init__(self, store: object | None = None, *, connector: str = "") -> None:
+    def __init__(self, store: object | None = None, *, connector: str = "", config: object | None = None) -> None:
         super().__init__(filter_fields=("name", "scope", "status", "reason", "target_name"))
         self.store = store
         self.connector = connector
+        self.config = config
 
     def load_intent(self) -> CatalogCommandIntent:
         return CatalogCommandIntent(
@@ -1024,11 +1026,13 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         return parse_tool_list_json(text)
 
     def refresh(self) -> None:
-        if self.store is None:
+        if self.store is None and self.config is None:
             self.apply_filter()
             return
+        from defenseclaw.enforce.policy import tool_rule_entries
+
         try:
-            entries = self.store.list_actions_by_type("tool")
+            entries = tool_rule_entries(self.config, self.store)
         except Exception as exc:  # noqa: BLE001 - panel state renders store errors.
             self.message = f"Error loading tools: {exc}"
             self._clamp_cursor()

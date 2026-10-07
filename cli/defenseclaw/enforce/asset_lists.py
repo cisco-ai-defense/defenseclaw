@@ -480,6 +480,22 @@ def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) 
             base[key] = copy.deepcopy(current.get(key, []))
 
 
+def tool_policy_on_disk(cfg: Any) -> Any:
+    """``asset_policy.tool`` as config.yaml holds it now; the loaded one when
+    the file is missing or can't be read."""
+    import yaml
+
+    from defenseclaw.config import _merge_asset_tool_policy, config_path_for_data_dir, parse_config_yaml
+
+    try:
+        with open(config_path_for_data_dir(getattr(cfg, "data_dir", None) or None), encoding="utf-8") as handle:
+            document = parse_config_yaml(handle.read())
+    except (OSError, ValueError, yaml.YAMLError):
+        return getattr(getattr(cfg, "asset_policy", None), "tool", None)
+    section = document.get("asset_policy") if isinstance(document, dict) else None
+    return _merge_asset_tool_policy(section.get("tool") if isinstance(section, dict) else None)
+
+
 def has_entry(cfg: Any, store: Any, target_type: str, name: str, connector: str, decision: str) -> bool:
     """True when the operator list holds a rule for ``name`` at exactly this
     connector scope ("" is the unscoped rule): ``decision`` "block" reads

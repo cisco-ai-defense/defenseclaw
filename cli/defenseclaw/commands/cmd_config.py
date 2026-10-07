@@ -628,6 +628,17 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     return True
 
 
+def _refuse_config_version(parts: list) -> None:
+    """config_version names the schema the file is written in; only the
+    migration changes it. Relabelling a version 9 file as 8 made the next
+    migration back it up as the 0.8.x original (config.yaml.v8.bak)."""
+    if parts and parts[0] == "config_version":
+        raise click.ClickException(
+            "config_version is set by the migration ('defenseclaw migrate'), not by config set or unset; "
+            "config.yaml was not changed."
+        )
+
+
 @config_cmd.command("set")
 @click.argument("key")
 @click.argument("value")
@@ -646,10 +657,11 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
     from defenseclaw.config_writer import Change, parse_path
 
     try:
-        parse_path(key)
+        parts = list(parse_path(key))
         parsed = json.loads(value) if as_json else load_config_value(value)
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
+    _refuse_config_version(parts)
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
 
 
@@ -670,13 +682,15 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         parsed = [(key, list(parse_path(key))) for key in keys]
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
+    for _key, parts in parsed:
+        _refuse_config_version(parts)
     if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
         return
     # Nothing was removed: a key with a default is already unset, anything
     # else is not a configuration key (a typo must not look like success).
     for key, parts in parsed:
         view = _key_view(app, parts)
-        if not _admission_layer_key(parts) and not _lookup(view, parts)[0]:
+        if not _admission_layer_key(parts) and not _lookup(view, parts)[0] and not _unlisted_entry_key(parts):
             if _is_destination_key(parts):
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
@@ -741,6 +755,50 @@ def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
         else:
             return False, None
     return True, value
+
+
+def _unlisted_entry_key(parts: list) -> bool:
+    """Whether *parts* is a config_version 9 key under a map entry config.yaml
+    does not list, such as guardrail.connectors.codex.block_at or
+    guardrail.custom_packs.foo: the resolved view has no entry for that name
+    to look the key up in, but the schema declares it."""
+    schema = _v8_schema()
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    def _names_ok(rule: object, name: str) -> bool:
+        rule = _resolve(rule)
+        if not isinstance(rule, dict):
+            return True
+        if "enum" in rule and name not in rule["enum"]:
+            return False
+        if not rule.get("minLength", 0) <= len(name) <= rule.get("maxLength", len(name)):
+            return False
+        return "pattern" not in rule or re.search(str(rule["pattern"]), name) is not None
+
+    node: object = schema
+    removed: object = defs.get("v9SourceConstraints") or {}
+    through_entry = False
+    for part in parts:
+        node = _resolve(node)
+        if not isinstance(node, dict) or not isinstance(part, str):
+            return False
+        removed = removed if isinstance(removed, dict) else {}
+        properties = node.get("properties") or {}
+        if part in properties:
+            node, removed = properties[part], (removed.get("properties") or {}).get(part, {})
+        elif isinstance(node.get("additionalProperties"), dict) and _names_ok(node.get("propertyNames"), part):
+            node, removed = node["additionalProperties"], removed.get("additionalProperties", {})
+            through_entry = True
+        else:
+            return False
+        if removed is False:
+            return False
+    return through_entry
 
 
 def _v8_schema() -> dict:

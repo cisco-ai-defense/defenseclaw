@@ -758,9 +758,14 @@ def fail_mode_transaction_lock(cfg: Any) -> Iterator[None]:
 
 
 def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[FileSnapshot, ...]:
-    paths = {config_module.config_path_for_data_dir(cfg.data_dir)}
+    """Snapshot the registration files a fail-mode change can rewrite.
+
+    config.yaml is not part of it: the caller reverts its modeled change and
+    saves again through the single writer, which keeps concurrent edits and
+    records the rollback as a new generation.
+    """
     hook_dir = Path(cfg.data_dir) / "hooks"
-    paths.update(
+    paths = set(
         {
             hook_dir / ".hookcfg",
             hook_dir / ".hookcfg.legacy",

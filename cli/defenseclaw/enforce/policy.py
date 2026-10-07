@@ -38,6 +38,34 @@ if TYPE_CHECKING:
     from defenseclaw.db import Store
 
 
+def _tool_policy_entries(tools: Any) -> list[ActionEntry]:
+    """asset_policy.tool rules as ActionEntry rows. config.yaml stores no
+    time for a rule, so ``updated_at`` is None (shown as "-"), never the
+    time of the read."""
+    out: list[ActionEntry] = []
+    for decision, rules in (("block", getattr(tools, "denied", [])), ("allow", getattr(tools, "allowed", []))):
+        for rule in rules or []:
+            target = f"@{rule.connector}/{rule.name}" if rule.connector else rule.name
+            out.append(ActionEntry(
+                id=f"asset_policy:tool:{target}", target_type="tool", target_name=target,
+                actions=ActionState(install=decision), reason=rule.reason, updated_at=None,
+            ))
+    return out
+
+
+def tool_rule_entries(cfg: Any | None, store: Store | None) -> list[ActionEntry]:
+    """The tool rules ``defenseclaw tool list`` shows, as config.yaml holds them now.
+
+    For a long-running reader such as the TUI: the CLI it runs writes
+    ``asset_policy.tool`` to config.yaml, so the config loaded at start would
+    miss every later rule. Secure Client (and a reader with no config) keeps
+    the audit.db rows.
+    """
+    if cfg is None or asset_lists.is_secure_client(cfg):
+        return store.list_actions_by_type("tool") if store else []
+    return _tool_policy_entries(asset_lists.tool_policy_on_disk(cfg))
+
+
 class PolicyEngine:
     def __init__(self, store: Store | None, cfg: Any | None = None) -> None:
         self.store = store
@@ -176,16 +204,7 @@ class PolicyEngine:
     def _tool_entries(self) -> list[ActionEntry]:
         if self._legacy_rows():
             return self.store.list_actions_by_type("tool") if self.store else []
-        tools = getattr(self._asset_policy(), "tool", None)
-        out: list[ActionEntry] = []
-        for decision, rules in (("block", getattr(tools, "denied", [])), ("allow", getattr(tools, "allowed", []))):
-            for rule in rules or []:
-                target = f"@{rule.connector}/{rule.name}" if rule.connector else rule.name
-                out.append(ActionEntry(
-                    id=f"asset_policy:tool:{target}", target_type="tool", target_name=target,
-                    actions=ActionState(install=decision), reason=rule.reason,
-                ))
-        return out
+        return _tool_policy_entries(getattr(self._asset_policy(), "tool", None))
 
     # ------------------------------------------------------------------
     # Enforcement journal (audit.db actions)

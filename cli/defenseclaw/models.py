@@ -167,7 +167,7 @@ class ActionEntry:
     source_path: str = ""
     actions: ActionState = field(default_factory=ActionState)
     reason: str = ""
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime | None = field(default_factory=lambda: datetime.now(timezone.utc))
     # Connector scoping (SK-4): "" means the entry is global — it applies to
     # every connector. A non-empty value scopes the action to one connector
     # (e.g. "hermes"). Mirrors ActionEntry.Connector in internal/audit/store.go.

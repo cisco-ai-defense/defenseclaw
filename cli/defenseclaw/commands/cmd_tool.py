@@ -269,8 +269,8 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
       --connector C   blocks the tool for connector C only (shown as @C/<tool>;
                       NAME may be given in that form); enforced per connector.
       --source S      audit only: the runtime payload carries no source, so a
-                      scoped block fail-closes to an unscoped block and a scoped
-                      audit row is kept for operator visibility.
+                      scoped block fail-closes to an unscoped block; the source
+                      is kept in the audit log.
       (neither)       block every configured connector through the fallback row.
 
     \b
@@ -301,6 +301,12 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
         # and the source stays in the audit record only. Use --connector for
         # runtime-scoped blocks.
         pe.block("tool", name, reason)
+        if asset_lists.is_secure_client(app.cfg):
+            # Secure Client keeps the scoped audit row main writes (#1092).
+            pe.block(
+                "tool", _target_name(name, source),
+                f"{reason} (scoped audit; runtime enforces as unscoped fallback)",
+            )
         log_scope = _target_name(name, source)
         ux.echo(
             f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
@@ -349,8 +355,9 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     Scope:
       --connector C   allows the tool for connector C only (shown as @C/<tool>;
                       NAME may be given in that form); runtime-enforceable.
-      --source S      audit only — a source allow is recorded but never read at
-                      runtime (the payload carries no source). Use --connector.
+      --source S      refused: the runtime payload carries no source, so a
+                      source allow would never apply (Secure Client keeps an
+                      audit-only row). Use --connector.
       (neither)       allow every configured connector through the fallback row.
 
     \b
@@ -361,6 +368,12 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     from defenseclaw.enforce import PolicyEngine
 
     name, connector = _resolve_name_scope(app, name, connector, source)
+    if source and not asset_lists.is_secure_client(app.cfg):
+        raise click.ClickException(
+            f"a --source allow is not stored: a tool call carries no source, so it would never apply. "
+            f"Use --connector C to allow {name!r} for one connector, or neither to allow it everywhere. "
+            "Nothing was changed."
+        )
     if not reason:
         reason = "manual allow via CLI"
 
@@ -371,12 +384,13 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
         target = _connector_target(name, connector)
         scope_note = f" (connector {connector!r})"
     else:
-        # Global, or source-scoped audit row (never read at runtime).
+        # Global, or (Secure Client only) a source-scoped audit row that the
+        # runtime never reads.
         target = _target_name(name, source)
         cleared_connectors = []
         if not source:
             cleared_connectors = _clear_tool_connector_install_overrides(pe, name)
-            pe.allow("tool", target, reason)
+        pe.allow("tool", target, reason)
         if source:
             scope_note = f" (source {source!r}; audit-only — not runtime-enforced)"
         else:
@@ -451,6 +465,15 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
         )
         _echo_cleared_connector_overrides(cleared_connectors)
         return
+    elif not asset_lists.is_secure_client(app.cfg):
+        # Nothing is stored per source: a --source block is the unscoped block.
+        click.echo(
+            f"{ux.dim('[tool]')} {name!r}{scope_note} has no block/allow state to clear: "
+            f"a source-scoped rule is not stored (run 'defenseclaw tool unblock {name}' for the unscoped one)"
+        )
+        return
+    else:
+        pe.unblock("tool", target)
 
     if app.logger:
         saved_change_audit(app.logger).log_action("tool-unblock", target, "removed from block/allow list")
