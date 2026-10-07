@@ -157,15 +157,10 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 			continue
 		}
 		seenHome[key] = struct{}{}
-		grants := make([]inventoryDACLGrant, 0, len(inventoryDACLDotdirs)+len(inventoryDACLListOnlyDirs))
-		for _, dotdir := range inventoryDACLDotdirs {
-			if _, owned := guardianOwned[key][dotdir]; !owned {
-				grants = append(grants, inventoryDACLGrant{dotdir, ensureInventoryReadACE})
-			}
-		}
-		for _, dir := range inventoryDACLListOnlyDirs {
-			grants = append(grants, inventoryDACLGrant{dir, ensureInventoryListACE})
-		}
+		// The standalone profile (ideInventory) refuses links on the agent
+		// folders as it does on the IDE folders; the Secure Client profile
+		// keeps the grants it always made.
+		grants := inventoryDACLAgentGrants(home, guardianOwned[key], ideInventory)
 		if ideInventory {
 			grants = append(grants, inventoryDACLIDEGrants(home)...)
 		}
@@ -222,6 +217,38 @@ func inventoryDACLGuardianOwnedByHome(manifest Manifest) map[string]map[string]s
 type inventoryDACLGrant struct {
 	dir    string
 	ensure func(string, *windows.SID) (inventoryDACLResult, error)
+}
+
+// inventoryDACLAgentGrants lists the agent folders (read, inherited) and the
+// list-only install folders of one profile, leaving out the dotdirs the
+// guardian owns there. With rejectLinks nothing is granted through a link or
+// other reparse point below the profile: a standard user who replaced
+// ~\.claude with a junction to a folder SYSTEM can modify would otherwise give
+// the gateway service a read ACE on that folder at the next enumerator cycle,
+// because the grant stats and sets the DACL by name, and both follow the link
+// (GAP-0197).
+func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, rejectLinks bool) []inventoryDACLGrant {
+	grant := func(rel string, ensure func(string, *windows.SID) (inventoryDACLResult, error)) inventoryDACLGrant {
+		if !rejectLinks {
+			return inventoryDACLGrant{rel, ensure}
+		}
+		return inventoryDACLGrant{rel, func(path string, sid *windows.SID) (inventoryDACLResult, error) {
+			if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+				return inventoryDACLSkippedMissing, err
+			}
+			return ensure(path, sid)
+		}}
+	}
+	grants := make([]inventoryDACLGrant, 0, len(inventoryDACLDotdirs)+len(inventoryDACLListOnlyDirs))
+	for _, dotdir := range inventoryDACLDotdirs {
+		if _, owned := guardianOwned[dotdir]; !owned {
+			grants = append(grants, grant(dotdir, ensureInventoryReadACE))
+		}
+	}
+	for _, dir := range inventoryDACLListOnlyDirs {
+		grants = append(grants, grant(dir, ensureInventoryListACE))
+	}
+	return grants
 }
 
 // inventoryDACLIDEGrants lists the IDE folders and files of one profile that
