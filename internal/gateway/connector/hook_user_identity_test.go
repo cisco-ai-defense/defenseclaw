@@ -5,7 +5,11 @@
 package connector
 
 import (
+	"encoding/json"
+	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -353,5 +358,51 @@ func TestManagedShellHookTakesSessionFactsFromTheAdministratorBinary(t *testing.
 	}
 	if out := run(); strings.Contains(out, "krb=") {
 		t.Fatalf("managed hook without the binary sent a principal:\n%s", out)
+	}
+}
+
+// The in-agent plugins cannot read a Kerberos credential cache, so a
+// per-user plugin asks the user's gateway binary (hook session-facts), as the
+// shell hooks do, and sends the whole value: the OpenCode plugin used to send
+// the SSH and logind variables alone, so its records carried no
+// defenseclaw.session.kerberos_principal (GAP-0125).
+func TestOpenCodePluginSendsTheKerberosPrincipal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in gateway binary is a shell script")
+	}
+	home := t.TempDir()
+	binary := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
+	if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n[ \"$1 $2\" = \"hook session-facts\" ] || exit 1\nprintf 'v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST'\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
+	t.Setenv("KRB5CCNAME", "FILE:/nonexistent")
+	var mu sync.Mutex
+	var facts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		if payload.Event == "tool.execute.before" {
+			mu.Lock()
+			facts = append(facts, r.Header.Get("X-DefenseClaw-Session-Facts"))
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"action":"allow","mode":"action"}`)
+	}))
+	t.Cleanup(server.Close)
+	runOpenCodePluginHarness(t, openCodePluginTestData(t, server), 1)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(facts) != 1 || facts[0] != "v1;k=ssh;ca=192.0.2.10;krb=alice@EXAMPLE.TEST" {
+		t.Fatalf("session facts sent by the plugin = %q", facts)
 	}
 }
