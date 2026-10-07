@@ -99,6 +99,43 @@ stopped`. Nothing is changed; use the install command above.
 - Removed the `binary_drift` and `tamper_attempt` sandbox finding kinds,
   which nothing produced.
 
+### Sandbox policy: extend packs, repository policy, record then lock, test
+
+- A custom sandbox pack can extend one parent with `extends:` (a built-in
+  pack, or a custom pack in `openshell.pack_dir` by name) and set only what
+  it changes: lists such as `egress.allow`, the masks and the review list add
+  to the parent's, other keys replace it. At most four ancestors; cycles are
+  refused. The digest covers the chain (the parent's digest, then the file),
+  so a pinned `required_pack_digest` follows a change anywhere in it. `pack
+  show`, `pack list`, `pack validate` and `policy explain` show the chain.
+  Packs without `extends` keep their digests.
+- A project can ask for a stricter sandbox with `.defenseclaw/sandbox.yaml`:
+  network and approvals floors, block entries, fewer ports, a lower
+  large-upload threshold or the large-upload block, copy mode, more masks
+  and review globs, the harness's prompts kept, MCP servers left behind,
+  blocked MCP tools, a stop on hook tamper. It can only tighten: a key that
+  would loosen refuses the run, one line per key. The file is untrusted
+  input (16 KiB, no links, strict YAML, no includes), read when the sandbox
+  is created; the sandbox keeps that copy, so an edit applies from the next
+  run on, and the file is on every session's review list. The banner, `policy
+  show` and `policy explain` (source `repo`) say what it tightened.
+- `defenseclaw sandbox policy suggest` now works from each sandbox's kept
+  destinations (they survive daemon restarts) instead of the in-memory
+  activity buffer, and suggests a pack that extends `balanced` with the hosts
+  reached that balanced does not cover, each with the programs that reached
+  it. Hosts only ever refused, shadow AI, blocklist-feed hosts and the
+  sandbox's model provider are listed apart. `--pack-out FILE` writes the
+  pack (a new file, checked like `pack validate`), `--diff` shows the
+  settings it changes and the reached hosts it would block. The old
+  `openshell.egress.allow` snippet output and its JSON shape are gone.
+- New `defenseclaw sandbox policy test --host H [--port P] [--binary B]`
+  (and `POST /api/v1/sandbox/policy/test`): the egress decision, the rule
+  that decides and the setting behind it, from the same decider the proxy
+  uses. `--sandbox NAME` asks the daemon (unblocks included); `--pack`,
+  `--profile` and `--harness` resolve locally, with no daemon, for CI.
+  `--fixture FILE` checks a YAML or JSON list of `{host, port, binary,
+  expect, rule}` and exits 1 on a mismatch.
+
 ## [Unreleased] — Enterprise hardening
 
 Entries that name the enterprise standalone profile apply only there; the

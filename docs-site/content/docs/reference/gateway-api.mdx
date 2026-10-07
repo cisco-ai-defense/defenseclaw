@@ -847,6 +847,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `POST` | `/api/v1/sandbox/approvals/{id}` | `ApprovalDecision` | `ApprovalResult`: the `approval`, whether it was `persisted`, a `message` |
 | `POST` | `/api/v1/sandbox/egress/unblock` | `UnblockRequest` | `UnblockResponse`: `host`, `sandbox`, `scope` (`sandbox` or `always`), `persisted`, `message` |
 | `GET` | `/api/v1/sandbox/policy/explain` | Query, see below | `Explain` |
+| `POST` | `/api/v1/sandbox/policy/test` | `{"sandbox", "checks": [{"host", "port", "binary"}]}`, at most 1024 checks; `404 not_found` for an unknown sandbox | `PolicyTestResult`, see [Policy test](#policy-test) |
 | `GET` | `/api/v1/sandbox/activity` | Query `sandbox`, `since`, `follow` | `{"events": [ActivityEvent]}`, or a server-sent event stream |
 
 Any other path under `/api/v1/sandbox/` gets 404 `not_found`.
@@ -867,6 +868,7 @@ it for `sandbox run`.
 | `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
 | `credentials` | `--credential` bindings: `name`, `value`, `host`, and `port` (default 443). |
 | `env` | Non-secret environment variables. DefenseClaw, proxy, and loader variables, and variables the harness image pins, are refused. |
+| `repo_policy_digest` | Optional. The digest of the project's [repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml) the client resolved the run with (`Explain.repo_policy.digest`), or `none` when it had none. The daemon reads the file itself and answers `409 conflict` when it changed since. |
 
 Secret values in `llm.credentials` and `credentials` go to OpenShell as
 provider credentials. The daemon never stores them or returns them.
@@ -952,9 +954,15 @@ sandbox. Only refusals the policy marks unblockable can be lifted; see
 provenance. The query names either `sandbox` (the policy that sandbox runs
 with, against the current config) or the run options `harness`, `pack`,
 `profile`, `project`, `copy`, `safe`, `yolo`, and `unmask` (repeatable).
-The `Explain` response has the `pack`, `pack_source`, and `pack_digest`, the
-`profile`, `network_mode`, and `approvals`, the `admin` status, `settings`,
-and `violations`. Before a create on a MicroVM gateway, `vm_first_boot` says
+The `Explain` response has the `pack`, `pack_source`, and `pack_digest`,
+`pack_chain` (the packs it extends, parent first, each with `name`,
+`builtin`, `source`, and `digest`), `repo_policy` (the project's repository
+policy the posture includes: `path`, `digest`, the keys it `tightened`, and
+the file's `content`, for a new run read from `project`, for a sandbox the
+copy its create read), the `profile`, `network_mode`, and `approvals`, the
+`admin` status, `settings`, and `violations`. A repository policy that would
+loosen the policy adds one fatal violation per key, with `source` `repo`.
+Before a create on a MicroVM gateway, `vm_first_boot` says
 the image the sandbox would boot has no prepared MicroVM disk yet, so its
 first start takes about a minute.
 
@@ -969,14 +977,32 @@ Codex), `run=true` describes that request with the following parameters:
 
 Without `run`, the daemon uses the newest sandbox of the harness.
 
-Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `admin`,
-`gateway`, or `default`), `origin` (such as `openshell.admin.min_profile`),
-and, for a clamped setting, the value `requested`. `gateway` is the compute
+Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `repo`,
+`admin`, `gateway`, or `default`), `origin` (such as
+`openshell.admin.min_profile`), and, for a clamped setting or one the
+repository policy tightened, the value `requested`. `gateway` is the compute
 driver of the OpenShell gateway (origin `openshell.gateway.compute_driver`):
 OpenShell's MicroVM driver mounts no host folders, so it runs every project
 on a copy. `admin` has `configured`,
 `authority` (`authoritative` in `managed_enterprise`, otherwise `advisory`),
 and `detail`.
+
+### Policy test
+
+`POST /api/v1/sandbox/policy/test` judges destinations with a sandbox's
+egress policy as its egress proxy does: the policy resolved against the
+current configuration, with the sandbox's own decider, so its unblocks
+count. Each check names a `host`, an optional `port` (0 judges the host on
+any port the policy carries), and an optional `binary`, which only labels
+the answer: the proxy decides by destination. The `PolicyTestResult` has the
+`sandbox`, `pack`, `profile`, `network_mode`, and one `decisions` entry per
+check: the check's fields, `allowed`, the deciding `rule` (`invalid`,
+`host_internal`, `private_network`, `port`, `admin_block`,
+`admin_allow_only`, `block`, `unblock`, `allow`, `feed`, `network_open`,
+`ip_literal`, `network_allowlist`, `network_deny`), the `match` (pattern,
+feed entry, or port), the `source` setting, the `reason`, `unblockable`, and
+`direct` when one of the sandbox's providers opens the destination around the
+proxy. `defenseclaw sandbox policy test --sandbox NAME` sends it.
 
 ### Activity stream
 

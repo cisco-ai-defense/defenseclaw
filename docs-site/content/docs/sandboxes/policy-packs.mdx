@@ -333,16 +333,64 @@ hooks:
   on_tamper: stop
 ```
 
-<Callout type="warn" title="A custom pack starts from nothing">
-A custom pack gets only what it lists. Its `masks`, `unmask`, and `review`
-lists replace the built-in ones, so copy every built-in entry you want to
-keep; only DefenseClaw's own review list (harness and agent config, lock
-files, `pack.yaml`) is always added. In `allowlist` mode, the policy's allow
-list for a custom pack is only the pack's own `egress.allow` hosts plus your
-`openshell.egress.allow` entries. The balanced pack's curated list is not
-added. Copy the registry and source hosts you need from
-`defenseclaw sandbox pack show balanced`.
+<Callout type="warn" title="A custom pack starts from nothing, unless it extends one">
+A custom pack without `extends` gets only what it lists. Its `masks`,
+`unmask`, and `review` lists replace the built-in ones, so copy every
+built-in entry you want to keep; only DefenseClaw's own review list (harness
+and agent config, lock files, `pack.yaml`, `.defenseclaw/sandbox.yaml`) is
+always added. In `allowlist` mode, the policy's allow list for such a pack is
+only the pack's own `egress.allow` hosts plus your `openshell.egress.allow`
+entries. The balanced pack's curated list is not added. To keep the built-in
+lists, [extend](#extend-a-pack) the built-in pack instead of copying it.
 </Callout>
+
+### Extend a pack
+
+A pack can name one parent with `extends:`, a built-in pack (`open`,
+`balanced`, `strict`) or another custom pack in `openshell.pack_dir`, by
+name. The pack then sets only what it changes:
+
+```yaml
+version: 1
+name: team-web
+extends: balanced
+egress:
+  allow:
+    - artifacts.example.com
+    - docs.example.com
+  ports: [443]
+harness:
+  yolo: false
+```
+
+- A key the pack leaves out has the parent's value, so a pack that extends
+  another needs only `version` and `name`.
+- These lists add to the parent's: `egress.allow`, `egress.block`,
+  `workspace.masks`, `workspace.unmask`, `workspace.review`, and
+  `mcp.blocked_tools`. A pack can't remove a parent's entry; extend a
+  smaller parent, or copy it, to drop one.
+- Every other key replaces the parent's value, and so do the lists that set
+  a scope: `egress.ports`, `egress.feeds`, and `harness.allowed`.
+- `name`, `version`, and `description` are the pack's own.
+- A parent can extend another pack, up to four packs above the one you run.
+  A chain that comes back to a pack it already holds is refused.
+- The merged pack is checked as a whole, with the same rules as any pack,
+  before your `openshell` keys, the run's options, and `openshell.admin`
+  apply. For example, a pack whose parent runs `deny` with no ports must
+  list ports when it sets `network.mode: allowlist`.
+- The allow entries a pack inherits from a built-in pack stay DefenseClaw's
+  curated entries: they admit their names but open no private network their
+  DNS answers lead to, and `openshell.admin.allow_unblock: false` keeps them.
+  The pack's own allow entries are yours, which that setting drops.
+- The parent packs' files are protected like the pack's own: a folder that
+  holds one is never shared with a sandbox. In a `managed_enterprise`
+  install, every custom pack of a required pack's chain must be
+  administrator-owned.
+
+`defenseclaw sandbox pack show team-web` prints the merged pack and names
+each pack of the chain with its source and digest, `pack list` shows
+`custom, extends balanced`, and `policy explain` lists the chain under the
+pack line.
 
 ### Pack file reference
 
@@ -351,6 +399,7 @@ added. Copy the registry and source hosts you need from
 | `version` | Yes | | Must be `1`. |
 | `name` | Yes | | Lowercase letters, digits, and dashes, starting with a letter or digit, at most 63 characters. Must match the pack's directory name when loaded by name. `open`, `balanced`, and `strict` are reserved. |
 | `description` | No | Empty | At most 1024 characters. |
+| `extends` | No | | A built-in pack name, or the name of a custom pack in `openshell.pack_dir`. Paths are refused. See [Extend a pack](#extend-a-pack); with it, the keys marked required come from the parent when the pack leaves them out. |
 | `network.mode` | Yes | | `open`, `allowlist`, or `deny`. |
 | `approvals.mode` | Yes | | `auto`, `triage`, or `manual`. |
 | `egress.feeds` | No | `[builtin]` | Only `builtin`; `[]` turns the feed off. At most 16. |
@@ -457,10 +506,18 @@ same hex value. A built-in pack's digest can change with each DefenseClaw
 release. Administrators use the digest to pin a required pack; see
 [`required_pack_digest`](#required_pack-and-required_pack_digest).
 
+The digest of a pack that [extends](#extend-a-pack) another covers the whole
+chain: it is the SHA-256 of the parent's digest (`sha256:` and 64 hex
+digits), a newline, and the file's bytes. A change to any pack of the chain
+changes it, and so does a DefenseClaw release that changes a built-in parent,
+so `sha256sum` of the file alone does not give it; read it with
+`pack show`.
+
 ## How the effective policy is computed
 
-DefenseClaw computes the policy for each run in four layers. Each layer can
-override the one before it, and the last one can only make things stricter:
+DefenseClaw computes the policy for each run in five layers. Each of the
+first three can override the one before it, and the last two can only make
+things stricter:
 
 1. **The pack** supplies every default.
 2. **Your `openshell` keys** in `config.yaml` override the pack. See
@@ -470,7 +527,11 @@ override the one before it, and the last one can only make things stricter:
    override your keys: `--pack`, `--profile`, `--copy`, `--safe` (keep the
    harness prompts), `--unmask`, `--host-port`, `--no-mcp`, `--cpu`, and
    `--memory`.
-4. **`openshell.admin`** clamps the result. Anything looser than the
+4. **The project's repository policy**, `.defenseclaw/sandbox.yaml`, narrows
+   the result. A run whose repository policy asks for anything looser is
+   refused. See
+   [Repository policy](#repository-policy-defenseclawsandboxyaml).
+5. **`openshell.admin`** clamps the result. Anything looser than the
    administrator allows is replaced with the allowed value, and a harness the
    administrator doesn't allow is refused.
 
@@ -506,6 +567,7 @@ unset follows the pack. Some settings merge instead of replacing:
 | Hook fail mode and tamper response | The pack's `hooks.fail_mode` and `hooks.on_tamper` only. |
 | Host ports | `openshell.mcp.host_ports` plus the run's ports. Each port is checked. |
 | Resources | `openshell.resources`, then the run's CPU and memory request, capped by `openshell.admin.max_resources`. |
+| Repository policy | Applied after the run's options and before `openshell.admin`: its modes are floors, its lists add entries, its ports and threshold only lower. |
 
 The size keys `openshell.workdir.max_upload_mb` and
 `openshell.egress.large_upload_mb` replace the pack's value when they are above
@@ -654,6 +716,149 @@ points at this machine is rejected, and one that points at your private
 network asks you. The check runs again right before an approval is applied,
 and on every reconcile, which removes approved rules whose names now point at
 this machine.
+
+## Repository policy (`.defenseclaw/sandbox.yaml`)
+
+A project can ask for a stricter sandbox than the one you run it with: a
+`.defenseclaw/sandbox.yaml` file in the project folder. DefenseClaw reads it
+on your machine when the sandbox is created. It can only tighten the
+policy; a file that asks for anything looser refuses the run.
+
+```yaml
+version: 1
+network:
+  mode: allowlist
+egress:
+  block: [uploads.example.net]
+  ports: [443]
+  large_upload_mb: 5
+workspace:
+  mode: copy
+  masks: ["config/*.secret"]
+  review: ["scripts/**"]
+harness:
+  yolo: false
+```
+
+| Key | What it does |
+| --- | --- |
+| `version` | Required, `1`. |
+| `network.mode` | `allowlist` or `deny`: a floor. A stricter profile you picked stays. |
+| `approvals.mode` | `triage` or `manual`: a floor. |
+| `egress.block` | Host patterns added to the block list. |
+| `egress.ports` | The ports the project needs: the run keeps only those of the ports its policy opens. A list that keeps none refuses the run, unless the network mode is `deny`. |
+| `egress.large_upload_mb` | Lowers the large-upload threshold (1 or more). |
+| `egress.block_large_uploads` | `true` turns the large-upload block on, and the report with it. |
+| `workspace.mode` | `copy`: the agent works on a copy. |
+| `workspace.masks`, `workspace.review` | Project globs added to the secret masks and to the end-of-session review. |
+| `harness.yolo` | `false`: the harness keeps its own prompts. |
+| `mcp.import` | `false`: your MCP servers stay behind. |
+| `mcp.blocked_tools` | MCP tools added to the blocked tools. |
+| `hooks.on_tamper` | `stop`: a hook tamper stops the sandbox. |
+
+A value that would loosen the policy is refused, one line per key: the
+loosest value of a mode (`network.mode: open`, `approvals.mode: auto`,
+`workspace.mode: mount`, `hooks.on_tamper: alert`), `harness.yolo: true`,
+`mcp.import: true`, `egress.block_large_uploads: false`,
+`egress.large_upload_mb: 0`, and any `egress.allow` or `workspace.unmask`
+entry. The run is refused, as when your organization refuses a harness, and
+nothing is created:
+
+```text
+the repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: harness.yolo true — skip-permissions mode drops the harness's own prompts; a repository policy can only tighten, so remove harness.yolo from .defenseclaw/sandbox.yaml
+```
+
+The repository may belong to someone else, so the file is treated as
+untrusted input. It must be a regular file of at most 16 KiB, and neither it
+nor the `.defenseclaw` folder may be a symbolic link. It is read as strictly
+as a pack: no unknown or repeated keys, no YAML anchors, aliases or merge
+keys, no includes and no `extends`, and a key outside the table above is an
+error that lists the keys it may set. Its ownership is not checked, since it
+can only tighten. Control characters in it never reach your terminal.
+
+The sandbox keeps the copy it was created with: an edit made during a
+session, in a live mount for example, applies from the next `sandbox run`
+on, not to the running sandbox or when it starts again. The file is on the
+review list of every session, so a change to it is called out at the end.
+The launch banner names it (`Policy  repo policy .defenseclaw/sandbox.yaml:
+tightened 3 settings (…)`), `policy show` says what it tightened,
+`policy explain` lists it with its digest, and every setting it tightened
+has the source `repo` with the value it replaced. `openshell.admin` still
+applies on top.
+
+## Record, then lock
+
+Start a project on a pack that lets the work happen, then lock it to what
+it actually reached:
+
+1. Run a few sessions, for example on the default `open` pack. Every
+   destination a sandbox reaches or tries to reach is kept, across daemon
+   restarts and stops, until you delete it
+   (`defenseclaw sandbox destinations NAME` lists them).
+2. See what a pack built from them would change:
+
+   ```bash
+   defenseclaw sandbox policy suggest --sandbox myapp-7f3a --diff
+   ```
+
+   It prints the settings that differ from the sandbox's policy (the network
+   mode moves to `allowlist`, approvals to `triage`) and every destination
+   the sandbox reached that the pack would block.
+3. Write the pack:
+
+   ```bash
+   defenseclaw sandbox policy suggest --sandbox myapp-7f3a \
+     --pack-out ~/.defenseclaw/policies/sandbox/myapp/pack.yaml
+   ```
+
+   The pack extends `balanced` and allows every host the sandbox reached that
+   balanced's curated allowlist doesn't cover, each with a comment naming the
+   programs that reached it. Hosts only ever refused, shadow AI, hosts on the
+   blocklist feed, and the sandbox's own model provider are listed as
+   comments, not allowed. The file is never written over, and it is checked
+   as `pack validate` would check it. Review it before you use it.
+4. Lock the project to it: `defenseclaw sandbox run --pack myapp`, or
+   `openshell.pack: myapp`.
+5. Keep it locked in CI with `policy test` and a fixture (below).
+
+Nothing is applied by `suggest` itself.
+
+## Test the policy
+
+`defenseclaw sandbox policy test` says what the egress policy decides for a
+destination, which rule of the [decision order](#how-a-destination-is-decided)
+decides, the pattern or feed entry that matched, and the setting that holds
+it. It asks the same decider the egress proxy uses.
+
+```bash
+defenseclaw sandbox policy test --pack balanced --host registry.npmjs.org --port 443
+defenseclaw sandbox policy test --sandbox myapp-7f3a --host api.example.com:443
+```
+
+With `--sandbox` the daemon answers with that sandbox's policy, its unblocks
+included. Without it, the policy a run in this folder would get with
+`--pack`, `--profile`, and `--harness` is resolved without the daemon, with
+`config.yaml` (or the defaults when there is none) and the folder's
+repository policy. The proxy decides by destination, the same for every
+program in the sandbox; `--binary` only names the program in the report.
+
+For CI, list the destinations and what you expect in a fixture, YAML or
+JSON:
+
+```yaml
+- {host: registry.npmjs.org, port: 443, expect: allow}
+- {host: artifacts.example.com, port: 443, binary: /usr/bin/node, expect: allow}
+- {host: pastebin.com, port: 443, expect: block, rule: feed}
+- {host: api.openai.com, port: 443, expect: block}
+```
+
+```bash
+defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pack.yaml \
+  --fixture egress-expectations.yaml --output json
+```
+
+The command exits 1 when any decision does not match. `rule`, when set,
+must be the deciding rule.
 
 ## Admin constraints
 
