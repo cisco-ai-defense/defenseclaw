@@ -280,7 +280,8 @@ func (m *Manager) observeOCSFProcess(ctx context.Context, b *box, r ocsf.Record,
 	m.recordProcesses(ctx, b, id, t, started, exited)
 }
 
-// endProcessTree ends every live process of a sandbox that stopped.
+// endProcessTree ends every live process of a sandbox that stopped or was
+// deleted.
 func (m *Manager) endProcessTree(b *box) {
 	m.mu.Lock()
 	t := b.procs

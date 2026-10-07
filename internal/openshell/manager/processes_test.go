@@ -262,3 +262,21 @@ func TestStopEndsTheProcessTree(t *testing.T) {
 		t.Fatalf("after the stop: %+v", list)
 	}
 }
+
+// A delete of a running sandbox ends its processes too: every start has
+// its exit.
+func TestDeleteEndsTheProcessTree(t *testing.T) {
+	var sample atomic.Pointer[string]
+	sample.Store(psAnswer("P 1 0 0 10 S", "Pc 1 init", "P 42 1 1000 20 S", "Pc 42 claude"))
+	e := treeEnv(t, "delbox", &sample)
+	e.m.sampleProcesses(context.Background(), e.boxOf("delbox"))
+	e.deleteBox("delbox", sandboxapi.DeleteRequest{})
+	count := func(event string) int {
+		return len(where(&e.tel.mu, &e.tel.processes, func(ev audit.SandboxProcessEvent) bool {
+			return ev.Sandbox.Name == "delbox" && ev.Event == event
+		}))
+	}
+	if starts, exits := count(audit.SandboxProcessStart), count(audit.SandboxProcessExit); starts != 2 || exits != 2 {
+		t.Fatalf("records: %d starts, %d exits, want every start ended", starts, exits)
+	}
+}

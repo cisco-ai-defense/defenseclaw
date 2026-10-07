@@ -95,7 +95,8 @@ func (c *discoveryCatalog) get(cfg *config.Config) ([]inventory.AISignature, err
 
 // syncObserve runs the sandbox's observer while it is ready and ends it
 // otherwise. A stop drops the processes from its scan record: the stop
-// ended them. Callers must not hold Manager.mu.
+// ended them. A stop or a delete ends its process tree. Callers must not
+// hold Manager.mu.
 func (m *Manager) syncObserve(b *box, phase audit.SandboxPhase) {
 	m.mu.Lock()
 	want := phase == audit.SandboxPhaseReady && !b.deleted && !b.retained && !b.creating
@@ -108,8 +109,11 @@ func (m *Manager) syncObserve(b *box, phase audit.SandboxPhase) {
 	case !want && running:
 		m.endObserve(b)
 	}
-	if stoppedWorkload(phase) {
+	switch {
+	case stoppedWorkload(phase):
 		m.dropDiscoveredProcesses(name)
+		m.endProcessTree(b)
+	case phase == audit.SandboxPhaseDeleted:
 		m.endProcessTree(b)
 	}
 }
