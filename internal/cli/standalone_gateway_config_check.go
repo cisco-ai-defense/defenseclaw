@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -52,11 +51,11 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		// folder, so the gateway service account's own access is checked
 		// first: a pack with an explicit Deny for it loaded here, and the
 		// install then failed with only "Failed to start service" (GAP-0095).
-		if err := standaloneServiceCanReadTree(pack.dir, pack.label, serviceAccount); err != nil {
+		if err := standaloneServiceCanReadTree(pack.Dir, pack.Key, serviceAccount); err != nil {
 			return fmt.Errorf("the gateway service cannot read the guardrail rule pack that %s names: %v", configPath, err)
 		}
-		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
-			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v", pack.dir, configPath, err)
+		if _, err := guardrail.LoadRulePack(pack.Dir); err != nil {
+			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v", pack.Dir, configPath, err)
 		}
 	}
 	return nil
@@ -74,32 +73,20 @@ var standaloneServiceCanReadTree = func(root, label, serviceAccount string) erro
 	return err
 }
 
-// standaloneRulePack is a rule pack directory and the config key that
-// selects it.
-type standaloneRulePack struct{ label, dir string }
-
 // standaloneGatewayRulePackDirs lists the distinct rule pack directories the
-// gateway loads for cfg: the global one and every connector's. An empty
-// directory selects the embedded packs and is always loadable.
-func standaloneGatewayRulePackDirs(cfg *config.Config) []standaloneRulePack {
+// gateway loads for cfg: the global one, every connector's and every
+// guardrail profile's (config.RulePackSettings). An empty directory selects
+// the embedded packs and is always loadable.
+func standaloneGatewayRulePackDirs(cfg *config.Config) []config.RulePackSetting {
 	seen := map[string]bool{}
-	packs := []standaloneRulePack{}
-	add := func(label, dir string) {
-		dir = strings.TrimSpace(dir)
+	packs := []config.RulePackSetting{}
+	for _, setting := range cfg.RulePackSettings() {
+		dir := strings.TrimSpace(setting.Dir)
 		if dir == "" || seen[dir] {
-			return
+			continue
 		}
 		seen[dir] = true
-		packs = append(packs, standaloneRulePack{label: label, dir: dir})
-	}
-	add("guardrail.rule_pack_dir", cfg.Guardrail.RulePackDir)
-	names := make([]string, 0, len(cfg.Guardrail.Connectors))
-	for name := range cfg.Guardrail.Connectors {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		add("guardrail.connectors."+name+".rule_pack_dir", cfg.EffectiveRulePackDirForConnector(name))
+		packs = append(packs, config.RulePackSetting{Key: setting.Key, Dir: dir})
 	}
 	return packs
 }

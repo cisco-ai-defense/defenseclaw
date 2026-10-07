@@ -503,6 +503,7 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700},
 		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0},
 		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0},
+		"missing profile pack": {"guardrail/default\n", "guardrail/default\n  profiles:\n    contractors:\n      rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom\n", `guardrail.profiles.contractors.rule_pack_dir "/etc/defenseclaw/policies/guardrail/custom" does not exist`, 0},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

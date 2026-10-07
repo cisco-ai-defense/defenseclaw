@@ -65,8 +65,9 @@ type validatedConfig struct {
 	NoProxy                string
 	SelfUpdateDisabled     bool
 	MachinePolicyOwnership map[string]string
-	// RulePacks maps each rule-pack setting (guardrail.rule_pack_dir and
-	// every connector's) to the pack the config resolves it to. An unset
+	// RulePacks maps each rule-pack setting (guardrail.rule_pack_dir, every
+	// connector's and every guardrail profile's) to the pack the config
+	// resolves it to. An unset
 	// rule_pack_dir follows <policy_dir>/guardrail/default once that folder
 	// exists, which changes no config byte, so the record keeps the resolved
 	// packs and ensure applies (and restarts the gateway) when they change.
@@ -390,12 +391,12 @@ func rulePackCheckOrder(dirs map[string]string) []string {
 	return order
 }
 
-// effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the
-// gateway loads for it.
+// effectiveRulePackDirs maps each rule-pack setting of cfg, guardrail
+// profiles included, to the pack the gateway loads for it.
 func effectiveRulePackDirs(cfg *config.Config) map[string]string {
-	dirs := map[string]string{"guardrail.rule_pack_dir": cfg.Guardrail.RulePackDir}
-	for name := range cfg.Guardrail.Connectors {
-		dirs["guardrail.connectors."+name+".rule_pack_dir"] = cfg.EffectiveRulePackDirForConnector(name)
+	dirs := map[string]string{}
+	for _, setting := range cfg.RulePackSettings() {
+		dirs[setting.Key] = setting.Dir
 	}
 	return dirs
 }

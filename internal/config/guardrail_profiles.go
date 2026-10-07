@@ -267,6 +267,65 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 	return out, nil
 }
 
+// RulePackSetting is a configuration key that selects a guardrail rule pack
+// and the directory it names.
+type RulePackSetting struct {
+	Key string
+	Dir string
+}
+
+// RulePackSettings lists the keys that select the rule packs the gateway
+// loads, in check order: guardrail.rule_pack_dir, every
+// guardrail.connectors.<c>.rule_pack_dir (resolved through
+// EffectiveRulePackDirForConnector), then every rule_pack_dir a guardrail
+// profile sets, guardrail.profiles.<p>.rule_pack_dir and
+// guardrail.profiles.<p>.connectors.<c>.rule_pack_dir. A configuration
+// DerivedForProfile resolves to one of these or to a directory the base
+// configuration selects without any profile, so the managed checks that
+// walk this list cover every profile (they used to stop at the base keys,
+// and a pack standard users could write passed as a profile's). Dirs may
+// be empty or repeat; callers skip what they need not check.
+func (c *Config) RulePackSettings() []RulePackSetting {
+	if c == nil {
+		return nil
+	}
+	settings := []RulePackSetting{{Key: "guardrail.rule_pack_dir", Dir: c.Guardrail.RulePackDir}}
+	connectors := make([]string, 0, len(c.Guardrail.Connectors))
+	for name := range c.Guardrail.Connectors {
+		connectors = append(connectors, name)
+	}
+	sort.Strings(connectors)
+	for _, name := range connectors {
+		settings = append(settings, RulePackSetting{
+			Key: "guardrail.connectors." + name + ".rule_pack_dir",
+			Dir: c.EffectiveRulePackDirForConnector(name),
+		})
+	}
+	profiles := make([]string, 0, len(c.Guardrail.Profiles))
+	for name := range c.Guardrail.Profiles {
+		profiles = append(profiles, name)
+	}
+	sort.Strings(profiles)
+	for _, name := range profiles {
+		profile := c.Guardrail.Profiles[name]
+		prefix := "guardrail.profiles." + name
+		if strings.TrimSpace(profile.RulePackDir) != "" {
+			settings = append(settings, RulePackSetting{Key: prefix + ".rule_pack_dir", Dir: profile.RulePackDir})
+		}
+		tuned := make([]string, 0, len(profile.Connectors))
+		for connector := range profile.Connectors {
+			tuned = append(tuned, connector)
+		}
+		sort.Strings(tuned)
+		for _, connector := range tuned {
+			if dir := profile.Connectors[connector].RulePackDir; strings.TrimSpace(dir) != "" {
+				settings = append(settings, RulePackSetting{Key: prefix + ".connectors." + connector + ".rule_pack_dir", Dir: dir})
+			}
+		}
+	}
+	return settings
+}
+
 // DerivedGuardrailProfile is one precomputed profile: its derived
 // configuration and the digest of its derived guardrail policy.
 type DerivedGuardrailProfile struct {

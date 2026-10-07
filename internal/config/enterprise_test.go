@@ -335,6 +335,15 @@ func TestStandalonePolicyInputsMustBeAdministratorControlled(t *testing.T) {
 	if err := validateManagedStandalonePolicyInputs(cfg); err == nil || !strings.Contains(err.Error(), "not administrator-controlled") {
 		t.Fatalf("user-owned policy dir must be rejected, got %v", err)
 	}
+	// A guardrail profile's rule pack gets the same check as the base one.
+	cfg.PolicyDir = filepath.Join(t.TempDir(), "absent")
+	cfg.Guardrail.Profiles = map[string]GuardrailProfile{"contractors": {
+		Connectors: map[string]PerConnectorGuardrailConfig{"codex": {RulePackDir: t.TempDir()}},
+	}}
+	if err := validateManagedStandalonePolicyInputs(cfg); err == nil ||
+		!strings.Contains(err.Error(), "guardrail.profiles.contractors.connectors.codex.rule_pack_dir is not administrator-controlled") {
+		t.Fatalf("user-owned profile rule pack must be rejected, got %v", err)
+	}
 	secureClient := &Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()}
 	if err := validateManagedStandalonePolicyInputs(secureClient); err != nil {
 		t.Fatalf("Secure Client never consults local policy inputs: %v", err)
