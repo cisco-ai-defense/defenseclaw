@@ -356,3 +356,22 @@ func TestStreamGapAfterAGatewayRestart(t *testing.T) {
 		t.Fatalf("a deleted sandbox reported its gap: %d records", n)
 	}
 }
+
+// A gateway that does not answer is recorded in words with the next step,
+// the client's error last (GAP-0169): another account's gateway on the port
+// read only "x509: certificate signed by unknown authority".
+func TestGatewayUnavailableSummary(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`openshell: health: Unavailable: connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority"`,
+			"is not this account's"},
+		{`openshell: health: Unavailable: connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:17670: connect: connection refused"`,
+			"is not running"},
+		{"openshell: health: DeadlineExceeded: context deadline exceeded", "does not answer"},
+	} {
+		got := gatewayUnavailableSummary(errors.New(tc.raw))
+		if !strings.HasPrefix(got, "the OpenShell gateway ") || !strings.Contains(got, tc.want) ||
+			!strings.Contains(got, "run `defenseclaw sandbox doctor`") || !strings.HasSuffix(got, "("+tc.raw+")") {
+			t.Errorf("summary of %q = %q", tc.raw, got)
+		}
+	}
+}

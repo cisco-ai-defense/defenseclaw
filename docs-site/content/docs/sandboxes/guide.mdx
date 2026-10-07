@@ -626,12 +626,13 @@ run tells you three times:
 - in the exit status: 69 when not one hook got through, unless the harness
   exited with its own error.
 
-The daemon keeps no hook counts across a restart. When it restarted during
-the session and no hook reached it since, the run can't tell whether the
-session's hooks got through before, so it says that instead, with no warning
-and no exit status 69:
-`the DefenseClaw daemon restarted during the session (at 11:05) and keeps no
-hook counts across a restart, so DefenseClaw cannot tell whether this
+The daemon keeps its hook counts across a restart, but one that did not stop
+cleanly loses the last minute of them. When it restarted during the session
+and has counted no hook of it, the run can't tell whether the session's hooks
+got through before, so it says that instead, with no warning and no exit
+status 69:
+`the DefenseClaw daemon restarted during the session (at 11:05) and has
+counted no hook of it since, so DefenseClaw cannot tell whether this
 session's hooks reached it`. A warning the restarted daemon raises itself
 still counts.
 
@@ -751,12 +752,14 @@ sandbox later in the session is listed without the unblock command
 since``). An invalid destination (a
 host name without a dot, such as a mistyped `curl echo`) counts as blocked
 too. The counts cover everything in the sandbox while the session ran,
-`sandbox exec` commands from another terminal included. The site counts come
-from the sandbox's destinations, which a restart of the DefenseClaw daemon
-keeps; the tool calls are not kept: after a restart during the session, the
-line says they cover only the time since (`0 tool calls since the daemon
-restarted at 11:05`). `sandbox status NAME` shows the same two counts for
-the sandbox's life: `Egress 9 destinations contacted, 2 blocked, …`.
+`sandbox exec` commands from another terminal included. A restart of the
+DefenseClaw daemon keeps the tool calls and the site counts (the sandbox's
+destinations), up to the last minute's when it did not stop cleanly: when
+that left a count below the session's start, the line says the counts cover
+only the time since (`2 tool calls since the daemon restarted at 11:05`).
+`sandbox status NAME` shows the same counts for the sandbox's life:
+`Hook traffic 107 requests, 13 tool calls, …` and
+`Egress 9 destinations contacted, 2 blocked, …`.
 
 - **Enter** or `y` keeps the changes.
 - `u` restores the folder to its pre-session snapshot.

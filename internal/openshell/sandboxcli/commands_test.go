@@ -135,6 +135,10 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// A restarted daemon keeps the counts, not the time of the last
+		// hook (GAP-0166): the column still counts them.
+		{"after a daemon restart", func(h *sandboxapi.HookCoverage) { h.LastHookAt = time.Time{} }, " 4 calls, 1 blocked ",
+			[]string{"Hook traffic  9 requests, 4 tool calls, 1 blocked\n"}},
 		// The verdicts per hook event, the most frequent first (#956).
 		{"events", func(h *sandboxapi.HookCoverage) {
 			h.Events = map[string]int64{"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "UserPromptSubmit": 3}

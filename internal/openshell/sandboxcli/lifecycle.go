@@ -94,7 +94,9 @@ func hooksText(sb sandboxapi.Sandbox) string {
 		return "unreachable!"
 	case sb.Hooks.Silent:
 		return "silent!"
-	case sb.Hooks.LastHookAt.IsZero():
+	case sb.Hooks.HookRequests == 0 && sb.Hooks.ToolCalls == 0:
+		// No hook reached DefenseClaw yet. A restarted daemon keeps the
+		// counts, not the time of the last hook (GAP-0166).
 		return "-"
 	}
 	s := plural(sb.Hooks.ToolCalls, "call", "calls")

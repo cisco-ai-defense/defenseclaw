@@ -1199,6 +1199,11 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 			return target
 		}
 	}
+	// The OpenShell integration's own health (a gateway that does not
+	// answer) names no sandbox: its target is OpenShell (GAP-0169).
+	if subsystem, _ := payload["defenseclaw.health.subsystem"].(string); subsystem == string(gatewaylog.SubsystemOpenShell) {
+		return subsystem
+	}
 	return ""
 }
 

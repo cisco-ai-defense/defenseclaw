@@ -2048,8 +2048,9 @@ hook contract has fewer events (Claude Code's, the largest, has 29). The
 sum can be lower than `hook_requests`: a post refused before a verdict
 (malformed, outside the contract) or a retried post answered from its first
 answer has no event. The counts live as long as the other hook counters:
-they survive a stop and start, and start over for a new sandbox of the name
-and when the daemon restarts.
+they survive a stop and start and a daemon restart (the sandbox's record
+keeps them; a daemon that did not stop cleanly loses the last minute of
+them), and start over for a new sandbox of the name.
 
 **Claude Code.** `/etc/claude-code/managed-settings.d/50-defenseclaw.json`
 sets `allowManagedHooksOnly`, the hooks, an `otelHeadersHelper` that sends

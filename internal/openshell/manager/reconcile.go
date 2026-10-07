@@ -56,6 +56,7 @@ func (m *Manager) loadRecords() error {
 				"DefenseClaw keeps managing it under %s", r.Name, r.Owner, m.opts.Owner, "sandboxes/images.json", r.Owner)
 		}
 		b := &box{rec: *r, seenChunks: map[string]struct{}{}, retained: r.Retained}
+		b.hooks.restore(r.HookCounts)
 		m.boxes[r.Name] = b
 		for _, pattern := range r.Unblocks {
 			_ = m.unblocks.Add(egress.Unblock{Pattern: pattern, SandboxID: scopeID(r.ID, r.Name)})

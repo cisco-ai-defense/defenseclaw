@@ -95,6 +95,11 @@ stopped`. Nothing is changed; use the install command above.
   daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
   sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
   detail sum it up; the detail lists the hosts.
+- A sandbox's hook counts (`Hook traffic` and `Hook events` in `sandbox
+  status NAME`, the tool calls in the TUI's Sandboxes list) survive daemon
+  restarts like its destinations, so the end-of-session summary counts the
+  whole session across a restart; a daemon that did not stop cleanly loses
+  the last minute of them.
 - New finding `shadow_ai`, also on the activity feed: an AI provider that is
   neither the sandbox's model provider nor its harness's vendor, once a
   session when the policy refuses it (LOW) and once when the sandbox reaches

@@ -189,6 +189,10 @@ type record struct {
 	// accept names the session it reviewed (Manager.Accept). A restarted
 	// daemon that finds the sandbox still ready counts nothing.
 	Sessions int `json:"sessions,omitempty"`
+	// HookCounts are the hook counters as the daemon last kept them
+	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
+	// record share them, so they are replaced, never changed in place.
+	HookCounts *hookCounts `json:"hook_counts,omitempty"`
 	// Cursor resumes the WatchSandbox stream.
 	Cursor string `json:"cursor,omitempty"`
 	// HostAlias is what OpenShell last reported of host.openshell.internal

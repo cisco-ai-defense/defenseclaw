@@ -458,3 +458,16 @@ func TestAProxiedRefusalKeepsTheBinaryThatGotThrough(t *testing.T) {
 		t.Fatalf("destinations = %+v, want curl last (its traffic got through)", d.Destinations)
 	}
 }
+
+// Hermes asks models.dev for its model metadata at every start (GAP-0161):
+// an open pack lets it through, and it is the harness's own request, no
+// shadow AI. From another harness's sandbox the host is still AI traffic.
+func TestHermesModelMetadataIsItsOwn(t *testing.T) {
+	r := &destRow{Host: "models.dev"}
+	if kind, provider, _ := r.classify("hermes"); kind != sandboxapi.DestinationHarnessVendor || provider != "Hermes Agent" {
+		t.Fatalf("hermes: %s %q, want the harness vendor", kind, provider)
+	}
+	if kind, _, _ := r.classify("claudecode"); kind != sandboxapi.DestinationUnknownAI {
+		t.Fatalf("claudecode: %s, want unknown AI", kind)
+	}
+}

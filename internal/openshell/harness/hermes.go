@@ -225,6 +225,14 @@ var Hermes = register(&Spec{
 	},
 	modelArg:  hermesModelArg,
 	modelFlag: "-m",
+	// Hermes 0.19.0 asks models.dev for its model metadata (context windows,
+	// prices) at start and hourly, through the egress proxy, with no setting
+	// that turns it off (agent/models_dev.py); when the request fails it goes
+	// on with its cached copy or its built-in defaults.
+	directFetches: []DirectFetch{{
+		Host: "models.dev", Port: 443,
+		What: "Hermes' model metadata download (models.dev); Hermes uses its cached copy or built-in defaults instead",
+	}},
 	customization: []CustomizationPath{
 		{Host: ".hermes/SOUL.md", Sandbox: "/sandbox/.hermes/SOUL.md", Note: "persona"},
 		{Host: ".hermes/skills", Sandbox: "/sandbox/.hermes/skills", Dir: true, Note: "user skills"},

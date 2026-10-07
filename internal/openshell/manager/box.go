@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -232,6 +233,93 @@ type hookStats struct {
 	unnoticed       int64
 }
 
+// hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
+// so a restarted daemon goes on from them as it does from the kept
+// destinations: sandbox status and the Sandboxes list keep the counts of the
+// sandbox's life (GAP-0156). The times, the silence and reach state and the
+// notices start over with the daemon: they judge the current session.
+type hookCounts struct {
+	Requests       int64            `json:"requests,omitempty"`
+	ToolCalls      int64            `json:"tool_calls,omitempty"`
+	ToolBlocked    int64            `json:"tool_blocked,omitempty"`
+	ToolAsked      int64            `json:"tool_asked,omitempty"`
+	PromptBlocked  int64            `json:"prompt_blocked,omitempty"`
+	LastBlocked    string           `json:"last_blocked,omitempty"`
+	Events         map[string]int64 `json:"events,omitempty"`
+	OtherEvents    int64            `json:"other_events,omitempty"`
+	Tampered       int64            `json:"tampered,omitempty"`
+	Failed         int64            `json:"failed,omitempty"`
+	IngressRefused int64            `json:"ingress_refused,omitempty"`
+}
+
+// counts are the counters of h a record keeps.
+func (h *hookStats) counts() hookCounts {
+	return hookCounts{
+		Requests: h.requests, ToolCalls: h.toolCalls, ToolBlocked: h.toolBlocked, ToolAsked: h.toolAsked,
+		PromptBlocked: h.promptBlocked, LastBlocked: h.lastBlocked, Events: maps.Clone(h.events), OtherEvents: h.otherEvents,
+		Tampered: h.tampered, Failed: h.failed, IngressRefused: h.ingressRefused,
+	}
+}
+
+// restore starts h from the counters a record kept, with at most
+// sandboxapi.MaxHookEvents event names (countEvent).
+func (h *hookStats) restore(c *hookCounts) {
+	if c == nil {
+		return
+	}
+	h.requests, h.toolCalls, h.toolBlocked, h.toolAsked = c.Requests, c.ToolCalls, c.ToolBlocked, c.ToolAsked
+	h.promptBlocked, h.lastBlocked, h.otherEvents = c.PromptBlocked, c.LastBlocked, c.OtherEvents
+	h.tampered, h.failed, h.ingressRefused = c.Tampered, c.Failed, c.IngressRefused
+	for name, n := range c.Events {
+		if len(h.events) >= sandboxapi.MaxHookEvents {
+			h.otherEvents += n
+			continue
+		}
+		if h.events == nil {
+			h.events = make(map[string]int64)
+		}
+		h.events[name] = n
+	}
+}
+
+// noteHookCountsLocked puts the box's hook counters in its record and
+// reports whether they moved since the record last kept them. Callers hold
+// Manager.mu.
+func (b *box) noteHookCountsLocked() bool {
+	c := b.hooks.counts()
+	kept := b.rec.HookCounts
+	if kept == nil {
+		kept = &hookCounts{}
+	}
+	if reflect.DeepEqual(*kept, c) {
+		return false
+	}
+	b.rec.HookCounts = &c
+	return true
+}
+
+// keepHookCounts writes the record of every sandbox whose hook counters
+// moved since its record last kept them. It runs with the destinations
+// flush and when the daemon stops, so a daemon that did not stop cleanly
+// loses at most the last interval's counts. Callers must not hold
+// Manager.mu.
+func (m *Manager) keepHookCounts() {
+	m.mu.Lock()
+	var moved []*box
+	var names []string
+	for name, b := range m.boxes {
+		if !b.deleted && !b.retained && !b.creating && b.noteHookCountsLocked() {
+			moved, names = append(moved, b), append(names, name)
+		}
+	}
+	m.mu.Unlock()
+	for i, b := range moved {
+		if err := m.saveRecord(b); err != nil {
+			m.logf("keep the hook counts of %s: %v", names[i], err)
+		}
+	}
+}
+
 var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // identity is the correlation.sandbox group for the box. Callers hold
@@ -329,10 +417,16 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.rec.SessionYolo = nil
 	}
 	b.rec.Phase = string(phase)
+	// The record written below keeps the hook counts reached so far.
+	b.noteHookCountsLocked()
 	id := b.identity()
 	rec := b.rec
 	m.mu.Unlock()
-	if previous == phase {
+	// A restarted daemon republishes the phase its record held: telemetry
+	// records it again, but nothing happened, so the feed gets no line
+	// ("sandbox X stopped" for every stopped sandbox at a restart, GAP-0167).
+	unchanged := previous == phase
+	if unchanged {
 		previous = ""
 	}
 	ev := audit.SandboxLifecycleEvent{
@@ -348,10 +442,12 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// The session is over: keep what it reached.
 		m.flushDestinations(rec.Name)
 	}
-	m.feed.Publish(sandboxapi.ActivityEvent{
-		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
-		Message: lifecycleMessage(rec.Name, phase),
-	})
+	if !unchanged {
+		m.feed.Publish(sandboxapi.ActivityEvent{
+			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
+			Message: lifecycleMessage(rec.Name, phase),
+		})
+	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
 }

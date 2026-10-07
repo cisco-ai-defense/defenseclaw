@@ -341,7 +341,10 @@ only in the image; nothing on your host changes.
   it, and while the agent runs it interrupts the agent. The sandbox is
   kept; `defenseclaw sandbox connect <name>` starts Hermes in it again.
 - **Other traffic.** Apart from the model, Hermes reaches only `models.dev`
-  at start (its model metadata, which has no setting to turn off). The
+  at start and hourly (its model metadata, which has no setting to turn
+  off). `sandbox destinations` lists it as Hermes Agent's own, not shadow
+  AI, and a pack that refuses it does so quietly (audited, not a blocked
+  site): Hermes then uses its cached copy or built-in defaults. The
   image marks the install the way Hermes' own image does (an
   `.install_method` of `docker` next to the code), so Hermes neither checks
   `pypi.org` for updates nor prints its "pip installs are no longer an

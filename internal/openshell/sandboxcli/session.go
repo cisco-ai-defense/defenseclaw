@@ -89,8 +89,7 @@ type session struct {
 	before *sandboxapi.Sandbox
 	// daemonStarted is when the daemon the session ends with started
 	// (sandboxapi.Status.StartedAt; zero when it does not say): after the
-	// session's start, the daemon restarted during it, and its counters
-	// cover only the time since.
+	// session's start, the daemon restarted during it.
 	daemonStarted time.Time
 
 	// shell marks a `connect --shell` session: no harness, so no hooks to
@@ -1243,36 +1242,30 @@ const (
 // the sandbox reached for the first time, and the sites blocked those the
 // session announced blocked (its ✗ lines, which the summary repeats), or
 // the daemon's count of newly blocked ones when that is higher (a late
-// denial, or a flood the feed paced). A daemon restart during the session
-// starts its hook counters from zero (nothing keeps them): the session's
-// then count from zero too, and the line says they cover only the time
-// since the restart. The site counts are the sandbox's destinations, which
-// a restart keeps; only a daemon whose counts went down restarted them.
+// denial, or a flood the feed paced). A daemon restart keeps the hook
+// counts and the destinations (GAP-0156), up to the last minute's when the
+// daemon did not stop cleanly: counters below the session's start mean
+// they started again, and the line says they cover only the time since the
+// restart.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
 		before = &sandboxapi.Sandbox{}
 	}
 	hooksBefore, egressBefore := before.Hooks, before.Egress
-	// since qualifies the counts a daemon restart started again; sitesReset
-	// marks the egress counts among them.
+	// since qualifies the hook counts a daemon restart started again;
+	// sitesReset marks the egress counts that started again.
+	restarted := "since the daemon restarted"
+	if s.restartedDuring() {
+		restarted += " at " + s.app.clock(s.daemonStarted)
+	}
 	since, sitesReset := "", false
-	switch {
-	case s.restartedDuring():
-		hooksBefore, since = sandboxapi.HookCoverage{}, "since the daemon restarted at "+s.app.clock(s.daemonStarted)
-		if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked {
-			egressBefore, sitesReset = sandboxapi.EgressStats{}, true
-		}
-	default:
-		// A daemon that does not say when it started: counters below the
-		// session's start mean it restarted.
-		if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
-			hooksBefore, since = sandboxapi.HookCoverage{}, "since the daemon restarted"
-		}
-		if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
-			after.Egress.BlockedRequests < egressBefore.BlockedRequests {
-			egressBefore, sitesReset = sandboxapi.EgressStats{}, since != ""
-		}
+	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
+		hooksBefore, since = sandboxapi.HookCoverage{}, restarted
+	}
+	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
+		after.Egress.BlockedRequests < egressBefore.BlockedRequests {
+		egressBefore, sitesReset = sandboxapi.EgressStats{}, true
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
@@ -1307,8 +1300,11 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	sites := after.Egress.Destinations - egressBefore.Destinations
 	contacted := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
-	if sitesReset {
+	switch {
+	case sitesReset && since != "":
 		contacted += " since then"
+	case sitesReset:
+		contacted += " " + restarted
 	}
 	parts = append(parts, contacted)
 	s.noticeMu.Lock()
@@ -1332,10 +1328,9 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 }
 
 // restartedDuring reports that the daemon the session ended with started
-// after the session did: it restarted during the session, and nothing kept
-// its counters, so they cover only the time since (PR 1022 live retest N1:
-// "0 tool calls · 0 new sites contacted" after 7 tool calls and two
-// restarts, which left no counter below the session's start).
+// after the session did: it restarted during the session, and a restart that
+// was not clean may have lost its last minute of hook counts
+// (hookReachUnknown).
 func (s *session) restartedDuring() bool {
 	return s.startedBefore(s.daemonStarted)
 }

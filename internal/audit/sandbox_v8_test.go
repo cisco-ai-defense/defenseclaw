@@ -2524,3 +2524,17 @@ func assertCatalogValue(t *testing.T, family, key, fieldType string, value any, 
 		t.Fatalf("%s %s has unsupported catalog type %s", family, key, fieldType)
 	}
 }
+
+// GAP-0169: the OpenShell integration's own health row (a gateway that does
+// not answer) names OpenShell as its target, not nothing.
+func TestOpenShellHealthRowNamesOpenShell(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	if err := recorder.RecordSandboxHealth(context.Background(), SandboxHealthEvent{State: SandboxHealthDegraded,
+		ErrorCode: "openshell_unavailable", ErrorSummary: "the OpenShell gateway is not running"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 || rows[0].Target != "openshell" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
