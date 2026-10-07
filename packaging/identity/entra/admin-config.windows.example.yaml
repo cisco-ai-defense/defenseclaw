@@ -31,8 +31,11 @@ guardrail:
   rule_pack_dir: ""              # use the built-in rule packs
   mode: observe                  # the posture when no profile applies
   connectors:
-    claudecode: {}
-    codex: {}
+    # Give every connector at least one key. An empty entry such as
+    # `claudecode: {}` is dropped when the config loads, and then the
+    # enumerator enrolls nobody for that connector.
+    claudecode: {enabled: true}
+    codex: {enabled: true}
 
   profiles:
     strict:
