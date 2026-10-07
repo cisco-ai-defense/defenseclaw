@@ -547,7 +547,7 @@ The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 | `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). |
 | `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity (hook decisions, tool activity, agent, model and tool spans, `identity.observed`). Off, records keep the domain, directory, assurance, session kind and client address but no principal. |
 | `ai_discovery.signature_packs` | `[]` | Signature pack files to load. Since `config_version: 9` only listed packs load; the migration lists the packs it finds in `<data_dir>/signature-packs/`. |
-| `ai_discovery.signature_pack_digests` | `{}` | The sha256 of each pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load. |
+| `ai_discovery.signature_pack_digests` | `{}` | The sha256 of each pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load, and an apply (`ensure`) refuses a config whose pack file does not match its digest or has none. |
 
 Within a profile, the precedence for one connector is the profile's
 `connectors.<connector>` entry, then the profile field, then
