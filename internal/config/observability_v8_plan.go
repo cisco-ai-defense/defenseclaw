@@ -77,7 +77,8 @@ type ObservabilityV8EffectiveTracePolicy struct {
 	// CompatibilityAliases is the retired alias switch. Only the plan of a
 	// Secure Client source carries it, as on main: the plan digest stamps
 	// every local audit record (provenance.config_digest, content_hash), so
-	// Secure Client keeps the digest of main (issue #1092). Nothing reads it.
+	// Secure Client keeps the digest of main (issue #1092). Only the managed
+	// AI Defense destination reads it (ObservabilityV8ManagedAIDDeploymentAliases).
 	CompatibilityAliases *bool                            `json:"compatibility_aliases,omitempty"`
 	Limits               ObservabilityV8TraceLimitsSource `json:"limits"`
 }
@@ -204,6 +205,10 @@ type ObservabilityV8EffectiveDestination struct {
 	// managedAIDSourceContentHash is generation-local release metadata. It is
 	// intentionally absent from display/effective JSON and public plan digests.
 	managedAIDSourceContentHash string
+	// managedAIDDeploymentAliasesOff is set when the plan turns
+	// trace_policy.compatibility_aliases off. The switch is already part of
+	// the plan digest, so this needs no place in the reload identity.
+	managedAIDDeploymentAliasesOff bool
 }
 
 type ObservabilityV8Warning struct {

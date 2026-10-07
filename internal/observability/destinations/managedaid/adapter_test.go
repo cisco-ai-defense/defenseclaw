@@ -95,6 +95,19 @@ func testConfig(endpoint string) Config {
 				"host.name":                                 "managed-host",
 			},
 		},
+		DeploymentAliases: true,
+	}
+}
+
+// deployment.environment and deployment.mode follow the retired
+// compatibility_aliases switch as on main; defenseclaw.device.id does not.
+func TestManagedResourceDeploymentAliasesFollowTheSwitch(t *testing.T) {
+	for aliases, want := range map[bool][2]string{true: {"managed-env", "managed_enterprise"}, false: {"", ""}} {
+		values, _, _, ok := managedResourceSnapshot(testConfig("").Resource.Values, aliases)
+		if !ok || values["defenseclaw.device.id"] != "sha256:managed-device" ||
+			values["deployment.environment"] != want[0] || values["deployment.mode"] != want[1] {
+			t.Fatalf("aliases=%t: managed resource = %#v", aliases, values)
+		}
 	}
 }
 
