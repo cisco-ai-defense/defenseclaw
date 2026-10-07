@@ -3,6 +3,7 @@ and ``--show`` prints the alert ID without the raw details_json blob."""
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -95,6 +96,23 @@ class AlertFindingRowsTests(unittest.TestCase):
         shown = self.runner.invoke(alerts, ["--show", "3"], obj=self.app, catch_exceptions=False)
         self.assertIn("llm-judge", shown.output)
         self.assertNotIn("hook-rules", shown.output)
+
+    def test_detection_only_findings_are_counted_not_listed(self):
+        # GAP-0176: rules that matched calls that then ran are detection-only,
+        # not alerts (#693), and the list said "All clear" without a word.
+        now = datetime.now(timezone.utc)
+        tags = json.dumps({"defenseclaw.finding.tags": ["detection-only"]})
+        self.app.store.db.executemany(
+            """INSERT INTO audit_events (id, timestamp, action, actor, details, severity, bucket, event_name, payload_json)
+               VALUES (?, ?, 'scan-finding', 'defenseclaw', '', 'CRITICAL', 'security.finding', 'finding.observed', ?)""",
+            [(f"det-{i}", (now - timedelta(hours=h)).isoformat(), tags) for i, h in enumerate((0, 2, 30))],
+        )
+        self.app.store.db.commit()
+        out = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False).output
+        self.assertIn("No alerts.", out)
+        self.assertNotIn("All clear", out)
+        self.assertIn("2 detection-only findings of the last 24 hours not listed", out)
+        self.assertIn("`defenseclaw audit export --since 24h` lists them", out)
 
     def test_copilot_local_and_cli_findings_share_one_target(self):
         # GAP-2619: the VS Code Local harness names the hook PreToolUse and the

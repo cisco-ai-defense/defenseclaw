@@ -765,12 +765,19 @@ def _alerts_default(
     else:
         alert_list = app.store.list_alerts(limit)
 
+    # Detection-only findings are not alerts (#693); say how many the list
+    # leaves out, or "All clear" hides rules that matched calls that ran
+    # (GAP-0176).
+    unlisted = "" if needle or show_idx is not None else _detection_only_note(app.store)
     if not alert_list:
         if needle:
             ux.ok(
                 f"No alerts from connector '{needle}' in the last "
                 f"{max(limit, _CONNECTOR_SCAN_POOL)} events."
             )
+        elif unlisted:
+            ux.ok("No alerts.")
+            click.echo(ux.dim(unlisted))
         else:
             ux.ok("No alerts. All clear.")
         return
@@ -854,6 +861,25 @@ def _alerts_default(
         )
 
     _render_table(alert_list, app.store, connector=needle)
+    if unlisted:
+        click.echo(ux.dim(unlisted))
+
+
+def _detection_only_note(store) -> str:
+    """The line naming the detection-only findings of the last 24 hours, or ""."""
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    try:
+        n = store.count_detection_only_findings(datetime.now(timezone.utc) - timedelta(hours=24))
+    except Exception:  # noqa: BLE001 - an older or busy audit DB only loses the note
+        return ""
+    if not n:
+        return ""
+    what = "1 detection-only finding" if n == 1 else f"{n} detection-only findings"
+    return (
+        f"  {what} of the last 24 hours not listed: a rule matched but could not decide the call. "
+        "`defenseclaw audit export --since 24h` lists them."
+    )
 
 
 @alerts.command("acknowledge")

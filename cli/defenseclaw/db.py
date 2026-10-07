@@ -1166,39 +1166,7 @@ class Store:
                 )"""
             )
         if "payload_json" in columns:
-            predicates.append(
-                """NOT EXISTS (
-                    SELECT 1
-                    FROM json_each(
-                        CASE
-                            WHEN json_valid(COALESCE(payload_json, ''))
-                             AND json_type(
-                                     payload_json,
-                                     '$."defenseclaw.finding.tags"'
-                                 ) = 'array'
-                            THEN json_extract(
-                                payload_json,
-                                '$."defenseclaw.finding.tags"'
-                            )
-                            ELSE '[]'
-                        END
-                    ) AS finding_tag
-                    WHERE LOWER(TRIM(
-                        CAST(finding_tag.value AS TEXT),
-                        CHAR(9, 10, 11, 12, 13, 32)
-                    )) = 'detection-only'
-                )"""
-            )
-            safe_text_tags = self._safe_json_extract(
-                "payload_json",
-                '$."defenseclaw.finding.tags"',
-            )
-            predicates.append(
-                f"""LOWER(TRIM(
-                    COALESCE({safe_text_tags}, ''),
-                    CHAR(9, 10, 11, 12, 13, 32)
-                )) <> 'detection-only'"""
-            )
+            predicates.append(f"NOT {self._detection_only_clause()}")
         if "alert_acknowledgement_projection" in tables:
             predicates.append(
                 """NOT EXISTS (
@@ -1208,6 +1176,62 @@ class Store:
                 )"""
             )
         return " AND ".join(f"({predicate})" for predicate in predicates)
+
+    def _detection_only_clause(self) -> str:
+        """SQL true for a finding tagged detection-only (an array tag or the
+        whole scalar, any case or padding): a rule matched but could not decide
+        the call. It needs the payload_json column."""
+
+        safe_text_tags = self._safe_json_extract(
+            "payload_json",
+            '$."defenseclaw.finding.tags"',
+        )
+        return f"""(
+            EXISTS (
+                SELECT 1
+                FROM json_each(
+                    CASE
+                        WHEN json_valid(COALESCE(payload_json, ''))
+                         AND json_type(
+                                 payload_json,
+                                 '$."defenseclaw.finding.tags"'
+                             ) = 'array'
+                        THEN json_extract(
+                            payload_json,
+                            '$."defenseclaw.finding.tags"'
+                        )
+                        ELSE '[]'
+                    END
+                ) AS finding_tag
+                WHERE LOWER(TRIM(
+                    CAST(finding_tag.value AS TEXT),
+                    CHAR(9, 10, 11, 12, 13, 32)
+                )) = 'detection-only'
+            )
+            OR LOWER(TRIM(
+                COALESCE({safe_text_tags}, ''),
+                CHAR(9, 10, 11, 12, 13, 32)
+            )) = 'detection-only'
+        )"""
+
+    def count_detection_only_findings(self, since: datetime) -> int:
+        """Count the detection-only findings recorded at or after since.
+
+        Alerts leave them out (#693), so ``defenseclaw alerts`` says how many
+        there are and where to read them (GAP-0176)."""
+
+        columns, _ = self._audit_projection_schema()
+        if "payload_json" not in columns:
+            return 0
+        cutoff = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        row = self.db.execute(
+            f"""SELECT COUNT(*) FROM audit_events
+               WHERE timestamp >= ?
+                 AND COALESCE(payload_json, '') LIKE '%detection-only%'
+                 AND {self._detection_only_clause()}""",
+            (cutoff,),
+        ).fetchone()
+        return int(row[0] or 0)
 
     def list_alerts(self, limit: int = 100) -> list[Event]:
         where = self._alert_where_clause(actionable=False)

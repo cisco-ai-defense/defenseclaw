@@ -535,6 +535,12 @@ rest also reach per-user installs.
   fallback. A command that blocks in Claude Code or Codex could then run in
   Amp with a detection-only finding, for example one that writes its output
   to `~/out.txt`. Amp commands are now analyzed like the other agents'.
+- **`defenseclaw alerts` says how many detection-only findings it leaves
+  out.** A rule that matched a call it could not decide is not an alert, so
+  the list could read `No alerts. All clear.` while such calls ran. It now
+  ends with how many detection-only findings the last 24 hours had, says
+  `No alerts.` without `All clear`, and names
+  `defenseclaw audit export --since 24h` to read them.
 - **AI discovery on macOS skips the folders macOS protects.** Without Full
   Disk Access, every model file scan counted each folder macOS privacy
   protection keeps it out of (for example other apps' containers under
