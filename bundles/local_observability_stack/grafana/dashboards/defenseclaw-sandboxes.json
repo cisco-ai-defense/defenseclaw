@@ -639,7 +639,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (source, decision) (increase(defenseclaw_egress_events_total{connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (source, decision) (increase(defenseclaw_egress_events_total{connector=~\"$connector\", source=~\"openshell|dc-egress-proxy\"}[$__rate_interval]))",
           "refId": "A",
           "legendFormat": "{{source}} · {{decision}}",
           "range": true

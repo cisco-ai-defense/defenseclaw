@@ -110,10 +110,12 @@ stopped`. Nothing is changed; use the install command above.
   record's sandbox name as the `defenseclaw.sandbox.name` log attribute (Loki
   structured metadata) so the variable and the filters never parse log bodies;
   the body is unchanged and sandbox names stay out of metric labels. The
-  Splunk Observability bundle splits the Egress blocks tile by source, adds a
-  Sandboxes dashboard and a sandbox egress-blocks detector (and the local
-  Prometheus rule `DefenseClawSandboxEgressBlocksSustained`), and drops the
-  unused "Egress blocks / min" tile.
+  Splunk Observability bundle adds an Egress blocks by source chart to
+  Security and Policy, a Sandboxes dashboard and a sandbox egress-blocks
+  detector (and the local Prometheus rule
+  `DefenseClawSandboxEgressBlocksSustained`), which count the sandbox egress
+  sources (`openshell`, `dc-egress-proxy`) only, and drops the unused
+  "Egress blocks / min" tile.
 
 ### Sandbox policy: extend packs, repository policy, record then lock, test
 

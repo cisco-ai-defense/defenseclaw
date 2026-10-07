@@ -330,13 +330,13 @@ locals {
       EOT
     }
     security_total_egress_blocks = {
-      name        = "Egress blocks by source"
-      description = "Egress events where decision is block in the selected time range, one value per egress source: openshell (OpenShell's own network boundary) and dc-egress-proxy (the DefenseClaw egress proxy)."
+      name        = "Egress blocks"
+      description = "Egress events where decision is block in the selected time range, summed over every egress source. The Egress blocks by source chart splits them."
       program     = <<-EOT
         A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='delta')
         B = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='latest')
         C = A.delta()
-        D = (A if C is not None else B).sum(by=['source']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress blocks')
+        D = (A if C is not None else B).sum().sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress blocks')
       EOT
     }
     security_total_runtime_alerts = {
@@ -650,23 +650,23 @@ locals {
       EOT
     }
     sandbox_egress_allowed_31d = {
-      name        = "Egress allowed by source"
-      description = "Allowed egress decisions in the selected time range, one value per egress source."
+      name        = "Sandbox egress allowed"
+      description = "Allowed sandbox egress decisions in the selected time range, summed over the two sandbox egress sources (openshell and dc-egress-proxy)."
       program     = <<-EOT
-        A = data('defenseclaw.egress.events', filter=filter('decision', 'allow'), extrapolation='zero', rollup='delta')
-        B = data('defenseclaw.egress.events', filter=filter('decision', 'allow'), extrapolation='zero', rollup='latest')
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'allow') and filter('source', 'openshell', 'dc-egress-proxy'), extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.egress.events', filter=filter('decision', 'allow') and filter('source', 'openshell', 'dc-egress-proxy'), extrapolation='zero', rollup='latest')
         C = A.delta()
-        D = (A if C is not None else B).sum(by=['source']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress allowed')
+        D = (A if C is not None else B).sum().sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Sandbox egress allowed')
       EOT
     }
     sandbox_egress_blocked_31d = {
-      name        = "Egress blocked by source"
-      description = "Blocked egress decisions in the selected time range, one value per egress source."
+      name        = "Sandbox egress blocked"
+      description = "Blocked sandbox egress decisions in the selected time range, summed over the two sandbox egress sources (openshell and dc-egress-proxy)."
       program     = <<-EOT
-        A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='delta')
-        B = data('defenseclaw.egress.events', filter=filter('decision', 'block'), extrapolation='zero', rollup='latest')
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'block') and filter('source', 'openshell', 'dc-egress-proxy'), extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.egress.events', filter=filter('decision', 'block') and filter('source', 'openshell', 'dc-egress-proxy'), extrapolation='zero', rollup='latest')
         C = A.delta()
-        D = (A if C is not None else B).sum(by=['source']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress blocked')
+        D = (A if C is not None else B).sum().sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Sandbox egress blocked')
       EOT
     }
     alerts_per_min = {
@@ -1071,7 +1071,7 @@ locals {
     }
     egress_blocks_by_source = {
       name        = "Egress blocks by source"
-      description = "Blocked egress event rate grouped by source: openshell (OpenShell's own network boundary) or dc-egress-proxy (the DefenseClaw egress proxy)."
+      description = "Blocked egress event rate grouped by source: go and ts (the guardrail's own egress checks), openshell (OpenShell's own network boundary for a sandbox) or dc-egress-proxy (the DefenseClaw egress proxy of a sandbox)."
       plot_type   = "ColumnChart"
       stacked     = true
       axis_label  = "blocks / min"
@@ -1106,7 +1106,7 @@ locals {
       stacked     = true
       axis_label  = "events / min"
       program     = <<-EOT
-        A = data('defenseclaw.egress.events', rollup='rate').sum(by=['source', 'decision']).scale(60).publish(label='Egress events / min')
+        A = data('defenseclaw.egress.events', filter=filter('source', 'openshell', 'dc-egress-proxy'), rollup='rate').sum(by=['source', 'decision']).scale(60).publish(label='Egress events / min')
       EOT
     }
     sandbox_blocks_by_connector = {
@@ -1116,7 +1116,17 @@ locals {
       stacked     = true
       axis_label  = "blocks / min"
       program     = <<-EOT
-        A = data('defenseclaw.egress.events', filter=filter('decision', 'block'), rollup='rate').sum(by=['connector']).scale(60).publish(label='Egress blocks / min')
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'block') and filter('source', 'openshell', 'dc-egress-proxy'), rollup='rate').sum(by=['connector']).scale(60).publish(label='Egress blocks / min')
+      EOT
+    }
+    sandbox_blocks_by_source = {
+      name        = "Sandbox egress blocks by source"
+      description = "Blocked sandbox egress per minute grouped by source: openshell (OpenShell's own network boundary) or dc-egress-proxy (the DefenseClaw egress proxy)."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "blocks / min"
+      program     = <<-EOT
+        A = data('defenseclaw.egress.events', filter=filter('decision', 'block') and filter('source', 'openshell', 'dc-egress-proxy'), rollup='rate').sum(by=['source']).scale(60).publish(label='Sandbox egress blocks / min')
       EOT
     }
     egress_by_decision = {
@@ -1567,6 +1577,7 @@ locals {
     sandbox_transitions_by_phase    = "defenseclaw.sandbox.phase.to"
     sandbox_egress_source_decision  = "source"
     sandbox_blocks_by_connector     = "connector"
+    sandbox_blocks_by_source        = "source"
     alerts_by_type_severity         = "alert.severity"
     judge_errors_by_reason          = "judge.reason"
     guardrail_cache                 = "plot_label"
@@ -1600,8 +1611,8 @@ locals {
       description = "Sandbox egress decision totals by harness connector, egress source, and decision in the selected time range."
       group_by    = ["connector", "source", "decision"]
       program     = <<-EOT
-        A = data('defenseclaw.egress.events', extrapolation='zero', rollup='delta')
-        B = data('defenseclaw.egress.events', extrapolation='zero', rollup='latest')
+        A = data('defenseclaw.egress.events', filter=filter('source', 'openshell', 'dc-egress-proxy'), extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.egress.events', filter=filter('source', 'openshell', 'dc-egress-proxy'), extrapolation='zero', rollup='latest')
         C = A.delta()
         D = (A if C is not None else B).sum(by=['connector', 'source', 'decision']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Egress events')
       EOT
@@ -1711,7 +1722,7 @@ locals {
       { type = "time", key = "sandbox_active_by_connector", row = 1, column = 0, width = 6, height = 2 },
       { type = "time", key = "sandbox_transitions_by_phase", row = 1, column = 6, width = 6, height = 2 },
       { type = "time", key = "sandbox_egress_source_decision", row = 3, column = 0, width = 6, height = 2 },
-      { type = "time", key = "egress_blocks_by_source", row = 3, column = 6, width = 6, height = 2 },
+      { type = "time", key = "sandbox_blocks_by_source", row = 3, column = 6, width = 6, height = 2 },
       { type = "time", key = "sandbox_blocks_by_connector", row = 5, column = 0, width = 6, height = 2 },
       { type = "table", key = "sandbox_egress_mix", row = 5, column = 6, width = 6, height = 2 },
     ]

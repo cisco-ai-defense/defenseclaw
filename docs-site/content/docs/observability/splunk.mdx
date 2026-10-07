@@ -219,20 +219,25 @@ container.
 of detectors from the bundled Terraform. Two parts cover OpenShell sandboxes.
 They use metrics only, because the dashboards read no logs.
 
-- **Security and Policy.** The **Egress blocks by source** tile shows one value
-  per egress source: `openshell` (OpenShell's own network boundary) and
-  `dc-egress-proxy` (the DefenseClaw egress proxy). A new **Egress blocks by
-  source** chart plots the same split over time.
+- **Security and Policy.** A new **Egress blocks by source** chart splits the
+  blocked egress rate by source: `go` and `ts` (the guardrail's own egress
+  checks), and for sandboxes `openshell` (OpenShell's own network boundary) and
+  `dc-egress-proxy` (the DefenseClaw egress proxy). The **Egress blocks** tile
+  still shows one total.
 - **Sandboxes.** Active sandboxes (the `defenseclaw.sandbox.active` gauge),
-  phase changes, allowed and blocked egress by source, and charts of the egress
-  rate by source and decision, phase changes by the phase entered, and blocks by
-  harness connector, with a table of connector, source and decision totals. The
-  dashboard filters on harness connector, egress source and decision. Sandbox
-  names are never metric dimensions; hosts, bytes, findings and health are in the
+  phase changes, sandbox egress allowed and blocked, and charts of the sandbox
+  egress rate by source and decision, phase changes by the phase entered, and
+  blocks by source and by harness connector, with a table of connector, source
+  and decision totals. Its egress tiles, charts and table count the two sandbox
+  sources only (`openshell`, `dc-egress-proxy`), not the guardrail's own egress.
+  The dashboard filters on harness connector, egress source and decision.
+  Sandbox names are never metric dimensions; hosts, bytes, findings and health
+  are in the
   [Grafana Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board).
 - **Detector.** `DefenseClaw - Sandbox egress blocks sustained` (warning) fires
-  when blocked egress stays above 30 a minute for 10 minutes. The local Prometheus
-  rule `DefenseClawSandboxEgressBlocksSustained` has the same threshold.
+  when blocked sandbox egress (sources `openshell` and `dc-egress-proxy`) stays
+  above 30 a minute for 10 minutes, for either source. The local Prometheus rule
+  `DefenseClawSandboxEgressBlocksSustained` has the same threshold and sources.
 
 The dashboard variable named `source` on Security and Policy also matches the
 egress source, because both use the dimension name `source`.
