@@ -198,7 +198,44 @@ func (d *Daemon) IsRunning() (bool, int) {
 		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
+	if strings.TrimSpace(info.Executable) == "" && !legacyRecordNamesGateway(info.PID) {
+		// A record with no executable identity (the pre-1.0 plain PID, or an
+		// older JSON record) still keeps a second gateway from starting. When
+		// the OS reused that PID for another program, start reported that
+		// program as the running gateway and stayed down, while stop and
+		// doctor refused the record (GAP-0399). It is stale: replace it.
+		d.removePIDFileIfStarted(info)
+		return false, 0
+	}
 	return true, info.PID
+}
+
+// legacyRecordNamesGateway reports whether pid runs a gateway binary: one
+// named defenseclaw-gateway, or this program. A process whose executable
+// cannot be read keeps the earlier detection-only answer.
+func legacyRecordNamesGateway(pid int) bool {
+	var executable string
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		executable, err = os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+		executable = strings.TrimSuffix(executable, " (deleted)")
+	case "darwin":
+		executable, err = processExecutableDarwin(pid)
+	case "windows":
+		executable, err = processExecutableWindows(pid)
+	default:
+		return true
+	}
+	if err != nil || strings.TrimSpace(executable) == "" {
+		return true
+	}
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(executable)), ".exe")
+	if name == "defenseclaw-gateway" {
+		return true
+	}
+	self, err := os.Executable()
+	return err == nil && strings.EqualFold(filepath.Base(self), filepath.Base(executable))
 }
 
 // HasManagedProcessIdentity requires the complete PID record written by current
