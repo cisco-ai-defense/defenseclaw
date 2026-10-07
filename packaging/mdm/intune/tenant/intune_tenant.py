@@ -425,15 +425,17 @@ def cmd_check(graph: Graph, args: argparse.Namespace) -> int:
 
 def cmd_devices(graph: Graph, args: argparse.Namespace) -> int:
     select = (
-        "id,deviceName,operatingSystem,osVersion,complianceState,managementState,lastSyncDateTime,userPrincipalName"
+        "id,azureADDeviceId,deviceName,operatingSystem,osVersion,complianceState,managementState,lastSyncDateTime,userPrincipalName"
     )
     devices = graph.get_all(f"{BETA}/deviceManagement/managedDevices?$select={select}")
     if args.group:
         group = group_by_name(graph, args.group)
-        member_names = {
-            m.get("displayName") for m in graph.get_all(f"{V1}/groups/{group['id']}/members?$select=displayName")
-        }
-        devices = [d for d in devices if d.get("deviceName") in member_names]
+        members = graph.get_all(
+            f"{V1}/groups/{group['id']}/members/microsoft.graph.device?$select=deviceId&$count=true",
+            {"ConsistencyLevel": "eventual"},
+        )
+        member_ids = {str(m["deviceId"]).casefold() for m in members if m.get("deviceId")}
+        devices = [d for d in devices if str(d.get("azureADDeviceId", "")).casefold() in member_ids]
     if args.os:
         devices = [d for d in devices if str(d.get("operatingSystem", "")).lower().startswith(args.os)]
     if args.noncompliant:

@@ -68,6 +68,28 @@ def test_graph_add_member_treats_an_existing_member_as_done() -> None:
         graph.add_member("group", "device")
 
 
+def test_intune_group_devices_match_directory_ids(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "managedDevices" in path:
+                return [
+                    {"id": "managed-1", "deviceName": "SHARED", "azureADDeviceId": "AAD-1"},
+                    {"id": "managed-2", "deviceName": "SHARED", "azureADDeviceId": "AAD-2"},
+                ]
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/members" in path:
+                return [{"deviceId": "aad-1"}]
+            raise AssertionError(path)
+
+    args = intune.build_parser().parse_args(["devices", "--group", "team", "--json"])
+    assert intune.cmd_devices(Graph(), args) == 0
+    import json
+    assert [d["id"] for d in json.loads(capsys.readouterr().out)] == ["managed-1"]
+
+
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
     entra = _load(ENTRA)
     # Data1 = 1; Data2 and Data3 share one little-endian word; Data4 is two more.
