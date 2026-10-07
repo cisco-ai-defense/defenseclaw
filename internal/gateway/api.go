@@ -2583,6 +2583,29 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 	}
 }
 
+// withScannerSettings adds the scanner settings a scan ran with (policy,
+// analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
+// reports them as the per-user `skill scan` does. The Secure Client
+// integration keeps its response unchanged.
+func withScannerSettings(cfg *config.Config, kind string, envelope map[string]interface{}) map[string]interface{} {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return envelope
+	}
+	settings := map[string]interface{}{}
+	switch kind {
+	case "skill":
+		settings["policy"] = cfg.Scanners.SkillScanner.EffectivePolicy()
+		if cfg.Scanners.SkillScanner.UseLLM {
+			settings["judge_model"] = cfg.ResolveLLM("scanners.skill").Model
+		}
+	case "mcp":
+		settings["analyzers"] = cfg.Scanners.MCPScanner.AnalyzersArg()
+		settings["judge_model"] = cfg.ResolveLLM("scanners.mcp").Model
+	}
+	envelope["scanner_settings"] = settings
+	return envelope
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/skill/scan — run skill scanner on a local path (Option 2: remote scan)
 // ---------------------------------------------------------------------------
@@ -2655,7 +2678,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -2830,7 +2853,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
 }
 
 // ---------------------------------------------------------------------------
