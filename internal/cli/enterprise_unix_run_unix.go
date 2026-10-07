@@ -163,7 +163,7 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 	// config the installed binary refuses: repair applies the same config
 	// again, and the config_refused error above names the fix.
 	if repairCommand != "" && result.Installed && !lifecycleResultHasError(result, "lifecycle_busy") &&
-		!lifecycleResultHasError(result, "config_refused") &&
+		!lifecycleResultHasError(result, "config_refused") && !configOnlyProblems(result) &&
 		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
 		target := "them"
 		if len(result.Errors) == 1 {
@@ -250,6 +250,25 @@ func lifecycleResultHasWarning(result *enterprisestatus.Result, code string) boo
 		}
 	}
 	return false
+}
+
+// configOnlyProblems reports whether every error of result is a config
+// problem (no connector enabled, a rejected config.yaml). Its line already
+// says to change config.yaml and run ensure; repair does not fix it
+// (GAP-0265).
+func configOnlyProblems(result *enterprisestatus.Result) bool {
+	configProblems := map[string]bool{}
+	for _, warning := range result.Warnings {
+		if warning.Code == "no_connectors_enabled" || warning.Code == "config_rejected" {
+			configProblems[warning.Message] = true
+		}
+	}
+	for _, e := range result.Errors {
+		if !configProblems[e.Message] {
+			return false
+		}
+	}
+	return len(result.Errors) > 0
 }
 
 // lifecycleResultHasError reports whether result carries an error with code.

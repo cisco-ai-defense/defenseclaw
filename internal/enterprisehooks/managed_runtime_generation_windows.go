@@ -643,6 +643,114 @@ func verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform(
 	)
 }
 
+// windowsMachinePolicyRegistersSID reports whether connectorName's primary
+// machine policy (the Claude Code policy target set, the Codex requirements
+// registry, the Cursor policy target set) registers sid: the same check the
+// hook makes before it reads the runtime selector. Replaceable in tests.
+var windowsMachinePolicyRegistersSID = func(connectorName, sid, hookExecutable string) (bool, error) {
+	var registered []string
+	switch connectorName {
+	case "claudecode":
+		targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+		if err != nil || !active {
+			return false, err
+		}
+		registered = targets
+	case "codex":
+		registry, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(hookExecutable)
+		if err != nil || !registry.Active {
+			return false, err
+		}
+		for _, target := range registry.Targets {
+			registered = append(registered, target.SID)
+		}
+	case "cursor":
+		targets, active, err := ReadWindowsCursorManagedPolicyTargets()
+		if err != nil || !active {
+			return false, err
+		}
+		for _, target := range targets {
+			registered = append(registered, target.SID)
+		}
+	default:
+		return false, fmt.Errorf("enterprise hooks: %q has no primary machine policy", connectorName)
+	}
+	for _, candidate := range registered {
+		if strings.EqualFold(strings.TrimSpace(candidate), sid) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// RetireWindowsUnregisteredRuntimeSelections removes this deployment's Claude
+// Code, Codex and Cursor runtime selections for SIDs their primary machine
+// policy no longer registers (GAP-0262). Revocation (a disabled connector, a
+// removed user, `enterprise hooks uninstall`) narrows only the primary policy,
+// so the selection stayed behind, and once the SID was enrolled again its
+// deferred pending proof refused it: "already has a selected runtime without
+// protected Guardian authorization". Such a selection is inert, since the hook
+// refuses an unregistered SID before it reads the selector. Each SID is
+// re-checked under its runtime transaction lock, which a secure install holds
+// from selection through registration. A selection made with another hook
+// executable belongs to another deployment and stays for the pending proof to
+// refuse. The selection's bundle is retired best effort: without the
+// selection it is unreachable, and generation GC collects what is left.
+// Standalone only; Secure Client keeps its selections as before.
+func RetireWindowsUnregisteredRuntimeSelections() error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return nil
+	}
+	hookExecutable, err := windowsEnterpriseHookExecutable()
+	if err != nil {
+		return err
+	}
+	hookExecutable = filepath.Clean(hookExecutable)
+	var errs []error
+	for _, name := range []string{"claudecode", "codex", "cursor"} {
+		selector, _, exists, err := readWindowsManagedRuntimeSelector(name, true)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s runtime selector: %w", name, err))
+			continue
+		}
+		if !exists {
+			continue
+		}
+		for _, entry := range selector.Targets {
+			if entry.HookExecutable != hookExecutable {
+				continue
+			}
+			if err := retireWindowsUnregisteredRuntimeSelection(name, entry.SID, hookExecutable); err != nil {
+				errs = append(errs, fmt.Errorf("%s runtime selection of %s: %w", name, entry.SID, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func retireWindowsUnregisteredRuntimeSelection(connectorName, sid, hookExecutable string) error {
+	unlock, err := lockWindowsUserRuntimeTransaction(sid)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	registered, err := windowsMachinePolicyRegistersSID(connectorName, sid, hookExecutable)
+	if err != nil || registered {
+		return err
+	}
+	commit, err := RemoveWindowsManagedRuntimeGenerationEnrollment(WindowsManagedRuntimeGenerationRemovalOptions{
+		Connector:                connectorName,
+		TargetSID:                sid,
+		HookExecutable:           hookExecutable,
+		PrimaryEnrollmentRemoved: true,
+	})
+	if err != nil {
+		return err
+	}
+	_ = commit.Finalize()
+	return nil
+}
+
 func restoreWindowsManagedRuntimeSelectorTargetCASPlatform(
 	opts WindowsManagedRuntimeSelectorRestoreOptions,
 ) error {

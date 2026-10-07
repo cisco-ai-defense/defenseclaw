@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // Machine policy codes in the lifecycle result.
@@ -452,13 +453,15 @@ func firstPaths(paths []string) string {
 // connector although the enumerator found users to protect.
 const codeNoConnectorsEnabled = "no_connectors_enabled"
 
-// warnNoConnectorsEnabled reports a config without an enabled
-// guardrail.connectors entry on a host with eligible users: the enumerator
-// publishes no target for them, and status would otherwise read coverage and
-// security complete with 0 targets. verify fails on it (GAP-0221).
+// warnNoConnectorsEnabled reports a config that enrols no connector on a
+// host with eligible users: the enumerator publishes no target for them, and
+// status would otherwise read coverage and security complete with 0 targets.
+// verify fails on it (GAP-0221). The connectors counted are the enumerator's
+// own set, so the singular guardrail.connector the per-user CLI writes counts
+// unless guardrail.connectors disables it (GAP-0263).
 func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 	env, r := l.env, l.result
-	if len(validated.Connectors) > 0 {
+	if len(enterprisehooks.EffectiveUnixHookConnectors(validated.Loaded, connector.NewDefaultRegistry())) > 0 {
 		return
 	}
 	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
