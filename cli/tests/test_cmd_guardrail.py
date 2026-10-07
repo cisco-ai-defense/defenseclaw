@@ -831,11 +831,14 @@ class PerConnectorToggleTests(unittest.TestCase):
         from defenseclaw import config as dcconfig
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None, "copilot": None})
-        app.cfg.guardrail.connectors["codex"].rule_pack_dir = "/packs/strict"
+        app.cfg.guardrail.connectors["codex"].rule_pack = "strict"
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
-        app.cfg.guardrail.connectors["copilot"].rule_pack_dir = "/packs/protected-copilot/default"
+        app.cfg.guardrail.custom_packs["protected-copilot"] = dcconfig.CustomRulePack(
+            path="/packs/protected-copilot/default"
+        )
+        app.cfg.guardrail.connectors["copilot"].rule_pack = "protected-copilot"
         app.cfg.guardrail.block_at = "HIGH"
         with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=200):  # the table layout
             result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
@@ -1760,7 +1763,6 @@ class ListPacksTests(unittest.TestCase):
     def test_lists_presets_and_per_connector_dirs(self):
         app = make_ctx(enabled=True, connector="codex")
         gc = app.cfg.guardrail
-        gc.rule_pack_dir = ""
         gc.effective_rule_pack_dir = lambda name="": {"codex": "/etc/dc/strict"}.get(name, "")
         app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
         result = CliRunner().invoke(cmd_guardrail.list_packs_cmd, [], obj=app)
@@ -1773,7 +1775,6 @@ class ListPacksTests(unittest.TestCase):
     def test_global_dir_default_when_unset(self):
         app = make_ctx(enabled=True, connector="codex")
         gc = app.cfg.guardrail
-        gc.rule_pack_dir = ""
         gc.effective_rule_pack_dir = lambda name="": ""
         app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
         result = CliRunner().invoke(cmd_guardrail.list_packs_cmd, [], obj=app)

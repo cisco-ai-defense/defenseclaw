@@ -47,7 +47,7 @@ def env(tmp_path, monkeypatch):
     cfg.claw.mode = "codex"
     cfg.guardrail.connector = "codex"
     cfg.guardrail.enabled = True
-    cfg.guardrail.rule_pack_dir = str(root / "default")
+    cfg.guardrail.rule_pack = "default"
     cfg.save = MagicMock()
     app = AppContext()
     app.cfg = cfg
@@ -124,13 +124,11 @@ def test_rule_and_suppress_wrappers(env) -> None:
 
 def test_use_pack_writes_rule_pack_and_pins_custom_digest(env, tmp_path) -> None:
     app, root, writes = env
-    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack_dir=str(root / "strict"))}
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="strict")}
     assert _run(app, "use-pack", "permissive").exit_code == 0
     assert writes[-1][0] == [
         config_writer.Change("guardrail.rule_pack", "permissive"),
-        config_writer.Change("guardrail.rule_pack_dir", unset=True),
         config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
-        config_writer.Change("guardrail.connectors.codex.rule_pack_dir", unset=True),
     ]
     custom = tmp_path / "Acme Pack"
     shutil.copytree(root / "default", custom)

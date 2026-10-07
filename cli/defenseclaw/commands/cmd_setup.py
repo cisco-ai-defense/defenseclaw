@@ -6098,96 +6098,29 @@ def _configure_hilt_interactive(
     ).upper()
 
 
-def _resolve_rule_pack_dir(
-    app: AppContext,
-    *,
-    rule_pack: str | None,
-    rule_pack_dir: str | None,
-) -> str | None:
-    """Resolve a rule-pack selection to a concrete directory path.
-
-    ``--rule-pack`` names a bundled preset (default/strict/permissive),
-    resolved under ``<policy_root>/guardrail/<preset>``. ``--rule-pack-dir``
-    (R1) points at an arbitrary directory verbatim, giving the CLI parity
-    with the TUI's free-text ``rule_pack_dir`` field. The two are mutually
-    exclusive — naming a single pack two different ways in one invocation is
-    exactly the one-input-two-meanings ambiguity R3 exists to remove, so we
-    reject it loudly rather than silently picking a winner.
-
-    Returns:
-      * ``None`` — neither flag supplied; the caller leaves the existing
-        ``rule_pack_dir`` untouched.
-      * ``""`` — ``--rule-pack-dir ""`` was passed explicitly; clears the
-        override back to the inherited/global default (three-state parity
-        with the YAML semantics the gateway loader honors).
-      * an absolute path — the resolved preset or operator-supplied dir.
-    """
-    if rule_pack is not None and rule_pack_dir is not None:
-        raise click.UsageError(
-            "--rule-pack and --rule-pack-dir are mutually exclusive: pass a "
-            "built-in preset name OR a custom directory path, not both."
-        )
-    if rule_pack is not None:
-        policy_root = app.cfg.policy_dir or os.path.join(app.cfg.data_dir, "policies")
-        return os.path.join(policy_root, "guardrail", rule_pack)
-    if rule_pack_dir is not None:
-        raw = rule_pack_dir.strip()
-        # Empty string is an explicit "clear the override"; a real path is
-        # anchored to an absolute location so the gateway's LoadRulePack
-        # reads exactly where the operator pointed regardless of the
-        # sidecar's working directory at boot.
-        if not raw:
-            return ""
-        resolved = os.path.abspath(os.path.expanduser(raw))
-        # R5: validate the pack dir on set. Setup is a local authoring command;
-        # saving a path that does not exist makes the summary look successful
-        # while the gateway cannot load the intended rules at boot.
-        if not os.path.isdir(resolved):
-            raise click.UsageError(
-                f"--rule-pack-dir {resolved!r} does not exist or is not a directory. "
-                "Create the directory first, or use --rule-pack default|strict|permissive."
-            )
-        return resolved
-    return None
-
-
-def _apply_rule_pack_selection(gc, pack_dir: str, *, connector: str | None) -> bool:
-    """Write *pack_dir* with per-connector scoping (R3).
+def _apply_rule_pack_selection(gc, name: str, *, connector: str | None) -> bool:
+    """Select the built-in rule pack *name* with per-connector scoping (R3).
 
     When *connector* already owns an override block in ``gc.connectors``, the
     pack is written there and peers keep their current rule pack. Without an
-    explicit connector, this is a global/all-connectors write: update
-    ``gc.rule_pack_dir`` and clear every per-connector rule-pack override so
-    all active connectors inherit the same pack. Returns True when the write
-    was per-connector.
+    explicit connector, this is a global/all-connectors write: set
+    ``gc.rule_pack`` and clear every per-connector rule-pack override so all
+    active connectors inherit the same pack. Returns True when the write was
+    per-connector. A custom pack is registered with ``guardrail use-pack``.
     """
     if connector and getattr(gc, "connectors", None) and connector in gc.connectors:
-        _set_scope_rule_pack_dir(gc.connectors[connector], pack_dir)
+        gc.connectors[connector].rule_pack = name
         return True
-    _set_scope_rule_pack_dir(gc, pack_dir)
+    gc.rule_pack = name
     for block in (getattr(gc, "connectors", None) or {}).values():
-        _set_scope_rule_pack_dir(block, "")
+        block.rule_pack = ""
     return False
 
 
-def _set_scope_rule_pack_dir(block, pack_dir: str) -> None:
-    """Select *pack_dir* at one guardrail scope ("" clears the scope's pack).
-
-    The config_version 9 key is ``rule_pack``; the save maps a non-empty v8
-    ``rule_pack_dir`` onto it, so the scope's ``rule_pack`` is cleared here or
-    an existing selection would survive a clear.
-    """
-    block.rule_pack_dir = pack_dir
-    if hasattr(block, "rule_pack"):
-        block.rule_pack = ""
-
-
 def _apply_guardrail_extra_options(
-    app: AppContext,
     gc,
     *,
     rule_pack: str | None,
-    rule_pack_dir: str | None = None,
     connector: str | None = None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
@@ -6199,9 +6132,8 @@ def _apply_guardrail_extra_options(
     R3 consistency fix so ``setup guardrail --connector X`` matches ``setup X``.
     """
 
-    pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
-    if pack_dir is not None:
-        _apply_rule_pack_selection(gc, pack_dir, connector=connector)
+    if rule_pack is not None:
+        _apply_rule_pack_selection(gc, rule_pack, connector=connector)
     per_connector = bool(connector and getattr(gc, "connectors", None) and connector in gc.connectors)
     _apply_hilt_setup(
         gc,
@@ -6351,17 +6283,6 @@ def _resolve_judge_hook_gate(
     type=click.Choice(["default", "strict", "permissive"]),
     default=None,
     help="Guardrail rule-pack profile",
-)
-@click.option(
-    "--rule-pack-dir",
-    default=None,
-    help=(
-        "Path to a custom rule-pack directory. Use instead of --rule-pack "
-        "to point at a pack "
-        "outside the built-in default/strict/permissive presets. Scoped "
-        "per-connector when --connector names a multi-install peer, else "
-        'global. Mutually exclusive with --rule-pack; pass "" to clear.'
-    ),
 )
 @click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
 @click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
@@ -6554,7 +6475,6 @@ def setup_guardrail(
     detection_strategy_completion: str | None,
     detection_strategy_tool_call: str | None,
     rule_pack,
-    rule_pack_dir,
     judge_model,
     judge_api_base,
     judge_api_key_env,
@@ -6860,10 +6780,8 @@ def setup_guardrail(
         if detection_strategy is not None:
             gc.detection_strategy = detection_strategy
         _apply_guardrail_extra_options(
-            app,
             gc,
             rule_pack=rule_pack,
-            rule_pack_dir=rule_pack_dir,
             connector=explicit_connector,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
@@ -7064,10 +6982,8 @@ def setup_guardrail(
                 click.echo("  Guardrail not enabled. Run again without declining to configure.")
                 return
             _apply_guardrail_extra_options(
-                app,
                 gc,
                 rule_pack=rule_pack,
-                rule_pack_dir=rule_pack_dir,
                 connector=explicit_connector,
                 human_approval=human_approval,
                 hilt_min_severity=hilt_min_severity,
@@ -7242,10 +7158,8 @@ def setup_guardrail(
         ]
         for c in _actives:
             hilt_c = gc.effective_hilt(c)
-            # Empty rule-pack dir = the built-in default pack — render it the
-            # same way `guardrail status` does (basename, or "default").
-            _rp = gc.effective_rule_pack_dir(c)
-            rp_label = os.path.basename(_rp.rstrip("/")) if _rp.strip() else "default"
+            # An unset rule_pack is the built-in default pack.
+            rp_label = gc.effective_rule_pack(c) or "default"
             rows.append((f"  [{c}] mode", gc.effective_mode(c)))
             rows.append((f"  [{c}] rule_pack", rp_label))
             rows.append((f"  [{c}] hook_fail_mode", gc.effective_hook_fail_mode(c) or "open"))
@@ -7268,7 +7182,7 @@ def setup_guardrail(
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", gc.detection_strategy),
-            ("guardrail.rule_pack_dir", gc.effective_rule_pack_dir()),
+            ("guardrail.rule_pack", gc.effective_rule_pack() or "default"),
         ]
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
@@ -9686,7 +9600,6 @@ def _apply_hook_connector_setup(
     write_mode: str = "replace",
     preserve_global_settings: bool = False,
     rule_pack: str | None = None,
-    rule_pack_dir: str | None = None,
     block_message: str | None = None,
     fail_mode: str | None = None,
     hilt: bool | None = None,
@@ -9782,7 +9695,6 @@ def _apply_hook_connector_setup(
 
     cfg = app.cfg
     gc = cfg.guardrail
-    pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except _SetupGatewayNoAnswerError as exc:
@@ -9879,24 +9791,17 @@ def _apply_hook_connector_setup(
     #     gets seeded into the map on the first add keeps an empty block and
     #     therefore inherits the global pack — unchanged.
     #   * sole connector (replace / first-ever single): there is no
-    #     per-connector block, so it sets the global rule_pack_dir exactly
+    #     per-connector block, so it sets the global rule_pack exactly
     #     like `setup guardrail --rule-pack` does for a single-connector
     #     install. "Set this connector's pack" thus means the same thing in
     #     both shapes.
-    #
-    # R1: --rule-pack-dir accepts a free-text directory verbatim (parity with
-    # the TUI's free-text field); ``pack_dir`` was resolved above. The scoping
-    # branch below is unchanged.
-    if pack_dir is not None:
-        # Operator-facing label: the preset name, the dir path, or an explicit
-        # "(cleared)" when --rule-pack-dir "" reset the override.
-        pack_label = rule_pack if rule_pack is not None else (pack_dir or "(cleared — inherits global)")
+    if rule_pack is not None:
         if write_mode == "add" and connector in gc.connectors:
-            _set_scope_rule_pack_dir(gc.connectors[connector], pack_dir)
-            ux.echo(f"  ✓ {connector} rule pack: {pack_label} (per-connector override)")
+            gc.connectors[connector].rule_pack = rule_pack
+            ux.echo(f"  ✓ {connector} rule pack: {rule_pack} (per-connector override)")
         else:
-            _set_scope_rule_pack_dir(gc, pack_dir)
-            ux.echo(f"  ✓ rule pack: {pack_label} (global)")
+            gc.rule_pack = rule_pack
+            ux.echo(f"  ✓ rule pack: {rule_pack} (global)")
     gc.enabled = True
     # SU-01/G1: write the guardrail mode PER-CONNECTOR when this connector owns
     # an override block (the multi/add shape), so flipping one connector to
@@ -10630,7 +10535,6 @@ def _setup_observability_alias(
     workspace_dir: str | None = None,
     replace: bool = False,
     rule_pack: str | None = None,
-    rule_pack_dir: str | None = None,
     block_message: str | None = None,
     fail_mode: str | None = None,
     human_approval: bool | None = None,
@@ -10821,7 +10725,6 @@ def _setup_observability_alias(
         workspace_dir=workspace_dir,
         write_mode=write_mode,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         block_message=block_message,
         fail_mode=fail_mode,
         hilt=human_approval,
@@ -11837,16 +11740,6 @@ def _hook_guardrail_options(fn):
         "(inherits the global pack)."
     ),
 )
-@click.option(
-    "--rule-pack-dir",
-    default=None,
-    help=(
-        "Path to a custom rule-pack directory for this connector. Use "
-        "instead of --rule-pack to point at a pack "
-        "outside the built-in presets; same per-connector scoping. Mutually "
-        'exclusive with --rule-pack; pass "" to clear an override.'
-    ),
-)
 @_hook_guardrail_options
 @pass_ctx
 def setup_codex(
@@ -11858,7 +11751,6 @@ def setup_codex(
     workspace_dir: str | None,
     replace: bool,
     rule_pack: str | None,
-    rule_pack_dir: str | None,
     enable_judge: bool | None,
     judge_hook_connectors: str | None,
     human_approval: bool | None,
@@ -11903,7 +11795,6 @@ def setup_codex(
         workspace_dir=workspace_dir,
         replace=replace,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         block_message=block_message,
         fail_mode=fail_mode,
         human_approval=human_approval,
@@ -11991,16 +11882,6 @@ def setup_codex(
         "unchanged (inherits the global pack)."
     ),
 )
-@click.option(
-    "--rule-pack-dir",
-    default=None,
-    help=(
-        "Path to a custom rule-pack directory for this connector. Use "
-        "instead of --rule-pack to point at a pack "
-        "outside the built-in presets; same per-connector scoping. Mutually "
-        'exclusive with --rule-pack; pass "" to clear an override.'
-    ),
-)
 @_hook_guardrail_options
 @pass_ctx
 def setup_claude_code(
@@ -12012,7 +11893,6 @@ def setup_claude_code(
     workspace_dir: str | None,
     replace: bool,
     rule_pack: str | None,
-    rule_pack_dir: str | None,
     enable_judge: bool | None,
     judge_hook_connectors: str | None,
     human_approval: bool | None,
@@ -12054,7 +11934,6 @@ def setup_claude_code(
         workspace_dir=workspace_dir,
         replace=replace,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         block_message=block_message,
         fail_mode=fail_mode,
         human_approval=human_approval,
@@ -12449,16 +12328,6 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             "leave unchanged (inherits the global pack)."
         ),
     )
-    @click.option(
-        "--rule-pack-dir",
-        default=None,
-        help=(
-            "Path to a custom rule-pack directory for this connector. Use "
-            "instead of --rule-pack to point at "
-            "a pack outside the built-in presets; same per-connector scoping. "
-            'Mutually exclusive with --rule-pack; pass "" to clear an override.'
-        ),
-    )
     @_hook_guardrail_options
     @pass_ctx
     def _cmd(
@@ -12470,7 +12339,6 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         workspace_dir: str | None,
         replace: bool,
         rule_pack: str | None,
-        rule_pack_dir: str | None,
         enable_judge: bool | None,
         judge_hook_connectors: str | None,
         human_approval: bool | None,
@@ -12488,7 +12356,6 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             workspace_dir=workspace_dir,
             replace=replace,
             rule_pack=rule_pack,
-            rule_pack_dir=rule_pack_dir,
             block_message=block_message,
             fail_mode=fail_mode,
             human_approval=human_approval,
@@ -12638,7 +12505,6 @@ def _setup_guardrail_connector_alias(
     block_message: str | None,
     detection_strategy: str | None,
     rule_pack: str | None,
-    rule_pack_dir: str | None,
     judge_model: str | None,
     judge_api_base: str | None,
     judge_api_key_env: str | None,
@@ -12724,7 +12590,6 @@ def _setup_guardrail_connector_alias(
         block_message=block_message,
         detection_strategy=detection_strategy,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         judge_model=judge_model,
         judge_api_base=judge_api_base,
         judge_api_key_env=judge_api_key_env,
@@ -13043,14 +12908,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         default=None,
         help="Guardrail rule-pack profile.",
     )
-    @click.option(
-        "--rule-pack-dir",
-        default=None,
-        help=(
-            "Path to a custom rule-pack directory. Mutually exclusive with "
-            '--rule-pack; pass "" to clear.'
-        ),
-    )
     @click.option("--judge-model", default=None, help="LLM judge model.")
     @click.option("--judge-api-base", default=None, help="LLM judge API base URL.")
     @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key.")
@@ -13085,7 +12942,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         block_message: str | None,
         detection_strategy: str | None,
         rule_pack: str | None,
-        rule_pack_dir: str | None,
         judge_model: str | None,
         judge_api_base: str | None,
         judge_api_key_env: str | None,
@@ -13116,7 +12972,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             block_message=block_message,
             detection_strategy=detection_strategy,
             rule_pack=rule_pack,
-            rule_pack_dir=rule_pack_dir,
             judge_model=judge_model,
             judge_api_base=judge_api_base,
             judge_api_key_env=judge_api_key_env,

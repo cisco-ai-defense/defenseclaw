@@ -6662,12 +6662,11 @@ def _guardrail_wizard_fields_for(
     mode = mode.strip().lower() or "observe"
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
-    # The pack the scope enforces: config_version 9 rule_pack, else the v8 dir.
-    rule_pack_dir = _effective_guardrail_value(
-        cfg, connector if connector_policy else "", "effective_rule_pack_dir", "guardrail.rule_pack_dir"
-    )
+    # The pack the scope enforces: its config_version 9 rule_pack.
+    pack_name = _effective_guardrail_value(
+        cfg, connector if connector_policy else "", "effective_rule_pack", "guardrail.rule_pack"
+    ).strip()
     rule_pack_options: tuple[str, ...] = ("default", "strict", "permissive")
-    pack_name = os.path.basename(rule_pack_dir.rstrip("/\\")).strip() if rule_pack_dir else ""
     rule_pack = pack_name.lower() or "default"
     if rule_pack not in rule_pack_options:
         # A custom pack is active. Show it as the untouched value so the form
@@ -7732,7 +7731,7 @@ def _effective_guardrail_value(
         "effective_mode": "mode",
         "effective_hook_fail_mode": "hook_fail_mode",
         "effective_block_message": "block_message",
-        "effective_rule_pack_dir": "rule_pack_dir",
+        "effective_rule_pack": "rule_pack",
     }.get(method_name, "")
     overrides = get_config_value(cfg, "guardrail.connectors", None)
     if connector and leaf and isinstance(overrides, Mapping):
@@ -7844,7 +7843,7 @@ def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> l
     """Build per-connector guardrail override groups for the config editor (B4).
 
     One header + editable rows per active connector covering every per-connector
-    guardrail control: ``mode``, ``rule_pack_dir``, ``enabled`` (E4c),
+    guardrail control: ``mode``, ``rule_pack``, ``enabled`` (E4c),
     ``hook_fail_mode``, ``hilt`` enable + min-severity, ``block_message`` (E4d),
     and the hook-lane judge toggle (membership in
     ``guardrail.judge.hook_connectors``). Each row displays the *effective* value

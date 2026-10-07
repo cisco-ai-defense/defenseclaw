@@ -927,7 +927,7 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         llm=resolved_llm,
     )
     # R4: overlay the configured guardrail rule pack onto the server definition
-    # (command/args/env/url). No-op when no rule_pack_dir is set.
+    # (command/args/env/url). No-op when no rule pack or guardrail.rules is set.
     from defenseclaw.scanner.rulepack import maybe_wrap
 
     scanner = maybe_wrap(

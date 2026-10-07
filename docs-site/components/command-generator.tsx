@@ -451,7 +451,7 @@ export function buildCommand(
   }
 
   // The rule pack applies in both modes: setup guardrail writes
-  // guardrail.rule_pack_dir whatever the mode, and observe mode logs the
+  // guardrail.rule_pack whatever the mode, and observe mode logs the
   // findings of that pack.
   lines.push(`--rule-pack ${s.rulePack}`);
 

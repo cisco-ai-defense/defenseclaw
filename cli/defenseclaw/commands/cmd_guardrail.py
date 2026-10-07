@@ -244,7 +244,7 @@ def _toggle_connector_guardrail(
     ``guardrail.connectors[X].enabled`` and (on restart) lets the Go boot
     loop run that one connector's ``Setup``/``Teardown`` via the existing
     set-difference path — the others are untouched. The connector's other
-    policy fields (mode/hilt/rule_pack_dir) are retained so re-enable
+    policy fields (mode/hilt/rule_pack) are retained so re-enable
     restores it with no re-prompt.
 
     ``--connector`` is a multi-connector feature: on a single-connector
@@ -3446,7 +3446,6 @@ def use_pack_cmd(
             app,
             [
                 config_writer.Change(f"{key}.rule_pack", unset=True),
-                config_writer.Change(f"{key}.rule_pack_dir", unset=True),
             ],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
@@ -3581,14 +3580,12 @@ def use_pack_cmd(
         )
     key = _scope_key(connector_key, None)
     changes.append(config_writer.Change(f"{key}.rule_pack", name))
-    changes.append(config_writer.Change(f"{key}.rule_pack_dir", unset=True))
     cleared: list[str] = []
     if connector_key is None:
         for other, block in sorted((getattr(gc, "connectors", None) or {}).items()):
             if policy_catalog.configured_pack_dir(app.cfg, block):
                 other_key = _scope_key(other, None)
                 changes.append(config_writer.Change(f"{other_key}.rule_pack", unset=True))
-                changes.append(config_writer.Change(f"{other_key}.rule_pack_dir", unset=True))
                 cleared.append(other)
     previous_pack = (
         policy_catalog.pack_name_for_path(
@@ -4593,7 +4590,7 @@ def profile_group() -> None:
 
 def _profile_settings(profile) -> dict:
     out: dict = {}
-    for key in ("description", "mode", "block_at", "alert_at", "rule_pack", "rule_pack_dir", "block_message"):
+    for key in ("description", "mode", "block_at", "alert_at", "rule_pack", "block_message"):
         value = getattr(profile, key, "")
         if value:
             out[key] = value
@@ -4607,8 +4604,7 @@ def _profile_settings(profile) -> dict:
                     ("mode", pc.mode),
                     ("block_at", pc.block_at),
                     ("alert_at", pc.alert_at),
-                    ("rule_pack", getattr(pc, "rule_pack", "")),
-                    ("rule_pack_dir", pc.rule_pack_dir),
+                    ("rule_pack", pc.rule_pack),
                     ("block_message", pc.block_message),
                 )
                 if value

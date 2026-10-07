@@ -91,7 +91,6 @@ def _make_app(connector: str):
         detection_strategy_completion="",
         detection_strategy_tool_call="",
         judge_sweep=True,
-        rule_pack_dir="",
         hook_fail_mode="",
         llm_role="",
     )

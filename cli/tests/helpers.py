@@ -240,6 +240,21 @@ def seed_cached_plugin(
     return str(root)
 
 
+def select_pack(cfg: Config, block, path: str) -> None:
+    """Make a guardrail scope (``cfg.guardrail`` or one connector entry) select the pack at *path*.
+
+    A built-in preset name is selected by name; any other folder is registered under its
+    folder name in ``guardrail.custom_packs`` (config_version 9 has no directory key).
+    """
+    from defenseclaw.config import CustomRulePack
+    from defenseclaw.policy_catalog import RULE_PACK_PRESETS
+
+    name = os.path.basename(path.rstrip("/\\")) if path else ""
+    if name and name not in RULE_PACK_PRESETS:
+        cfg.guardrail.custom_packs[name] = CustomRulePack(path=path)
+    block.rule_pack = name
+
+
 def make_temp_store() -> tuple[Store, str]:
     """Create a temporary SQLite store. Returns (store, db_path)."""
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)

@@ -2651,11 +2651,11 @@ def test_per_connector_guardrail_field_creates_missing_entry() -> None:
     from defenseclaw.tui.services.setup_state import apply_config_field
 
     cfg = Config(guardrail=GuardrailConfig(enabled=True, mode="observe", connector="codex"))
-    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack_dir", "/codex/pack")
+    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack", "strict")
 
     entry = cfg.guardrail.connectors["codex"]
     assert isinstance(entry, PerConnectorGuardrailConfig)
-    assert entry.rule_pack_dir == "/codex/pack"
+    assert entry.rule_pack == "strict"
 
 
 def test_guardrail_section_single_connector_omits_per_connector_groups() -> None:
