@@ -879,9 +879,10 @@ def test_no_asks_text_holds_for_every_pack() -> None:
     assert text.startswith("No asks are waiting.") and "Only" not in text
     assert "private-network address" in text and "balanced" in text and "strict" in text
     # A port on this machine drafts no proposal (OpenShell denies the mapping
-    # itself), so the text must not promise that one asks (R2-47).
-    assert "localhost ports" not in text and "Ports on this machine never ask" in text
-    assert "--host-port" in text
+    # itself), so only a port the run named with --host-port asks (R2-47,
+    # GAP-0102: the text said no port ever asks).
+    assert "localhost ports" not in text and "never ask" not in text
+    assert "asks only if the run named it with --host-port PORT" in text
 
 
 @pytest.mark.parametrize(
