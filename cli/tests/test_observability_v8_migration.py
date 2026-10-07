@@ -1172,6 +1172,34 @@ audit_sinks:
     assert "legacy_insecure_skip_verify_ignored:plain" in result.warnings
 
 
+@pytest.mark.parametrize(
+    ("block", "endpoint", "path"),
+    [
+        ("endpoint: http://127.0.0.1:4318, protocol: http", "http://127.0.0.1:4318", None),
+        ("endpoint: http://127.0.0.1:4318/custom/logs, protocol: http", "http://127.0.0.1:4318", "/custom/logs"),
+        ("endpoint: http://127.0.0.1:4317, protocol: grpc", "http://127.0.0.1:4317", None),
+    ],
+)
+def test_plaintext_otlp_logs_sink_materializes_v8_tls_mode(block: str, endpoint: str, path: str | None) -> None:
+    # A released otlp_logs sink sent plaintext to an http:// collector with no
+    # insecure flag; v8 needs that stated, or the whole upgrade is refused.
+    result = _convert(
+        f"""config_version: 7
+audit_sinks:
+  - name: local-logs
+    kind: otlp_logs
+    enabled: true
+    otlp_logs: {{{block}}}
+"""
+    )
+
+    destination = _destination(_document(result), "local-logs")
+    assert destination["endpoint"] == endpoint
+    assert destination["tls"] == {"insecure": True}
+    assert destination.get("signal_overrides", {}).get("logs", {}).get("path") == path
+    load_validate_v8(result.candidate)
+
+
 def test_plaintext_flat_otel_endpoint_materializes_v8_tls_mode() -> None:
     result = _convert(
         """config_version: 7

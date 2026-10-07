@@ -515,14 +515,7 @@ def build_readiness_checks(
             ReadinessCheck("Custom-provider Overlay", f"instance '{instance_name}' bound", "pass")
         )
 
-    if any(
-        str(_get_path(cfg, key, "") or "").strip()
-        for key in (
-            "scanners.skill_scanner.binary",
-            "scanners.mcp_scanner.binary",
-            "scanners.codeguard",
-        )
-    ):
+    if str(_get_path(cfg, "scanners.codeguard", "") or "").strip():
         checks.append(ReadinessCheck("Scanner Availability", "Scanner config present.", "pass"))
     else:
         checks.append(

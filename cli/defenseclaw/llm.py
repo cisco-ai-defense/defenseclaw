@@ -726,7 +726,8 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         "timeout": max(1, int(timeout or 5)),
         "num_retries": 0,
     }
-    base_url = getattr(llm_config, "base_url", "") or ""
+    request_base_url = getattr(llm_config, "request_base_url", None)
+    base_url = (request_base_url() if callable(request_base_url) else getattr(llm_config, "base_url", "")) or ""
     if base_url:
         kwargs["api_base"] = base_url
     if api_key:

@@ -664,9 +664,8 @@ func TestV8ResourceUsesPlanAndSafeProcessMetadataOnly(t *testing.T) {
 		"service.instance.id": "test-instance", "service.version": "test-version",
 		"deployment.environment.name": "configured-environment", "tenant.id": "tenant-a",
 		"workspace.id": "workspace-a", "defenseclaw.deployment.mode": "unmanaged", "defenseclaw.claw.mode": "multi",
-		"defenseclaw.instance.id":                   "defenseclaw-instance",
+		"defenseclaw.instance.id": "defenseclaw-instance", "custom.safe": "configured",
 		"defenseclaw.device.public_key_fingerprint": fingerprint,
-		"custom.safe":                               "configured",
 	} {
 		if got := resourceAttribute(provider, key); got != want {
 			t.Errorf("resource %s=%q, want %q", key, got, want)

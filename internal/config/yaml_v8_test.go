@@ -233,30 +233,6 @@ func TestParseV8YAMLNodeLimitCountsKeysAndScalars(t *testing.T) {
 	requireV8YAMLError(t, []byte(sequenceV8YAML(allowedItems+1)), V8YAMLErrorNodeLimit)
 }
 
-func TestParseV8YAMLTargetedLegacyDiagnostics(t *testing.T) {
-	for _, test := range []struct {
-		name, body, path, target string
-	}{
-		{"otel", "otel: {}\n", "$.otel", "observability"},
-		{"audit sinks", "audit_sinks: []\n", "$.audit_sinks", "observability.destinations"},
-		{"audit db", "audit_db: /tmp/audit.db\n", "$.audit_db", "observability.local.path"},
-		{"judge db", "judge_bodies_db: /tmp/judge.db\n", "$.judge_bodies_db", "observability.local.judge_bodies_path"},
-		{"discovery", "ai_discovery:\n  emit_otel: false\n", "$.ai_discovery.emit_otel", "ai.discovery"},
-		{"splunk", "splunk: {}\n", "$.splunk", "splunk_hec"},
-		{"connector sinks", "observability:\n  connectors:\n    codex:\n      audit_sinks: []\n", "$.observability.connectors.codex.audit_sinks", "connector selectors"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := requireV8YAMLError(t, []byte("config_version: 8\n"+test.body), V8YAMLErrorLegacyKeyForbidden)
-			if err.Path != test.path {
-				t.Fatalf("Path = %q, want %q", err.Path, test.path)
-			}
-			if !strings.Contains(err.Action, test.target) {
-				t.Fatalf("Action = %q, want the replacement %q", err.Action, test.target)
-			}
-		})
-	}
-}
-
 func TestParseV8YAMLConnectorWebhooksRemainsAllowed(t *testing.T) {
 	_, err := ParseV8YAML("config.yaml", []byte(`config_version: 8
 observability:

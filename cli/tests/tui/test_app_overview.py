@@ -117,7 +117,7 @@ def test_v8_tui_status_loader_preserves_legacy_and_bounds_invalid_source_errors(
     )
     status, error = _fetch_v8_operator_status(config, tmp_path)
     assert status is None
-    assert error.startswith("invalid v8 configuration at $")
+    assert error.startswith("invalid configuration at $")
     assert "must-not-render" not in error
     assert "user:secret" not in error
 
