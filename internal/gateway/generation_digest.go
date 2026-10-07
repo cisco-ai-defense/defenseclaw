@@ -208,10 +208,8 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	if digest := strings.TrimSpace(cfg.OpenShell.Admin.RequiredPackDigest); digest != "" {
 		out["sandbox_pack"] = digest
 	}
-	for _, path := range cfg.AIDiscovery.SignaturePacks {
-		if path = strings.TrimSpace(path); path != "" {
-			out["signature_pack:"+rewriteDataDir(path, dataDir)] = fileDigest(path)
-		}
+	for key, digest := range signaturePackDigests(cfg) {
+		out[key] = digest
 	}
 	if path := strings.TrimSpace(cfg.AIDiscovery.ConfidencePolicyPath); path != "" {
 		if digest := fileDigest(path); digest != "missing" {
@@ -238,6 +236,35 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 		out["builtin"] = digest
 	}
 	return out
+}
+
+// signaturePackDigests digests each ai_discovery.signature_packs file, keyed
+// "signature_pack:<path>".
+func signaturePackDigests(cfg *config.Config) map[string]string {
+	out := map[string]string{}
+	dataDir := dataDirOf(cfg)
+	for _, path := range cfg.AIDiscovery.SignaturePacks {
+		if path = strings.TrimSpace(path); path != "" {
+			out["signature_pack:"+rewriteDataDir(path, dataDir)] = fileDigest(path)
+		}
+	}
+	return out
+}
+
+// signaturePacksChanged reports whether a signature pack file changed on disk
+// since the live generation was built. AI discovery loads its catalog once, when
+// its service is built, so a pack edited in place only takes effect (or is
+// refused, under its pin) when the service is rebuilt.
+func signaturePacksChanged(live *Generation, cfg *config.Config) bool {
+	if live == nil || cfg == nil || !cfg.AIDiscovery.Enabled {
+		return false
+	}
+	for key, digest := range signaturePackDigests(cfg) {
+		if live.Components[key] != digest {
+			return true
+		}
+	}
+	return false
 }
 
 // assetRefDigest is a reference's pinned digest, else the file's.

@@ -23,9 +23,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -452,8 +454,19 @@ func TestInspectToolResponse_SensitiveToolRaisesResultAlert(t *testing.T) {
 // finalizeAgentHook, which raises the same alert as the inspect route, for a
 // listed tool and a result-like event only.
 func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	var delivered atomic.Int32
+	hooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		delivered.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hooks.Close()
+	webhooks := NewWebhookDispatcher([]config.WebhookConfig{{
+		URL: hooks.URL, Type: "generic", MinSeverity: "HIGH", Enabled: true, Events: []string{"guardrail"},
+	}})
 	store, logger := testStoreAndLogger(t)
 	api := &APIServer{store: store, logger: logger}
+	api.SetWebhookSource(func() *WebhookDispatcher { return webhooks })
 	api.SetGenerationSource(func() *Generation {
 		return &Generation{RulePacks: map[string]*guardrail.RulePack{"global": {SensitiveTools: &guardrail.SensitiveToolsConfig{
 			Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 2}},
@@ -491,6 +504,26 @@ func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 	want := []string{"codex:listed_tool:tool=listed_tool severity=HIGH entities=2", "claudecode:listed_tool:tool=listed_tool severity=HIGH entities=2"}
 	if !slices.Equal(alerted, want) {
 		t.Fatalf("tool-result-pii-alert rows = %v, want %v", alerted, want)
+	}
+	// GAP-0187: the row carries the findings' severity, so it is in the alert
+	// queue (an INFO row is not), and it reaches the webhooks.
+	alerts, err := store.ListAlerts(50)
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	var listed []string
+	for _, alert := range alerts {
+		if alert.Action == "tool-result-pii-alert" {
+			listed = append(listed, alert.Connector+":"+alert.Severity)
+		}
+	}
+	slices.Sort(listed)
+	if want := []string{"claudecode:HIGH", "codex:HIGH"}; !slices.Equal(listed, want) {
+		t.Fatalf("alert queue rows = %v, want %v", listed, want)
+	}
+	webhooks.Close()
+	if delivered.Load() == 0 {
+		t.Fatal("tool-result-pii-alert reached no webhook")
 	}
 }
 

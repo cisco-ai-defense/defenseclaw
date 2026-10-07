@@ -74,13 +74,6 @@ def _sql_string_values(values: tuple[str, ...]) -> str:
     return ",".join(f"'{value}'" for value in values)
 
 
-# Keep this vocabulary aligned with the canonical outcome registry. Successful
-# terminal outcomes (allowed/applied/completed/etc.) deliberately stay out of
-# the Alerts queue; these values require operator attention even when an older
-# producer persisted the row with INFO severity.
-V8_NON_ALLOW_OUTCOMES = frozenset(ALERT_NON_ALLOW_OUTCOMES)
-V8_LEGACY_FINDING_ACTIONS = frozenset(ALERT_LEGACY_FINDING_ACTIONS)
-
 _V8_ALERT_WHERE_SQL_TEMPLATE = """
     (
         (
@@ -170,6 +163,16 @@ _V8_ALERT_WHERE_SQL_TEMPLATE = """
         OR (
             bucket IN ('platform.health', 'diagnostic')
             AND UPPER(COALESCE(severity, 'INFO')) IN ({actionable_severities})
+        )
+        OR (
+            -- A current gateway files the legacy finding actions (for example
+            -- tool-result-pii-alert) under security.finding with a
+            -- legacy.audit.* event name, so they are alerts like the
+            -- bucket-less rows older gateways wrote.
+            bucket = 'security.finding'
+            AND event_name LIKE 'legacy.audit.%'
+            AND UPPER(COALESCE(severity, 'INFO')) IN ({all_severities})
+            AND LOWER(COALESCE(action, '')) IN ({legacy_finding_actions})
         )
         OR (
             bucket IS NULL

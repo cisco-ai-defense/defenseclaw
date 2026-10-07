@@ -55,6 +55,16 @@ _WINDOWS_SETUP_EXECUTABLE = "DefenseClawSetup-x64.exe"
 _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 
 
+def refuse_first_run_when_managed() -> None:
+    """Exit 3 before init or quickstart prompts or writes on a managed device:
+    the admin config rules there, so a per-user config would be ignored."""
+    from defenseclaw.config_writer import MANAGED_NOT_INITIALIZED, machine_managed_standalone
+
+    if machine_managed_standalone():
+        click.echo(f"error: {MANAGED_NOT_INITIALIZED}", err=True)
+        raise SystemExit(3)
+
+
 @click.command("init")
 @click.option(
     "--skip-install",
@@ -246,12 +256,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
-    from defenseclaw.config_writer import MANAGED_NOT_INITIALIZED, machine_managed_standalone
 
-    if machine_managed_standalone():
-        # The admin config rules on a managed device; a per-user config would be ignored.
-        click.echo(f"error: {MANAGED_NOT_INITIALIZED}", err=True)
-        raise SystemExit(3)
+    refuse_first_run_when_managed()
 
     # Refuse a pasted key before anything is written (GAP-2589).
     cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")

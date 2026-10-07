@@ -3419,3 +3419,28 @@ def test_a_stopped_local_observability_stack_is_not_a_failure():
     with patch.object(cmd_doctor.socket, "create_connection", return_value=contextlib.nullcontext()):
         # The stack is up, so its collector failing is a real failure.
         assert not cmd_doctor._local_observability_stack_stopped(local, live, "fail")
+
+
+def test_a_signature_pack_that_fails_its_pin_is_a_doctor_warning(tmp_path):
+    """GAP-0177: the refusal is a WARN naming the pack and both digests, not a gateway.log line."""
+    from defenseclaw.commands import cmd_doctor
+
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps({"version": 1, "signatures": [{
+        "id": "pinned-ai", "name": "Pinned", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}))
+    pinned = "sha256:" + "0" * 64
+    discovery = SimpleNamespace(
+        enabled=True, signature_packs=[str(pack)], signature_pack_digests={str(pack): pinned},
+        allow_workspace_signatures=False, scan_roots=[],
+    )
+    cfg = SimpleNamespace(ai_discovery=discovery, data_dir=str(tmp_path))
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    [check] = result.checks
+    assert check["status"] == "warn" and check["reason_code"] == "signature-pack-refused"
+    assert str(pack.resolve()) in check["detail"] and pinned in check["detail"]
+
+    discovery.signature_pack_digests = {}
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    assert [c["status"] for c in result.checks] == ["pass"]

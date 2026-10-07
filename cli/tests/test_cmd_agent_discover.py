@@ -386,6 +386,47 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         payload = json.loads(listed.output)
         self.assertIn("custom-cli-ai", {sig["id"] for sig in payload})
 
+    def test_a_pack_that_fails_its_pin_is_reported_where_it_is_read(self):
+        """GAP-0177: a refused pack is named with both digests by list and discovery status."""
+        import hashlib
+
+        app, tmp_dir, db_path = make_app_context()
+        packs = []
+        for name in ("pinned", "tampered"):
+            pack = Path(tmp_dir) / f"{name}.json"
+            pack.write_text(
+                json.dumps({
+                    "version": 1,
+                    "signatures": [{
+                        "id": f"{name}-ai", "name": name, "vendor": "Example", "category": "ai_cli",
+                        "confidence": 0.7,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            packs.append(pack)
+        good = "sha256:" + hashlib.sha256(packs[0].read_bytes()).hexdigest()
+        bad = "sha256:" + "0" * 64
+        app.cfg.ai_discovery.signature_packs = [str(path) for path in packs]
+        app.cfg.ai_discovery.signature_pack_digests = {str(packs[0]): good, str(packs[1]): bad}
+        try:
+            listed = self.runner.invoke(agent, ["signatures", "list", "--json"], obj=app, catch_exceptions=False)
+            status = self.runner.invoke(agent, ["discovery", "status", "--json"], obj=app, catch_exceptions=False)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        ids = {sig["id"] for sig in json.loads(listed.stdout)}
+        self.assertIn("pinned-ai", ids)
+        self.assertNotIn("tampered-ai", ids)
+        self.assertIn(f"Not loaded: {packs[1].resolve()}", listed.stderr)
+        self.assertIn(f"does not match the pinned {bad}", listed.stderr)
+        packs_status = json.loads(status.stdout)["signature_packs"]
+        self.assertEqual(packs_status["configured"], 2)
+        [refused] = packs_status["not_loaded"]
+        self.assertEqual((refused["path"], refused["pinned"]), (str(packs[1].resolve()), bad))
+        self.assertTrue(refused["digest"].startswith("sha256:") and refused["digest"] != bad)
+
     def test_signatures_disable_updates_config(self):
         app, tmp_dir, db_path = make_app_context()
         app.cfg.data_dir = str(Path(tmp_dir) / ".defenseclaw-signatures")

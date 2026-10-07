@@ -409,7 +409,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
 def enable_cmd(app: AppContext, name: str) -> None:
     """Turn a disabled destination back on."""
     _require_v8_operator_status(app.cfg.data_dir)
-    _set_v8_destination_enabled(app.cfg.data_dir, name, True, "")
+    _set_v8_destination_enabled(app.cfg.data_dir, name, True)
 
 
 @observability.command("disable")
@@ -418,7 +418,7 @@ def enable_cmd(app: AppContext, name: str) -> None:
 def disable_cmd(app: AppContext, name: str) -> None:
     """Disable a destination."""
     _require_v8_operator_status(app.cfg.data_dir)
-    _set_v8_destination_enabled(app.cfg.data_dir, name, False, "")
+    _set_v8_destination_enabled(app.cfg.data_dir, name, False)
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +438,7 @@ def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
     if not yes and not click.confirm(f"  Remove destination {name!r}?", default=False):
         click.echo("  Aborted.")
         return
-    _remove_v8_destination(app.cfg.data_dir, name, "")
+    _remove_v8_destination(app.cfg.data_dir, name)
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +452,7 @@ def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
 @click.option(
     "--write-probe",
     is_flag=True,
-    help="For v8, send one marked content-free probe to the named destination.",
+    help="Send one marked, content-free probe to the named destination.",
 )
 @pass_ctx
 def test_cmd(app: AppContext, name: str, timeout: float, write_probe: bool) -> None:
@@ -541,7 +541,7 @@ def _add_v8_destination(
         if existing.get("name") == destination_name
     ]
     if len(matches) > 1:
-        raise ValueError(f"destination {destination_name!r} is duplicated in the v8 source")
+        raise ValueError(f"destination {destination_name!r} appears more than once in config.yaml")
     if matches:
         index, existing = matches[0]
         if existing.get("kind") != destination["kind"]:
@@ -614,7 +614,7 @@ def _staged_secret_validator(overrides: dict[str, str]):
             environment_overrides=overrides,
         )
         if result.valid is not True:
-            raise RuntimeError("canonical v8 configuration validator rejected the candidate")
+            raise RuntimeError("the configuration validator rejected the candidate")
 
     return validate
 
@@ -736,7 +736,7 @@ def _v8_header_value(value: str) -> Any:
     if composite:
         return {"env": composite.group(1)}
     if "${" in value:
-        raise ValueError("v8 secret-backed headers must be a whole environment reference")
+        raise ValueError("secret-backed headers must be a whole environment reference")
     return value
 
 
@@ -849,7 +849,7 @@ def _print_v8_destination_list(status, *, emit_json: bool) -> None:
         click.echo(_json.dumps(rows, indent=2))
         return
     click.echo()
-    ux.section("Observability v8 destinations")
+    ux.section("Observability destinations")
     click.echo(
         f"  {'NAME':<24} {'KIND':<12} {'STATE':<9} {'SIGNALS':<22} "
         f"{'BUCKETS':<8} {'POLICY':<20} REDACTION"
@@ -998,15 +998,10 @@ def _set_v8_destination_enabled(
     data_dir: str,
     name: str,
     enabled: bool,
-    connector: str,
 ) -> None:
     from defenseclaw.observability.v8_writer import mutate_v8_config
     from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
-    if connector:
-        raise click.ClickException(
-            "v8 destinations are process-wide; use route selectors to constrain a connector"
-        )
     index = _v8_source_destination_index(data_dir, name)
     result = mutate_v8_config(
         config_path_for_data_dir(data_dir),
@@ -1018,14 +1013,10 @@ def _set_v8_destination_enabled(
     click.echo(f"  {name}: {state}{suffix}")
 
 
-def _remove_v8_destination(data_dir: str, name: str, connector: str) -> None:
+def _remove_v8_destination(data_dir: str, name: str) -> None:
     from defenseclaw.observability.v8_writer import mutate_v8_config
     from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
-    if connector:
-        raise click.ClickException(
-            "v8 destinations are process-wide; use route selectors to constrain a connector"
-        )
     index = _v8_source_destination_index(data_dir, name)
     try:
         authored = _v8_authored_destinations(data_dir)

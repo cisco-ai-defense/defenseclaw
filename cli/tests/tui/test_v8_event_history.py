@@ -304,6 +304,31 @@ def test_alert_reader_and_panel_keep_warning_findings_in_all_view() -> None:
     assert "warning-finding" in {event.id for event in events}
 
 
+def test_alert_reader_lists_a_legacy_finding_action_filed_as_a_compat_row() -> None:
+    store = _store()
+    store.db.executemany(
+        """INSERT INTO audit_events (
+               id, timestamp, bucket, event_name, source, signal, severity,
+               action, actor, details, connector, redaction_profile,
+               payload_json, projected_record_json
+           ) VALUES (
+               ?, '2026-07-11T00:00:01Z', 'security.finding',
+               'legacy.audit.tool.result.pii.alert', 'gateway', 'logs', ?,
+               'tool-result-pii-alert', 'gateway', 'tool=Bash severity=HIGH entities=1',
+               'codex', 'default', '{}', '{}'
+           )""",
+        [("compat-high", "HIGH"), ("compat-info", "INFO")],
+    )
+    store.db.commit()
+
+    rows = V8EventHistoryReader(store).load_alerts(500)
+    events = alerts_from_v8_history(rows)
+
+    assert "compat-high" in {row.id for row in rows}
+    assert "compat-high" in {event.id for event in events}
+    assert "compat-info" not in {row.id for row in rows}
+
+
 def test_alert_reader_keeps_only_explicit_non_allow_legacy_hooks() -> None:
     store = _store()
     store.db.executemany(
