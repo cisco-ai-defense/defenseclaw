@@ -67,7 +67,11 @@ defenseclaw acp setup --client zed --agent kiro --activate
 ```
 
 For JetBrains, replace `--client zed` with `--client jetbrains`. The command
-preserves unrelated JSON keys and foreign agent entries. It writes one
+preserves unrelated JSON keys and foreign agent entries, but it writes the
+settings file back as plain JSON with two-space indentation and sorted keys:
+the comment block before the opening `{` is kept, while every other comment
+and trailing comma is dropped. Managed `enterprise acp setup` writes the file
+the same way. Keep a copy of a settings file whose comments you want. It writes one
 `DefenseClaw · Kiro` entry, a mode-0600 scoped token, and a runtime contract
 lock. A failed config write rolls all three changes back.
 
@@ -275,9 +279,17 @@ agent is the catalog executable on the user's `PATH`, or the path
 program installed under that name from the agent, so pair the enrollment with
 application control (see [Configuration](#configuration)). It reads no central configuration,
 so it cannot change policy, and the gateway refuses any request that does not
-match the enrollment. On a computer that has the Python CLI the same files come
-from `defenseclaw acp setup --managed`, which the **ACP Guard → Enroll managed
-enterprise ACP** panel of the TUI runs.
+match the enrollment. On a Secure Client computer, where the Python CLI is
+allowed, the same files come from `defenseclaw acp setup --managed`, which the
+**ACP Guard → Enroll managed enterprise ACP** panel of the TUI runs; a
+standalone managed computer refuses that CLI.
+
+The contract lock pins the digest of the whole editor settings file, so any
+edit to it, even of an unrelated key, stops every guarded entry of that file
+with "the editor settings file ... changed after setup" until the user runs the
+setup command again. If a user deletes their token copy, `verify` says it is
+missing and nothing restores it: run `enterprise acp enroll` again with the
+same selectors, which publishes the same credential again.
 
 Use the same exact selectors to verify or revoke an enrollment (on Windows,
 the same `defenseclaw.exe` commands as LocalSystem):

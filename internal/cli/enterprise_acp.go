@@ -482,6 +482,12 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 			setupDone = true
 		}
 		if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) && !cfg.SecureClientIntegration() {
+				// Nothing restores a deleted copy; enrolling again
+				// publishes the same credential (GAP-0391).
+				return fmt.Errorf("enterprise acp: the user's copy of the credential is missing (%s); "+
+					"run enterprise acp enroll with the same selectors to publish it again", tokenPath)
+			}
 			return err
 		}
 		body, err := safefile.ReadRegularFileBounded(tokenPath, 16<<10)

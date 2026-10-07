@@ -399,6 +399,15 @@ to keep the machine state for a reinstall instead.
   that could not be stopped. Fix the cause and run the same uninstall again.
   Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their
   own moved-aside hooks back.
+- **Managed ACP entries.** The uninstall does not edit editor settings.
+  Without `--purge`, each enrolled user keeps the ACP token copy and the
+  contract lock in `~/.defenseclaw/acp/` (`<client>-<agent>.token`,
+  `<client>-<agent>.contract-lock.json`); `--purge` removes them with
+  `~/.defenseclaw`. Either way the guarded `DefenseClaw · <Agent>` entry
+  stays in `~/.config/zed/settings.json` or `~/.jetbrains/acp.json`, pointing
+  at a guard that is gone, and the editor reports that it cannot start it;
+  remove the entry in the editor. The service-side credentials go with the
+  machine state, so a leftover token copy has no authority.
 - **MDM.** Use `uninstall.sh [--purge]` on Linux and macOS, or `uninstall.ps1`
   on Windows. See [Install with an MDM](/docs/enterprise/mdm).
 - **Windows per-user registrations.** Acting as a user needs that user's
