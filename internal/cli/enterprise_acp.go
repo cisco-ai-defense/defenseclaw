@@ -53,17 +53,34 @@ enrolled user runs "setup" to write their own editor entry.`,
 	Annotations: map[string]string{
 		secureClientLongAnnotation: enterpriseACPLongIntro + " The gateway never writes an editor profile or user home.",
 	},
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// The administrator commands read the managed deployment (GAP-0249).
-		// The user-side setup reads no central config and runs as the user
-		// (GAP-0254).
-		if cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true" {
-			if err := pinEnterpriseACPAdministratorEnv(cmd); err != nil {
-				return err
-			}
+	PersistentPreRunE: enterpriseACPPersistentPreRun,
+}
+
+// enterpriseACPRootPreRun loads the config; a variable so tests can supply
+// one without a managed deployment.
+var enterpriseACPRootPreRun = rootPersistentPreRunNoAuditE
+
+func enterpriseACPPersistentPreRun(cmd *cobra.Command, args []string) error {
+	// The administrator commands read the managed deployment (GAP-0249).
+	// The user-side setup reads no central config and runs as the user
+	// (GAP-0254).
+	admin := cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true"
+	if admin {
+		if err := pinEnterpriseACPAdministratorEnv(cmd); err != nil {
+			return err
 		}
-		return rootPersistentPreRunNoAuditE(cmd, args)
-	},
+	}
+	if err := enterpriseACPRootPreRun(cmd, args); err != nil {
+		return err
+	}
+	if admin {
+		// A directory account (AD, SSSD) resolves only through the
+		// directory on the static gateway, as in the enterprise hooks
+		// commands; without it enroll, verify and revoke refused every
+		// such user (GAP-0269).
+		configureEnterpriseACPTargetLookup(cmd.Context())
+	}
+	return nil
 }
 
 // pinEnterpriseACPAdministratorEnv points an administrator on a standalone
@@ -213,8 +230,40 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	target := enterpriseACPTargetCredentials(enrollment)
+	// Prove the bearer can be published as the target user before minting
+	// it: a refused target (an elevated prompt instead of LocalSystem, a
+	// SYSTEM-owned profile folder, an account the lookup cannot resolve)
+	// used to leave a minted, indexed credential that no user held
+	// (GAP-0260).
+	// Secure Client keeps the order it has on main.
+	secureClient := cfg.SecureClientIntegration()
+	if !secureClient {
+		if err := enterprisehooks.RunAsTarget(target, func() error { return nil }); err != nil {
+			return enterpriseACPResult(cmd, nil, enterpriseACPRefusal(err))
+		}
+	}
 	var credential acp.EnterpriseCredential
+	minted := false
+	// discardMinted removes a credential this call minted when the
+	// enrollment does not complete; a re-enrollment keeps the working one.
+	discardMinted := func(cause error) error {
+		if !minted || secureClient {
+			return cause
+		}
+		if removeErr := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+			return acp.RemoveEnterpriseCredential(
+				cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+			)
+		}); removeErr != nil {
+			return fmt.Errorf("%w; the credential this enrollment minted could not be removed, revoke it with the same selectors: %v", cause, removeErr)
+		}
+		return cause
+	}
 	err = withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		existing, loadErr := acp.LoadEnterpriseCredential(
+			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+		)
 		var ensureErr error
 		credential, ensureErr = acp.EnsureEnterpriseCredential(
 			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
@@ -222,18 +271,16 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 		if ensureErr != nil {
 			return ensureErr
 		}
+		minted = loadErr != nil || subtle.ConstantTimeCompare([]byte(existing.Token), []byte(credential.Token)) != 1
 		return alignEnterpriseACPCredentialOwner(
 			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile, credential.Token,
 		)
 	})
 	if err != nil {
-		return enterpriseACPResult(cmd, nil, err)
+		return enterpriseACPResult(cmd, nil, discardMinted(err))
 	}
 	var tokenPath string
-	err = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
-		UserHome: enrollment.target.home, UID: enrollment.target.uid,
-		GID: enrollment.target.gid, SID: enrollment.target.sid,
-	}, func() error {
+	err = enterprisehooks.RunAsTarget(target, func() error {
 		var publishErr error
 		tokenPath, publishErr = acp.PublishEnterpriseUserToken(
 			enrollment.dataDir, enrollment.client, enrollment.agent, credential.Token,
@@ -241,7 +288,7 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 		return publishErr
 	})
 	if err != nil {
-		return enterpriseACPResult(cmd, nil, err)
+		return enterpriseACPResult(cmd, nil, discardMinted(enterpriseACPRefusal(err)))
 	}
 	payload := map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
@@ -249,6 +296,13 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 		"next": enterpriseACPSetupCommand(enrollment, tokenPath),
 	}
 	return enterpriseACPResult(cmd, payload, nil)
+}
+
+func enterpriseACPTargetCredentials(enrollment enterpriseACPEnrollment) enterprisehooks.TargetCredentials {
+	return enterprisehooks.TargetCredentials{
+		UserHome: enrollment.target.home, UID: enrollment.target.uid,
+		GID: enrollment.target.gid, SID: enrollment.target.sid,
+	}
 }
 
 // enterpriseACPSetupCommand is the user-side command an enrollment reports:
@@ -303,10 +357,7 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	err = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
-		UserHome: enrollment.target.home, UID: enrollment.target.uid,
-		GID: enrollment.target.gid, SID: enrollment.target.sid,
-	}, func() error {
+	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
 		if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
 			return err
 		}
@@ -322,7 +373,7 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 		return nil
 	})
 	if err != nil {
-		return enterpriseACPResult(cmd, nil, err)
+		return enterpriseACPResult(cmd, nil, enterpriseACPRefusal(err))
 	}
 	return enterpriseACPResult(cmd, map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
@@ -348,10 +399,7 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	err = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
-		UserHome: enrollment.target.home, UID: enrollment.target.uid,
-		GID: enrollment.target.gid, SID: enrollment.target.sid,
-	}, func() error {
+	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
 		info, statErr := os.Lstat(tokenPath)
 		if errors.Is(statErr, os.ErrNotExist) {
 			return nil
@@ -364,6 +412,7 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		}
 		return os.Remove(tokenPath)
 	})
+	err = enterpriseACPRefusal(err)
 	payload := map[string]any{
 		"ok": err == nil, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,

@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "ok", "action", "noop", "profile", "platform", "product_version",
-    "installed", "transaction_pending", "services", "readiness", "inspection",
-    "machine_policy", "enrollment", "coverage_complete", "security_complete", "errors", "exit_code"
+    "coverage_complete", "security_complete", "errors", "exit_code"
   ],
   "properties": {
     "schema_version": { "const": 2 },
@@ -103,8 +102,25 @@
       "if": { "properties": { "ok": { "const": true } } },
       "then": { "properties": { "exit_code": { "enum": [0, 3010] } } },
       "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } } } }
+    },
+    {
+      "$comment": "A not_root result (Linux, macOS) checked nothing: a standard user cannot read the root-only deployment record, so it leaves out every field that reports the deployment. Every other result has them.",
+      "if": {
+        "required": ["errors"],
+        "properties": { "errors": { "contains": { "required": ["code"], "properties": { "code": { "const": "not_root" } } } } }
+      },
+      "then": {
+        "properties": {
+          "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false
+        }
+      },
+      "else": {
+        "required": ["installed", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment"]
+      }
     }
   ],
+
   "$defs": {
     "service": {
       "type": "object",

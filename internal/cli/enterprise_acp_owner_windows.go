@@ -6,11 +6,24 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
+
+// configureEnterpriseACPTargetLookup does nothing on Windows: accounts
+// resolve through the local security authority.
+func configureEnterpriseACPTargetLookup(context.Context) {}
+
+// enterpriseACPTargetError says how to enroll on Windows when the target
+// account cannot be reached (GAP-0261).
+func enterpriseACPTargetError(err error) error {
+	return enterpriseACPWindowsTargetError(err, errors.Is(err, enterprisehooks.ErrWindowsEnterpriseNotLocalSystem))
+}
 
 // withEnterpriseACPServiceOwner runs fn as is: on Windows the elevated
 // caller hardens the records with ACLs for the gateway service afterwards

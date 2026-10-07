@@ -272,6 +272,7 @@ nfpms:
       - src: NOTICE
         dst: /usr/share/doc/defenseclaw-enterprise/NOTICE
     scripts:
+      preinstall: packaging/linux/preinstall.sh
       postinstall: packaging/linux/postinstall.sh
       preremove: packaging/linux/preremove.sh
       postremove: packaging/linux/postremove.sh
