@@ -179,6 +179,45 @@ func TestCodexNotifyEmitsCanonicalV8ModelLogsWithSourceFacts(t *testing.T) {
 	}
 }
 
+// GAP-0203: the notify webhook is no hook, so its model logs join the agent
+// identity and instance the session was seen under on the hook path.
+func TestCodexNotifyModelLogsJoinTheHookSessionIdentity(t *testing.T) {
+	const identityID = "agt-0123456789abcdef"
+	sharedRegMu.Lock()
+	previous := sharedReg
+	sharedReg = NewAgentRegistry("", "")
+	registry := sharedReg
+	sharedRegMu.Unlock()
+	t.Cleanup(func() {
+		sharedRegMu.Lock()
+		sharedReg = previous
+		sharedRegMu.Unlock()
+	})
+	hook, _ := registry.ResolveForAgentIdentity(t.Context(), identityID, "thread-join", "")
+	if hook.AgentInstanceID == "" {
+		t.Fatal("the hook path minted no agent instance")
+	}
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(
+		`{"type":"agent-turn-complete","thread-id":"thread-join","turn-id":"turn-join","model":"gpt-5","input-messages":["hello"],"last-assistant-message":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.handleCodexNotify(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("notify status=%d", response.Code)
+	}
+	eventuallyTrue(t, func() bool {
+		_, names := capturedModelLogWire(t, capture)
+		return names[observability.TelemetryEventModelRequest] && names[observability.TelemetryEventModelResponse]
+	})
+	wire, _ := capturedModelLogWire(t, capture)
+	for _, want := range []string{identityID, hook.AgentInstanceID} {
+		if !bytes.Contains(wire, []byte(want)) {
+			t.Fatalf("notify model logs do not carry %q", want)
+		}
+	}
+}
+
 func TestClaudeMessageDisplayPreservesReportedV8ResponseIdentity(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	api.emitClaudeCodeHookLLMEvent(t.Context(), claudeCodeHookRequest{

@@ -875,7 +875,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 
 	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
 	sessionID := codexNotifySessionID(p)
-	ctx := ContextWithSessionID(r.Context(), sessionID)
+	ctx := withSessionAgentInstance(ContextWithSessionID(r.Context(), sessionID), sessionID)
 	agentID := a.codexNotifyAgentID(sessionID)
 
 	ev := audit.Event{
@@ -1039,6 +1039,9 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		UserID:     user.ID,
 		UserIDKind: user.IDKind,
 		UserName:   user.Name,
+		// The notify webhook is no hook, so it joins the session's agent
+		// identity from the hook path (GAP-0203).
+		AgentIdentityID: agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
 	}
 
 	if prompt := codexNotifyPrompt(payload); prompt != "" {
