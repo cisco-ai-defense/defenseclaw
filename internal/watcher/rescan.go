@@ -118,7 +118,10 @@ const (
 // since the last baseline. Unchanged targets are skipped entirely, which keeps
 // the periodic loop cheap and stops scan_results from growing on every cycle.
 func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
-	defer func() { w.startupRescanDone = true }()
+	defer func() {
+		w.startupRescanDone = true
+		w.firstCycleDone.Store(true)
+	}()
 	if !w.startupRescanDone {
 		w.startupAdmitRoots = w.baselinedWatchRoots()
 		defer func() { w.startupAdmitRoots = nil }()
@@ -1403,10 +1406,16 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 // same name has its own baseline and admission; any other server is keyed by
 // its name.
 func MCPEventPath(server config.MCPServerEntry) string {
-	if server.Home == "" {
-		return server.Name
+	key := server.Name
+	if server.Home != "" {
+		key += "@" + server.Connector + ":" + server.Home
 	}
-	return server.Name + "@" + server.Connector + ":" + server.Home
+	// A project's server is its own: another project's server with the
+	// same name has its own baseline and admission (GAP-0405).
+	if server.Project != "" {
+		key += "@" + server.Connector + "#" + server.Project
+	}
+	return key
 }
 
 func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEntry, error) {

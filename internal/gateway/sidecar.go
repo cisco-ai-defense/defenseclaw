@@ -3602,10 +3602,26 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
 		w.SetMCPServerSource(enrolled.live.list)
-	} else if len(conns) > 1 {
-		// Each folder belongs to the connector that lists it, so its events,
-		// rule pack and enforcement are that connector's (GAP-0392).
-		w.SetRootConnectors(roots)
+	} else {
+		if len(conns) > 1 {
+			// Each folder belongs to the connector that lists it, so its
+			// events, rule pack and enforcement are that connector's
+			// (GAP-0392).
+			w.SetRootConnectors(roots)
+		}
+		if cfg := s.currentConfig(); watcherUsesConnectorDirs(cfg) && !cfg.SecureClientIntegration() {
+			// Every connector's servers in every scope, admitted when they
+			// appear: claude mcp add and .mcp.json servers were never
+			// scanned (GAP-0405).
+			names := make([]string, 0, len(conns))
+			for _, conn := range conns {
+				names = append(names, conn.Name())
+			}
+			w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+				return s.currentConfig().ReadWatchedMCPServers(names)
+			})
+			w.SetMCPDiscoveryPoll(true)
+		}
 	}
 	var artifacts []string
 	bundledSet := false

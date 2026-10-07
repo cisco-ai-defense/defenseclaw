@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -227,6 +228,12 @@ type InstallWatcher struct {
 	admitMu sync.Mutex
 	// fpMu guards a rescan cycle's fingerprint cache.
 	fpMu sync.Mutex
+
+	// pollMCP has Run look for MCP servers added outside `mcp set` every
+	// mcpDiscoveryInterval (SetMCPDiscoveryPoll); firstCycleDone gates it
+	// until the first rescan cycle recorded the existing servers.
+	pollMCP        bool
+	firstCycleDone atomic.Bool
 }
 
 type rootConnector struct {
@@ -357,7 +364,7 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 		if !names[server.Name] || server.Bundled {
 			continue
 		}
-		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: server.Name, Connector: server.Connector, Timestamp: time.Now().UTC()}
+		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector, Timestamp: time.Now().UTC()}
 		w.mcpMu.Lock()
 		if _, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path); errors.Is(err, sql.ErrNoRows) {
 			if snap, err := w.snapshotForEvent(evt); err == nil {
@@ -371,6 +378,53 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 		}
 		w.mcpMu.Unlock()
 	}
+}
+
+// mcpDiscoveryInterval is how often a per-user watcher looks for MCP
+// servers added outside `defenseclaw mcp set`.
+var mcpDiscoveryInterval = 30 * time.Second
+
+// SetMCPDiscoveryPoll has the watcher admit, within mcpDiscoveryInterval, an
+// MCP server added by the agent's own commands (claude mcp add, an edited
+// .mcp.json) instead of at the next hourly rescan (GAP-0405). Call it after
+// SetMCPServerSource and before Run.
+func (w *InstallWatcher) SetMCPDiscoveryPoll(enabled bool) {
+	w.pollMCP = enabled && w.admitNewMCP
+}
+
+func (w *InstallWatcher) mcpDiscoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(mcpDiscoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.discoverAddedMCPServers()
+		}
+	}
+}
+
+// discoverAddedMCPServers queues for admission the MCP servers that have no
+// baseline yet, once the first rescan cycle recorded the existing ones.
+func (w *InstallWatcher) discoverAddedMCPServers() {
+	if !w.firstCycleDone.Load() || w.store == nil {
+		return
+	}
+	servers, err := w.readMCPServers()
+	if err != nil {
+		return
+	}
+	var added []string
+	for _, server := range servers {
+		if strings.TrimSpace(server.Name) == "" || server.Bundled {
+			continue
+		}
+		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), MCPEventPath(server)); errors.Is(err, sql.ErrNoRows) {
+			added = append(added, server.Name)
+		}
+	}
+	w.AdmitAddedMCPServers(added)
 }
 
 // readMCPServers is the MCP server list admission and the rescan use.
@@ -609,6 +663,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 	if w.admitNewMCP {
 		go w.addedMCPLoop(ctx)
+	}
+	if w.pollMCP {
+		if !w.cfg.Watch.RescanEnabled {
+			w.firstCycleDone.Store(true)
+		}
+		go w.mcpDiscoveryLoop(ctx)
 	}
 
 	ticker := time.NewTicker(w.debounce)

@@ -82,6 +82,9 @@ type MCPServerEntry struct {
 	// serialized). Two users, or two connectors of one user, may each list a
 	// server under the same name.
 	Home string `json:"-"`
+	// Project is the project folder whose local or .mcp.json scope lists
+	// the server (never serialized); empty for a user-scope server.
+	Project string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never
@@ -277,6 +280,80 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		}
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
+}
+
+// ReadWatchedMCPServers returns the MCP servers the install watcher admits
+// and rescans: every scope of each connector, tagged with the connector. For
+// Claude Code that adds every project ~/.claude.json knows, with the servers
+// 'claude mcp add' stored for it (local scope) and its .mcp.json (project
+// scope), each tagged with the project: the gateway has no working folder,
+// so these were never scanned (GAP-0405).
+func (c *Config) ReadWatchedMCPServers(connectors []string) ([]MCPServerEntry, error) {
+	var out []MCPServerEntry
+	var firstErr error
+	for _, name := range connectors {
+		entries, err := c.ReadMCPServersForConnector(name)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		for _, entry := range entries {
+			entry.Connector = normalizeConnectorKey(name)
+			out = append(out, entry)
+		}
+		if normalizeConnectorKey(name) == "claudecode" {
+			out = append(out, claudeCodeProjectMCPServers()...)
+		}
+	}
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+// maxClaudeProjects bounds the projects claudeCodeProjectMCPServers reads.
+const maxClaudeProjects = 512
+
+// claudeCodeProjectMCPServers lists, for each project in Claude Code's state
+// file, the local-scope servers stored there and the project's .mcp.json.
+func claudeCodeProjectMCPServers() []MCPServerEntry {
+	data, err := os.ReadFile(claudeCodeMCPStatePath())
+	if err != nil {
+		return nil
+	}
+	var state struct {
+		Projects map[string]json.RawMessage `json:"projects"`
+	}
+	if json.Unmarshal(data, &state) != nil {
+		return nil
+	}
+	projects := make([]string, 0, len(state.Projects))
+	for project := range state.Projects {
+		if filepath.IsAbs(project) {
+			projects = append(projects, project)
+		}
+	}
+	sort.Strings(projects)
+	if len(projects) > maxClaudeProjects {
+		projects = projects[:maxClaudeProjects]
+	}
+	var out []MCPServerEntry
+	for _, project := range projects {
+		var raw map[string]any
+		if json.Unmarshal(state.Projects[project], &raw) == nil {
+			local, _ := readMCPFromAnyPaths(raw, []string{"mcpServers"})
+			for _, entry := range local {
+				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "local"
+				out = append(out, entry)
+			}
+		}
+		if shared, err := readMCPFromDotMCPJSON(filepath.Join(project, ".mcp.json")); err == nil {
+			for _, entry := range shared {
+				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
+				out = append(out, entry)
+			}
+		}
+	}
+	return out
 }
 
 // ReadUserMCPServersForConnector returns a sandbox harness's user-scope MCP
