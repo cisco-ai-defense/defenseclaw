@@ -541,6 +541,7 @@ whole machine next to the filtered rows.
   installations that hold an AI plugin. `GET /api/v1/ai-usage` carries the
   same counts for the whole machine. See the
   [gateway API](/docs/reference/gateway-api#identity-profiles-and-ide-inventory).
+  Secure Client does not register the IDE plugin route, so it returns `404`.
 - **AIBOM.** The `ide_plugins` category lists the same rows. `--only` can
   leave it out or select it alone.
 - **TUI.** Inventory (`6`) → **IDE plugins** lists IDE, Plugin, Version,
