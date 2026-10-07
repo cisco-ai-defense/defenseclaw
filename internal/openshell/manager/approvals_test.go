@@ -872,6 +872,11 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	if eg := e.get("hpbox").Egress; len(requested) != 1 || eg.BlockedRequests != 0 || eg.Blocked != 0 {
 		t.Fatalf("%d approval.requested events, egress %+v; want 1 and no blocked destination or request", len(requested), eg)
 	}
+	// Its audit record (an alert) reads as the ask, not as a raw OpenShell code (GAP-0138).
+	if recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Port == 38830 }); len(recs) == 0 ||
+		recs[0].DecisionCode != "SANDBOX_EGRESS_HOST_PORT_ASK" || !strings.Contains(recs[0].Reason, "asks to reach port 38830 on your machine") {
+		t.Fatalf("audited %+v", recs)
+	}
 	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)
 	}

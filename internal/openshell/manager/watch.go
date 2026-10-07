@@ -328,6 +328,13 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 				// The connection that follows is the refusal that counts
 				// (and the alert); the lookup alone is audited at INFO.
 				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeLookupRefused, "INFO"
+			case policyReloadCut(r):
+				// The end of a connection the policy still allows, not a
+				// refusal: no block, no alert, no blocked count (GAP-0138).
+				ev.Blocked, ev.End, ev.Terminated = false, audit.SandboxEgressFailed, true
+				ev.DecisionCode = "SANDBOX_EGRESS_TERMINATED"
+				ev.Reason = truncate("OpenShell closed it when the sandbox policy changed; the client connects again ("+
+					firstNonEmpty(r.Reason, r.Message)+")", 512)
 			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it

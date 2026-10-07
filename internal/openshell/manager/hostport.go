@@ -85,16 +85,24 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 	explained := b.closedPorts[port]
 	m.mu.Unlock()
 	replayed := at.Before(m.startedAt)
-	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
-		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: port,
-		Blocked: true, DecisionCode: "SANDBOX_EGRESS_OPENSHELL_DENIED", Reason: truncate(openshellReason(r, openshellHostAlias), 512),
-		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
-	})
 	refusal := errors.New("the sandbox policy is not resolved")
 	if eff != nil {
 		refusal = eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: port})
 	}
-	if declared && refusal == nil && !replayed {
+	ask := declared && refusal == nil && !replayed
+	ev := audit.SandboxEgressEvent{
+		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: port,
+		Blocked: true, DecisionCode: "SANDBOX_EGRESS_OPENSHELL_DENIED", Reason: truncate(openshellReason(r, openshellHostAlias), 512),
+		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+	}
+	if ask {
+		// The refusal reads as the ask it raises (GAP-0138).
+		ev.DecisionCode = "SANDBOX_EGRESS_HOST_PORT_ASK"
+		ev.Reason = truncate(fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d): answer it with defenseclaw sandbox approvals (%s)",
+			port, port, firstNonEmpty(r.Reason, r.Message)), 512)
+	}
+	m.tel.RecordSandboxEgress(ctx, ev)
+	if ask {
 		// An ask, not a blocked destination (until it is answered).
 		m.hostPortAsk(ctx, b, port, r.Binary)
 		return

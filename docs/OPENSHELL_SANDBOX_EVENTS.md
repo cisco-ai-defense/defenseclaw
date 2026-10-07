@@ -138,10 +138,16 @@ MEDIUM, allowed ones to INFO. Each record also increments
 `defenseclaw.egress.events`.
 
 OpenShell's denials are recorded as they come (decision code
-`SANDBOX_EGRESS_OPENSHELL_DENIED`), including the connections it closes on a
-policy reload ("policy generation is stale") and the denials of this
-install's own ingress and egress ports; those two are not counted in the
+`SANDBOX_EGRESS_OPENSHELL_DENIED`), including the denials of this
+install's own ingress and egress ports, which are not counted in the
 sandbox's blocked requests and are not shown as blocks on the activity feed.
+A connection OpenShell closes on a policy reload ("policy generation is
+stale"; every reload closes the open connections, allowed ones included) is
+no denial: it is the end of an allowed connection, `log.egress.failed` with
+outcome `cancelled` and decision code `SANDBOX_EGRESS_TERMINATED`, without
+byte counts or duration, and no alert. The denial of a `--host-port` port
+that raises an ask has decision code `SANDBOX_EGRESS_HOST_PORT_ASK` and a
+reason that names the ask.
 The reason of an OpenShell denial (`defenseclaw.network.reason`) has the
 words the activity feed shows, with OpenShell's token after them: `no
 OpenShell rule allows it (transparent_tcp_policy_denied)`, and for port 22

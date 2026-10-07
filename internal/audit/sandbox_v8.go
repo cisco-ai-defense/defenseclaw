@@ -847,10 +847,12 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	decisionCode := optionalNetworkIdentifier(input.DecisionCode)
 	conversationID, agentID := sandboxAgentCorrelation(event, input.ConversationID)
 	bytesUp, bytesDown, duration := observability.Absent[int64](), observability.Absent[int64](), observability.Absent[int64]()
-	if input.End == SandboxEgressCompleted || input.Terminated {
+	// OpenShell's record of a connection it closed (a policy reload)
+	// counts neither bytes nor time; the proxy's ends do.
+	if input.Source == SandboxEgressSourceProxy && (input.End == SandboxEgressCompleted || input.Terminated) {
 		bytesUp, bytesDown = observability.Present(input.BytesUp), observability.Present(input.BytesDown)
 	}
-	if input.End != "" {
+	if input.Source == SandboxEgressSourceProxy && input.End != "" {
 		duration = observability.Present(input.Duration.Milliseconds())
 	}
 	actorPID, actorExe := optionalSandboxPID(input.PID), optionalSandboxText(input.Executable, maxSandboxPathBytes)
