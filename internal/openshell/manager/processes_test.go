@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package manager
 
 import (
@@ -71,7 +73,7 @@ func TestProcessTreeMergesSamples(t *testing.T) {
 	if len(exited) != 0 {
 		t.Fatalf("exited %+v, want the late process kept", exited)
 	}
-	if names := tree.lineageNamesLocked(43); len(names) != 3 || names[0] != "python3" || names[1] != "claude" || names[2] != "init" {
+	if names := tree.ancestryLocked(tree.live[43]); len(names) != 3 || names[0] != "python3" || names[1] != "claude" || names[2] != "init" {
 		t.Fatalf("lineage = %v", names)
 	}
 }

@@ -74,6 +74,41 @@ type ProcessList struct {
 	Exited          []Process `json:"exited,omitempty"`
 	// Truncated reports a sample that stopped at its bound.
 	Truncated bool `json:"truncated,omitempty"`
+	// Kernel is the sandbox kernel feed, on a Linux docker sandbox whose
+	// host has it installed: Tetragon's exec and exit records join the
+	// tree (source tetragon).
+	Kernel *ProcessKernelFeed `json:"kernel,omitempty"`
+}
+
+// ProcessKernelFeed is the sandbox kernel feed as a sandbox's process tree
+// sees it.
+type ProcessKernelFeed struct {
+	// Source is the records' source: tetragon.
+	Source string `json:"source"`
+	// Connected reports the gateway reading the feed now; Reason says why
+	// not (kernel_feed_version_skew, kernel_feed_not_permitted, ...).
+	Connected bool   `json:"connected"`
+	Reason    string `json:"reason,omitempty"`
+	// Build is the feed's release; Tetragon whether its Tetragon stream is
+	// up, and TetragonReason why not.
+	Build          string `json:"build,omitempty"`
+	Tetragon       string `json:"tetragon,omitempty"`
+	TetragonReason string `json:"tetragon_reason,omitempty"`
+	// Execs counts the execs this tree took from the feed, Pinned those
+	// whose in-sandbox pid the feed captured (the rest are in the tree by
+	// exec id and host pid only); SupervisorExecs OpenShell's supervisor's
+	// summarized exec loop; CollectorExecs DefenseClaw's own collector's
+	// execs, left out of the tree.
+	Execs           int64 `json:"execs"`
+	Pinned          int64 `json:"pinned"`
+	SupervisorExecs int64 `json:"supervisor_execs,omitempty"`
+	CollectorExecs  int64 `json:"collector_execs,omitempty"`
+	// Dropped counts records the feed lost (Tetragon's rate limit or
+	// throttle, or this gateway reading too slowly).
+	Dropped int64 `json:"dropped,omitempty"`
+	// UpdateCommand updates a feed that is older than this gateway or
+	// speaks a protocol it does not read.
+	UpdateCommand string `json:"update_command,omitempty"`
 }
 
 // Process is one process of a sandbox's process tree.
@@ -92,8 +127,12 @@ type Process struct {
 	// name secrets replaced.
 	Cmdline string `json:"cmdline,omitempty"`
 	// Source is what saw it first: sample (DefenseClaw's sample of the
-	// sandbox's /proc) or ocsf (an OpenShell PROC record).
+	// sandbox's /proc), ocsf (an OpenShell PROC record) or tetragon (the
+	// sandbox kernel feed).
 	Source string `json:"source"`
+	// HostPID is the host's pid of a process the kernel feed reported. PID
+	// is 0 for one whose in-sandbox pid it could not read.
+	HostPID int `json:"host_pid,omitempty"`
 }
 
 // Processes returns a sandbox's process tree.

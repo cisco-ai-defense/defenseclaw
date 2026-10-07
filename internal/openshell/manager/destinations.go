@@ -95,11 +95,21 @@ type ProcessRef struct {
 }
 
 // lineage is pid's lineage in the sandbox, nil without a process index.
-func (m *Manager) lineage(sandbox string, pid int) []sandboxapi.DestinationProcess {
+// exe is the binary the record that named pid reported: an index that tells
+// process images apart (Manager.LineageFor, with the kernel feed's records)
+// takes only a process that ran it.
+func (m *Manager) lineage(sandbox string, pid int, exe string) []sandboxapi.DestinationProcess {
 	if m.procs == nil || pid <= 0 {
 		return nil
 	}
-	refs := m.procs.Lineage(sandbox, pid)
+	var refs []ProcessRef
+	if keyed, ok := m.procs.(interface {
+		LineageFor(sandboxName string, pid int, exe string) []ProcessRef
+	}); ok {
+		refs = keyed.LineageFor(sandbox, pid, exe)
+	} else {
+		refs = m.procs.Lineage(sandbox, pid)
+	}
 	if len(refs) == 0 {
 		return nil
 	}
@@ -602,10 +612,12 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 	if t == nil && len(live) > 0 {
 		t = m.tableLocked(info.name)
 	}
+	binaries := map[string]string{}
 	if t != nil {
 		m.mergeLiveLocked(t, live, info.harness)
 		for _, r := range t.rows {
 			out.Destinations = append(out.Destinations, r.view(info.harness))
+			binaries[sandboxapi.DisplayText(r.Host)] = r.lastBinary()
 		}
 		for _, u := range t.models {
 			out.Models = append(out.Models, *u)
@@ -620,7 +632,8 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 		return cmp.Or(cmp.Compare(b.Calls, a.Calls), cmp.Compare(a.Provider, b.Provider), cmp.Compare(a.Model, b.Model))
 	})
 	for i := range out.Destinations {
-		out.Destinations[i].Lineage = m.lineage(info.name, out.Destinations[i].PID)
+		d := &out.Destinations[i]
+		d.Lineage = m.lineage(info.name, d.PID, binaries[d.Host])
 	}
 	return out, nil
 }

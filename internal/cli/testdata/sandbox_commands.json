@@ -313,6 +313,39 @@
     ]
   },
   {
+    "path": "sandbox kernel-feed",
+    "use": "kernel-feed",
+    "short": "Feed Tetragon's exec records into your docker sandboxes' process trees (Linux, a root service)"
+  },
+  {
+    "path": "sandbox kernel-feed install",
+    "use": "install",
+    "short": "Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon)"
+  },
+  {
+    "path": "sandbox kernel-feed status",
+    "use": "status",
+    "short": "Show whether the sandbox kernel feed is installed, running and matches this gateway",
+    "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox kernel-feed uninstall",
+    "use": "uninstall",
+    "short": "Stop and remove the sandbox kernel feed service (as root)"
+  },
+  {
     "path": "sandbox list",
     "use": "list",
     "short": "List sandboxes",

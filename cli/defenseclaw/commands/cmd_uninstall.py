@@ -1330,6 +1330,7 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         names = (
             "defenseclaw-gateway",
             "defenseclaw-acp",
+            "defenseclaw-sensor-helper",
             "defenseclaw",
             "skill-scanner",
             "skill-scanner-api",
@@ -1526,6 +1527,9 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             f"      {ux.dim('·')} DefenseClaw's OpenShell sandboxes, images, gateway change and shell wrappers "
             f"stay; {later}"
         )
+    feed = _sandbox_kernel_feed_hint(plan)
+    if feed:
+        ux.echo(f"  • {ux.bold('sandbox kernel feed:')} stays (a root service); {feed}")
     ux.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
     if "openclaw" in display_connectors:
         ux.echo(
@@ -2087,6 +2091,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
             else {
                 "defenseclaw-gateway",
                 "defenseclaw-acp",
+                "defenseclaw-sensor-helper",
                 "defenseclaw",
                 "skill-scanner",
                 "skill-scanner-api",
@@ -2437,6 +2442,27 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
         raise click.ClickException(f"could not stop sidecar: {exc}") from exc
     finally:
         _close_process_waiters(waiters)
+
+
+# The sandbox kernel feed (``sudo defenseclaw-gateway sandbox kernel-feed
+# install``) is a root service with its own root-owned copy of the helper. A
+# per-user uninstall cannot remove it, so the plan says how.
+_SANDBOX_FEED_UNIT = "/etc/systemd/system/defenseclaw-sandbox-feed.service"
+_SANDBOX_FEED_HELPER = "/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"
+
+
+def _sandbox_kernel_feed_hint(plan: UninstallPlan, unit: str = _SANDBOX_FEED_UNIT) -> str:
+    """How to remove the sandbox kernel feed, or "" when it is not installed.
+
+    While the gateway stays, its ``sandbox kernel-feed uninstall`` does it;
+    the feed's own copy of the helper can remove it at any time, also after
+    this uninstall removed the gateway.
+    """
+    if not sys.platform.startswith("linux") or not os.path.isfile(unit):
+        return ""
+    if plan.gateway_path and not plan.remove_binaries:
+        return f"remove it with `sudo {plan.gateway_path} sandbox kernel-feed uninstall`"
+    return f"remove it with `sudo {_SANDBOX_FEED_HELPER} --sandbox-feed --uninstall`"
 
 
 def _gateway_supports_sandbox_teardown(gateway_path: str) -> bool:

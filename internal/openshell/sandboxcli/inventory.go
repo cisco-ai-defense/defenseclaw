@@ -115,8 +115,37 @@ func (a *App) Ps(ctx context.Context, o PsOptions) error {
 	if list.Truncated {
 		a.warn("the last sample stopped at its bound; some processes are not listed")
 	}
-	a.note(fmt.Sprintf("sampled every %ds; a process that starts and ends between two samples is not seen", list.IntervalSeconds))
+	a.processSourceNote(list)
 	return nil
+}
+
+// processSourceNote says where the tree comes from: the sample, or also the
+// sandbox kernel feed's Tetragon records.
+func (a *App) processSourceNote(list *sandboxapi.ProcessList) {
+	sampled := fmt.Sprintf("sampled every %ds; a process that starts and ends between two samples is not seen", list.IntervalSeconds)
+	k := list.Kernel
+	switch {
+	case k == nil:
+	case k.Connected && k.Tetragon == "connected":
+		a.note(fmt.Sprintf("source: kernel (Tetragon, through the sandbox kernel feed): every exec and exit is recorded, "+
+			"%d so far (%d with their pid in the sandbox); the %ds sample fills in the rest", k.Execs, k.Pinned, list.IntervalSeconds))
+		if k.Dropped > 0 {
+			a.warn(fmt.Sprintf("the kernel feed lost %d records (Tetragon's rate limit or a slow reader)", k.Dropped))
+		}
+		if k.UpdateCommand != "" {
+			a.note("the kernel feed is older than this gateway; update it: " + k.UpdateCommand)
+		}
+		return
+	case k.Connected:
+		a.warn("the sandbox kernel feed is connected, but its Tetragon is not (" + firstNonEmpty(k.TetragonReason, "unavailable") + ")")
+	default:
+		hint := ""
+		if k.UpdateCommand != "" {
+			hint = "; update it: " + k.UpdateCommand
+		}
+		a.warn("the sandbox kernel feed is not used (" + k.Reason + ")" + hint)
+	}
+	a.note(sampled)
 }
 
 // treeRow is one process of a tree walk and its depth.
