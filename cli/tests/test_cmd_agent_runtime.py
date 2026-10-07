@@ -532,7 +532,7 @@ def test_grant_commands_are_scoped_and_reversible():
     granted = _linux_grant_commands("/opt/defenseclaw/bin/defenseclaw-gateway", False)
     reverted = _linux_grant_commands("/opt/defenseclaw/bin/defenseclaw-gateway", True)
     assert granted == [[
-        "setcap", "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep",
+        "setcap", "cap_dac_read_search,cap_net_admin,cap_net_raw,cap_sys_admin+ep",
         "/opt/defenseclaw/bin/defenseclaw-gateway",
     ]]
     assert reverted == [["setcap", "-r", "/opt/defenseclaw/bin/defenseclaw-gateway"]]
@@ -551,6 +551,52 @@ def test_grant_commands_are_scoped_and_reversible():
     # Nothing here touches an ACL.
     joined = " ".join(" ".join(c) for c in win_grant)
     assert "SACL" not in joined and "Set-Acl" not in joined and "icacls" not in joined
+
+
+def test_linux_process_events_need_cap_net_admin(monkeypatch):
+    """The cn_proc truth fix: the process connector is not unprivileged.
+
+    An ordinary uid's bind to the cn_proc multicast group fails with EPERM
+    (RHEL 9, kernel 5.14), so the row names CAP_NET_ADMIN, probes it, and
+    --grant sets it; before the fix it read "needs: nothing" and even a
+    granted gateway still could not subscribe.
+    """
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    result = CliRunner().invoke(runtime_permissions, ["--os", "linux", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = {entry["plane"]: entry for entry in json.loads(result.output)["grants"]}
+    process = rows["agent actions (C), process events"]
+    assert process["needs"] == "CAP_NET_ADMIN"
+    assert process["probe"] == "cap_net_admin"
+    assert process["how"]
+    assert "cap_net_admin" in cmd_agent._LINUX_GRANT_CAPS.split("+")[0].split(",")
+    assert cmd_agent._LINUX_CAPABILITY_BITS["CAP_NET_ADMIN"] == 12
+
+    asked: list[str] = []
+    monkeypatch.setattr(cmd_agent, "_probe_linux_capability", lambda name: asked.append(name) or False)
+    assert cmd_agent._evaluate_grant("cap_net_admin", True) is False
+    assert asked == ["CAP_NET_ADMIN"]
+
+
+def test_linux_permissions_explain_tetragon_without_asking_for_it():
+    """Per-user installs never connect to Tetragon; the row says so and why."""
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    as_json = CliRunner().invoke(runtime_permissions, ["--os", "linux", "--json"])
+    assert as_json.exit_code == 0, as_json.output
+    rows = {entry["plane"]: entry for entry in json.loads(as_json.output)["grants"]}
+    tetragon = rows["agent actions (C), Tetragon"]
+    assert tetragon["info"] is True
+    assert tetragon["needs"] == "nothing" and tetragon["granted"] is True
+    assert "root-only" in tetragon["why"] and "sensor helper" in tetragon["why"]
+
+    text = CliRunner().invoke(runtime_permissions, ["--os", "linux"])
+    assert text.exit_code == 0, text.output
+    assert "[info] agent actions (C), Tetragon" in text.output
+    assert "[granted] agent actions (C), Tetragon" not in text.output
 
 
 def test_grant_refuses_to_act_on_another_host_os():
@@ -610,46 +656,92 @@ def test_grant_confirmed_runs_exactly_the_planned_commands(monkeypatch):
     assert ran == cmd_agent._linux_grant_commands("/usr/bin/true", False)
 
 
-def test_runtime_acquisition_survives_the_merge():
-    """A setting the Python layer does not know is a setting it erases.
+def test_runtime_dataclass_matches_the_closed_schema():
+    """Every runtime key the CLI models is one a config can carry, and back.
 
-    _merge_ai_runtime rebuilds the runtime block from a whitelist, so any
-    key missing from it is dropped on the next save. An operator who pinned
-    acquisition to "direct" while diagnosing would have found it silently
-    gone after any CLI config write, with the gateway quietly back on auto.
+    _merge_ai_runtime rebuilds the block from a whitelist, so a schema key the
+    dataclass lacks is erased on the next save; a dataclass key the closed
+    schema lacks (the retired acquisition and helper_socket) is a setting no
+    config.yaml could ever hold.
     """
-    from defenseclaw.config import _merge_ai_runtime
+    from dataclasses import fields
 
-    merged = _merge_ai_runtime({
-        "enabled": True,
-        "acquisition": "direct",
-        "helper_socket": "/run/defenseclaw/sensor-helper.sock",
-    })
-    assert merged.acquisition == "direct"
-    assert merged.helper_socket == "/run/defenseclaw/sensor-helper.sock"
+    from defenseclaw.config import AIRuntimeConfig
+    from defenseclaw.observability.v8_config import _schema_validator
 
-    # Absent stays empty rather than becoming a value the compiler must read.
-    assert _merge_ai_runtime({"enabled": True}).acquisition == ""
-    assert _merge_ai_runtime({"enabled": True}).helper_socket == ""
+    schema = _schema_validator().schema
+    defs = schema["$defs"]
+
+    def resolve(node: dict) -> dict:
+        while "$ref" in node:
+            node = defs[node["$ref"].rsplit("/", 1)[-1]]
+        return node
+
+    discovery = resolve(schema["properties"]["ai_discovery"])
+    runtime = resolve(discovery["properties"]["runtime"])
+    assert runtime.get("additionalProperties") is False
+    assert {f.name for f in fields(AIRuntimeConfig)} == set(runtime["properties"])
 
 
-def test_runtime_acquisition_is_pruned_when_unset():
-    """Unset must stay absent on the wire, mirroring Go's omitempty.
+def _snapshot_with_plane_c(backend: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(_DEGRADED_SNAPSHOT)
+    plane_c: dict[str, Any] = {
+        "plane": "c", "name": "agent actions", "available": True, "running": True,
+        "mechanism": "Tetragon (exec, exit) + fanotify",
+    }
+    if backend is not None:
+        plane_c["backend"] = backend
+    payload["planes"] = [payload["planes"][0], plane_c]
+    return payload
 
-    Writing an empty string would be a value the schema has to accept and
-    the compiler has to interpret, where absence already means auto.
-    """
-    from defenseclaw.config import _prune_ai_runtime_fields
 
-    block = {"runtime": {"enabled": True, "acquisition": "", "helper_socket": ""}}
-    _prune_ai_runtime_fields(block)
-    assert "acquisition" not in block["runtime"]
-    assert "helper_socket" not in block["runtime"]
+def test_status_names_the_kernel_sensor_and_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = {
+        "kind": "tetragon", "version": "1.7.1", "mode": "enforce", "events_lost": 0, "loss_known": True,
+        "kernel_floor": {
+            "mode": "enforce", "enforced_users": 2, "enrolled_users": 3, "burn_in_users": 1,
+            "paused_until": "14:05",
+        },
+    }
+    client = _StubClient(_snapshot_with_plane_c(backend))
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("status")
+    assert result.exit_code == 0, result.output
+    assert "kernel sensor: Tetragon 1.7.1, enforce, 0 events lost" in result.output
+    assert "kernel floor: enforce for 2 of 3 users (1 in burn-in); paused until 14:05" in result.output
 
-    # A real value survives pruning.
-    kept = {"runtime": {"enabled": True, "acquisition": "helper"}}
-    _prune_ai_runtime_fields(kept)
-    assert kept["runtime"]["acquisition"] == "helper"
+    as_json = _invoke("status", "--json")
+    planes = json.loads(as_json.output)["planes"]
+    assert planes[1]["backend"] == backend
+
+
+def test_status_says_why_tetragon_is_not_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    fallback = {"kind": "native", "fallback_reason": "tetragon_tcp_api", "loss_known": False}
+    client = _StubClient(_snapshot_with_plane_c(fallback))
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("status")
+    assert result.exit_code == 0, result.output
+    assert "kernel sensor: cn_proc and fanotify (Tetragon not used: tetragon_tcp_api)" in result.output
+    assert "kernel floor" not in result.output
+
+
+def test_status_without_a_backend_prints_no_kernel_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every gateway but the managed Linux sensor helper's omits the field.
+    client = _StubClient(_snapshot_with_plane_c(None))
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("status")
+    assert result.exit_code == 0, result.output
+    assert "kernel sensor" not in result.output
+    assert "agent actions: running via Tetragon" in result.output
+
+
+def test_kernel_sensor_summary_never_claims_unknown_loss_is_zero() -> None:
+    assert cmd_agent.kernel_sensor_summary({"kind": "tetragon", "version": "1.7.1", "mode": "consume"}) == (
+        "Tetragon 1.7.1, consume, events lost unknown"
+    )
+    assert cmd_agent.kernel_sensor_summary(
+        {"kind": "tetragon", "mode": "observe", "events_lost": 12, "loss_known": True}
+    ) == "Tetragon, observe, 12 events lost"
 
 
 def test_status_marks_a_limited_running_plane_partial(monkeypatch: pytest.MonkeyPatch) -> None:
