@@ -34,7 +34,8 @@ func (a *APIServer) emitCorrelationRelationshipsV8(
 	if a == nil {
 		return nil
 	}
-	if ctx != nil && len(relationships) > 0 {
+	// Secure Client keeps its agentless relationship rows (issue #1092).
+	if ctx != nil && len(relationships) > 0 && !a.managedAIDOnly() {
 		ctx = a.contextWithSessionAgentV8(ctx, connector)
 	}
 	return emitCorrelationRelationshipsV8WithEmitter(

@@ -120,10 +120,18 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	// process-local "latest turn" map.
 	// The minted agent is the session's root agent, with the ID the hook
 	// model and lifecycle records derive for it (hookLLMEventMeta), so every
-	// row of one session carries the same agent_id.
+	// row of one session carries the same agent_id. Secure Client keeps the
+	// UUIDv7 agent of main (issue #1092).
 	if req.SessionID != "" && req.AgentID == "" &&
 		(lifecycle == connector.CorrelationLifecycleSessionStart || lifecycle == connector.CorrelationLifecycleTurnStart) {
 		req.AgentID = stableLLMEventID("agent", req.ConnectorName, req.SessionID, "root")
+		if a.managedAIDOnly() {
+			id, idErr := audit.NewSemanticEventID()
+			if idErr != nil {
+				return ctx, req, idErr
+			}
+			req.AgentID = string(id)
+		}
 		appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
 	}
 	if req.TurnID == "" && lifecycle == connector.CorrelationLifecycleTurnStart &&
