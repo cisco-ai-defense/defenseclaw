@@ -147,12 +147,29 @@ func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	if rows := destinationKinds(t, e, "keepbox"); rows["files.example.org"].Connections != 1 {
 		t.Fatalf("after a restart = %+v", rows)
 	}
+	// A delete drops them before it forgets the sandbox: a sighting that
+	// arrives in between (a refusal the egress sink still held) and a
+	// flush neither bring the table back nor write the file again.
+	must(t, e.m.dropDestinations("keepbox", e.binding("keepbox").ID))
+	e.ocsf("keepbox", "NET:OPEN [MED] DENIED /usr/bin/curl(9) -> late.example.org:443/tcp [policy:- engine:opa]", time.Now())
+	e.m.flushDestinations("")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("destinations after a late sighting: %v", err)
+	}
+	if rows := destinationKinds(t, e, "keepbox"); len(rows) != 0 {
+		t.Fatalf("the dropped table came back: %+v", rows)
+	}
 	e.deleteBox("keepbox", sandboxapi.DeleteRequest{})
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("destinations after delete: %v", err)
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Fatalf("sandbox dir after delete: %v", err)
+	}
+	// A new sandbox of the name starts with none.
+	e.live(sandboxapi.CreateRequest{Name: "keepbox"})
+	if rows := destinationKinds(t, e, "keepbox"); len(rows) != 0 {
+		t.Fatalf("a new sandbox of the name has %+v", rows)
 	}
 }
 

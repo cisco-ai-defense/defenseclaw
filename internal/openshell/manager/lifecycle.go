@@ -963,6 +963,10 @@ func (m *Manager) forget(b *box) {
 	m.mu.Unlock()
 	if gone {
 		m.tel.forgetSandbox(name)
+		// A sandbox created under the name later starts with no destinations.
+		m.destMu.Lock()
+		delete(m.dests, name)
+		m.destMu.Unlock()
 	}
 	m.refreshEgress()
 }

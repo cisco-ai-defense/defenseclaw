@@ -218,11 +218,12 @@ func (m *Manager) destinationCatalog() *catalog.Catalog {
 	return m.catalog
 }
 
-// tableLocked returns name's table, making an empty one. Callers hold
-// destMu.
+// tableLocked returns name's table, making an empty one; nil once a delete
+// dropped it (dropDestinations), until the sandbox is forgotten. Callers
+// hold destMu.
 func (m *Manager) tableLocked(name string) *destTable {
-	t := m.dests[name]
-	if t == nil {
+	t, ok := m.dests[name]
+	if !ok {
 		t = &destTable{rows: map[string]*destRow{}, models: map[string]*sandboxapi.ModelUse{}, shadow: map[string]int{}}
 		m.dests[name] = t
 	}
@@ -388,7 +389,10 @@ func (m *Manager) observeDestination(ctx context.Context, b *box, s destinationS
 	}
 	m.destMu.Lock()
 	t := m.tableLocked(info.name)
-	r := t.row(m, host, s.at, info.harness)
+	var r *destRow
+	if t != nil {
+		r = t.row(m, host, s.at, info.harness)
+	}
 	if r == nil {
 		m.destMu.Unlock()
 		return
@@ -464,6 +468,9 @@ func (m *Manager) observeInference(b *box, provider, model string, failed bool, 
 	m.destMu.Lock()
 	defer m.destMu.Unlock()
 	t := m.tableLocked(info.name)
+	if t == nil {
+		return
+	}
 	key := provider + "\x00" + model
 	u := t.models[key]
 	if u == nil {
@@ -543,8 +550,11 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 	live := m.proxyStats(info.bindingID)
 	m.destMu.Lock()
 	out := &sandboxapi.Destinations{Name: info.name, Harness: info.harness, Destinations: []sandboxapi.DestinationRow{}}
-	if t := m.dests[info.name]; t != nil || len(live) > 0 {
+	t := m.dests[info.name]
+	if t == nil && len(live) > 0 {
 		t = m.tableLocked(info.name)
+	}
+	if t != nil {
 		m.mergeLiveLocked(t, live, info.harness)
 		for _, r := range t.rows {
 			out.Destinations = append(out.Destinations, r.view(info.harness))
@@ -750,7 +760,10 @@ func (m *Manager) loadDestinations(name string) *destTable {
 }
 
 // dropDestinations forgets a deleted sandbox's destinations: its table, its
-// kept file and what the proxy counter counted for its binding.
+// kept file and what the proxy counter counted for its binding. The table
+// stays dropped (nil) until forget: a refusal the egress sink still holds,
+// or a late OpenShell record, must neither bring it back nor write the file
+// again before the sandbox's directory goes.
 func (m *Manager) dropDestinations(name, bindingID string) error {
 	m.mu.Lock()
 	proxy := m.proxy
@@ -760,7 +773,7 @@ func (m *Manager) dropDestinations(name, bindingID string) error {
 	}
 	m.destMu.Lock()
 	defer m.destMu.Unlock()
-	delete(m.dests, name)
+	m.dests[name] = nil
 	if path, ok := m.destinationsPath(name); ok {
 		if err := removeIfExists(path); err != nil {
 			return fmt.Errorf("remove the destinations of %s: %w", name, err)
