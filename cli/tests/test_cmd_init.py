@@ -170,6 +170,17 @@ class TestInitFirstRunBackend(unittest.TestCase):
             cache_hit=False,
         )
 
+    def test_repeated_connector_flag_is_refused_not_silently_dropped(self):
+        # GAP-0392: --connector claudecode --connector codex kept only codex.
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--connector", "claudecode", "--connector", "codex",
+            "--skip-install", "--no-start-gateway", "--no-verify",
+        ])
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--action-connectors claudecode,codex", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
+
     def test_json_summary_codex_does_not_default_to_openclaw(self):
         result = self._invoke([
             "--non-interactive",
