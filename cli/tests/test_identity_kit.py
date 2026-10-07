@@ -164,3 +164,17 @@ def test_okta_rate_limit_honors_lowercase_reset_header(monkeypatch: pytest.Monke
     status, _, _ = client.call("GET", "/api/v1/users")
     assert status == 429
     assert waited and min(waited) > 5
+
+
+def test_okta_explicit_gid_is_not_its_own_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    group = {"id": "group1", "type": "OKTA_GROUP", "profile": {"name": "team"}}
+    monkeypatch.setattr(okta, "find_group", lambda *_args: group)
+
+    class Client:
+        def must(self, method, path, body):
+            assert (method, path, body["profile"]["gidNumber"]) == ("PUT", "/api/v1/groups/group1", 1720500)
+
+    report = okta.Report(dry_run=False)
+    assert okta.ensure_group(Client(), report, "team", 1720500, set(), 1720000) == (group, 1720500)
+    assert report.problems == 0

@@ -382,6 +382,9 @@ def ensure_group(client: Okta, report: Report, name: str, want_gid: int | None, 
     the gidNumber is the planned one), or when it cannot carry a gidNumber."""
     group = find_group(client, name)
     if group is None:
+        if want_gid is not None and want_gid in used:
+            report.problem(f"gid {want_gid} for group {name} is already used by another group")
+            return None, None
         report.change(f"create group {name}")
         if report.dry_run:
             return None, pick_gid(want_gid, used, gid_base)
@@ -399,10 +402,10 @@ def ensure_group(client: Okta, report: Report, name: str, want_gid: int | None, 
         else:
             report.ok(f"group {name} has gidNumber {have}")
         return group, int(have)
-    gid = pick_gid(want_gid, used, gid_base)
     if want_gid is not None and want_gid in used:
         report.problem(f"gid {want_gid} for group {name} is already used by another group")
         return group, None
+    gid = pick_gid(want_gid, used, gid_base)
     report.change(f"set gidNumber {gid} on group {name}")
     if not report.dry_run:
         profile["gidNumber"] = gid
