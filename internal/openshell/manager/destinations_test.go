@@ -145,6 +145,29 @@ func TestDestinationsAreClassified(t *testing.T) {
 	}
 }
 
+// The host of a shadow AI finding comes from the sandbox, so it goes into
+// the block command a user copies only as a host name or an IP address;
+// any other spelling is shown made safe, and the command is left out.
+func TestShadowRemediationPastesOnlyAHost(t *testing.T) {
+	for _, c := range []struct {
+		host    string
+		command bool
+	}{
+		{"api.openai.com", true}, {"192.0.2.7", true}, {"2001:db8::7", true},
+		{"llm.example.net;dccert-block-marker", false}, {"llm.example.net dccert-block-marker", false},
+		{"*.example-llm.net", false}, {"10.0.0.0/8", false}, {"[2001:db8::7]", false}, {"llm.example.net\x1b[0m", false},
+	} {
+		got := shadowRemediation("destbox", c.host, true)
+		if strings.Contains(got, "policy block "+c.host+".") != c.command || !c.command && strings.Contains(got, "policy block") ||
+			strings.ContainsRune(got, 0x1b) || !strings.Contains(got, "`defenseclaw sandbox destinations destbox`") {
+			t.Errorf("%q: %q", c.host, got)
+		}
+	}
+	if got := shadowRemediation("destbox", "api.openai.com", false); strings.Contains(got, "policy block") {
+		t.Errorf("refused: %q", got)
+	}
+}
+
 // A --credential binding's endpoint, which a provider rule opens as it does
 // the model endpoint, is a credential destination: no model provider (the
 // status counts one model API) and no shadow AI.
