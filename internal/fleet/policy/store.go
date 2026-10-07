@@ -37,6 +37,14 @@ type PolicyStore interface {
 
 	// MarkDistributed flags a policy version as having been pushed to devices.
 	MarkDistributed(tenantID, fleetID uint64, version uint32) error
+
+	// GetEmergencySeq returns the last persisted emergency broadcast sequence number.
+	// Returns 0 if no sequence has been stored yet.
+	GetEmergencySeq() (uint32, error)
+
+	// SetEmergencySeq persists the emergency broadcast sequence number so it
+	// survives gateway restarts (REQ-31 anti-replay).
+	SetEmergencySeq(seq uint32) error
 }
 
 // fleetKey builds a composite key for the tenant+fleet pair.
@@ -46,8 +54,9 @@ func fleetKey(tenantID, fleetID uint64) string {
 
 // MemoryPolicyStore is an in-memory PolicyStore for development and testing.
 type MemoryPolicyStore struct {
-	mu       sync.RWMutex
-	policies map[string][]PolicyRecord // keyed by "tenantID:fleetID"
+	mu            sync.RWMutex
+	policies      map[string][]PolicyRecord // keyed by "tenantID:fleetID"
+	emergencySeq  uint32
 }
 
 // NewMemoryPolicyStore creates an empty in-memory store.
@@ -173,4 +182,17 @@ func (s *MemoryPolicyStore) MarkDistributed(tenantID, fleetID uint64, version ui
 		}
 	}
 	return fmt.Errorf("policy version %d not found for tenant=%d fleet=%d", version, tenantID, fleetID)
+}
+
+func (s *MemoryPolicyStore) GetEmergencySeq() (uint32, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.emergencySeq, nil
+}
+
+func (s *MemoryPolicyStore) SetEmergencySeq(seq uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.emergencySeq = seq
+	return nil
 }

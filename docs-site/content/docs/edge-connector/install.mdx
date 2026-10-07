@@ -55,6 +55,9 @@ cmake .. -DDCLAW_PROFILE=EDGE      # ~131KB — Edge gateways with bloom filter
 ### Step 1 — Copy and edit
 
 ```bash
+# Return to the repository root (if you are still in edge-connector/build)
+cd ../..
+
 mkdir -p ~/.defenseclaw
 cp policies/strict.yaml ~/.defenseclaw/policy.yaml
 ```
@@ -130,10 +133,10 @@ iot_extensions:
         severity: critical
         action: block
 
-    ssrf_protection:
-      enabled: true
-      block_private_ranges: true     # 10.x, 172.16-31.x, 192.168.x
-      block_cloud_metadata: true     # 169.254.169.254
+  ssrf_protection:
+    enabled: true
+    block_private_ranges: true     # 10.x, 172.16-31.x, 192.168.x
+    block_cloud_metadata: true     # 169.254.169.254
 ```
 
 ### Step 3 — Compile (optional)

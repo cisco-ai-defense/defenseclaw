@@ -354,7 +354,7 @@ func TestPolicyVersionsInvalidTenant(t *testing.T) {
 
 func TestEmergencyEndpoint(t *testing.T) {
 	api := setupAPIWithPolicy()
-	body := `{"tenant_id":1,"fleet_id":2,"command":"FLUSH_CACHE"}`
+	body := `{"tenant_id":1,"fleet_id":2,"command":"BLOCK_ALL"}`
 	req := authedRequest("POST", "/policy/emergency", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
@@ -405,7 +405,7 @@ func TestEmergencyEndpointUnknownCommand(t *testing.T) {
 
 func TestEmergencyEndpointMissingIDs(t *testing.T) {
 	api := setupAPIWithPolicy()
-	body := `{"command":"FLUSH_CACHE"}`
+	body := `{"command":"BLOCK_ALL"}`
 	req := authedRequest("POST", "/policy/emergency", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
@@ -438,7 +438,7 @@ func TestPolicyEndpointsWithoutService(t *testing.T) {
 	}{
 		{"POST", "/policy/push", `{"tenant_id":1,"fleet_id":1,"policy_yaml":"test","profile":"standard"}`},
 		{"GET", "/policy/versions?tenant_id=1&fleet_id=1", ""},
-		{"POST", "/policy/emergency", `{"tenant_id":1,"fleet_id":1,"command":"FLUSH_CACHE"}`},
+		{"POST", "/policy/emergency", `{"tenant_id":1,"fleet_id":1,"command":"BLOCK_ALL"}`},
 	}
 
 	for _, tc := range tests {

@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -52,16 +53,26 @@ type TCPClient struct {
 	readerDone   chan struct{}
 }
 
-// stripMQTTScheme removes URI scheme prefixes (tcp://, mqtt://, mqtts://,
-// ssl://) from a broker address, returning just the host:port portion that
-// net.Dial expects.
+// errTLSNotSupported is returned when a TLS MQTT scheme is requested but not
+// yet implemented.
+var errTLSNotSupported = fmt.Errorf("TLS MQTT not yet supported. Use mqtt:// or host:port for plaintext")
+
+// stripMQTTScheme removes URI scheme prefixes (tcp://, mqtt://) from a broker
+// address, returning just the host:port portion that net.Dial expects.
+// P0-5 fix: mqtts:// and ssl:// are NOT stripped — callers must check for TLS
+// schemes explicitly and return an error instead of silently downgrading.
 func stripMQTTScheme(addr string) string {
-	for _, prefix := range []string{"tcp://", "mqtt://", "mqtts://", "ssl://"} {
+	for _, prefix := range []string{"tcp://", "mqtt://"} {
 		if strings.HasPrefix(addr, prefix) {
 			return strings.TrimPrefix(addr, prefix)
 		}
 	}
 	return addr
+}
+
+// isTLSScheme returns true if the address uses a TLS MQTT scheme (mqtts:// or ssl://).
+func isTLSScheme(addr string) bool {
+	return strings.HasPrefix(addr, "mqtts://") || strings.HasPrefix(addr, "ssl://")
 }
 
 // NewTCPClient creates a new minimal MQTT client that connects to the given
@@ -85,7 +96,12 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 		return nil // already connected
 	}
 
-	// Defensively strip URI scheme prefixes — net.Dial expects bare host:port.
+	// P0-5 fix: Reject TLS schemes instead of silently downgrading to plaintext.
+	if isTLSScheme(c.addr) {
+		return fmt.Errorf("%w: broker address %q uses TLS scheme", errTLSNotSupported, c.addr)
+	}
+
+	// Strip URI scheme prefixes — net.Dial expects bare host:port.
 	addr := stripMQTTScheme(c.addr)
 
 	// Dial with context deadline if present.
@@ -95,8 +111,13 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("tcp dial %s: %w", c.addr, err)
 	}
 
+	// P0-4 fix: Read MQTT credentials from environment so authenticated
+	// brokers (set up by `defenseclaw setup mqtt-broker`) accept connections.
+	mqttUser := os.Getenv("DCLAW_MQTT_USER")
+	mqttPass := os.Getenv("DCLAW_MQTT_PASS")
+
 	// Build MQTT CONNECT packet (MQTT 3.1.1, clean session).
-	pkt := buildConnectPacket(c.clientID)
+	pkt := buildConnectPacket(c.clientID, mqttUser, mqttPass)
 	if err := writeAll(conn, pkt); err != nil {
 		conn.Close()
 		return fmt.Errorf("send CONNECT: %w", err)
@@ -369,14 +390,25 @@ func (c *TCPClient) pingLoop(ctx context.Context, interval time.Duration) {
 
 // buildConnectPacket constructs an MQTT CONNECT packet.
 // Protocol: MQTT 3.1.1, Clean Session, KeepAlive 60s.
-func buildConnectPacket(clientID string) []byte {
+// If username and password are non-empty, they are included in the packet
+// with the appropriate connect flags (bits 7 and 6).
+func buildConnectPacket(clientID, username, password string) []byte {
+	// Connect flags: clean session (bit 1) = 0x02
+	connectFlags := byte(0x02)
+	if username != "" {
+		connectFlags |= 0x80 // bit 7: username flag
+	}
+	if password != "" {
+		connectFlags |= 0x40 // bit 6: password flag
+	}
+
 	// Variable header: protocol name + level + connect flags + keepalive
 	varHeader := []byte{
 		0x00, 0x04, // protocol name length
 		'M', 'Q', 'T', 'T', // protocol name
-		0x04,       // protocol level (4 = MQTT 3.1.1)
-		0x02,       // connect flags: clean session
-		0x00, 0x3C, // keepalive: 60 seconds
+		0x04,         // protocol level (4 = MQTT 3.1.1)
+		connectFlags, // connect flags
+		0x00, 0x3C,   // keepalive: 60 seconds
 	}
 
 	// Payload: client ID (length-prefixed UTF-8 string)
@@ -384,6 +416,23 @@ func buildConnectPacket(clientID string) []byte {
 	payload := make([]byte, 2+len(cidBytes))
 	binary.BigEndian.PutUint16(payload[0:2], uint16(len(cidBytes)))
 	copy(payload[2:], cidBytes)
+
+	// P0-4 fix: Append username and password fields if credentials are set.
+	// MQTT 3.1.1 spec section 3.1.3: payload order is ClientID, Username, Password.
+	if username != "" {
+		uBytes := []byte(username)
+		uField := make([]byte, 2+len(uBytes))
+		binary.BigEndian.PutUint16(uField[0:2], uint16(len(uBytes)))
+		copy(uField[2:], uBytes)
+		payload = append(payload, uField...)
+	}
+	if password != "" {
+		pBytes := []byte(password)
+		pField := make([]byte, 2+len(pBytes))
+		binary.BigEndian.PutUint16(pField[0:2], uint16(len(pBytes)))
+		copy(pField[2:], pBytes)
+		payload = append(payload, pField...)
+	}
 
 	remainLen := len(varHeader) + len(payload)
 	fixed := encodeFixedHeader(mqttPktConnect, remainLen)

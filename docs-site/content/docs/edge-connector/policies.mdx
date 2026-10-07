@@ -66,6 +66,10 @@ iot_extensions:
     - "metadata.google.internal"
 ```
 
+<Callout type="info">
+**Note:** `destination_denylist` is planned for a future release. The policy compiler does not currently read this field. Use `ssrf_protection` with `block_private_ranges` and `block_cloud_metadata` for equivalent protection today.
+</Callout>
+
 Wildcards match any subdomain: `*.example.com` matches `api.example.com` and `deep.sub.example.com`. A tool call to an unlisted destination falls through to cloud escalation.
 
 ## Rate limits
@@ -133,11 +137,11 @@ iot_extensions:
         severity: critical
         action: block
 
-    ssrf_protection:
-      enabled: true
-      block_private_ranges: true
-      block_cloud_metadata: true
-      block_link_local: true
+  ssrf_protection:
+    enabled: true
+    block_private_ranges: true
+    block_cloud_metadata: true
+    block_link_local: true
 ```
 
 <Callout type="info">

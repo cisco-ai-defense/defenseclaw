@@ -5,8 +5,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -14,18 +16,56 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 )
 
+// DeviceKeyProvider resolves the signing key for a given device.
+// The default implementation returns a fleet-wide shared key read from
+// the DCLAW_DEVICE_KEY environment variable (hex-encoded, 32 bytes).
+// In production, replace with a per-device key lookup.
+type DeviceKeyProvider interface {
+	KeyForDevice(deviceID uint32) []byte
+}
+
+// envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment.
+// Falls back to a 32-byte zero key when the env var is unset (dev mode).
+type envDeviceKeyProvider struct {
+	key []byte
+}
+
+func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
+	raw := os.Getenv("DCLAW_DEVICE_KEY")
+	if raw != "" {
+		decoded, err := hex.DecodeString(raw)
+		if err == nil && len(decoded) == 32 {
+			return &envDeviceKeyProvider{key: decoded}
+		}
+		log.Printf("[mqtt-bridge] WARNING: DCLAW_DEVICE_KEY is set but invalid (want 64 hex chars / 32 bytes), falling back to zero key")
+	}
+	return &envDeviceKeyProvider{key: make([]byte, 32)}
+}
+
+func (p *envDeviceKeyProvider) KeyForDevice(_ uint32) []byte {
+	return p.key
+}
+
 // Bridge connects the MQTT subscriber to the fleet manager and verdict cache.
 // It subscribes to device heartbeat and verdict-request topics, decodes the
 // binary/CBOR payloads, and routes them to the appropriate handlers.
 type Bridge struct {
-	client   Client
-	fleet    *manager.FleetManager
-	cache    *verdict.Cache
-	logger   *log.Logger
-	cancelMu sync.Mutex
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	stopped  chan struct{}
+	client      Client
+	fleet       *manager.FleetManager
+	cache       *verdict.Cache
+	keyProvider DeviceKeyProvider
+	logger      *log.Logger
+	cancelMu    sync.Mutex
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	stopped     chan struct{}
+
+	// AllowAutoRegistration controls whether unknown devices are automatically
+	// registered when they send a heartbeat or registration message. In production
+	// this should be false — operators must register devices via CLI/API. In dev
+	// mode (DCLAW_FLEET_AUTO_REGISTER=true) this can be enabled for convenience.
+	// P0-6 fix: default is false to prevent unauthenticated auto-registration.
+	AllowAutoRegistration bool
 
 	// Stats for observability
 	mu                  sync.RWMutex
@@ -48,23 +88,23 @@ type BridgeConfig struct {
 	// VerdictQoS is the QoS for verdict request subscriptions (default 1).
 	VerdictQoS byte
 
-	// RequireRegistrationToken, when non-empty, requires registration payloads
-	// to include a pre-shared token. The token is NOT currently carried in the
-	// heartbeat wire format; this field is reserved for Phase 2 extended
-	// registration payloads. For now, setting it logs a warning on every
-	// registration attempt since the 32-byte heartbeat format has no token field.
-	RequireRegistrationToken string
 }
 
 // NewBridge creates a new MQTT bridge.
 func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache) *Bridge {
 	return &Bridge{
-		client:  client,
-		fleet:   fleet,
-		cache:   cache,
-		logger:  log.Default(),
-		stopped: make(chan struct{}),
+		client:      client,
+		fleet:       fleet,
+		cache:       cache,
+		keyProvider: newEnvDeviceKeyProvider(),
+		logger:      log.Default(),
+		stopped:     make(chan struct{}),
 	}
+}
+
+// SetKeyProvider overrides the default device key provider.
+func (b *Bridge) SetKeyProvider(kp DeviceKeyProvider) {
+	b.keyProvider = kp
 }
 
 // Start connects to the MQTT broker and begins processing messages.
@@ -217,6 +257,22 @@ func (b *Bridge) handleRegistration(msg Message) {
 		return
 	}
 
+	// P0-6 fix: When AllowAutoRegistration is false (production default),
+	// unknown devices are logged but NOT registered. Operators must register
+	// devices via CLI/API. This prevents any MQTT client from registering
+	// rogue devices by publishing matching topic+payload.
+	//
+	// Check if the device already exists first — re-registration of known
+	// devices is always allowed (idempotent update of safe fields).
+	_, existsAlready := b.fleet.GetDevice(manager.ComposeID(
+		parts.TenantID, parts.FleetID, parts.DeviceID))
+
+	if !existsAlready && !b.AllowAutoRegistration {
+		b.logger.Printf("[mqtt-bridge] WARNING: auto-registration denied for unknown device %d (tenant=%d fleet=%d) — set DCLAW_FLEET_AUTO_REGISTER=true or register via CLI/API",
+			parts.DeviceID, parts.TenantID, parts.FleetID)
+		return
+	}
+
 	_, regErr := b.fleet.RegisterDevice(
 		parts.TenantID, parts.FleetID, parts.DeviceID,
 		"mqtt-registered",
@@ -276,9 +332,10 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	// The session ID on the C side comes from dclaw_mqtt_get_session_id()
 	// which returns the MQTT session identifier; here we use the session ID
 	// derived from the device's MQTT connection (device ID as string).
-	// The device key defaults to 32-byte zero key for dev parity with C.
+	// The device key is resolved via the DeviceKeyProvider (defaults to
+	// DCLAW_DEVICE_KEY env var; zero key in dev mode).
 	sessionID := fmt.Sprintf("%d", parts.DeviceID)
-	deviceKey := make([]byte, 32) // zero key — dev fallback matching C HAL
+	deviceKey := b.keyProvider.KeyForDevice(parts.DeviceID)
 	resp.HMACTag = computeVerdictHMAC(deviceKey, sessionID, vr.RequestID, resp.Action, vr.ToolHash)
 
 	// Publish the response to the device's verdict/resp topic

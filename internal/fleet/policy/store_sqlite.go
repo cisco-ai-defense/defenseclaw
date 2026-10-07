@@ -34,6 +34,11 @@ func NewSQLitePolicyStore(dbPath string) (*SQLitePolicyStore, error) {
 		return nil, err
 	}
 
+	if err := createMetadataTable(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return &SQLitePolicyStore{db: db}, nil
 }
 
@@ -65,6 +70,52 @@ func createPoliciesTable(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func createMetadataTable(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS metadata (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create metadata table: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLitePolicyStore) GetEmergencySeq() (uint32, error) {
+	var valStr string
+	err := s.db.QueryRow(`SELECT value FROM metadata WHERE key = 'emergency_seq'`).Scan(&valStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("get emergency_seq: %w", err)
+	}
+	val, err := parseUint32(valStr)
+	if err != nil {
+		return 0, fmt.Errorf("parse emergency_seq %q: %w", valStr, err)
+	}
+	return val, nil
+}
+
+func (s *SQLitePolicyStore) SetEmergencySeq(seq uint32) error {
+	_, err := s.db.Exec(`
+		INSERT INTO metadata (key, value) VALUES ('emergency_seq', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, fmt.Sprintf("%d", seq))
+	if err != nil {
+		return fmt.Errorf("set emergency_seq: %w", err)
+	}
+	return nil
+}
+
+func parseUint32(s string) (uint32, error) {
+	var v uint32
+	_, err := fmt.Sscanf(s, "%d", &v)
+	return v, err
 }
 
 func (s *SQLitePolicyStore) SavePolicy(tenantID, fleetID uint64, version uint32, policyBin []byte, signature []byte, profile string) error {

@@ -130,11 +130,6 @@ def edge_connector(
         "\n"
         "Fleet Manager (Go):\n"
         "\n"
-        "  cd internal/fleet\n"
-        "  go build -o fleet-manager ./...\n"
-        "\n"
-        "Or build the full gateway binary which includes the fleet API:\n"
-        "\n"
         "  go build -o defenseclaw ./cmd/defenseclaw\n"
     )
 
@@ -187,10 +182,10 @@ def edge_connector(
         "       defenseclaw policy load fleet-policy.yaml\n"
         "\n"
         "  Note: Device registration currently requires the REST API.\n"
-        "  Register devices via POST to /api/v1/fleet/devices.\n"
+        "  Register devices via: defenseclaw edge-connector register <device-id>\n"
         "\n"
         "  Optional environment variables for edge devices:\n"
-        "    DCLAW_OTA_KEY          — Ed25519 public key for OTA policy verification\n"
+        "    DCLAW_OTA_KEY          — Shared HMAC-SHA256 signing key (hex-encoded, 32 bytes)\n"
         "    DCLAW_BROKER_URL       — MQTT broker URL for cloud escalation\n"
     )
 

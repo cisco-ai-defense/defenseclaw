@@ -128,10 +128,16 @@ def _setup_docker(port: int) -> dict | bool:
     mqtt_user = "dclaw"
     mqtt_pass = secrets.token_urlsafe(24)
 
-    # Write mosquitto config (password auth, no anonymous access)
+    # P0-3 fix: Create the config directory with BOTH mosquitto.conf AND the
+    # password file BEFORE starting the container. Previously, the container
+    # started with password_file referencing a file that didn't exist yet,
+    # causing Mosquitto to fail on startup.
     conf_dir = Path(tempfile.mkdtemp(prefix="dclaw-mqtt-"))
     conf_file = conf_dir / "mosquitto.conf"
     conf_file.write_text(_MOSQUITTO_CONF)
+    passwd_file = conf_dir / "passwd"
+    # Create an empty passwd file so the mount target exists
+    passwd_file.touch()
 
     ux.echo(f"  Pulling {_MOSQUITTO_IMAGE}...")
     pull = subprocess.run(
@@ -143,6 +149,26 @@ def _setup_docker(port: int) -> dict | bool:
         return False
     ux.ok(f"Image {_MOSQUITTO_IMAGE} ready")
 
+    # P0-3 fix: Generate the hashed password file using a throwaway container
+    # BEFORE starting the long-lived broker container. This ensures the
+    # password_file referenced by mosquitto.conf exists when Mosquitto reads it.
+    ux.echo("  Generating MQTT password file...")
+    passwd_result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "-v", f"{conf_dir}:/tmp/mqttconf",
+            _MOSQUITTO_IMAGE,
+            "mosquitto_passwd", "-b", "-c",
+            "/tmp/mqttconf/passwd", mqtt_user, mqtt_pass,
+        ],
+        capture_output=True, text=True,
+    )
+    if passwd_result.returncode != 0:
+        ux.warn(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
+        ux.warn("  Broker may not accept authenticated connections.")
+    else:
+        ux.ok(f"MQTT user '{mqtt_user}' password file generated")
+
     ux.echo("  Starting container...")
     run_result = subprocess.run(
         [
@@ -150,6 +176,7 @@ def _setup_docker(port: int) -> dict | bool:
             "--name", _CONTAINER_NAME,
             "-p", f"{port}:1883",
             "-v", f"{conf_file}:/mosquitto/config/mosquitto.conf",
+            "-v", f"{passwd_file}:/mosquitto/config/passwd",
             "--restart", "unless-stopped",
             _MOSQUITTO_IMAGE,
         ],
@@ -160,22 +187,6 @@ def _setup_docker(port: int) -> dict | bool:
         return False
 
     ux.ok(f"Container '{_CONTAINER_NAME}' started on port {port}")
-
-    # Create password file inside the container using mosquitto_passwd
-    ux.echo("  Configuring MQTT authentication...")
-    passwd_result = subprocess.run(
-        [
-            "docker", "exec", _CONTAINER_NAME,
-            "mosquitto_passwd", "-b", "-c",
-            "/mosquitto/config/passwd", mqtt_user, mqtt_pass,
-        ],
-        capture_output=True, text=True,
-    )
-    if passwd_result.returncode != 0:
-        ux.warn(f"Failed to set MQTT password: {passwd_result.stderr.strip()}")
-        ux.warn("  Broker may not accept authenticated connections.")
-    else:
-        ux.ok(f"MQTT user '{mqtt_user}' configured with password auth")
 
     return {"mqtt_user": mqtt_user, "mqtt_pass": mqtt_pass}
 

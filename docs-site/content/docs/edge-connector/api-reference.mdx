@@ -293,7 +293,7 @@ The `not_found` field is only present when one or more devices could not be foun
 POST /policy/push
 ```
 
-Compiles a policy YAML, signs it with Ed25519, stores the version, and distributes the signed binary to devices in the target fleet via MQTT.
+Compiles a policy YAML, signs it with HMAC-SHA256 shared key, stores the version, and distributes the signed binary to devices in the target fleet via MQTT.
 
 **Request body**
 
@@ -560,10 +560,10 @@ Returns aggregate fleet status and verdict cache statistics. Use this for dashbo
 ### Prometheus metrics
 
 ```
-GET /metrics
+GET /api/v1/fleet/metrics
 ```
 
-Returns metrics in Prometheus exposition format (`text/plain; version=0.0.4`). Scrape this endpoint with Prometheus.
+Returns metrics in Prometheus exposition format (`text/plain; version=0.0.4`). Scrape this endpoint with Prometheus. Requires bearer authentication like all other fleet API endpoints.
 
 **Response** `200 OK` (text/plain)
 

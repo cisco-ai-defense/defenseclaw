@@ -201,10 +201,47 @@ class DclawEngine:
 
         # P1-8 fix: Pass tool arguments as content so the C engine's content
         # scanner can inspect them for secrets, PII, injection, etc.
+        # P1-11 fix: Scan in overlapping 511-byte chunks (64-byte overlap)
+        # so secrets past position 511 are not bypassed by truncation.
+        # Same approach as generic_hook.py's _evaluate_chunked().
         if content:
-            content_bytes = content.encode("utf-8", errors="replace")[:511]
-            req.content = content_bytes
-            req.content_len = len(content_bytes)
+            content_bytes = content.encode("utf-8", errors="replace")
+            if len(content_bytes) <= 511:
+                req.content = content_bytes
+                req.content_len = len(content_bytes)
+                verdict = self.lib.dclaw_evaluate(ctypes.byref(req))
+                return {
+                    "action": verdict.action,
+                    "reason": verdict.reason,
+                    "reason_name": REASON_NAMES.get(verdict.reason, "UNKNOWN"),
+                    "severity": verdict.severity,
+                    "mode": verdict.mode,
+                    "from_cache": verdict.from_cache,
+                }
+            else:
+                # Overlapping chunk scan
+                _CHUNK_MAX = 511
+                _OVERLAP = 64
+                step = _CHUNK_MAX - _OVERLAP
+                offset = 0
+                last_verdict = None
+                while offset < len(content_bytes):
+                    chunk = content_bytes[offset:offset + _CHUNK_MAX]
+                    req.content = chunk
+                    req.content_len = len(chunk)
+                    verdict = self.lib.dclaw_evaluate(ctypes.byref(req))
+                    last_verdict = {
+                        "action": verdict.action,
+                        "reason": verdict.reason,
+                        "reason_name": REASON_NAMES.get(verdict.reason, "UNKNOWN"),
+                        "severity": verdict.severity,
+                        "mode": verdict.mode,
+                        "from_cache": verdict.from_cache,
+                    }
+                    if verdict.action == ACTION_BLOCK:
+                        return last_verdict
+                    offset += step
+                return last_verdict
         else:
             req.content = None
             req.content_len = 0

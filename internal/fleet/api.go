@@ -536,15 +536,17 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 
 	var cmd policy.EmergencyCommand
 	switch strings.ToUpper(req.Command) {
-	case "FLUSH_CACHE":
-		cmd = policy.EmergencyFlushCache
+	case "BLOCK_ALL":
+		cmd = policy.EmergencyBlockAll
 	case "ENTER_LOCKDOWN":
 		cmd = policy.EmergencyEnterLockdown
 	case "REVOKE_SESSIONS":
 		cmd = policy.EmergencyRevokeSessions
+	case "FORCE_SYNC":
+		cmd = policy.EmergencyForceSync
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "unknown command: must be FLUSH_CACHE, ENTER_LOCKDOWN, or REVOKE_SESSIONS",
+			"error": "unknown command: must be BLOCK_ALL, ENTER_LOCKDOWN, REVOKE_SESSIONS, or FORCE_SYNC",
 		})
 		return
 	}

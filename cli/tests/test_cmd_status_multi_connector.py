@@ -981,7 +981,10 @@ class TestStatusProfileIdentity(unittest.TestCase):
                         result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
                 self.assertEqual(human.exit_code, 0, msg=human.output)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
-                self.assertEqual(seen, ["/status", "/status"])
+                self.assertEqual(
+                    [p for p in seen if not p.startswith("/api/v1/fleet/")],
+                    ["/status", "/status"],
+                )
                 self.assertIn("not running", human.output)
                 self.assertNotIn(foreign_marker, human.output)
                 self.assertNotIn(str(ambient_home), human.output)
@@ -1011,7 +1014,10 @@ class TestStatusProfileIdentity(unittest.TestCase):
                     with patch.dict(os.environ, env, clear=False):
                         result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
-                self.assertEqual(seen, ["/status"])
+                self.assertEqual(
+                    [p for p in seen if not p.startswith("/api/v1/fleet/")],
+                    ["/status"],
+                )
                 doc = json.loads(result.output)
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))

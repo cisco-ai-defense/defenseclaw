@@ -24,14 +24,24 @@ func sha256Sum(data []byte) [32]byte {
 type EmergencyCommand uint8
 
 const (
-	// EmergencyFlushCache tells all devices to flush their verdict caches.
-	EmergencyFlushCache EmergencyCommand = 0x01
+	// EmergencyBlockAll tells all devices to flush caches and block ALL requests
+	// until cleared or daemon restart.
+	// C-side ota_receiver.c: case 0x01 — BLOCK_ALL.
+	EmergencyBlockAll EmergencyCommand = 0x01
 
-	// EmergencyEnterLockdown tells all devices to enter lockdown mode.
-	EmergencyEnterLockdown EmergencyCommand = 0x04
-
-	// EmergencyRevokeSessions tells all devices to revoke all active sessions.
+	// EmergencyRevokeSessions tells all devices to revoke all active sessions
+	// (flushes caches and clears session table).
+	// C-side ota_receiver.c: case 0x02 — REVOKE_HASH / REVOKE_SESSIONS.
 	EmergencyRevokeSessions EmergencyCommand = 0x02
+
+	// EmergencyForceSync tells all devices to flush their audit logs immediately.
+	// C-side ota_receiver.c: case 0x03 — FORCE_SYNC.
+	EmergencyForceSync EmergencyCommand = 0x03
+
+	// EmergencyEnterLockdown tells all devices to enter lockdown mode
+	// (flushes caches and blocks ALL requests, same effect as BLOCK_ALL).
+	// C-side ota_receiver.c: case 0x04 — ENTER_LOCKDOWN.
+	EmergencyEnterLockdown EmergencyCommand = 0x04
 )
 
 // PolicyHeader matches the C-side dclaw_policy_header_t structure (8 bytes, big-endian).
@@ -86,9 +96,7 @@ type Service struct {
 
 	// emergencySeq tracks the next emergency broadcast sequence number.
 	// Must be strictly increasing per the C-side anti-replay (REQ-31).
-	// NOTE: emergencySeq is not persisted and will reset to 0 on process restart.
-	// For production, this should be stored in the policy store to guarantee
-	// monotonically increasing values across restarts.
+	// Persisted in the PolicyStore to survive gateway restarts.
 	mu           sync.Mutex
 	emergencySeq uint32
 }
@@ -104,6 +112,8 @@ type Config struct {
 }
 
 // NewService creates a new policy distribution service.
+// On startup, it loads the last persisted emergency sequence number from the
+// policy store to guarantee monotonically increasing values across restarts.
 func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Config) *Service {
 	s := &Service{
 		store:        store,
@@ -120,6 +130,19 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 			s.logger = cfg.Logger
 		}
 	}
+
+	// P0-2 fix: Load persisted emergency sequence number from the store so
+	// it survives gateway restarts. Without this, the sequence resets to 0
+	// and devices reject the messages as anti-replay violations (REQ-31).
+	if store != nil {
+		if seq, err := store.GetEmergencySeq(); err != nil {
+			s.logger.Printf("[policy] WARNING: failed to load emergency sequence from store: %v (starting from 0)", err)
+		} else if seq > 0 {
+			s.emergencySeq = seq
+			s.logger.Printf("[policy] loaded emergency sequence %d from store", seq)
+		}
+	}
+
 	return s
 }
 
@@ -246,6 +269,9 @@ func (s *Service) Sign(policyBin []byte) ([]byte, error) {
 // Distribute publishes a signed policy blob to the fleet's OTA topic via MQTT.
 // Topic format: defenseclaw/{tenant}/{fleet}/ota/policy
 func (s *Service) Distribute(ctx context.Context, tenantID, fleetID uint64, signedPolicy []byte) error {
+	if s.client == nil {
+		return errors.New("MQTT not configured")
+	}
 	if len(signedPolicy) < HeaderSize+32 {
 		return errors.New("signed policy too short")
 	}
@@ -278,9 +304,20 @@ func (s *Service) Distribute(ctx context.Context, tenantID, fleetID uint64, sign
 //	[42:44] _reserved   [2]byte
 //	[44:76] signature   [32]byte (HMAC-SHA256 over bytes [0:44])
 func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uint64, cmd EmergencyCommand) error {
+	if s.client == nil {
+		return errors.New("MQTT not configured")
+	}
+
 	s.mu.Lock()
 	s.emergencySeq++
 	seq := s.emergencySeq
+	// P0-2 fix: Persist the new sequence number before releasing the lock.
+	// This ensures the sequence survives gateway restarts (REQ-31).
+	if s.store != nil {
+		if err := s.store.SetEmergencySeq(seq); err != nil {
+			s.logger.Printf("[policy] WARNING: failed to persist emergency sequence %d: %v", seq, err)
+		}
+	}
 	s.mu.Unlock()
 
 	// Build the message: 44 bytes of data + 64-byte signature field = 108 bytes.

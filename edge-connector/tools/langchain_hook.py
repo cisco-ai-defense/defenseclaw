@@ -96,12 +96,37 @@ def _make_wrapper_class(tool: Any, connector: Optional["EdgeConnector"] = None) 
     # Build the class dict.  ``args_schema`` must be a plain class attribute
     # (a Type[BaseModel] or None) — NOT a property — so that Pydantic
     # model_fields / schema generation works correctly.
-    ns: Dict[str, Any] = {
-        "name": wrapped_tool.name,
-        "description": wrapped_tool.description,
-    }
+    #
+    # Pydantic v2 requires fields inherited from base classes to be
+    # re-declared with proper type annotations.  Using plain assignment
+    # (``name = "foo"``) triggers:
+    #   PydanticUserError: Field 'name' defined on a base class was
+    #   overridden by a non-annotated attribute.
+    #
+    # We solve this by declaring ``__annotations__`` so Pydantic sees
+    # ``name`` and ``description`` as annotated ``str`` fields with
+    # defaults provided via ``Field(default=...)``.
+    try:
+        from pydantic import Field as PydanticField
+    except ImportError:
+        PydanticField = None
+
+    ns: Dict[str, Any] = {}
+    annotations: Dict[str, Any] = {}
+
+    if PydanticField is not None:
+        ns["name"] = PydanticField(default=wrapped_tool.name)
+        ns["description"] = PydanticField(default=wrapped_tool.description)
+    else:
+        ns["name"] = wrapped_tool.name
+        ns["description"] = wrapped_tool.description
+    annotations["name"] = str
+    annotations["description"] = str
+
     if schema is not None:
         ns["args_schema"] = schema
+
+    ns["__annotations__"] = annotations
 
     def _run(self: Any, *args: Any, **kwargs: Any) -> str:  # noqa: N805
         ec = wrapped_connector or get_connector(fail_open=False)

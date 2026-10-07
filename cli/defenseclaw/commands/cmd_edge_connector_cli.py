@@ -191,13 +191,15 @@ def device_detail(app: AppContext, device_id: str, as_json: bool) -> None:
 
 @edge_connector_group.command("register")
 @click.argument("device_id")
+@click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--tags", default="", help="Comma-separated tags for the device.")
 @click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
 @pass_ctx
-def register(app: AppContext, device_id: str, tags: str, as_json: bool) -> None:
+def register(app: AppContext, device_id: str, tenant_id: int, fleet_id: int, tags: str, as_json: bool) -> None:
     """Manually register a device in the fleet."""
     c = _client(app)
-    payload: dict = {"device_id": device_id}
+    payload: dict = {"device_id": int(device_id), "tenant_id": tenant_id, "fleet_id": fleet_id}
     if tags:
         payload["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     try:
@@ -223,14 +225,16 @@ def decommission(app: AppContext, device_id: str, assume_yes: bool) -> None:
         return
     c = _client(app)
     try:
-        resp = c.delete(f"/devices/{device_id}")
+        resp = c.post("/devices/decommission-batch", {"device_ids": [device_id]})
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
-    if resp.status_code == 404:
+    _check(resp, f"Failed to decommission device '{device_id}'")
+    data = _body(resp) or {}
+    failed = data.get("failed", [])
+    if failed:
         ux.err(f"Device '{device_id}' not found.")
         raise SystemExit(1)
-    _check(resp, f"Failed to decommission device '{device_id}'")
     ux.ok(f"Device '{device_id}' decommissioned.")
 
 
@@ -319,9 +323,11 @@ def edge_connector_group_policy() -> None:
 
 @edge_connector_group_policy.command("push")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--tenant-id", default=None, type=int, help="Tenant ID (overrides YAML metadata; default 1).")
+@click.option("--fleet-id", default=None, type=int, help="Fleet ID (overrides YAML metadata; default 1).")
 @click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
 @pass_ctx
-def policy_push(app: AppContext, file: str, as_json: bool) -> None:
+def policy_push(app: AppContext, file: str, tenant_id: int | None, fleet_id: int | None, as_json: bool) -> None:
     """Push a edge connector policy file (compile, sign, distribute)."""
     import yaml
     try:
@@ -334,8 +340,8 @@ def policy_push(app: AppContext, file: str, as_json: bool) -> None:
     meta = data.get("metadata", {}) or {}
     payload = {"policy_yaml": raw_yaml,
                "profile": str(meta.get("profile", "standard")),
-               "tenant_id": int(meta.get("tenant_id", 1)),
-               "fleet_id": int(meta.get("fleet_id", 1))}
+               "tenant_id": tenant_id if tenant_id is not None else int(meta.get("tenant_id", 1)),
+               "fleet_id": fleet_id if fleet_id is not None else int(meta.get("fleet_id", 1))}
     c = _client(app)
     try:
         resp = c.post("/policy/push", payload)
@@ -351,13 +357,15 @@ def policy_push(app: AppContext, file: str, as_json: bool) -> None:
 
 
 @edge_connector_group_policy.command("versions")
+@click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--json", "as_json", is_flag=True, help="Emit versions as JSON.")
 @pass_ctx
-def policy_versions(app: AppContext, as_json: bool) -> None:
+def policy_versions(app: AppContext, tenant_id: int, fleet_id: int, as_json: bool) -> None:
     """List edge connector policy versions."""
     c = _client(app)
     try:
-        resp = c.get("/policy/versions?tenant_id=1&fleet_id=1")
+        resp = c.get(f"/policy/versions?tenant_id={tenant_id}&fleet_id={fleet_id}")
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
@@ -380,9 +388,11 @@ def policy_versions(app: AppContext, as_json: bool) -> None:
 
 @edge_connector_group_policy.command("emergency")
 @click.argument("cmd", type=click.Choice(["flush-cache", "enter-lockdown", "revoke-sessions"]))
+@click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
 @pass_ctx
-def policy_emergency(app: AppContext, cmd: str, assume_yes: bool) -> None:
+def policy_emergency(app: AppContext, cmd: str, tenant_id: int, fleet_id: int, assume_yes: bool) -> None:
     """Send an emergency fleet command (flush-cache, enter-lockdown, revoke-sessions)."""
     if not assume_yes and not click.confirm(f"Send emergency command '{cmd}' to the entire fleet?"):
         ux.echo("Cancelled.")
@@ -391,7 +401,7 @@ def policy_emergency(app: AppContext, cmd: str, assume_yes: bool) -> None:
     api_cmd = cmd.upper().replace("-", "_")
     c = _client(app)
     try:
-        resp = c.post("/policy/emergency", {"command": api_cmd})
+        resp = c.post("/policy/emergency", {"command": api_cmd, "tenant_id": tenant_id, "fleet_id": fleet_id})
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)

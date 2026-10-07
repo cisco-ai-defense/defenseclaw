@@ -282,8 +282,12 @@ static ssize_t sock_read_timeout(int fd, uint8_t *buf, size_t len, int timeout_m
 
 /*
  * Build and send MQTT CONNECT packet (v3.1.1).
- * Clean session, no username/password, keepalive = MQTT_KEEPALIVE_SEC.
+ * Clean session, keepalive = MQTT_KEEPALIVE_SEC.
  * Client ID = "dclaw-{device_id}".
+ *
+ * P0-4 fix: If DCLAW_MQTT_USER and DCLAW_MQTT_PASS are set in the environment,
+ * include username/password in the CONNECT packet so authenticated brokers
+ * (set up by `defenseclaw setup mqtt-broker`) accept the connection.
  */
 static int mqtt_send_connect(int fd) {
     dclaw_state_t *s = dclaw_get_state();
@@ -291,19 +295,31 @@ static int mqtt_send_connect(int fd) {
     int cid_len = snprintf(client_id, sizeof(client_id), "dclaw-%u", s->device.device_id);
     if (cid_len <= 0 || (size_t)cid_len >= sizeof(client_id)) return -1;
 
+    /* Read optional MQTT credentials from environment */
+    const char *mqtt_user = getenv("DCLAW_MQTT_USER");
+    const char *mqtt_pass = getenv("DCLAW_MQTT_PASS");
+    uint16_t user_len = (mqtt_user && mqtt_user[0]) ? (uint16_t)strlen(mqtt_user) : 0;
+    uint16_t pass_len = (mqtt_pass && mqtt_pass[0]) ? (uint16_t)strlen(mqtt_pass) : 0;
+
     /*
      * Variable header (10 bytes):
      *   Protocol Name: 0x00 0x04 "MQTT"
      *   Protocol Level: 0x04 (v3.1.1)
-     *   Connect Flags: 0x02 (clean session)
+     *   Connect Flags: 0x02 (clean session) | username/password bits
      *   Keep Alive: MQTT_KEEPALIVE_SEC
      *
-     * Payload: client_id (UTF-8 string)
+     * Payload: client_id (UTF-8 string) [+ username] [+ password]
      */
+    uint8_t connect_flags = 0x02; /* clean session */
+    if (user_len > 0) connect_flags |= 0x80; /* bit 7: username flag */
+    if (pass_len > 0) connect_flags |= 0x40; /* bit 6: password flag */
+
     uint16_t client_id_len = (uint16_t)cid_len;
     uint32_t remaining = 10 + 2 + client_id_len;
+    if (user_len > 0) remaining += 2 + user_len;
+    if (pass_len > 0) remaining += 2 + pass_len;
 
-    uint8_t pkt[64];
+    uint8_t pkt[256];
     int pos = 0;
 
     /* Fixed header */
@@ -314,12 +330,22 @@ static int mqtt_send_connect(int fd) {
     pkt[pos++] = 0x00; pkt[pos++] = 0x04; /* Protocol Name Length */
     pkt[pos++] = 'M'; pkt[pos++] = 'Q'; pkt[pos++] = 'T'; pkt[pos++] = 'T';
     pkt[pos++] = 0x04; /* Protocol Level: 3.1.1 */
-    pkt[pos++] = 0x02; /* Connect Flags: Clean Session */
+    pkt[pos++] = connect_flags;
     pkt[pos++] = (uint8_t)(MQTT_KEEPALIVE_SEC >> 8);
     pkt[pos++] = (uint8_t)(MQTT_KEEPALIVE_SEC & 0xFF);
 
     /* Payload: Client ID */
     pos += mqtt_write_utf8_string(pkt + pos, client_id, client_id_len);
+
+    /* Payload: Username (if set) */
+    if (user_len > 0) {
+        pos += mqtt_write_utf8_string(pkt + pos, mqtt_user, user_len);
+    }
+
+    /* Payload: Password (if set) */
+    if (pass_len > 0) {
+        pos += mqtt_write_utf8_string(pkt + pos, mqtt_pass, pass_len);
+    }
 
     return sock_write_all(fd, pkt, (size_t)pos);
 }

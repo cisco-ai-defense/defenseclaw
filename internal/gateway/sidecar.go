@@ -6906,6 +6906,13 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		} else {
 			fleetMQTTClient = tcpClient
 			bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+			// P0-6 fix: Only allow auto-registration of unknown devices when
+			// DCLAW_FLEET_AUTO_REGISTER=true (dev mode). In production (default),
+			// operators must register devices via CLI/API.
+			if strings.EqualFold(os.Getenv("DCLAW_FLEET_AUTO_REGISTER"), "true") {
+				bridge.AllowAutoRegistration = true
+				fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration enabled (DCLAW_FLEET_AUTO_REGISTER=true)")
+			}
 			go func() {
 				if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
 					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)

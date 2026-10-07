@@ -421,7 +421,7 @@ func TestServiceDistributeEmergency(t *testing.T) {
 	svc, mc, _ := newTestService()
 	mc.Connect(context.Background())
 
-	err := svc.DistributeEmergency(context.Background(), 10, 20, EmergencyFlushCache)
+	err := svc.DistributeEmergency(context.Background(), 10, 20, EmergencyBlockAll)
 	if err != nil {
 		t.Fatalf("DistributeEmergency: %v", err)
 	}
@@ -448,8 +448,8 @@ func TestServiceDistributeEmergency(t *testing.T) {
 	}
 
 	// Verify command byte
-	if msg[8] != uint8(EmergencyFlushCache) {
-		t.Errorf("command = %d, want %d", msg[8], EmergencyFlushCache)
+	if msg[8] != uint8(EmergencyBlockAll) {
+		t.Errorf("command = %d, want %d", msg[8], EmergencyBlockAll)
 	}
 
 	// Verify signature over first 44 bytes (HMAC-SHA256 lives in first 32
@@ -494,7 +494,7 @@ func TestServiceDistributeEmergencyPublishError(t *testing.T) {
 	svc, mc, _ := newTestService()
 	mc.pubErr = fmt.Errorf("connection lost")
 
-	err := svc.DistributeEmergency(context.Background(), 1, 1, EmergencyFlushCache)
+	err := svc.DistributeEmergency(context.Background(), 1, 1, EmergencyBlockAll)
 	if err == nil {
 		t.Fatal("expected error when MQTT publish fails")
 	}
@@ -502,7 +502,7 @@ func TestServiceDistributeEmergencyPublishError(t *testing.T) {
 
 func TestServiceDistributeEmergencyAllCommands(t *testing.T) {
 	cmds := []EmergencyCommand{
-		EmergencyFlushCache,
+		EmergencyBlockAll,
 		EmergencyRevokeSessions,
 		EmergencyEnterLockdown,
 	}
