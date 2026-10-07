@@ -2106,11 +2106,13 @@ def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
 
     stream = StringIO()
     console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    from rich.text import Text
+
     table = Table()
     for header in headers:
         table.add_column(header)
     for row in rows:
-        table.add_row(*row)
+        table.add_row(*(Text("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(cell))) for cell in row))
     console.print(table)
     return stream.getvalue()
 
