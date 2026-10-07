@@ -119,7 +119,7 @@ from defenseclaw.file_permissions import (
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
-from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
+from defenseclaw.paths import bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
@@ -1421,7 +1421,6 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     data_dir = cfg.data_dir
     click.echo()
     ux.section("Skill Scanner Configuration")
-    click.echo(f"  {ux.dim('Binary:')} {sc.binary}")
     click.echo()
 
     sc.use_llm = click.confirm("  Use the LLM judge (recommended)?", default=sc.use_llm)
@@ -1456,8 +1455,7 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
         sc, click.confirm("  Enable VirusTotal binary scanner?", default=scanner_settings.virustotal_enabled(sc))
     )
     if sc.analyzers.virustotal.enabled:
-        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", sc.virustotal_api_key, data_dir)
-        sc.virustotal_api_key = ""
+        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", "", data_dir)
     _set_skill_aidefense(
         sc, click.confirm("  Enable Cisco AI Defense analyzer?", default=scanner_settings.aidefense_enabled(sc))
     )
@@ -1515,7 +1513,6 @@ def _role_to_target_path(role: str) -> str:
     :func:`_target_llm_block` / :meth:`Config.resolve_llm`.
     """
     return _LLM_ROLE_TO_TARGET_PATH.get(role, "")
-
 
 
 def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
@@ -2791,20 +2788,16 @@ def _apply_scanner_llm_flags(llm, provider: str | None, model: str | None, base_
 
 
 def _set_skill_virustotal(sc, enabled: bool) -> None:
-    """analyzers.virustotal; the v8 use_virustotal/key fields are cleared."""
+    """analyzers.virustotal.enabled and the variable that holds its key."""
     sc.analyzers.virustotal.enabled = enabled
     if enabled and not sc.analyzers.virustotal.api_key_env:
-        sc.analyzers.virustotal.api_key_env = sc.virustotal_api_key_env or "VIRUSTOTAL_API_KEY"
+        sc.analyzers.virustotal.api_key_env = "VIRUSTOTAL_API_KEY"
     if not enabled:
         sc.analyzers.virustotal.api_key_env = ""
-    sc.use_virustotal = False
-    sc.virustotal_api_key_env = ""
 
 
 def _set_skill_aidefense(sc, enabled: bool) -> None:
-    """analyzers.aidefense; the v8 use_aidefense field is cleared."""
     sc.analyzers.aidefense.enabled = enabled
-    sc.use_aidefense = False
 
 
 # ---------------------------------------------------------------------------
@@ -4449,11 +4442,6 @@ def _refuse_rotate_token_on_managed_host() -> None:
     ),
 )
 @click.option(
-    "--no-restart",
-    is_flag=True,
-    help="Deprecated unsafe mode; retained only to return a fail-closed migration error.",
-)
-@click.option(
     "--yes",
     "--non-interactive",
     "--accept-defaults",
@@ -4462,7 +4450,7 @@ def _refuse_rotate_token_on_managed_host() -> None:
     help="Skip the confirmation prompt and rotate immediately (--non-interactive and --accept-defaults are aliases).",
 )
 @pass_ctx
-def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
+def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     """Rotate the gateway token and connector-scoped hook credentials.
 
     Generates distinct 32-byte CSPRNG values, verifies and stops gateway A,
@@ -4481,10 +4469,6 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     _refuse_rotate_token_on_managed_host()
     dotenv_path = _rotate_token_dotenv_path(app)
-    if no_restart:
-        raise click.ClickException(
-            "--no-restart is not safe for token rotation; the daemon must cross the verified A/B lifecycle boundary."
-        )
     token_env = str(getattr(app.cfg.gateway, "token_env", "") or "").strip()
     canonical_token_env = (
         token_env.casefold() == _GATEWAY_TOKEN_ENV.casefold() if os.name == "nt" else token_env == _GATEWAY_TOKEN_ENV
@@ -4909,32 +4893,6 @@ _CONNECTOR_NAMES_FALLBACK = [
     "omnigent",
     "kiro",
 ]
-
-
-def _fetch_connector_names(cfg=None) -> list[str]:
-    """Query the sidecar /v1/connectors endpoint for available connectors.
-
-    Falls back to the hardcoded list if the sidecar is unreachable.
-    """
-    import urllib.request
-
-    host = "127.0.0.1"
-    port = 0
-    if cfg and hasattr(cfg, "guardrail"):
-        host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
-        port = getattr(cfg.guardrail, "port", 0) or 0
-    if not port:
-        return platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
-    try:
-        url = f"http://{host}:{port}/v1/connectors"
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = _json.loads(resp.read())
-            names = [c.get("name") or c.get("id") for c in data.get("connectors", [])]
-            resolved = [n for n in names if n] or list(_CONNECTOR_NAMES_FALLBACK)
-            return platform_support.supported_connectors(resolved)
-    except Exception:
-        return platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
 
 
 _CONNECTOR_NAMES = platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
@@ -12853,7 +12811,6 @@ def _refuse_hook_switch_over_configured_proxy(connector: str | None) -> None:
         _refuse_hook_setup_over_proxy_connector(wanted, proxy)
 
 
-
 def _refuse_hook_set_over_configured_proxy(connectors) -> None:
     """Refuse a set of hook connectors over a guarded proxy with one message (GAP-2476).
 
@@ -14140,41 +14097,6 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
     if app.logger:
         app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")
-
-
-def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = False) -> None:
-    click.echo()
-    ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
-    ux.echo("  ✓ Guardrail proxy configured (built into Go binary)")
-    ux.echo(f"  ✓ OpenClaw config patched: {openclaw_config_file}")
-    if gc.original_model:
-        ux.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
-    click.echo()
-
-    rows = [
-        ("mode", gc.mode),
-        ("scanner_mode", gc.scanner_mode),
-        ("port", str(gc.port)),
-        ("model", gc.model),
-        ("model_name", gc.model_name),
-        ("api_key_env", gc.api_key_env),
-    ]
-    for key, val in rows:
-        click.echo(f"    guardrail.{key + ':':<16s} {val}")
-    click.echo()
-
-
-def _find_plugin_source() -> str | None:
-    """Locate the built OpenClaw plugin.
-
-    Checks ~/.defenseclaw/extensions/defenseclaw first (production install),
-    then the repo source tree (dev).
-    """
-    d = bundled_extensions_dir()
-    resolved = str(d.resolve())
-    if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "package.json")):
-        return resolved
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -16108,19 +16030,6 @@ def _echo_native_command_diagnostics(result: Any) -> None:
         click.echo(f"    {line}")
 
 
-def _native_gateway_lifecycle_status(runner, executable: str) -> bool:
-    from defenseclaw.observability.local_stack import LocalStackError
-
-    try:
-        result = runner.run(
-            [str(Path(executable).resolve()), "status"],
-            timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
-        )
-    except LocalStackError:
-        return False
-    return result.returncode == 0
-
-
 def _native_gateway_lifecycle_stop(runner, executable: str) -> bool:
     from defenseclaw.observability.local_stack import LocalStackError
 
@@ -16448,17 +16357,6 @@ def _looks_like_secret(value: str) -> bool:
     return False
 
 
-def _prompt_env_var_name(default: str) -> str:
-    """Prompt for an env var name, rejecting values that look like actual secrets."""
-    while True:
-        val = click.prompt("  Env var name (e.g. ANTHROPIC_API_KEY)", default=default)
-        if _looks_like_secret(val):
-            click.echo("  That looks like an actual API key, not an env var name.")
-            click.echo("  Enter the NAME of the environment variable (e.g. ANTHROPIC_API_KEY).")
-            continue
-        return val
-
-
 def _print_gateway_summary(gw, *, openclaw: bool = True) -> None:
     click.echo()
     ux.ok("Saved to ~/.defenseclaw/config.yaml")
@@ -16490,7 +16388,6 @@ def _print_gateway_summary(gw, *, openclaw: bool = True) -> None:
 # setup splunk
 # ---------------------------------------------------------------------------
 
-_SPLUNK_O11Y_INGEST_TEMPLATE = "ingest.{realm}.observability.splunkcloud.com"
 _SPLUNK_GENERAL_TERMS_URL = "https://www.splunk.com/en_us/legal/splunk-general-terms.html"
 
 _SPLUNK_LOCAL_HEC_DEFAULTS = {

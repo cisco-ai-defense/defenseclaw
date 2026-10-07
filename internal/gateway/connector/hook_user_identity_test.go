@@ -294,3 +294,30 @@ func withoutSessionFactsEnv(env []string) []string {
 	}
 	return out
 }
+
+// A Secure Client shell hook sends no session facts (GAP-0148, issue #1092);
+// a per-user hook in the same SSH session sends them.
+func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
+	}
+	shell := systemBashForTest(t)
+	helperPath := materializeHookAssetForTest(t, "hooks/_hardening.sh")
+	run := func(extra ...string) string {
+		command := exec.Command(shell, "-c", `set -e; source "$0"; defenseclaw_user_identity_args`, helperPath)
+		command.Env = append(withoutSessionFactsEnv(os.Environ()),
+			"SSH_CONNECTION=192.0.2.10 50000 192.0.2.20 22", "SSH_TTY=/dev/pts/9", "HOME="+t.TempDir())
+		command.Env = append(command.Env, extra...)
+		out, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	if out := run("DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_HOME=/opt/cisco/secureclient/defenseclaw/runtime"); strings.Contains(out, "Session-Facts") {
+		t.Fatalf("Secure Client hook sent session facts:\n%s", out)
+	}
+	if out := run(); !strings.Contains(out, "X-DefenseClaw-Session-Facts: v1;k=ssh") {
+		t.Fatalf("per-user hook sent no session facts:\n%s", out)
+	}
+}

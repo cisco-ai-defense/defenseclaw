@@ -1925,9 +1925,6 @@ func testCompleteSignalResourceValues() map[string]string {
 		"defenseclaw.instance.id":     "defenseclaw-test-instance",
 		"defenseclaw.device.public_key_fingerprint": "sha256:test-device-fingerprint",
 		"operator.profile":                          "soc",
-		"deployment.environment":                    "test",
-		"deployment.mode":                           "unmanaged",
-		"defenseclaw.device.id":                     "sha256:test-device-fingerprint",
 	}
 }
 
@@ -1980,15 +1977,6 @@ func assertExactSignalResource(
 	for key := range want {
 		if _, present := seen[key]; !present {
 			t.Fatalf("resource is missing attribute %q", key)
-		}
-	}
-	for alias, canonical := range map[string]string{
-		"deployment.environment": "deployment.environment.name",
-		"deployment.mode":        "defenseclaw.deployment.mode",
-		"defenseclaw.device.id":  "defenseclaw.device.public_key_fingerprint",
-	} {
-		if want[alias] != want[canonical] {
-			t.Fatalf("resource alias %q does not mirror %q", alias, canonical)
 		}
 	}
 }

@@ -1039,18 +1039,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.applyConfigReloadSnapshot,
 	)
 	s.configMgr.bindInitialObservabilityV8Plan(s.observabilityV8ActivePlan())
-	s.configMgr.assetDirs = func() []string {
-		if g := s.Generation(); g != nil {
-			return g.assetDirs
-		}
-		return nil
-	}
-	s.configMgr.assetFiles = func() []string {
-		if g := s.Generation(); g != nil {
-			return g.assetFiles
-		}
-		return nil
-	}
+	s.watchGenerationAssets()
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	s.configMgr.bindObservabilityV8(metricRuntime)
 	// managed_enterprise: wire the AVC-authored env_config.json so the
@@ -2150,6 +2139,27 @@ func inspectorNeedsRebuild(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.Enterprise.Network, newCfg.Enterprise.Network)
 }
 
+// watchGenerationAssets points the config watcher at the policy assets of
+// the live generation. Secure Client watches only its config and
+// env_config.json, as before the configuration generation (issue #1092).
+func (s *Sidecar) watchGenerationAssets() {
+	if s.currentConfig().SecureClientIntegration() {
+		return
+	}
+	s.configMgr.assetDirs = func() []string {
+		if g := s.Generation(); g != nil {
+			return g.assetDirs
+		}
+		return nil
+	}
+	s.configMgr.assetFiles = func() []string {
+		if g := s.Generation(); g != nil {
+			return g.assetFiles
+		}
+		return nil
+	}
+}
+
 // guardrailNeedsRestart reports a guardrail change that only a new gateway
 // process applies: the proxy listener, the guardrail and connector
 // enablement and the hook self-heal settings, and judge-body retention (its
@@ -2161,6 +2171,21 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
+	if oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration() {
+		// Secure Client keeps the restart set it had before the configuration
+		// generation (issue #1092): its hook decisions read the start-time
+		// configuration, so the levels, the LLM, the connectors, the rule
+		// pack and the judge restart with the listeners.
+		return oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
+			oldG.Connector != newG.Connector ||
+			oldG.BlockAt != newG.BlockAt || oldG.AlertAt != newG.AlertAt ||
+			oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
+			!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
+			!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
+			oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+			oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
+			!reflect.DeepEqual(oldG.Judge, newG.Judge)
+	}
 	return oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
 		oldG.Connector != newG.Connector || oldG.ScannerMode != newG.ScannerMode ||
 		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||

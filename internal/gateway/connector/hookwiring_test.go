@@ -839,16 +839,7 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	}{
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
-		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", "", "", hookBinary)},
-		{name: "event-bound-start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", event, contractID, hookBinary)},
-		{
-			name: "event-bound-non-waiting",
-			command: legacyWindowsNativePowerShellHookCommandForCodexEvent(
-				event,
-				contractID,
-				hookBinary,
-			),
-		},
+		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", hookBinary)},
 	}
 	for _, testCase := range legacyCommands {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -1955,41 +1946,6 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 
 	if _, ok := table["state"]; ok {
 		t.Fatal("buildCodexHooksTable added state before final merge positions were known")
-	}
-}
-
-func TestLegacyEventBoundCodexOwnershipIsStrictAndFinite(t *testing.T) {
-	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
-	setHookBinaryOverride(t, hookBinary)
-	legacy := legacyWindowsNativePowerShellHookCommandForCodexEvent(
-		"SessionStart",
-		"codex-hooks-v4",
-		hookBinary,
-	)
-	wantLegacyScript := "$ErrorActionPreference='Stop'; " +
-		"$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-		"& 'C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe' " +
-		"'hook' '--connector' 'codex' '--event' 'SessionStart' " +
-		"'--hook-contract' 'codex-hooks-v4'; exit $LASTEXITCODE"
-	if got := decodePowerShellEncodedCommandForTest(t, legacy); got != wantLegacyScript {
-		t.Fatalf("legacy event-bound script = %q, want %q", got, wantLegacyScript)
-	}
-	if !isNativeHookCommand(legacy) {
-		t.Fatalf("exact legacy event-bound command was not recognized: %q", legacy)
-	}
-
-	for _, tampered := range []string{
-		legacyWindowsNativePowerShellHookCommandForCodexEvent("FutureEvent", "codex-hooks-v4", hookBinary),
-		legacyWindowsNativePowerShellHookCommandForCodexEvent("SessionStart", "codex-hooks-v999", hookBinary),
-		legacyWindowsNativePowerShellHookCommandForCodexEvent(
-			"SessionStart",
-			"codex-hooks-v4",
-			`C:\Temp\defenseclaw-hook.exe`,
-		),
-	} {
-		if isNativeHookCommand(tampered) {
-			t.Fatalf("ownership accepted tampered legacy event-bound command: %q", tampered)
-		}
 	}
 }
 

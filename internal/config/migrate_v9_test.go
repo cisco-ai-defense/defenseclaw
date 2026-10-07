@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,7 +53,14 @@ scanners:
     virustotal_api_key_env: VT_KEY
   mcp_scanner:
     analyzers: auto,llm,prompt_defense
-observability: {}
+observability:
+  resource:
+    attributes:
+      deployment.environment: production
+  trace_policy:
+    compatibility_aliases: false
+  destinations:
+    - {name: collector, kind: otlp, endpoint: "https://otel.example.test"}
 `
 	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
@@ -88,6 +96,22 @@ observability: {}
 	  "env_keys": ["ACME_KEY"], "tls": {"ca_cert_pem": "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"}}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// 0.8.x also seeded the firewall and audit modules, which 1.0 retires:
+	// the unmodified copy goes, the edited one stays.
+	retiredFirewall := filepath.Join(dir, "policies", "rego", "firewall.rego")
+	editedAudit := filepath.Join(dir, "policies", "rego", "audit.rego")
+	for src, dst := range map[string]string{"firewall.rego": retiredFirewall, "audit.rego": editedAudit} {
+		raw, err := os.ReadFile(filepath.Join("testdata", "rego_0_8_10", src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dst == editedAudit {
+			raw = append(raw, []byte("# local edit\n")...)
+		}
+		if err := os.WriteFile(dst, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	auditDB := filepath.Join(dir, "audit.db")
 	db, err := sql.Open("sqlite", auditDB)
 	if err != nil {
@@ -118,6 +142,9 @@ observability: {}
 	}
 	if raw, _ := os.ReadFile(configPath); string(raw) != source {
 		t.Fatal("the dry run changed config.yaml")
+	}
+	if _, err := os.Stat(retiredFirewall); err != nil {
+		t.Fatalf("the dry run removed firewall.rego: %v", err)
 	}
 
 	result, err := MigrateV9(context.Background(), in)
@@ -171,6 +198,16 @@ observability: {}
 	if !strings.Contains(string(migrated), "# keep this comment") {
 		t.Error("the migration dropped a comment")
 	}
+	// Telemetry carries canonical names only: the alias switch is dropped and
+	// reported, the retired environment spelling becomes the canonical one.
+	attributes, _ := get("observability.resource.attributes").(map[string]any)
+	if attributes["deployment.environment.name"] != "production" || attributes["deployment.environment"] != nil ||
+		get("observability.trace_policy") != nil ||
+		!slices.Contains(result.Record.Removed, "observability.trace_policy.compatibility_aliases") ||
+		!strings.Contains(strings.Join(result.Record.Notes, "\n"), "no longer carries the alias attributes") {
+		t.Errorf("telemetry aliases not migrated: attributes=%v removed=%v notes=%v",
+			attributes, result.Record.Removed, result.Record.Notes)
+	}
 	// strict posture is block MEDIUM / alert LOW: alert_threshold 1 matches.
 	if get("guardrail.alert_at") != nil {
 		t.Error("alert_at was written although data.json matched the pack default")
@@ -199,6 +236,16 @@ observability: {}
 	}
 	if _, err := os.Stat(staleRego + DataJSONMigratedSuffix); err != nil {
 		t.Errorf("the pre-9 admission.rego was not kept: %v", err)
+	}
+	if _, err := os.Stat(retiredFirewall); !os.IsNotExist(err) {
+		t.Errorf("the unmodified 0.8 firewall.rego was not removed: %v", err)
+	}
+	if _, err := os.Stat(editedAudit); err != nil {
+		t.Errorf("the edited audit.rego was removed: %v", err)
+	}
+	if notes := strings.Join(result.Record.Notes, "\n"); !strings.Contains(notes, editedAudit+" was changed after install and is kept") ||
+		!strings.Contains(notes, retiredFirewall) {
+		t.Errorf("the report does not name both retired files: %q", notes)
 	}
 	if _, err := os.Stat(MigrationRecordPath(configPath)); err != nil {
 		t.Errorf("migration-v9.json missing: %v", err)
@@ -626,5 +673,94 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 	cfg.Enterprise.Profile = "standalone"
 	if got := cfg.ResolveRulePackDir(RulePackRef{Name: "strict"}); got != shipped {
 		t.Fatalf("strict resolves to %q, want the shipped %s while policy_dir has none", got, shipped)
+	}
+}
+
+// TestMigrateV9DropsTheKeysTheRuntimeNoLongerHas: a 0.8.10-shaped v8 file with
+// every key only an upgrade still understands (the three *_actions maps,
+// update_check and the privacy: section) migrates to its v9 equivalent or is
+// reported as dropped, and the same keys in a v9 file are plain unknown keys.
+// The 0.x environment inputs (DEFENSECLAW_PERSIST_JUDGE,
+// DEFENSECLAW_DISABLE_REDACTION) are read by the 0.x conversion in
+// cli/defenseclaw/observability/v8_migration.py, which has its own tests.
+func TestMigrateV9DropsTheKeysTheRuntimeNoLongerHas(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + `
+update_check: false
+privacy:
+  disable_redaction: true
+skill_actions:
+  high: {file: none, runtime: enable, install: block}
+mcp_actions:
+  critical: {file: none, runtime: enable, install: none}
+  medium: {file: none, runtime: enable, install: block}
+plugin_actions:
+  critical: {file: quarantine, runtime: disable, install: block}
+observability: {}
+`
+	dataJSON := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(dataJSON, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, Source: []byte(source), DataJSONPath: dataJSON, DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(result.Record.Notes, "\n")
+	var wantConflicts []string
+	for _, row := range []struct {
+		key       string
+		moved     string   // v9 key that carries the value, "" when dropped
+		removed   string   // entry in the report's removed list, "" when moved
+		conflicts []string // customised levels that data.json overrode
+		note      string
+	}{
+		{key: "skill_actions", removed: "skill_actions", conflicts: []string{"admission.skill.actions.high"}},
+		{key: "mcp_actions", removed: "mcp_actions",
+			conflicts: []string{"admission.mcp.actions.critical", "admission.mcp.actions.medium"}},
+		// Equal to what data.json enforced: nothing to report beyond the drop.
+		{key: "plugin_actions", removed: "plugin_actions"},
+		{key: "update_check", moved: "update.check"},
+		{key: "privacy", removed: "privacy.disable_redaction", note: "privacy.disable_redaction"},
+	} {
+		if _, kept := doc[row.key]; kept {
+			t.Errorf("%s is still in the migrated config", row.key)
+		}
+		if row.removed != "" && !slices.Contains(result.Record.Removed, row.removed) {
+			t.Errorf("%s: removed = %v, want %s", row.key, result.Record.Removed, row.removed)
+		}
+		if row.moved != "" && !slices.ContainsFunc(result.Record.Moved, func(m MigrationMove) bool {
+			return m.From == row.key && m.To == row.moved
+		}) {
+			t.Errorf("%s: moved = %+v, want %s", row.key, result.Record.Moved, row.moved)
+		}
+		if row.note != "" && !strings.Contains(notes, row.note) {
+			t.Errorf("%s: notes = %q", row.key, notes)
+		}
+		wantConflicts = append(wantConflicts, row.conflicts...)
+
+		// In a v9 file the key has no special handling: it is an unknown key.
+		v9 := "config_version: 9\n" + row.key + ": {}\nobservability: {}\n"
+		if err := ValidateCandidate(configPath, []byte(v9)); err == nil || !strings.Contains(err.Error(), row.key) {
+			t.Errorf("%s in a v9 file: got %v, want an unknown-key error naming it", row.key, err)
+		}
+	}
+	if update, _ := doc["update"].(map[string]any); update["check"] != false {
+		t.Errorf("update = %v, want check: false", doc["update"])
+	}
+	var gotConflicts []string
+	for _, c := range result.Record.Conflicts {
+		gotConflicts = append(gotConflicts, c.To)
+	}
+	if !slices.Equal(gotConflicts, wantConflicts) {
+		t.Errorf("conflicts = %v, want %v", gotConflicts, wantConflicts)
 	}
 }

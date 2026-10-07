@@ -267,14 +267,6 @@ def choice_for_hotkey(hotkey: str) -> ModeChoice | None:
     return None
 
 
-def choice_index(wire: str) -> int:
-    normalized = normalize_connector(wire)
-    for index, choice in enumerate(MODE_PICKER_CHOICES):
-        if choice.wire == normalized:
-            return index
-    return 0
-
-
 def preview_for_switch(current_wire: str, dest_wire: str) -> str:
     current = normalize_connector(current_wire)
     dest = normalize_connector(dest_wire)

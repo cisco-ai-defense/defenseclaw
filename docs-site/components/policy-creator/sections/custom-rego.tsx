@@ -83,7 +83,7 @@ export function CustomRegoSection({
       </div>
       {policy.custom_rego.length === 0 ? (
         <p className="rounded-md border border-dashed border-fd-border bg-fd-background px-3 py-3 text-center text-[11px] text-fd-muted-foreground">
-          No custom Rego. The bundled admission/guardrail/firewall/audit modules
+          No custom Rego. The bundled admission and guardrail modules
           cover most cases — only reach for this section when you need a verdict the bundled
           Rego can&apos;t express.
         </p>

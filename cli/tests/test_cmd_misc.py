@@ -167,13 +167,9 @@ class TestAlertsCommand(unittest.TestCase):
         else:
             os.environ["COLUMNS"] = self._orig_columns
 
-    # ------------------------------------------------------------------
-    # Helpers: existing tests updated to pass --no-tui (TUI is default)
-    # ------------------------------------------------------------------
-
     def test_alerts_empty(self):
         from defenseclaw.commands.cmd_alerts import alerts
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No alerts", result.output)
 
@@ -185,7 +181,7 @@ class TestAlertsCommand(unittest.TestCase):
         self.app.store.log_event(Event(action="scan-finding", target="/skills/worse",
                                        severity="CRITICAL", details="major vulnerability"))
 
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
         self.assertIn("HIGH", result.output)
@@ -198,7 +194,7 @@ class TestAlertsCommand(unittest.TestCase):
             self.app.store.log_event(Event(action="scan-finding", target=f"/skills/s{i}",
                                            severity="MEDIUM", details=f"issue {i}"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "-n", "2"], obj=self.app,
+        result = self.runner.invoke(alerts, ["-n", "2"], obj=self.app,
                                     catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
@@ -206,7 +202,7 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_no_store(self):
         from defenseclaw.commands.cmd_alerts import alerts
         self.app.store = None
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No audit store", result.output)
 
@@ -221,7 +217,7 @@ class TestAlertsCommand(unittest.TestCase):
                                        severity="HIGH",
                                        details="scanner=skill-scanner findings=2 max_severity=HIGH"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+        result = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
                                     catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Alert #1", result.output)
@@ -236,7 +232,7 @@ class TestAlertsCommand(unittest.TestCase):
         event = Event(id="a1", action="telemetry-destination", severity="HIGH",
                       details="galileo/traces failed: request_timeout")
         with patch.object(self.app.store, "list_alerts", return_value=[event]):
-            result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+            result = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
                                         catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("galileo/traces failed: request_timeout", result.output)
@@ -256,9 +252,9 @@ class TestAlertsCommand(unittest.TestCase):
                   details="galileo/traces failed: http_authentication"),
         ]
         with patch.object(self.app.store, "list_alerts", return_value=events):
-            circuit = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+            circuit = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
                                          catch_exceptions=False)
-            delivery = self.runner.invoke(alerts, ["--no-tui", "--show", "2"], obj=self.app,
+            delivery = self.runner.invoke(alerts, ["--show", "2"], obj=self.app,
                                           catch_exceptions=False)
         self.assertEqual(circuit.exit_code, 0, circuit.output)
         self.assertIn("galileo degraded: otlp export paused after 1 failure (authentication", circuit.output)
@@ -275,7 +271,7 @@ class TestAlertsCommand(unittest.TestCase):
         self.app.store.log_event(Event(action="scan-finding", target="/skills/x",
                                        severity="LOW", details="scanner=skill-scanner findings=0"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--show", "99"], obj=self.app,
+        result = self.runner.invoke(alerts, ["--show", "99"], obj=self.app,
                                     catch_exceptions=True)
         self.assertNotEqual(result.exit_code, 0)
 
@@ -295,7 +291,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex"],
+        result = self.runner.invoke(alerts, ["--connector", "codex"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         # The scope is reflected in the title and only codex rows survive.
@@ -308,7 +304,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "CODEX"],
+        result = self.runner.invoke(alerts, ["--connector", "CODEX"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=codex", result.output)
@@ -320,7 +316,7 @@ class TestAlertsCommand(unittest.TestCase):
 
         # A known connector without alerts; an unknown name exits 1 (GAP-2130,
         # covered in test_alerts_connector_ux_b2.py).
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "cursor"],
+        result = self.runner.invoke(alerts, ["--connector", "cursor"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No alerts from connector 'cursor'", result.output)
@@ -330,7 +326,7 @@ class TestAlertsCommand(unittest.TestCase):
         self._seed_two_connectors()
 
         # --show 1 should resolve against the filtered list, i.e. the codex row.
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex", "--show", "1"],
+        result = self.runner.invoke(alerts, ["--connector", "codex", "--show", "1"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Alert #1", result.output)
@@ -341,7 +337,7 @@ class TestAlertsCommand(unittest.TestCase):
         self._seed_two_connectors()
 
         # Without --connector, both connectors' rows render (no-op parity).
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=codex", result.output)
         self.assertIn("claudec", result.output)

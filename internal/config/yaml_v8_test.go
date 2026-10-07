@@ -241,7 +241,6 @@ func TestParseV8YAMLTargetedLegacyDiagnostics(t *testing.T) {
 		{"audit sinks", "audit_sinks: []\n", "$.audit_sinks", "observability.destinations"},
 		{"audit db", "audit_db: /tmp/audit.db\n", "$.audit_db", "observability.local.path"},
 		{"judge db", "judge_bodies_db: /tmp/judge.db\n", "$.judge_bodies_db", "observability.local.judge_bodies_path"},
-		{"privacy", "privacy:\n  disable_redaction: false\n", "$.privacy.disable_redaction", "bucket policies"},
 		{"discovery", "ai_discovery:\n  emit_otel: false\n", "$.ai_discovery.emit_otel", "ai.discovery"},
 		{"splunk", "splunk: {}\n", "$.splunk", "splunk_hec"},
 		{"connector sinks", "observability:\n  connectors:\n    codex:\n      audit_sinks: []\n", "$.observability.connectors.codex.audit_sinks", "connector selectors"},

@@ -19,6 +19,8 @@ package config
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,8 +43,10 @@ import (
 // The v8 to v9 migration moves admin intent into config.yaml: data.json
 // admission and guardrail values, the *_actions keys,
 // watch.allow_list_bypass_scan, rule_pack_dir, the v8 scanner keys,
-// update_check and (OSS only) the operator block/allow rows of audit.db and a
-// legacy custom-providers.json overlay.
+// update_check, the reserved privacy: section and (OSS only) the operator
+// block/allow rows of audit.db and a legacy custom-providers.json overlay.
+// The runtime Config has no field for any of those keys; the migration reads
+// them from the raw YAML.
 // It is the one implementation: `defenseclaw-gateway config migrate --to 9`,
 // the Python CONFIG_MIGRATIONS[8] step and enterprise ensure all call it,
 // and the gateway runs it in memory (read-only) on a v8 file at load.
@@ -372,6 +376,9 @@ type v9Migrator struct {
 	// llm_providers; commit writes providerCAs and retires the file.
 	providersOverlay string
 	providerCAs      []v9RegoRefresh
+	// retired are the unmodified 0.8 copies of retired policy files that
+	// commit removes.
+	retired []string
 	// globalPackPosture is the posture the gateway gives the global v8
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
@@ -433,12 +440,18 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 			m.moved("config", "update_check", "update.check", check)
 		}
 	}
+	m.migrateTelemetryAliases(root)
+	m.migratePrivacy(root)
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
 	m.migrateCustomProviders(root)
 	if err := m.planRegoRefresh(); err != nil {
 		return nil, false, err
+	}
+	// A Secure Client policy folder is the deployment's, not the user's.
+	if !v9SecureClientDocument(root) {
+		m.planRetiredPolicyFiles()
 	}
 	versionNode.Value = fmt.Sprint(ConfigVersionV9)
 	versionNode.Tag = "!!int"
@@ -453,6 +466,47 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: encode the migrated config: %w", err)
 	}
 	return out.Bytes(), false, nil
+}
+
+// migrateTelemetryAliases retires the telemetry attribute alias switch. Since
+// config_version 9 telemetry carries only canonical attribute names, so
+// observability.trace_policy.compatibility_aliases is dropped (recorded in
+// Removed) and a configured resource attribute deployment.environment becomes
+// deployment.environment.name. A host that exports to a backend is told its
+// queries and dashboards must use the canonical names. Keep this until the
+// config_version 8 migration is dropped (1.1.0).
+func (m *v9Migrator) migrateTelemetryAliases(root *yaml.Node) {
+	observability := v8YAMLMapValue(root, "observability")
+	if observability == nil || observability.Kind != yaml.MappingNode {
+		return
+	}
+	if policy := v8YAMLMapValue(observability, "trace_policy"); policy != nil {
+		if v9Pop(policy, "compatibility_aliases") != nil {
+			m.record.Removed = append(m.record.Removed, "observability.trace_policy.compatibility_aliases")
+		}
+		if policy.Kind == yaml.MappingNode && len(policy.Content) == 0 {
+			v9Pop(observability, "trace_policy")
+		}
+	}
+	const from, to = "deployment.environment", "deployment.environment.name"
+	attributes := v8YAMLMapValue(v8YAMLMapValue(observability, "resource"), "attributes")
+	if node := v9Pop(attributes, from); node != nil {
+		prefix := "observability.resource.attributes."
+		if v8YAMLMapValue(attributes, to) == nil {
+			v9Set(attributes, node, to)
+			m.moved("config", prefix+from, prefix+to, node.Value)
+		} else if v8YAMLMapValue(attributes, to).Value != node.Value {
+			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+				To: prefix + to, Kept: to, Lost: from,
+				Reason: "both spellings were set to different values; the canonical name wins",
+			})
+		}
+	}
+	if len(v9SeqItems(v8YAMLMapValue(observability, "destinations"))) > 0 {
+		m.note("telemetry no longer carries the alias attributes deployment.environment, deployment.mode and " +
+			"defenseclaw.device.id; queries, dashboards and alerts on an exported backend must use " +
+			"deployment.environment.name, defenseclaw.deployment.mode and defenseclaw.device.public_key_fingerprint")
+	}
 }
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
@@ -508,6 +562,11 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	if m.providersOverlay != "" {
 		m.retireProvidersOverlay(&written)
+	}
+	for _, path := range m.retired {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			m.note("could not remove the retired policy file %s: %v; nothing reads it", path, err)
+		}
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
@@ -635,6 +694,49 @@ func (m *v9Migrator) planRegoRefresh() error {
 		}
 	}
 	return nil
+}
+
+// v9RetiredPolicyFiles are the policy files 0.8.x could leave under
+// <policy_dir>/rego that 1.0 no longer ships: the firewall and audit Rego
+// modules (seeded by init) and the data file the firewall dry runs read
+// (never seeded by the wheel, but carried by source installs). Every release
+// from 0.5.0 to 0.8.10 carried them byte for byte (SHA-256 below), so a copy
+// that still matches was never edited. Remove this table with the v8 to v9
+// migration (1.1.0).
+var v9RetiredPolicyFiles = []struct{ name, sha256 string }{
+	{"firewall.rego", "cc51d978cf63b63f5bb0f21c4710019d106e9bcf7f9100536d35525b8d4ce5a5"},
+	{"audit.rego", "a40b408b08f976153e5937220efaaeb73460055b3ba10831061b5be55ae2c108"},
+	{"data-sandbox.json", "a1cfab935ac600eefb57d027093b6e615f9e7fa2139febebc034d05527ef7cc4"},
+}
+
+// planRetiredPolicyFiles removes the unmodified 0.8 copies of the retired
+// policy files. An edited copy belongs to the operator: it stays, and the
+// report says so. On a managed host the admin owns policy_dir, so the files
+// are only reported.
+func (m *v9Migrator) planRetiredPolicyFiles() {
+	dir := filepath.Join(m.policyDir(), "rego")
+	for _, file := range v9RetiredPolicyFiles {
+		path := filepath.Join(dir, file.name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		var raw []byte
+		if info.Mode().IsRegular() && info.Size() <= 1<<20 {
+			raw, _ = os.ReadFile(path)
+		}
+		sum := sha256.Sum256(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")))
+		switch {
+		case raw == nil || hex.EncodeToString(sum[:]) != file.sha256:
+			m.note("%s was changed after install and is kept; 1.0 no longer ships or reads it (the firewall and audit "+
+				"Rego policies are retired)", path)
+		case m.in.Managed:
+			m.note("%s is the unmodified 0.8 copy of a retired policy; nothing reads it, remove it", path)
+		default:
+			m.retired = append(m.retired, path)
+			m.note("%s, the unmodified 0.8 copy of a retired policy, is removed", path)
+		}
+	}
 }
 
 func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {
@@ -786,9 +888,10 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	// The v8 keys enforcement never read: removed, with a conflict when an
 	// operator customised them away from what was enforced.
 	legacy := map[string]map[string]SeverityAction{}
-	for key, assetType := range map[string]string{
-		"skill_actions": AdmissionTypeSkill, "mcp_actions": AdmissionTypeMCP, "plugin_actions": AdmissionTypePlugin,
+	for _, item := range []struct{ key, assetType string }{
+		{"skill_actions", AdmissionTypeSkill}, {"mcp_actions", AdmissionTypeMCP}, {"plugin_actions", AdmissionTypePlugin},
 	} {
+		key, assetType := item.key, item.assetType
 		node := v9Pop(root, key)
 		if node == nil {
 			continue
@@ -931,22 +1034,35 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	}
 }
 
+// migratePrivacy drops the reserved privacy: section, which config_version 9
+// does not have. A v8 loader refused privacy.disable_redaction, so it was
+// never applied; a true value is reported, and redaction stays as
+// observability.redaction_profiles sets it.
+func (m *v9Migrator) migratePrivacy(root *yaml.Node) {
+	section := v9Pop(root, "privacy")
+	if section == nil {
+		return
+	}
+	if section.Kind != yaml.MappingNode || len(section.Content) == 0 {
+		m.record.Removed = append(m.record.Removed, "privacy")
+		return
+	}
+	for index := 0; index+1 < len(section.Content); index += 2 {
+		key := section.Content[index].Value
+		m.record.Removed = append(m.record.Removed, "privacy."+key)
+		var disabled bool
+		if key == "disable_redaction" && section.Content[index+1].Decode(&disabled) == nil && disabled {
+			m.note("privacy.disable_redaction: true was dropped: no config_version 8 or 9 runtime applies it; " +
+				"redaction follows observability.redaction_profiles (set a destination's redaction_profile to none to send unredacted data)")
+		}
+	}
+}
+
 // legacyActionConflicts records a conflict for every severity an operator
 // customised in a *_actions key away from what was enforced (source names
 // where that came from, read says it in a sentence).
 func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[string]SeverityAction, source, read string) {
-	defaults := map[string]SeverityAction{}
-	switch assetType {
-	case AdmissionTypeSkill:
-		d := DefaultSkillActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	case AdmissionTypeMCP:
-		d := DefaultMCPActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	case AdmissionTypePlugin:
-		d := DefaultPluginActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	}
+	defaults := v9LegacyActionDefaults(assetType)
 	for _, severity := range v9Severities {
 		lower := strings.ToLower(severity)
 		value, ok := old[lower]
@@ -963,6 +1079,19 @@ func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[
 			Reason: "enforcement read " + read + "; " + assetType + "_actions only filled unknown severities",
 		})
 	}
+}
+
+// v9LegacyActionDefaults are the 0.8.x defaults of a *_actions key: a value
+// equal to its default was never customised. Only MCP servers blocked
+// install at CRITICAL and HIGH.
+func v9LegacyActionDefaults(assetType string) map[string]SeverityAction {
+	none := SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallNone}
+	block := SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallBlock}
+	defaults := map[string]SeverityAction{"critical": none, "high": none, "medium": none, "low": none, "info": none}
+	if assetType == AdmissionTypeMCP {
+		defaults["critical"], defaults["high"] = block, block
+	}
+	return defaults
 }
 
 func v9NormalAction(a SeverityAction) SeverityAction {
@@ -1823,6 +1952,19 @@ func v9AuditDBDamaged(err error) bool {
 
 // v9SecureClientDocument reports whether the document is a managed
 // deployment on the Secure Client profile (pinned or configured).
+// SecureClientSource reports whether config bytes describe a Secure Client
+// deployment (its deployment mode and profile, or their environment pins).
+// The Secure Client integration stays on config_version 8, so `config
+// migrate` leaves such a file unchanged (issue #1092).
+func SecureClientSource(raw []byte) bool {
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return false
+	}
+	root := v8DocumentRoot(&doc)
+	return root != nil && root.Kind == yaml.MappingNode && v9SecureClientDocument(root)
+}
+
 func v9SecureClientDocument(root *yaml.Node) bool {
 	mode := normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
 	if env := strings.TrimSpace(os.Getenv(managed.DeploymentModeEnv)); env != "" {

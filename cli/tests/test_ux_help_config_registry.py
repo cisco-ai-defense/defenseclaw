@@ -171,9 +171,12 @@ def test_config_get_destinations_index_the_list_config_set_edits(
     ):
         first = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations[0].name"])
         listed = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations", "--format", "json"])
+        past = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations[1].name"])
     assert first.exit_code == 0, first.output
     assert first.stdout == "remote\n"
     assert [item["name"] for item in json.loads(listed.stdout)] == ["remote"]
+    # GAP-0154: the plan's entry at index 1 is not one config set can edit.
+    assert past.exit_code == 1 and "out of range (config.yaml lists 1 destination)" in past.output
 
 
 def test_config_get_effective_resolves_pack_levels_and_the_scanner_gate(

@@ -152,7 +152,7 @@ var openAICompatibleProviders = map[string]bool{
 // start, so an unusable judge is not requested.
 func (s *SkillScanner) judge() (skillJudge, bool) {
 	llm := s.LLM
-	j := skillJudge{model: liteLLMModel(llm), apiKey: llm.ResolvedAPIKey(), baseURL: strings.TrimSpace(llm.BaseURL)}
+	j := skillJudge{model: liteLLMModel(llm), apiKey: llm.ResolvedAPIKey(), baseURL: strings.TrimSpace(llm.RequestBaseURL())}
 	if j.model == "" {
 		return j, false
 	}
@@ -227,13 +227,13 @@ func (s *SkillScanner) buildArgs(target, policy string) []string {
 	if s.Config.UseTrigger {
 		args = append(args, "--use-trigger")
 	}
-	if s.Config.VirusTotalEnabled() {
+	if s.Config.Analyzers.VirusTotal.Enabled {
 		args = append(args, "--use-virustotal")
 		if s.Config.Analyzers.VirusTotal.UploadFiles {
 			args = append(args, "--vt-upload-files")
 		}
 	}
-	if s.Config.AIDefenseEnabled() {
+	if s.Config.Analyzers.AIDefense.Enabled {
 		args = append(args, "--use-aidefense")
 	}
 	if s.Config.Analyzers.OSV.Enabled {
@@ -280,10 +280,10 @@ func (s *SkillScanner) scanEnv() []string {
 			derived["AWS_REGION"] = j.awsRegion
 		}
 	}
-	if s.Config.VirusTotalEnabled() {
+	if s.Config.Analyzers.VirusTotal.Enabled {
 		derived["VIRUSTOTAL_API_KEY"] = s.Config.ResolvedVirusTotalKey()
 	}
-	if s.Config.AIDefenseEnabled() {
+	if s.Config.Analyzers.AIDefense.Enabled {
 		derived["AI_DEFENSE_API_KEY"] = s.CiscoAIDefense.ResolvedAPIKey()
 		derived["AI_DEFENSE_API_URL"] = strings.TrimSpace(s.CiscoAIDefense.Endpoint)
 	}

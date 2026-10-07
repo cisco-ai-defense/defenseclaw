@@ -2177,10 +2177,6 @@ func supersedingProtectedSetupSelection(
 	return agentSelectionEvidence{}, false
 }
 
-func codexSelectionMatchesLock(selection agentSelectionEvidence, entry HookContractLockEntry) bool {
-	return protectedSelectionMatchesLock(selection, entry)
-}
-
 func protectedSelectionMatchesLock(selection agentSelectionEvidence, entry HookContractLockEntry) bool {
 	return strings.TrimSpace(selection.RawVersion) == strings.TrimSpace(entry.RawAgentVersion) &&
 		strings.TrimSpace(selection.NormalizedVersion) == strings.TrimSpace(entry.NormalizedAgentVersion) &&
