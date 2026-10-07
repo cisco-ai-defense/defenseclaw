@@ -135,7 +135,8 @@ observability:
 	// the strict pack's MEDIUM, which governed the hook paths.
 	data := `{"config": {"allow_list_bypass_scan": false, "policy_name": "x"},
 	  "actions": {"HIGH": {"install": "none", "file": "none", "runtime": "allow"}},
-	  "guardrail": {"block_threshold": 3, "alert_threshold": 1}}`
+	  "guardrail": {"block_threshold": 3, "alert_threshold": 1},
+	  "first_party_allow_list": [{"target_type": "skill", "target_name": "mine", "reason": "x"}]}`
 	if err := os.WriteFile(dataJSON, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +190,7 @@ observability:
 		`INSERT INTO actions VALUES ('4','skill','post','','{"install":"block"}','post-scan: 2 findings, max=HIGH','now','')`,
 		`INSERT INTO actions VALUES ('5','mcp','fs','','{"install":"allow"}','scan clean or within policy','now','codex')`,
 		`INSERT INTO actions VALUES ('6','plugin','ok','/p/ok','{"install":"allow"}','operator','now','')`,
+		`INSERT INTO actions VALUES ('7','tool','filesystem/read','','{"install":"allow"}','','now','')`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -242,6 +244,11 @@ observability:
 		"asset_policy.mcp":                                        nil,
 		"ai_discovery.signature_packs":                            []any{installedPack},
 		"asset_policy.tool.denied":                                []any{map[string]any{"name": "rm", "connector": "codex"}},
+		// A <source>/<tool> row was audit-only: it keeps its whole name, so it
+		// never allows every tool named "read".
+		"asset_policy.tool.allowed": []any{map[string]any{"name": "filesystem/read"}},
+		// A first-party entry without source_path_contains matched any path.
+		"asset_policy.skill.allowed": []any{map[string]any{"name": "mine", "reason": "x"}},
 		"llm_providers.custom": []any{map[string]any{"name": "acme", "domains": []any{"llm.acme.internal"}, "env_keys": []any{"ACME_KEY"},
 			"tls": map[string]any{"ca_cert_file": filepath.Join(dir, "provider-ca", "acme.pem")}}},
 	} {
@@ -278,8 +285,8 @@ observability:
 		result.Record.Conflicts[1].To != "guardrail.block_at" {
 		t.Errorf("conflicts = %+v", result.Record.Conflicts)
 	}
-	if result.Record.ActionsRowsMoved != 3 {
-		t.Errorf("actions rows moved = %d, want 3", result.Record.ActionsRowsMoved)
+	if result.Record.ActionsRowsMoved != 4 {
+		t.Errorf("actions rows moved = %d, want 4", result.Record.ActionsRowsMoved)
 	}
 	if backup, _ := os.ReadFile(configPath + ConfigV8BackupSuffix); string(backup) != source {
 		t.Error("config.yaml.v8.bak does not hold the v8 bytes")

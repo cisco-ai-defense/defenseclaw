@@ -1028,6 +1028,24 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	if data.FirstPartyAllowList != nil {
 		byType := map[string][]AdmissionFirstParty{}
 		for _, entry := range *data.FirstPartyAllowList {
+			switch entry.TargetType {
+			case AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin:
+			default:
+				m.note("data.json first_party_allow_list entry %q has the unknown type %q and is not migrated",
+					entry.TargetName, entry.TargetType)
+				continue
+			}
+			if len(entry.SourcePathContains) == 0 {
+				// v8 matched an entry without source_path_contains on any
+				// path. A first-party entry needs a path marker now, so the
+				// closest equal is a name-only asset_policy allow.
+				m.addAssetRule(root, "data.json", "data.json:first_party_allow_list", v9ActionRow{
+					targetType: entry.TargetType, targetName: entry.TargetName, reason: entry.Reason,
+				}, "allowed", entry.TargetName, "")
+				m.note("data.json first_party_allow_list entry %q has no source_path_contains; it became asset_policy.%s.allowed (any path)",
+					entry.TargetName, entry.TargetType)
+				continue
+			}
 			byType[entry.TargetType] = append(byType[entry.TargetType], AdmissionFirstParty{
 				Name: entry.TargetName, SourcePathContains: entry.SourcePathContains, Reason: entry.Reason,
 			})
@@ -2016,23 +2034,30 @@ func (m *v9Migrator) appendAssetRule(root *yaml.Node, row v9ActionRow, list stri
 	switch row.targetType {
 	case AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin:
 	case AdmissionTypeTool:
+		// Only the @<connector>/<tool> form was scoped at runtime. A
+		// <source>/<tool> row was audit-only, and v8 matched a bare name
+		// exactly, so any other name keeps its whole text (a slash included)
+		// and never becomes a global rule for its last segment.
 		if strings.HasPrefix(name, "@") {
 			if conn, tool, ok := strings.Cut(name[1:], "/"); ok {
 				connector, name = conn, tool
 			}
-		} else if i := strings.LastIndex(name, "/"); i >= 0 {
-			// <source>/<tool>: the source was audit-only.
-			name = name[i+1:]
 		}
 	default:
 		return false
 	}
+	m.addAssetRule(root, "audit.db", "actions:"+row.id, row, list, name, connector)
+	return true
+}
+
+// addAssetRule appends one asset_policy rule unless an identical one exists.
+func (m *v9Migrator) addAssetRule(root *yaml.Node, origin, from string, row v9ActionRow, list, name, connector string) {
 	target := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "asset_policy"), row.targetType), list)
 	for _, existing := range v9SeqItems(target) {
 		if yamlScalarValue(v8YAMLMapValue(existing, "name")) == name &&
 			yamlScalarValue(v8YAMLMapValue(existing, "connector")) == connector {
-			m.moved("audit.db", "actions:"+row.id, "asset_policy."+row.targetType+"."+list, name)
-			return true
+			m.moved(origin, from, "asset_policy."+row.targetType+"."+list, name)
+			return
 		}
 	}
 	item := v9Mapping("name", v9Scalar(name))
@@ -2056,8 +2081,7 @@ func (m *v9Migrator) appendAssetRule(root *yaml.Node, row v9ActionRow, list stri
 		v9Set(root, target, "asset_policy", row.targetType, list)
 	}
 	target.Content = append(target.Content, item)
-	m.moved("audit.db", "actions:"+row.id, "asset_policy."+row.targetType+"."+list, name)
-	return true
+	m.moved(origin, from, "asset_policy."+row.targetType+"."+list, name)
 }
 
 // ---------------------------------------------------------------------------
