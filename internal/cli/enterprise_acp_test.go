@@ -230,4 +230,21 @@ func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 	if _, err := resolveEnterpriseACPEnrollment(true); err == nil {
 		t.Fatal("implicit empty allowlist was accepted for enterprise enrollment")
 	}
+	// A per-pair binding authorizes its pair as the gateway evaluates it,
+	// and a refusal names the pin that disagrees (GAP-0357).
+	cfg.Enterprise.Profile = "standalone"
+	cfg.ACP.Clients = map[string]config.ACPBinding{"zed": {Enabled: true}}
+	cfg.ACP.Agents = map[string]config.ACPBinding{"kiro": {Enabled: true}, "hermes": {Enabled: true, Profile: "watch"}}
+	cfg.ACP.Bindings = map[string]config.ACPBinding{"zed/kiro": {Enabled: true, Profile: "locked"}}
+	cfg.ACP.Profiles = map[string]config.ACPProfile{
+		"locked": {AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"}},
+		"watch":  {AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}},
+	}
+	if _, err := resolveEnterpriseACPEnrollment(true); err != nil && strings.Contains(err.Error(), "does not authorize") {
+		t.Fatalf("the binding for zed/kiro was not honoured: %v", err)
+	}
+	enterpriseACPAgent, enterpriseACPProfile = "hermes", "watch"
+	if _, err := resolveEnterpriseACPEnrollment(true); err == nil || !strings.Contains(err.Error(), `acp.clients.zed.profile is ""`) {
+		t.Fatalf("the refusal does not name the pin that disagrees: %v", err)
+	}
 }

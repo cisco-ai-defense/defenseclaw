@@ -472,6 +472,11 @@ can govern a process it never receives.
 In `managed_enterprise`, `allowed_clients` and `allowed_agents` must explicitly
 name the enrolled pair; an empty wildcard allow-list is deliberately rejected
 by enrollment even though it remains valid for ordinary local profiles.
+Enrollment resolves the pair the way the gateway does: a `bindings` entry for
+the pair (as in [several guarded agents in one editor](#several-guarded-agents-in-one-editor)),
+or else both the client and the agent pin, must name the profile. A refusal
+names each setting that disagrees, for example
+`central ACP policy does not authorize zed/kiro in profile kiro-only: the pair resolves to profile "devin-watch"; acp.agents.kiro.profile is "devin-watch"; set both to "kiro-only", or add acp.bindings.zed/kiro with profile "kiro-only"`.
 
 ## Supported agents
 

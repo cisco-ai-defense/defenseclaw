@@ -550,18 +550,7 @@ func resolveACPProfileForPair(
 // at all, so disabling a client or an agent continues to disable every pair
 // that uses it.
 func acpPairIsBound(cfg config.ACPConfig, client, agent, profileName string) bool {
-	clientBinding, clientOK := cfg.Clients[client]
-	agentBinding, agentOK := cfg.Agents[agent]
-	if !clientOK || !clientBinding.Enabled || !agentOK || !agentBinding.Enabled {
-		return false
-	}
-	if pair, ok := cfg.ACPBindingFor(client, agent); ok {
-		if !pair.Enabled {
-			return false
-		}
-		return strings.TrimSpace(pair.Profile) == "" || strings.TrimSpace(pair.Profile) == profileName
-	}
-	return clientBinding.Profile == profileName && agentBinding.Profile == profileName
+	return len(cfg.ACPPairBindingRefusals(client, agent, profileName)) == 0
 }
 
 func effectiveACPMode(cfg config.ACPConfig, profileName string) string {

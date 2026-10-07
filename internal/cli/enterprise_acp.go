@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -166,7 +167,13 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 	if !clientKnown {
 		return enterpriseACPEnrollment{}, fmt.Errorf("unknown ACP client: %s", client)
 	}
-	if requireAuthorization {
+	if requireAuthorization && !cfg.SecureClientIntegration() {
+		if refusals := enterpriseACPAuthorizationRefusals(cfg.ACP, client, agent, profile); len(refusals) > 0 {
+			return enterpriseACPEnrollment{}, fmt.Errorf("central ACP policy does not authorize %s/%s in profile %s: %s",
+				client, agent, profile, strings.Join(refusals, "; "))
+		}
+	} else if requireAuthorization {
+		// Secure Client keeps the pin-only rule and wording of main.
 		clientBinding, clientOK := cfg.ACP.Clients[client]
 		agentBinding, agentOK := cfg.ACP.Agents[agent]
 		policy, profileOK := cfg.ACP.Profiles[profile]
@@ -248,6 +255,38 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 	return enterpriseACPEnrollment{
 		target: target, principal: principal, dataDir: abs, client: client, agent: agent, profile: profile,
 	}, nil
+}
+
+// enterpriseACPAuthorizationRefusals applies the gateway's rule for a pair
+// (config.ACPPairBindingRefusals), with the profile the pair resolves to and
+// allow-lists that name the pair explicitly. Enrollment used to require both
+// pins to name the profile, so the per-pair bindings the docs describe for
+// several agents in one editor were refused, and the refusal did not say
+// which pin was missing (GAP-0357).
+func enterpriseACPAuthorizationRefusals(policy config.ACPConfig, client, agent, profile string) []string {
+	if !policy.Enabled {
+		return []string{"acp.enabled is false"}
+	}
+	var refusals []string
+	resolved := policy.ACPProfileForPair(client, agent)
+	if resolved == "" {
+		resolved = "default"
+	}
+	if resolved != profile {
+		refusals = append(refusals, fmt.Sprintf("the pair resolves to profile %q", resolved))
+	}
+	refusals = append(refusals, policy.ACPPairBindingRefusals(client, agent, profile)...)
+	settings, defined := policy.Profiles[profile]
+	if !defined {
+		return append(refusals, fmt.Sprintf("acp.profiles.%s is not defined", profile))
+	}
+	if !slices.Contains(settings.AllowedClients, client) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_clients does not name %s", profile, client))
+	}
+	if !slices.Contains(settings.AllowedAgents, agent) {
+		refusals = append(refusals, fmt.Sprintf("acp.profiles.%s.allowed_agents does not name %s", profile, agent))
+	}
+	return refusals
 }
 
 func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
