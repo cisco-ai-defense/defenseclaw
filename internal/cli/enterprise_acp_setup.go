@@ -53,8 +53,9 @@ administrator-owned credential and profile were fixed at enrollment, and the
 gateway refuses a request that does not match them.`,
 	Args: cobra.NoArgs,
 	// The user cannot read the administrator-owned configuration, and setup
-	// needs none.
-	Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+	// needs none. Secure Client keeps the command tree of main, which has no
+	// setup (issue #1092).
+	Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true", secureClientAbsentAnnotation: "true"},
 	RunE:        runEnterpriseACPSetup,
 }
 

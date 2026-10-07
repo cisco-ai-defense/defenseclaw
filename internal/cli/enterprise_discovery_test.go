@@ -353,17 +353,24 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	group := &cobra.Command{Use: "windows"}
 	group.AddCommand(&cobra.Command{Use: "discovery"})
 	group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
-	enterprise.AddCommand(group)
+	// Nor does it have enterprise acp setup or its help line (GAP-0302).
+	acpGroup := &cobra.Command{Use: "acp", Long: enterpriseACPCmd.Long, Annotations: enterpriseACPCmd.Annotations}
+	acpGroup.AddCommand(&cobra.Command{Use: "enroll"}, &cobra.Command{Use: "setup", Annotations: enterpriseACPSetupCmd.Annotations})
+	enterprise.AddCommand(group, acpGroup)
 	root.AddCommand(enterprise)
 	secureClientHost = func() bool { return false }
-	dropEnterpriseIdentityViewsOnSecureClient(root)
-	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) {
-		t.Fatalf("standalone group has %d commands, want the identity views too", got)
+	keepCommandTreeOfMainOnSecureClient(root)
+	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 {
+		t.Fatalf("standalone groups have %d and %d commands, want the identity views and setup too", got, len(acpGroup.Commands()))
 	}
 	secureClientHost = func() bool { return true }
-	dropEnterpriseIdentityViewsOnSecureClient(root)
+	keepCommandTreeOfMainOnSecureClient(root)
 	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" {
 		t.Fatalf("Secure Client group = %v, want discovery only", got)
+	}
+	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
+		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
+		t.Fatalf("Secure Client acp group = %v, help %q, want the ones of main", got, acpGroup.Long)
 	}
 
 	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
