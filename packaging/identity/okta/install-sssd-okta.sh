@@ -278,6 +278,10 @@ import tempfile
 template, out = sys.argv[1:3]
 prefix = "OKTA_KIT_"
 values = {k[len(prefix):]: v for k, v in os.environ.items() if k.startswith(prefix)}
+# Never let a remote Okta group shadow a local group used by sudoers or PAM.
+with open("/etc/group", encoding="utf-8", errors="replace") as groups:
+    local_groups = {line.partition(":")[0] for line in groups if ":" in line}
+values["FILTER_GROUPS"] = ", ".join(sorted(local_groups | {"root", "wheel", "sudo", "adm"}))
 keep_upn = values.get("UPN") == "1"
 text = []
 for line in open(template, encoding="ascii"):

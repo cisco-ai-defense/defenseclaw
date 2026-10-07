@@ -348,3 +348,20 @@ restart_sssd
     result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert actions.read_text().strip() == "restart"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_template_filters_local_group_names(tmp_path: Path) -> None:
+    out = tmp_path / "sssd.conf"
+    result = subprocess.run(
+        ["bash", str(OKTA_INSTALL), "--org", "example", "--bind-login", "bind@example.com",
+         "--allow-group", "linux-users", "--render-only", str(out)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "OKTA_BIND_PASSWORD": "test-password"},
+    )
+    assert result.returncode == 0, result.stderr
+    line = next(line for line in out.read_text().splitlines() if line.startswith("filter_groups = "))
+    filtered = {name.strip() for name in line.partition("=")[2].split(",")}
+    local = {line.partition(":")[0] for line in Path("/etc/group").read_text().splitlines() if ":" in line}
+    assert local <= filtered
+    assert {"wheel", "sudo", "adm"} <= filtered
