@@ -257,13 +257,17 @@ they write nothing:
 | --- | --- |
 | `defenseclaw config set KEY VALUE`, `config unset KEY` | Exit `3`: `error: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device` |
 | `defenseclaw skill`, `mcp`, `plugin` or `tool` with `block`, `allow` or `unblock` | Exit `3`: `This device is managed: add it to asset_policy in the admin config (MDM or management plane)` |
-| `defenseclaw init`, and any command that needs a per-user config an account does not have | Exit `3`: `This device is managed: DefenseClaw is configured by your administrator (MDM or management plane), so there is no per-user config to create and 'defenseclaw init' does not apply. Nothing was changed.` |
+| `defenseclaw init`, `defenseclaw quickstart`, and any command that needs a per-user config an account does not have | Exit `3`: `This device is managed: DefenseClaw is configured by your administrator (MDM or management plane), so there is no per-user config to create and 'defenseclaw init' does not apply. Nothing was changed.` |
 | `defenseclaw guardrail block-at`, `policy activate`, the `setup` commands that write config, and the TUI's config editor | Refused by the same writer; nothing is written. The TUI shows `Config save failed:` and the message |
 | `POST` or `DELETE` on the gateway's `/enforce/block` and `POST` on `/enforce/allow` | HTTP `403` with `{"error": "managed_device", "detail": "policy changes are made in the management plane"}` |
 
 The gateway records each refused attempt in the audit log with
 `outcome=refused reason=managed_device`, and the CLI does the same when it can
-reach the gateway. The enterprise packages ship no
+reach the gateway. On Linux and macOS the CLI reports through the gateway
+hook socket, so a standard user refusal is recorded too, with the account the
+kernel reports (`actor=uid:501 user=alice`); a standard user holds no gateway
+token. Windows has no hook socket: only a refusal by an account that holds the
+gateway token is recorded there. The enterprise packages ship no
 `defenseclaw` CLI, so these commands matter where an earlier per-user install
 left one behind; the gateway's API refuses regardless of the client.
 

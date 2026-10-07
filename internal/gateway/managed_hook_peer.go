@@ -471,6 +471,12 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		defer release()
+		if r.URL.Path == managedRefusalAuditPath {
+			// Any kernel-verified local account may report its own refused
+			// policy write; the route has no connector to enroll for.
+			next.ServeHTTP(w, r)
+			return
+		}
 		connectorName, inspect := a.managedHookRouteScope(r)
 		decision := authorizer.decide(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader))
 		if !decision.Allow {
@@ -539,9 +545,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 }
 
 // managedHookSocketMux registers only the agent-facing routes on the hook
-// socket: connector hook endpoints, the inspect endpoints and the Codex
-// notifier. Management, status, configuration, policy and scan routes are
-// not reachable through it at all.
+// socket: connector hook endpoints, the inspect endpoints, the Codex
+// notifier and the refused-write report of a standard user CLI. Management,
+// status, configuration, policy and scan routes are not reachable through it
+// at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -554,6 +561,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.Handle("/api/v1/inspect/", limiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	a.registerConnectorHookRoutes(mux, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
+	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	return a.apiCSRFProtect(handler)
 }
