@@ -20,6 +20,7 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -229,6 +230,24 @@ func TestPerSandboxDeciders(t *testing.T) {
 	e.create(sandboxapi.CreateRequest{Name: "balbox2", Profile: "balanced", Project: e.otherProject("bal2")})
 	if status, _ := proxy.connect(t, "balbox2", "example.org:443"); status != http.StatusForbidden {
 		t.Fatalf("another sandbox got balbox's unblock: %d", status)
+	}
+}
+
+// GAP-0173: `sandbox policy block HOST` then at once `sandbox unblock HOST`
+// is decided against config.yaml as written, not the snapshot from before
+// the write that the reload watcher has not replaced yet: the unblock is
+// refused with the block list's remedy instead of reported done.
+func TestUnblockLoadsTheBlockListJustWritten(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "balbox", Profile: "balanced"})
+	e.m.opts.SyncConfig = func(context.Context) error {
+		e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"example.org"} })
+		return nil
+	}
+	resp, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "example.org", Sandbox: "balbox"})
+	var se *sandboxapi.Error
+	if !errors.As(err, &se) || se.Code != sandboxapi.CodePolicyViolation || !strings.Contains(se.Detail, "policy block --remove example.org") {
+		t.Fatalf("unblock right after the block = %+v, %v; want the block list's refusal", resp, err)
 	}
 }
 

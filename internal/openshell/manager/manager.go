@@ -128,6 +128,10 @@ type Options struct {
 	Telemetry audit.SandboxTelemetry
 	// Persist keeps "always" decisions in config.yaml; nil refuses them.
 	Persist triage.Persister
+	// SyncConfig loads config.yaml into the snapshot Config returns before
+	// a decision that must see the user's latest write (the reload watcher
+	// follows the file a second or so later); nil decides on the snapshot.
+	SyncConfig func(context.Context) error
 	// Quiesce is the ingress in-flight tracker approvals wait on.
 	Quiesce triage.Quiescer
 	// ForgetBinding drops the ingress's per-binding state after a revoke.

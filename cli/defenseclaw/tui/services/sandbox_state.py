@@ -2018,9 +2018,13 @@ def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS
     for row in rows[:limit]:
         kind = _text(row.get("kind"))
         what = _DESTINATION_KINDS.get(kind, kind.replace("_", " ") or "other")
-        provider = _text(row.get("provider")) or _text(row.get("category"))
+        # An AI provider, or why a refused host was refused, in words: the
+        # category of any other row repeats its kind (GAP-0177).
+        provider = _text(row.get("provider"))
+        if not provider and kind == "blocked":
+            provider = reason_label(_text(row.get("category")))
         if provider:
-            what += f" ({provider.replace('_', ' ')})"
+            what += f" ({provider})"
         requests = _int(row.get("connections")) + _int(row.get("tunnels"))
         refused = _int(row.get("refused")) + _int(row.get("blocked"))
         parts = [what, _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")]

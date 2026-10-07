@@ -1726,8 +1726,14 @@ func windowsClassifyPowerShell(
 	case "get-acl":
 		classifyStructuredGetACL(builder.out, command)
 	case "set-content", "out-file":
-		windowsAddOperation(command, OperationWrite)
-		windowsAddPowerShellPrimaryPath(command.ID, PathAccessWrite, args, true, builder)
+		access, operation := PathAccessWrite, OperationWrite
+		if name == "out-file" && windowsInformationalInvocation(args, "-append") {
+			// Out-File -Append adds to the file, as the structured binder
+			// records it.
+			access, operation = PathAccessAppend, OperationAppend
+		}
+		windowsAddOperation(command, operation)
+		windowsAddPowerShellPrimaryPath(command.ID, access, args, true, builder)
 	case "add-content":
 		windowsAddOperation(command, OperationAppend)
 		windowsAddPowerShellPrimaryPath(command.ID, PathAccessAppend, args, true, builder)
@@ -4095,17 +4101,23 @@ func windowsAddPowerShellPrimaryPath(
 	pathParams := map[string]bool{
 		"-path": true, "-literalpath": true, "-filepath": true,
 	}
+	// Set-Content, Add-Content and Out-File take their content with -Value
+	// or -InputObject, and -NoNewline, -Append and -NoClobber shape the
+	// write without moving it: the structured binder knows them, and an
+	// agent's write commonly carries one, so they must not leave the raw
+	// parse partial and its CEL rules on detection-only fallback (GAP-0175).
 	valueParams := map[string]bool{
 		"-value": true, "-encoding": true, "-filter": true, "-include": true,
 		"-exclude": true, "-erroraction": true, "-warningaction": true,
 		"-name": true, "-type": true, "-itemtype": true, "-argumentlist": true,
 		"-workingdirectory": true, "-verb": true, "-credential": true,
-		"-width": true, "-wi": true,
+		"-width": true, "-wi": true, "-inputobject": true,
 	}
 	switchParams := map[string]bool{
 		"-force": true, "-recurse": true, "-raw": true, "-quiet": true,
 		"-confirm": true, "-whatif": true, "-nonewwindow": true,
 		"-wait": true, "-passthru": true, "-usenewenvironment": true,
+		"-nonewline": true, "-append": true, "-noclobber": true,
 	}
 	var positionals []windowsWord
 	found := false

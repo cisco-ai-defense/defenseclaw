@@ -56,7 +56,7 @@ func (a *App) Destinations(ctx context.Context, name string, format OutputFormat
 			shadow++
 		}
 		rows = append(rows, []string{
-			destinationHost(r), destinationKindText(r.Kind), truncate(destinationProviderText(r), 32),
+			destinationHost(r), truncate(destinationKindCell(r), 48), truncate(firstNonEmpty(r.Provider, "-"), 32),
 			destinationRequests(r), humanBytes(r.BytesUp) + " / " + humanBytes(r.BytesDown),
 			truncate(firstNonEmpty(destinationBinary(r), "-"), 40), r.LastSeen.Local().Format("01-02 15:04"),
 		})
@@ -103,27 +103,32 @@ func destinationHost(r sandboxapi.DestinationRow) string {
 	return host + ":" + strings.Join(ports, ",")
 }
 
-// destinationKindText is how a destination kind reads.
-// destinationProviderText is a row's PROVIDER cell: the AI provider, else
-// the egress category; for a destination only ever refused, whose list
-// refused it, in words (GAP-0125: a repository-policy block read
-// operator_block).
-func destinationProviderText(r sandboxapi.DestinationRow) string {
-	if r.Kind == sandboxapi.DestinationBlocked && r.Provider == "" {
-		switch r.Category {
-		case "operator_block":
-			return "your block list"
-		case sandboxapi.CategoryPackBlock:
-			return "the pack's block list"
-		case sandboxapi.CategoryRepoPolicyBlock:
-			return "repository policy"
-		case sandboxapi.CategoryFirewallBlock:
-			return "host egress firewall"
-		}
+// destinationKindCell is a row's KIND cell: the kind in words and, for a
+// destination only ever refused, why in words. The PROVIDER cell holds only
+// an AI provider: the egress category there repeated the kind
+// (package_registry) or was a raw refusal token (not_allowlisted; GAP-0177).
+func destinationKindCell(r sandboxapi.DestinationRow) string {
+	kind := destinationKindText(r.Kind)
+	if r.Kind != sandboxapi.DestinationBlocked || r.Category == "" {
+		return kind
 	}
-	return firstNonEmpty(r.Provider, r.Category, "-")
+	// Whose list refused it, in words (GAP-0125: a repository-policy block
+	// read operator_block).
+	why := sandboxapi.BlockedText(r.Category, r.Host)
+	switch r.Category {
+	case "operator_block":
+		why = "your block list"
+	case sandboxapi.CategoryPackBlock:
+		why = "the pack's block list"
+	case sandboxapi.CategoryRepoPolicyBlock:
+		why = "repository policy"
+	case sandboxapi.CategoryFirewallBlock:
+		why = "host egress firewall"
+	}
+	return kind + " (" + why + ")"
 }
 
+// destinationKindText is how a destination kind reads.
 func destinationKindText(kind string) string {
 	switch kind {
 	case sandboxapi.DestinationModelProvider:

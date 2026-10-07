@@ -199,6 +199,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		MCP:                mcp,
 		Telemetry:          s.sandboxTelemetry(),
 		Persist:            sandboxConfigPersister{api: api},
+		SyncConfig:         api.syncSandboxConfig,
 		Quiesce:            inflight,
 		ForgetBinding:      api.ForgetSandboxBinding,
 		IngressPort:        ingressPort,
@@ -510,6 +511,16 @@ func (p sandboxConfigPersister) AllowAlways(ctx context.Context, host string) er
 
 func (p sandboxConfigPersister) BlockAlways(ctx context.Context, host string) error {
 	return p.api.appendSandboxConfigList(ctx, "openshell.egress.block", host)
+}
+
+// syncSandboxConfig reloads config.yaml through the central reload
+// transaction, so a sandbox decision sees a change the CLI wrote a moment
+// ago instead of waiting for the reload watcher (manager.Options.SyncConfig).
+func (a *APIServer) syncSandboxConfig(ctx context.Context) error {
+	if a.configReloader == nil {
+		return nil
+	}
+	return a.configReloader(ctx, "sandbox_decision")
 }
 
 func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host string) error {

@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -49,6 +50,10 @@ type Feed struct {
 	full bool
 	seq  uint64
 	subs map[*subscriber]struct{}
+	// created is the sequence number of each name's latest "creating"
+	// event: a sandbox's backlog starts there, so a new sandbox with a
+	// deleted one's name does not open with that one's events (GAP-0189).
+	created map[string]uint64
 }
 
 type subscriber struct {
@@ -65,7 +70,8 @@ func NewFeed(size int, now func() time.Time) *Feed {
 	if now == nil {
 		now = time.Now
 	}
-	return &Feed{now: now, epoch: newFeedEpoch(), buf: make([]sandboxapi.ActivityEvent, size), subs: map[*subscriber]struct{}{}}
+	return &Feed{now: now, epoch: newFeedEpoch(), buf: make([]sandboxapi.ActivityEvent, size), subs: map[*subscriber]struct{}{},
+		created: map[string]uint64{}}
 }
 
 // newFeedEpoch names a feed: 16 random hex digits, or the time in
@@ -103,6 +109,18 @@ func (f *Feed) Publish(ev sandboxapi.ActivityEvent) sandboxapi.ActivityEvent {
 	if f.next == 0 {
 		f.full = true
 	}
+	if ev.Kind == sandboxapi.ActivityLifecycle && ev.Phase == string(audit.SandboxPhaseCreating) && ev.Sandbox != "" {
+		f.created[ev.Sandbox] = ev.Seq
+		if len(f.created) > len(f.buf) {
+			// A name whose creation left the buffer filters nothing.
+			oldest := f.buf[f.next].Seq
+			for name, seq := range f.created {
+				if seq < oldest {
+					delete(f.created, name)
+				}
+			}
+		}
+	}
 	for s := range f.subs {
 		if s.sandbox != "" && ev.Sandbox != s.sandbox {
 			continue
@@ -132,7 +150,9 @@ func (f *Feed) deliverLocked(s *subscriber, ev sandboxapi.ActivityEvent) {
 }
 
 // Since returns the buffered events after seq, oldest first, for one
-// sandbox or (with an empty name) all of them.
+// sandbox or (with an empty name) all of them. Without a seq, one
+// sandbox's events start at its latest creation: an earlier sandbox of the
+// same name, deleted since, is not this one.
 func (f *Feed) Since(seq uint64, sandbox string) []sandboxapi.ActivityEvent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -149,9 +169,13 @@ func (f *Feed) sinceLocked(seq uint64, sandbox string) []sandboxapi.ActivityEven
 	if f.full {
 		start = f.next
 	}
+	from := seq + 1
+	if created := f.created[sandbox]; sandbox != "" && seq == 0 && created > 0 {
+		from = created
+	}
 	for i := 0; i < n; i++ {
 		ev := f.buf[(start+i)%len(f.buf)]
-		if ev.Seq <= seq || (sandbox != "" && ev.Sandbox != sandbox) {
+		if ev.Seq < from || (sandbox != "" && ev.Sandbox != sandbox) {
 			continue
 		}
 		out = append(out, ev)

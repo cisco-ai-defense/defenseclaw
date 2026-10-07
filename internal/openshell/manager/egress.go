@@ -309,6 +309,11 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	if req.Sandbox == "" && !req.Always {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name a sandbox or ask for always")
 	}
+	// `sandbox policy block HOST` writes config.yaml, and the snapshot
+	// follows the file only after the reload watcher: an unblock in that
+	// second must not be decided, and reported done, against the block
+	// list from before the write (GAP-0173).
+	m.syncConfig(ctx)
 	var (
 		b   *box
 		eff *packs.Effective
@@ -395,6 +400,18 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: req.Sandbox, Host: host,
 		Reason: resp.Scope, Message: resp.Message})
 	return resp, nil
+}
+
+// syncConfig loads config.yaml into the configuration snapshot
+// (Options.SyncConfig). A file the reload refuses keeps the snapshot as it
+// is; the reload reports why in the daemon's health.
+func (m *Manager) syncConfig(ctx context.Context) {
+	if m.opts.SyncConfig == nil {
+		return
+	}
+	if err := m.opts.SyncConfig(ctx); err != nil {
+		m.logf("load config.yaml before the decision: %v", err)
+	}
 }
 
 // EgressUnblock reports whether a sandbox's egress proxy reaches host
