@@ -171,6 +171,23 @@ def discover(
 _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
 
 
+def _usage_payload(client: Any, refresh: bool) -> dict[str, Any]:
+    """The sidecar's AI usage report, scanned first with ``refresh``.
+
+    The scan answers 503 while AI discovery is off, where the cached view
+    says ``enabled: false``: both read the same, so ``--refresh`` gives the
+    disabled message and the enable command too (GAP-0150).
+    """
+    if not refresh:
+        return client.ai_usage()
+    try:
+        return client.scan_ai_usage()
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 503:
+            return {"enabled": False, "signals": []}
+        raise
+
+
 @agent.command("usage")
 @click.option("--refresh", is_flag=True, help="Ask the running sidecar to scan before rendering.")
 @click.option("--json", "as_json", is_flag=True, help="Output AI usage visibility as JSON.")
@@ -307,7 +324,7 @@ def usage(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.scan_ai_usage() if refresh else client.ai_usage()
+        payload = _usage_payload(client, refresh)
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -536,7 +553,7 @@ def processes(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.scan_ai_usage() if refresh else client.ai_usage()
+        payload = _usage_payload(client, refresh)
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
