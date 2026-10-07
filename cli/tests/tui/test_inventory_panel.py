@@ -585,6 +585,13 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
         ("bob", "vscode", "ms-python.python", "1.0.0", "no", ""),
     )
     assert dict(panel.summary_table_rows())["IDE plugins"] == "2 (1 AI, 1 disabled, 2 users)"
+    versioned = InventoryPanelModel()
+    versioned.apply_json(json.dumps({"ide_plugins": [ide("alice", "com.tabnine", ide_version="2025.2")]}))
+    versioned.set_active_subtab("ide_plugins")
+    assert versioned.data_table_rows()[0][0] == "vscode 2025.2"
+    versioned.set_cursor(0)
+    assert dict(versioned.detail_info().fields)["IDE version"] == "2025.2"
+
 
     # At 80 columns long cells give way while Enabled and AI stay whole, a
     # remote install is marked (GAP-0055), and the detail leads with what the

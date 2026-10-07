@@ -940,6 +940,17 @@ if __name__ == "__main__":
 
 
 class IDEPluginsTests(unittest.TestCase):
+    def test_untrusted_names_render_literally_and_ide_version_distinguishes_rows(self):
+        from defenseclaw.commands import cmd_agent
+
+        table = cmd_agent._render_runtime_table(["Plugin"], [["[/] close tag"]])
+        self.assertIn("[/] close tag", table)
+        rows = cmd_agent.ide_plugin_rows(
+            [{"ide_product": "intellij-idea-ce", "install_id": "i1", "plugin_id": "com.tabnine"}],
+            {"i1": "2025.2"},
+        )
+        self.assertEqual(rows[0][1], "intellij-idea-ce 2025.2")
+
     def test_lists_every_page_with_filters_and_scope_messages(self):
         from defenseclaw.gateway import OrchestratorClient
 
