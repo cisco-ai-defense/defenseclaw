@@ -96,7 +96,7 @@ func TestFallbackGuardrailVerdict_PreservesScannerMetadata(t *testing.T) {
 		Scanner:  "regex",
 	}
 
-	out := fallbackGuardrailVerdictForThresholds(in, defaultFallbackThresholds)
+	out := fallbackGuardrailVerdictForThresholds(in, nil, defaultFallbackThresholds, "action", nil)
 	if out == nil {
 		t.Fatal("fallbackGuardrailVerdict(non-nil) returned nil")
 	}
@@ -131,12 +131,47 @@ func TestFallbackGuardrailVerdict_PreservesScannerMetadata(t *testing.T) {
 // keeps the fallback path safe for call sites that haven't decided
 // whether the scanner produced anything yet.
 func TestFallbackGuardrailVerdict_NilInput(t *testing.T) {
-	out := fallbackGuardrailVerdictForThresholds(nil, defaultFallbackThresholds)
+	out := fallbackGuardrailVerdictForThresholds(nil, nil, defaultFallbackThresholds, "action", nil)
 	if out == nil {
 		t.Fatal("fallbackGuardrailVerdictForThresholds(nil, defaultFallbackThresholds) must return a usable allow verdict, not nil")
 	}
 	if out.Action != "allow" || out.Severity != "NONE" {
 		t.Errorf("nil verdict should map to allow/NONE; got action=%q severity=%q",
 			out.Action, out.Severity)
+	}
+}
+
+// TestFallbackGuardrailVerdict_FollowsRego pins that guardrail.cisco_trust_level
+// and HILT decide the same without the Rego module as with it
+// (guardrail.rego): a managed standalone host ships no .rego.
+func TestFallbackGuardrailVerdict_FollowsRego(t *testing.T) {
+	none := &ScanVerdict{Action: "allow", Severity: "NONE"}
+	critical := &ScanVerdict{Action: "block", Severity: "CRITICAL"}
+	high := &ScanVerdict{Action: "alert", Severity: "HIGH"}
+	hilt := &policy.GuardrailHILTInput{Enabled: true, MinSeverity: "HIGH"}
+	thresholds := func(trust string) policy.ThresholdsInput {
+		return policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium, CiscoTrustLevel: trust}
+	}
+	for _, tc := range []struct {
+		name         string
+		local, cisco *ScanVerdict
+		trust, mode  string
+		hilt         *policy.GuardrailHILTInput
+		want         string
+	}{
+		{"full trust blocks a Cisco-only critical", none, critical, "full", "action", nil, "block"},
+		{"advisory downgrades a Cisco-only block", none, critical, "advisory", "action", nil, "alert"},
+		{"advisory keeps a local block", critical, critical, "advisory", "action", nil, "block"},
+		{"none ignores the Cisco verdict", none, critical, "none", "action", nil, "allow"},
+		{"HILT confirms at its minimum severity", high, nil, "full", "action", hilt, "confirm"},
+		{"HILT does not confirm in observe mode", high, nil, "full", "observe", hilt, "alert"},
+		{"observe alerts instead of blocking", critical, nil, "full", "observe", nil, "alert"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fallbackGuardrailVerdictForThresholds(tc.local, tc.cisco, thresholds(tc.trust), tc.mode, tc.hilt)
+			if got.Action != tc.want {
+				t.Errorf("action = %q, want %q", got.Action, tc.want)
+			}
+		})
 	}
 }

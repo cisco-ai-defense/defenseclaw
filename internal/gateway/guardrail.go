@@ -116,14 +116,37 @@ func guardrailFallbackActionForProfile(severity, profile string) string {
 	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
 }
 
-// fallbackGuardrailVerdictForThresholds applies resolved thresholds to a
-// verdict when no OPA policy decides; there is no human confirmation.
-func fallbackGuardrailVerdictForThresholds(v *ScanVerdict, thresholds policy.ThresholdsInput) *ScanVerdict {
+// fallbackGuardrailVerdictForThresholds applies the resolved thresholds to a
+// verdict when no OPA policy decides. It follows the same order as
+// guardrail.rego, so one config decides the same with or without the module:
+// observe mode alerts, an advisory Cisco block downgrades to alert, a Cisco
+// verdict at trust level none counts for nothing, and a confirm needs HILT.
+func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string, hilt *policy.GuardrailHILTInput) *ScanVerdict {
 	if v == nil {
 		return allowVerdict("fallback")
 	}
 	out := *v
-	out.Action = guardrailActionForRank(guardrailSeverityRank(out.Severity), thresholds.Block, thresholds.Alert, false, 0)
+	localRank := guardrailSeverityRank(v.Severity)
+	ciscoRank := 0
+	if cisco != nil && thresholds.CiscoTrustLevel != "none" {
+		ciscoRank = guardrailSeverityRank(cisco.Severity)
+	}
+	rank := max(localRank, ciscoRank)
+	switch {
+	case rank <= severityNone:
+		out.Action = guardrailActionAllow
+	case mode == "observe" && rank >= thresholds.Alert:
+		out.Action = guardrailActionAlert
+	case thresholds.CiscoTrustLevel == "advisory" && ciscoRank >= thresholds.Block && localRank < thresholds.Alert:
+		out.Action = guardrailActionAlert
+	default:
+		confirm := mode == "action" && hilt != nil && hilt.Enabled
+		hiltMin := severityHigh
+		if confirm {
+			hiltMin = guardrailSeverityRank(hilt.MinSeverity)
+		}
+		out.Action = guardrailActionForRank(rank, thresholds.Block, thresholds.Alert, confirm, hiltMin)
+	}
 	return &out
 }
 
@@ -1274,7 +1297,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		prepared = gen.OPA
 	}
 	if prepared == nil {
-		return fallbackGuardrailVerdictForThresholds(merged, thresholds)
+		return fallbackGuardrailVerdictForThresholds(merged, ciscoResult, thresholds, mode, g.hiltInput())
 	}
 
 	input := policy.GuardrailInput{
@@ -1312,7 +1335,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return fallbackGuardrailVerdictForThresholds(merged, thresholds)
+		return fallbackGuardrailVerdictForThresholds(merged, ciscoResult, thresholds, mode, g.hiltInput())
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 
