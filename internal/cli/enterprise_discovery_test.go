@@ -205,6 +205,7 @@ func TestEnterpriseDiscoveryShowsTheKernelBackend(t *testing.T) {
 		`{"kind":"native","kernel_floor":{"mode":"enforce","enrolled_users":1,"approval":"missing"}}`:                                       "kernel controls: monitoring 1 user; enforce is not approved yet",
 		`{"kind":"native","kernel_floor":{"mode":"enforce","enrolled_users":3,"approval":"stale"}}`:                                         "kernel controls: monitoring 3 users; the approval is for another build",
 		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":2,"burn_in_users":1,"next_ready_hours":20}}`: "kernel controls: enforcing 1 of 2 users; 1 in burn-in, next ready ~20 hours",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":1}}`:                                         "kernel controls: enforcing 1 of 1 user",
 		`{"kind":"native","customer_events":{"forwarded":1}}`:                                                                               "your Tetragon policies: 0 loaded (0 enforcing); 1 agent event forwarded (DefenseClaw never changes them)",
 	} {
 		var b enterpriseRuntimeBackend

@@ -136,7 +136,7 @@ def kernel_controls_line(floor: Mapping[str, Any] | None) -> str:
         return f"monitoring {_users(enrolled)}; enforce is not approved yet"
     if approval == "stale":
         return f"monitoring {_users(enrolled)}; the approval is for another build"
-    text = f"enforcing {_int(floor.get('enforced_users'))} of {enrolled} users"
+    text = f"enforcing {_int(floor.get('enforced_users'))} of {_users(enrolled)}"
     burning = _int(floor.get("burn_in_users"))
     if burning:
         text += f"; {burning} in burn-in"

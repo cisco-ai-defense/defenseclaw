@@ -268,7 +268,7 @@ func (b *enterpriseRuntimeBackend) lines() []string {
 		case floor.Approval == "stale":
 			text = "monitoring " + usersNoun(floor.EnrolledUsers) + "; the approval is for another build"
 		default:
-			text = fmt.Sprintf("enforcing %d of %d users", floor.EnforcedUsers, floor.EnrolledUsers)
+			text = fmt.Sprintf("enforcing %d of %s", floor.EnforcedUsers, usersNoun(floor.EnrolledUsers))
 			if floor.BurnInUsers > 0 {
 				text += fmt.Sprintf("; %d in burn-in", floor.BurnInUsers)
 				if eta := readyETA(floor.NextReadyHours); eta != "" {

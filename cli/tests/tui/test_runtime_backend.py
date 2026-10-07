@@ -159,7 +159,7 @@ def test_kernel_controls_say_when_enforce_is_not_approved_and_when_the_eta_is_kn
     assert "next ready ~20 hours" in _lines(next_ready_hours=20)[1]
     assert _lines(next_ready_hours=0)[1].endswith("1 in burn-in")  # no estimate yet ("measuring")
     assert _lines(burn_in_users=0)[1] == "kernel controls: enforcing 2 of 3 users"
-    assert _lines(enforced_users=1, enrolled_users=1, burn_in_users=0)[1] == "kernel controls: enforcing 1 of 1 users"
+    assert _lines(enforced_users=1, enrolled_users=1, burn_in_users=0)[1] == "kernel controls: enforcing 1 of 1 user"
     assert _lines(approval="missing")[1] == "kernel controls: monitoring 3 users; enforce is not approved yet"
     assert _lines(approval="stale")[1] == "kernel controls: monitoring 3 users; the approval is for another build"
 
