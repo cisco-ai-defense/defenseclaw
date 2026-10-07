@@ -691,6 +691,49 @@ func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
 		result.Record.Conflicts[0].To != "guardrail.block_at" || !strings.HasSuffix(result.Record.Conflicts[0].Lost, ":MEDIUM") {
 		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
 	}
+
+	// v8 guardrail.rego gave the OpenClaw proxy the data.json levels whatever
+	// openclaw's own pack or alert_at; v9 resolves the proxy for openclaw. Its
+	// looser permissive pack must not loosen the strict block level, and its
+	// own alert_at wins as a recorded conflict.
+	policyDir := filepath.Join(dir, "policies")
+	dataJSON = filepath.Join(policyDir, "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": 2, "alert_threshold": 1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  connector: openclaw\n  rule_pack_dir: " +
+		filepath.Join(policyDir, "guardrail", "strict") + "\n  connectors:\n    openclaw:\n      rule_pack_dir: " +
+		filepath.Join(policyDir, "guardrail", "permissive") + "\n      alert_at: HIGH\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, DryRun: true})
+	if err != nil {
+		t.Fatalf("MigrateV9 (proxy connector): %v", err)
+	}
+	var doc struct {
+		Guardrail struct {
+			BlockAt    string `yaml:"block_at"`
+			Connectors map[string]struct {
+				BlockAt string `yaml:"block_at"`
+				AlertAt string `yaml:"alert_at"`
+			} `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	openclaw := doc.Guardrail.Connectors["openclaw"]
+	if doc.Guardrail.BlockAt != "" || openclaw.BlockAt != "MEDIUM" || openclaw.AlertAt != "HIGH" {
+		t.Errorf("block_at global %q openclaw %q alert_at openclaw %q; want openclaw pinned to MEDIUM and its HIGH kept:\n%s",
+			doc.Guardrail.BlockAt, openclaw.BlockAt, openclaw.AlertAt, result.Migrated)
+	}
+	if c := result.Record.Conflicts; len(c) != 1 || c[0].To != "guardrail.connectors.openclaw.alert_at" || !strings.HasSuffix(c[0].Lost, ":LOW") {
+		t.Errorf("conflicts = %+v; want openclaw's alert_at over the data.json LOW", c)
+	}
 }
 
 // TestMigrateV9NamesTheActionsAHostWithoutDataJSONDropped: a managed layout

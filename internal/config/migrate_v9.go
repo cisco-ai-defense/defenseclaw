@@ -1422,6 +1422,18 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		guardrail = v8YAMLMapValue(root, "guardrail")
 		m.pinStricterScopePostures(guardrail, item.key, *item.value)
 	}
+	for _, item := range []struct {
+		key     string
+		value   *int
+		shipped int
+	}{
+		{"block_at", data.Guardrail.BlockThreshold, shippedBlock},
+		{"alert_at", data.Guardrail.AlertThreshold, shippedAlert},
+	} {
+		if item.value != nil {
+			m.keepProxyConnectorLevel(root, item.key, *item.value, item.shipped)
+		}
+	}
 	if level := strings.TrimSpace(data.Guardrail.CiscoTrustLevel); level != "" && level != "full" {
 		v9Set(root, v9Scalar(level), "guardrail", "cisco_trust_level")
 		m.moved("data.json", "data.json:guardrail.cisco_trust_level", "guardrail.cisco_trust_level", level)
@@ -1434,6 +1446,86 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 			}
 		}
 	}
+}
+
+// keepProxyConnectorLevel keeps the data.json level the v8 LLM proxy enforced
+// for the connector it served. v8 guardrail.rego read only data.json, whatever
+// that connector's own pack or block_at said; v9 resolves the proxy's levels
+// for that connector (spec 2.2), so its guardrail.connectors entry would now
+// govern the proxy. Its own key still wins, as a recorded conflict. A pack
+// default looser than the data.json level is pinned at the connector, unless
+// the level is the shipped one, which was never a choice (as for the global
+// key). A connector that inherits the global key or pack is covered by the
+// global migration above.
+func (m *v9Migrator) keepProxyConnectorLevel(root *yaml.Node, key string, rank, shipped int) {
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	connector := v9ProxyConnector(root)
+	name, named := v9RankNames[rank]
+	if connector == "" || !named {
+		return
+	}
+	var scope v9NamedNode
+	for _, c := range v9ChildMappings(v8YAMLMapValue(guardrail, "connectors")) {
+		if normalizeConnectorKey(c.name) == connector {
+			scope = c
+			break
+		}
+	}
+	if scope.node == nil {
+		return
+	}
+	path := "guardrail.connectors." + scope.name
+	legacy := "data.json:guardrail." + strings.Replace(key, "_at", "_threshold", 1)
+	if set := strings.ToUpper(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, key)))); set != "" {
+		if rank < v9RankOf(set) {
+			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+				To: path + "." + key, Kept: "config:" + path + "." + key + ":" + set, Lost: legacy + ":" + name,
+				Reason: "the stricter data.json level applied to the " + connector + " LLM proxy; " + path + "." + key + " now applies to the proxy too",
+			})
+		}
+		return
+	}
+	posture := m.scopePackPosture(guardrail, scope.node)
+	if posture == "" || strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(guardrail, key))) != "" {
+		return
+	}
+	block, alert := v9PostureRanks(posture)
+	own := block
+	if key == "alert_at" {
+		own = alert
+	}
+	if own <= rank {
+		return
+	}
+	if rank == shipped {
+		m.note("data.json guardrail %s (%s) is the shipped value; the %s LLM proxy now follows the %s pack default of %s",
+			strings.Replace(key, "_at", "_threshold", 1), name, connector, posture, path)
+		return
+	}
+	v9Set(scope.node, v9Scalar(name), key)
+	m.moved("data.json", legacy, path+"."+key, name)
+	m.note("%s.%s is set to the data.json level (%s) the %s LLM proxy enforced, so the %s pack default (%s) does not loosen the proxy; it now applies to that connector's hook prompts and tool calls too",
+		path, key, name, connector, posture, v9RankNames[own])
+}
+
+// v9ProxyConnector is the connector the v8 LLM proxy served:
+// guardrail.connector, else claw.mode, else openclaw (the gateway's
+// configuredConnectorName and resolveActiveConnector), when it is a built-in
+// proxy connector (proxyShouldBindForConfiguredConnector). It is "" for a
+// hook connector, whose traffic never reached the proxy, so data.json never
+// applied to it (and for a plugin connector, which is not resolved here).
+func v9ProxyConnector(root *yaml.Node) string {
+	name := normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "connector")))
+	if name == "" {
+		name = normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "claw"), "mode")))
+	}
+	switch name {
+	case "", "openclaw":
+		return "openclaw"
+	case "zeptoclaw":
+		return name
+	}
+	return ""
 }
 
 // pinStricterScopePostures keeps a connector or profile pack posture that is
