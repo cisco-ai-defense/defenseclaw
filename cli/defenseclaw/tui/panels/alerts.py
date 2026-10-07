@@ -363,6 +363,17 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
     if summary:
         detail_parts.append(f"summary={summary}")
     facts: list[tuple[str, str]] = []
+    if payload_text(payload, "defenseclaw.scan.scanner") == "codeguard":
+        location = payload_text(payload, "defenseclaw.finding.location") or (row.target or "")
+        file_path = location.replace("\\", "/")
+        if ":" in file_path and file_path.rsplit(":", 1)[1].isdigit():
+            file_path = file_path.rsplit(":", 1)[0]
+        if "/" in file_path and not file_path.startswith("<hashed"):
+            file_name = file_path.rsplit("/", 1)[1]
+            if target == file_name:
+                parent = file_path.rsplit("/", 2)[-2]
+                target = f"{parent}/{file_name}"
+                facts.append(("File", file_path))
     if row.connector:
         facts.append(("Connector", row.connector))
     rule_id = payload_text(payload, "defenseclaw.finding.rule_id")

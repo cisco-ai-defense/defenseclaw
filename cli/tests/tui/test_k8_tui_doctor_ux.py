@@ -46,3 +46,34 @@ def test_set_one_api_key_is_fully_masked_until_reveal() -> None:
     field = WizardFormField("Secret Value", "password", value="fake-short")
     assert render_wizard_value(field) == "********"
     assert render_wizard_value(field, reveal=True) == "fake-short"
+
+
+def test_codeguard_skill_alert_names_folder_and_file() -> None:
+    from datetime import datetime, timezone
+
+    from defenseclaw.tui.panels.alerts import _v8_alert_event
+    from defenseclaw.tui.services.v8_event_history import V8EventHistoryRow
+
+    path = "/home/user/.claude/skills/tf-skill-004/SKILL.md"
+    row = V8EventHistoryRow(
+        id="finding-1",
+        timestamp=datetime.now(timezone.utc),
+        bucket="security.finding",
+        event_name="finding.observed",
+        source="scanner",
+        severity="HIGH",
+        action="scan-finding",
+        actor="gateway",
+        details="",
+        connector="claudecode",
+        redaction_profile="sensitive",
+        target=path,
+        payload={
+            "defenseclaw.scan.scanner": "codeguard",
+            "defenseclaw.finding.target_ref": "SKILL.md",
+            "defenseclaw.finding.location": f"{path}:4",
+        },
+    )
+    alert = _v8_alert_event(row)
+    assert alert.target == "tf-skill-004/SKILL.md"
+    assert ("File", path) in alert.facts
