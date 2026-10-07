@@ -23578,6 +23578,20 @@ function Invoke-DefenseClawNuclearUninstall {
     #    console. Errors are swallowed - a service that is already gone or
     #    whose stop fails is fine; sc.exe delete marks the row for deletion
     #    regardless and the SCM pending-delete flag completes at reboot.
+    #
+    #    BEFORE sc stop: clear SCM failure actions and demote start= to
+    #    disabled. The managed services ship with FailureActionsOnNonCrash-
+    #    Failures=1 + a 5s/15s/60s restart schedule (see
+    #    Get-DefenseClawFailureActionsBytes). A nuclear sc stop that
+    #    hits SCM's stop-timeout, or a taskkill /F while SCM still has
+    #    the row, counts as a non-crash failure - SCM then respawns the
+    #    worker ~5s later while this function is still deleting files,
+    #    which lands us at Remove-Item "being used by another process"
+    #    and a surviving broker row at state=running on the probe below.
+    #    Clearing failure actions first makes sc stop + taskkill /F
+    #    terminal; demoting start= disabled makes the service row
+    #    inert even if `sc delete` has to wait on an open-handle
+    #    pending-delete flag.
     foreach ($name in @(
         $GatewayServiceName,
         $GuardianServiceName,
@@ -23585,6 +23599,12 @@ function Invoke-DefenseClawNuclearUninstall {
         $brokerName
     )) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $script:ScExe `
+            -Arguments @('failure', $name, 'reset=', '0', 'actions=', '')
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $script:ScExe `
+            -Arguments @('config', $name, 'start=', 'disabled')
         Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('stop', $name)
         Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('delete', $name)
     }
