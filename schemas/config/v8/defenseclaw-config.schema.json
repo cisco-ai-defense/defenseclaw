@@ -138,6 +138,24 @@
     "admission": {
       "$ref": "#/$defs/admission"
     },
+    "skill_actions": {
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
+    },
+    "mcp_actions": {
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
+    },
+    "plugin_actions": {
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
+    },
     "asset_policy": {
       "$ref": "#/$defs/assetPolicy"
     },
@@ -165,6 +183,13 @@
     },
     "observability": {
       "$ref": "#/$defs/observability"
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: the reserved empty section is read only as v8 migration input and rejected in a v9 source."
     },
     "ai_discovery": {
       "$ref": "#/$defs/aiDiscovery"
@@ -2043,6 +2068,27 @@
             "allow",
             "none"
           ]
+        }
+      }
+    },
+    "actionMatrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "critical": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "high": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "medium": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "low": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "info": {
+          "$ref": "#/$defs/severityAction"
         }
       }
     },
@@ -5525,6 +5571,10 @@
     "v9SourceConstraints": {
       "description": "Additional constraints for a config_version 9 source: removed v8 keys and v9-only value shapes.",
       "properties": {
+        "skill_actions": false,
+        "mcp_actions": false,
+        "plugin_actions": false,
+        "privacy": false,
         "observability": {
           "properties": {
             "trace_policy": {

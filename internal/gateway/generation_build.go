@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -168,8 +169,11 @@ func generationAssetFiles(cfg *config.Config) []string {
 			seen[filepath.Clean(path)] = struct{}{}
 		}
 	}
-	for _, path := range cfg.AIDiscovery.SignaturePacks {
-		add(path)
+	for _, entry := range cfg.AIDiscovery.SignaturePacks {
+		files, _ := inventory.SignaturePackEntry(entry)
+		for _, file := range files {
+			add(file)
+		}
 	}
 	add(cfg.AIDiscovery.ConfidencePolicyPath)
 	add(cfg.Scanners.SkillScanner.PolicyFile.Path)
@@ -267,6 +271,11 @@ func generationAssetDirs(cfg *config.Config, g *Generation) []string {
 			for _, scope := range profileRulePackScopes(derived.Config, tuned) {
 				addPack(scope.dir)
 			}
+		}
+	}
+	for _, entry := range cfg.AIDiscovery.SignaturePacks {
+		if _, watchDir := inventory.SignaturePackEntry(entry); watchDir != "" {
+			add(watchDir)
 		}
 	}
 	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {

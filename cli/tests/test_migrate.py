@@ -232,6 +232,23 @@ def test_v8_config_runs_the_go_v9_step(data_dir: Path, monkeypatch: pytest.Monke
     assert result.to_config_version == 9
 
 
+def test_secure_client_config_stays_on_v8_without_a_migration(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw import config_inspect
+
+    body = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\nobservability: {}\n"
+    config = _write_config(data_dir, body)
+    monkeypatch.setattr(
+        config_inspect, "migrate_config_v9", lambda **_kwargs: pytest.fail("a Secure Client config must not run the 8 -> 9 step")
+    )
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+
+    result = migrate(str(data_dir), from_version="1.0.0")
+
+    assert result.applied == []
+    assert result.to_config_version == 8
+    assert config.read_text(encoding="utf-8") == body
+
+
 def test_config_migrations_bump_the_version_line(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from defenseclaw import config as config_module
 

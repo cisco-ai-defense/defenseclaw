@@ -368,6 +368,18 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 	if version == nil || version.Decode(&number) != nil || number < ConfigVersionV9 {
 		return nil
 	}
+	for _, removed := range []struct{ key, target string }{
+		{"skill_actions", "admission.skill.actions"},
+		{"mcp_actions", "admission.mcp.actions"},
+		{"plugin_actions", "admission.plugin.actions"},
+	} {
+		if node := v8YAMLMapValue(root, removed.key); node != nil {
+			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
+		}
+	}
+	if node := v8YAMLMapValue(root, "privacy"); node != nil {
+		return v9RemovedKeyAction(source, "$.privacy", node, "remove it: config_version 9 has no privacy section")
+	}
 	if node := v8YAMLMapValue(v8YAMLMapValue(root, "watch"), "allow_list_bypass_scan"); node != nil {
 		return v9RemovedKeyError(source, "$.watch.allow_list_bypass_scan", node,
 			"admission.<type>.allow_list_bypass_scan")

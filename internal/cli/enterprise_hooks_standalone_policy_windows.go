@@ -144,14 +144,20 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 
 // enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows
 // machine policy and summary, re-checks the Claude Code version floor
-// drop-in (inside the lifecycle's Claude Code policy lock) and reconciles
-// the WSL agent-session registry policy. Failure is
+// drop-in (inside the lifecycle's Claude Code policy lock), reconciles
+// the WSL agent-session registry policy and retires the runtime selections
+// of users the machine policies no longer enroll. Failure is
 // reported, not fatal: rows that depend on the policy (Copilot) fail their
 // own verification, and `enterprise policy verify` reports a missing floor.
 func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	opts, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
 		return
+	}
+	// After this pass's revocations and before any row: a deferred row
+	// whose SID kept a selection would fail its pending proof (GAP-0262).
+	if retireErr := enterprisehooks.RetireWindowsUnregisteredRuntimeSelections(); retireErr != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks (Windows): runtime selections of unenrolled users: %v\n", retireErr)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)

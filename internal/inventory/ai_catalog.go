@@ -257,6 +257,30 @@ func CheckSignaturePackPins(cfg *config.Config) error {
 	return nil
 }
 
+// SignaturePackEntry resolves one ai_discovery.signature_packs entry the way
+// the loader does (a ~ path, a directory of *.json, a glob). files are the
+// pack files it names now (a plain path stays listed while the file is not
+// there yet); watchDir is the folder a new pack would appear in, "" for an
+// entry that names one file.
+func SignaturePackEntry(entry string) (files []string, watchDir string) {
+	home, _ := platformDiscoveryHomeDir()
+	files, _ = expandSignaturePackCandidate(entry, home)
+	expanded := expandHome(entry, home)
+	if info, err := os.Stat(expanded); err == nil && info.IsDir() {
+		return files, filepath.Clean(expanded)
+	}
+	if hasGlobMeta(expanded) {
+		if dir := filepath.Dir(expanded); !hasGlobMeta(dir) {
+			return files, filepath.Clean(dir)
+		}
+		return files, ""
+	}
+	if len(files) == 0 && expanded != "" {
+		files = []string{expanded}
+	}
+	return files, ""
+}
+
 // Signature data added to the embedded catalog after 1.0.0. The Secure Client
 // profile keeps the catalog of 1.0.0 (issue #1092), so secureClientSignatures
 // removes it there.

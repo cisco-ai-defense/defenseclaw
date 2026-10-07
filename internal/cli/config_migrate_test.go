@@ -123,8 +123,8 @@ func TestConfigMigrateResolvesCredentialsFromDotEnv(t *testing.T) {
 	}
 }
 
-// A Secure Client config stays on config_version 8: `config migrate` refuses
-// it and writes nothing (GAP-0110, issue #1092).
+// A Secure Client config stays on config_version 8: `config migrate` succeeds
+// without writing anything (GAP-0110, issue #1092).
 func TestConfigMigrateLeavesASecureClientConfigUnchanged(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
@@ -137,8 +137,8 @@ func TestConfigMigrateLeavesASecureClientConfigUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	configMigratePath, configMigrateTo = path, config.ConfigVersionV9
-	if err := configMigrateCmd.RunE(configMigrateCmd, nil); err == nil {
-		t.Fatal("config migrate accepted a Secure Client config")
+	if err := configMigrateCmd.RunE(configMigrateCmd, nil); err != nil {
+		t.Fatalf("config migrate failed on a Secure Client config: %v", err)
 	}
 	entries, _ := os.ReadDir(dir)
 	if raw, _ := os.ReadFile(path); string(raw) != string(v8) || len(entries) != 1 {

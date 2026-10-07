@@ -201,6 +201,18 @@ def test_config_get_effective_resolves_pack_levels_and_the_scanner_gate(
         )
     assert block.exit_code == 0, block.output
     assert block.stdout == "MEDIUM\n" and "pack-default:strict" in block.stderr
+    # An unset level or trust level prints what applies, not a blank default.
+    with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
+        plain = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.block_at"])
+        trust = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.cisco_trust_level"])
+        config_path.write_text(
+            "config_version: 9\ngateway: {}\nobservability: {}\nguardrail: {cisco_trust_level: advisory}\n",
+            encoding="utf-8",
+        )
+        set_trust = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.cisco_trust_level", "--effective"])
+    assert plain.stdout == "MEDIUM\n" and "pack-default:strict" in plain.stderr
+    assert trust.stdout == "full\n" and "builtin" in trust.stderr
+    assert set_trust.stdout == "advisory\n" and "config:guardrail.cisco_trust_level" in set_trust.stderr
     assert skill.exit_code == 0, skill.output
     assert json.loads(skill.stdout) == {
         "critical": "quarantine", "high": "warn", "medium": "warn", "low": "allow", "info": "allow"
