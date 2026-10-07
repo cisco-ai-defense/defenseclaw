@@ -583,6 +583,45 @@ func TestKernelStatusIsReadKeptAndBackedOff(t *testing.T) {
 	direct.RecordHookDecision(HookDecision{CommandHash: "x"})
 }
 
+// TestKernelHitsAreCountedOverTheLastHour pins KernelState's hour counts:
+// the first read is a baseline, later reads add the growth of the helper's
+// totals, a restarted helper counts from zero, and growth older than an hour
+// leaves the counts.
+func TestKernelHitsAreCountedOverTheLastHour(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_760_000_000, 0)
+	acquirer := &kernelAcquirer{source: newFake(fullCoverage())}
+	service := newBrokeredService(t, acquirer, &now)
+	ctx := context.Background()
+	read := func(advance time.Duration, wouldBlock, blocked int64) *KernelState {
+		t.Helper()
+		now = now.Add(advance)
+		acquirer.status = acquire.KernelStatus{Available: true, Mode: "enforce",
+			Counters: map[string]int64{"would_block_total": wouldBlock, "blocked_total": blocked}}
+		service.refreshKernelState(ctx)
+		return service.Snapshot().Kernel
+	}
+	for _, step := range []struct {
+		advance                  time.Duration
+		totalWould, totalBlocked int64
+		wantWould, wantBlocked   int64
+		why                      string
+	}{
+		{0, 9, 4, 0, 0, "the first read is the baseline"},
+		{10 * time.Minute, 11, 5, 2, 1, "growth since the baseline"},
+		{10 * time.Minute, 11, 8, 2, 4, "more denials"},
+		{10 * time.Minute, 1, 0, 3, 4, "a restarted helper counts from zero"},
+		{45 * time.Minute, 1, 0, 1, 3, "the first growth is older than an hour"},
+		{2 * time.Hour, 1, 0, 0, 0, "nothing in the last hour"},
+	} {
+		state := read(step.advance, step.totalWould, step.totalBlocked)
+		if state.WouldBlockLastHour != step.wantWould || state.BlockedLastHour != step.wantBlocked {
+			t.Fatalf("%s: would-block %d blocked %d, want %d %d", step.why, state.WouldBlockLastHour, state.BlockedLastHour,
+				step.wantWould, step.wantBlocked)
+		}
+	}
+}
+
 // TestSessionsAreScoredWithTheirRootFacts pins the identity a host-plane
 // finding carries for its records (12.1).
 func TestSessionsAreScoredWithTheirRootFacts(t *testing.T) {

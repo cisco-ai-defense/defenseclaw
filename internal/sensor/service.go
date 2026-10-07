@@ -163,6 +163,11 @@ type Service struct {
 	kernelReader  kernelStatusReader
 	kernel        *KernelState
 	kernelNextTry time.Time
+	// kernelHits is the growth of the helper's hit totals per read over the
+	// last hour, and kernelHitTotals the previous read's totals (both under
+	// mu): KernelState's hour counts.
+	kernelHits      []kernelHitGrowth
+	kernelHitTotals *[2]int64
 	// lastContainerEvents is the container-event count at the previous
 	// poll, for the per-cycle figure. Poll owns it (pollMu).
 	lastContainerEvents int64
@@ -397,6 +402,7 @@ func (s *Service) refreshKernelState(ctx context.Context) {
 		// A helper that predates the op: nothing to report, and nothing to
 		// infer about kernel policies it cannot load.
 		s.kernel = nil
+		s.kernelHits, s.kernelHitTotals = nil, nil
 		s.kernelNextTry = now.Add(kernelStatusUnsupportedRetry)
 	case err != nil:
 		state := KernelState{}
@@ -410,8 +416,64 @@ func (s *Service) refreshKernelState(ctx context.Context) {
 		state.Error = boundedError(err)
 		s.kernel = &state
 	default:
-		s.kernel = &KernelState{Status: status, FetchedAt: now, Reachable: true}
+		wouldBlock, blocked := s.noteKernelHits(now, status.Counters)
+		s.kernel = &KernelState{Status: status, FetchedAt: now, Reachable: true,
+			WouldBlockLastHour: wouldBlock, BlockedLastHour: blocked}
 	}
+}
+
+// kernelHitWindow is how far back KernelState's hour counts look;
+// maxKernelHitReads bounds the reads kept for them (a read with no growth is
+// not kept).
+const (
+	kernelHitWindow   = time.Hour
+	maxKernelHitReads = 4096
+)
+
+// kernelHitGrowth is how much the helper's hit totals grew since the read
+// before.
+type kernelHitGrowth struct {
+	at                  time.Time
+	wouldBlock, blocked int64
+}
+
+// noteKernelHits records a read's growth of the helper's would_block_total
+// and blocked_total and returns their sums over the last hour. The first
+// read is the baseline. The caller holds mu.
+func (s *Service) noteKernelHits(now time.Time, counters map[string]int64) (wouldBlock, blocked int64) {
+	totals := [2]int64{counters["would_block_total"], counters["blocked_total"]}
+	if previous := s.kernelHitTotals; previous != nil {
+		growth := kernelHitGrowth{at: now, wouldBlock: counterGrowth(previous[0], totals[0]), blocked: counterGrowth(previous[1], totals[1])}
+		if growth.wouldBlock > 0 || growth.blocked > 0 {
+			s.kernelHits = append(s.kernelHits, growth)
+		}
+	}
+	s.kernelHitTotals = &totals
+	cut := now.Add(-kernelHitWindow)
+	kept := s.kernelHits[:0]
+	for _, growth := range s.kernelHits {
+		if growth.at.After(cut) {
+			kept = append(kept, growth)
+		}
+	}
+	if len(kept) > maxKernelHitReads {
+		kept = kept[len(kept)-maxKernelHitReads:]
+	}
+	s.kernelHits = kept
+	for _, growth := range kept {
+		wouldBlock += growth.wouldBlock
+		blocked += growth.blocked
+	}
+	return wouldBlock, blocked
+}
+
+// counterGrowth is how much a since-start counter grew; one that went down
+// was restarted and counts from zero.
+func counterGrowth(previous, current int64) int64 {
+	if current < previous {
+		return current
+	}
+	return current - previous
 }
 
 // boundedError is an error's text cut to a status-sized length.

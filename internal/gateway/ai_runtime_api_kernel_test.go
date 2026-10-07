@@ -52,6 +52,7 @@ func sortedKeys(object map[string]interface{}) []string {
 func enforcingKernelState() *sensor.KernelState {
 	return &sensor.KernelState{
 		Reachable: true, FetchedAt: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC),
+		WouldBlockLastHour: 5, BlockedLastHour: 2,
 		Status: acquire.KernelStatus{
 			Available: true, Mode: "enforce", KernelPolicy: "sha256:3f9c2a7d41b0", Applied: true,
 			Users: []acquire.KernelUserStatus{
@@ -110,6 +111,24 @@ func TestRenderCarriesTheTetragonBackendOnPlaneC(t *testing.T) {
 	if floor["mode"] != "enforce" || floor["enrolled_users"] != float64(3) || floor["enforced_users"] != float64(1) ||
 		floor["burn_in_users"] != float64(1) || floor["paused_until"] != "2026-10-07T14:05:00Z" {
 		t.Fatalf("kernel_floor = %v", floor)
+	}
+	// The TUI's "blocks (1h)" line and who paused (5.8).
+	if floor["blocked_1h"] != float64(2) || floor["would_block_1h"] != float64(5) || floor["paused_by"] != kernelAccountName(0) {
+		t.Fatalf("kernel_floor hour counts or paused_by = %v", floor)
+	}
+	resumed := enforcingKernelState()
+	resumed.Status.Pause = nil
+	if floor := renderKernelFloor(resumed); floor.PausedBy != "" || floor.PausedUntil != "" {
+		t.Fatalf("paused_by without a pause: %+v", floor)
+	}
+}
+
+// TestKernelAccountNameFallsBackToTheUID: a uid NSS does not know reads as
+// "uid N", never empty.
+func TestKernelAccountNameFallsBackToTheUID(t *testing.T) {
+	t.Parallel()
+	if got := kernelAccountName(2147483641); got != "uid 2147483641" {
+		t.Fatalf("kernelAccountName = %q", got)
 	}
 }
 

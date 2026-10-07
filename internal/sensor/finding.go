@@ -197,6 +197,14 @@ type KernelState struct {
 	UnreachableSince time.Time
 	// Error is the latest read's failure, content-free.
 	Error string
+	// WouldBlockLastHour and BlockedLastHour are the would-block hits and
+	// denials of DefenseClaw's kernel controls in the hour before FetchedAt,
+	// for every user on the host: the growth of the helper's
+	// would_block_total and blocked_total across the reads of that hour (a
+	// total that went down, a restarted helper, counts from zero). In the
+	// gateway's first hour they cover only the time since it started.
+	WouldBlockLastHour int64
+	BlockedLastHour    int64
 }
 
 // ProviderReach is one attributed egress peer.

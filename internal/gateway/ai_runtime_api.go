@@ -25,9 +25,11 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	osuser "os/user"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
@@ -264,6 +266,14 @@ type aiRuntimeKernelFloor struct {
 	// Approval is enforce_ack's state as the helper reports it: not_needed,
 	// missing, stale or approved.
 	Approval string `json:"approval,omitempty"`
+	// PausedBy names who set an active pause: the account name of the
+	// pause record's uid, or "uid N" when it does not resolve.
+	PausedBy string `json:"paused_by,omitempty"`
+	// BlockedLastHour and WouldBlockLastHour are the controls' denials and
+	// would-block hits for every user on the host in the last hour (since
+	// the gateway started, when that is less).
+	BlockedLastHour    int64 `json:"blocked_1h"`
+	WouldBlockLastHour int64 `json:"would_block_1h"`
 	// NextReadyHours is the calendar time, in hours, until the user closest
 	// to the end of burn-in is ready at the rate so far (the rule tetragon
 	// verify prints); absent when nobody is in burn-in and while every
@@ -489,6 +499,10 @@ func renderKernelFloor(kernel *sensor.KernelState) *aiRuntimeKernelFloor {
 	floor := &aiRuntimeKernelFloor{
 		Mode: kernel.Status.Mode, EnrolledUsers: len(kernel.Status.Users),
 		PausedUntil: kernelPauseUntil(kernel.Status.Pause), Approval: kernel.Status.Approval,
+		BlockedLastHour: kernel.BlockedLastHour, WouldBlockLastHour: kernel.WouldBlockLastHour,
+	}
+	if floor.PausedUntil != "" && floor.PausedUntil != "resumed" {
+		floor.PausedBy = kernelAccountName(kernel.Status.Pause.SetByUID)
 	}
 	for _, user := range kernel.Status.Users {
 		switch user.Mode {
@@ -535,8 +549,26 @@ func kernelNextReadyHours(users []acquire.KernelUserStatus, now time.Time) *floa
 	return next
 }
 
+// kernelAccountName is a uid's account name through NSS, cached, else
+// "uid N".
+var kernelAccountName = func(uid int) string {
+	if cached, ok := kernelAccountNames.Load(uid); ok {
+		return cached.(string)
+	}
+	name := "uid " + strconv.Itoa(uid)
+	if account, err := osuser.LookupId(strconv.Itoa(uid)); err == nil && account.Username != "" {
+		name = account.Username
+	}
+	kernelAccountNames.Store(uid, name)
+	return name
+}
+
+var kernelAccountNames sync.Map
+
 // kernelPauseUntil renders a break-glass pause's end: a UTC time, "reboot"
-// for --until-reboot, or "" when there is no pause.
+// for --until-reboot, "resumed" for a pause file the helper cannot trust (a
+// pause too: enforcement stays off until tetragon resume removes the file),
+// or "" when there is no pause.
 func kernelPauseUntil(pause *acquire.KernelPause) string {
 	switch {
 	case pause == nil:
