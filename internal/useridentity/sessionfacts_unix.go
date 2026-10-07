@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -33,9 +34,30 @@ const (
 	klistTimeout   = kcmCallTimeout
 	maxKlistOutput = 64 << 10
 	klistWaitDelay = 100 * time.Millisecond
+	// sessionFactsDeadline bounds the whole read; the KCM call and klist
+	// finish well inside it.
+	sessionFactsDeadline = kcmCallTimeout + time.Second
 )
 
+// currentSessionFactsHeader gives up after sessionFactsDeadline and sends the
+// session variables alone. A credential cache, or the home holding the facts
+// cache, on a network or FUSE mount that stopped answering blocks in the
+// kernel, where nothing can interrupt it; that read is left to finish on its
+// own, so the hook still answers inside the agent's deadline.
 func currentSessionFactsHeader(now time.Time) string {
+	done := make(chan string, 1)
+	go func() { done <- readSessionFactsHeader(now) }()
+	timer := time.NewTimer(sessionFactsDeadline)
+	defer timer.Stop()
+	select {
+	case header := <-done:
+		return header
+	case <-timer.C:
+		return EncodeSessionFactsHeader(ClaimedSessionHeader{Session: SessionFromSSHEnv(os.Getenv)})
+	}
+}
+
+func readSessionFactsHeader(now time.Time) string {
 	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
 	kind, residual := SplitCCacheName(ccname)
 	mtime := ccacheModTime(kind, residual)
@@ -261,18 +283,31 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// openRegularFile opens path for reading if it is a regular file, or returns
+// nil. The path comes from the user's KRB5CCNAME: opened non-blocking, a
+// FIFO with no writer cannot hold the hook, and the type is checked on the
+// open descriptor, so a path swapped after a check cannot either.
+func openRegularFile(path string) *os.File {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil
+	}
+	return file
+}
+
 func readFileCCachePrincipal(path string) string {
 	if path == "" || !filepath.IsAbs(path) {
 		return ""
 	}
-	file, err := os.Open(path)
-	if err != nil {
+	file := openRegularFile(path)
+	if file == nil {
 		return ""
 	}
 	defer file.Close()
-	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
 	principal, err := ParseFileCCachePrincipal(file)
 	if err != nil {
 		return ""
@@ -286,7 +321,12 @@ func readDirCCachePrincipal(residual string) string {
 	if strings.HasPrefix(residual, ":") {
 		return readFileCCachePrincipal(strings.TrimPrefix(residual, ":"))
 	}
-	data, err := os.ReadFile(filepath.Join(residual, "primary"))
+	file := openRegularFile(filepath.Join(residual, "primary"))
+	if file == nil {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 257))
+	_ = file.Close()
 	if err != nil || len(data) > 256 {
 		return ""
 	}

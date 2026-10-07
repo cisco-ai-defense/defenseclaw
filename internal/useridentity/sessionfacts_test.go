@@ -168,3 +168,34 @@ func TestShellHookSendsTheCachedKerberosPrincipal(t *testing.T) {
 		t.Fatalf("shell hook sent %q (%v), want the cached %q", out, err, want)
 	}
 }
+
+// GAP-0299: KRB5CCNAME is the user's. A FIFO it names, as a FILE: cache or
+// a DIR: collection's primary file, has no writer, and waiting on it held
+// every hook past the agent's deadline, so the tool call ran uninspected.
+func TestSessionFactsDoNotWaitOnAFIFOCredentialCache(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks read the logon session in-process")
+	}
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "primary")
+	if out, err := exec.Command("mkfifo", fifo).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %v %s", err, out)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.1 22")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("XDG_SESSION_ID", "")
+	for _, ccname := range []string{"FILE:" + fifo, "DIR:" + dir} {
+		t.Setenv("KRB5CCNAME", ccname)
+		done := make(chan string, 1)
+		go func() { done <- currentSessionFactsHeader(time.Now()) }()
+		select {
+		case got := <-done:
+			if got != "v1;k=ssh;ca=192.0.2.10" {
+				t.Fatalf("%s: header = %q, want the SSH facts alone", ccname, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: the session facts read waited on a FIFO", ccname)
+		}
+	}
+}
