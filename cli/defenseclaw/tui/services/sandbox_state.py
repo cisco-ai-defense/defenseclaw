@@ -543,13 +543,17 @@ class SandboxRow:
 
     @property
     def alert_badge(self) -> str:
+        return self.badge()
+
+    def badge(self, *, short: bool = False) -> str:
+        """The Alerts cell; ``short`` (a narrow table) says unreachable as `sandbox list` does (GAP-0163)."""
         parts = []
         if self.tampered:
             parts.append("tamper")
         if self.nested_repos:
             parts.append("nested repo")
         if self.hooks_unreachable:
-            parts.append("hooks unreachable")
+            parts.append("unreachable" if short else "hooks unreachable")
         if self.hook_failed:
             parts.append("hook errors")
         if self.hooks_silent:
@@ -557,6 +561,24 @@ class SandboxRow:
         if self.orphaned:
             parts.append("orphaned")
         return ", ".join(parts) or "-"
+
+
+def _fit_last_cell(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
+) -> tuple[tuple[str, ...], ...]:
+    """Rows whose last cell (Alerts) ends in "…" where the other columns leave
+    it too little of ``width``: the screen edge cut "hooks unreachable" to
+    "hooks unre" at 80x24 (GAP-0163). DataTable pads every cell by one
+    column a side; the last column's right pad may be cut."""
+    if width <= 0 or not rows:
+        return rows
+    widths = [max(map(len, column)) for column in zip(columns, *rows, strict=True)]
+    room = max(len(columns[-1]), width - sum(cells + 2 for cells in widths[:-1]) - 1)
+    if widths[-1] <= room:
+        return rows
+    return tuple(
+        (*row[:-1], row[-1] if len(row[-1]) <= room else row[-1][: room - 1].rstrip(" ,") + "…") for row in rows
+    )
 
 
 def _tool_calls_text(row: SandboxRow) -> str:
@@ -1697,7 +1719,8 @@ class SandboxesPanelModel:
             return f"  ({ADMIN_UNBLOCK_IGNORED})"
         return "  (u unblocks)" if row.unblockable else ""
 
-    def data_table_rows(self, compact: bool = False) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, compact: bool = False, width: int = 0) -> tuple[tuple[str, ...], ...]:
+        """``width`` (cells the table may use, 0 = unknown) cuts the Sandboxes view's Alerts cells to fit."""
         if self.view == "activity":
             return tuple(
                 (row.time_text, row.sandbox or "-", row.glyph, row.summary + self._feed_suffix(row))
@@ -1728,7 +1751,7 @@ class SandboxesPanelModel:
                 for ask in self.asks
             )
         if compact:
-            return tuple(
+            rows = tuple(
                 (
                     row.name,
                     row.phase or "-",
@@ -1736,25 +1759,27 @@ class SandboxesPanelModel:
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),
+                    row.badge(short=True),
+                )
+                for row in self.rows
+            )
+        else:
+            rows = tuple(
+                (
+                    row.name,
+                    row.phase or "-",
+                    row.harness_label,
+                    row.policy_label,
+                    row.workdir_mode or "-",
+                    row.uptime_text,
+                    str(row.destinations),
+                    str(row.blocked),
+                    _tool_calls_text(row),
                     row.alert_badge,
                 )
                 for row in self.rows
             )
-        return tuple(
-            (
-                row.name,
-                row.phase or "-",
-                row.harness_label,
-                row.policy_label,
-                row.workdir_mode or "-",
-                row.uptime_text,
-                str(row.destinations),
-                str(row.blocked),
-                _tool_calls_text(row),
-                row.alert_badge,
-            )
-            for row in self.rows
-        )
+        return _fit_last_cell(self.data_table_columns(compact), rows, width)
 
     def empty_state(self) -> str:
         if self.view == "activity":

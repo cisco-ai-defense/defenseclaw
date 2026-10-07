@@ -1927,6 +1927,22 @@ def test_unreachable_hooks_are_an_alert_and_a_toast() -> None:
     refused = decode_sandbox({**RUNNING, "hooks": {"ingress_refused": 2}})
     assert refused is not None and any("refused 2 hook request(s)" in alert for alert in refused.alerts)
 
+
+def test_the_alerts_cell_fits_a_narrow_table() -> None:
+    # GAP-0163: at 80x24 the screen edge cut "hooks unreachable" to "hooks
+    # unre". The narrow table says unreachable as `sandbox list` does, and a
+    # cell that still does not fit ends in "…".
+    model = _model()
+    sandbox = {**RUNNING, "name": "myapp-opencode", "nested_repos": [], "hooks": {"unreachable": True}}
+    model.set_snapshot(STATUS, [sandbox], [])
+    columns = model.data_table_columns(compact=True)
+    assert model.data_table_rows(compact=True)[0][-1] == "unreachable"
+    for width, cell in ((70, "unreacha…"), (74, "unreachable")):
+        rows = model.data_table_rows(compact=True, width=width)
+        assert rows[0][-1] == cell
+        assert sum(max(map(len, column)) + 2 for column in zip(columns, *rows, strict=True)) - 1 <= width
+    assert model.data_table_rows(width=200)[0][-1] == "hooks unreachable"
+
     model = _model()
     unreachable = (
         "⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (why). "
