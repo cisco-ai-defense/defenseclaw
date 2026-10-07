@@ -201,6 +201,8 @@ func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
 		Reason:     "matched admin@example.com",
 		WouldBlock: true,
 		ElapsedMs:  42,
+		// An SSSD fully qualified home directory holds the user principal.
+		RulePackDir: "/home/alice@corp.example/.defenseclaw/policies/guardrail/default",
 	})
 
 	events, err := store.ListEvents(10)
@@ -231,6 +233,14 @@ func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
 	}
 	if got.Structured["reason"] != "matched admin@example.com" {
 		t.Fatalf("default-none route changed source reason: %#v", got.Structured["reason"])
+	}
+	// The directory is a path: it has its own column and path-class field, and
+	// is not repeated in the free-form text a redaction profile cannot see into.
+	if !strings.HasSuffix(got.RulePackDir, "/policies/guardrail/default") {
+		t.Fatalf("rule_pack_dir column = %q", got.RulePackDir)
+	}
+	if _, repeated := got.Structured["rule_pack_dir"]; repeated || strings.Contains(got.Details, "alice@corp.example") {
+		t.Fatalf("rule-pack directory repeated in the envelope text: %#v / %q", got.Structured, got.Details)
 	}
 }
 

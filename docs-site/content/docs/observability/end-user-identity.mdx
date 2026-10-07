@@ -26,8 +26,8 @@ gateway's service account is not the person running the AI agent.
 | `defenseclaw.user.tenant_id` | Cloud directory tenant, for an Entra-joined Windows account. |
 | `defenseclaw.user.identity.source` | The OS facility that resolved the directory facts. |
 | `defenseclaw.user.principal.assurance` | `verified` when the gateway or the root guardian resolved the facts, `claimed` when only the hook reported them (`defenseclaw.user.identity.source` is then `hook_reported`). |
-| `defenseclaw.session.kind` | Login session of the agent: `local`, `ssh`, `rdp` or `console`. Reported when the session has the same assurance as the directory facts. |
-| `client.address` | The client address of an SSH or remote session, reported with the session kind. |
+| `defenseclaw.session.kind` | Login session of the agent: `local`, `ssh`, `rdp` or `console`. Reported when the session has the same assurance as the directory facts. Only Linux verifies a session, so Windows and macOS records of a resolved user omit it. |
+| `client.address` | The client address of an SSH or remote session, reported with the session kind (so it is absent on Windows and macOS records too). |
 | `defenseclaw.session.kerberos_principal` | The principal of the login session's Kerberos ticket cache. Always claimed. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.agent.identity.id` | The agent's own stable identity (`agt-`), one per connector install, user and machine. |
 | `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The [guardrail profile](/docs/guardrail/user-and-group-policies) that decided the request, its policy digest, why it was chosen, and the matching group. |
@@ -150,9 +150,10 @@ connector evidence leaves the field absent.
 <Callout type="warn" title="Email is preserved as plaintext">
 `defenseclaw.user.email` is a sensitive, high-cardinality identifier. When the
 option is enabled, it may be sent as plaintext to configured destinations,
-including the managed AI Defense destination. V8 redaction profiles preserve
-identifier fields and cannot redact this address. Keep the default off unless
-the destination and your privacy policy explicitly allow it.
+including the managed AI Defense destination. Only the `strict` profile (and a
+custom profile that extends it) removes this address; `none`, `sensitive` and
+`content` keep it. Keep the default off unless the destination and your privacy
+policy explicitly allow it.
 </Callout>
 
 For Codex and Claude Code, join a hook event to the latest `ai.discovery` row
@@ -174,8 +175,12 @@ ai_discovery:
   include_user_principal: true
 ```
 
-Like the email, the principal is an identifier, so v8 redaction profiles keep
-it. Enable it only when every selected destination may receive it.
+The option applies to the whole gateway. The `strict` redaction profile (and a
+custom profile that extends it) removes the principal, the Kerberos principal, the
+client address, the tenant ID and the email from what a destination receives;
+`none`, `sensitive` and `content` keep them. To send principals to a trusted local
+Loki but not to a SaaS destination such as Galileo, turn the option on and select
+`strict` for the destination that must not receive them.
 
 The option governs the two principal attributes only. On a Linux host that
 joined a directory with SSSD fully qualified names
@@ -185,8 +190,13 @@ contains the UPN inside that path whatever this option says. The rule-pack
 directory of a hook decision, health errors and the AI discovery roots do, and so
 does `defenseclaw-gateway audit export`. Paths are the `path` field class: the
 `sensitive` and `content` profiles hash them, `strict` removes them, and the
-default profile `none` keeps them. Apply a path-redacting profile to a
-destination that must not learn the account's directory name, as in
+default profile `none` keeps them. The rule-pack directory of a hook decision is
+a path field of its own, in the record and in the `rule_pack_dir` column of
+`audit export`, so those profiles reach it. Free text is not path-aware: a
+command line, tool argument or prompt that names the home directory keeps it
+under `sensitive`, which detects email addresses but not an account name inside
+a path; `content` and `strict` replace or remove that text. Apply one of them to
+a destination that must not learn the account's directory name, as in
 [Redaction](/docs/observability/redaction).
 
 See [AI Discovery](/docs/ai-discovery) for profile inventory, the

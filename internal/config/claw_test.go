@@ -1011,6 +1011,9 @@ func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 	if got := cfg.ConnectorHomeDir("opencode"); strings.Contains(got, "openclaw-home") {
 		t.Errorf("ConnectorHomeDir(opencode) leaked OpenClaw home: %q", got)
 	}
+	if got, want := cfg.ConnectorHomeDir("kiro"), filepath.Join(home, ".kiro"); got != want {
+		t.Errorf("ConnectorHomeDir(kiro) = %q, want %q", got, want)
+	}
 }
 
 func TestConnectorHomeDir_OpenCodeHonorsConfigDir(t *testing.T) {

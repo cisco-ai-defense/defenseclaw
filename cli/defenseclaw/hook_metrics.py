@@ -191,22 +191,33 @@ def connector_hook_decision(
 def hook_decision_may_block_sql(details: str, structured: str, enforced: str) -> str:
     """SQL pre-check to put before ``dc_hook_decision(...) = 'block'``.
 
-    A block needs an enforced flag or a block/deny ``action`` value. Checking
-    for them in SQLite first keeps the per-row Python classifier off rows that
-    can't block: on a 1.27 GB audit.db of legacy rows it ran for minutes
-    (GAP-1487), and legacy hook rows carry ``action=allow`` in their details,
-    so a bare ``action`` test still let every one through (GAP-1674). LIKE is
-    case-insensitive, as the classifier is on values; a quoted value is left
-    to the classifier.
+    The classifier is a Python function SQLite calls once per row, so every row
+    it can skip is time saved: about 60 to 120 us each, which made the alert
+    count of ``defenseclaw status`` spend its whole 3-second budget on 25,000
+    hook rows (GAP-0199). A row that says whether the call was enforced is
+    decided by that alone: the classifier returns ``block`` for it exactly when
+    the flag is true, and never for a false one. The gateway states it twice,
+    in the ``enforced`` column (NULL stands for false there) and as
+    ``"enforced"`` in the structured envelope, so the classifier is left to the
+    rows that were enforced and the legacy rows that carry neither. For those
+    a block needs a block/deny ``action`` value, or ``enforced`` somewhere in
+    the structured text. Checking for them in SQLite first keeps the
+    classifier off rows that can't block: on a 1.27 GB audit.db of legacy rows
+    it ran for minutes (GAP-1487), and legacy hook rows carry ``action=allow``
+    in their details, so a bare ``action`` test still let every one through
+    (GAP-1674). LIKE is case-insensitive, as the classifier is on values; a
+    quoted value is left to the classifier.
     """
 
     return (
-        f"(CAST(COALESCE({enforced}, 0) AS TEXT) NOT IN ('0', '')"
-        f" OR {details} LIKE '%action=block%'"
+        f"(CASE"
+        f" WHEN {enforced} IS NOT NULL THEN CAST({enforced} AS TEXT) NOT IN ('0', '')"
+        f" WHEN json_valid({structured}) AND json_type({structured}, '$.enforced') = 'false' THEN 0"
+        f" ELSE ({details} LIKE '%action=block%'"
         f" OR {details} LIKE '%action=deny%'"
         f" OR {details} LIKE '%action=\"%'"
         f" OR instr(COALESCE({structured}, ''), 'action') > 0"
-        f" OR instr(COALESCE({structured}, ''), 'enforced') > 0)"
+        f" OR instr(COALESCE({structured}, ''), 'enforced') > 0) END)"
     )
 
 

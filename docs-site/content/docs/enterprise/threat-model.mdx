@@ -588,7 +588,7 @@ A user can hold the gateway's address while the gateway is stopped. `defenseclaw
 
 #### A hook flood slows other accounts
 
-Each account has its own hook budget (see `enterprise_managed_rate_limited` in [Troubleshooting](/docs/enterprise/troubleshooting)) and runs at most half as many requests at once as the gateway has processors, so one account's flood is refused or queued without stopping other accounts' hooks. It still makes their hooks slower: the gateway accepts and refuses the flood's connections, and the flooding account's own processes compete for the host's CPU, which DefenseClaw does not control.
+Each account has its own hook budget (see `enterprise_managed_rate_limited` in [Troubleshooting](/docs/enterprise/troubleshooting)) and runs at most half as many requests at once as the gateway has processors, so one account's flood is refused or queued without stopping other accounts' hooks. The gateway also bounds the requests it holds at once for all accounts together (`enterprise_managed_overloaded`): past that bound the next hook is refused at once instead of every hook waiting past its deadline. A flood still makes their hooks slower: the gateway accepts and refuses the flood's connections, and the flooding account's own processes compete for the host's CPU, which DefenseClaw does not control.
 
 **Where:** Standalone profile, every OS.
 
