@@ -417,8 +417,9 @@ func (a *APIServer) alertSensitiveToolResult(r *http.Request, tool string, verdi
 	if !ok {
 		return
 	}
-	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(
-		r, "/api/v1/inspect/tool-response", string(audit.ActionToolResultPIIAlert), tool, details))
+	event := a.inspectAuditEvent(
+		r, "/api/v1/inspect/tool-response", string(audit.ActionToolResultPIIAlert), tool, details)
+	a.raiseToolResultAlert(r.Context(), event, verdict.Severity)
 }
 
 // alertSensitiveHookToolResult is the same alert for the connector hook
@@ -434,14 +435,42 @@ func (a *APIServer) alertSensitiveHookToolResult(ctx context.Context, connectorN
 	}
 	structured := map[string]any{"route": "hook:" + req.HookEventName, "connector": connectorName}
 	auditCallerIdentity(ctx).addTo(structured)
-	_ = a.logger.LogEventCtx(ctx, audit.Event{
+	a.raiseToolResultAlert(ctx, audit.Event{
 		Action:     string(audit.ActionToolResultPIIAlert),
 		Target:     req.ToolName,
 		Details:    details,
-		Severity:   "INFO",
 		Connector:  connectorName,
 		Structured: structured,
-	})
+	}, resp.Severity)
+}
+
+// raiseToolResultAlert files a tool-result-pii-alert with the severity of the
+// result's findings and sends it to the configured webhooks. The row used to
+// carry INFO, which the alert views leave out, so the alert was an audit row
+// no operator saw (GAP-0187). The details only count the findings.
+func (a *APIServer) raiseToolResultAlert(ctx context.Context, event audit.Event, findingSeverity string) {
+	event.Severity = toolResultAlertSeverity(findingSeverity)
+	_ = a.logger.LogEventCtx(ctx, event)
+	if a.webhookSource == nil {
+		return
+	}
+	if webhooks := a.webhookSource(); webhooks != nil {
+		event.Timestamp = time.Now().UTC()
+		event.Actor = "defenseclaw-hook"
+		event.Structured = nil
+		webhooks.Dispatch(event)
+	}
+}
+
+// toolResultAlertSeverity maps a findings severity to the outer severity of
+// the alert row: one the alert views list (never INFO or NONE).
+func toolResultAlertSeverity(severity string) string {
+	switch s := strings.ToUpper(strings.TrimSpace(severity)); s {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW":
+		return s
+	default:
+		return "MEDIUM"
+	}
 }
 
 // sensitiveToolResultAlert returns the audit details of a

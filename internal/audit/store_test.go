@@ -740,7 +740,11 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		('v8-connector-observe', '2026-07-07T10:00:07Z', 'connector-hook', 'gateway', 'observed',
 		 'HIGH', 'tool.activity', 'tool.decision', '{}', 'cursor', 0),
 		('v8-unattributed-block', '2026-07-07T10:00:08Z', 'connector-hook', 'gateway', 'blocked',
-		 'HIGH', 'tool.activity', 'tool.decision', '{}', NULL, 1)`); err != nil {
+		 'HIGH', 'tool.activity', 'tool.decision', '{}', NULL, 1),
+		('v8-legacy-finding', '2026-07-07T10:00:09Z', 'tool-result-pii-alert', 'gateway', 'tool=Bash',
+		 'HIGH', 'security.finding', 'legacy.audit.tool.result.pii.alert', '{}', 'codex', NULL),
+		('v8-legacy-finding-info', '2026-07-07T10:00:10Z', 'tool-result-pii-alert', 'gateway', 'tool=Bash',
+		 'INFO', 'security.finding', 'legacy.audit.tool.result.pii.alert', '{}', 'codex', NULL)`); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
@@ -751,10 +755,10 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, target := range targets {
 		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-	if len(targets) != 5 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+	if len(targets) != 6 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
 		!targetIDs["v8-platform"] || !targetIDs["v8-enforcement"] ||
-		!targetIDs["v8-connector-block"] ||
-		targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
+		!targetIDs["v8-connector-block"] || !targetIDs["v8-legacy-finding"] ||
+		targetIDs["v8-legacy-finding-info"] || targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
 		targetIDs["v8-detection-only-padded-scalar"] {
 		t.Fatalf("targets=%+v", targets)
 	}
@@ -768,10 +772,10 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		alertIDs[alert.ID] = true
 		alertSeverities[alert.ID] = alert.Severity
 	}
-	if len(alerts) != 5 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
+	if len(alerts) != 6 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
 		!alertIDs["v8-platform"] || !alertIDs["v8-enforcement"] ||
-		!alertIDs["v8-connector-block"] ||
-		alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
+		!alertIDs["v8-connector-block"] || !alertIDs["v8-legacy-finding"] ||
+		alertIDs["v8-legacy-finding-info"] || alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
 		alertIDs["v8-detection-only-padded-scalar"] || alertSeverities["v8-enforcement"] != "HIGH" {
 		t.Fatalf("alerts=%+v", alerts)
 	}
