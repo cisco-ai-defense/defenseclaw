@@ -1912,6 +1912,21 @@ class TestMcpListUnconfigured(MCPCommandTestBase):
         self.assertNotIn("connector=openclaw", result.output)
         self.assertNotIn("MCP Servers", result.output)
 
+    def test_unconfigured_policy_commands_edit_asset_policy(self):
+        # GAP-0269/GAP-0379: block worked before setup, but allow, unblock and
+        # list printed the setup hint and exited 0 while the rule stayed.
+        self._unconfigure()
+        self.assertEqual(self.invoke(["block", "demo-mcp", "--reason", "t"]).exit_code, 0)
+        listed = self.invoke(["list"])
+        self.assertIn("blocked  demo-mcp (every connector)", listed.output)
+        unblocked = self.invoke(["unblock", "demo-mcp"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("Unblocked 'demo-mcp'", unblocked.output)
+        self.assertEqual(self.app.cfg.asset_policy.mcp.denied, [])
+        allowed = self.invoke(["allow", "demo-mcp"])
+        self.assertIn("Allowed 'demo-mcp' (every connector)", allowed.output)
+        self.assertEqual([r.name for r in self.app.cfg.asset_policy.mcp.allowed], ["demo-mcp"])
+
     def test_unconfigured_set_does_not_touch_phantom(self):
         # The mutator path shares the resolver, so `mcp set` with nothing
         # configured must also refuse rather than write to ~/.openclaw.

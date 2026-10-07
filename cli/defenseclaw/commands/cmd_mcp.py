@@ -145,6 +145,8 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         if connector_flag and connector_flag.strip()
         else None
     )
+    if explicit is None and not as_json and not _configured_mcp_connectors(app):
+        _echo_mcp_rules_without_connector(app)
     all_connectors = resolve_list_connectors(app, "")
     connectors = explicit if explicit is not None else all_connectors
     allow_legacy_plain_scans = len(all_connectors) == 1
@@ -1432,6 +1434,48 @@ def _mcp_unconfigured_note(app: AppContext, target: str, connector: str) -> str:
     return f"{target!r} is not configured {where}. Configured MCP servers: {shown}."
 
 
+def _configured_mcp_connectors(app: AppContext) -> list[str]:
+    """The configured connectors, [] when there is none.
+
+    Unlike ``resolve_list_connectors`` this neither prints the setup hint nor
+    exits: block, allow and unblock edit asset_policy, which needs no
+    connector, so all three work before ``setup`` (GAP-0269). Without it a
+    bare allow or unblock printed the setup hint and exited 0 while the
+    denied rule that block wrote stayed (GAP-0379).
+    """
+    cfg = getattr(app, "cfg", None)
+    try:
+        if cfg is None or (hasattr(cfg, "has_connector_configured") and not cfg.has_connector_configured()):
+            return []
+        names = [n for n in cfg.active_connectors() if n] if hasattr(cfg, "active_connectors") else []
+        if not names and hasattr(cfg, "active_connector"):
+            names = [n for n in [cfg.active_connector()] if n]
+    except click.UsageError:
+        raise
+    except Exception:  # noqa: BLE001 - a broken connector config only narrows the fan-out
+        return []
+    return names
+
+
+def _echo_mcp_rules_without_connector(app: AppContext) -> None:
+    """``mcp list`` before setup: the asset_policy MCP rules, which apply
+    once a connector is set up (GAP-0269)."""
+    holder = getattr(getattr(app.cfg, "asset_policy", None), "mcp", None)
+    rows = [
+        (verdict, rule)
+        for verdict, rules in (("blocked", getattr(holder, "denied", [])), ("allowed", getattr(holder, "allowed", [])))
+        for rule in rules or []
+    ]
+    if not rows:
+        return
+    click.echo("MCP rules in asset_policy (they apply to every connector you set up):")
+    for verdict, rule in rows:
+        scope = f"({rule.connector})" if (rule.connector or "").strip() else "(every connector)"
+        label = rule.name or rule.url or rule.command or "?"
+        reason = f"  {rule.reason}" if rule.reason else ""
+        click.echo(f"  {verdict:<8} {label} {scope}{reason}")
+
+
 def _mcp_policy_fanout_connectors(
     app: AppContext, pe, target: str,
 ) -> list[str]:
@@ -1441,9 +1485,7 @@ def _mcp_policy_fanout_connectors(
     includes stale connector-scoped policy rows so cleanup still works after a
     server copy has been removed from config.
     """
-    from defenseclaw.commands import resolve_list_connectors
-
-    configured = resolve_list_connectors(app, "")
+    configured = _configured_mcp_connectors(app)
     order = {connector_paths.normalize(c): idx for idx, c in enumerate(configured)}
     seen: set[str] = set()
     connectors: list[str] = []
@@ -2098,6 +2140,8 @@ def _mcp_target_url(app: AppContext, target: str, connector: str) -> str:
 
 
 def _mcp_rescan_hint(app: AppContext, target: str, connector: str) -> None:
+    if not connector and not _configured_mcp_connectors(app):
+        return  # nothing is configured, so there is nothing to scan
     note = _mcp_unconfigured_note(app, target, connector)
     if note:
         # GAP-2397: no scan hint for a server that is not configured.
