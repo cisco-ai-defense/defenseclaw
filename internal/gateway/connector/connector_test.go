@@ -7509,8 +7509,8 @@ func TestHookScripts_MissingTokenNamesTheFile(t *testing.T) {
 	}
 }
 
-// runHookAndReturnCurlArgsWithHome is the sentinel-aware variant of
-// runHookAndReturnCurlArgs. It takes an explicit DEFENSECLAW_HOME so
+// runHookAndReturnCurlArgsWithHome runs a hook against a curl stub that
+// records its arguments. It takes an explicit DEFENSECLAW_HOME so
 // tests can drive the .disabled / missing-home branches deterministically
 // without touching the real $HOME of the developer running the tests.
 // curl args end up in a file the stub appends to; the function returns

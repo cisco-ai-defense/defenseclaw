@@ -170,15 +170,13 @@ func TestShellHooksColdStartTheGatewayAfterARefusedRequest(t *testing.T) {
 			if fields[4] != "" {
 				t.Errorf("the started gateway inherited the hook's DEFENSECLAW_GATEWAY_TOKEN")
 			}
-			// The retry sends the same request: same body and, for Codex, the
-			// same credential through a fresh descriptor.
+			// The retry sends the same request: the same body and the same
+			// credential, each through a fresh descriptor.
 			if first, second := readColdStartCapture(t, run.capDir, "body.1"), readColdStartCapture(t, run.capDir, "body.2"); first == "" || first != second {
 				t.Errorf("retry body = %q, want the first body %q", second, first)
 			}
-			if tc.name == "codex" {
-				if first, second := readColdStartCapture(t, run.capDir, "config.1"), readColdStartCapture(t, run.capDir, "config.2"); !strings.Contains(second, "cold-start-scoped-token") || first != second {
-					t.Errorf("retry did not resend the scoped credential (first %d bytes, second %d bytes)", len(first), len(second))
-				}
+			if first, second := readColdStartCapture(t, run.capDir, "config.1"), readColdStartCapture(t, run.capDir, "config.2"); !strings.Contains(second, "cold-start-scoped-token") || first != second {
+				t.Errorf("retry did not resend the scoped credential (first %d bytes, second %d bytes)", len(first), len(second))
 			}
 		})
 	}
