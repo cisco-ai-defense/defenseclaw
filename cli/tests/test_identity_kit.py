@@ -319,3 +319,32 @@ def test_okta_dry_run_discloses_sssd_restart(tmp_path: Path) -> None:
     result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert "would restart sssd" in result.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_installer_restarts_stale_running_sssd(tmp_path: Path) -> None:
+    conf = tmp_path / "installed.conf"
+    conf.write_text("new configuration")
+    actions = tmp_path / "actions"
+    source = OKTA_INSTALL.read_text().rsplit('main "$@"', 1)[0]
+    probe = f"""
+CONF={conf}
+CONF_CHANGED=0
+DRY_RUN=0
+systemctl() {{
+  case $1 in
+    is-active|enable) return 0 ;;
+    show) echo '2020-01-01 00:00:00 UTC' ;;
+    restart) echo restart >> {actions} ;;
+  esac
+}}
+sss_cache() {{ return 0; }}
+wait_online() {{ return 0; }}
+check_allow_group() {{ return 0; }}
+restart_sssd
+"""
+    script = tmp_path / "probe.sh"
+    script.write_text(source + probe)
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert actions.read_text().strip() == "restart"

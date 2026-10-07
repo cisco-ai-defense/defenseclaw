@@ -494,14 +494,27 @@ check_allow_group() {
   fi
 }
 
+sssd_config_stale() {
+  # A previous run may have installed the config and then failed at PAM or sshd.
+  # Compare nanoseconds so a rerun in the same second still notices that change.
+  local started config_time service_time
+  systemctl is-active sssd > /dev/null 2>&1 || return 0
+  started=$(systemctl show sssd -p ActiveEnterTimestamp --value 2> /dev/null) || return 0
+  config_time=$(date -d "$(stat -c %y "$CONF" 2> /dev/null)" +%s%N 2> /dev/null) || return 0
+  service_time=$(date -d "$started" +%s%N 2> /dev/null) || return 0
+  ((config_time > service_time))
+}
+
 restart_sssd() {
   if ((DRY_RUN)); then
-    if ((${CONF_CHANGED:-0})); then log "  would restart sssd and wait for the $DOMAIN domain to be Online"; fi
+    if ((${CONF_CHANGED:-0})) || sssd_config_stale; then
+      log "  would restart sssd and wait for the $DOMAIN domain to be Online"
+    fi
     log "  would enable sssd at boot"
     return 0
   fi
   systemctl enable sssd > /dev/null 2>&1
-  if ((CONF_CHANGED)) || ! systemctl is-active sssd > /dev/null 2>&1; then
+  if ((CONF_CHANGED)) || sssd_config_stale; then
     systemctl restart sssd
     sss_cache -E > /dev/null 2>&1 || true
     if wait_online; then
