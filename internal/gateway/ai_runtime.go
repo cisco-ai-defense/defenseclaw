@@ -269,6 +269,11 @@ func (s *Sidecar) publishAIRuntimeHealth(snapshot sensor.Snapshot) {
 		if health.Reason != "" {
 			entry["reason"] = health.Reason
 		}
+		// Plane C's backend on the managed Linux sensor helper, in the same
+		// snake_case shape as the runtime API; doctor and the TUI read it here.
+		if backend := renderAIRuntimeBackend(health.Backend, snapshot.Kernel); backend != nil {
+			entry["backend"] = *backend
+		}
 		planes[string(health.Plane)] = entry
 	}
 	details := map[string]interface{}{
