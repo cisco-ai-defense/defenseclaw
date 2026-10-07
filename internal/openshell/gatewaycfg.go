@@ -1863,13 +1863,32 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 		File       string `json:"file"`
 		Registered bool   `json:"registered"`
 	}
-	if err := json.Unmarshal(out, &infos); err != nil || len(infos) == 0 {
+	// Homebrew may print warnings and hints first ("Warning: running
+	// through sudo, using user/* instead of gui/* domain!" in a shell from
+	// sudo -iu): the answer is the JSON array after them.
+	if err := json.NewDecoder(bytes.NewReader(jsonArrayStart(out))).Decode(&infos); err != nil || len(infos) == 0 {
 		return nil, fmt.Errorf("openshell: brew services info %s: unexpected output %q", GatewayFormula, strings.TrimSpace(string(out)))
 	}
 	i := infos[0]
 	st.Installed = i.File != "" || i.Loaded || i.Registered
 	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
 	return st, nil
+}
+
+// jsonArrayStart is out from its first line that starts a JSON array (all
+// of out when none does).
+func jsonArrayStart(out []byte) []byte {
+	for i := 0; i < len(out); {
+		line := out[i:]
+		if j := bytes.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j+1]
+		}
+		if t := bytes.TrimLeft(line, " \t"); len(t) > 0 && t[0] == '[' {
+			return out[i:]
+		}
+		i += len(line)
+	}
+	return out
 }
 
 // brewFormulaInstalled reports whether GatewayFormula has a keg under a

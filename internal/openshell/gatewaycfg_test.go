@@ -923,6 +923,18 @@ func TestGatewayServiceState(t *testing.T) {
 			t.Fatalf("restart: %v", err)
 		}
 	})
+	// GAP-0050: in a shell from sudo -iu, brew prints warnings before its
+	// JSON, and setup stopped at "Gateway service: unexpected output".
+	t.Run("homebrew warns first", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", "Warning: running through sudo, using user/* instead of gui/* domain!\n"+
+			"Hide these hints with HOMEBREW_NO_ENV_HINTS (see `man brew`).\n"+`[{"name":"openshell","running":true,"loaded":true,"status":"started","file":"/x.plist"}]`+"\n", nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Active || !st.Installed {
+			t.Fatalf("state = %+v, %v", st, err)
+		}
+	})
 	// Without the formula there is no service to ask brew about, and brew
 	// took about 40 s to say so on a Mac (manual test M4): the Homebrew
 	// prefix answers instead.
