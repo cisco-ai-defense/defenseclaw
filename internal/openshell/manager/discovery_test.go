@@ -104,8 +104,11 @@ func TestDiscoverInventoriesTheSandbox(t *testing.T) {
 	detectors := map[string]bool{}
 	for _, sig := range res.Signals {
 		detectors[sig.Detector] = true
-		if sig.Detector == "mcp" && !slices.Contains(sig.Names, "dccert-marker") {
-			t.Fatalf("mcp signal %+v, want the server named", sig)
+		// The server is a name; the config file it is in is evidence
+		// (GAP-0116).
+		if sig.Detector == "mcp" && (!slices.Contains(sig.Names, "dccert-marker") || len(sig.Evidence) == 0 ||
+			slices.ContainsFunc(sig.Names, func(n string) bool { return strings.HasSuffix(n, ".json") })) {
+			t.Fatalf("mcp signal %+v, want the server named and its config file as evidence", sig)
 		}
 	}
 	for _, want := range []string{"mcp", "process", "env"} {

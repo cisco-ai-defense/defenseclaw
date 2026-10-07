@@ -87,11 +87,11 @@ func TestDiscoverListsWhatWasFound(t *testing.T) {
 	app, out := inventoryApp(t, sandboxapi.ProcessList{}, sandboxapi.DiscoveryResult{Name: "box", Result: "partial",
 		Problems: []string{"sandbox_collect: the collector's answer was cut short"},
 		Signals: []sandboxapi.DiscoverySignal{{Category: "mcp_server", Product: "Claude Code", Detector: "mcp",
-			Names: []string{"a", "b", "c", "d", "e"}}}})
+			Names: []string{"a", "b", "c", "d", "e"}, Evidence: []string{".claude.json"}}}})
 	if err := app.Discover(context.Background(), DiscoverOptions{Name: "box"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"mcp_server", "Claude Code", "a, b, c (+2)", "the scan was partial", "agent usage --sandbox box"} {
+	for _, want := range []string{"mcp_server", "Claude Code", "a, b, c (+2)", "EVIDENCE", ".claude.json", "the scan was partial", "agent usage --sandbox box"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}

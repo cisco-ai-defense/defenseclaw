@@ -54,9 +54,10 @@ func (a *App) Discover(ctx context.Context, o DiscoverOptions) error {
 	} else {
 		rows := make([][]string, 0, len(res.Signals))
 		for _, sig := range res.Signals {
-			rows = append(rows, []string{sig.Category, firstNonEmpty(sig.Product, "-"), sig.Detector, discoveryNames(sig.Names)})
+			rows = append(rows, []string{sig.Category, firstNonEmpty(sig.Product, "-"), sig.Detector, discoveryNames(sig.Names),
+				discoveryNames(sig.Evidence)})
 		}
-		a.table([]string{"CATEGORY", "PRODUCT", "FOUND BY", "NAMES"}, rows)
+		a.table([]string{"CATEGORY", "PRODUCT", "FOUND BY", "NAMES", "EVIDENCE"}, rows)
 	}
 	if res.Result != "ok" {
 		a.warn("the scan was partial: " + strings.Join(res.Problems, "; "))
@@ -179,7 +180,8 @@ func psUptime(now, started time.Time) string {
 	return humanDuration(now.Sub(started))
 }
 
-// discoveryNames is a signal's names cell: the first few, and how many more.
+// discoveryNames is a signal's names or evidence cell: the first few, and
+// how many more.
 func discoveryNames(names []string) string {
 	const show = 3
 	switch {
