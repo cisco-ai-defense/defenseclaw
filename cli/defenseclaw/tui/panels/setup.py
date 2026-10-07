@@ -5830,6 +5830,8 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
         return field.value
     if reveal:
         return field.value or "(empty)"
+    if field.label == "Secret Value":
+        return "********" if field.value else "(empty)"
     return mask_secret(field.value)
 
 

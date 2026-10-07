@@ -38,3 +38,11 @@ def test_tui_unavailable_explains_dumb_term(monkeypatch) -> None:
     assert "TERM=dumb" in message
     assert "TERM=xterm-256color" in message
     assert "Windows" not in message
+
+
+def test_set_one_api_key_is_fully_masked_until_reveal() -> None:
+    from defenseclaw.tui.panels.setup import WizardFormField, render_wizard_value
+
+    field = WizardFormField("Secret Value", "password", value="fake-short")
+    assert render_wizard_value(field) == "********"
+    assert render_wizard_value(field, reveal=True) == "fake-short"
