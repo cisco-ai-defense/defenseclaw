@@ -1714,7 +1714,8 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
         return None
     return StepResult(
         "Connector runtime",
-        "warn",
+        # A hook command the shell cannot run guards nothing (GAP-0382).
+        "fail" if problems[0].startswith("hook command ") else "warn",
         f"{label} is not guarded: {problems[0]}",
         setup_command(connector),
     )

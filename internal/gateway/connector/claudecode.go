@@ -1095,10 +1095,7 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return codexValueMatches(args, expectedArgs)
 	}
 	command, _ := handler["command"].(string)
-	expected := hookInvocationCommand(
-		"claudecode",
-		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
-	)
+	expected, _ := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
 	return command == expected
 }
 
@@ -1115,7 +1112,7 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		}
 		return executable, []string{"hook", "--connector", "claudecode"}
 	}
-	return hookCommand, nil
+	return posixHookCommandWord(hookCommand), nil
 }
 
 func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string, []string) {
@@ -2361,6 +2358,7 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if command == "" {
 		return false
 	}
+	command = posixHookCommandUnquoted(command)
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}

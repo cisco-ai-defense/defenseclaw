@@ -668,10 +668,18 @@ def _registered_hook_script_paths(
                     tokens = shlex.split(cmd, posix=os.name != "nt")
                 except ValueError:
                     tokens = [cmd]
-                match = next((tok for tok in tokens if script_name in tok), cmd)
+                # The shell runs the first word. An unquoted path with a space
+                # splits there, and the fragment that still names the script is
+                # relative; that registration cannot run at all, which the Hook
+                # command row reports (GAP-0382), so it names no script here.
+                match = next(
+                    (tok for i, tok in enumerate(tokens) if script_name in tok and (i == 0 or os.path.isabs(tok))),
+                    "",
+                )
                 if len(match) >= 2 and match[0] == match[-1] and match[0] in {'"', "'"}:
                     match = match[1:-1]
-                paths.append(os.path.abspath(os.path.expanduser(match)))
+                if match:
+                    paths.append(os.path.abspath(os.path.expanduser(match)))
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -13475,6 +13483,16 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
             "Hook runtime files",
             f"{'; '.join(problems)}; run `defenseclaw doctor --fix`, or `{setup_command(connector)}`",
             r=r,
+        )
+    from defenseclaw.hook_integrity import hook_command_problems
+
+    for problem in hook_command_problems(cfg, connector):
+        _emit(
+            "fail",
+            "Hook command",
+            f"{problem}; the agent runs its tool calls unguarded",
+            r=r,
+            remediation=f"re-register the hooks: {setup_command(connector)} --yes",
         )
 
 

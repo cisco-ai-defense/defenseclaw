@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -176,18 +178,9 @@ def _registration_text(text: str) -> str:
     return json.dumps({key: value for key, value in data.items() if key != "env"}).lower()
 
 
-def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
-    """Report hook config files that no longer mention DefenseClaw at all.
+def _hook_config_paths(cfg: Any, connector: str) -> list[Path]:
+    """The agent config files setup recorded hooks in for *connector*."""
 
-    Setup records the agent config files it registered hooks in
-    (``locations.hook_config_paths``). When every one of them that exists has
-    lost its DefenseClaw entries (for example the ``hooks`` key was deleted
-    from ``~/.claude/settings.json``), the agent runs unguarded; status says
-    so instead of showing the connector as normal (GAP-1230).
-    """
-
-    if os.name == "nt":
-        return []
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     lock_path = Path(data_dir, "hook_contract_lock.json")
     try:
@@ -202,19 +195,86 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
     raw_paths = locations.get("hook_config_paths") if isinstance(locations, dict) else None
     if not isinstance(raw_paths, list):
         return []
+    return [Path(str(raw)) for raw in raw_paths if str(raw or "").strip()]
+
+
+def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
+    """Report hook config files that no longer mention DefenseClaw at all.
+
+    Setup records the agent config files it registered hooks in
+    (``locations.hook_config_paths``). When every one of them that exists has
+    lost its DefenseClaw entries (for example the ``hooks`` key was deleted
+    from ``~/.claude/settings.json``), the agent runs unguarded; status says
+    so instead of showing the connector as normal (GAP-1230). When the
+    entries are there, their commands must also be ones the shell can run
+    (:func:`hook_command_problems`).
+    """
+
+    if os.name == "nt":
+        return []
     existing: list[Path] = []
-    for raw in raw_paths:
-        path = Path(str(raw or ""))
-        if not str(raw or "").strip():
-            continue
+    for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
             if "defenseclaw" in _registration_text(path.read_text(encoding="utf-8", errors="replace")):
-                return []
+                return hook_command_problems(cfg, connector)
         except OSError:
             continue
         existing.append(path)
     if not existing:
         return []
     return [f"no DefenseClaw hooks are registered in {existing[0]}"]
+
+
+def _registered_commands(value: Any) -> list[str]:
+    """Every string under a ``command`` key of a decoded agent hook config."""
+
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "command" and isinstance(item, str):
+                found.append(item)
+            else:
+                found.extend(_registered_commands(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_registered_commands(item))
+    return found
+
+
+def hook_command_problems(cfg: Any, connector: str) -> list[str]:
+    """Report DefenseClaw hook commands that the agent shell cannot run.
+
+    Agents run a Unix hook command through a shell. A registration whose
+    script path contains a space and no quotes makes the shell run the first
+    half of the path (``/home/dc``), so no hook call reaches the gateway while
+    the other rows stay green (GAP-0382). Setup writes the path quoted.
+    """
+
+    if os.name == "nt":
+        return []
+    hooks_dir = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks")
+    for path in _hook_config_paths(cfg, connector):
+        try:
+            if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            document = tomllib.loads(text) if path.suffix == ".toml" else json.loads(text)
+        except (OSError, ValueError):
+            continue
+        for command in _registered_commands(document):
+            if hooks_dir + os.sep not in command:
+                continue
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                tokens = []
+            program = tokens[0] if tokens else command
+            if program.startswith(hooks_dir + os.sep):
+                continue
+            return [
+                f"hook command in {path} cannot run: the shell runs {program!r}, not the hook script "
+                f"under {hooks_dir} (a path with a space must be quoted)"
+            ]
+    return []
