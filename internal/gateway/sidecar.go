@@ -1852,7 +1852,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	apiRestart := apiNeedsRestart(oldCfg, newCfg)
 	watcherRestart := watcherNeedsRestart(oldCfg, newCfg)
-	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || signaturePacksChanged(previousGen, newCfg)
+	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || discoveryAssetsChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
 		oldCfg.Guardrail.AllowPrivateUpstreams,
 		newCfg.Guardrail.AllowPrivateUpstreams,

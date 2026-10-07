@@ -153,8 +153,9 @@ func TestGenerationUnchangedComparesTheOPAFailure(t *testing.T) {
 
 // A signature pack edited on disk rebuilds AI discovery, which loads its catalog
 // once: under a pin it no longer matches, the pack is refused at once instead of
-// at the next config change (GAP-0177).
-func TestSignaturePacksChangedFollowsTheFileNotTheConfig(t *testing.T) {
+// at the next config change (GAP-0177). The confidence policy file, loaded
+// once too, rebuilds it the same way when it is created or edited (GAP-0316).
+func TestDiscoveryAssetsChangedFollowsTheFileNotTheConfig(t *testing.T) {
 	pack := filepath.Join(t.TempDir(), "pack.json")
 	if err := os.WriteFile(pack, []byte(`{"version":1}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -163,17 +164,28 @@ func TestSignaturePacksChangedFollowsTheFileNotTheConfig(t *testing.T) {
 	cfg.AIDiscovery.Enabled = true
 	cfg.AIDiscovery.SignaturePacks = []string{pack}
 	live := &Generation{Components: assetDigestComponents(cfg)}
-	if signaturePacksChanged(live, cfg) {
+	if discoveryAssetsChanged(live, cfg) {
 		t.Fatal("an untouched pack rebuilt discovery")
 	}
 	if err := os.WriteFile(pack, []byte(`{"version":1,"signatures":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !signaturePacksChanged(live, cfg) {
+	if !discoveryAssetsChanged(live, cfg) {
 		t.Fatal("an edited pack did not rebuild discovery")
 	}
+	live = &Generation{Components: assetDigestComponents(cfg)}
+	cfg.AIDiscovery.ConfidencePolicyPath = filepath.Join(cfg.DataDir, "confidence.yaml")
+	if discoveryAssetsChanged(live, cfg) {
+		t.Fatal("an absent confidence policy rebuilt discovery")
+	}
+	if err := os.WriteFile(cfg.AIDiscovery.ConfidencePolicyPath, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !discoveryAssetsChanged(live, cfg) {
+		t.Fatal("a new confidence policy did not rebuild discovery")
+	}
 	cfg.AIDiscovery.Enabled = false
-	if signaturePacksChanged(live, cfg) {
+	if discoveryAssetsChanged(live, cfg) {
 		t.Fatal("a disabled discovery service was rebuilt for a pack edit")
 	}
 
@@ -184,14 +196,14 @@ func TestSignaturePacksChangedFollowsTheFileNotTheConfig(t *testing.T) {
 		cfg.AIDiscovery.Enabled = true
 		cfg.AIDiscovery.SignaturePacks = []string{entry}
 		live = &Generation{Components: assetDigestComponents(cfg)}
-		if signaturePacksChanged(live, cfg) {
+		if discoveryAssetsChanged(live, cfg) {
 			t.Fatalf("%s: an untouched entry rebuilt discovery", entry)
 		}
 		added := filepath.Join(packs, "added.json")
 		if err := os.WriteFile(added, []byte(`{"version":1}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if !signaturePacksChanged(live, cfg) {
+		if !discoveryAssetsChanged(live, cfg) {
 			t.Fatalf("%s: a new pack did not rebuild discovery", entry)
 		}
 		if !slices.Contains(generationAssetDirs(cfg, &Generation{}), packs) {
