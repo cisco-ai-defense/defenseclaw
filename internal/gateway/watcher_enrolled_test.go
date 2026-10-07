@@ -53,8 +53,9 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	dataDir := mkdir(root, "data")
 	record := map[string]any{
 		"version": 1, "updated_at": time.Now().UTC().Format(time.RFC3339), "ok": true,
-		"target_count": 2, "success_count": 2, "failure_count": 0,
+		"target_count": 3, "success_count": 3, "failure_count": 0,
 		"protected_targets": []map[string]any{
+			{"user": "alice", "user_home": alice, "sid": "S-1-5-21-1-1001", "connector": "amp", "ok": true},
 			{"user": "alice", "user_home": alice, "sid": "S-1-5-21-1-1001", "connector": "claudecode", "ok": true},
 			{"user": "bob", "user_home": bob, "sid": "S-1-5-21-1-1002", "connector": "codex", "ok": true},
 		},
@@ -90,6 +91,7 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 			t.Fatalf("watched a folder that does not exist: %s", dir)
 		}
 	}
+	// Amp also lists ~/.claude/skills; Claude Code owns its layout.
 	if set.roots[aliceSkills] != "claudecode" || set.roots[bobSkills] != "codex" {
 		t.Fatalf("root connectors = %v", set.roots)
 	}

@@ -129,9 +129,16 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 		}
 		targets = append(targets, userConnector{filepath.Clean(home), name})
 	}
+	// A folder several connectors list (Amp and OpenCode also read Claude
+	// Code's ~/.claude/skills) belongs to the connector that owns its layout,
+	// so the watcher applies that connector's rules (Claude Code's skills
+	// and plugin cache, Hermes categories): owners claim first.
 	sort.Slice(targets, func(i, j int) bool {
 		if targets[i].home != targets[j].home {
 			return targets[i].home < targets[j].home
+		}
+		if pi, pj := enrolledRootPrecedence(targets[i].connector), enrolledRootPrecedence(targets[j].connector); pi != pj {
+			return pi < pj
 		}
 		return targets[i].connector < targets[j].connector
 	})
@@ -180,6 +187,21 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 		}
 	}
 	return set
+}
+
+// enrolledRootPrecedence orders the connectors whose folder layout the
+// watcher interprets itself ahead of the ones that only share a folder.
+func enrolledRootPrecedence(connectorName string) int {
+	switch connectorName {
+	case "claudecode":
+		return 0
+	case "codex":
+		return 1
+	case "hermes":
+		return 2
+	default:
+		return 3
+	}
 }
 
 // rebaseUnderHome moves path from below fromHome to the same place below
