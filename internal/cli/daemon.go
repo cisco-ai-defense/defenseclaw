@@ -1057,6 +1057,9 @@ func daemonConfigLoadError(verb string, err error) error {
 	if err == nil {
 		return nil
 	}
+	if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("cannot %s the gateway: no config.yaml exists yet; run defenseclaw init first", verb)
+	}
 	if secretErr := missingObservabilitySecretError(verb, err); secretErr != nil {
 		return secretErr
 	}

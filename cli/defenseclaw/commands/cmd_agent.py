@@ -3992,6 +3992,11 @@ def _format_missing_token_error(app: AppContext) -> str:
     the wording (presence of remediation hints) without bringing the
     whole click.ClickException raise path into the assertion.
     """
+    from defenseclaw import config as config_module
+
+    if not config_module.config_path().is_file():
+        return "DefenseClaw is not initialized — run defenseclaw init first."
+
     configured_env = ""
     cfg = getattr(app, "cfg", None)
     gw = getattr(cfg, "gateway", None) if cfg is not None else None
