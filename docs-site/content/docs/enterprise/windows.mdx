@@ -334,7 +334,10 @@ fall back to an environment variable. Store a new key with the same command
 to rotate it. `enterprise windows status` then prints a `Scanners:` line with
 the scanner versions, the skill scanner policy and the judge model. Without
 an `llm:` block it warns `scanner_judge_missing`: the scanners then run their
-static analyzers only.
+static analyzers only. While the scanner runtime is missing or not prepared,
+every skill, MCP server and plugin install is blocked: `status` warns and
+`verify` fails with `scanner_runtime_unavailable`, and Setup `/repair`
+installs it again.
 
 ## Verify the install
 

@@ -32,7 +32,7 @@ The installer:
 2. Builds the new version next to the running one and checks that it starts,
    and that your configuration can be migrated, before changing anything.
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`,
-   swaps in the new version, and runs `defenseclaw migrate`. From 1.0.x that
+   swaps in the new version, and runs `defenseclaw migrate`. From 0.x that
    moves `config.yaml` to `config_version: 9` and keeps the old file (see
    [Config migration](#config-migration)).
 4. Starts the gateway and waits for it to report healthy.
@@ -74,8 +74,7 @@ defenseclaw config set update.check false
 
 ## Update settings
 
-The `update` block of `config.yaml` has three keys. They replace the
-`update_check` key and the `DEFENSECLAW_REPO` variable of DefenseClaw 1.0.x.
+The `update` block of `config.yaml` has three keys.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -134,6 +133,17 @@ installed. Every path keeps your configuration and data.
 - The installer imports the 0.x install in place. Installs older than 0.8.5 get
   the schema-v8 observability conversion that `0.8.5` introduced, and an
   installed local observability bundle is refreshed.
+- `config.yaml` becomes the only place your policy lives (`config_version: 9`).
+  The installer first checks that your configuration can be migrated; for a
+  version 8 file it also says how many values will move and how many conflicts
+  there are. It then copies the admission actions and thresholds from
+  `policies/rego/data.json`, the `skill_actions`, `mcp_actions` and
+  `plugin_actions` keys, `rule_pack_dir`, the old scanner switches, and your
+  skill, MCP server and plugin block and allow entries from `audit.db` into
+  `config.yaml`. The old `config.yaml` stays as `config.yaml.v8.bak`,
+  `data.json` becomes `data.json.migrated-v9`, and `migration-v9.json` records
+  every value that moved and every conflict that was settled. An unmodified
+  install moves one value. See [Config migration](#config-migration).
 - On Windows, the installer also removes a 0.8.x native Setup installation
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in
@@ -181,15 +191,14 @@ One previous install is kept, and rolling back needs no network. Reinstalling
 the same version does not replace the rollback copy. Running it again rolls
 forward (its header then reads `Rolling forward to DefenseClaw <version>`).
 
-Rolling back from a release that uses `config_version: 9` to 1.0.x restores the
-version 8 `config.yaml` that was saved when the upgrade started, together with
-`data.json` and the operator block and allow entries in `audit.db`, because
-those are part of the saved data. Policy edits you made after the upgrade stay
-in `~/.defenseclaw/previous` and return when you roll forward. A 1.0.x release
-that you install yourself, without `defenseclaw rollback`, refuses a version 9
-file ("Configuration was written by a newer DefenseClaw (config_version 9)");
-[Going back to 1.0.x](/docs/reference/migrate-v9#going-back-to-10x) lists the
-manual steps.
+Rolling back to 0.8.x restores the version 8 `config.yaml` that was saved when
+the upgrade started, together with `data.json` and the operator block and allow
+entries in `audit.db`, because those are part of the saved data. Policy edits
+you made after the upgrade stay in `~/.defenseclaw/previous` and return when
+you roll forward. A 0.8.x release that you install yourself, without
+`defenseclaw rollback`, refuses a version 9 file (`Configuration schema v8 is
+required`); [Going back to 0.8.x](/docs/reference/migrate-v9#going-back-to-08x)
+lists the manual steps.
 
 The rollback starts the restored gateway when it was running and waits for it.
 A 0.8.x gateway on a large audit database can take a few minutes to start, so
@@ -231,10 +240,10 @@ list the pending steps by name without changing anything.
 
 ### Config migration
 
-The step from `config_version: 8` to `9` moves the decisions that 1.0.x kept
+The step from `config_version: 8` to `9` moves the decisions that 0.8.x kept
 outside `config.yaml` into it: admission and thresholds from
 `policies/rego/data.json`, the `*_actions` keys, `rule_pack_dir`, the scanner
-switches, `update_check`, and the operator block and allow entries from
+switches, and the operator block and allow entries from
 `audit.db`. It keeps `config.yaml.v8.bak`, renames the retired `data.json` to
 `data.json.migrated-v9`, and writes `migration-v9.json` with every value it
 moved and every conflict it settled. The upgrade summary prints one line, and
@@ -245,14 +254,14 @@ the gateway reads a version 8 file as if it were migrated, in memory only.
 
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) shows the before
 and after files for every key, explains the conflicts, and covers going back to
-1.0.x. On a managed standalone host the lifecycle migrates the administrator
+0.8.x. On a managed standalone host the lifecycle migrates the administrator
 config for you; see [Lifecycle](/docs/enterprise/lifecycle).
 
 ## Troubleshooting
 
 | Message | What to do |
 | --- | --- |
-| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. For example, 1.0.x refuses a `config_version: 9` file. Run `defenseclaw rollback`, or install the newer release again. |
+| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one: the newer release moved `config.yaml` past the `config_version` this one reads. Run `defenseclaw rollback`, or install the newer release again. |
 | `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
 | `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
 | `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |

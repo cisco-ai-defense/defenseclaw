@@ -276,25 +276,31 @@ def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
 
 
 @pytest.mark.parametrize(
-    ("removed", "path", "target"),
+    ("removed", "path", "action"),
     [
-        ("skill_actions: {high: {install: block}}", "$.skill_actions", "admission.skill.actions"),
-        ("guardrail: {rule_pack_dir: /x}", "$.guardrail.rule_pack_dir", "rule_pack or custom_packs"),
+        ("skill_actions: {high: {install: block}}", "$.skill_actions", "use admission.skill.actions"),
+        ("guardrail: {rule_pack_dir: /x}", "$.guardrail.rule_pack_dir", "use rule_pack or custom_packs"),
         (
             "guardrail: {connectors: {codex: {rule_pack_dir: /x}}}",
             "$.guardrail.connectors.codex.rule_pack_dir",
-            "rule_pack or custom_packs",
+            "use rule_pack or custom_packs",
+        ),
+        ("privacy: {disable_redaction: true}", "$.privacy", "remove it: config_version 9 has no privacy section"),
+        (
+            "observability: {trace_policy: {compatibility_aliases: false}}",
+            "$.observability.trace_policy.compatibility_aliases",
+            "remove it: telemetry carries only canonical attribute names",
         ),
     ],
 )
-def test_v9_names_the_replacement_of_a_removed_v8_key(removed: str, path: str, target: str) -> None:
+def test_v9_names_the_replacement_of_a_removed_v8_key(removed: str, path: str, action: str) -> None:
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8(f"config_version: 9\n{removed}\n")
 
     assert captured.value.path == path
     assert captured.value.keyword == "legacy-key-forbidden"
     message = str(captured.value)
-    assert f"use {target}" in message
+    assert action in message
     assert "invalid configuration" in message and "invalid v9" not in message
     assert "defenseclaw upgrade" not in message
 

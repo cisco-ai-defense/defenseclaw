@@ -28,6 +28,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestHandleSkillScanRejectsBundledSystemSkillBeforeScanner(t *testing.T) {
@@ -153,6 +156,15 @@ func TestHandleSkillScanNamesAFolderTheGatewayCannotRead(t *testing.T) {
 
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "service account cannot read") {
 		t.Fatalf("response = %d %q, want 403 naming the unreadable folder", w.Code, w.Body.String())
+	}
+	// Secure Client runs the scanner as main did, and reports its failure
+	// (GAP-0280).
+	t.Setenv("PATH", "")
+	w = httptest.NewRecorder()
+	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}}
+	secureClient.handleSkillScan(w, httptest.NewRequest(http.MethodPost, "/v1/skill/scan", bytes.NewReader(body)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Secure Client response = %d %q, want the scanner failure", w.Code, w.Body.String())
 	}
 }
 

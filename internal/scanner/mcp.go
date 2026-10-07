@@ -165,22 +165,26 @@ func (s *MCPScanner) Name() string               { return "mcp-scanner" }
 func (s *MCPScanner) Version() string            { return "1.0.0" }
 func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 
+// commandArgs is the scanner command line. The Python CLI reads
+// scanners.mcp_scanner from config.yaml itself. The embedded scanner runtime
+// reads no config, so its "mcp-scan" gets the whole block (runtimeSettings)
+// and its judge from the config-derived environment (runtimeEnv).
+func (s *MCPScanner) commandArgs(target string) ([]string, error) {
+	if !usesScannerRuntime(s.Config.Binary) {
+		return s.buildArgs(target), nil
+	}
+	settings, err := s.runtimeSettings()
+	if err != nil {
+		return nil, fmt.Errorf("scanner: %s settings for the scanner runtime: %w", s.Name(), err)
+	}
+	return []string{"mcp-scan", "--settings", settings, target}, nil
+}
+
 // buildArgs builds the argument vector for “defenseclaw mcp scan“.
 // The “--json/--analyzers/--scan-*“ flags are options on the “scan“
 // subcommand, so they follow “mcp scan“; the target is positional and
 // comes last. The Python CLI resolves a bare server name or a URL via
 // its own “_resolve_scan_target“, so the gateway can pass either.
-// commandArgs is the scanner command line. The embedded scanner runtime's
-// "mcp-scan" takes the options of "mcp scan" and its judge from the
-// config-derived environment (runtimeEnv).
-func (s *MCPScanner) commandArgs(target string) []string {
-	args := s.buildArgs(target)
-	if usesScannerRuntime(s.Config.Binary) {
-		return append([]string{"mcp-scan"}, args[2:]...)
-	}
-	return args
-}
-
 func (s *MCPScanner) buildArgs(target string) []string {
 	args := []string{"mcp", "scan", "--json"}
 
@@ -233,7 +237,11 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 	}
 
-	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(target)...)
+	args, argsErr := s.commandArgs(target)
+	if argsErr != nil {
+		return nil, argsErr
+	}
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
 	// Inherit the gateway's environment (like the plugin scanner):
 	// the Python CLI resolves LLM / Cisco AI Defense credentials from
 	// its own config, so no scanner-specific env injection is needed.

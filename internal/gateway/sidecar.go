@@ -2297,7 +2297,8 @@ func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.Scanners, newCfg.Scanners) ||
 		!reflect.DeepEqual(oldCfg.Admission, newCfg.Admission) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy, newCfg.AssetPolicy) ||
-		oldCfg.Claw != newCfg.Claw
+		oldCfg.Claw != newCfg.Claw ||
+		(!newCfg.SecureClientIntegration() && oldCfg.QuarantineDir != newCfg.QuarantineDir)
 }
 
 func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {

@@ -731,10 +731,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	diff := diffConfigs(oldCfg, next)
 	// In hot mode a restart-required edit (a listener, the hook settings
-	// setup bakes in, a section still read once at start) keeps its running
-	// value and is reported as pending, so the rest of the edit, and every
-	// later one, still applies instead of each reload failing until the
-	// gateway restarts. Secure Client keeps its behaviour.
+	// setup bakes in, the resource identity, a section still read once at
+	// start) keeps its running value and is reported as pending, so the rest
+	// of the edit, and every later one, still applies instead of each reload
+	// failing until the gateway restarts. A storage path or deployment_mode
+	// change can not be held (holdRestartRequired) and still fails the
+	// reload. Secure Client keeps its behaviour.
 	var pendingRestart []string
 	if len(diff.RestartRequired) > 0 && configReloadMode(next) != "restart" &&
 		!oldCfg.SecureClientIntegration() && !next.SecureClientIntegration() {
@@ -1167,6 +1169,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	newEffectiveGateway := effectiveGatewayConfigForDiff(newCfg.Gateway)
 	add("gateway", oldEffectiveGateway, newEffectiveGateway)
 	add("openshell", oldCfg.OpenShell, newCfg.OpenShell)
+	// The v8 action keys of a Secure Client source, which main compared here;
+	// no Secure Client hot set lists them, so an edit is restart-required.
+	for _, key := range []string{"skill_actions", "mcp_actions", "plugin_actions"} {
+		add(key, oldCfg.SecureClientV8Actions[key], newCfg.SecureClientV8Actions[key])
+	}
 	add("admission", oldCfg.Admission, newCfg.Admission)
 	add("asset_policy", oldCfg.AssetPolicy, newCfg.AssetPolicy)
 	add("registries", oldCfg.Registries, newCfg.Registries)
@@ -1191,9 +1198,19 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	// configuration generation (issue #1092): the hot set below, a restart
 	// for any gateway edit but the reload mode, and every per-connector
 	// guardrail setting. Its v8 action keys (skill_actions, mcp_actions,
-	// plugin_actions) are read as admission, which the restart set covers.
+	// plugin_actions, compared above) are restart-required.
 	secureClient := oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration()
 	standalone := oldCfg.StandaloneEnterprise() || newCfg.StandaloneEnterprise()
+	if !secureClient {
+		// The directory keys, which main did not compare (Secure Client keeps
+		// that). policy_dir is generation input (the Rego modules and their
+		// watch) and quarantine_dir restarts the install watcher in-process,
+		// so both are hot; plugin_dir is restart-required: the connector
+		// registry discovers its plugins when the guardrail starts.
+		add("policy_dir", oldCfg.PolicyDir, newCfg.PolicyDir)
+		add("quarantine_dir", oldCfg.QuarantineDir, newCfg.QuarantineDir)
+		add("plugin_dir", oldCfg.PluginDir, newCfg.PluginDir)
+	}
 	if standalone {
 		// The standalone profile keeps its runtime settings in the enterprise
 		// block. The AI Defense client (enterprise.inspection) is rebuilt in
@@ -1266,6 +1283,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// in applyConfigReload: the hook lane, and the proxy's) and the OTel
 		// log sink folds the endpoint (otelNeedsReload).
 		"cisco_ai_defense": {},
+		// The generation prepares the Rego modules from policy_dir; the
+		// install watcher restarts for quarantine_dir (watcherNeedsRestart).
+		"policy_dir":     {},
+		"quarantine_dir": {},
 	}
 	if secureClient {
 		hotReloadable = map[string]struct{}{
@@ -1334,10 +1355,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 }
 
 // holdRestartRequired returns next with every restart-required section at
-// its running value, or nil when a path can not be held: storage paths, the
-// resource identity the compiled observability plan already carries, the
-// deployment mode and enterprise profile, and the legacy sandbox mode. Such
-// a reload still fails as restart-required.
+// its running value, or nil when a path can not be held: the storage paths,
+// which the compiled observability plan of the candidate already carries, and
+// the deployment mode, which the managed destination of that plan is built
+// from. Such a reload still fails as restart-required.
 func holdRestartRequired(running, next *config.Config, restart []string) *config.Config {
 	if running == nil || next == nil {
 		return nil
@@ -1357,6 +1378,20 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.Gateway.ConfigReload, held.Gateway.Watcher = reload, watcher
 		case "guardrail", "guardrail.retain_judge_bodies", "guardrail.scanner_mode", "guardrail.connectors":
 			holdGuardrailProcessSettings(&held.Guardrail, running.Guardrail)
+		case "environment", "tenant_id", "workspace_id", "discovery_source":
+			// The OTel resource identity the provider factory captured at start.
+			held.Environment, held.TenantID = running.Environment, running.TenantID
+			held.WorkspaceID, held.DiscoverySource = running.WorkspaceID, running.DiscoverySource
+		case "enterprise", "enterprise.network":
+			// Enrollment, the hook-socket authorizer and the egress route are
+			// installed at start; enterprise.inspection stays hot.
+			inspection := held.Enterprise.Inspection
+			held.Enterprise = running.Enterprise
+			held.Enterprise.Inspection = inspection
+		case "openshell.mode":
+			held.OpenShell.Mode = running.OpenShell.Mode
+		case "plugin_dir":
+			held.PluginDir = running.PluginDir
 		default:
 			return nil
 		}

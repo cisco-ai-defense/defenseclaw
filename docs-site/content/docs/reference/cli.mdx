@@ -44,8 +44,8 @@ Tables below tag each row with the binary that owns it.
 `policy activate`, the `setup` commands, the TUI) goes through the same config
 writer, which checks the change before it writes. A running gateway applies a
 valid change by itself and shows a new policy generation in `defenseclaw status`;
-only a short list of process-level keys needs `defenseclaw-gateway restart`
-(see [Restart-required keys](#restart-required-keys)). Files DefenseClaw
+only the keys listed under [Restart-required keys](#restart-required-keys) need
+`defenseclaw-gateway restart`. Files DefenseClaw
 derives from `config.yaml`, such as `custom-providers.json` and the generated
 hook scripts, are rewritten for you and never read back. See
 [Configuration: one source of truth](/docs/reference/source-of-truth).
@@ -817,7 +817,7 @@ These commands are connector-aware because the same asset name can exist in more
 | `defenseclaw mcp set\|unset <name> [--connector X]` | Add, update or remove an MCP server in the connector's own MCP config. `mcp set` / `unset` write every configured connector source by default; `--connector X` writes one connector's MCP source. This edits the agent's config, not `config.yaml`. |
 | `defenseclaw plugin block\|allow\|unblock <name> [--reason R] [--connector X]` | The same for a plugin. |
 | `defenseclaw plugin remove\|disable\|enable\|quarantine\|restore\|info <name> [--connector X]` | Remove a plugin's files, disable or re-enable it, quarantine or restore it, or show its details, across configured connector copies by default or one connector when scoped. |
-| `defenseclaw tool block\|allow <name> [--connector X] [--source S] [--reason R]` | Put a tool on the block or allow list. Bare rows are the fallback tier for every configured connector; connector-scoped rows use the runtime-enforceable `@connector/tool` key. `--source` is recorded for audit only: hook payloads carry no tool source, so a source-scoped block is enforced as an unscoped block. |
+| `defenseclaw tool block\|allow <name> [--connector X] [--source S] [--reason R]` | Put a tool on the block or allow list. Bare rules are the fallback tier for every configured connector. A connector-scoped rule (`--connector X`, or the name given as `@X/<name>`, the form `tool list` shows) is stored as the tool name with `connector: X` in `asset_policy.tool`. `--source` is recorded for audit only: hook payloads carry no tool source, so a source-scoped block is enforced as an unscoped block. |
 | `defenseclaw tool unblock <name> [--connector X] [--source S]` | Remove a tool from the block/allow list. Without `--connector` or `--source` it removes the fallback entry and the connector-specific overrides for this tool. |
 | `defenseclaw tool status <name> [--connector X] [--source S] [--json]` | Show the effective policy for one tool. |
 | `defenseclaw tool list [--blocked\|--allowed] [--connector X] [--json]` | List tool policy entries. |
@@ -1052,7 +1052,7 @@ misspelled one.
   ```
 
   ```text
-  Error: config.yaml was not changed: /home/alice/.defenseclaw/config.yaml: invalid configuration at $.guardrail.block_at (pattern); correct the field using the configuration schema and reference
+  Error: config.yaml was not changed: guardrail.block_at is not in the expected format. Use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits).
   ```
 
   The schema that names itself `v8` accepts `config_version` 8 and 9 files.
@@ -1091,8 +1091,14 @@ is saved, but the running gateway keeps the old value until you run
   `guardrail.retain_judge_bodies`, `guardrail.hook_self_heal`,
   `guardrail.hook_self_heal_debounce_ms`, and
   `guardrail.connectors.<c>.enabled`
-- `claw`, `agent` and `routing`
+- `claw`, `agent`, `routing` and `plugin_dir`
 - `observability.local.path` and `observability.local.judge_bodies_path`
+
+The storage paths (`data_dir` and the two `observability.local` paths) and
+`deployment_mode` are the exception: the gateway can not keep their old value,
+so it refuses that reload, and every later one, until you restart it. `/health`
+shows the error as `last_reload_error`, and an `/enforce` write answers
+`applied: false`.
 
 Thresholds, rule packs and rules, suppressions, `guardrail.hook_fail_mode`, `admission`, `asset_policy`,
 `scanners`, `llm_providers`, `update` and the observability destinations and
@@ -1158,7 +1164,7 @@ Every registry command takes `--json`, except `wizard`.
 
 ### Migrate `config.yaml` to version 9
 
-A fresh `defenseclaw init` writes `config_version: 9`. A file from 1.0.x is
+A fresh `defenseclaw init` writes `config_version: 9`. A file from 0.8.5 or later is
 at 8; `defenseclaw migrate` (or the upgrade, or `defenseclaw config migrate`)
 rewrites it as 9. Run `defenseclaw migrate --check` first to see what is
 pending:

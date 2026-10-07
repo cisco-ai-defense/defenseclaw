@@ -28,7 +28,7 @@ question: may this asset be installed and run? Two sections of `config.yaml`
 This is one case of the rule that `config.yaml` is the only admin intent (see
 [Configuration: one source of truth](/docs/reference/source-of-truth)). The
 older homes of this policy are read once, by the version 9 migration, and are
-then ignored (Secure Client devices keep the 1.0 behavior):
+then ignored (Secure Client devices keep the version 8 behavior):
 `policies/rego/data.json`, the `skill_actions`, `mcp_actions` and
 `plugin_actions` keys, and the operator rows of the audit database's `actions`
 table. [Upgrading from config_version 8](#upgrading-from-config_version-8)
@@ -543,7 +543,7 @@ management plane"}`. Put the same `asset_policy` rules in the admin config. See
 Reading the lists (`GET /enforce/blocked` and `/enforce/allowed`) works
 everywhere.
 
-Secure Client devices are unchanged: they keep reading the 1.0 admission policy
+Secure Client devices are unchanged: they keep reading the version 8 admission policy
 and keep their operator entries in the audit database. See
 [Secure Client](/docs/enterprise/secure-client).
 

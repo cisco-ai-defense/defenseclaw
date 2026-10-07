@@ -212,6 +212,11 @@ type Config struct {
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
+	// SecureClientV8Actions holds the skill_actions, mcp_actions and
+	// plugin_actions of a Secure Client source (critical, high, medium, low,
+	// info), which the gateway compares on reload as main did. Set only by
+	// the loader, only under Secure Client.
+	SecureClientV8Actions map[string][5]SeverityAction `mapstructure:"-" yaml:"-" json:",omitempty"`
 	// LegacyConnectorNotices records connector IDs this load moved to their
 	// replacement (see internal/legacyconnector). The gateway logs them once
 	// per boot and finishes the host-side cleanup. Never serialized.
@@ -2755,6 +2760,11 @@ func loadConfigSourceChecked(
 			ReportConfigLoadError(context.Background(), "observability_invalid")
 		}
 		return nil, fmt.Errorf("config: observability: %w", err)
+	}
+	if cfg.SecureClientIntegration() {
+		if err := readSecureClientV8Actions(&cfg); err != nil {
+			return nil, err
+		}
 	}
 	if err := cfg.ACP.Validate(); err != nil {
 		if ReportConfigLoadError != nil {

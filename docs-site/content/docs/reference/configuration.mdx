@@ -25,7 +25,7 @@ model behind this page: what is configuration, what is derived from it, and
 what only records what happened.
 
 The current contract is `config_version: 9`. A version 8 file, which is what
-DefenseClaw 1.0.x writes, still loads: the gateway migrates it in memory.
+DefenseClaw 0.8.5 to 0.8.10 write, still loads: the gateway migrates it in memory.
 `defenseclaw upgrade` or `defenseclaw migrate` rewrites it as version 9 and
 keeps the old file as `config.yaml.v8.bak`. See
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) for what moved
@@ -828,13 +828,17 @@ change:
 | `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
 | `restart` | Validate first, then use a fresh gateway process only for edits that cross a restart boundary, such as listener, topology, or storage changes. Fields that are explicitly hot-reloadable—including observability destinations—still reconcile in process so active agent sessions are not interrupted. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path when one is required; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
 
-In `hot` mode, a change to a key that needs a restart (`data_dir`, the audit
-and judge-bodies database paths, the gateway listener and credentials, and the
-rest of the list under [Reload without restart](#reload-without-restart)) is
-not rejected: the gateway keeps that key's running value, logs
+In `hot` mode, a change to a key that needs a restart (the gateway listener
+and credentials, the resource identity, and the rest of the list under
+[Reload without restart](#reload-without-restart)) is not rejected: the gateway
+keeps that key's running value, logs
 `[config] restart the gateway to apply <key>; the rest of the change applies now`,
-and applies everything else. Changing `gateway.config_reload.mode` itself needs
-a restart to take effect.
+and applies everything else. The storage paths (`data_dir`,
+`observability.local.path`, `observability.local.judge_bodies_path`) and
+`deployment_mode` can not be kept that way: the gateway refuses the reload, and
+every later one, until it restarts. `/health` shows `last_reload_error`, and an
+`/enforce` write answers `applied: false` with the error. Changing
+`gateway.config_reload.mode` itself needs a restart to take effect.
 
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/guardrail/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 
@@ -1268,7 +1272,7 @@ An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching it
 
 The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
 
-`~/.defenseclaw/custom-providers.json` is **derived** from this section on every config write, for tools that read the file, and carries a `_derived_from` hash. Do not edit it: a hand edit is never read back, and `defenseclaw doctor` fails the **Custom-provider overlay** row (`was edited by hand; the gateway ignores those edits`). `defenseclaw doctor --fix` rewrites it from `llm_providers`. A hand-written `custom-providers.json` from 1.0.x, which has no `_derived_from` hash, is still merged until the next `setup provider add` or `remove` moves its entries into `llm_providers`. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
+`~/.defenseclaw/custom-providers.json` is **derived** from this section on every config write, for tools that read the file, and carries a `_derived_from` hash. Do not edit it: a hand edit is never read back, and `defenseclaw doctor` fails the **Custom-provider overlay** row (`was edited by hand; the gateway ignores those edits`). `defenseclaw doctor --fix` rewrites it from `llm_providers`. A hand-written `custom-providers.json` from 0.8.x, which has no `_derived_from` hash, is still merged until the next `setup provider add` or `remove` moves its entries into `llm_providers`. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
 
 ## Environment variables
 
@@ -1394,13 +1398,13 @@ Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway resta
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
 | `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms`, `guardrail.connectors.<connector>.enabled` | The hook guard and which connectors have hooks installed |
-| `claw`, `agent`, `routing` | Paths, identity and the model router, captured at start |
+| `claw`, `agent`, `routing`, `plugin_dir` | Paths, identity, the model router and the connector plugins, captured at start |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network` | The deployment boundary |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |
 
 Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and
-rules, `admission`, `asset_policy`, `scanners`, `llm_providers`,
-`observability.destinations` and `update`. The effective policy digest, which
+rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`,
+`quarantine_dir`, `observability.destinations` and `update`. The effective policy digest, which
 is the sha256 of the migrated config (secrets dropped) plus the digests of the
 assets it names, is stamped on `/health`, `/status` and every decision event,
 so you can tell which version of the policy decided something:

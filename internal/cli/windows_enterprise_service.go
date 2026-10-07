@@ -104,6 +104,11 @@ type windowsEnterpriseLifecycleOptions struct {
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.
 	ignoredDeploymentRecords []string
+	// localEnforcementEntriesIgnored counts the audit.db block/allow entries
+	// a config_version 9 migration in this run left in place (the
+	// actions_rows_ignored of the migration-v9.json it wrote). The standalone
+	// result reports them as local_enforcement_entries_ignored.
+	localEnforcementEntriesIgnored int
 	// deploymentTrustMode is the payload trust the deployment records
 	// (deployment.json trust_mode), taken from the installer report the
 	// standalone result was built from. The marker publishes it rather than

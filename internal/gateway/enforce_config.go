@@ -168,11 +168,26 @@ func toolRuleMap(rule config.AssetPolicyToolRule) map[string]any {
 	return out
 }
 
+// assetListResult is the writer result and the error of the reload that
+// followed it. The edit is saved either way.
+type assetListResult struct {
+	configwrite.Result
+	reloadErr error
+}
+
 // enforceWriteResponse is the /enforce write reply: the status, the
 // config_generation the writer recorded and, once the gateway has applied
-// it, the live generation's effective_policy_digest.
-func (a *APIServer) enforceWriteResponse(status string, generation uint64) map[string]any {
-	out := map[string]any{"status": status, "generation": generation}
+// it, the live generation's effective_policy_digest. When the gateway refused
+// the reload (a restart-required key it can not keep at its running value),
+// the reply says so instead of passing the old generation's digest off as the
+// new one's.
+func (a *APIServer) enforceWriteResponse(status string, result assetListResult) map[string]any {
+	out := map[string]any{"status": status, "generation": result.Generation}
+	if result.reloadErr != nil {
+		out["applied"] = false
+		out["reload_error"] = result.reloadErr.Error()
+		return out
+	}
 	if g := a.generation(); g != nil && g.Digest != "" {
 		out["effective_policy_digest"] = g.Digest
 	}
@@ -183,7 +198,7 @@ func (a *APIServer) enforceWriteResponse(status string, generation uint64) map[s
 // reading the lists from the file it changes (compare-and-swap on its
 // sha256, retried when another writer got there first), then applies the
 // new config to this gateway.
-func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, actor string) (configwrite.Result, error) {
+func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, actor string) (assetListResult, error) {
 	// Written as the canonical connector name the runtime passes.
 	edit.Connector = config.NormalizeConnectorName(edit.Connector)
 	path := configFilePathForSnapshot(a.liveConfig())
@@ -191,14 +206,14 @@ func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, 
 	for attempt := 0; attempt < 3; attempt++ {
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return configwrite.Result{}, fmt.Errorf("read %s: %w", path, err)
+			return assetListResult{}, fmt.Errorf("read %s: %w", path, err)
 		}
 		sum := sha256.Sum256(raw)
 		var current struct {
 			AssetPolicy config.AssetPolicyConfig `yaml:"asset_policy"`
 		}
 		if err := yaml.Unmarshal(raw, &current); err != nil {
-			return configwrite.Result{}, fmt.Errorf("parse %s: %w", path, err)
+			return assetListResult{}, fmt.Errorf("parse %s: %w", path, err)
 		}
 		changes := assetListChange(&config.Config{AssetPolicy: current.AssetPolicy}, edit)
 		apply := a.configApply
@@ -215,16 +230,17 @@ func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, 
 			continue
 		}
 		if err != nil {
-			return configwrite.Result{}, err
+			return assetListResult{}, err
 		}
+		out := assetListResult{Result: result}
 		if a.configReloader != nil {
-			if reloadErr := a.configReloader(ctx, "enforce_api"); reloadErr != nil {
-				fmt.Fprintf(os.Stderr, "[api] config reload after %s %s %q: %v\n", edit.Op, edit.TargetType, edit.Name, reloadErr)
+			if out.reloadErr = a.configReloader(ctx, "enforce_api"); out.reloadErr != nil {
+				fmt.Fprintf(os.Stderr, "[api] config reload after %s %s %q: %v\n", edit.Op, edit.TargetType, edit.Name, out.reloadErr)
 			}
 		}
-		return result, nil
+		return out, nil
 	}
-	return configwrite.Result{}, lastErr
+	return assetListResult{}, lastErr
 }
 
 // liveConfig is the config a read-only decision uses: the sidecar's

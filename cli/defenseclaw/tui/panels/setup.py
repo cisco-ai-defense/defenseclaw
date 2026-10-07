@@ -6127,14 +6127,16 @@ def _llm_catalog_provider_choices() -> tuple[str, ...]:
     return tuple(dict.fromkeys(base))
 
 
-def llm_catalog_models(provider: str, instance_name: str = "", data_dir: str = "") -> tuple[str, ...]:
+def llm_catalog_models(
+    provider: str, instance_name: str = "", data_dir: str = "", cfg: object | None = None
+) -> tuple[str, ...]:
     """Curated model ids for ``provider`` (or a custom instance's models)."""
     try:
         from defenseclaw.commands import _llm_picker  # noqa: PLC0415
 
         models: list[str] = []
         if instance_name:
-            inst = _llm_picker.custom_instance(data_dir, instance_name)
+            inst = _llm_picker.custom_instance(data_dir, instance_name, cfg)
             if inst:
                 models = [str(m) for m in (inst.get("available_models") or []) if m]
         if not models:
@@ -6168,7 +6170,7 @@ def llm_model_candidates(
 
     provider = (wizard_field_value(fields, "Provider") or "anthropic").strip().lower()
     instance = (wizard_field_value(fields, "Instance Name") or "").strip()
-    return llm_catalog_models(provider, instance, _llm_data_dir(cfg))
+    return llm_catalog_models(provider, instance, _llm_data_dir(cfg), cfg)
 
 
 def _provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:

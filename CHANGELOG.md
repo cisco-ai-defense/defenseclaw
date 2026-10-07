@@ -62,7 +62,7 @@ stopped`. Nothing is changed; use the install command above.
 ### Added
 
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
-  Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
+  Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update.check: false`.
 
 ### Removed
 
@@ -99,8 +99,8 @@ line in `migration-v9.json`.
   records overridden severities in `migration-v9.json`, drops a leftover
   `privacy` section and notes a `privacy.disable_redaction: true` there;
   redaction follows `observability.redaction_profiles`. In a
-  `config_version` 9 file any of these keys is rejected with the normal
-  unknown-key error naming the key.
+  `config_version` 9 file any of these keys is refused with an error that
+  names the key and what replaces it, or says to remove it.
 - **0.8.x, breaking (telemetry): the resource attribute aliases.** DefenseClaw
   emits only canonical names: `deployment.environment` is now
   `deployment.environment.name`, `deployment.mode` is now

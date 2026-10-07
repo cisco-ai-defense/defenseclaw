@@ -78,6 +78,10 @@ type MCPServerEntry struct {
 	// Connector is the connector whose registry listed the server when a
 	// managed gateway reads several users' registries (never serialized).
 	Connector string `json:"-"`
+	// Home is the user home a managed gateway read the server from (never
+	// serialized). Two users, or two connectors of one user, may each list a
+	// server under the same name.
+	Home string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never

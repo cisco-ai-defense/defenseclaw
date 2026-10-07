@@ -162,11 +162,10 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
+		// A prompt block stands: guardrail.block_at is one threshold on every
+		// surface. A prompt is never confirmable, so there is no confirm to
+		// demote.
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
-		// Apply the prompt-surface UX contract before mode handling so
-		// "action" mode operators see alert (instead of block) and "observe"
-		// mode operators see the same audit reason explaining the demotion.
-		clampPromptDirectionToolVerdict(verdict, "prompt")
 	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
 

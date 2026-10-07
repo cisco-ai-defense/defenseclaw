@@ -25,9 +25,11 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -2057,4 +2059,58 @@ func warningCodes(result *enterprisestatus.Result) []string {
 		codes = append(codes, warning.Code)
 	}
 	return codes
+}
+
+// A lifecycle run whose config step migrated a config_version 8 config and
+// left audit.db block/allow entries in place warns
+// local_enforcement_entries_ignored with the count, as on Linux and macOS. A
+// run that wrote no new migration record does not (GAP-0292).
+func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	runtimeDir := t.TempDir()
+	layoutSeam, runnerSeam, scannerSeam := windowsEnterpriseHotConfigLayout, windowsEnterpriseStandaloneRunner, windowsScannerRuntimeDir
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, windowsEnterpriseStandaloneRunner, windowsScannerRuntimeDir = layoutSeam, runnerSeam, scannerSeam
+	})
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: configPath, ConfigDir: dir}, nil
+	}
+	windowsScannerRuntimeDir = func() (string, error) { return runtimeDir, nil }
+	migrate := false
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		if migrate {
+			record := `{"schema_version":1,"from_version":8,"to_version":9,"actions_rows_ignored":2}`
+			if err := os.WriteFile(config.MigrationRecordPath(configPath), []byte(record), 0o600); err != nil {
+				return windowsEnterpriseStandaloneRun{}, err
+			}
+		}
+		return windowsEnterpriseStandaloneRun{Output: []byte(`{"schema_version":1,"ok":true,"action":"upgrade"}`)}, nil
+	}
+	ignored := func() []enterprisestatus.Message {
+		opts := &windowsEnterpriseLifecycleOptions{jsonOutput: true}
+		if _, _, err := runWindowsEnterpriseStandaloneInstaller(context.Background(), &cobra.Command{}, opts,
+			`C:\x\install-enterprise.ps1`, []string{"-Action", "Upgrade"}); err != nil {
+			t.Fatal(err)
+		}
+		command := &cobra.Command{}
+		command.SetOut(&bytes.Buffer{})
+		result := newWindowsEnterpriseStandaloneResult("upgrade", opts)
+		_ = finishWindowsEnterpriseStandalone(command, opts, result, 0)
+		var found []enterprisestatus.Message
+		for _, warning := range result.Warnings {
+			if warning.Code == config.LocalEnforcementEntriesIgnored {
+				found = append(found, warning)
+			}
+		}
+		return found
+	}
+	migrate = true
+	if got := ignored(); len(got) != 1 || !strings.HasPrefix(got[0].Message, "2 local block/allow entries in audit.db are ignored") {
+		t.Fatalf("migrating run warnings = %+v", got)
+	}
+	migrate = false
+	if got := ignored(); len(got) != 0 {
+		t.Fatalf("a run that migrated nothing warned %+v", got)
+	}
 }

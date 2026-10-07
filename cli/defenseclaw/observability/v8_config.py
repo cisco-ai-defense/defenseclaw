@@ -967,6 +967,16 @@ _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("scanners", "mcp_scanner", "binary"), "the managed scanner install"),
 )
 
+# v8 keys config_version 9 dropped with nothing in their place, with what
+# rejectV9RemovedKeys (Go) tells the reader to do.
+_V9_DROPPED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("privacy",), "remove it: config_version 9 has no privacy section"),
+    (
+        ("observability", "trace_policy", "compatibility_aliases"),
+        "remove it: telemetry carries only canonical attribute names",
+    ),
+)
+
 
 # The corrective action of a retired key in a config_version 8 source;
 # cmd_config words it plainly for config set.
@@ -995,17 +1005,20 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
             node = node[part]
         return True
 
-    def refuse(parts: tuple[str, ...], target: str) -> None:
+    def refuse(parts: tuple[str, ...], action: str) -> None:
         raise V8ConfigError(
             source_name,
             _json_path(parts),
             "legacy-key-forbidden",
-            f"a retired configuration key is not accepted in config_version 9; use {target}",
+            f"a retired configuration key is not accepted in config_version 9; {action}",
         )
 
     for parts, target in _V9_REMOVED_KEYS:
         if lookup(parts):
-            refuse(parts, target)
+            refuse(parts, f"use {target}")
+    for parts, action in _V9_DROPPED_KEYS:
+        if lookup(parts):
+            refuse(parts, action)
     guardrail = document.get("guardrail")
     if not isinstance(guardrail, dict):
         return
@@ -1021,7 +1034,7 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
         scopes += children(profile_path, profile, "connectors")
     for scope_path, scope in scopes:
         if isinstance(scope, dict) and "rule_pack_dir" in scope:
-            refuse((*scope_path, "rule_pack_dir"), "rule_pack or custom_packs")
+            refuse((*scope_path, "rule_pack_dir"), "use rule_pack or custom_packs")
 
 
 def _validate_schema(document: dict[str, Any], source_name: str) -> None:

@@ -744,6 +744,18 @@ class TestCustomProviderCredentialDiscovery(unittest.TestCase):
             names = {s.spec.env_name for s in statuses}
             self.assertIn("ACME_LLM_KEY", names)
 
+    def test_discovery_reads_llm_providers_without_the_overlay_file(self) -> None:
+        # The v9 migration folds the overlay into llm_providers and renames
+        # the file: the keys still come from config.
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _make_cfg(d)
+            cfg.llm_providers.custom = [
+                _cfgmod.LLMCustomProvider(name="acme-gw", domains=["llm.acme.example"], env_keys=["ACME_LLM_KEY"]),
+            ]
+            self.assertFalse(os.path.exists(os.path.join(d, "custom-providers.json")))
+            specs = {s.spec.env_name: s.spec for s in creds.classify(cfg)}
+            self.assertEqual(specs["ACME_LLM_KEY"].feature, "llm.custom.acme-gw")
+
 
 class TestLLMPing(unittest.TestCase):
     """:func:`defenseclaw.llm.ping` returns (ok, message) and never raises."""

@@ -121,6 +121,28 @@ def _reject_connector_with_source(connector: str, source: str) -> None:
         )
 
 
+def _resolve_name_scope(app: AppContext, name: str, connector: str, source: str) -> tuple[str, str]:
+    """Validate the scope options and return ``(tool, connector)``.
+
+    An ``@<connector>/<tool>`` NAME, the form ``tool list`` shows a connector
+    rule in, is ``<tool> --connector <connector>``: a rule is a tool name plus
+    a connector, and the gateway never splits a name, so a rule named
+    ``@codex/shell`` would block nothing.
+    """
+    _reject_connector_with_source(connector, source)
+    if not (name.startswith("@") and "/" in name):
+        return name, _resolve_connector_scope(app, connector)
+    scoped, _, tool_name = name[1:].partition("/")
+    if not scoped or not tool_name:
+        raise click.UsageError(f"{name!r}: give the tool as @<connector>/<tool> or <tool> --connector <connector>")
+    if source:
+        raise click.UsageError(f"--source cannot be combined with {name!r}, which is scoped to connector {scoped!r}")
+    scoped = _resolve_connector_scope(app, scoped)
+    if connector and _resolve_connector_scope(app, connector) != scoped:
+        raise click.UsageError(f"{name!r} is scoped to connector {scoped!r}, but --connector is {connector!r}")
+    return tool_name, scoped
+
+
 def _connector_target(name: str, connector: str) -> str:
     """Display key of a tool rule, as PolicyEngine presents asset_policy.tool
     rules: ``@<connector>/<tool>`` when scoped, else ``<tool>``."""
@@ -244,8 +266,8 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
 
     \b
     Scope:
-      --connector C   blocks the tool for connector C only (writes @C/<tool>);
-                      the runtime enforces it per connector.
+      --connector C   blocks the tool for connector C only (shown as @C/<tool>;
+                      NAME may be given in that form); enforced per connector.
       --source S      audit only: the runtime payload carries no source, so a
                       scoped block fail-closes to an unscoped block and a scoped
                       audit row is kept for operator visibility.
@@ -259,8 +281,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
     """
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
     if not reason:
         reason = "manual block via CLI"
 
@@ -326,8 +347,8 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
 
     \b
     Scope:
-      --connector C   allows the tool for connector C only (writes @C/<tool>);
-                      runtime-enforceable.
+      --connector C   allows the tool for connector C only (shown as @C/<tool>;
+                      NAME may be given in that form); runtime-enforceable.
       --source S      audit only — a source allow is recorded but never read at
                       runtime (the payload carries no source). Use --connector.
       (neither)       allow every configured connector through the fallback row.
@@ -339,8 +360,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     """
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
     if not reason:
         reason = "manual allow via CLI"
 
@@ -398,8 +418,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
 
     if connector:
         target = _connector_target(name, connector)
@@ -694,8 +713,7 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
     from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
     connectors = [connector] if connector else resolve_list_connectors(app, "")
 
     pe = PolicyEngine(app.store, app.cfg)

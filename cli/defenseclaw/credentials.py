@@ -734,7 +734,7 @@ def discover_observability_credentials(cfg: Config) -> list[CredentialSpec]:
 # Custom-provider overlay env discovery
 # ---------------------------------------------------------------------------
 #
-# ``~/.defenseclaw/custom-providers.json`` lets operators declare an
+# config.yaml ``llm_providers.custom`` lets operators declare an
 # arbitrary number of internal/self-hosted LLM endpoints, each with its
 # own ``env_keys`` list (e.g. ``ACME_INTERNAL_LLM_KEY``). Surfacing these
 # alongside the static CREDENTIALS table means ``defenseclaw keys list``
@@ -742,44 +742,29 @@ def discover_observability_credentials(cfg: Config) -> list[CredentialSpec]:
 # pester about ``DEFENSECLAW_LLM_KEY`` — without us hard-coding every
 # custom env var.
 #
-# The check is best-effort: a missing overlay returns ``[]`` and a
-# malformed JSON file is silently ignored (the ``setup provider`` write
-# path raises hard on parse errors, so a corrupt overlay would have
-# been caught earlier).
-
-
-def _custom_provider_overlay_path(cfg: Config) -> str:
-    data_dir = getattr(cfg, "data_dir", "") or ""
-    if not data_dir:
-        return ""
-    return os.path.join(data_dir, "custom-providers.json")
+# The entries come from config (``derived_providers.configured_providers``),
+# as ``resolve_llm`` reads them: the derived custom-providers.json is never
+# read back, so a migration that folded the overlay into config and renamed
+# the file loses no key. A legacy operator overlay counts only while config
+# declares no providers.
 
 
 def _custom_provider_env_keys(cfg: Config) -> dict[str, str]:
-    """Return ``{ENV_VAR: provider_name}`` for every env_key declared in
-    the overlay. Order follows file order; provider names later in the
-    file win on duplicate env_key, which matches the merge semantics on
-    the Go side (last entry wins).
+    """Return ``{ENV_VAR: provider_name}`` for every env_key a custom
+    provider declares. Order follows the provider order; provider names
+    later in the list win on duplicate env_key, which matches the merge
+    semantics on the Go side (last entry wins).
     """
-    path = _custom_provider_overlay_path(cfg)
-    if not path or not os.path.isfile(path):
+    from defenseclaw import derived_providers  # noqa: PLC0415
+
+    if not (getattr(cfg, "data_dir", "") or ""):
         return {}
     try:
-        import json  # noqa: PLC0415
-
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+        providers = derived_providers.configured_providers(cfg)
+    except Exception:  # noqa: BLE001 - discovery is best-effort
         return {}
     out: dict[str, str] = {}
-    if not isinstance(data, dict):
-        return {}
-    providers = data.get("providers") or []
-    if not isinstance(providers, list):
-        return {}
     for entry in providers:
-        if not isinstance(entry, dict):
-            continue
         pname = str(entry.get("name") or "").strip()
         keys = entry.get("env_keys") or []
         if not isinstance(keys, list):
@@ -835,7 +820,7 @@ def _custom_provider_predicate(env_key: str) -> Callable[[Config], Requirement]:
 
 def discover_custom_provider_credentials(cfg: Config) -> list[CredentialSpec]:
     """Return ad-hoc :class:`CredentialSpec` entries for every env_key
-    declared in ``custom-providers.json``.
+    a custom provider (``llm_providers.custom``) declares.
 
     These are *runtime* specs — not part of the static ``CREDENTIALS``
     tuple — because they depend on operator overlay state. ``classify``
@@ -855,7 +840,7 @@ def discover_custom_provider_credentials(cfg: Config) -> list[CredentialSpec]:
             continue
         feature = f"llm.custom.{provider_name}" if provider_name else "llm.custom"
         description = (
-            f"Custom-provider key declared in custom-providers.json "
+            f"Custom-provider key declared in llm_providers "
             f"({provider_name or 'unnamed'} → {env_key})."
         )
         out.append(

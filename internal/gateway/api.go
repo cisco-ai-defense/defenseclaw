@@ -2193,7 +2193,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(action), req.TargetName, details)
 	}
-	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse(status, result.Generation))
+	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse(status, result))
 }
 
 func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
@@ -2260,14 +2260,15 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var generation uint64
+	var result assetListResult
 	if a.legacyEnforcementRows() {
 		if err := a.legacyAllow(req.TargetType, policyName, reason); err != nil {
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 	} else {
-		result, err := a.applyAssetListEdit(r.Context(), assetListEdit{
+		var err error
+		result, err = a.applyAssetListEdit(r.Context(), assetListEdit{
 			Op: assetListOpAllow, TargetType: req.TargetType, Name: policyName,
 			Connector: req.Connector, Reason: reason, SourcePath: req.SourcePath,
 		}, apiConfigActor(r.Context()))
@@ -2275,7 +2276,6 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			a.writeAssetListError(w, r, audit.ActionAPIEnforceAllow, err)
 			return
 		}
-		generation = result.Generation
 		// An operator allow lifts the automatic quarantine/disable journal
 		// state, as it always did.
 		if a.store != nil {
@@ -2290,7 +2290,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 		return
 	}
-	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse("allowed", generation))
+	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse("allowed", result))
 }
 
 // decodeEnforcementRequest reads and validates an /enforce/* body.
@@ -2752,7 +2752,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 // exists but is not a directory is only logged: the scanner reports it.
 func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
 	info, err := os.Stat(target)
-	if errors.Is(err, fs.ErrPermission) {
+	// Secure Client keeps the scan of main, which the scanner fails on
+	// (issue #1092).
+	if errors.Is(err, fs.ErrPermission) && !a.managedAIDOnly() {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": fmt.Sprintf("the gateway's service account cannot read %s: copy the folder somewhere it can read, or grant that account read access", target),
 		})

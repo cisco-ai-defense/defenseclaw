@@ -149,14 +149,31 @@ func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds pol
 	return &out
 }
 
-// fallbackVerdict is the verdict without a Rego module. Secure Client keeps
-// the 1.0 threshold-only answer (issue #1092): no Cisco trust level and no
+// fallbackVerdict is the verdict without a Rego module: merged with the
+// action the thresholds give the local verdict and AI Defense's, the way
+// guardrail.rego weighs them. Secure Client keeps the 1.0 threshold-only
+// answer on the merged verdict (issue #1092): no Cisco trust level and no
 // HILT confirm.
-func (g *GuardrailInspector) fallbackVerdict(merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
-	if gen := currentGeneration(); gen != nil && gen.Config != nil && gen.Config.SecureClientIntegration() {
+func (g *GuardrailInspector) fallbackVerdict(local, merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
+	if secureClientGeneration() {
 		return fallbackGuardrailVerdictForThresholds(merged, nil, thresholds, "", nil)
 	}
-	return fallbackGuardrailVerdictForThresholds(merged, cisco, thresholds, mode, g.hiltInput())
+	if merged == nil {
+		return allowVerdict("fallback")
+	}
+	if local == nil {
+		local = allowVerdict("fallback")
+	}
+	out := *merged
+	out.Action = fallbackGuardrailVerdictForThresholds(local, cisco, thresholds, mode, g.hiltInput()).Action
+	return &out
+}
+
+// secureClientGeneration reports a live generation on the Secure Client
+// profile.
+func secureClientGeneration() bool {
+	gen := currentGeneration()
+	return gen != nil && gen.Config != nil && gen.Config.SecureClientIntegration()
 }
 
 func errorVerdict(scanner string) *ScanVerdict {
@@ -968,7 +985,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern"}
 		}
-		return g.finalize(ctx, direction, model, mode, content, localResult, nil)
+		return g.finalize(ctx, direction, model, mode, content, localResult, localResult, nil)
 	}
 
 	if (sm == "remote" || sm == "both") && g.ciscoClient != nil && len(messages) > 0 {
@@ -983,7 +1000,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	merged := g.mergeVerdict(localResult, ciscoResult)
 	merged.CiscoElapsedMs = ciscoElapsedMs
 
-	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
+	return g.finalize(ctx, direction, model, mode, content, localResult, merged, ciscoResult)
 }
 
 // inspectRegexJudge uses triage patterns to route ambiguous findings to the
@@ -1049,24 +1066,26 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		if ruleVerdict != nil {
 			verdict = mergeVerdicts(verdict, ruleVerdict)
 		}
+		local := verdict
 
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 			runCisco()
 			verdict = g.mergeVerdict(verdict, ciscoResult)
 			verdict.CiscoElapsedMs = ciscoElapsedMs
 		}
-		return g.finalize(ctx, direction, model, mode, content, verdict, ciscoResult)
+		return g.finalize(ctx, direction, model, mode, content, local, verdict, ciscoResult)
 	}
 
 	// If the rule engine found HIGH+ severity, return immediately (covers
 	// sensitive paths, dangerous commands, C2, etc. that triage doesn't have).
 	if ruleVerdict != nil && severityRank[ruleVerdict.Severity] >= severityRank["HIGH"] {
+		local := ruleVerdict
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 			runCisco()
 			ruleVerdict = g.mergeVerdict(ruleVerdict, ciscoResult)
 			ruleVerdict.CiscoElapsedMs = ciscoElapsedMs
 		}
-		return g.finalize(ctx, direction, model, mode, content, ruleVerdict, ciscoResult)
+		return g.finalize(ctx, direction, model, mode, content, local, ruleVerdict, ciscoResult)
 	}
 
 	// NEEDS_REVIEW: send to judge for adjudication with evidence.
@@ -1113,12 +1132,13 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			merged = mergeVerdicts(merged, judgeVerdict)
 		}
 	}
+	local := merged
 	if ciscoResult != nil {
 		merged = g.mergeVerdict(merged, ciscoResult)
 		merged.CiscoElapsedMs = ciscoElapsedMs
 	}
 
-	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
+	return g.finalize(ctx, direction, model, mode, content, local, merged, ciscoResult)
 }
 
 // inspectJudgeFirst runs the LLM judge as the primary scanner with regex as
@@ -1204,6 +1224,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
 		}
+		local := localResult
 		// Also run Cisco remote on fallback for full parity with regex_only path.
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 			t0 := time.Now()
@@ -1217,7 +1238,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 				localResult.CiscoElapsedMs = ciscoElapsedMs
 			}
 		}
-		return g.finalize(ctx, direction, model, mode, content, localResult, ciscoResult)
+		return g.finalize(ctx, direction, model, mode, content, local, localResult, ciscoResult)
 	}
 
 	merged := judgeRes.verdict
@@ -1258,6 +1279,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	}
 
 	// Cisco AI Defense (if configured).
+	local := merged
 	if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
@@ -1269,7 +1291,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		merged.CiscoElapsedMs = ciscoElapsedMs
 	}
 
-	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
+	return g.finalize(ctx, direction, model, mode, content, local, merged, ciscoResult)
 }
 
 // phaseAction safely extracts the action from a potentially-nil verdict
@@ -1297,16 +1319,23 @@ func phaseSeverity(v *ScanVerdict) string {
 }
 
 // finalize runs the live generation's OPA guardrail policy when there is
-// one, otherwise it applies the resolved thresholds to the merged verdict.
-// Both read input.thresholds for the request's connector and profile.
-func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, merged *ScanVerdict, ciscoResult *ScanVerdict) *ScanVerdict {
+// one, otherwise it applies the resolved thresholds. Both read
+// input.thresholds for the request's connector and profile. local is the
+// verdict before AI Defense's was merged in: guardrail.rego weighs AI Defense
+// from cisco_result alone (guardrail.cisco_trust_level), so the merged
+// severity must not reach it as local_result too. Secure Client keeps the
+// merged verdict there, as main did (issue #1092).
+func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, local, merged, ciscoResult *ScanVerdict) *ScanVerdict {
 	thresholds := g.thresholds(ctx)
 	var prepared *policy.Prepared
 	if gen := currentGeneration(); gen != nil {
 		prepared = gen.OPA
 	}
 	if prepared == nil {
-		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
+		return g.fallbackVerdict(local, merged, ciscoResult, thresholds, mode)
+	}
+	if secureClientGeneration() {
+		local = merged
 	}
 
 	input := policy.GuardrailInput{
@@ -1319,12 +1348,12 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		Thresholds:    &thresholds,
 	}
 
-	if merged != nil && merged.Severity != "NONE" {
+	if local != nil && local.Severity != "NONE" {
 		input.LocalResult = &policy.GuardrailScanResult{
-			Action:   merged.Action,
-			Severity: merged.Severity,
-			Reason:   merged.Reason,
-			Findings: merged.Findings,
+			Action:   local.Action,
+			Severity: local.Severity,
+			Reason:   local.Reason,
+			Findings: local.Findings,
 		}
 	}
 	if ciscoResult != nil && ciscoResult.Severity != "NONE" {
@@ -1344,7 +1373,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
+		return g.fallbackVerdict(local, merged, ciscoResult, thresholds, mode)
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 
