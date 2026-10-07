@@ -160,6 +160,16 @@ func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 	observe("dc-ml-team@dclab.test", "dc-devs@dclab.test")
 	observe("dc-devs@dclab.test", "dc-ml-team@dclab.test")
 	observe("dc-ml-team@dclab.test", "dc-devs@dclab.test", "dc-sre@dclab.test")
+	// Stale facts, served while a refresh is in flight, are not reported
+	// (GAP-0172).
+	observeIdentity(context.Background(), capture, VerifiedSubject{
+		UserID: "1291", IDKind: useridentity.KindPOSIXUID, UserName: "dcad-alice",
+		Directory: useridentity.DirectoryFacts{
+			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+			Groups: []string{"dc-devs@dclab.test"}, Source: useridentity.SourceSSSDInfoPipe,
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now().Add(-identityDirectoryTTL - time.Minute),
+		},
+	}, useridentity.SessionFacts{})
 	records := capture.snapshot()
 	if len(records) != 2 || string(records[0].EventName()) != observability.TelemetryEventIdentityObserved {
 		t.Fatalf("records = %d, want two identity.observed", len(records))
