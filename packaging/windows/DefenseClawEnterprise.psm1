@@ -3340,6 +3340,9 @@ function New-DefenseClawProtectedDirectory {
     param(
         [Parameter(Mandatory)][string]$Path,
         [switch]$AllowUsersRead,
+        # Read for BUILTIN\Users on the directory itself, not inherited by
+        # anything created beneath it.
+        [switch]$UsersReadThisFolder,
         [string]$StagingMarkerSID
     )
     $parent = [IO.Path]::GetDirectoryName($Path)
@@ -3364,6 +3367,9 @@ function New-DefenseClawProtectedDirectory {
         [string]::IsNullOrWhiteSpace($StagingMarkerSID)) {
         $sddl += '(A;OICI;0x1200a9;;;BU)'
     }
+    elseif ($UsersReadThisFolder) {
+        $sddl += '(A;;0x1200a9;;;BU)'
+    }
     # CreateDirectoryW receives the protected descriptor in SECURITY_ATTRIBUTES,
     # so the object is never visible with an inherited permissive DACL. If
     # another principal wins the absent->create race, ERROR_ALREADY_EXISTS is
@@ -3377,6 +3383,31 @@ function New-DefenseClawProtectedDirectory {
         -AllowUsersRead:($AllowUsersRead -and
             [string]::IsNullOrWhiteSpace($StagingMarkerSID))
     return [bool]$created
+}
+
+# The standalone ProgramData vendor directory (C:\ProgramData\Cisco) holds the
+# hook runtime directory, and every standard user's hook reads the machine
+# policy summary there only after checking the owner and DACL of each
+# ancestor. On a device without other Cisco software standalone Setup creates
+# the vendor directory, so it creates it with read for BUILTIN\Users on that
+# directory alone; without it every hook fails closed with
+# enterprise_machine_policy_summary_untrusted. Write stays with SYSTEM and
+# Administrators. A vendor directory that already exists (Secure Client or
+# other Cisco software) is only validated, never changed, and the Secure
+# Client profile never takes this path.
+function Test-DefenseClawStandaloneVendorDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $vendor = [IO.Path]::GetDirectoryName(
+        [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).StateRoot
+    )
+    return [string]::Equals(
+        [IO.Path]::GetFullPath($Path).TrimEnd('\'),
+        [IO.Path]::GetFullPath($vendor).TrimEnd('\'),
+        [StringComparison]::OrdinalIgnoreCase
+    )
 }
 
 # Directories strictly between the required base and a managed root. The base
@@ -3556,6 +3587,7 @@ function Initialize-DefenseClawManagedRoot {
             $createdThisComponent = New-DefenseClawProtectedDirectory `
                 -Path $current `
                 -AllowUsersRead:$AllowUsersRead `
+                -UsersReadThisFolder:(Test-DefenseClawStandaloneVendorDirectory -Path $current) `
                 -StagingMarkerSID $(if ($isLeaf) {
                     $StagingMarkerSID
                 }

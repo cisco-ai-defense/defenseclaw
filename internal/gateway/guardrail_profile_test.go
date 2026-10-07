@@ -381,7 +381,7 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	prevAccount, prevFacts := profileExplainAccount, profileExplainDirectoryFacts
 	t.Cleanup(func() { profileExplainAccount, profileExplainDirectoryFacts = prevAccount, prevFacts })
-	profileExplainAccount = func(string) (string, string, bool) { return "94401116", "dcad-manygroups@dclab.test", true }
+	profileExplainAccount = func(string) (string, string, error) { return "94401116", "dcad-manygroups@dclab.test", nil }
 	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
 		return useridentity.DirectoryFacts{}, errors.New("in 3000 groups, more than the 2048 DefenseClaw names")
 	}
@@ -438,6 +438,38 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
 	if note := unnamedGroupsNote(named); !strings.Contains(note, "2 of this account's 3 group(s) have no name, only a SID") {
 		t.Fatalf("unnamed SID note = %q", note)
+	}
+}
+
+// TestExplainNamesEntraIDAccountsThroughTheLSA pins GAP-0222: explain names
+// an Entra ID account by its SID, bare name or UPN through the LSA, as the
+// hook path names it, where os/user failed for every Entra ID account; a
+// name the LSA cannot resolve is reported with the LSA's reason.
+func TestExplainNamesEntraIDAccountsThroughTheLSA(t *testing.T) {
+	const sid = "S-1-12-1-2531559698-1231582900-1003231414-1134328369"
+	alice := windowsAccount{SID: sid, Name: "EntraAlice", User: true}
+	noMapping := errors.New("No mapping between account names and security IDs was done.")
+	bySID := func(s string) (windowsAccount, error) {
+		if strings.EqualFold(s, sid) {
+			return alice, nil
+		}
+		return windowsAccount{}, noMapping
+	}
+	// LookupAccountName takes an Entra ID account only in the AzureAD domain.
+	byName := func(name string) (windowsAccount, error) {
+		switch strings.ToLower(name) {
+		case `azuread\entraalice`, `azuread\entra-alice@contoso.example`:
+			return alice, nil
+		}
+		return windowsAccount{}, noMapping
+	}
+	for _, name := range []string{strings.ToLower(sid), "EntraAlice", "entra-alice@contoso.example", `AzureAD\EntraAlice`} {
+		if id, user, err := resolveWindowsExplainAccount(name, bySID, byName); err != nil || id != sid || user != "EntraAlice" {
+			t.Errorf("resolve(%q) = %q, %q, %v; want %s, EntraAlice", name, id, user, err, sid)
+		}
+	}
+	if _, _, err := resolveWindowsExplainAccount("entra-bob@contoso.example", bySID, byName); err == nil || !strings.Contains(err.Error(), noMapping.Error()) {
+		t.Errorf("unknown account: err = %v; want an error with the LSA's reason", err)
 	}
 }
 
