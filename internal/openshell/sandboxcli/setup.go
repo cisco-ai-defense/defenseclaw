@@ -246,9 +246,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
 		}
 		rep = a.runDoctor(ctx)
-	} else if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn {
+	} else if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn &&
+		!slices.ContainsFunc(gatewayStops, func(id string) bool { return failed(rep, id) }) {
 		// A supported OpenShell older than the release DefenseClaw
-		// installs: it works, and setup offers the upgrade.
+		// installs, whose gateway is usable: it works, and setup offers the
+		// upgrade. With a gateway check failing, setup stops on its fix
+		// first (below); the upgrade is offered on the next run.
 		var err error
 		if rep, err = a.offerOpenShellUpgrade(ctx, o, rep, *c); err != nil {
 			return err
@@ -256,8 +259,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 	// A stopped service leaves the gateway not answering, whose fix (start
 	// it) comes first; with the gateway answering, the service's own fix.
-	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
-		openshell.CheckIDGatewayService} {
+	for _, id := range gatewayStops {
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {
@@ -647,6 +649,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	return nil
 }
 
+// gatewayStops are the checks setup stops on, in this order, once
+// OpenShell is installed: the gateway must be usable before setup goes on.
+var gatewayStops = []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
+	openshell.CheckIDGatewayService}
+
 // installerHow says how NVIDIA's installer installs OpenShell here: on
 // macOS a Homebrew formula, without sudo.
 func (a *App) installerHow() string {
@@ -661,8 +668,9 @@ func (a *App) installerHow() string {
 // upgrade (DoctorReport.OpenShellUpgradeAvailable). The question's default
 // is no, so --yes and --non-interactive keep the installed release, which
 // goes on working; --install-openshell upgrades it. NVIDIA's installer
-// restarts the gateway, which stops the sandboxes running on it, of every
-// owner, once their disks are flushed (openshell.Installer.Upgrade). An
+// restarts the gateway, which drops the connections of every sandbox on
+// it, of every owner, and stops the running MicroVM ones once their disks
+// are flushed (openshell.Installer.Upgrade). An
 // OpenShell installed another way is its user's to upgrade: the check's
 // fix says how. It returns the doctor report of the machine as it is then.
 func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {
@@ -676,11 +684,20 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 	if !rep.OpenShellUpgradeAvailable() {
 		return keep()
 	}
-	stops := "running sandboxes stop once their disks are flushed"
+	// What the restart does to the sandboxes on the gateway, of every
+	// owner: a MicroVM one stops (flushed first), a docker one keeps running
+	// and loses its connections.
+	microVM := rep.Driver == openshell.DriverVM
+	stops := "it drops the connections of every sandbox on it"
+	if microVM {
+		stops = "running sandboxes stop once their disks are flushed"
+	}
 	running, known := a.runningSandboxes(ctx)
-	switch {
+	switch names := "(" + shortList(running) + ")"; {
+	case known && len(running) > 0 && microVM:
+		stops = "the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it " + names + " stop once their disks are flushed"
 	case known && len(running) > 0:
-		stops = "the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ") stop once their disks are flushed"
+		stops = "it drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it " + names
 	case known:
 		stops = "no sandbox runs on it now"
 	}

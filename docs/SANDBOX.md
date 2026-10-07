@@ -2921,11 +2921,14 @@ nothing of the vm driver, but the names of its caches carry the release
   older than `InstallerVersion` (0.1.1) still works: the doctor's
   `openshell-cli` check warns, and setup upgrades it in place only with
   consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
-  question, whose default is no). The upgrade flushes the running MicroVM
-  sandboxes first (`FlushSandboxes`), since NVIDIA's script restarts the
-  gateway, never downgrades, and refuses an OpenShell installed another way
-  than NVIDIA's installer (`ErrUnmanagedUpgrade`). The daemon's periodic
-  gateway recheck reconnects when the gateway answers with another release.
+  question, whose default is no). NVIDIA's script restarts the gateway: the
+  docker driver keeps its running sandboxes (their connections drop, and
+  the restarted gateway pulls its release's supervisor image), the vm driver
+  stops them, so the upgrade flushes the running MicroVM sandboxes first
+  (`FlushSandboxes`). It never downgrades, and refuses an OpenShell
+  installed another way than NVIDIA's installer (`ErrUnmanagedUpgrade`).
+  The daemon's periodic gateway recheck reconnects when the gateway answers
+  with another release.
 - A local gateway only, registered with mTLS. Remote gateways and plaintext,
   unauthenticated, OIDC or Cloudflare registrations are refused. So are a
   private key other users can access, world-writable or foreign-owned mTLS

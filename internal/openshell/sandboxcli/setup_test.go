@@ -373,7 +373,7 @@ func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, 
 func TestSetupOffersTheUpgrade(t *testing.T) {
 	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
 	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (sudo; sha256 verified; restarts the gateway: " +
-		"the 2 sandboxes running on it (dc-claude-theirs-a, dc-claude-theirs-b) stop once their disks are flushed) [y/N]"
+		"it drops the connections of the 2 sandboxes running on it (dc-claude-theirs-a, dc-claude-theirs-b)) [y/N]"
 	for _, tc := range []struct {
 		name     string
 		input    string
@@ -387,7 +387,10 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 		{"--yes keeps it", "", true, SetupOptions{Yes: true}, false, []string{later}},
 		{"-n keeps it", "", false, SetupOptions{NonInteractive: true}, false, []string{later}},
 		{"--install-openshell upgrades it", "", false, SetupOptions{NonInteractive: true, InstallOpenShell: true}, true,
-			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: the 2 sandboxes running on it"}},
+			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: it drops the connections of the 2 sandboxes running on it"}},
+		// A MicroVM sandbox stops on the restart, once its disk is flushed.
+		{"on MicroVMs", "", false, SetupOptions{NonInteractive: true, InstallOpenShell: true}, true,
+			[]string{"restarts the gateway: the 2 sandboxes running on it (dc-claude-theirs-a, dc-claude-theirs-b) stop once their disks are flushed"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := setupApp(t, tc.input, "", true)
@@ -396,7 +399,11 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			calls := 0
 			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
 				if calls++; calls == 1 {
-					return upgradableReport(nil)(ctx, d)
+					return upgradableReport(func(r *openshell.DoctorReport) {
+						if tc.name == "on MicroVMs" {
+							r.Driver = openshell.DriverVM
+						}
+					})(ctx, d)
 				}
 				return hostReport(nil)(ctx, d)
 			}
@@ -420,6 +427,26 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			}
 		})
 	}
+	// A gateway that is not usable comes first: setup stops on its fix, and
+	// offers the upgrade on the next run.
+	t.Run("a broken gateway first", func(t *testing.T) {
+		ta := setupApp(t, "", "", true)
+		ta.HostDoctor = upgradableReport(func(r *openshell.DoctorReport) {
+			c := r.Get(openshell.CheckIDGatewayService)
+			c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is inactive"
+			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: "systemctl --user enable --now openshell-gateway"}
+		})
+		inst := &fakeInstaller{}
+		ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+			inst.consent = consent
+			return inst
+		}
+		wantErr(t, ta.Setup(bg, SetupOptions{InstallOpenShell: true, SkipImages: true, NoWrappers: true}), "is not usable yet (Gateway service)")
+		lacks(t, ta.output(), "Upgrade OpenShell", "upgrading OpenShell")
+		if inst.upgraded {
+			t.Fatal("upgraded under a gateway that is not usable")
+		}
+	})
 }
 
 // TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when

@@ -1452,7 +1452,7 @@ func (r *doctorRun) upgradeFix() *Fix {
 	if r.serviceMissing() {
 		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"}
 	}
-	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway, which stops the sandboxes running on it once their disks are flushed)",
+	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway, which drops the connections of every sandbox on it)",
 		Command: installOpenShellCommand}
 }
 

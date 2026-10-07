@@ -407,8 +407,12 @@ def test_an_older_openshell_is_offered_the_upgrade_with_the_install_off() -> Non
     assert install.hint == (
         f"OpenShell 0.1.1 is installed; {why}. Yes upgrades it in place to OpenShell 0.1.2 with NVIDIA's pinned, "
         "sha256-verified installer (uses sudo; the terminal asks for your password); that restarts the OpenShell "
-        "gateway, and the sandboxes running on it stop once their disks are flushed."
+        "gateway, which drops the connections of every sandbox on it."
     )
+    mac = sandbox_wizard_fields({}, machine=check, os_name="darwin")
+    assert "the MicroVM sandboxes running on it stop once their disks are flushed" in next(
+        f for f in mac if f.label == "Install OpenShell"
+    ).hint
     assert "--install-openshell" not in model.wizard_command_preview()
     model.form_fields = _set(model.form_fields, "Install OpenShell", "yes")
     assert "--install-openshell" in model.wizard_command_preview()

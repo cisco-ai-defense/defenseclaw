@@ -799,8 +799,9 @@ deleted.
   ``Upgrade OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer?``,
   no by default, so `--yes` and `--non-interactive` keep 0.1.1;
   `--install-openshell` upgrades. NVIDIA's installer restarts the gateway,
-  which stops the sandboxes running on it: setup names them, and flushes the
-  disks of running MicroVM sandboxes first. An OpenShell installed another
+  which drops the connections of every sandbox on it: setup names the
+  running ones, and flushes the disks of running MicroVM sandboxes, which
+  stop, first. An OpenShell installed another
   way is not upgraded; the check says to upgrade it the way you installed
   it. The TUI wizard shows the upgrade with **Install OpenShell** off.
   `sandbox doctor --json` reports `openshell_upgrade` and

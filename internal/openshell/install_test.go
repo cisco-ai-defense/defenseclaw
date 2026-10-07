@@ -295,7 +295,7 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 			t.Fatalf("installer env = %v", env)
 		}
 		for _, want := range []string{"upgrades the installed openshell 0.1.1 to " + openshell.InstallerTag + " in place",
-			"the script restarts the OpenShell gateway, which stops every sandbox running on it"} {
+			"the script restarts the OpenShell gateway, which drops the connections of every sandbox on it; running MicroVM sandboxes stop"} {
 			if !strings.Contains(f.out.String(), want) {
 				t.Errorf("plan lacks %q:\n%s", want, f.out.String())
 			}

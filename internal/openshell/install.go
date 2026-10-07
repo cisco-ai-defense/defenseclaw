@@ -221,11 +221,10 @@ type Installer struct {
 	// version a failed install on a Mac reports (HomebrewInstallError).
 	XcodeApp string
 	// FlushSandboxes runs before Upgrade runs the script, which restarts
-	// the gateway and so stops every sandbox on it: where the running
-	// driver's stop keeps nothing a workload has not synced (the MicroVM
-	// driver) it flushes their disks, and an error stops the upgrade
-	// (default: discover the Discover registration, dial it and
-	// FlushSandboxes).
+	// the gateway: where that stops the running sandboxes and the driver's
+	// stop keeps nothing a workload has not synced (the MicroVM driver) it
+	// flushes their disks, and an error stops the upgrade (default:
+	// discover the Discover registration, dial it and FlushSandboxes).
 	FlushSandboxes func(context.Context) error
 }
 
@@ -301,11 +300,11 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 // Upgrade is Install, but a supported CLI older than Release is upgraded
 // in place too: NVIDIA's installer installs the release's package (on a
 // Mac, reinstalls the Homebrew formula) and restarts the gateway, which
-// stops every sandbox on it, so FlushSandboxes runs first. It never
-// downgrades (a CLI of Release or later is kept), and it refuses a CLI
-// the install would not replace, one installed another way than NVIDIA's
-// installer (ErrUnmanagedUpgrade): that one is upgraded the way it was
-// installed.
+// stops every running MicroVM sandbox, so FlushSandboxes runs first. It
+// never downgrades (a CLI of Release or later is kept), and it refuses a
+// CLI the install would not replace, one installed another way than
+// NVIDIA's installer (ErrUnmanagedUpgrade): that one is upgraded the way
+// it was installed.
 func (i *Installer) Upgrade(ctx context.Context) (*InstallResult, error) {
 	return i.install(ctx, true)
 }
@@ -372,8 +371,8 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
 	if upgrading {
-		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway, which stops every sandbox running on it; "+
-			"DefenseClaw first flushes the disks of those whose driver would not keep what they wrote")
+		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway, which drops the connections of every sandbox on it; "+
+			"running MicroVM sandboxes stop, and DefenseClaw flushes their disks first")
 	}
 	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
 		// Setup offers it once OpenShell is installed only where the

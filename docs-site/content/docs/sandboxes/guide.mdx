@@ -1451,12 +1451,13 @@ What the upgrade does:
 
 - NVIDIA's pinned installer installs the 0.1.2 package (with `sudo`) on
   Linux, or reinstalls the `nvidia/openshell` Homebrew formula on a Mac, and
-  restarts the gateway. That stops the sandboxes running on it, of every
-  owner: setup names them first, and flushes the disks of running MicroVM
-  sandboxes before the restart. Start them again with
-  `defenseclaw sandbox start <name>`; sandboxes made on 0.1.1 start on 0.1.2.
-- On the docker driver the first sandbox after the upgrade pulls the 0.1.2
-  supervisor image from `ghcr.io`.
+  restarts the gateway, which drops the connections of every sandbox on it,
+  of every owner; setup names the running ones first. Running MicroVM
+  sandboxes stop: DefenseClaw flushes their disks before the restart, and
+  `defenseclaw sandbox start <name>` starts them again. Sandboxes made on
+  0.1.1 start on 0.1.2.
+- On the docker driver the restarted gateway pulls the 0.1.2 supervisor
+  image from `ghcr.io` as it starts.
 - On a Mac the first start of each harness image prepares its MicroVM disk
   again (about a minute and 5 GB). The disks 0.1.1 prepared stay in
   `~/.local/state/openshell/vm-driver/images` until

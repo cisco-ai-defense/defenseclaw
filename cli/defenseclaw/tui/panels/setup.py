@@ -5410,9 +5410,14 @@ def sandbox_wizard_fields(
         # until the operator turns it on (sandboxcli/setup.go).
         machine_line = machine.summary
         install = "no"
+        restart = (
+            "and the MicroVM sandboxes running on it stop once their disks are flushed"
+            if macos
+            else "which drops the connections of every sandbox on it"
+        )
         install_hint = (
             f"{machine.openshell_detail}. Yes upgrades it in place to {release} with {installer}; that restarts "
-            "the OpenShell gateway, and the sandboxes running on it stop once their disks are flushed."
+            f"the OpenShell gateway, {restart}."
         )
     elif machine.openshell_attention == "vm-driver":
         # Under the install's consent setup installs e2fsprogs and signs
