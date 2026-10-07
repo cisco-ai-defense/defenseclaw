@@ -6,6 +6,7 @@ package ideplugins
 import (
 	"archive/zip"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,7 +134,7 @@ func TestScanVSCodeFamily(t *testing.T) {
 		total += len(inst.Plugins)
 		partial = partial || inst.Partial
 	}
-	if total != 2 || !partial {
+	if total != 3 || !partial {
 		t.Fatalf("capped scan: total=%d partial=%v", total, partial)
 	}
 
@@ -152,6 +153,35 @@ func TestScanVSCodeFamily(t *testing.T) {
 	}
 }
 
+func TestLargeVSCodeInventoryKeepsLaterJetBrainsPlugins(t *testing.T) {
+	home := t.TempDir()
+	var manifest strings.Builder
+	manifest.WriteByte('[')
+	for i := 0; i < 5000; i++ {
+		if i > 0 {
+			manifest.WriteByte(',')
+		}
+		manifest.WriteString(fmt.Sprintf(`{"identifier":{"id":"bulk.ext%04d"},"version":"1"}`, i))
+	}
+	manifest.WriteByte(']')
+	writeFile(t, filepath.Join(home, ".vscode", "extensions", "extensions.json"), manifest.String())
+	writeFile(t, filepath.Join(home, ".local", "share", "JetBrains", "IdeaIC2025.2", "plugins", "ai", "META-INF", "plugin.xml"),
+		`<idea-plugin><id>com.example.ai</id></idea-plugin>`)
+	installs := Scan(home, "linux", Limits{})
+	vs, jb := false, false
+	for _, inst := range installs {
+		if inst.Product == "vscode" {
+			vs = len(inst.Plugins) == DefaultMaxPlugins && inst.Partial
+		}
+		if inst.Product == "intellij-idea-ce" {
+			jb = len(inst.Plugins) == 1 && inst.Plugins[0].ID == "com.example.ai"
+		}
+	}
+	if !vs || !jb {
+		t.Fatalf("later IDE was starved: vscode=%v jetbrains=%v", vs, jb)
+	}
+}
+
 func TestScanJetBrains(t *testing.T) {
 	home := t.TempDir()
 	config := filepath.Join(home, ".config", "JetBrains", "PyCharm2024.1")
@@ -162,8 +192,12 @@ func TestScanJetBrains(t *testing.T) {
 	writeJar(t, filepath.Join(plugins, "off-plugin.jar"), `<idea-plugin><id>com.example.off</id><name>Off</name><version>0.1</version></idea-plugin>`)
 	writeFile(t, filepath.Join(home, ".cache", "JetBrains", "RemoteDev", "dist", "abc_ideaIU-2024.1", "product-info.json"), `{"name":"IntelliJ IDEA","version":"2024.1","productCode":"IU"}`)
 
+	writeFile(t, filepath.Join(plugins, "meta", "cache.json"), `{}`)
 	installs := Scan(home, "linux", Limits{})
 	got := byID(installs, FamilyJetBrains, "pycharm", "")
+	if _, cache := got["meta|user"]; cache {
+		t.Fatal("JetBrains metadata cache was reported as a plugin")
+	}
 	copilot := got["com.github.copilot|user"]
 	if copilot.DisplayName != "GitHub Copilot" || copilot.Version != "1.5.20" || copilot.Publisher != "GitHub" || copilot.Enabled != EnabledOn {
 		t.Fatalf("copilot = %+v (all %v)", copilot, got)
