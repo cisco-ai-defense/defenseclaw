@@ -45,8 +45,16 @@ const (
 // kernel, where nothing can interrupt it; that read is left to finish on its
 // own, so the hook still answers inside the agent's deadline.
 func currentSessionFactsHeader(now time.Time) string {
+	return currentSessionFactsHeaderWithCache(now, true)
+}
+
+func currentSessionFactsHeaderLive(now time.Time) string {
+	return currentSessionFactsHeaderWithCache(now, false)
+}
+
+func currentSessionFactsHeaderWithCache(now time.Time, useCache bool) string {
 	done := make(chan string, 1)
-	go func() { done <- readSessionFactsHeader(now) }()
+	go func() { done <- readSessionFactsHeader(now, useCache) }()
 	timer := time.NewTimer(sessionFactsDeadline)
 	defer timer.Stop()
 	select {
@@ -57,7 +65,7 @@ func currentSessionFactsHeader(now time.Time) string {
 	}
 }
 
-func readSessionFactsHeader(now time.Time) string {
+func readSessionFactsHeader(now time.Time, useCache bool) string {
 	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
 	kind, residual := SplitCCacheName(ccname)
 	mtime := ccacheModTime(kind, residual)
@@ -68,8 +76,10 @@ func readSessionFactsHeader(now time.Time) string {
 	cachePath := ""
 	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
 		cachePath = filepath.Join(home, ".defenseclaw", SessionFactsCacheFileName)
-		if header, ok := cachedSessionFactsHeader(cachePath, key, envKey, now); ok {
-			return header
+		if useCache {
+			if header, ok := cachedSessionFactsHeader(cachePath, key, envKey, now); ok {
+				return header
+			}
 		}
 	}
 	facts := SessionFromSSHEnv(os.Getenv)

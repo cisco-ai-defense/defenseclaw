@@ -365,6 +365,9 @@ func withSessionAgentInstance(ctx context.Context, sessionID string) context.Con
 // link is a join, not a verification, so it never feeds
 // agentIdentityFromContext.
 func agentIdentityIDForTraffic(ctx context.Context, identity AgentIdentity) string {
+	if ctx.Value(acpUnboundAgentContextKey{}) != nil {
+		return ""
+	}
 	return agentIdentityIDForSession(ctx, identity, firstNonEmpty(SessionIDFromContext(ctx), audit.EnvelopeFromContext(ctx).SessionID))
 }
 

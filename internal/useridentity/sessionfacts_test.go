@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -197,5 +198,19 @@ func TestSessionFactsDoNotWaitOnAFIFOCredentialCache(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: the session facts read waited on a FIFO", ccname)
 		}
+	}
+}
+
+func TestLiveSessionFactsRefreshAfterEnvironmentChange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KRB5CCNAME", "FILE:/nonexistent-defenseclaw-test-cache")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("XDG_SESSION_ID", "")
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
+	first := CurrentSessionFactsHeaderLive()
+	t.Setenv("SSH_CONNECTION", "192.0.2.11 50000 192.0.2.20 22")
+	second := CurrentSessionFactsHeaderLive()
+	if first == second || !strings.Contains(second, "ca=192.0.2.11") {
+		t.Fatalf("live session facts stayed at %q after a session change: %q", first, second)
 	}
 }
