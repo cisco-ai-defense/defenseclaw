@@ -1037,8 +1037,17 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			}
 			if len(entry.SourcePathContains) == 0 {
 				// v8 matched an entry without source_path_contains on any
-				// path. A first-party entry needs a path marker now, so the
-				// closest equal is a name-only asset_policy allow.
+				// path, and skipped the scan for it only where
+				// allow_list_bypass_scan was true. A first-party entry needs
+				// a path marker now, so where the bypass applies the closest
+				// equal is a name-only asset_policy allow, which always skips
+				// the scan. Elsewhere v8 scanned the asset anyway, so the
+				// entry never changed a verdict and is dropped.
+				if !v9AllowListBypassed(root, entry.TargetType) {
+					m.note("data.json first_party_allow_list entry %q has no source_path_contains and was dropped: allow_list_bypass_scan is off for %s, so it was scanned at any path and the entry had no effect",
+						entry.TargetName, entry.TargetType)
+					continue
+				}
 				m.addAssetRule(root, "data.json", "data.json:first_party_allow_list", v9ActionRow{
 					targetType: entry.TargetType, targetName: entry.TargetName, reason: entry.Reason,
 				}, "allowed", entry.TargetName, "")
@@ -1168,6 +1177,29 @@ func v9SameFirstParty(a, b []AdmissionFirstParty) bool {
 		}
 	}
 	return true
+}
+
+// v9AllowListBypassed reports whether allow-listed assets of assetType skip
+// the scan under the migrated document, resolved as CompileAdmission does:
+// admission.<type>, then admission.defaults, then the built-in true.
+func v9AllowListBypassed(root *yaml.Node, assetType string) bool {
+	for _, scope := range []string{assetType, "defaults"} {
+		if bypass := v9ConfiguredBool(root, scope, "allow_list_bypass_scan"); bypass != nil {
+			return *bypass
+		}
+	}
+	return true
+}
+
+// v9ConfiguredBool is the boolean admission.<scope>.<key> the document sets,
+// or nil when it sets none.
+func v9ConfiguredBool(root *yaml.Node, scope, key string) *bool {
+	node := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "admission"), scope), key)
+	var value bool
+	if node == nil || node.Kind != yaml.ScalarNode || node.ShortTag() == "!!null" || node.Decode(&value) != nil {
+		return nil
+	}
+	return &value
 }
 
 // ---------------------------------------------------------------------------

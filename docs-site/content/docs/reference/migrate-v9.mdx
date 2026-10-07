@@ -208,6 +208,12 @@ admission:
   bypassed the scan only for an explicit `true`).
 - `first_party_allow_list` is written for a type only when it differs from the
   built-in list.
+- A `first_party_allow_list` entry without `source_path_contains` matched any
+  path in v8, and skipped the scan only where `allow_list_bypass_scan` was on.
+  A v9 first-party entry needs a path, so where the bypass applies to its type
+  the entry becomes a name-only `asset_policy.<type>.allowed` entry. Where it
+  does not, v8 scanned the asset anyway: the entry is dropped and a note is
+  recorded.
 - `cisco_trust_level` is written when it is not `full`.
 - Keys with no reader in 1.0.x (`config.policy_name`,
   `config.max_enforcement_delay_seconds`, `severity_ranking`, `audit`,

@@ -247,8 +247,9 @@ observability:
 		// A <source>/<tool> row was audit-only: it keeps its whole name, so it
 		// never allows every tool named "read".
 		"asset_policy.tool.allowed": []any{map[string]any{"name": "filesystem/read"}},
-		// A first-party entry without source_path_contains matched any path.
-		"asset_policy.skill.allowed": []any{map[string]any{"name": "mine", "reason": "x"}},
+		// A first-party entry without source_path_contains matched any path
+		// but, with allow_list_bypass_scan false, v8 still scanned it.
+		"asset_policy.skill.allowed": nil,
 		"llm_providers.custom": []any{map[string]any{"name": "acme", "domains": []any{"llm.acme.internal"}, "env_keys": []any{"ACME_KEY"},
 			"tls": map[string]any{"ca_cert_file": filepath.Join(dir, "provider-ca", "acme.pem")}}},
 	} {
@@ -276,6 +277,9 @@ observability:
 		!strings.Contains(strings.Join(result.Record.Notes, "\n"), "no longer carries the alias attributes") {
 		t.Errorf("telemetry aliases not migrated: attributes=%v removed=%v notes=%v",
 			attributes, result.Record.Removed, result.Record.Notes)
+	}
+	if notes := strings.Join(result.Record.Notes, "\n"); !strings.Contains(notes, `"mine" has no source_path_contains and was dropped`) {
+		t.Errorf("the dropped first-party entry is not reported: %q", notes)
 	}
 	// strict posture is block MEDIUM / alert LOW: alert_threshold 1 matches.
 	if get("guardrail.alert_at") != nil {
