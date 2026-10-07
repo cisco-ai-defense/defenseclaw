@@ -61,6 +61,10 @@ stopped`. Nothing is changed; use the install command above.
 - Interactive `defenseclaw init` offers `closed` as the hook fail mode on a
   new install (Enter used to pick `open`), the default `--non-interactive`,
   `quickstart` and the config already used; a re-run offers the saved value.
+- `defenseclaw guardrail use-pack` removes a `guardrail.custom_packs` pin that
+  no connector or profile selects after the switch (it used to stay, pointing
+  at the folder after it was deleted) and names it; `use-pack DIR` pins the
+  pack again.
 
 ### Added
 

@@ -3199,6 +3199,34 @@ def _scope_rules(cfg, connector_key: str | None, profile: str | None):
     return getattr(block, "rules", None) if block is not None else None
 
 
+def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
+    """Unset the ``guardrail.custom_packs`` pins no scope selects once the
+    scopes in *after* (config path -> its new ``rule_pack``, "" when unset)
+    are written. A pin left behind keeps a path and digest no pack uses and
+    outlives the folder it names (GAP-0127); ``use-pack DIR`` pins it again."""
+    from defenseclaw import config_writer
+
+    gc = cfg.guardrail
+    selected = {"guardrail": getattr(gc, "rule_pack", "")}
+    for connector, block in (getattr(gc, "connectors", None) or {}).items():
+        selected[_scope_key(connector, None)] = getattr(block, "rule_pack", "")
+    for profile, block in (getattr(gc, "profiles", None) or {}).items():
+        selected[_scope_key(None, profile)] = getattr(block, "rule_pack", "")
+        for connector, sub in (getattr(block, "connectors", None) or {}).items():
+            selected[_scope_key(connector, profile)] = getattr(sub, "rule_pack", "")
+    selected.update(after)
+    used = {str(name or "").strip() for name in selected.values()}
+    dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
+    return [config_writer.Change(f"guardrail.custom_packs.{name}", unset=True) for name in dropped], dropped
+
+
+def _dropped_pins_note(dropped: list[str]) -> str:
+    if not dropped:
+        return ""
+    names = ", ".join(f"guardrail.custom_packs.{name}" for name in dropped)
+    return f" Removed the pin no connector uses any more: {names}."
+
+
 def _scope_words(connector_key: str | None, profile: str | None) -> str:
     if profile and connector_key:
         return f"{_connector_label(connector_key)} in profile {profile}"
@@ -3329,6 +3357,7 @@ def use_pack_cmd(
         cleared: list[str] | None = None,
         validation: dict | None = None,
         warning: str = "",
+        dropped: list[str] | None = None,
     ) -> None:
         if json_out:
             click.echo(
@@ -3341,6 +3370,7 @@ def use_pack_cmd(
                         "pack": pack_name,
                         "path": path,
                         "cleared_overrides": list(cleared or []),
+                        "dropped_pins": list(dropped or []),
                         "validation": validation,
                         "message": message,
                     },
@@ -3390,11 +3420,13 @@ def use_pack_cmd(
             return
         _preflight_config_write(app)
         key = _scope_key(connector_key, None)
+        pin_changes, dropped = _unused_pin_changes(app.cfg, {key: ""})
         result = _write_guardrail_config(
             app,
             [
                 config_writer.Change(f"{key}.rule_pack", unset=True),
                 config_writer.Change(f"{key}.rule_pack_dir", unset=True),
+                *pin_changes,
             ],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
@@ -3408,9 +3440,10 @@ def use_pack_cmd(
             exit_code=0,
             pack_name=fallback.pack,
             path=fallback.path,
+            dropped=dropped,
             message=(
-                f"{_connector_label(connector_key)} now uses the global rule pack '{fallback.pack}'. "
-                f"{_applied_note(app, result)}"
+                f"{_connector_label(connector_key)} now uses the global rule pack '{fallback.pack}'."
+                f"{_dropped_pins_note(dropped)} {_applied_note(app, result)}"
             ),
         )
         return
@@ -3510,6 +3543,10 @@ def use_pack_cmd(
                 changes.append(config_writer.Change(f"{other_key}.rule_pack", unset=True))
                 changes.append(config_writer.Change(f"{other_key}.rule_pack_dir", unset=True))
                 cleared.append(other)
+    pin_changes, dropped = _unused_pin_changes(
+        app.cfg, {key: name, **{_scope_key(other, None): "" for other in cleared}}
+    )
+    changes.extend(pin_changes)
     previous_pack = (
         policy_catalog.pack_name_for_path(
             app.cfg, policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
@@ -3536,9 +3573,10 @@ def use_pack_cmd(
         pack_name=pack_name,
         path=path,
         cleared=cleared,
+        dropped=dropped,
         validation=validation,
         warning=warning,
-        message=f"{message} {_applied_note(app, result)}",
+        message=f"{message}{_dropped_pins_note(dropped)} {_applied_note(app, result)}",
     )
 
 
