@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -135,6 +136,20 @@ func kernelPolicyCleanup(ctx context.Context, logger *slog.Logger, out io.Writer
 		// uninstall must not depend on the customer's agent being up.
 		fmt.Fprintln(out, "tetragon-cleanup: no recorded policies")
 		return cleanupOK
+	}
+	// A helper in observe or enforce manages these policies: removing them
+	// under it would read as an operator's deletion and keep them away until
+	// the intent changes. The lifecycle and the package scripts stop it first.
+	unlock, err := kernelpolicy.LockForCleanup(dirs)
+	switch {
+	case errors.Is(err, kernelpolicy.ErrReconcilerRunning):
+		fmt.Fprintf(out, "tetragon-cleanup: %v; %d recorded policies left in place: %v\n", err, len(recorded), recorded)
+		return cleanupFailed
+	case err != nil:
+		// A lock that cannot be taken at all must not stop an uninstall.
+		logger.Warn("tetragon cleanup runs without the reconciler lock", "error", err)
+	default:
+		defer unlock()
 	}
 	client, closeFn, err := dial(ctx)
 	if err != nil {

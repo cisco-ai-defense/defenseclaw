@@ -45,6 +45,9 @@ type Intervals struct {
 	Call time.Duration
 	// RetryBackoff spaces repeated attempts to repair one broken policy (5 min).
 	RetryBackoff time.Duration
+	// Lock is how often a helper that starts during a --tetragon-cleanup
+	// tries the reconciler lock again (1 s).
+	Lock time.Duration
 }
 
 func (i Intervals) withDefaults() Intervals {
@@ -61,6 +64,7 @@ func (i Intervals) withDefaults() Intervals {
 	def(&i.Debounce, time.Second)
 	def(&i.Call, 30*time.Second)
 	def(&i.RetryBackoff, 5*time.Minute)
+	def(&i.Lock, time.Second)
 	return i
 }
 
@@ -174,11 +178,7 @@ func New(cfg Config) *Controller {
 		cfg.Logger.Warn("kernel policy state unreadable; starting from the live state", "error", err)
 		c.st = FileState{}
 	}
-	if names, err := readLoaded(cfg.Dirs); err == nil {
-		for _, name := range names {
-			c.recorded[name] = true
-		}
-	}
+	c.reloadRecord()
 	c.st.Version = stateVersion
 	c.st.HelperPID = os.Getpid()
 	c.st.KernelPolicy = Digest()
@@ -376,6 +376,58 @@ func (c *Controller) observeMode(name string, mode LoadedMode) {
 // own record.
 func (c *Controller) mayTouch(name string) bool { return c.recorded[name] }
 
+// reloadRecord reads the record of loaded names again and drops what Applied
+// says about names it no longer holds. Applied is written after the record and
+// cleared before it, so such a name was retired by DefenseClaw's own cleanup:
+// its absence from Tetragon is never an operator's deletion. An unreadable
+// record changes nothing.
+func (c *Controller) reloadRecord() {
+	names, err := readLoaded(c.cfg.Dirs)
+	if err != nil {
+		return
+	}
+	c.recorded = map[string]bool{}
+	for _, name := range names {
+		c.recorded[name] = true
+	}
+	for name := range c.st.Applied {
+		if !c.recorded[name] {
+			delete(c.st.Applied, name)
+		}
+	}
+}
+
+// lockReconciler holds the reconciler lock for as long as Run reconciles, so
+// a one-shot --tetragon-cleanup never removes policies under a helper that
+// manages them. It waits out a cleanup in progress and then reads the record
+// again; a lock that cannot be taken for another reason is logged, and the
+// reconciler runs without it.
+func (c *Controller) lockReconciler(ctx context.Context) func() {
+	waiting := false
+	for {
+		unlock, err := tryLock(c.cfg.Dirs)
+		switch {
+		case err == nil:
+			if waiting {
+				c.reloadRecord()
+				c.syncTally()
+			}
+			return unlock
+		case !errors.Is(err, ErrReconcilerRunning):
+			c.cfg.Logger.Warn("kernel policy lock unavailable; reconciling without it", "error", err)
+			return func() {}
+		case !waiting:
+			waiting = true
+			c.cfg.Logger.Info("waiting for a tetragon cleanup to finish")
+		}
+		select {
+		case <-ctx.Done():
+			return func() {}
+		case <-time.After(c.cfg.Intervals.Lock):
+		}
+	}
+}
+
 func (c *Controller) recordLoaded(name string) error {
 	if c.recorded[name] {
 		return nil
@@ -401,6 +453,11 @@ func (c *Controller) forgetLoaded(name string) {
 func (c *Controller) Run(ctx context.Context) error {
 	if !c.cfg.Intent.Mode.LoadsPolicies() {
 		return c.runRetire(ctx)
+	}
+	unlock := c.lockReconciler(ctx)
+	defer unlock()
+	if ctx.Err() != nil {
+		return nil
 	}
 	iv := c.cfg.Intervals
 	c.pass(ctx, "start")
@@ -523,6 +580,9 @@ func (c *Controller) retireOnce(ctx context.Context) error {
 		delete(c.st.Applied, name)
 		c.change(Change{Event: EventRemoved, Policy: name, Reason: "mode " + string(c.cfg.Intent.Mode)})
 	}
+	// The record on disk is the truth: a --tetragon-cleanup run while this
+	// helper waited to retry may have retired the rest.
+	c.reloadRecord()
 	for _, name := range result.Foreign {
 		c.st.Warnings = addUnique(c.st.Warnings, WarnForeignName+":"+name)
 	}

@@ -232,6 +232,9 @@ func (d Dirs) RuntimePause() string { return d.Run + "/tetragon-pause" }
 // PolicyCopies is where the rendered policies are copied for an operator.
 func (d Dirs) PolicyCopies() string { return d.Run + "/tetragon" }
 
+// Lock is the reconciler lock file (see LockForCleanup).
+func (d Dirs) Lock() string { return d.State + "/tetragon.lock" }
+
 // Digest is the kernel_policy digest an administrator approves: "sha256:"
 // and 12 hex. It covers the embedded control set and the Tetragon schema
 // they are rendered for, and no per-host input.

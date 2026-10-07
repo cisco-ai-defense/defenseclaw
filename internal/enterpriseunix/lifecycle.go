@@ -1550,10 +1550,13 @@ const keptSnapshotAdvice = "the previous deployment could not be fully restored;
 // the transaction enabled are disabled again, everything is stopped, the
 // snapshot is restored and what was running and enabled before is started
 // and enabled again. With restoreFirst the files are put back before any
-// service is touched (linking and renaming are safe while the services
-// run), and a restore that fails returns without stopping or starting
-// anything. restored is false when any file could not be put back; the
-// snapshot must then be kept for a retry.
+// other service is touched (linking and renaming are safe while the
+// services run), and a restore that fails returns without stopping or
+// starting anything else. Only a sensor helper that recorded Tetragon
+// policies stops first, so its policies are retired with the binary that
+// loaded them and never under it; it starts again when the restore fails.
+// restored is false when any file could not be put back; the snapshot must
+// then be kept for a retry.
 func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeStart func()) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
@@ -1574,7 +1577,10 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 	}
 	// The Tetragon policies the transaction's helper loaded go with that
-	// helper, before the snapshot puts the previous one back (once).
+	// helper, before the snapshot puts the previous one back (once), and
+	// never while it runs: a running helper reads their disappearance as an
+	// operator's deletion and does not load them again until the intent
+	// changes.
 	retired := false
 	retire := func() {
 		if !retired {
@@ -1583,8 +1589,18 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 	}
 	if restoreFirst {
-		retire()
+		// Only the helper stops before the files go back. When they cannot,
+		// it starts again and manages its own policies as before.
+		helper, stopped, safe := l.stopHelperHoldingKernelPolicies(ctx)
+		if safe {
+			retire()
+		}
 		if err := env.restoreFiles(snap); err != nil {
+			if stopped {
+				if startErr := env.Services.Start(ctx, helper); startErr != nil {
+					err = errors.Join(err, startErr)
+				}
+			}
 			return false, errors.Join(append(disableErrs, err)...)
 		}
 	}
@@ -1701,10 +1717,10 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 		}
 		return true
 	}
-	// The files go back before any service is touched: a restore that
-	// still fails (the disk is still full) then leaves the running services
-	// alone instead of stopping and restarting the gateway on every apply
-	// trigger, MDM ensure or package postinstall until it succeeds.
+	// The files go back before any other service is touched: a restore
+	// that still fails (the disk is still full) then leaves the running
+	// services alone instead of stopping and restarting the gateway on every
+	// apply trigger, MDM ensure or package postinstall until it succeeds.
 	restored, err := l.rollback(ctx, snap, pending, true, nil)
 	switch {
 	case !restored:

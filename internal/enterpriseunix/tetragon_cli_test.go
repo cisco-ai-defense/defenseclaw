@@ -390,6 +390,91 @@ func TestRollbackRemovesTheTetragonPoliciesBeforeRestoring(t *testing.T) {
 	}
 }
 
+// interruptedHelperUpgrade leaves the pending transaction of an upgrade that
+// died after it put its own helper (2.0.0) in place, while the services ran
+// on: the next lifecycle run rolls it back with the files first.
+func interruptedHelperUpgrade(t *testing.T, h *testHost) string {
+	t.Helper()
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	helper := filepath.Join(h.env.Layout.BinDir, binSensorHelper)
+	snap, err := h.env.takeSnapshot("crash", []string{helper}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.env.savePending(&Pending{Action: ActionUpgrade, SnapshotDir: snap.Dir, Phase: "apply",
+		PreviouslyActive: []string{unitGateway, unitSensorHelper}}); err != nil {
+		t.Fatal(err)
+	}
+	staged := h.env.P(helper) + ".new"
+	if err := os.WriteFile(staged, []byte("defenseclaw-sensor-helper 2.0.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staged, h.env.P(helper)); err != nil {
+		t.Fatal(err)
+	}
+	if !h.services.isActive(unitSensorHelper) {
+		t.Fatal("the helper must be running when the transaction is interrupted")
+	}
+	h.recordTetragonPolicies(recordedTetragonPolicies...)
+	return helper
+}
+
+// The rollback of an interrupted transaction puts the files back while the
+// services run, but the transaction's helper retires its Tetragon policies
+// only once that helper is stopped: a running helper reads their removal as an
+// operator's deletion and never loads them again. The previous helper then
+// starts and loads its own.
+func TestInterruptedTransactionRetiresTheTetragonPoliciesWithTheHelperStopped(t *testing.T) {
+	h := newTestHost(t, "linux")
+	helper := interruptedHelperUpgrade(t, h)
+	runner := &tetragonHelperRunner{Runner: h.runner, h: h}
+	h.env.Runner = runner
+	r := h.run(Options{Action: ActionEnsure})
+	requireOK(t, r)
+	if !hasWarning(r, codeRecovered) {
+		t.Fatalf("expected recovery warning: %+v", r.Warnings)
+	}
+	if runner.binary != "defenseclaw-sensor-helper 2.0.0\n" || !runner.stopped {
+		t.Fatalf("the cleanup must run with the transaction's helper once it is stopped: binary %q stopped %v", runner.binary, runner.stopped)
+	}
+	if got := h.read(helper); got != "defenseclaw-sensor-helper 1.0.0\n" {
+		t.Fatalf("the previous helper was not restored: %q", got)
+	}
+	if !h.services.isActive(unitSensorHelper) {
+		t.Fatal("the restored helper is not running")
+	}
+}
+
+// When the files still cannot go back, the helper stopped for the cleanup is
+// started again, so it manages its own policies as before the run.
+func TestInterruptedTransactionThatCannotRestoreRestartsTheHelper(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	h := newTestHost(t, "linux")
+	interruptedHelperUpgrade(t, h)
+	runner := &tetragonHelperRunner{Runner: h.runner, h: h}
+	h.env.Runner = runner
+	bin := h.env.P(h.env.Layout.BinDir)
+	if err := os.Chmod(bin, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bin, 0o755) })
+	calls := len(h.services.calls)
+	r := h.run(Options{Action: ActionEnsure})
+	requireError(t, r, codeRollbackFailed)
+	if !runner.stopped {
+		t.Fatal("the cleanup ran while the helper was running")
+	}
+	got := strings.Join(h.services.calls[calls:], "\n")
+	if !strings.Contains(got, "stop "+unitSensorHelper) || !strings.Contains(got, "start "+unitSensorHelper) || !h.services.isActive(unitSensorHelper) {
+		t.Fatalf("the helper must be stopped for the cleanup and started again: %v", h.services.calls[calls:])
+	}
+	if strings.Contains(got, "stop "+unitGateway) {
+		t.Fatalf("a restore that fails must leave the other services alone: %v", h.services.calls[calls:])
+	}
+}
+
 // verify fails only on DefenseClaw-owned state: recorded policies with no
 // helper running, and a policy of DefenseClaw's that did not load. The
 // helper's other conditions are warnings.

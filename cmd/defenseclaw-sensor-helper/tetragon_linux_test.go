@@ -164,6 +164,36 @@ func TestKernelPolicyCleanupExitCodes(t *testing.T) {
 	}
 }
 
+// A one-shot cleanup while a helper in observe or enforce reconciles leaves
+// its policies alone: removing them under it reads as an operator's deletion.
+func TestKernelPolicyCleanupRefusesWhileAHelperReconciles(t *testing.T) {
+	dirs := cleanupDirs(t, recordedObserve)
+	unlock, err := kernelpolicy.LockForCleanup(dirs) // the running helper's hold
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	dial := func(context.Context) (kernelpolicy.Client, func(), error) {
+		t.Fatal("a refused cleanup must not reach Tetragon")
+		return nil, nil, nil
+	}
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, dial, false); code != cleanupFailed {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "stop it first") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if recorded, _ := kernelpolicy.Recorded(dirs); len(recorded) != 1 {
+		t.Fatalf("record = %v", recorded)
+	}
+	unlock()
+	fake := &cleanupFake{loaded: map[string]bool{recordedObserve: true}}
+	ok := func(context.Context) (kernelpolicy.Client, func(), error) { return fake, func() {}, nil }
+	if code := kernelPolicyCleanup(context.Background(), quiet(), &out, dirs, ok, false); code != cleanupOK {
+		t.Fatalf("exit %d once the helper stopped", code)
+	}
+}
+
 func TestKernelPolicyIntentIsSafeOnBadInput(t *testing.T) {
 	t.Setenv(kernelpolicy.EnvMode, "enforce-everything")
 	t.Setenv(kernelpolicy.EnvBurnIn, "soon")

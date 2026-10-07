@@ -236,6 +236,26 @@ func cleanupRemoved(stdout []byte) []string {
 	return out
 }
 
+// stopHelperHoldingKernelPolicies stops the sensor helper so the policies it
+// recorded can be retired while the rest of the deployment keeps running (the
+// rollback of an interrupted transaction puts the files back before it
+// touches any service). It stops nothing when no policy is recorded or the
+// helper is not running. safe is false when the helper could not be stopped:
+// its policies must not be retired under it.
+func (l *lifecycle) stopHelperHoldingKernelPolicies(ctx context.Context) (helper Unit, stopped, safe bool) {
+	if names, err := l.env.recordedKernelPolicies(); err != nil || len(names) == 0 {
+		return Unit{}, false, true
+	}
+	unit, ok := l.helperUnit()
+	if !ok || !l.env.Services.Active(ctx, unit) {
+		return unit, false, true
+	}
+	if err := l.env.Services.Stop(ctx, unit); err != nil {
+		return unit, false, false
+	}
+	return unit, true, true
+}
+
 // retireRolledBackKernelPolicies is the rollback's cleanup: the change line
 // says the restored helper loads its own policies again.
 func (l *lifecycle) retireRolledBackKernelPolicies(ctx context.Context) {

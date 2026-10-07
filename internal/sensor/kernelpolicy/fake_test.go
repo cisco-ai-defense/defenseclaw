@@ -253,7 +253,7 @@ func (h *harness) start(intent Intent) {
 		Procs:         func(func(int) bool) ([]Proc, error) { return h.procs, nil },
 		ExtraPrefixes: []string{"/opt/agents"},
 		Now:           func() time.Time { return h.now },
-		Intervals:     Intervals{Call: 5 * time.Second, Reconcile: 20 * time.Millisecond},
+		Intervals:     Intervals{Call: 5 * time.Second, Reconcile: 20 * time.Millisecond, Lock: 5 * time.Millisecond},
 	})
 }
 
