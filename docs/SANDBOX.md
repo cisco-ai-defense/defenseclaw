@@ -902,8 +902,10 @@ that decides wins:
    administrator lifts either. The block message says "blocked by your organization's
    DefenseClaw policy".
 3. **The block list**: the pack's `egress.block` plus `openshell.egress.block`
-   (`operator_block`). It is checked before unblock decisions, so a host on
-   it is not one-click unblockable. Reaching it takes removing the entry.
+   and the project's repository policy's (`.defenseclaw/sandbox.yaml`)
+   entries (`operator_block`). It is checked before unblock decisions, so a
+   host on it is not one-click unblockable. Reaching it takes removing the
+   entry.
 4. **Unblock decisions**, for one sandbox or for every sandbox ("always",
    saved to `openshell.egress.unblocked`). They are ignored when
    `openshell.admin.allow_unblock` is `false`.
@@ -923,6 +925,18 @@ that decides wins:
 
 `Decision.Unblockable`, the 403 body's `unblockable` and `how_to_unblock`,
 blocked events and the feed's unblock action all follow steps 6 and 8.
+
+`sandbox policy test` (`packs.Effective.CheckEgress`) asks the same decider
+for a destination and names the setting behind the step that decided: for a
+sandbox the daemon answers with the sandbox's own decider and principal
+(`POST /api/v1/sandbox/policy/test`), so its unblocks count; for a pack the
+CLI resolves the policy itself, without the daemon.
+
+Policy resolution (`packs.Resolve`) layers the pack (a custom pack may
+`extends:` one parent, merged before anything else), the user's `openshell`
+keys, the run flags, the repository policy (`packs.RepoPolicy`, tighten-only:
+a loosening key is a fatal violation, one per key; the sandbox record keeps
+the copy the create read) and the administrator's clamps.
 
 `sandbox unblock` refuses with the reason that applies, checked in this
 order: a host on the administrator's lists or the block list (only the

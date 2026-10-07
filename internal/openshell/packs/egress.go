@@ -244,11 +244,93 @@ func (e *Effective) DecideEgress(host string, port int) EgressDecision {
 	if err != nil {
 		return EgressDecision{Rule: RuleInvalid, Reason: err.Error()}
 	}
+	out, _ := e.decideWith(d, policyProbe, host, port)
+	return out
+}
+
+// EgressCheck is `sandbox policy test`'s answer for one destination: the
+// decision and the setting behind it.
+type EgressCheck struct {
+	EgressDecision
+	// Source names where the deciding rule comes from: the list holding
+	// the pattern that matched ("pack balanced", "openshell.egress.block",
+	// "openshell.admin.egress_block", the repository policy), the feed, or
+	// the setting whose default decided ("network.mode allowlist (profile
+	// balanced from pack balanced)").
+	Source string `json:"source"`
+}
+
+// CheckEgress is DecideEgress with the setting behind the decision. d is
+// the decider to ask, built from this policy (EgressDecider), and p the
+// principal it decides for: a sandbox's own decider and principal carry
+// its unblocks. A nil d asks the decider without unblocks.
+func (e *Effective) CheckEgress(d *egress.Decider, p egress.Principal, host string, port int) EgressCheck {
+	if e == nil {
+		return EgressCheck{EgressDecision: EgressDecision{Rule: RuleInvalid}}
+	}
+	if d == nil {
+		var err error
+		if d, err = e.policyDecider(); err != nil {
+			return EgressCheck{EgressDecision: EgressDecision{Rule: RuleInvalid, Reason: err.Error()}}
+		}
+	}
+	out, raw := e.decideWith(d, p, host, port)
+	return EgressCheck{EgressDecision: out, Source: e.ruleSource(host, out, raw)}
+}
+
+// ruleSource names the setting behind a decision (EgressCheck.Source).
+func (e *Effective) ruleSource(host string, out EgressDecision, raw egress.Decision) string {
+	setting := func(key string) string {
+		s, ok := e.Setting(key)
+		if !ok {
+			return key
+		}
+		return key + " " + s.Value + " (" + s.Origin + ")"
+	}
+	switch out.Rule {
+	case RuleInvalid, RuleHostInternal, RulePrivateNetwork:
+		return "defenseclaw guard"
+	case RulePort:
+		return setting("egress.ports")
+	case RuleAdminBlock:
+		return "openshell.admin.egress_block"
+	case RuleAdminAllowOnly:
+		return "openshell.admin.egress_allow_only"
+	case RuleBlock:
+		if v := e.blockVerdict("egress", host); v != nil {
+			return v.Constraint
+		}
+		return "openshell.egress.block"
+	case RuleUnblock:
+		return "an unblock (defenseclaw sandbox unblock)"
+	case RuleFeed:
+		return "the " + raw.Feed + " blocklist feed (entry " + raw.Entry + ")"
+	case RuleAllow:
+		switch {
+		case raw.Source == egress.SourceFeed || containsString(e.curatedAllow, out.Match):
+			from := "egress.allow"
+			if s, ok := e.Setting("egress.allow"); ok {
+				from = s.Origin
+			}
+			return "DefenseClaw's curated allowlist (" + from + ")"
+		case e.Pack != nil && containsString(e.Pack.Egress.Allow, out.Match):
+			return "pack " + e.Pack.Name
+		}
+		return "openshell.egress.allow"
+	case RuleNetworkOpen, RuleIPLiteral, RuleNetworkAllowlist, RuleNetworkDeny:
+		return setting("network.mode")
+	}
+	return ""
+}
+
+// decideWith is DecideEgress with decider d for principal p, and the
+// decider's own verdict.
+func (e *Effective) decideWith(d *egress.Decider, p egress.Principal, host string, port int) (EgressDecision, egress.Decision) {
 	var dec egress.Decision
 	if port == 0 {
-		dec = d.DecideHost(policyProbe, host)
+		dec = d.DecideHost(p, host)
 	} else {
-		dec = d.Decide(policyProbe, host, port)
+		dec = d.Decide(p, host, port)
 	}
 	out := EgressDecision{Allowed: dec.Allowed, Rule: egressRuleOf(dec), Match: dec.Rule,
 		Unblockable: dec.Unblockable, Reason: dec.Reason}
@@ -273,7 +355,7 @@ func (e *Effective) DecideEgress(host string, port int) EgressDecision {
 			out.Reason = "the " + e.Profile + " profile runs without the egress proxy"
 		}
 	}
-	return out
+	return out, dec
 }
 
 // egressRuleOf names the decision order step behind a decider verdict.

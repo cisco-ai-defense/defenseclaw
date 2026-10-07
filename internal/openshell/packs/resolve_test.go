@@ -1064,7 +1064,7 @@ func TestResolveRequiredPackTrust(t *testing.T) {
 	corpDir := writePack(t, root, "corp", strings.Replace(customPack("corp"), "network: {mode: open}",
 		"network: {mode: open}\negress: {feeds: []}", 1))
 	corpFile := filepath.Join(corpDir, PackFileName)
-	corp, err := LoadFile(corpDir)
+	corp, err := Validate(corpDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1547,7 +1547,7 @@ func TestResolveRunsTheComparedPack(t *testing.T) {
 	file := filepath.Join(writePack(t, root, "mine", builtinBytes("strict")), PackFileName)
 	loose := builtinBytes("open")
 
-	// Each LoadFile checks the pack directory's owner before it reads the
+	// Each load checks the pack directory's owner before it reads the
 	// file; the second check of "mine" swaps in the loose content.
 	checks := 0
 	fakeOwners(t, func(info fs.FileInfo) int {
@@ -1587,7 +1587,7 @@ func TestResolveReviewFloor(t *testing.T) {
 		eff, _ := mustResolve(t, cfg, Flags{})
 		for _, glob := range []string{"**/.claude/**", ".mcp.json", "**/.codex/**", "AGENTS.md", "CLAUDE.md", "**/.cursor/**",
 			"**/.devin/**", "**/.openhands/**", "**/.omnigent/**", ".github/hooks/**", ".github/copilot/**",
-			"package-lock.json", "yarn.lock", "go.sum", "Cargo.lock", "uv.lock", PackFileName} {
+			"package-lock.json", "yarn.lock", "go.sum", "Cargo.lock", "uv.lock", PackFileName, RepoPolicyPath} {
 			if !containsString(eff.Workspace.Review, glob) {
 				t.Fatalf("pack %s review %v lacks %q", eff.Pack.Name, eff.Workspace.Review, glob)
 			}

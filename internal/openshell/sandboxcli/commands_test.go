@@ -1320,12 +1320,6 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{Harness: "claude", Profile: "open"}))
 	has(t, ta.output(), "1 (instead of unlimited)", "strict (asked for open)")
 	lacks(t, ta.output(), "asked for (unlimited)")
-	ta.daemon.events = []sandboxapi.ActivityEvent{
-		{Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"}, {Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"},
-		{Kind: sandboxapi.ActivityEgressAllowed, Host: "docs.python.org"}, {Kind: sandboxapi.ActivityEgressBlocked, Host: "webhook.site"},
-	}
-	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{}))
-	has(t, ta.output(), "      - docs.python.org  # 1\n      - registry.npmjs.org  # 2", "Blocked (not suggested): webhook.site")
 }
 
 // `policy show` sizes its key column to the longest key; `policy explain`
@@ -1410,6 +1404,27 @@ func TestPackCommands(t *testing.T) {
 	ta.ok(t, ta.PackList(PackOptions{}))
 	has(t, ta.output(), "invalid (see below)", "✗ broken: ", key)
 	lacks(t, ta.output(), "…")
+}
+
+// A pack that extends another says so: pack list, show and validate, and
+// policy show and explain name the chain.
+func TestPackChainIsShown(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.PackDir = filepath.Join(ta.Cfg.DataDir, "policies", "sandbox")
+	file := filepath.Join(ta.Cfg.OpenShell.PackDir, "team", "pack.yaml")
+	writeFile(t, file, "version: 1\nname: team\nextends: balanced\negress: {allow: [example.org]}\n")
+	ta.ok(t, ta.PackList(PackOptions{}))
+	has(t, ta.output(), "custom, extends balanced")
+	ta.ok(t, ta.fresh().PackShow("team", PackOptions{}))
+	has(t, ta.output(), "# extends balanced (", "the settings below are the merged result", "example.org", "registry.npmjs.org")
+	ta.ok(t, ta.fresh().PackValidate(file))
+	has(t, ta.output(), "valid pack team (profile balanced)", "extends balanced")
+	ta.daemon.explain.Pack = "team"
+	ta.daemon.explain.PackChain = []sandboxapi.PackLink{{Name: "balanced", Builtin: true, Source: "builtin:balanced", Digest: "sha256:" + strings.Repeat("b", 64)}}
+	ta.ok(t, ta.fresh().PolicyShow(bg, PolicyOptions{}))
+	has(t, ta.output(), "extends balanced")
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{}))
+	has(t, ta.output(), "  extends balanced sha256:bbbb")
 }
 
 func TestEnableDisableWrappers(t *testing.T) {

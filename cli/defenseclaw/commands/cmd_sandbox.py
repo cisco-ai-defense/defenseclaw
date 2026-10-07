@@ -480,9 +480,36 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         flags=_policy_flags(),
     ),
     _Cmd(
+        ("policy", "test"),
+        "Show what the egress policy decides for a destination, the rule and where it comes from",
+        flags=(
+            _OUTPUT,
+            _JSON,
+            _Flag("sandbox", "string", "test this sandbox's policy (its unblocks included)", metavar="NAME"),
+            _Flag("pack", "string", "resolve with this pack", metavar="PACK"),
+            _Flag("profile", "string", "resolve with this profile", metavar="PROFILE"),
+            _Flag("harness", "string", "resolve for this harness", metavar="HARNESS"),
+            _Flag("host", "string", "the destination host (or host:port)", metavar="HOST"),
+            _Flag("port", "int", "the destination port (0: any port the policy carries)", default="0", metavar="PORT"),
+            _Flag("binary", "string", "the program that connects (shown in the report)", metavar="PATH"),
+            _Flag(
+                "fixture",
+                "string",
+                "check every destination of this YAML or JSON list; exit 1 on a mismatch",
+                metavar="FILE",
+            ),
+        ),
+    ),
+    _Cmd(
         ("policy", "suggest"),
-        "Suggest an egress allowlist from the destinations sandboxes reached",
-        flags=(_OUTPUT, _JSON, _Flag("sandbox", "string", "only this sandbox's destinations", metavar="NAME")),
+        "Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations",
+        flags=(
+            _OUTPUT,
+            _JSON,
+            _Flag("sandbox", "string", "only this sandbox's destinations", metavar="NAME"),
+            _Flag("pack-out", "string", "write the suggested pack (extends balanced) to this new file", metavar="FILE"),
+            _Flag("diff", "bool", "show what the suggested pack changes against the effective policy"),
+        ),
     ),
     _Cmd(
         ("policy", "allow"),

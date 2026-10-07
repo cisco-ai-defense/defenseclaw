@@ -385,6 +385,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
+| `Policy` | Shown when the project has a [repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml): `repo policy .defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)`, or that the policy was as strict already. |
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
@@ -1134,10 +1135,18 @@ leaves MCP servers behind. See
 [sandbox policy packs](/docs/sandboxes/policy-packs) for the packs, custom
 packs, and the limits an organization can set.
 
-After a few sessions, `defenseclaw sandbox policy suggest` turns the sites
-your sandboxes reached into an `openshell.egress.allow` list you can paste
-into `config.yaml`; `defenseclaw sandbox policy allow HOST` and
-`defenseclaw sandbox policy block HOST` add one host at a time.
+After a few sessions, record, then lock:
+`defenseclaw sandbox policy suggest --sandbox NAME --pack-out FILE` writes a
+pack that extends `balanced` with the sites the sandbox reached (each with
+the programs that reached it), `--diff` shows what it would change and block,
+and `defenseclaw sandbox run --pack FILE` runs the project with it. See
+[Record, then lock](/docs/sandboxes/policy-packs#record-then-lock).
+`defenseclaw sandbox policy allow HOST` and
+`defenseclaw sandbox policy block HOST` add one host at a time, and
+`defenseclaw sandbox policy test --host HOST` says what the policy decides
+for a destination and why.
+A project can ask for a stricter sandbox itself with a
+[`.defenseclaw/sandbox.yaml` repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml).
 `defenseclaw sandbox policy explain` shows every setting a run would get and
 where each one comes from. It shortens long lists, such as the secret-file
 masks and the allowlist, and says so; `-o json` prints every value in full.

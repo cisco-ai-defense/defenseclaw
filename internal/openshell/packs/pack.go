@@ -25,15 +25,23 @@
 // policies/sandbox; custom packs are <pack_dir>/<name>/pack.yaml files or an
 // absolute path, loaded with the same strict rules as guardrail rule packs.
 //
-// Resolve layers pack ⊕ user openshell keys ⊕ run flags and then clamps the
-// result by openshell.admin, reporting every attempted loosening as a
-// Violation; Effective.Allow checks runtime actions against the same policy.
+// A custom pack may extend one parent (extends: a built-in pack or another
+// custom pack by name): the parent's settings apply where the pack sets
+// nothing, and its lists add to the parent's.
+//
+// Resolve layers pack ⊕ user openshell keys ⊕ run flags ⊕ the project's
+// repository policy (.defenseclaw/sandbox.yaml, which only tightens) and
+// then clamps the result by openshell.admin, reporting every attempted
+// loosening as a Violation; Effective.Allow checks runtime actions against
+// the same policy.
 package packs
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -54,10 +62,16 @@ const PackFileName = "pack.yaml"
 // MaxPackBytes bounds a pack file.
 const MaxPackBytes = 64 << 10
 
+// MaxListEntries bounds a pack list (egress.allow with what it inherits,
+// egress.block, the workspace globs, mcp.blocked_tools); MaxPorts bounds
+// egress.ports.
 const (
-	maxListEntries = 1024
+	MaxListEntries = 1024
+	MaxPorts       = 64
+)
+
+const (
 	maxFeeds       = 16
-	maxPorts       = 64
 	maxDescription = 1024
 	maxUploadMB    = 1 << 20
 )
@@ -149,8 +163,28 @@ type Pack struct {
 	// Source is "builtin:<name>" or the pack file's absolute path.
 	Source string `yaml:"-" json:"source"`
 	// Digest is "sha256:<hex>" over the pack file bytes, for telemetry and
-	// for comparing packs by content.
+	// for comparing packs by content. A pack that extends another hashes its
+	// parent's digest and then its own bytes, so the digest covers the
+	// whole chain.
 	Digest string `yaml:"-" json:"digest"`
+	// Extends is the parent the pack file names (extends:), and Chain its
+	// ancestors, parent first. The pack's settings are already the merged
+	// result.
+	Extends string     `yaml:"-" json:"extends,omitempty"`
+	Chain   []PackLink `yaml:"-" json:"chain,omitempty"`
+
+	// builtinAllow are the egress.allow entries a built-in ancestor put
+	// there: DefenseClaw's curated entries, which resolveAllow keeps apart
+	// from the operator's own.
+	builtinAllow []string
+}
+
+// PackLink names one ancestor of a pack that extends another.
+type PackLink struct {
+	Name    string `json:"name"`
+	Builtin bool   `json:"builtin"`
+	Source  string `json:"source"`
+	Digest  string `json:"digest"`
 }
 
 // NetworkPolicy selects the egress posture.
@@ -296,6 +330,9 @@ type Error struct {
 	Field  string `json:"field,omitempty"`
 	Code   string `json:"code"`
 	Reason string `json:"reason"`
+	// What names the file kind in the message ("sandbox pack" when empty,
+	// "repository policy").
+	What string `json:"-"`
 }
 
 func (e *Error) Error() string {
@@ -303,6 +340,9 @@ func (e *Error) Error() string {
 		return "sandbox pack error"
 	}
 	msg := "sandbox pack"
+	if e.What != "" {
+		msg = e.What
+	}
 	if e.Source != "" {
 		msg += " " + e.Source
 	}
@@ -317,8 +357,16 @@ func packErr(source, field, code, format string, args ...any) *Error {
 }
 
 // Parse strictly decodes and validates pack bytes. source names the pack in
-// errors and becomes Pack.Source.
+// errors and becomes Pack.Source. A pack that extends another needs the
+// loader to find its parent (Load, Validate), so Parse refuses one.
 func Parse(data []byte, source string) (*Pack, error) {
+	return parse(data, source, nil)
+}
+
+// parentLoader loads the parent an extends: key names.
+type parentLoader func(ref string) (*Pack, error)
+
+func parse(data []byte, source string, parent parentLoader) (*Pack, error) {
 	if len(data) > MaxPackBytes {
 		return nil, packErr(source, "", "too_large", "pack exceeds %d bytes", MaxPackBytes)
 	}
@@ -326,14 +374,139 @@ func Parse(data []byte, source string) (*Pack, error) {
 	if err := decodeStrict(data, source, &doc); err != nil {
 		return nil, err
 	}
+	var base *Pack
+	if doc.Extends != nil {
+		var err error
+		if base, err = loadParent(source, *doc.Extends, parent); err != nil {
+			return nil, err
+		}
+		if doc, err = extendFile(base, doc); err != nil {
+			return nil, err
+		}
+	}
 	pack, err := doc.normalize(source)
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(data)
-	pack.Digest = "sha256:" + hex.EncodeToString(sum[:])
+	h := sha256.New()
+	if base != nil {
+		// A digest is always "sha256:" and 64 hex digits, so the parent's
+		// and the file's bytes cannot run into each other.
+		h.Write([]byte(base.Digest + "\n"))
+	}
+	h.Write(data)
+	pack.Digest = "sha256:" + hex.EncodeToString(h.Sum(nil))
 	pack.Source = source
+	if base != nil {
+		pack.Extends = base.Name
+		pack.Chain = append([]PackLink{{Name: base.Name, Builtin: base.Builtin, Source: base.Source, Digest: base.Digest}}, base.Chain...)
+		pack.builtinAllow = base.builtinAllow
+		if base.Builtin {
+			pack.builtinAllow = base.Egress.Allow
+		}
+	}
 	return pack, nil
+}
+
+// ParseIn is Parse for a pack that may extend another: a custom parent is
+// looked up in packDir (`sandbox policy suggest` checks the pack it writes).
+func ParseIn(data []byte, source, packDir string) (*Pack, error) {
+	l := &loader{packDir: packDir, chain: []string{source}}
+	return parse(data, source, l.parent)
+}
+
+// loadParent loads the parent of the pack at source: a built-in pack or a
+// custom pack in openshell.pack_dir, by name.
+func loadParent(source, ref string, parent parentLoader) (*Pack, error) {
+	ref = strings.TrimSpace(ref)
+	if parent == nil {
+		return nil, packErr(source, "extends", "extends_unsupported", "a pack that extends another must be loaded from its file")
+	}
+	if !packNamePattern.MatchString(ref) {
+		return nil, packErr(source, "extends", "invalid_value",
+			"%q must name a built-in pack (%s) or a custom pack in openshell.pack_dir", truncateText(ref, 80), strings.Join(BuiltinNames(), ", "))
+	}
+	base, err := parent(ref)
+	if err == nil {
+		return base, nil
+	}
+	var pe *Error
+	if errors.As(err, &pe) && (pe.Source == source || pe.Field == "extends") {
+		// It names the chain already (a cycle, the depth, a grandparent).
+		return nil, err
+	}
+	code := "parent_invalid"
+	if pe != nil {
+		code = pe.Code
+	}
+	return nil, packErr(source, "extends", code, "the parent pack %s: %v", ref, err)
+}
+
+// extendFile merges a child pack file over its resolved parent: a key the
+// child sets replaces the parent's value, and a list the child sets adds to
+// the parent's (mergeFile). The name, version and description are the
+// child's own.
+func extendFile(base *Pack, child packFile) (packFile, error) {
+	raw, err := yaml.Marshal(base)
+	if err != nil {
+		return packFile{}, packErr(base.Source, "", "unreadable", "cannot render the parent pack: %v", err)
+	}
+	var merged packFile
+	if err := decodeStrict(raw, base.Source, &merged); err != nil {
+		return packFile{}, err
+	}
+	merged.Version, merged.Name, merged.Description, merged.Extends = child.Version, child.Name, child.Description, nil
+	child.Version, child.Name, child.Description, child.Extends = nil, nil, nil, nil
+	mergeFile(reflect.ValueOf(&merged).Elem(), reflect.ValueOf(&child).Elem(), "")
+	return merged, nil
+}
+
+// replacedLists are the lists a child pack replaces instead of adding to:
+// the harnesses a pack allows are a scope, not a list of extras. Pointer
+// lists (egress.feeds, egress.ports) are replaced too, as other scalars.
+var replacedLists = map[string]bool{"harness.allowed": true}
+
+// mergeFile merges child into dst field by field (both pack-file structs
+// of the same type): a set pointer replaces, a nested section merges, and a
+// list appends the child's entries the parent lacks.
+func mergeFile(dst, child reflect.Value, path string) {
+	for i := 0; i < dst.NumField(); i++ {
+		field := dst.Type().Field(i)
+		name := joinPath(path, strings.Split(field.Tag.Get("yaml"), ",")[0])
+		d, c := dst.Field(i), child.Field(i)
+		switch {
+		case c.Kind() == reflect.Pointer && c.IsNil():
+		case c.Kind() == reflect.Pointer && c.Elem().Kind() == reflect.Struct && !d.IsNil():
+			mergeFile(d.Elem(), c.Elem(), name)
+		case c.Kind() == reflect.Pointer:
+			d.Set(c)
+		case c.Kind() == reflect.Slice && c.Len() > 0 && replacedLists[name]:
+			d.Set(c)
+		case c.Kind() == reflect.Slice:
+			for j := 0; j < c.Len(); j++ {
+				if !sliceHas(d, c.Index(j)) {
+					d.Set(reflect.Append(d, c.Index(j)))
+				}
+			}
+		}
+	}
+}
+
+func sliceHas(list, item reflect.Value) bool {
+	for i := 0; i < list.Len(); i++ {
+		if list.Index(i).Interface() == item.Interface() {
+			return true
+		}
+	}
+	return false
+}
+
+// truncateText cuts s to n bytes for an error message.
+func truncateText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // packFile is the on-disk shape. Pointers distinguish an absent key (which
@@ -342,6 +515,7 @@ type packFile struct {
 	Version     *int           `yaml:"version"`
 	Name        *string        `yaml:"name"`
 	Description *string        `yaml:"description"`
+	Extends     *string        `yaml:"extends"`
 	Network     *networkFile   `yaml:"network"`
 	Approvals   *approvalsFile `yaml:"approvals"`
 	Observe     *observeFile   `yaml:"observe"`
@@ -640,7 +814,7 @@ func (v *validator) feeds(field string, feeds []string) []string {
 }
 
 func (v *validator) hostGlobs(field string, globs []string) []string {
-	if !v.listLimit(field, len(globs), maxListEntries) {
+	if !v.listLimit(field, len(globs), MaxListEntries) {
 		return nil
 	}
 	out := make([]string, 0, len(globs))
@@ -668,7 +842,7 @@ func (v *validator) allowGlobs(field string, globs []string) []string {
 }
 
 func (v *validator) ports(field string, ports []int) []int {
-	if !v.listLimit(field, len(ports), maxPorts) {
+	if !v.listLimit(field, len(ports), MaxPorts) {
 		return nil
 	}
 	out := make([]int, 0, len(ports))
@@ -691,7 +865,7 @@ func (v *validator) ports(field string, ports []int) []int {
 // openshell.workdir keys (config.ValidateOpenShellProjectGlob): no absolute
 // paths, no ".." segments, no NUL bytes.
 func (v *validator) projectGlobs(field string, globs []string) []string {
-	if !v.listLimit(field, len(globs), maxListEntries) {
+	if !v.listLimit(field, len(globs), MaxListEntries) {
 		return nil
 	}
 	out := make([]string, 0, len(globs))
@@ -722,7 +896,7 @@ func (v *validator) harnesses(field string, names []string) []string {
 }
 
 func (v *validator) blockedTools(field string, tools []string) []string {
-	if !v.listLimit(field, len(tools), maxListEntries) {
+	if !v.listLimit(field, len(tools), MaxListEntries) {
 		return nil
 	}
 	out := make([]string, 0, len(tools))

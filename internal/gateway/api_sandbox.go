@@ -62,6 +62,8 @@ type SandboxController interface {
 	DecideApproval(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
 	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
+	// PolicyTest judges destinations with a sandbox's egress policy.
+	PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error)
 	// ActivitySince returns buffered activity after since.
 	ActivitySince(since uint64, sandbox string) []sandboxapi.ActivityEvent
 	// SubscribeActivity returns buffered activity after since and a
@@ -216,6 +218,13 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 	}))
 	mux.HandleFunc("GET "+sandboxapi.PathPolicyExplain, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		return c.Explain(ctx, sandboxapi.ParseExplainQuery(r.URL.Query()))
+	}))
+	mux.HandleFunc("POST "+sandboxapi.PathPolicyTest, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		var req sandboxapi.PolicyTestRequest
+		if err := decodeSandboxBody(r, &req, false); err != nil {
+			return nil, err
+		}
+		return c.PolicyTest(ctx, req)
 	}))
 	mux.HandleFunc("GET "+sandboxapi.PathActivity, a.handleSandboxActivity)
 	mux.HandleFunc(sandboxapi.PathPrefix, func(w http.ResponseWriter, r *http.Request) {

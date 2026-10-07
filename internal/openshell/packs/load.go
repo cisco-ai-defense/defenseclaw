@@ -87,8 +87,26 @@ func Builtin(name string) (*Pack, error) {
 //   - an absolute path (or "~/…") selects that pack.yaml or pack directory.
 //
 // Built-in names always resolve to the embedded packs, so a custom file can
-// never impersonate one.
+// never impersonate one. A pack that extends another finds a custom parent
+// by name in packDir.
 func Load(ref, packDir string) (*Pack, error) {
+	return (&loader{packDir: packDir}).load(ref)
+}
+
+// MaxExtendsDepth bounds an extends chain: a pack has at most this many
+// ancestors.
+const MaxExtendsDepth = 4
+
+// loader loads one pack reference and the chain of parents it extends.
+// trusted holds every custom pack of the chain to LoadTrusted's rule.
+type loader struct {
+	packDir string
+	trusted bool
+	// chain are the pack files being loaded, the first reference first.
+	chain []string
+}
+
+func (l *loader) load(ref string) (*Pack, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		ref = DefaultPack
@@ -97,9 +115,39 @@ func Load(ref, packDir string) (*Pack, error) {
 		return Builtin(ref)
 	}
 	if packNamePattern.MatchString(ref) {
-		return loadNamed(ref, packDir)
+		return l.loadNamed(ref)
 	}
-	return LoadFile(ref)
+	return l.loadFile(ref)
+}
+
+// parent loads the parent a pack of the chain extends.
+func (l *loader) parent(ref string) (*Pack, error) {
+	if len(l.chain) > MaxExtendsDepth {
+		return nil, packErr(l.chain[0], "extends", "extends_depth", "a pack may have at most %d ancestors: %s → %s",
+			MaxExtendsDepth, strings.Join(l.chain, " → "), ref)
+	}
+	if IsBuiltin(ref) {
+		return Builtin(ref)
+	}
+	file, err := packFilePath(ref, l.packDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, seen := range l.chain {
+		if seen == file {
+			return nil, packErr(l.chain[0], "extends", "extends_cycle", "the extends chain comes back to %s", file)
+		}
+	}
+	if l.trusted {
+		if _, err := os.Lstat(file); errors.Is(err, fs.ErrNotExist) {
+			return nil, packErr(file, "", "not_found", "no such pack file")
+		}
+		if err := validateTrustedFile(file, "sandbox policy pack"); err != nil {
+			return nil, packErr(file, "", "untrusted",
+				"must be an administrator-owned file that other users cannot modify (%v)", err)
+		}
+	}
+	return l.loadNamed(ref)
 }
 
 // LoadTrusted is Load for a pack an administrator relies on (a
@@ -124,7 +172,8 @@ func LoadTrusted(ref, packDir string) (*Pack, error) {
 		return nil, packErr(file, "", "untrusted",
 			"must be an administrator-owned file that other users cannot modify (%v)", err)
 	}
-	pack, err := Load(ref, packDir)
+	// The packs it extends must be the administrator's as well.
+	pack, err := (&loader{packDir: packDir, trusted: true}).load(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -164,8 +213,8 @@ func packFilePath(ref, packDir string) (string, error) {
 	return target, nil
 }
 
-func loadNamed(name, packDir string) (*Pack, error) {
-	packDir = strings.TrimSpace(packDir)
+func (l *loader) loadNamed(name string) (*Pack, error) {
+	packDir := strings.TrimSpace(l.packDir)
 	if packDir == "" {
 		return nil, packErr(name, "", "not_found", "no built-in pack named %q and openshell.pack_dir is not set", name)
 	}
@@ -178,7 +227,7 @@ func loadNamed(name, packDir string) (*Pack, error) {
 		return nil, packErr(name, "", "not_found", "no built-in or custom pack named %q (custom packs live in %s/<name>/%s)",
 			name, dir, PackFileName)
 	}
-	pack, err := LoadFile(candidate)
+	pack, err := l.loadFile(candidate)
 	if err != nil {
 		return nil, err
 	}
@@ -188,13 +237,13 @@ func loadNamed(name, packDir string) (*Pack, error) {
 	return pack, nil
 }
 
-// LoadFile loads a custom pack from an absolute path to a pack.yaml or to the
+// loadFile loads a custom pack from an absolute path to a pack.yaml or to the
 // directory holding one ("~/" expands to the home directory). The pack
 // directory and the file must not be symbolic links, the file must be a
 // regular file of at most MaxPackBytes, no other local user may have written
 // it or be able to replace it (checkPackOwnership), and the pack may not
 // claim a built-in name.
-func LoadFile(p string) (*Pack, error) {
+func (l *loader) loadFile(p string) (*Pack, error) {
 	raw := strings.TrimSpace(p)
 	expanded, err := expandHome(raw)
 	if err != nil {
@@ -242,7 +291,8 @@ func LoadFile(p string) (*Pack, error) {
 	if err != nil {
 		return nil, packErr(target, "", "unreadable", "cannot read the pack file safely")
 	}
-	pack, err := Parse(data, target)
+	l.chain = append(l.chain, target)
+	pack, err := parse(data, target, l.parent)
 	if err != nil {
 		return nil, err
 	}
@@ -301,9 +351,10 @@ func checkPackOwnership(file string, info fs.FileInfo) error {
 	return nil
 }
 
-// Validate strictly loads a pack file for `defenseclaw sandbox pack validate`.
-func Validate(p string) (*Pack, error) {
-	return LoadFile(p)
+// Validate strictly loads a pack file for `defenseclaw sandbox pack
+// validate`; a custom pack it extends is looked up in packDir.
+func Validate(p, packDir string) (*Pack, error) {
+	return (&loader{packDir: packDir}).loadFile(p)
 }
 
 // Entry describes one pack for `defenseclaw sandbox pack list`.
@@ -314,6 +365,8 @@ type Entry struct {
 	Description string `json:"description,omitempty"`
 	Profile     string `json:"profile,omitempty"`
 	Digest      string `json:"digest,omitempty"`
+	// Extends is the parent pack, for a pack that extends one.
+	Extends string `json:"extends,omitempty"`
 	// Err is set for a custom pack that failed to load; the other fields
 	// then describe only where it was found.
 	Err error `json:"-"`
@@ -379,7 +432,7 @@ func List(packDir string) ([]Entry, error) {
 				Err: packErr(full, "", "reserved_name", "%q is a built-in pack name; this directory is ignored", name)})
 			continue
 		}
-		pack, err := loadNamed(name, dir)
+		pack, err := (&loader{packDir: dir}).loadNamed(name)
 		if err != nil {
 			entries = append(entries, Entry{Name: name, Source: full, Err: err})
 			continue
@@ -397,6 +450,7 @@ func entryFor(p *Pack) Entry {
 		Description: p.Description,
 		Profile:     p.Profile(),
 		Digest:      p.Digest,
+		Extends:     p.Extends,
 	}
 }
 

@@ -63,6 +63,9 @@ const (
 	// SourceGateway is what the OpenShell gateway the sandbox runs on
 	// decides: its compute driver (ConstraintComputeDriver).
 	SourceGateway Source = "gateway"
+	// SourceRepo is the project's repository policy (RepoPolicyPath),
+	// which only tightens.
+	SourceRepo Source = "repo"
 )
 
 // Flags are the `sandbox run` inputs that take part in resolution. Zero values
@@ -116,6 +119,10 @@ type Flags struct {
 	// its enabled Prometheus destinations is reserved. config.Config does
 	// not carry that plan, so a caller that has it must pass it.
 	Observability *config.ObservabilityV8Plan
+	// RepoPolicy is not a flag either: the project's repository policy as
+	// the run read it (LoadRepoPolicy), nil when it has none. It only
+	// tightens; a key that would loosen refuses the run.
+	RepoPolicy *RepoPolicy
 }
 
 // Authority says how far the admin block can be trusted to bind the user.
@@ -320,6 +327,10 @@ type Effective struct {
 	HookOnSilence    string        `json:"hook_on_silence"`
 	HookSilenceAfter time.Duration `json:"-"`
 	Admin            AdminStatus   `json:"admin"`
+	// RepoPolicy is the repository policy the run applies (nil: none), and
+	// RepoTightened the settings it made stricter.
+	RepoPolicy    *RepoPolicy `json:"repo_policy,omitempty"`
+	RepoTightened []string    `json:"repo_tightened,omitempty"`
 
 	admin config.OpenShellAdminConfig
 	// requiredPack: Pack is openshell.admin.required_pack, whose posture is
@@ -406,6 +417,10 @@ type resolver struct {
 	// (firewall.config_file), whose deny rules join the block list
 	// (firewallBlock).
 	firewallFile string
+	// repo is the run's repository policy (Flags.RepoPolicy), and
+	// repoRequested the value each setting it tightened had before.
+	repo          *RepoPolicy
+	repoRequested map[string]string
 }
 
 const requiredPackConstraint = "openshell.admin.required_pack"
@@ -456,6 +471,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 		return nil, nil, err
 	}
 	r.eff.Pack, r.eff.requiredPack = pack, r.required
+	r.refuseRepoLoosening(flags.RepoPolicy)
 	r.resolveProfile(o, flags)
 	r.resolveYolo(o, flags)
 	r.resolveHarness(flags)
@@ -479,6 +495,12 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	r.eff.HookOnSilence, r.eff.HookSilenceAfter = pack.Hooks.OnSilence, pack.Hooks.SilenceAfterDuration()
 	r.set("hooks.on_silence", pack.Hooks.OnSilence, r.packLayer)
 	r.set("hooks.silence_after", pack.Hooks.SilenceAfter, r.packLayer)
+	if r.eff.HookOnTamper != OnTamperStop && r.repo != nil && r.repo.TamperStop {
+		r.eff.HookOnTamper = OnTamperStop
+		r.repoRequested["hooks.on_tamper"] = pack.Hooks.OnTamper
+		r.set("hooks.on_tamper", OnTamperStop, r.tightened("hooks.on_tamper"))
+	}
+	r.finishRepo()
 	r.eff.policySources = r.policySources(o)
 	return r.eff, r.violations, nil
 }
@@ -516,6 +538,12 @@ func (r *resolver) policySources(o config.OpenShellConfig) []string {
 	for _, pack := range r.loaded {
 		if !pack.Builtin && filepath.IsAbs(pack.Source) {
 			sources = appendUnique(sources, pack.Source)
+		}
+		// The custom packs it extends are as much the policy as it is.
+		for _, link := range pack.Chain {
+			if !link.Builtin && filepath.IsAbs(link.Source) {
+				sources = appendUnique(sources, link.Source)
+			}
 		}
 	}
 	sort.Strings(sources)
@@ -804,6 +832,14 @@ func (r *resolver) resolveProfile(o config.OpenShellConfig, flags Flags) {
 		// strictest profile.
 		profile = config.OpenShellProfileStrict
 	}
+	if r.repo != nil && r.repo.NetworkMode != "" {
+		// The repository's network mode is a floor; the administrator's
+		// floors still apply on top.
+		if want := profileForNetwork(r.repo.NetworkMode); config.OpenShellProfileRank(want) > config.OpenShellProfileRank(profile) {
+			r.repoRequested["profile"], r.repoRequested["network.mode"] = profile, networkForProfile(profile)
+			profile, from = want, r.tightened("network.mode")
+		}
+	}
 	floor, constraint, detail := -1, "", ""
 	raise := func(rank int, byConstraint, because string) {
 		if rank > floor {
@@ -838,6 +874,10 @@ func (r *resolver) resolveProfile(o config.OpenShellConfig, flags Flags) {
 	approvals, approvalsFrom := r.eff.Pack.Approvals.Mode, r.packLayer
 	if minimum := minimumApprovals[profile]; minimum != "" && approvalsRank(approvals) < approvalsRank(minimum) {
 		approvals, approvalsFrom = minimum, layer{from.source, "profile " + profile}
+	}
+	if r.repo != nil && r.repo.Approvals != "" && approvalsRank(r.repo.Approvals) > approvalsRank(approvals) {
+		r.repoRequested["approvals.mode"] = approvals
+		approvals, approvalsFrom = r.repo.Approvals, r.tightened("approvals.mode")
 	}
 	r.eff.Approvals = approvals
 	r.set("approvals.mode", approvals, approvalsFrom)
@@ -874,6 +914,10 @@ func (r *resolver) resolveYolo(o config.OpenShellConfig, flags Flags) {
 		yolo, from = false, layer{SourceFlag, "--safe"}
 	case flags.Yolo:
 		yolo, from = true, layer{SourceFlag, "--yolo"}
+	}
+	if yolo && r.repo != nil && r.repo.NoYolo {
+		r.repoRequested["yolo"] = "true"
+		yolo, from = false, r.tightened("harness.yolo")
 	}
 	switch {
 	case yolo && isFalse(r.admin.AllowYolo):
@@ -943,7 +987,8 @@ func (r *resolver) resolveHarness(flags Flags) {
 // are the files a harness or agent tool loads and acts on without asking the
 // next time anyone runs one in the project outside the sandbox (hooks, MCP
 // servers, instructions), lock files, which can point the next install at
-// any package source, and sandbox policy packs kept in the project.
+// any package source, and sandbox policy packs and the repository policy
+// kept in the project (an edit to it applies from the next run on).
 var reviewFloor = []string{
 	"**/.claude/**", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json",
 	"**/.codex/**", "AGENTS.md", "AGENTS.override.md",
@@ -959,7 +1004,7 @@ var reviewFloor = []string{
 	"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
 	"deno.lock", "poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock", "Cargo.lock", "go.sum", "Gemfile.lock",
 	"composer.lock", "mix.lock", "pubspec.lock", "Podfile.lock", "packages.lock.json", "gradle.lockfile",
-	PackFileName,
+	PackFileName, RepoPolicyPath,
 }
 
 func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
@@ -972,6 +1017,10 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	}
 	if flags.Copy {
 		mode, from = config.OpenShellWorkdirCopy, layer{SourceFlag, "--copy"}
+	}
+	if mode == config.OpenShellWorkdirMount && r.repo != nil && r.repo.Copy {
+		r.repoRequested["workdir.mode"] = mode
+		mode, from = config.OpenShellWorkdirCopy, r.tightened("workspace.mode")
 	}
 	mount := mode == config.OpenShellWorkdirMount
 	switch {
@@ -1008,7 +1057,9 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	ws.Mode = mode
 
 	ws.Masks = mergeLists(pack.Workspace.Masks, o.Workdir.Masks)
-	r.set("workdir.masks", listValue(ws.Masks), mergedLayer(r.packLayer, len(o.Workdir.Masks) > 0, "openshell.workdir.masks"))
+	masksFrom := mergedLayer(r.packLayer, len(o.Workdir.Masks) > 0, "openshell.workdir.masks")
+	ws.Masks, masksFrom = r.addRepo("workspace.masks", ws.Masks, r.repoList(func(rp *RepoPolicy) []string { return rp.Masks }), masksFrom)
+	r.set("workdir.masks", listValue(ws.Masks), masksFrom)
 
 	ws.Unmask = mergeLists(pack.Workspace.Unmask, o.Workdir.Unmask, flags.Unmask)
 	unmaskFrom := layerDefault
@@ -1026,7 +1077,9 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	r.set("workdir.unmask", listValue(ws.Unmask), unmaskFrom)
 
 	ws.Review = mergeLists(pack.Workspace.Review, reviewFloor)
-	r.set("workdir.review", listValue(ws.Review), layer{r.packLayer.source, r.packLayer.origin + " + defenseclaw review floor"})
+	reviewFrom := layer{r.packLayer.source, r.packLayer.origin + " + defenseclaw review floor"}
+	ws.Review, reviewFrom = r.addRepo("workspace.review", ws.Review, r.repoList(func(rp *RepoPolicy) []string { return rp.Review }), reviewFrom)
+	r.set("workdir.review", listValue(ws.Review), reviewFrom)
 
 	ws.MaxUploadMB, from = pack.Workspace.MaxUploadMB, r.packLayer
 	if o.Workdir.MaxUploadMB > 0 {
@@ -1075,7 +1128,9 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 
 	userBlock := normalizeGlobs(o.Egress.Block)
 	eg.Block = mergeLists(pack.Egress.Block, userBlock)
-	r.set("egress.block", listValue(eg.Block), mergedLayer(r.packLayer, len(userBlock) > 0, "openshell.egress.block"))
+	blockFrom := mergedLayer(r.packLayer, len(userBlock) > 0, "openshell.egress.block")
+	eg.Block, blockFrom = r.addRepo("egress.block", eg.Block, r.repoList(func(rp *RepoPolicy) []string { return rp.Block }), blockFrom)
+	r.set("egress.block", listValue(eg.Block), blockFrom)
 	// A host name on the administrator's list blocks its subdomains too;
 	// the user's block list and the allow-only list stay exact.
 	eg.AdminBlock = config.OpenShellAdminBlockPatterns(r.admin.EgressBlock)
@@ -1088,6 +1143,7 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 	r.set("egress.allow_only", listValue(eg.AllowOnly), layer{SourceAdmin, "openshell.admin.egress_allow_only"})
 
 	r.resolvePorts(o)
+	r.repoPorts()
 	// The host firewall's deny rules apply for the ports the proxy carries,
 	// so they are read once those are known.
 	fwBlock, err := firewallBlock(r.firewallFile, eg.Ports)
@@ -1097,13 +1153,23 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 	if len(fwBlock) > 0 {
 		r.eff.firewallBlock = fwBlock
 		eg.Block = mergeLists(eg.Block, fwBlock)
-		blockFrom := mergedLayer(r.packLayer, len(userBlock) > 0, "openshell.egress.block")
-		blockFrom = layer{SourceUser, blockFrom.origin + " + the deny rules of " + r.firewallFile}
-		r.set("egress.block", listValue(eg.Block), blockFrom)
+		r.set("egress.block", listValue(eg.Block), layer{SourceUser, blockFrom.origin + " + the deny rules of " + r.firewallFile})
 	}
 	eg.LargeUploadMB, from = pack.Egress.LargeUploadMB, r.packLayer
 	if o.Egress.LargeUploadMB > 0 {
 		eg.LargeUploadMB, from = o.Egress.LargeUploadMB, layer{SourceUser, "openshell.egress.large_upload_mb"}
+	}
+	if rp := r.repo; rp != nil {
+		switch {
+		case rp.LargeUploadMB > 0 && (eg.LargeUploadMB <= 0 || rp.LargeUploadMB < eg.LargeUploadMB):
+			r.repoRequested["egress.large_upload_mb"] = strconv.Itoa(eg.LargeUploadMB)
+			eg.LargeUploadMB, from = rp.LargeUploadMB, r.tightened("egress.large_upload_mb")
+		case rp.BlockLargeUploads && eg.LargeUploadMB <= 0:
+			// The block acts on the large-upload report, so the
+			// repository's block turns the report on.
+			r.repoRequested["egress.large_upload_mb"] = "0"
+			eg.LargeUploadMB, from = defaultLargeUploadMB, r.tightened("egress.large_upload_mb")
+		}
 	}
 	// The administrator's block acts on the report, so under it the report
 	// can neither be turned off nor raised out of reach: the threshold is
@@ -1142,6 +1208,10 @@ func (r *resolver) resolveUploadBlock(o config.OpenShellConfig) {
 	block, from := r.eff.Pack.Egress.BlockLargeUploads, r.packLayer
 	if o.Egress.BlockLargeUploads && !block {
 		block, from = true, layer{SourceUser, "openshell.egress.block_large_uploads"}
+	}
+	if r.repo != nil && r.repo.BlockLargeUploads && !block {
+		r.repoRequested["egress.block_large_uploads"] = "false"
+		block, from = true, r.tightened("egress.block_large_uploads")
 	}
 	if r.admin.BlockLargeUploads {
 		block, from = true, layer{SourceAdmin, adminBlockUploadsConstraint}
@@ -1182,11 +1252,16 @@ func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool)
 	eg.Allow = []string{}
 	from := r.packLayer
 	var refused, curated, operator []string
+	// A built-in pack's entries are DefenseClaw's curated ones, and so are
+	// the entries a custom pack inherits from a built-in pack it extends.
+	own := withoutEntries(pack.Egress.Allow, pack.builtinAllow)
 	switch {
 	case pack.Builtin:
 		curated = mergeLists(pack.Egress.Allow)
 	case r.required:
-		operator = mergeLists(pack.Egress.Allow)
+		curated, operator = mergeLists(pack.builtinAllow), mergeLists(own)
+	default:
+		curated = mergeLists(pack.builtinAllow)
 	}
 	eg.Allow = mergeLists(curated, operator)
 	if r.eff.NetworkMode == NetworkAllowlist && pack.Network.Mode != NetworkAllowlist {
@@ -1198,17 +1273,17 @@ func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool)
 		eg.Allow = mergeLists(eg.Allow, balanced.Egress.Allow)
 		from = layer{from.source, from.origin + " + the curated allowlist of pack balanced"}
 	}
-	if !pack.Builtin && !r.required && len(pack.Egress.Allow) > 0 {
+	if !pack.Builtin && !r.required && len(own) > 0 {
 		if unblockForbidden {
-			refused = append(refused, pack.Egress.Allow...)
+			refused = append(refused, own...)
 			r.violate(Violation{
-				Key: key, Source: SourcePack, Attempted: listValue(pack.Egress.Allow), Enforced: listValue(eg.Allow),
+				Key: key, Source: SourcePack, Attempted: listValue(own), Enforced: listValue(eg.Allow),
 				Constraint: "openshell.admin.allow_unblock",
 				Detail:     "allow entries of a pack you chose are ignored; ask your administrator to add destinations",
 			})
 		} else {
-			eg.Allow = mergeLists(pack.Egress.Allow, eg.Allow)
-			operator = mergeLists(operator, pack.Egress.Allow)
+			eg.Allow = mergeLists(own, eg.Allow)
+			operator = mergeLists(operator, own)
 		}
 	}
 
@@ -1311,6 +1386,10 @@ func (r *resolver) resolveMCP(o config.OpenShellConfig, flags Flags) {
 	if flags.NoMCP {
 		imp, from = false, layer{SourceFlag, "--no-mcp"}
 	}
+	if imp && r.repo != nil && r.repo.NoMCPImport {
+		r.repoRequested["mcp.import"] = "true"
+		imp, from = false, r.tightened("mcp.import")
+	}
 	if imp && r.required && !pack.MCP.Import {
 		r.clamp("mcp.import", "true", "false", from, requiredPackConstraint,
 			"the required "+pack.Name+" sandbox pack does not bring MCP servers into the sandbox")
@@ -1364,8 +1443,10 @@ func (r *resolver) resolveMCP(o config.OpenShellConfig, flags Flags) {
 	} else {
 		r.set("mcp.host_ports", joinInts(m.HostPorts), portsFrom)
 	}
-	m.BlockedTools = append([]string{}, pack.MCP.BlockedTools...)
-	r.set("mcp.blocked_tools", listValue(m.BlockedTools), r.packLayer)
+	toolsFrom := r.packLayer
+	m.BlockedTools, toolsFrom = r.addRepo("mcp.blocked_tools", append([]string{}, pack.MCP.BlockedTools...),
+		r.repoList(func(rp *RepoPolicy) []string { return rp.BlockedTools }), toolsFrom)
+	r.set("mcp.blocked_tools", listValue(m.BlockedTools), toolsFrom)
 	m.ProjectServers = pack.MCP.ProjectServers
 	if m.ProjectServers == "" {
 		m.ProjectServers = MCPProjectServersBlock

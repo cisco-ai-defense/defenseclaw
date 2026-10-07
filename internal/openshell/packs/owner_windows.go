@@ -19,7 +19,7 @@ package packs
 import "io/fs"
 
 // statOwner reports no uid: OpenShell sandboxes do not run on Windows, and
-// LoadFile skips the POSIX ownership checks there.
+// The loader skips the POSIX ownership checks there.
 func statOwner(fs.FileInfo) (int, bool) {
 	return 0, false
 }

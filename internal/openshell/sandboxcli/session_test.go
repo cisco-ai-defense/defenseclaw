@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -1372,6 +1373,52 @@ func TestRunAgainResumesWithTheSameFlags(t *testing.T) {
 	other.Env, other.Credentials = []string{"ANTHROPIC_BASE_URL=http://elsewhere"}, []string{"ANTHROPIC_API_KEY=api.anthropic.com"}
 	if got := resumeIgnores(other, ta.mustGet(t, sbName), rec); !slices.Equal(got, []string{"--credential", "--env"}) {
 		t.Fatalf("resumeIgnores = %q", got)
+	}
+}
+
+// A repository policy that changed since the folder's sandbox was created
+// turns the resume default to a new sandbox (a resume keeps the copy the
+// sandbox's run read), and the new sandbox's copy holds back what it masks.
+// A copy-mode sandbox's refresh and pull use the copy its run read: its
+// masks and review globs.
+func TestRunWithAChangedRepoPolicy(t *testing.T) {
+	content := []byte("version: 1\nworkspace: {mode: copy, masks: [\"config/*.secret\"], review: [\"scripts/**\"]}\n")
+	rp, err := packs.ParseRepoPolicy(content, packs.RepoPolicyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := &sandboxapi.RepoPolicy{Path: rp.Source, Digest: rp.Digest, Tightened: []string{"workdir.mode", "workspace.masks"}, Content: content}
+
+	ta := newTestApp(t, "\ns\n")
+	noChanges(ta)
+	ta.daemon.add(folderSandbox(ta, "stopped")) // a live mount, created before the file
+	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+		if req.Sandbox == "" { // a new run in the folder reads the file
+			ex.RepoPolicy = wire
+			ex.Settings = []sandboxapi.Setting{{Key: "workdir.mode", Value: "copy", Source: "repo", Origin: packs.RepoPolicyConstraint, Requested: "mount"}}
+		}
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), "ignores the changed repository policy .defenseclaw/sandbox.yaml. Resume it anyway? [y/N]")
+	if req := createRequest(t, ta.daemon); req.RepoPolicyDigest != rp.Digest || !req.Copy || ta.calls("POST", "proj-0a1b/start") != 0 {
+		t.Fatalf("the default must create a sandbox on a copy with the new policy: %+v", req)
+	}
+	if len(ta.copy.staged) != 1 || !slices.Contains(ta.copy.staged[0].Masks, "config/*.secret") {
+		t.Fatalf("the staged copy does not mask what the repository policy masks: %+v", ta.copy.staged)
+	}
+
+	ta = newTestApp(t, "s\n", copySandbox("copybox"))
+	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+		if req.Sandbox == "copybox" {
+			ex.RepoPolicy = wire
+		}
+	}
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "copybox", Refresh: true}))
+	if len(ta.copy.refreshed) != 1 || !slices.Contains(ta.copy.refreshed[0].Stage.Masks, "config/*.secret") {
+		t.Fatalf("the refreshed copy does not mask what the repository policy masks: %+v", ta.copy.refreshed)
+	}
+	if len(ta.copy.pulled) == 0 || !slices.Contains(ta.copy.pulled[0].SensitiveGlobs, "scripts/**") {
+		t.Fatalf("the pull does not review what the repository policy asks: %+v", ta.copy.pulled)
 	}
 }
 

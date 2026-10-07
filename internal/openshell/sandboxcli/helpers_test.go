@@ -107,6 +107,8 @@ type fakeDaemon struct {
 	stopRunLogs map[string]*sandboxapi.RunLog
 	// destinations are the sandboxes' destinations views.
 	destinations map[string]*sandboxapi.Destinations
+	// policyTest answers POST /policy/test.
+	policyTest func(req sandboxapi.PolicyTestRequest) *sandboxapi.PolicyTestResult
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -239,6 +241,10 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			d.onExplain(sandboxapi.ParseExplainQuery(r.URL.Query()), &ex)
 		}
 		reply(ex)
+	case path == sandboxapi.PathPolicyTest && d.policyTest != nil:
+		var req sandboxapi.PolicyTestRequest
+		_ = json.Unmarshal(body, &req)
+		reply(d.policyTest(req))
 	case path == sandboxapi.PathApprovals && r.Method == http.MethodGet:
 		var out []sandboxapi.Approval
 		for _, a := range d.approvals {
@@ -739,6 +745,17 @@ type fakeCopy struct {
 	// reuseErr is what a Pull with Reuse fails with (it reuses f.pull
 	// otherwise).
 	reuseErr error
+	// staged, refreshed and pulled are the options of every Stage, Refresh
+	// and Pull.
+	staged    []workspace.StageOptions
+	refreshed []workspace.RefreshOptions
+	pulled    []workspace.PullOptions
+}
+
+func (f *fakeCopy) record(add func()) {
+	f.mu.Lock()
+	add()
+	f.mu.Unlock()
 }
 
 func (f *fakeCopy) Discard(_, name string) error {
@@ -782,6 +799,7 @@ func (f *fakeCopy) step(s string) {
 
 func (f *fakeCopy) Stage(_ context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {
 	f.step("stage " + o.Name)
+	f.record(func() { f.staged = append(f.staged, o) })
 	return &workspace.CopyRecord{Name: o.Name, Project: o.Project, Files: 3, Bytes: 1024, HeldBack: []string{".env"}}, nil
 }
 
@@ -797,10 +815,12 @@ func (f *fakeCopy) Baseline(_ context.Context, _, name string, _ workspace.Exece
 
 func (f *fakeCopy) Refresh(_ context.Context, o workspace.RefreshOptions) (*workspace.CopyRecord, error) {
 	f.step("refresh " + o.Stage.Name)
+	f.record(func() { f.refreshed = append(f.refreshed, o) })
 	return &workspace.CopyRecord{Name: o.Stage.Name}, nil
 }
 
 func (f *fakeCopy) Pull(_ context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	f.record(func() { f.pulled = append(f.pulled, o) })
 	if o.Reuse != "" {
 		f.step("reuse " + o.Name + " " + o.Reuse)
 		if f.reuseErr != nil || f.pull == nil || f.pull.Result != o.Reuse {

@@ -813,8 +813,14 @@ func (a *App) branchHolds(ctx context.Context, sb *sandboxapi.Sandbox, o PullOpt
 
 // reviewGlobs are the paths the review of sb's work flags besides the
 // built-in ones (the pack's workspace.review).
-func (a *App) reviewGlobs(sb *sandboxapi.Sandbox) []string {
-	if eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: sb.Pack, Harness: sb.Harness, Project: sb.Project, Profile: sb.Profile, Copy: true}); err == nil {
+func (a *App) reviewGlobs(ctx context.Context, sb *sandboxapi.Sandbox) []string {
+	// The repository policy the sandbox's run read may add review globs.
+	var repo *packs.RepoPolicy
+	if api, err := a.api(); err == nil {
+		repo, _ = a.sandboxRepoPolicy(ctx, api, sb.Name)
+	}
+	if eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: sb.Pack, Harness: sb.Harness, Project: sb.Project, Profile: sb.Profile, Copy: true,
+		RepoPolicy: repo}); err == nil {
 		return eff.Workspace.Review
 	}
 	return nil
@@ -829,7 +835,7 @@ func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace
 	if st == nil || st.Pulled == "" {
 		return nil, nil
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Reuse: st.Pulled, SensitiveGlobs: a.reviewGlobs(sb)})
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Reuse: st.Pulled, SensitiveGlobs: a.reviewGlobs(ctx, sb)})
 	if errors.Is(err, workspace.ErrNoReusablePull) {
 		return nil, nil
 	}
@@ -847,7 +853,7 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 	if announce {
 		a.note("Pulling " + sb.Name + "'s work…")
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(sb)})
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(ctx, sb)})
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))
 	}
