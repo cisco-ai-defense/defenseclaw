@@ -70,7 +70,7 @@ func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string,
 		},
 	}
 	if intent.Mode != kernelpolicy.ModeOff {
-		config.Dial = tetragon.NewDialer(tetragon.DialerConfig{Homes: homes, BinDir: helperBinDir()})
+		config.Dial = tetragon.NewDialer(tetragon.DialerConfig{Homes: homes, BinDir: helperBinDir(), PolicyMode: controller.PolicyMode})
 	}
 	return config
 }

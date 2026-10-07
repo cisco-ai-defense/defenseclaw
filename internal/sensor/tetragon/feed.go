@@ -35,9 +35,13 @@ type DialerConfig struct {
 	Homes  []string
 	BinDir string
 	// PolicyInterval is how often the loaded policies are listed (their
-	// modes decide blocked against would_block; the list feeds the coverage
-	// and the fanotify hand-off). Default 15 s.
+	// modes decide blocked against would_block, together with PolicyMode;
+	// the list feeds the coverage and the fanotify hand-off). Default 15 s.
 	PolicyInterval time.Duration
+	// PolicyMode is the reconciler's mode of a policy it loaded and when it
+	// last changed (kernelpolicy.Controller.PolicyMode). When it is newer
+	// than the last listing it decides; nil leaves the listing alone.
+	PolicyMode func(name string) (mode string, changed time.Time, ok bool)
 	// MetricsInterval is how often the loss counters are scraped. Default
 	// 30 s.
 	MetricsInterval time.Duration
@@ -68,9 +72,13 @@ type feed struct {
 	cancel context.CancelFunc
 	mapper *Mapper
 
+	// own is DialerConfig.PolicyMode.
+	own func(name string) (string, time.Time, bool)
+
 	mu        sync.Mutex
 	policies  []plane.BackendPolicy
 	modes     map[string]string
+	listedAt  time.Time
 	lost      int64
 	lossKnown bool
 }
@@ -88,7 +96,7 @@ func openFeed(ctx context.Context, config DialerConfig) (*feed, error) {
 		_ = client.Close()
 		return nil, refuse(ReasonUnavailable, err, "GetEvents: %v", err)
 	}
-	f := &feed{client: client, stream: stream, cancel: cancel, modes: map[string]string{}}
+	f := &feed{client: client, stream: stream, cancel: cancel, modes: map[string]string{}, own: config.PolicyMode}
 	f.mapper = NewMapper(MapperConfig{Homes: config.Homes, BinDir: config.BinDir, PolicyMode: f.policyMode})
 	f.refreshPolicies(ctx)
 	f.refreshLoss(ctx)
@@ -128,10 +136,21 @@ func (f *feed) Close() error {
 	return f.client.Close()
 }
 
+// policyMode is a policy's mode as the mapper needs it: the newer of the
+// reconciler's own record (it knows the moment it adds, promotes or demotes a
+// policy, which a 15 s listing does not) and the last listing (which catches
+// an operator's `tetra tracingpolicy set-mode`).
 func (f *feed) policyMode(name string) string {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.modes[name]
+	listed, ok := f.modes[name]
+	at := f.listedAt
+	f.mu.Unlock()
+	if f.own != nil {
+		if mode, changed, known := f.own(name); known && (!ok || changed.After(at)) {
+			return mode
+		}
+	}
+	return listed
 }
 
 func (f *feed) poll(ctx context.Context, config DialerConfig) {
@@ -176,7 +195,7 @@ func (f *feed) refreshPolicies(ctx context.Context) {
 	}
 	sort.Slice(own, func(i, j int) bool { return own[i].Name < own[j].Name })
 	f.mu.Lock()
-	f.policies, f.modes = own, modes
+	f.policies, f.modes, f.listedAt = own, modes, time.Now()
 	f.mu.Unlock()
 }
 

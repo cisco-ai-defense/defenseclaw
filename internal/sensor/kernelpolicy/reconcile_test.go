@@ -809,3 +809,24 @@ func TestOperatorDisablingTheControlsCountsAsAStop(t *testing.T) {
 		}
 	}
 }
+
+// The event mapper asks the controller whether a controls policy enforces:
+// the answer changes at the helper's own call, not at the next listing.
+func TestPolicyModeFollowsTheHelpersOwnCalls(t *testing.T) {
+	h := enforcing(t)
+	controls, _ := h.tg.find(FamilyControls)
+	mode, at, ok := h.ctl.PolicyMode(controls.Name)
+	if !ok || mode != "enforce" {
+		t.Fatalf("enforcing controls: %q %v", mode, ok)
+	}
+	h.now = h.now.Add(time.Minute)
+	h.pause(time.Hour)
+	h.pass()
+	mode, demoted, ok := h.ctl.PolicyMode(controls.Name)
+	if !ok || mode != "monitor" || !demoted.After(at) {
+		t.Fatalf("after a pause: %q at %v (before %v) %v", mode, demoted, at, ok)
+	}
+	if _, _, ok := h.ctl.PolicyMode("defenseclaw-controls-ffffffff"); ok {
+		t.Fatal("a name the helper never loaded has no mode")
+	}
+}

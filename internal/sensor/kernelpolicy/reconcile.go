@@ -107,6 +107,9 @@ type known struct {
 	family Family
 	index  PathIndex
 	mode   LoadedMode
+	// modeAt is when mode last changed: the event mapper prefers it over a
+	// Tetragon listing that is older.
+	modeAt time.Time
 	// live is true while the helper's record holds the name; a retired name
 	// stays a few seconds so its last events are still attributed.
 	live    bool
@@ -372,14 +375,16 @@ func (c *Controller) syncTally() {
 		}
 	}
 	for name, applied := range c.st.Applied {
-		entry := c.names[name]
+		entry, had := c.names[name]
 		entry.family = applied.Family
 		entry.live = true
 		entry.expires = now.Add(30 * time.Second)
+		mode := LoadedMonitor
 		if applied.Mode == PolicyEnforce {
-			entry.mode = LoadedEnforce
-		} else {
-			entry.mode = LoadedMonitor
+			mode = LoadedEnforce
+		}
+		if !had || entry.mode != mode {
+			entry.mode, entry.modeAt = mode, now
 		}
 		c.names[name] = entry
 	}
@@ -397,12 +402,31 @@ func (c *Controller) setIndex(name string, index PathIndex) {
 // observeMode records the mode Tetragon reports for a name, so a hit is
 // counted as blocked or would-block by what is actually loaded.
 func (c *Controller) observeMode(name string, mode LoadedMode) {
+	now := c.cfg.Now()
 	c.tallyMu.Lock()
-	if entry, ok := c.names[name]; ok {
-		entry.mode = mode
+	if entry, ok := c.names[name]; ok && entry.mode != mode {
+		entry.mode, entry.modeAt = mode, now
 		c.names[name] = entry
 	}
 	c.tallyMu.Unlock()
+}
+
+// PolicyMode is the mode of a policy this helper loaded, as of its own last
+// call or listing ("enforce" or "monitor"), and when that changed. The event
+// mapper uses it to tell a denial from a would-block: the helper knows the
+// moment it adds, promotes or demotes a policy, and a controls policy gets a
+// new name whenever its anchors change. ok is false for any other name.
+func (c *Controller) PolicyMode(name string) (mode string, changed time.Time, ok bool) {
+	c.tallyMu.Lock()
+	defer c.tallyMu.Unlock()
+	entry, known := c.names[name]
+	if !known || !entry.live {
+		return "", time.Time{}, false
+	}
+	if entry.mode.Enforcing() {
+		return "enforce", entry.modeAt, true
+	}
+	return "monitor", entry.modeAt, true
 }
 
 // mayTouch is the only authority to delete or configure a name: the helper's
