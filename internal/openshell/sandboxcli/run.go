@@ -228,14 +228,16 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// sandbox keeps the settings it was created with, so flags that only a
 	// new sandbox takes (and it does not have already), and grants
 	// (credentials, host ports) it holds that this run did not ask for, turn
-	// the default answer to no. A sandbox the policy would not start is not
-	// offered.
+	// the default answer to no, as does a repository policy that changed
+	// since it was created (it keeps the copy its run read). A sandbox the
+	// policy would not start is not offered.
 	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach {
 		if sb := a.resumable(ctx, api, project, spec.Name); sb != nil {
-			if why := a.startRefusal(ctx, api, sb); why != "" {
+			kept := keptPolicy(ctx, api, sb)
+			if why := startRefusal(kept, sb); why != "" {
 				a.note(fmt.Sprintf("Sandbox %s (%s, %s) holds this folder but cannot start under the current policy (%s); `%s delete %s` removes it.",
 					sb.Name, sb.Phase, sb.WorkdirMode, why, CommandName, sb.Name))
-			} else if resumed, err := a.offerResume(ctx, o, sb, copyMode); resumed || err != nil {
+			} else if resumed, err := a.offerResume(ctx, o, sb, copyMode, repoPolicyChanged(ex, kept)); resumed || err != nil {
 				return err
 			}
 		}
@@ -1108,8 +1110,9 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 // harness, and resumes it when the answer is yes. Flags sb does not
 // already have are named and turn the default to no; when the folder's
 // live mount is sb's, a new sandbox needs a copy (or sb deleted), and the
-// hint says so.
-func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode bool) (bool, error) {
+// hint says so. repoChanged names the project's repository policy, which
+// changed since sb was created, among what a resume ignores.
+func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode, repoChanged bool) (bool, error) {
 	run := a.runLaunchOf(sb)
 	held := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder", sb.Name, sb.Phase, sb.WorkdirMode)
 	if n := a.attachedSessions(sb.Name); n > 0 {
@@ -1122,6 +1125,9 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 		question += "It keeps grants this run did not ask for: " + strings.Join(grants, ", ") + ". "
 	}
 	ignored := resumeIgnores(o, sb, run)
+	if repoChanged {
+		ignored = append(ignored, "the changed repository policy "+packs.RepoPolicyPath)
+	}
 	if len(ignored) > 0 {
 		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". "
 	}
@@ -1145,14 +1151,24 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 	return true, a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
 }
 
-// startRefusal says why the current policy would refuse to start sb (a
-// setting it can no longer have, like a live mount the organization now
-// runs on a copy, or a harness it no longer allows), or "" when a start
-// would go ahead or the daemon cannot tell. The daemon checks the same at
-// the start.
-func (a *App) startRefusal(ctx context.Context, api API, sb *sandboxapi.Sandbox) string {
+// keptPolicy is the explain of sb's own policy, what a start of it
+// resolves (with the repository policy its run read), or nil when the
+// daemon cannot tell.
+func keptPolicy(ctx context.Context, api API, sb *sandboxapi.Sandbox) *sandboxapi.Explain {
 	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name})
 	if err != nil {
+		return nil
+	}
+	return ex
+}
+
+// startRefusal says why the current policy, as ex (keptPolicy) resolves
+// it, would refuse to start sb (a setting it can no longer have, like a
+// live mount the organization now runs on a copy, or a harness it no longer
+// allows), or "" when a start would go ahead or the daemon cannot tell (ex
+// nil). The daemon checks the same at the start.
+func startRefusal(ex *sandboxapi.Explain, sb *sandboxapi.Sandbox) string {
+	if ex == nil {
 		return ""
 	}
 	for _, v := range ex.Violations {

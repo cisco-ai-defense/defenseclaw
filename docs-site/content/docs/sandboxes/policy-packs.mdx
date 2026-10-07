@@ -777,8 +777,11 @@ error that lists the keys it may set. Its ownership is not checked, since it
 can only tighten. Control characters in it never reach your terminal.
 
 The sandbox keeps the copy it was created with: an edit made during a
-session, in a live mount for example, applies from the next `sandbox run`
-on, not to the running sandbox or when it starts again. The file is on the
+session, in a live mount for example, applies to the next new sandbox, not
+to the running sandbox or when it starts again. When the file changed since
+the folder's sandbox was created, `sandbox run` still offers to resume that
+sandbox, but names the changed repository policy among what a resume
+ignores and makes a new sandbox the default answer. The file is on the
 review list of every session, so a change to it is called out at the end.
 The launch banner names it (`Policy  repo policy .defenseclaw/sandbox.yaml:
 tightened 3 settings (…)`), `policy show` says what it tightened,

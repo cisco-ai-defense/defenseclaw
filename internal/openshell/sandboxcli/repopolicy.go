@@ -53,6 +53,14 @@ func (a *App) sandboxRepoPolicy(ctx context.Context, api API, name string) (*pac
 	return parseRepoPolicy(ex.RepoPolicy)
 }
 
+// repoPolicyChanged reports whether the repository policy a new run of the
+// project reads (fresh, the preflight explain) differs from the copy a
+// sandbox runs with (kept, its own explain; nil: unknown), which a resume
+// keeps.
+func repoPolicyChanged(fresh, kept *sandboxapi.Explain) bool {
+	return fresh != nil && kept != nil && repoPolicyDigest(fresh.RepoPolicy) != repoPolicyDigest(kept.RepoPolicy)
+}
+
 // repoPolicyDigest is CreateRequest.RepoPolicyDigest for the repository
 // policy a preflight explain reported.
 func repoPolicyDigest(rp *sandboxapi.RepoPolicy) string {

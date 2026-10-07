@@ -139,7 +139,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 	}
 	a.printSandbox(sb)
 	if sb.Phase == "stopped" {
-		if why := a.startRefusal(ctx, api, sb); why != "" {
+		if why := startRefusal(keptPolicy(ctx, api, sb), sb); why != "" {
 			a.warn(sb.Name + " cannot start under the current policy: " + why + "; delete it (`" + CommandName + " delete " + sb.Name +
 				"`) and run again")
 		}
