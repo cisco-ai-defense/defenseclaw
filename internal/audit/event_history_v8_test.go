@@ -1490,6 +1490,8 @@ func TestEventHistoryCompatibilityColumnsFollowTheLocalProfile(t *testing.T) {
 				Severity:   "INFO",
 				Connector:  "claudecode",
 				Structured: map[string]any{"reason": "judge-exfil: quoted " + rawMarker},
+				// GAP-0131: a path-class field of the projection, so the column follows it.
+				RulePackDir: "/home/alice@corp.example/.defenseclaw/policies/guardrail/default",
 			}
 			stampAuditEventEnvelope(&event)
 			record, err := buildCompatibilityAuditV8Record(
@@ -1507,12 +1509,20 @@ func TestEventHistoryCompatibilityColumnsFollowTheLocalProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			row := loadV8HistoryRow(t, store, record.RecordID())
+			var rulePackDir string
+			if err := store.db.QueryRow(`SELECT COALESCE(rule_pack_dir,'') FROM audit_events WHERE id = ?`,
+				record.RecordID()).Scan(&rulePackDir); err != nil {
+				t.Fatal(err)
+			}
 			if profileName == observabilityredaction.ProfileNone {
 				if row.Details != event.Details || row.Target != event.Target ||
-					!strings.Contains(row.StructuredJSON, rawMarker) {
-					t.Fatalf("profile none changed the compatibility columns: %#v", row)
+					!strings.Contains(row.StructuredJSON, rawMarker) || rulePackDir != event.RulePackDir {
+					t.Fatalf("profile none changed the compatibility columns: %#v %q", row, rulePackDir)
 				}
 				return
+			}
+			if rulePackDir != "" {
+				t.Fatalf("rule_pack_dir kept the path the %s profile removed: %q", profileName, rulePackDir)
 			}
 			for field, value := range map[string]string{
 				"target": row.Target, "details": row.Details, "structured_json": row.StructuredJSON,

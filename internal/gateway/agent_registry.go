@@ -331,6 +331,21 @@ func (r *AgentRegistry) AgentIdentityForSession(ctx context.Context, sessionID s
 	return ""
 }
 
+// SessionSharedWithOtherIdentity reports whether sessionID was seen on the
+// hook path under an agent identity other than agentIdentityID, or under
+// several. Two users can send the same session id; state keyed by session
+// alone is then not necessarily the caller's.
+func (r *AgentRegistry) SessionSharedWithOtherIdentity(ctx context.Context, sessionID, agentIdentityID string) bool {
+	if r == nil || sessionID == "" {
+		return false
+	}
+	sessionID = sandboxSessionStateKey(ctx, sessionID)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ref, ok := r.sessionAgents[sessionID]
+	return ok && (ref.ambiguous || ref.agent != agentIdentityID)
+}
+
 // Resolve returns the three-tier identity for a request context.
 // sessionID may be "" (pre-session traffic) in which case only
 // AgentID and SidecarInstanceID are populated.

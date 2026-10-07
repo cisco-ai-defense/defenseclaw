@@ -288,16 +288,23 @@ func TestEarlierGatewayIsProbedOnTheAPIPort(t *testing.T) {
 }
 
 // Enabled AI Defense that fails (a rejected key) leaves the local engine
-// deciding, so status stays ok, but it must say so.
+// deciding, so status stays ok, but it must say so. So must directory lookups
+// that fail, which leave the accounts without cached facts on the default
+// guardrail profile (GAP-0216).
 func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
-		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"}}`), nil
+		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"},` +
+			`"directory":{"failing":2,"since":"2026-10-07T00:05:54Z","stale":0}}`), nil
 	}
 	status := h.run(Options{Action: ActionStatus})
 	if !status.OK || !strings.Contains(messagesOf(status.Warnings, codeAIDefenseUnavailable), "unavailable:auth_failed") {
 		t.Fatalf("an unavailable AI Defense must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
+	}
+	if got := messagesOf(status.Warnings, codeDirectoryLookups); !strings.Contains(got, "failing for 2 account(s) since 2026-10-07T00:05:54Z") ||
+		!strings.Contains(got, "enterprise linux profile-explain --user") {
+		t.Fatalf("failing directory lookups must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}
 }
 

@@ -1092,6 +1092,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.runCapacityObservabilityV8(runCtx, sidecarCapacityInterval)
 	}()
 
+	// The audit write-ahead log is checkpointed once it passes a size limit, so
+	// sustained hook traffic cannot grow it without bound.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditWALGuard(runCtx)
+	}()
+
 	// Agent identities seen on the hook path are written to inventory.db in
 	// one batch per flush interval, never per hook.
 	agentIdentityStoreToken := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore {
@@ -1526,7 +1534,7 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 	if rp == nil {
 		return nil, fmt.Errorf("%s rule pack %q: loader returned no rule pack", scope, dir)
 	}
-	if err := rp.Validate(); err != nil {
+	if err := cache.Validate(rp); err != nil {
 		return nil, fmt.Errorf("%s rule pack %q: %w", scope, dir, err)
 	}
 	return rp, nil
