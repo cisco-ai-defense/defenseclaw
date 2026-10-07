@@ -124,7 +124,7 @@ func guardrailFallbackActionForProfile(severity, profile string) string {
 // applied here: callers report this raw action and apply the mode after it.
 func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string, hilt *policy.GuardrailHILTInput) *ScanVerdict {
 	if v == nil {
-		return allowVerdict("fallback")
+		v = allowVerdict("fallback")
 	}
 	out := *v
 	localRank := guardrailSeverityRank(v.Severity)

@@ -183,6 +183,7 @@ func TestFallbackGuardrailVerdict_FollowsRego(t *testing.T) {
 		want         string
 	}{
 		{"full trust blocks a Cisco-only critical", none, critical, "full", "action", nil, "block"},
+		{"full trust blocks without a local verdict", nil, critical, "full", "action", nil, "block"},
 		{"advisory downgrades a Cisco-only block", none, critical, "advisory", "action", nil, "alert"},
 		{"advisory keeps a local block", critical, critical, "advisory", "action", nil, "block"},
 		{"none ignores the Cisco verdict", none, critical, "none", "action", nil, "allow"},
