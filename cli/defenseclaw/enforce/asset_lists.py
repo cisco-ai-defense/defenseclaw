@@ -30,6 +30,10 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import http.client
+import json
+import os
+import socket
 from typing import Any
 
 import click
@@ -129,11 +133,74 @@ def audit_managed_config_refusal(target: str, command: str) -> None:
     audit_managed_refusal(ACTION_ACTION, target, f"command={command}")
 
 
+MANAGED_REFUSAL_PATH = "/api/v1/managed/refusal"
+
+
+class _HookSocketConnection(http.client.HTTPConnection):
+    """HTTP over the managed gateway unix hook socket."""
+
+    def __init__(self, path: str, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._socket_path)
+        self.sock = sock
+
+
+def _managed_hook_socket() -> str:
+    """The hook socket of this host managed gateway, from the runtime
+    descriptor the enterprise lifecycle publishes ("" on Windows, which has
+    none, and on an unmanaged host)."""
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    descriptor = managed_descriptor()
+    if not descriptor:
+        return ""
+    try:
+        with open(descriptor, encoding="utf-8") as stream:
+            path = str(json.load(stream).get("hook_socket") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return path if os.path.isabs(path) else ""
+
+
+def _clip(text: str, limit: int) -> str:
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def _report_refusal_to_managed_gateway(action: str, target: str, details: str) -> bool:
+    """Hand a refusal to the managed gateway over its hook socket, which
+    names the caller from the kernel: a standard user has no gateway token,
+    so the token-authenticated audit path never records its refusals."""
+    socket_path = _managed_hook_socket()
+    if not socket_path:
+        return False
+    body = json.dumps({"action": action, "target": _clip(target, 256), "details": _clip(details, 512)})
+    connection = _HookSocketConnection(socket_path, timeout=3)
+    try:
+        connection.request(
+            "POST", MANAGED_REFUSAL_PATH, body,
+            {"Content-Type": "application/json", "X-DefenseClaw-Client": "defenseclaw-cli"},
+        )
+        return 200 <= connection.getresponse().status < 300
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
 def audit_managed_refusal(action: str, target: str, details: str = "") -> None:
     """Record a refused local policy write on a managed device in the audit
     trail (best effort: the refusal stands even when the gateway that
-    records CLI events is down)."""
+    records CLI events is down). The managed gateway hook socket takes it
+    for every account, a standard user included; the token-authenticated
+    CLI path is the fallback."""
     try:
+        if _report_refusal_to_managed_gateway(action, target, details):
+            return
         ctx = click.get_current_context(silent=True)
         app = getattr(ctx, "obj", None) if ctx is not None else None
         logger = getattr(app, "logger", None)

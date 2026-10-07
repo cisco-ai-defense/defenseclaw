@@ -561,7 +561,7 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
             stop = next((rest.strip() for rest in lines[index + 1 :] if rest.strip().startswith("To stop it:")), "")
             text = "New installs blocked; the installed copy still loads."
             return f"{text} {stop}" if stop else text
-    if any(line.strip() == "Observability v8 destinations" for line in lines):
+    if any(line.strip() == "Observability destinations" for line in lines):
         rows = _destination_rows(lines)
         noun = "destination" if rows == 1 else "destinations"
         return f"{rows} {noun} listed"

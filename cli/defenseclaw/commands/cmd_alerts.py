@@ -1060,7 +1060,7 @@ def _set_alert_disposition(
     audit_db_identity = _alert_audit_db_identity(app.cfg.audit_db)
     token = app.cfg.gateway.resolved_token()
     if not token:
-        raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the v8 gateway.")
+        raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the gateway.")
     exact_ids = selector.get("ids")
     id_count = len(exact_ids) if isinstance(exact_ids, list) else 0
     client = OrchestratorClient(

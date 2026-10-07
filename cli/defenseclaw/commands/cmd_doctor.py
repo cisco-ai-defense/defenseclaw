@@ -1337,7 +1337,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         _emit(
             "fail",
             "Config validation",
-            "canonical v8 validator returned no validity decision",
+            "the configuration validator returned no validity decision",
             r=r,
             check_id="doctor.config.canonical-v8",
             reason_code="canonical-validation-unavailable",
@@ -1476,19 +1476,19 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
                 f"configuration check failed: {exc}; "
                 "run `defenseclaw config validate` before applying repairs"
             )
-        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
+        return RepairDecision("blocked", reason, blockers=("configuration validation failed",))
     except (OSError, ValueError):
         reason = (
-            "canonical-v8 configuration preflight failed; "
+            "configuration preflight failed; "
             "run `defenseclaw config validate` before applying repairs"
         )
-        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
+        return RepairDecision("blocked", reason, blockers=("configuration validation failed",))
     if validation.valid is not True:
         reason = (
-            "canonical-v8 validator returned no positive validity decision; "
+            "the configuration validator returned no positive validity decision; "
             "run `defenseclaw config validate` before applying repairs"
         )
-        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation unavailable",))
+        return RepairDecision("blocked", reason, blockers=("configuration validation unavailable",))
     return RepairDecision("noop", f"{config_path}; canonical schema valid")
 
 
@@ -9718,7 +9718,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         status = inspect_v8_operator_status(config_path)
     except ConfigInspectTimeoutError as exc:
         # A busy host, not a bad config (GAP-1621).
-        _emit("warn", "Observability v8 effective plan", f"{exc}; re-run defenseclaw doctor", r=r)
+        _emit("warn", "Observability plan", f"{exc}; re-run defenseclaw doctor", r=r)
         return
     except (ConfigInspectError, V8ConfigError, ValueError) as exc:
         if _config_validation_failed(r):
@@ -9726,17 +9726,17 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
             # one bad value is one failure (GAP-1662).
             _emit(
                 "skip",
-                "Observability v8 effective plan",
+                "Observability plan",
                 "not evaluated until config.yaml validates (see the Config validation row above)",
                 r=r,
             )
             return
-        _emit("fail", "Observability v8 effective plan", str(exc), r=r)
+        _emit("fail", "Observability plan", str(exc), r=r)
         return
     except OSError as exc:
         # A config or snapshot the account cannot read or protect is a
         # finding, not a crash of the whole report.
-        _emit("fail", "Observability v8 effective plan", f"cannot inspect the configuration: {exc}", r=r)
+        _emit("fail", "Observability plan", f"cannot inspect the configuration: {exc}", r=r)
         return
     _check_observability_v8_status(
         status, r, live_health=live_health, audit_db=str(getattr(cfg, "audit_db", "") or "")

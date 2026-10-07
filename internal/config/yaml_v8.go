@@ -192,15 +192,15 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 	}
 	if node.Kind == yaml.AliasNode {
 		return v8Error(w.source, V8YAMLErrorAliasForbidden, path, node,
-			"YAML aliases are not allowed in v8 configuration", "replace the alias with explicit configuration")
+			"YAML aliases are not allowed in config.yaml", "replace the alias with explicit configuration")
 	}
 	if v8YAMLIsMerge(node) {
 		return v8Error(w.source, V8YAMLErrorMergeKeyForbidden, path, node,
-			"YAML merge keys are not allowed in v8 configuration", "write every merged key explicitly")
+			"YAML merge keys are not allowed in config.yaml", "write every merged key explicitly")
 	}
 	if !v8YAMLTagAllowed(node) {
 		return v8Error(w.source, V8YAMLErrorCustomTagForbidden, path, node,
-			"custom or unsupported YAML tags are not allowed in v8 configuration",
+			"custom or unsupported YAML tags are not allowed in config.yaml",
 			"use ordinary mappings, sequences, and scalar values")
 	}
 
@@ -220,7 +220,7 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 			key, value := node.Content[index], node.Content[index+1]
 			if v8YAMLIsMerge(key) {
 				return v8Error(w.source, V8YAMLErrorMergeKeyForbidden, path, key,
-					"YAML merge keys are not allowed in v8 configuration", "write every merged key explicitly")
+					"YAML merge keys are not allowed in config.yaml", "write every merged key explicitly")
 			}
 			// Report aliases/custom tags with their specific code before the
 			// more general string-key diagnostic.
@@ -280,7 +280,7 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	value := v8YAMLMapValue(root, "config_version")
 	if value == nil {
 		return v8Error(source, V8YAMLErrorVersionRequired, "$.config_version", root,
-			"config_version is required by the v8 configuration entrypoint",
+			"config_version is required in config.yaml",
 			"run `defenseclaw migrate` to create a current source")
 	}
 	if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
@@ -401,7 +401,7 @@ func v9RemovedKeyError(source, path string, node *yaml.Node, target string) erro
 
 func v9RemovedKeyAction(source, path string, node *yaml.Node, action string) error {
 	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
-		"a v8 configuration key is not accepted in config_version 9", action)
+		"a retired configuration key is not accepted in config_version 9", action)
 }
 
 func projectV8YAML(source string, node *yaml.Node, path string) (any, error) {

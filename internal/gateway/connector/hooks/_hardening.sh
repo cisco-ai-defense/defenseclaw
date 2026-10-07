@@ -155,6 +155,11 @@ defenseclaw_harden_env() {
   export HOME="$DEFENSECLAW_HOOK_HOME"
   trap '_defenseclaw_hook_cleanup' EXIT
 
+  # A managed hook's socket transport names the session-facts binary after
+  # this point. An inherited one would let the agent pick a binary for the
+  # hook to run, and would make a Secure Client hook send session facts.
+  unset DEFENSECLAW_SESSION_FACTS_BIN
+
   export GIT_CONFIG_NOSYSTEM=1
   export GIT_CONFIG_GLOBAL=/dev/null
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
@@ -1393,14 +1398,22 @@ defenseclaw_session_facts_value() {
 # variables it saw (env_key); a fresh record for the same variables is used
 # as it is, so the binary runs at most once per five minutes per session. It
 # runs only when a credential cache can exist (KRB5CCNAME or /etc/krb5.conf;
-# always on macOS, whose default API: cache needs neither), never for a
-# managed hook (the native hook reads the cache itself), and its answer is
-# used only when it matches the header charset.
+# always on macOS, whose default API: cache needs neither), and its answer is
+# used only when it matches the header charset. A standalone managed hook
+# runs the administrator-owned hook binary its rendered socket transport names
+# (DEFENSECLAW_SESSION_FACTS_BIN) instead, since a managed user has no
+# per-user gateway binary; a managed hook that names none (Secure Client)
+# sends the SSH and logind variables alone.
 defenseclaw_session_facts_full() {
+  local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin="${DEFENSECLAW_SESSION_FACTS_BIN:-}"
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) return 0 ;;
+    1|true|TRUE|yes|YES) [ -n "$bin" ] || return 0 ;;
   esac
-  local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin=""
+  case "$bin" in
+    '') ;;
+    /*) { [ -f "$bin" ] && [ -x "$bin" ]; } || return 0 ;;
+    *) return 0 ;;
+  esac
   case "$home" in
     /*) ;;
     *) return 0 ;;
@@ -1426,7 +1439,7 @@ defenseclaw_session_facts_full() {
     darwin*) ;;
     *) [ -n "${KRB5CCNAME:-}" ] || [ -r /etc/krb5.conf ] || return 0 ;;
   esac
-  bin="$(defenseclaw_gateway_binary "${DEFENSECLAW_HOME:-${home}/.defenseclaw}" "$home")" || return 0
+  [ -n "$bin" ] || bin="$(defenseclaw_gateway_binary "${DEFENSECLAW_HOME:-${home}/.defenseclaw}" "$home")" || return 0
   # The Go runtime cannot start under the hook's address-space limit.
   out="$(
     ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true

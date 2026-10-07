@@ -874,7 +874,16 @@ observability:
 """
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8(wrong_kind)
-    assert captured.value.keyword == "oneOf"
+    # GAP-0186: the problem inside the chosen shape, not every shape's key list.
+    assert captured.value.keyword == "additionalProperties"
+    assert captured.value.path.endswith("destinations[0].logger_name")
+
+    unknown_kind = wrong_kind.replace("http_jsonl", "carrier_pigeon")
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(unknown_kind)
+    assert captured.value.path.endswith("destinations[0].kind")
+    assert captured.value.corrective_action == "use one of jsonl, console, prometheus, splunk_hec, http_jsonl, otlp"
+    assert len(str(captured.value)) < 200
 
 
 def test_compatibility_adapter_fields_enforce_utf8_byte_bounds() -> None:

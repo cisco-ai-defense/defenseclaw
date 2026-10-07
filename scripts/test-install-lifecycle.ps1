@@ -599,6 +599,20 @@ public static class DrillGateway {
     public static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "--version") { System.Console.WriteLine("defenseclaw-gateway version $Target"); return 0; }
         if (args.Length > 0 && args[0] == "start") { return int.Parse(System.Environment.GetEnvironmentVariable("DC_DRILL_START_EXIT") ?? "1"); }
+        // The staged config check (config-v8) asks the staged gateway; answer it with the working one.
+        string real = System.Environment.GetEnvironmentVariable("DC_DRILL_REAL_GATEWAY");
+        if (args.Length > 0 && args[0] == "config-v8" && !string.IsNullOrEmpty(real)) {
+            var quoted = new System.Collections.Generic.List<string>();
+            foreach (string a in args) { quoted.Add("\"" + a.Replace("\"", "\\\"") + "\""); }
+            var info = new System.Diagnostics.ProcessStartInfo(real, string.Join(" ", quoted.ToArray()));
+            info.UseShellExecute = false;
+            info.RedirectStandardOutput = true;
+            using (var p = System.Diagnostics.Process.Start(info)) {
+                System.Console.Out.Write(p.StandardOutput.ReadToEnd());
+                p.WaitForExit();
+                return p.ExitCode;
+            }
+        }
         return 0;
     }
 }
@@ -612,6 +626,7 @@ public static class DrillGateway {
         Check ($built -eq 0) "could not build the drill gateway"
     }
 
+    $env:DC_DRILL_REAL_GATEWAY = $gateway
     Write-Log "an install whose gateway does not start is undone"
     Check ((Install-Candidate $drill) -eq 1) "an install whose gateway does not start must exit 1"
     Check ((Get-Sha256 $gateway) -eq $goodGateway) "the working gateway was not put back"
@@ -627,6 +642,7 @@ public static class DrillGateway {
     try { Check ((Install-Candidate $drill) -eq 3) "an install whose gateway start exits 3 must exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
     Check ((Get-Sha256 $gateway) -ne $goodGateway) "exit 3 must keep the new version"
     Assert-DataKept
+    Remove-Item Env:DC_DRILL_REAL_GATEWAY -ErrorAction SilentlyContinue
 }
 
 # HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate stops install,
