@@ -331,6 +331,19 @@ function Write-WizardTrace([string]$Event, [System.Collections.IDictionary]$Fiel
     )
 }
 
+# Setup creates, renames and deletes these paths while the wizard observer samples
+# them. A file Setup has just deleted can still be open elsewhere, and Windows then
+# reports access denied for it, so any probe error counts as "not there".
+function Test-ObservedPath([string]$Path, [string]$PathType = 'Any') {
+    # Assign first: Windows PowerShell can emit a result before it raises.
+    try {
+        $found = Test-Path -LiteralPath $Path -PathType $PathType -ErrorAction Stop
+        return [bool]$found
+    } catch {
+        return $false
+    }
+}
+
 function Get-WizardObservation(
     [Diagnostics.Process]$WizardProcess,
     [IntPtr]$PrimaryControl,
@@ -346,28 +359,32 @@ function Get-WizardObservation(
         # HasExited below remains the authoritative process-state check.
     }
     $maintenanceBytes = 0
-    if (Test-Path -LiteralPath $observedMaintenancePath -PathType Leaf) {
-        $maintenanceBytes = (Get-Item -LiteralPath $observedMaintenancePath -Force).Length
+    if (Test-ObservedPath $observedMaintenancePath Leaf) {
+        try {
+            $maintenanceBytes = (Get-Item -LiteralPath $observedMaintenancePath -Force -ErrorAction Stop).Length
+        } catch {
+            # Setup can replace its maintenance copy between the probe and the read.
+        }
     }
     $payloadRoot = $null
-    if (Test-Path -LiteralPath $observedInstallerTempRoot -PathType Container) {
+    if (Test-ObservedPath $observedInstallerTempRoot Container) {
         $payloadRoot = Get-ChildItem -LiteralPath $observedInstallerTempRoot -Force -Directory `
             -Filter '.DefenseClawSetup.*' -ErrorAction SilentlyContinue | Select-Object -First 1
     }
     $stagingRoot = $null
-    if (Test-Path -LiteralPath $observedInstallParent -PathType Container) {
+    if (Test-ObservedPath $observedInstallParent Container) {
         $stagingRoot = Get-ChildItem -LiteralPath $observedInstallParent -Force -Directory `
             -Filter 'DefenseClaw.staging.*' -ErrorAction SilentlyContinue | Select-Object -First 1
     }
     $payloadReady = $null -ne $payloadRoot -and
-        (Test-Path -LiteralPath (Join-Path $payloadRoot.FullName 'payload\manifest.json') -PathType Leaf)
+        (Test-ObservedPath (Join-Path $payloadRoot.FullName 'payload\manifest.json') Leaf)
     $stagingPresent = $null -ne $stagingRoot
     $stagedPython = $stagingPresent -and
-        (Test-Path -LiteralPath (Join-Path $stagingRoot.FullName 'runtime\python\python.exe') -PathType Leaf)
+        (Test-ObservedPath (Join-Path $stagingRoot.FullName 'runtime\python\python.exe') Leaf)
     $stagedGateway = $stagingPresent -and
-        (Test-Path -LiteralPath (Join-Path $stagingRoot.FullName 'bin\defenseclaw-gateway.exe') -PathType Leaf)
+        (Test-ObservedPath (Join-Path $stagingRoot.FullName 'bin\defenseclaw-gateway.exe') Leaf)
     $stagedState = $stagingPresent -and
-        (Test-Path -LiteralPath (Join-Path $stagingRoot.FullName 'installer\install-state.json') -PathType Leaf)
+        (Test-ObservedPath (Join-Path $stagingRoot.FullName 'installer\install-state.json') Leaf)
     return [ordered]@{
         process_id       = $WizardProcess.Id
         process_exited   = $WizardProcess.HasExited
@@ -375,19 +392,19 @@ function Get-WizardObservation(
         working_set      = $workingSetBytes
         primary_text     = Get-BoundedWindowText $PrimaryControl
         heading_text     = Get-BoundedWindowText $HeadingControl
-        install_root     = Test-Path -LiteralPath $observedInstallRoot -PathType Container
-        install_state    = Test-Path -LiteralPath $observedInstallState -PathType Leaf
-        maintenance_copy = Test-Path -LiteralPath $observedMaintenancePath -PathType Leaf
+        install_root     = Test-ObservedPath $observedInstallRoot Container
+        install_state    = Test-ObservedPath $observedInstallState Leaf
+        maintenance_copy = Test-ObservedPath $observedMaintenancePath Leaf
         maintenance_size = $maintenanceBytes
         payload_ready     = $payloadReady
         staging_present   = $stagingPresent
         staged_python     = $stagedPython
         staged_gateway    = $stagedGateway
         staged_state      = $stagedState
-        installed_app    = Test-Path -LiteralPath $observedARPKey
-        config_present   = Test-Path -LiteralPath $observedConfigPath -PathType Leaf
-        gateway_pid      = Test-Path -LiteralPath $observedGatewayPID -PathType Leaf
-        watchdog_pid     = Test-Path -LiteralPath $observedWatchdogPID -PathType Leaf
+        installed_app    = Test-ObservedPath $observedARPKey
+        config_present   = Test-ObservedPath $observedConfigPath Leaf
+        gateway_pid      = Test-ObservedPath $observedGatewayPID Leaf
+        watchdog_pid     = Test-ObservedPath $observedWatchdogPID Leaf
     }
 }
 
