@@ -87,8 +87,9 @@ const (
 // tree is off has destinations without lineage.
 type ProcessLookup interface {
 	Lineage(sandboxName string, pid int) []ProcessRef
-	// PIDOf is the pid of the one process of the sandbox whose executable
-	// is exe and that ran at at; 0 for none or several.
+	// PIDOf is the pid of the one process of the sandbox that runs exe and
+	// started shortly before at, when the program was seen connecting; 0
+	// for none or several.
 	PIDOf(sandboxName, exe string, at time.Time) int
 }
 
@@ -158,8 +159,12 @@ type destRow struct {
 	Category string   `json:"category,omitempty"`
 	Refusal  string   `json:"refusal,omitempty"`
 	Binaries []string `json:"binaries,omitempty"`
-	PID      int      `json:"pid,omitempty"`
-	Proxy    counts   `json:"proxy,omitzero"`
+	// ActorAt is when the last of Binaries was last seen connecting: the
+	// row's lineage is that of the process of it that started shortly
+	// before (PIDOf, GAP-0174).
+	ActorAt time.Time `json:"actor_at,omitzero"`
+	PID     int       `json:"pid,omitempty"`
+	Proxy   counts    `json:"proxy,omitzero"`
 
 	live counts
 	// proxyAt are the proxy's requests to the host that no program is
@@ -393,16 +398,16 @@ func (r *destRow) note(s destinationSighting) {
 			}
 		}
 	}
-	r.addActor(s.binary, s.pid, s.denied)
+	r.addActor(s.binary, s.pid, s.denied, s.at)
 }
 
 // addActor records the program (and its pid, 0 when unknown) that reached
-// the row's host, or was refused it (denied). The last binary is the one a
-// view shows for the row: the latest whose traffic got through, once one
-// did. A refusal does not move a binary up, and one only ever refused a
+// the row's host at `at`, or was refused it (denied). The last binary is the
+// one a view shows for the row: the latest whose traffic got through, once
+// one did. A refusal does not move a binary up, and one only ever refused a
 // host the sandbox reached goes first (the first to go when the list is
 // full).
-func (r *destRow) addActor(binary string, pid int, denied bool) {
+func (r *destRow) addActor(binary string, pid int, denied bool, at time.Time) {
 	if binary != "" {
 		bin := truncate(binary, maxDestinationText)
 		switch listed := slices.Contains(r.Binaries, bin); {
@@ -415,6 +420,9 @@ func (r *destRow) addActor(binary string, pid int, denied bool) {
 		}
 		if len(r.Binaries) > maxDestinationBins {
 			r.Binaries = r.Binaries[len(r.Binaries)-maxDestinationBins:]
+		}
+		if r.Binaries[len(r.Binaries)-1] == bin {
+			r.ActorAt = at
 		}
 	}
 	if pid > 0 {
@@ -483,7 +491,7 @@ func (r *destRow) attributeProxied(opens []proxyOpen, now time.Time) bool {
 			continue
 		}
 		if bin, pid, ok := proxyActor(opens, q.at); ok {
-			r.addActor(bin, pid, q.denied)
+			r.addActor(bin, pid, q.denied, q.at)
 			named = true
 		}
 	}
@@ -766,6 +774,13 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 	if t == nil && len(live) > 0 {
 		t = m.tableLocked(info.name)
 	}
+	// actors are each row's program and when it was seen connecting, in
+	// out.Destinations' order, for its lineage.
+	type actor struct {
+		binary string
+		at     time.Time
+	}
+	var actors []actor
 	if t != nil {
 		m.mergeLiveLocked(t, live, info.harness)
 		for _, r := range t.rows {
@@ -773,6 +788,7 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 				t.dirty = true
 			}
 			out.Destinations = append(out.Destinations, r.view(info))
+			actors = append(actors, actor{r.lastBinary(), r.ActorAt})
 		}
 		for _, u := range t.models {
 			out.Models = append(out.Models, *u)
@@ -780,24 +796,24 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 		out.Dropped = t.dropped
 	}
 	m.destMu.Unlock()
+	for i := range out.Destinations {
+		d := &out.Destinations[i]
+		pid := d.PID
+		if pid <= 0 && m.procs != nil && actors[i].binary != "" {
+			// OpenShell names no pid for a connection (its NET records
+			// say 0 on both drivers): the program the row names finds its
+			// process in the tree when exactly one copy of it started
+			// shortly before it was seen connecting (GAP-0139, GAP-0174).
+			pid = m.procs.PIDOf(info.name, actors[i].binary, actors[i].at)
+		}
+		d.Lineage = m.lineage(info.name, pid)
+	}
 	slices.SortFunc(out.Destinations, func(a, b sandboxapi.DestinationRow) int {
 		return cmp.Or(cmp.Compare(destinationRank(a.Kind), destinationRank(b.Kind)), b.LastSeen.Compare(a.LastSeen), cmp.Compare(a.Host, b.Host))
 	})
 	slices.SortFunc(out.Models, func(a, b sandboxapi.ModelUse) int {
 		return cmp.Or(cmp.Compare(b.Calls, a.Calls), cmp.Compare(a.Provider, b.Provider), cmp.Compare(a.Model, b.Model))
 	})
-	for i := range out.Destinations {
-		d := &out.Destinations[i]
-		pid := d.PID
-		if pid <= 0 && m.procs != nil && len(d.Binaries) > 0 {
-			// OpenShell names no pid for a connection (its NET records
-			// say 0 on both drivers): the program the row names, at the
-			// time it was last seen, finds its process in the tree, when
-			// exactly one copy of it ran then (GAP-0139).
-			pid = m.procs.PIDOf(info.name, d.Binaries[len(d.Binaries)-1], d.LastSeen)
-		}
-		d.Lineage = m.lineage(info.name, pid)
-	}
 	return out, nil
 }
 

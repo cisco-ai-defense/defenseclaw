@@ -987,9 +987,12 @@ shows that process and its parents instead (`curl ← bash ← claude`), and
 `--output json` adds them (`lineage`). OpenShell names no process id for a
 connection (on Linux and on the Mac), so the row finds the binary's process
 in the tree by its path (or its name: the sandbox seldom shows a process's
-executable) and the time the host was last seen: a program that
-ran for less than one sample (5 seconds, 15 on a slow Mac) or in two copies
-at once keeps only the binary. A second table lists the
+executable): the one copy of it that started in the 5 seconds before the
+connection. A program that ran for less than one sample (5 seconds, 15 on a
+slow Mac), that ran in two copies then, or that connected long after it
+started (a package manager's later downloads) keeps only the binary: a
+program too short for the tree cannot be told from an older copy that is
+still running. A second table lists the
 models OpenShell's inference route reported calls to. The view survives
 daemon restarts and stops, keeps at most 512 hosts (the oldest that are not
 AI destinations make room; when every row is one, a provider the catalog

@@ -243,8 +243,14 @@ func treeEnv(t *testing.T, name string, sample *atomic.Pointer[string]) *harness
 	return e
 }
 
+// psAnswer is a ps answer of a sandbox that booted two seconds ago, so its
+// processes started just before now.
 func psAnswer(lines ...string) *string {
-	s := string(answerOf(append(append([]string{"T 100 1700000000"}, lines...), collectEnd)...))
+	return psAnswerBoot(time.Now().Add(-2*time.Second), lines...)
+}
+
+func psAnswerBoot(boot time.Time, lines ...string) *string {
+	s := string(answerOf(append(append([]string{fmt.Sprintf("T 100 %d", boot.Unix())}, lines...), collectEnd)...))
 	return &s
 }
 
@@ -294,6 +300,32 @@ func TestDestinationLineageWithoutExe(t *testing.T) {
 	if err != nil || len(d.Destinations) != 1 || len(d.Destinations[0].Lineage) != 4 || d.Destinations[0].Lineage[0].PID != 526 ||
 		d.Destinations[0].Lineage[2].Comm != "claude" {
 		t.Fatalf("destinations = %+v, %v", d.Destinations, err)
+	}
+}
+
+// TestDestinationLineageNeedsARecentStart (GAP-0174): a program too short for
+// a sample (a quick curl, a `sandbox exec`) is not in the tree, so a copy of
+// it that started long before and still runs (a slow download) is not
+// credited with its connection; the copy that started just before one is.
+func TestDestinationLineageNeedsARecentStart(t *testing.T) {
+	var sample atomic.Pointer[string]
+	now := time.Now()
+	// curl 526 started a minute ago; curl 530 starts in 29 seconds.
+	sample.Store(psAnswerBoot(now.Add(-60*time.Second), "P 1 0 1000 10", "Pc 1 init", "P 124 1 1000 20", "Pc 124 claude",
+		"P 521 124 1000 30", "Pc 521 bash", "P 526 521 1000 100", "Pc 526 curl", "Pa 526 curl",
+		"P 530 521 1000 8900", "Pc 530 curl", "Pa 530 curl"))
+	e := treeEnv(t, "slowbox", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("slowbox")); !ok {
+		t.Fatal("no sample")
+	}
+	e.ocsf("slowbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> example.net:443/tcp [policy:allow_example engine:opa]", now)
+	e.ocsf("slowbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> example.org:443/tcp [policy:allow_example engine:opa]", now.Add(30*time.Second))
+	rows := destinationKinds(t, e, "slowbox")
+	if l := rows["example.net"].Lineage; len(l) != 0 {
+		t.Fatalf("example.net lineage %+v, want none: the only curl then started a minute before", l)
+	}
+	if l := rows["example.org"].Lineage; len(l) != 4 || l[0].PID != 530 || l[1].Comm != "bash" {
+		t.Fatalf("example.org lineage %+v, want curl 530's", l)
 	}
 }
 
