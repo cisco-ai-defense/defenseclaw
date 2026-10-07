@@ -75,6 +75,13 @@ func acpPeerConnContext(ctx context.Context, conn net.Conn) context.Context {
 	return context.WithValue(ctx, acpConnPeerKey{}, &acpConnPeer{local: local, remote: remote})
 }
 
+// The refusal reasons of a managed ACP request whose caller is another
+// account than its credential's, or could not be told.
+const (
+	acpCallerAccountMismatchReason   = "acp_caller_account_mismatch"
+	acpCallerAccountUnverifiedReason = "acp_caller_account_unverified"
+)
+
 // acpCallerAccountChecked reports whether this gateway checks the OS account
 // of an ACP caller: a standalone managed gateway on Linux or macOS, whose
 // kernel names the owner of a loopback TCP socket. Windows tells a service
@@ -103,15 +110,15 @@ func (a *APIServer) acpCallerAccountRefusal(r *http.Request) string {
 	}
 	want, err := strconv.Atoi(value)
 	if err != nil {
-		return "acp_caller_account_unverified"
+		return acpCallerAccountUnverifiedReason
 	}
 	got, err := acpLoopbackPeerUID(r)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar-api] ACP caller account unavailable: %v\n", err)
-		return "acp_caller_account_unverified"
+		return acpCallerAccountUnverifiedReason
 	}
 	if got != want {
-		return "acp_caller_account_mismatch"
+		return acpCallerAccountMismatchReason
 	}
 	return ""
 }
