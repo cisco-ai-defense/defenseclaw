@@ -142,3 +142,19 @@ def test_alert_at_editor_explains_effective_block_floor() -> None:
     field = next(field for field in _guardrail_section(None).fields if field.key == "guardrail.alert_at")
     assert "blocking severities always alert" in field.hint
     assert "Block At" in field.hint
+
+
+
+def test_80_column_tab_strip_matches_documented_key_labels() -> None:
+    from pathlib import Path
+
+    from defenseclaw.tui.app import PANELS
+    from defenseclaw.tui.widgets.tab_fit import fit_tab_labels, strip_width
+
+    labels = fit_tab_labels(PANELS, "overview", {}, 66)
+    assert labels["overview"] == "1 Overview"
+    assert labels["alerts"] == "2"
+    assert labels["policies"] == "P"
+    assert strip_width(tuple(labels.values())) <= 66
+    docs = (Path(__file__).parents[3] / "docs-site/content/docs/tui.mdx").read_text()
+    assert "At 80 columns, the tab strip keeps every panel's key" in docs
