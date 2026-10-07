@@ -801,6 +801,14 @@ Its **IDE plugins** section shows the plugin count by IDE, AI against other
 plugins, disabled plugins and a per-user table. The `$user` box narrows the
 Loki panels to one user by `user.id`, account name or principal.
 
+Its **Sandbox signals** section lists what AI discovery found
+[inside OpenShell sandboxes](#inside-openshell-sandboxes), one row per
+sandbox and component, from the `ai_component.*` records that carry
+`defenseclaw.sandbox.name`. The `$sandbox` box narrows that table and the
+per-signal log to one sandbox; All keeps the host's own records in the log.
+The metric panels count the host's and the sandboxes' signals together:
+sandbox names are never metric labels.
+
 It cross-links from the overview, runtime, and agent-identity dashboards so you can drill from "block rate spiked" → "which agent" → "when was this agent first discovered."
 
 ## Privacy and trust model

@@ -1005,6 +1005,15 @@ def test_low_risk_dashboard_labels_match_their_queries() -> None:
     assert vendors["transformations"][0]["options"]["renameByName"]["Value"] == "signals/$__range"
 
 
+def test_ai_discovery_dashboard_shows_sandbox_signals() -> None:
+    # GAP-0109, GAP-0114: what discovery found inside a sandbox is told apart
+    # from the host's signals, by the sandbox name the records carry.
+    board = _dashboard("defenseclaw-ai-discovery.json")
+    assert any(variable["name"] == "sandbox" for variable in board["templating"]["list"])
+    expr = _panel(board, "AI components inside sandboxes (records in range)")["targets"][0]["expr"]
+    assert 'defenseclaw_sandbox_name=~"$sandbox"' in expr and 'defenseclaw_sandbox_name!=""' in expr
+
+
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
     audit = _load_audit_module()
 
