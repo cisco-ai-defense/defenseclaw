@@ -334,13 +334,8 @@ func (m *Manager) finalSweep(ctx context.Context, b *box) {
 
 // guardOptions are the guard options of rec's session.
 func (m *Manager) guardOptions(ctx context.Context, b *box, rec record) nestguard.Options {
-	baseline := rec.Guard.Baseline
-	if baseline.At.IsZero() {
-		// A baseline recorded before it carried its own time.
-		baseline.At = rec.Guard.TakenAt
-	}
 	return nestguard.Options{
-		Root: rec.Project, Baseline: baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
+		Root: rec.Project, Baseline: rec.Guard.Baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
 		OnDetect: func(d nestguard.Detection) { m.nestedRepo(ctx, b, d) },
 		OnMerge:  func(d nestguard.Detection) { m.nestedRepoMerged(b, d) },
 		Logf: func(format string, args ...any) {
@@ -355,13 +350,10 @@ func (m *Manager) guardLoop(ctx context.Context, b *box) {
 		rec := b.rec
 		m.mu.Unlock()
 		if rec.Guard == nil {
-			// A record from before the guard existed: the best baseline
-			// left is now.
-			m.takeGuardBaseline(ctx, &rec)
-			m.mu.Lock()
-			b.rec.Guard = rec.Guard
-			m.mu.Unlock()
-			_ = m.saveRecord(b)
+			// Create and start take the baseline before the workload runs;
+			// one taken now could take in what the workload planted.
+			m.logf("sandbox %s: nested-repository guard: the session has no baseline, so the guard does not run", rec.Name)
+			return
 		}
 		err := m.opts.Guard(ctx, m.guardOptions(ctx, b, rec))
 		if ctx.Err() != nil {

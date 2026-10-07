@@ -116,6 +116,12 @@ func (f *fakeSandboxController) Destinations(_ context.Context, name string) (*s
 	}})
 }
 
+func (f *fakeSandboxController) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
+	return answer(f, "policy test "+req.Sandbox, &sandboxapi.PolicyTestResult{Sandbox: req.Sandbox, Decisions: []sandboxapi.PolicyDecision{
+		{PolicyCheck: req.Checks[0], Rule: "block", Source: "pack balanced"},
+	}})
+}
+
 func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, r sandboxapi.WorkspaceReport) error {
 	_, err := answer(f, "workspace "+name+" "+r.Operation, struct{}{})
 	return err
@@ -443,6 +449,10 @@ func TestSandboxAPIClientRoundTrip(t *testing.T) {
 	}
 	if _, err := c.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: "box"}); err != nil {
 		t.Fatal(err)
+	}
+	if res, err := c.PolicyTest(ctx, sandboxapi.PolicyTestRequest{Sandbox: "box", Checks: []sandboxapi.PolicyCheck{{Host: "a.example", Port: 443}}}); err != nil ||
+		res.Sandbox != "box" || len(res.Decisions) != 1 || res.Decisions[0].Host != "a.example" || res.Decisions[0].Source != "pack balanced" {
+		t.Fatalf("policy test = %+v, %v", res, err)
 	}
 	if st, err := c.Status(ctx); err != nil || !st.Available {
 		t.Fatalf("status = %+v, %v", st, err)

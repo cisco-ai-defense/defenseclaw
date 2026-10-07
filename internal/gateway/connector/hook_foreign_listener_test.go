@@ -80,7 +80,7 @@ func TestHostHooksCheckTheListenerBeforeSending(t *testing.T) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") || name == "test_large_argv.sh" {
+		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") {
 			continue
 		}
 		body, err := hookFS.ReadFile("hooks/" + name)
@@ -89,7 +89,7 @@ func TestHostHooksCheckTheListenerBeforeSending(t *testing.T) {
 		}
 		text := string(body)
 		check := strings.Index(text, `defenseclaw_api_listener_foreign "$API_ADDR"`)
-		send := strings.Index(text, `curl -s --noproxy '*'`)
+		send := strings.Index(text, `defenseclaw_gateway_post "http://${API_ADDR}`)
 		if check < 0 || send < 0 || check > send {
 			t.Errorf("%s does not check the API listener before its gateway request", name)
 		}

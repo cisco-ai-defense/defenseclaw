@@ -174,7 +174,7 @@ groups:
             "Per-connector verdict summary (1h)".
 
       - alert: DefenseClawSandboxEgressBlocksSustained
-        expr: sum by (source) (rate(defenseclaw_egress_events_total{decision="block"}[5m])) * 60 > 30
+        expr: sum by (source) (rate(defenseclaw_egress_events_total{decision="block", source=~"openshell|dc-egress-proxy"}[5m])) * 60 > 30
         for: 10m
         labels:
           severity: warning

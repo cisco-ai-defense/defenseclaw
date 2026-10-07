@@ -352,6 +352,15 @@ func (c *Client) Unblock(ctx context.Context, req UnblockRequest) (*UnblockRespo
 	return &out, nil
 }
 
+// PolicyTest judges destinations with a sandbox's egress policy.
+func (c *Client) PolicyTest(ctx context.Context, req PolicyTestRequest) (*PolicyTestResult, error) {
+	var out PolicyTestResult
+	if err := c.do(ctx, http.MethodPost, PathPolicyTest, nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Explain resolves the sandbox posture with provenance.
 func (c *Client) Explain(ctx context.Context, req ExplainRequest) (*Explain, error) {
 	var out Explain

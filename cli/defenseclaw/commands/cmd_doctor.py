@@ -620,19 +620,24 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     return ""
 
 
+# defenseclaw_gateway_post: hooks rendered before it gave curl the gateway
+# bearer and the prompt or tool payload as command-line arguments, which every
+# local account can read (GAP-0027).
 _GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
     "codex": {
-        "codex-hook.sh": ("defenseclaw_response_failure_reason",),
+        "codex-hook.sh": ("defenseclaw_response_failure_reason", "defenseclaw_gateway_post"),
         "_hardening.sh": (
             "defenseclaw_response_failure_reason",
             "possible token drift",
+            "defenseclaw_gateway_post",
         ),
     },
     "claudecode": {
-        "claude-code-hook.sh": ("defenseclaw_response_failure_reason",),
+        "claude-code-hook.sh": ("defenseclaw_response_failure_reason", "defenseclaw_gateway_post"),
         "_hardening.sh": (
             "defenseclaw_response_failure_reason",
             "possible token drift",
+            "defenseclaw_gateway_post",
         ),
     },
 }
@@ -14944,10 +14949,9 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
             continue
         state = raw_state.strip().lower()
         if subsystem == "sandbox" and state == "degraded":
-            # The legacy sandbox shim, or a sandbox listener or manager that
-            # failed: a gateway restart cannot be relied on to fix either,
-            # and neither may block repairs of real drift. The legacy check
-            # and `defenseclaw sandbox doctor` report them.
+            # A sandbox listener or manager that failed: a gateway restart
+            # cannot be relied on to fix it, and it may not block repairs of
+            # real drift. `defenseclaw sandbox doctor` reports it.
             continue
 
         if expected is True and state in inactive_states:

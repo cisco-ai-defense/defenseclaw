@@ -99,6 +99,10 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	repo, err := m.repoPolicy(project, req.RepoPolicyDigest)
+	if err != nil {
+		return nil, err
+	}
 	// What the sandbox is sent depends on the driver the gateway runs
 	// now, which a restart since the connection may have changed.
 	gw, err := m.driverGateway(ctx)
@@ -109,6 +113,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		Pack: req.Pack, Profile: req.Profile, Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo,
 		Unmask: req.Unmask, HostPorts: req.HostPorts, NoMCP: req.NoMCP, Learn: req.Learn,
 		CPU: req.CPU, Memory: req.Memory, Context: req.Context, ProcessTree: req.ProcessTree,
+		RepoPolicy: repo,
 	}
 	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
@@ -472,7 +477,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if ri := delivered.runImage; ri != nil {
 		rec.RunImage, rec.RunImageID = ri.Tag, ri.ImageID
 	}
-	if err := m.vmDiskRoom(ctx, gw.Driver, img, rec.RunImageID); err != nil {
+	if err := m.vmDiskRoom(ctx, gw.Driver, gw.Version, img, rec.RunImageID); err != nil {
 		return nil, err
 	}
 
@@ -594,13 +599,15 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 // vmDiskRoom refuses a create on a driver that prepares a disk from each
 // image it boots (the vm driver's ImageCache) when the image the sandbox
 // boots, id (its run image or alias; the overlay image img's own ID when
-// empty), has no disk prepared for img's workload identity yet and the
-// volume of the driver's image cache lacks the room for one
-// (openshell.VMDiskShortage): the preparation would fill the disk. The CLI
+// empty), has no disk prepared for img's workload identity by the
+// gateway's release yet (a disk of the release before an in-place upgrade
+// is not booted: image.VMDisk.PreparedBy) and the volume of the driver's
+// image cache lacks the room for one (openshell.VMDiskShortage): the
+// preparation would fill the disk. The CLI
 // refuses such a run before it stages a copy, and warns when the room is
 // short of the recommended; this covers every other client. Nothing is
 // refused when the space cannot be measured.
-func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.Record, id string) error {
+func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, release string, img image.Record, id string) error {
 	if d.ImageCache == "" || m.opts.VMDiskFree == nil {
 		return nil
 	}
@@ -612,7 +619,7 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.
 		return nil
 	}
 	for _, disk := range image.VMDisks(dir, id) {
-		if disk.UID == img.UID && disk.GID == img.GID {
+		if disk.UID == img.UID && disk.GID == img.GID && disk.PreparedBy(release) {
 			return nil
 		}
 	}
@@ -1140,6 +1147,29 @@ func (m *Manager) release(name string, b *box) {
 	}
 	m.mu.Unlock()
 	_ = m.removeRecord(b)
+}
+
+// repoPolicy reads a project's repository policy (packs.LoadRepoPolicy)
+// for a new sandbox. want is the digest the client resolved the run with
+// (sandboxapi.NoRepoPolicy when the project had none, "" when the client
+// does not say): a policy that changed since refuses the create, since the
+// client staged a copy with the one it read.
+func (m *Manager) repoPolicy(project, want string) (*packs.RepoPolicy, error) {
+	rp, err := packs.LoadRepoPolicy(project)
+	if err != nil {
+		m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodePackInvalid,
+			Message: "the repository policy " + packs.RepoPolicyPath + " of this project cannot be used", Detail: err.Error()}
+	}
+	got := sandboxapi.NoRepoPolicy
+	if rp != nil {
+		got = rp.Digest
+	}
+	if want != "" && want != got {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"the repository policy %s of this project changed while the run started; run it again", packs.RepoPolicyPath)
+	}
+	return rp, nil
 }
 
 func realProject(p string) (string, error) {

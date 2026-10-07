@@ -544,8 +544,13 @@
   {
     "path": "sandbox policy suggest",
     "use": "suggest",
-    "short": "Suggest an egress allowlist from the destinations sandboxes reached",
+    "short": "Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations",
     "flags": [
+      {
+        "name": "diff",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "json",
         "type": "bool",
@@ -556,6 +561,61 @@
         "shorthand": "o",
         "type": "string",
         "default": "text"
+      },
+      {
+        "name": "pack-out",
+        "type": "string"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "path": "sandbox policy test",
+    "use": "test",
+    "short": "Show what the egress policy decides for a destination, the rule and where it comes from",
+    "flags": [
+      {
+        "name": "binary",
+        "type": "string"
+      },
+      {
+        "name": "fixture",
+        "type": "string"
+      },
+      {
+        "name": "harness",
+        "type": "string"
+      },
+      {
+        "name": "host",
+        "type": "string"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "pack",
+        "type": "string"
+      },
+      {
+        "name": "port",
+        "type": "int",
+        "default": "0"
+      },
+      {
+        "name": "profile",
+        "type": "string"
       },
       {
         "name": "sandbox",

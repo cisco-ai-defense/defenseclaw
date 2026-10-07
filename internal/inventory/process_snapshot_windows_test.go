@@ -116,7 +116,7 @@ func TestNativeWindowsNamedAgentProcessRefresh(t *testing.T) {
 		IncludeShellHistory:     false,
 		IncludeEnvVarNames:      false,
 		IncludeNetworkDomains:   false,
-	}, windowsAgentCatalog(), nil, nil)
+	}, windowsAgentCatalog())
 	t.Cleanup(func() {
 		if err := svc.Close(); err != nil {
 			t.Errorf("close discovery service: %v", err)

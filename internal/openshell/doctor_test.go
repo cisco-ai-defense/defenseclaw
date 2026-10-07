@@ -270,8 +270,12 @@ func expectMode(t *testing.T, path string, mode os.FileMode) {
 	}
 }
 
+// TestDoctorHealthyHost: a host on the release setup installs passes every
+// check.
 func TestDoctorHealthyHost(t *testing.T) {
 	f := newDoctorFixture(t)
+	f.runner.On("/usr/bin/openshell --version", "openshell "+openshell.InstallerVersion+"\n", nil)
+	f.fake.SetRelease(openshell.InstallerVersion)
 	r := f.run()
 	var got []string
 	for _, c := range r.Checks {
@@ -294,9 +298,12 @@ func TestDoctorHealthyHost(t *testing.T) {
 		t.Fatalf("a Linux host asked a Docker VM for Landlock %d times", f.vmProbes)
 	}
 	expectCheck(t, r, openshell.CheckIDDisk, openshell.StatusPass, "40.0 GiB free under /data/docker")
-	if f.diskProbed != "/data/docker" || r.DockerVersion != "29.4.0" || r.CLIVersion != "0.1.1" || r.CLIPath != "/usr/bin/openshell" || r.GatewayVersion != "0.1.1" || r.Registration.Name != "openshell" ||
-		r.Service == nil || r.Service.Manager != "systemd" || !r.Service.Installed {
+	if f.diskProbed != "/data/docker" || r.DockerVersion != "29.4.0" || r.CLIVersion != openshell.InstallerVersion || r.CLIPath != "/usr/bin/openshell" ||
+		r.GatewayVersion != openshell.InstallerVersion || r.Registration.Name != "openshell" || r.Service == nil || r.Service.Manager != "systemd" || !r.Service.Installed {
 		t.Fatalf("facts = %+v (disk probed at %q)", r, f.diskProbed)
+	}
+	if r.OpenShellInstallNeeded() || r.OpenShellUpgradeAvailable() {
+		t.Fatalf("install needed %v, upgrade available %v on %s", r.OpenShellInstallNeeded(), r.OpenShellUpgradeAvailable(), openshell.InstallerVersion)
 	}
 	if _, err := json.Marshal(r); err != nil {
 		t.Fatalf("report does not marshal: %v", err)
@@ -307,6 +314,34 @@ func TestDoctorHealthyHost(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("report lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestDoctorOffersTheUpgrade: OpenShell 0.1.1 is supported and works, so
+// its CLI check only warns (the report stays OK), naming what
+// InstallerVersion fixes, with setup's in-place upgrade as the fix, which
+// says what the gateway restart needs on the configured driver.
+func TestDoctorOffersTheUpgrade(t *testing.T) {
+	f := newDoctorFixture(t) // OpenShell 0.1.1, CLI and gateway
+	r := f.run()
+	c := expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusWarn,
+		"0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug that can stall a sandbox's first connection")
+	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" || c.Fix.Automatic || c.Fix.Apply != nil ||
+		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this pulls its supervisor images from ghcr.io and restarts the gateway, "+
+			"which drops the connections of every sandbox on it)" {
+		t.Fatalf("openshell-cli fix = %+v", c.Fix)
+	}
+	if !r.OK() || !r.OpenShellUpgradeAvailable() || r.OpenShellInstallNeeded() {
+		t.Fatalf("OK %v, upgrade available %v, install needed %v\n%s", r.OK(), r.OpenShellUpgradeAvailable(), r.OpenShellInstallNeeded(), r)
+	}
+	expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
+
+	f = newDoctorFixture(t)
+	f.onMicroVMs()
+	c = expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusWarn, "0.1.1 at ")
+	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" ||
+		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this restarts the gateway; stop the running MicroVM sandboxes first with `defenseclaw sandbox stop NAME`)" {
+		t.Fatalf("openshell-cli fix on MicroVMs = %+v", c.Fix)
 	}
 }
 
@@ -576,7 +611,7 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "cli without a release", setup: cliVersion("openshell dev\n"), want: []checkWant{{"openshell-cli", fail, "--version"}}, then: installNeeded(true)},
 		// The install step refuses a newer CLI: it does not downgrade.
 		{name: "cli newer than supported", setup: cliVersion("openshell 0.2.0\n"), want: []checkWant{{"openshell-cli", fail, "not supported"}},
-			fix:  &fixWant{command: install, manual: true, text: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0, then install OpenShell 0.1.1"},
+			fix:  &fixWant{command: install, manual: true, text: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell 0.2.0, then install OpenShell " + openshell.InstallerVersion},
 			then: installNeeded(false)},
 		{name: "cli and gateway differ", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.1.2") },
 			want: []checkWant{{"gateway-version", warn, "gateway 0.1.2 but CLI 0.1.1"}}},
@@ -877,7 +912,12 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 		f, cli := release(t, "0.1.1")
 		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		r := f.run()
-		expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusPass, "0.1.1 at "+cli)
+		// Its upgrade is the user's: the install step does not replace it.
+		c := expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusWarn, "0.1.1 at "+cli)
+		if c.Fix == nil || c.Fix.Command != "" || !strings.HasPrefix(c.Fix.Summary, "upgrade OpenShell to "+openshell.InstallerVersion+" the way you installed it") ||
+			r.OpenShellUpgradeAvailable() {
+			t.Fatalf("openshell-cli fix = %+v, upgrade available %v", c.Fix, r.OpenShellUpgradeAvailable())
+		}
 		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), outside(start, cli))
 		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not answering"), outside(start, cli))
 		outcomes, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil })
@@ -1135,7 +1175,7 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			other := "the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell " + tc.gateway +
 				", not the OpenShell 0.1.1 of the CLI at /usr/bin/openshell. Stop that gateway (`systemctl --user stop openshell-gateway`) " +
-				"and remove that other OpenShell, then install OpenShell 0.1.1"
+				"and remove that other OpenShell, then install OpenShell " + openshell.InstallerVersion
 			f := newDoctorFixture(t)
 			f.fake.SetHealth(true, tc.gateway)
 			restarts := restartTo(f, restart, tc.gateway)
@@ -1231,7 +1271,7 @@ func TestDoctorOnAGatewayOfAnotherRelease(t *testing.T) {
 		f.fake.SetHealth(true, "0.0.40")
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1")
-		if c.Fix == nil || c.Fix.Summary != "install OpenShell 0.1.1" || c.Fix.Command != install || c.Fix.Apply != nil {
+		if c.Fix == nil || c.Fix.Summary != "install OpenShell "+openshell.InstallerVersion || c.Fix.Command != install || c.Fix.Apply != nil {
 			t.Fatalf("gateway fix = %+v", c.Fix)
 		}
 	})

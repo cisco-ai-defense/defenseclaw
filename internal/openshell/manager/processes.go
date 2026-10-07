@@ -200,19 +200,29 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 // another start time is a new process; a live process a complete sample
 // lacks has exited, unless it joined the tree after the sample was taken.
 // A sample cut short, without its end, or stopped at a process bound does
-// not show every process: it ends none.
+// not show every process: it ends none. Whatever the samples, the tree holds
+// at most procTreeMaxLive live processes: a new one past the bound is left
+// out (the tree says it is truncated) until others end.
 func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exited []*procNode) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sampledAt = now
 	complete := c.Ended && !c.ProcessesCapped && len(c.Processes) <= procTreeMaxLive
 	t.truncated = !complete
-	seen := map[int]bool{}
-	for _, p := range c.Processes {
-		if len(seen) >= procTreeMaxLive {
-			break
+	if complete {
+		// The processes a complete sample lacks end first, so they do not
+		// hold room the ones it shows need.
+		seen := make(map[int]bool, len(c.Processes))
+		for _, p := range c.Processes {
+			seen[p.PID] = true
 		}
-		seen[p.PID] = true
+		for pid, node := range t.live {
+			if !seen[pid] && node.FirstSeen.Before(sampledAt) {
+				exited = append(exited, t.exitLocked(node, now, nil))
+			}
+		}
+	}
+	for _, p := range c.Processes {
 		node := t.live[p.PID]
 		if node != nil && node.startTicks != 0 && node.startTicks != p.StartTicks {
 			exited = append(exited, t.exitLocked(node, now, nil))
@@ -220,6 +230,10 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		}
 		fresh := node == nil
 		if fresh {
+			if len(t.live) >= procTreeMaxLive {
+				t.truncated = true
+				continue
+			}
 			node = &procNode{PID: p.PID, FirstSeen: now, Source: audit.SandboxProcessSourceSample}
 			t.live[p.PID] = node
 		}
@@ -236,14 +250,6 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		}
 		if fresh {
 			started = append(started, node)
-		}
-	}
-	if !complete {
-		return started, exited
-	}
-	for pid, node := range t.live {
-		if !seen[pid] && node.FirstSeen.Before(sampledAt) {
-			exited = append(exited, t.exitLocked(node, now, nil))
 		}
 	}
 	return started, exited
@@ -469,26 +475,30 @@ func (m *Manager) endProcessTree(b *box) {
 // recordProcesses records the processes that started and exited, within the
 // tree's record rate; the log says once a minute how many it held back.
 func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxIdentity, t *procTree, started, exited []*procNode) {
-	emit := func(node *procNode, event string, at time.Time) {
+	emit := func(node *procNode, event string) {
+		// The record copies the process while it holds the tree: a sample,
+		// an OpenShell record or a kernel feed frame may update the process
+		// meanwhile.
 		t.mu.Lock()
-		lineage := t.ancestryLocked(t.parentLocked(node))
-		t.mu.Unlock()
-		if !t.gate.take(processGateKey, at) {
-			return
-		}
 		ev := audit.SandboxProcessEvent{
 			Sandbox: id, Event: event, Source: node.Source, PID: node.PID, ParentPID: node.PPID,
 			HostPID: node.HostPID, ExecID: node.ExecID,
 			Executable: node.Exe, Name: node.Comm, CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
-			ExitCode: node.ExitCode, Lineage: lineage, Timestamp: at,
+			Lineage: t.ancestryLocked(t.parentLocked(node)), Timestamp: node.FirstSeen,
 		}
-		m.tel.RecordSandboxProcess(ctx, ev)
+		if event == audit.SandboxProcessExit {
+			ev.ExitCode, ev.Timestamp = node.ExitCode, node.ExitedAt
+		}
+		t.mu.Unlock()
+		if t.gate.take(processGateKey, ev.Timestamp) {
+			m.tel.RecordSandboxProcess(ctx, ev)
+		}
 	}
 	for _, node := range started {
-		emit(node, audit.SandboxProcessStart, node.FirstSeen)
+		emit(node, audit.SandboxProcessStart)
 	}
 	for _, node := range exited {
-		emit(node, audit.SandboxProcessExit, node.ExitedAt)
+		emit(node, audit.SandboxProcessExit)
 	}
 	now := m.now()
 	t.mu.Lock()

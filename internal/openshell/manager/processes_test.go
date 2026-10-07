@@ -22,12 +22,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -125,6 +127,40 @@ func TestProcessTreeIsBounded(t *testing.T) {
 	_, exited := tree.merge(sampleOf("1 0 1 init"), now.Add(time.Second), now.Add(time.Second))
 	if len(exited) != procTreeMaxLive || len(tree.exited) != procTreeMaxExited {
 		t.Fatalf("exited %d kept %d, want the last %d kept", len(exited), len(tree.exited), procTreeMaxExited)
+	}
+}
+
+// The bound holds across samples that end nothing: the new processes of
+// partial samples join only while the tree has room, and a complete sample
+// ends the ones it lacks before it adds its own.
+func TestProcessTreeStaysBoundedAcrossPartialSamples(t *testing.T) {
+	tree := newProcTree()
+	now := time.Now()
+	for round := range 3 {
+		lines := []string{"T 100 1700000000"}
+		for i := range 3000 {
+			pid := 2 + round*3000 + i
+			lines = append(lines, fmt.Sprintf("P %d 1 1000 %d", pid, pid), fmt.Sprintf("Pc %d p%d", pid, pid))
+		}
+		// No end line: the sample may not show every process.
+		c, err := parseCollection(answerOf(lines...), false, newCollectScope(), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := now.Add(time.Duration(round) * time.Second)
+		started, exited := tree.merge(c, at, at)
+		if len(tree.live) > procTreeMaxLive || len(exited) != 0 || !tree.truncated {
+			t.Fatalf("round %d: live = %d started = %d exited = %d truncated = %v, want at most %d live",
+				round, len(tree.live), len(started), len(exited), tree.truncated, procTreeMaxLive)
+		}
+	}
+	if len(tree.live) != procTreeMaxLive {
+		t.Fatalf("live = %d, want the bound of %d", len(tree.live), procTreeMaxLive)
+	}
+	at := now.Add(time.Minute)
+	started, exited := tree.merge(sampleOf("1 0 1 init", "90000 1 5 claude"), at, at)
+	if len(started) != 2 || len(exited) != procTreeMaxLive || len(tree.live) != 2 || tree.truncated {
+		t.Fatalf("complete sample: started %d exited %d live %d truncated %v", len(started), len(exited), len(tree.live), tree.truncated)
 	}
 }
 
@@ -257,6 +293,60 @@ func TestDestinationsNameTheProcessTreesLineage(t *testing.T) {
 	if l := row.Lineage; row.PID != 77 || len(l) != 3 || l[0].PID != 77 || l[0].Comm != "curl" || l[0].Exe != "/usr/bin/curl" ||
 		l[1].PID != 42 || l[1].Comm != "bash" || l[2].PID != 1 {
 		t.Fatalf("row %+v, lineage %+v", row, row.Lineage)
+	}
+}
+
+// A process record copies its process while it holds the tree: a sample or
+// an OpenShell record may update or end the process at the same time (run
+// with -race). A start record carries no exit status.
+func TestProcessRecordsCopyTheirProcess(t *testing.T) {
+	var sample atomic.Pointer[string]
+	lines := []string{"P 1 0 0 10", "Pc 1 init"}
+	for i := range 20 {
+		pid := 5000 + i
+		lines = append(lines, fmt.Sprintf("P %d 1 1000 %d", pid, pid), fmt.Sprintf("Pc %d sampled", pid))
+	}
+	sample.Store(psAnswer(lines...))
+	e := treeEnv(t, "racebox", &sample)
+	b := e.boxOf("racebox")
+	// Launches of processes the samples show and of ones they do not.
+	var launches []ocsf.Record
+	for i := range 20 {
+		for _, pid := range []int{5000 + i, 6000 + i} {
+			launches = append(launches, *parseOCSF(t, fmt.Sprintf("PROC:LAUNCH [INFO] python3(%d) [cmd:python3 main.py]", pid)))
+		}
+	}
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 20 {
+			e.m.sampleProcesses(ctx, b)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for _, r := range launches {
+			e.m.ocsfEvent(ctx, b, r, time.Now())
+		}
+	}()
+	wg.Wait()
+	e.deleteBox("racebox", sandboxapi.DeleteRequest{})
+	var starts, exits int
+	for _, ev := range where(&e.tel.mu, &e.tel.processes, func(ev audit.SandboxProcessEvent) bool { return ev.Sandbox.Name == "racebox" }) {
+		switch ev.Event {
+		case audit.SandboxProcessStart:
+			starts++
+			if ev.ExitCode != nil {
+				t.Fatalf("start record with an exit status: %+v", ev)
+			}
+		case audit.SandboxProcessExit:
+			exits++
+		}
+	}
+	if starts == 0 || starts != exits {
+		t.Fatalf("records: %d starts, %d exits, want every start ended", starts, exits)
 	}
 }
 

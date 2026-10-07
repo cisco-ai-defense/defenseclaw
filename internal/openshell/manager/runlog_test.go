@@ -382,23 +382,33 @@ func TestATamperStopDoesNotReadTheRunLog(t *testing.T) {
 	e.m.mu.Unlock()
 	must(t, e.m.saveRunLog("tamperlog", keptRun{SandboxID: id, State: sandboxapi.RunExited, Exit: "0",
 		StartedAt: time.Unix(1780000000, 0).UTC(), KeptAt: time.Now()}, []byte("an earlier run\n")))
-	var reads atomic.Int32
+	// Every look at the run directory is held, as the workload could hold
+	// it, and counted: a stop that waited on one would have to count it.
+	var reads, probes atomic.Int32
 	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		if slices.Contains(call.Command, "defenseclaw-run-log") {
+		switch {
+		case slices.Contains(call.Command, "defenseclaw-run-log"):
 			reads.Add(1)
-			<-ctx.Done()
-			return openshelltest.ExecResponse{Err: ctx.Err()}
+		case slices.Contains(call.Command, "defenseclaw-run-probe"):
+			probes.Add(1)
+		default:
+			return runOnHost(ctx, call, going)
 		}
-		return runOnHost(ctx, call, going)
+		<-ctx.Done()
+		return openshelltest.ExecResponse{Err: ctx.Err()}
 	})
 	d := e.decider("tamperlog", "Bash")
-	began := time.Now()
 	e.m.ObserveHookDecision(d("PostToolUse", "toolu_1", "allow"))
 	if !stopped(t, e, "tamperlog") {
 		t.Fatal("the tampered sandbox did not stop")
 	}
-	if took := time.Since(began); reads.Load() != 0 || took > 10*time.Second {
-		t.Fatalf("the tamper stop read the run log %d times and took %s", reads.Load(), took)
+	if reads.Load() != 0 || probes.Load() != 0 {
+		t.Fatalf("the tamper stop read the run log %d times and looked at the run %d times", reads.Load(), probes.Load())
+	}
+	for _, call := range e.execCalls() {
+		if slices.Contains(call.Command, "defenseclaw-end-harness") && slices.Contains(call.Command, harness.RunDir) {
+			t.Fatalf("the tamper stop's harness end was given the run directory %s", harness.RunDir)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(going, "latest.exit")); !os.IsNotExist(err) {
 		t.Fatalf("the tamper stop wrote into the run directory: %v", err)

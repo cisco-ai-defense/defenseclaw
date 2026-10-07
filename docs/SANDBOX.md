@@ -902,8 +902,10 @@ that decides wins:
    administrator lifts either. The block message says "blocked by your organization's
    DefenseClaw policy".
 3. **The block list**: the pack's `egress.block` plus `openshell.egress.block`
-   (`operator_block`). It is checked before unblock decisions, so a host on
-   it is not one-click unblockable. Reaching it takes removing the entry.
+   and the project's repository policy's (`.defenseclaw/sandbox.yaml`)
+   entries (`operator_block`). It is checked before unblock decisions, so a
+   host on it is not one-click unblockable. Reaching it takes removing the
+   entry.
 4. **Unblock decisions**, for one sandbox or for every sandbox ("always",
    saved to `openshell.egress.unblocked`). They are ignored when
    `openshell.admin.allow_unblock` is `false`.
@@ -923,6 +925,18 @@ that decides wins:
 
 `Decision.Unblockable`, the 403 body's `unblockable` and `how_to_unblock`,
 blocked events and the feed's unblock action all follow steps 6 and 8.
+
+`sandbox policy test` (`packs.Effective.CheckEgress`) asks the same decider
+for a destination and names the setting behind the step that decided: for a
+sandbox the daemon answers with the sandbox's own decider and principal
+(`POST /api/v1/sandbox/policy/test`), so its unblocks count; for a pack the
+CLI resolves the policy itself, without the daemon.
+
+Policy resolution (`packs.Resolve`) layers the pack (a custom pack may
+`extends:` one parent, merged before anything else), the user's `openshell`
+keys, the run flags, the repository policy (`packs.RepoPolicy`, tighten-only:
+a loosening key is a fatal violation, one per key; the sandbox record keeps
+the copy the create read) and the administrator's clamps.
 
 `sandbox unblock` refuses with the reason that applies, checked in this
 order: a host on the administrator's lists or the block list (only the
@@ -1851,8 +1865,13 @@ compromised hook shows:
   to 24 hours) without a single hook request: one run of activity since the
   last hook (or the session's start) that no idle stretch of `silence_after`
   breaks (`noteActiveLocked`), so a harness that wakes up after a long idle
-  stretch, before its first hook, is no alarm. Commands the harness did not
-  start, such as the CLI's probe, a copy-mode upload or pull, or your own
+  stretch, before its first hook, is no alarm. Residual: the same reset lets
+  a harness with switched-off hooks that works in runs shorter than
+  `silence_after`, each after an idle stretch at least that long (for
+  example a tool call that sleeps), go unflagged, at the cost of being idle
+  more than half of the time; there is no cumulative-activity alarm. The
+  file and egress boundaries do not depend on hooks. Commands the harness
+  did not start, such as the CLI's probe, a copy-mode upload or pull, or your own
   `sandbox exec`, do not count, and neither do the egress proxy's own
   events, which cannot tell the harness's requests from theirs. For a
   user-tier harness (its hook registration is in the image HOME, the
@@ -2930,13 +2949,15 @@ These were not measured, so the design does not rely on a result for them:
 ### macOS and Docker Desktop
 
 Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
-29.1.5) and OpenShell 0.1.1 in September 2026.
+29.1.5) and OpenShell 0.1.1 in September 2026. OpenShell 0.1.2 changes
+nothing of the vm driver, but the names of its caches carry the release
+(see the prepared rootfs below).
 
 | Behaviour | Design consequence |
 | --- | --- |
 | Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver. `sandbox run` on a Mac whose gateway runs the Docker driver on Docker Desktop (one `docker info`, no probe) refuses before it builds an image or makes a sandbox, and names the switch on a line of its own; a run that fails the probe on another Docker VM names it too. |
 | OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
-| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune`, `image rm` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
+| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. The directory name carries the driver's release (`…-openshell-0.1.1-…-sha256-<image ID>`): after an in-place upgrade the driver prepares each image again and keeps the old release's disks. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note, counting only a disk of the gateway's release (`image.VMDisk.PreparedBy`), and so does the daemon's disk-room check at create; the doctor names the cache and its size, and `image prune`, `image rm` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. `image prune` also removes every prepared rootfs of another release than the gateway's (`image.StaleVMDisks`), which that gateway never boots. |
 | Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Without a fix interactive Copilot CLI would wait out its 30-second hook timeout on every hook on both drivers; its image preloads a `pidfd_open` fallback into the pinned CLI (see GitHub Copilot CLI under [harness facts](#harness-facts)). |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost. With only a loopback interface `nss-myhostname` does not answer `_gateway` and `_outbound`, so they go on to DNS; in a real MicroVM the `127.0.0.53` relay answers them, like every name but localhost and even nonexistent ones, with a synthetic `198.18.x.x` address (`_gateway` `198.18.0.3`, `_outbound` `198.18.0.4`, `nonexistent-zz9.invalid` `198.18.0.6`), and the egress proxy refuses a connection to one as an invalid destination. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
@@ -2947,9 +2968,30 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 
 - OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.1 tag only after checking it against a pinned SHA-256. Releases before
-  0.0.37 must be cleaned up with the old CLI first; later ones upgrade in
-  place.
+  v0.1.2 tag (`InstallerVersion`) only after checking it against a pinned
+  SHA-256 (the v0.1.1 and v0.1.2 scripts are byte-identical; the release
+  comes from `OPENSHELL_VERSION`). Releases before 0.0.37 must be cleaned up
+  with the old CLI first; later ones upgrade in place. A supported release
+  older than `InstallerVersion` (0.1.1) still works: the doctor's
+  `openshell-cli` check warns, and setup upgrades it in place only with
+  consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
+  question, whose default is no). NVIDIA's script restarts the gateway only
+  after its downloads and the package's (formula's) install, so
+  `PrepareUpgrade` runs right before the script, after consent. The docker
+  driver keeps its running sandboxes (their connections drop), and the
+  restarted gateway does not start without its release's supervisor and
+  sandbox runtime images (upstream `ensure_runtime_image` pulls one that is
+  not local), so Docker pulls them first (`PullRuntimeImages`; images
+  `[openshell.drivers.docker]` replaces are left alone) and a failed pull
+  refuses the upgrade (`ErrRuntimeImages`). The vm driver stops its running
+  sandboxes without a flush, and a flush before the script would leave
+  minutes of writes unsynced, so a running or starting sandbox refuses the
+  upgrade (`ErrSandboxesRunning`); setup checks first and says to stop
+  them. Either refusal ran nothing, and setup keeps the old release. It
+  never downgrades, and refuses an OpenShell installed another way than
+  NVIDIA's installer (`ErrUnmanagedUpgrade`).
+  The daemon's periodic gateway recheck reconnects when the gateway answers
+  with another release.
 - A local gateway only, registered with mTLS. Remote gateways and plaintext,
   unauthenticated, OIDC or Cloudflare registrations are refused. So are a
   private key other users can access, world-writable or foreign-owned mTLS

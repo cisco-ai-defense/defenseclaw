@@ -215,7 +215,7 @@ Then it records the harnesses, offers shell wrappers and builds the harness imag
 		}),
 	}
 	f := cmd.Flags()
-	f.BoolVar(&o.InstallOpenShell, "install-openshell", false, "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)")
+	f.BoolVar(&o.InstallOpenShell, "install-openshell", false, "install OpenShell, or upgrade an older supported release in place, with NVIDIA's pinned, sha256-verified installer (uses sudo on Linux)")
 	f.BoolVar(&o.NoMounts, "no-mounts", false, "leave bind mounts off (Linux); no Claude Code or Codex sandbox can then start, a --copy run included, and other harnesses run on a copy")
 	f.BoolVar(&o.Wrappers, "wrappers", false, "make the harness commands run sandboxed without asking")
 	f.BoolVar(&o.NoWrappers, "no-wrappers", false, "do not offer the shell wrappers")
@@ -735,11 +735,50 @@ func newSandboxPolicyCmd() *cobra.Command {
 		policyFlags(sub, &o)
 		cmd.AddCommand(sub)
 	}
+	var to sandboxcli.PolicyTestOptions
+	test := &cobra.Command{
+		Use:   "test",
+		Short: "Show what the egress policy decides for a destination, the rule and where it comes from",
+		Long: `Show what the egress policy decides for a destination: allowed or blocked, the rule
+of the egress proxy's order that decides, and the setting that holds it. It asks the
+same decider the egress proxy uses. --sandbox tests that sandbox's policy (its
+unblocks included); otherwise --pack, --profile and --harness resolve the policy a
+run in this folder would get, without the daemon. --fixture checks a YAML or JSON
+list of {host, port, binary, expect: allow|block, rule} and exits 1 on any mismatch.`,
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sandboxConfigDefault: "true"},
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
+			out, err := parseOutput(cmd.Flag("output").Value.String())
+			if err != nil {
+				return err
+			}
+			to.Output = out
+			return app.PolicyTest(ctx, to)
+		}),
+	}
+	outputFlag(test)
+	tf := test.Flags()
+	tf.StringVar(&to.Sandbox, "sandbox", "", "test this sandbox's policy (its unblocks included)")
+	tf.StringVar(&to.Pack, "pack", "", "resolve with this pack")
+	tf.StringVar(&to.Profile, "profile", "", "resolve with this profile")
+	tf.StringVar(&to.Harness, "harness", "", "resolve for this harness")
+	tf.StringVar(&to.Host, "host", "", "the destination host (or host:port)")
+	tf.IntVar(&to.Port, "port", 0, "the destination port (0: any port the policy carries)")
+	tf.StringVar(&to.Binary, "binary", "", "the program that connects (shown in the report)")
+	tf.StringVar(&to.Fixture, "fixture", "", "check every destination of this YAML or JSON list; exit 1 on a mismatch")
+	cmd.AddCommand(test)
 	var so sandboxcli.SuggestOptions
 	suggest := &cobra.Command{
 		Use:   "suggest",
-		Short: "Suggest an egress allowlist from the destinations sandboxes reached",
-		Args:  cobra.NoArgs,
+		Short: "Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations",
+		Long: `Record, then lock: read the destinations your sandboxes reached (kept across daemon
+restarts and stops) and suggest a pack that extends balanced with every host they
+reached that balanced's curated allowlist does not cover. Hosts only ever refused,
+shadow AI, hosts on the blocklist feed and the sandbox's own model provider and
+--credential endpoints are listed apart, not suggested. --pack-out writes the pack
+to a new file, --diff shows what it changes against the effective policy. Nothing
+is applied.`,
+		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
@@ -751,6 +790,8 @@ func newSandboxPolicyCmd() *cobra.Command {
 	}
 	outputFlag(suggest)
 	suggest.Flags().StringVar(&so.Sandbox, "sandbox", "", "only this sandbox's destinations")
+	suggest.Flags().StringVar(&so.PackOut, "pack-out", "", "write the suggested pack (extends balanced) to this new file")
+	suggest.Flags().BoolVar(&so.Diff, "diff", false, "show what the suggested pack changes against the effective policy")
 	cmd.AddCommand(suggest)
 	for _, list := range []string{"allow", "block"} {
 		list := list

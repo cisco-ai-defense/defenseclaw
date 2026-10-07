@@ -207,9 +207,11 @@ func (r *DoctorReport) GatewayUnmanaged() bool {
 // (Installer.Install) would run NVIDIA's installer on this host: no
 // OpenShell CLI, one whose release it cannot read, or one older than
 // SupportedMin, which it upgrades. Over a supported CLI it installs
-// nothing, and one newer than supported it refuses, so there every other
-// failing check (the gateway, its service, the MicroVM driver) is its
-// fix's, not the install's. Setup offers the install only then, and the
+// nothing (an older one than InstallerVersion is offered the upgrade
+// instead: OpenShellUpgradeAvailable), and one newer than supported it
+// refuses, so there every other failing check (the gateway, its service,
+// the MicroVM driver) is its fix's, not the install's. Setup offers the
+// install only then, and the
 // TUI presets it only then (`sandbox doctor --json` reports it as
 // openshell_install).
 func (r *DoctorReport) OpenShellInstallNeeded() bool {
@@ -224,6 +226,22 @@ func (r *DoctorReport) OpenShellInstallNeeded() bool {
 	}
 	v, err := ParseVersion(r.CLIVersion)
 	return err != nil || v.Compare(mustParse(SupportedBelow)) < 0
+}
+
+// OpenShellUpgradeAvailable reports a supported OpenShell older than
+// InstallerVersion that DefenseClaw's install step upgrades in place
+// (Installer.Upgrade): the CLI check warns with that fix. Not for an
+// OpenShell installed another way (GatewayUnmanaged), which its user
+// upgrades. Setup offers the upgrade (no by default) only then, and the
+// TUI shows it with the install toggle off (`sandbox doctor --json`
+// reports it as openshell_upgrade).
+func (r *DoctorReport) OpenShellUpgradeAvailable() bool {
+	cli := r.Get(CheckIDCLI)
+	if cli == nil || cli.Status != StatusWarn || r.GatewayUnmanaged() {
+		return false
+	}
+	v, err := ParseVersion(r.CLIVersion)
+	return err == nil && CheckSupported(v) == nil && v.Compare(mustParse(InstallerVersion)) < 0
 }
 
 // Get returns the check with id, or nil.
@@ -1218,7 +1236,7 @@ func describeRelease(release string) string {
 func (r *doctorRun) otherOpenShellFix(release string) *Fix {
 	return &Fix{Summary: r.serviceName() + " runs another OpenShell's gateway: restarted, it still answers with " + describeRelease(release) +
 		", not the OpenShell " + r.cli.String() + " of the CLI at " + r.report.CLIPath +
-		". Stop that gateway (`" + r.stopCommand().String() + "`) and remove that other OpenShell, then install OpenShell " + SupportedMin,
+		". Stop that gateway (`" + r.stopCommand().String() + "`) and remove that other OpenShell, then install OpenShell " + InstallerVersion,
 		Command: installOpenShellCommand}
 }
 
@@ -1391,7 +1409,7 @@ func credentialFailure(err error) bool {
 func (r *doctorRun) checkCLI(ctx context.Context) {
 	c := Check{ID: CheckIDCLI, Title: "OpenShell CLI"}
 	defer func() { r.add(c) }()
-	install := &Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+	install := &Fix{Summary: "install OpenShell " + InstallerVersion, Command: installOpenShellCommand}
 	path, err := r.LookPath(r.CLI)
 	if err != nil {
 		c.Status, c.Detail, c.Fix = StatusFail, r.CLI+" is not on PATH", install
@@ -1411,11 +1429,37 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 		if v.Compare(mustParse(SupportedBelow)) >= 0 {
 			// Installer.Install refuses a newer CLI: it does not downgrade.
 			c.Fix = &Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell " + v.String() +
-				", then install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+				", then install OpenShell " + InstallerVersion, Command: installOpenShellCommand}
 		}
 		return
 	}
 	c.Status, c.Detail = StatusPass, fmt.Sprintf("%s at %s", v, path)
+	if v.Compare(mustParse(InstallerVersion)) < 0 {
+		// Supported, and still works: a warning, which setup offers to
+		// upgrade in place (OpenShellUpgradeAvailable).
+		c.Status = StatusWarn
+		c.Detail += "; OpenShell " + InstallerVersion + " " + installerUpgradeReason
+		c.Fix = r.upgradeFix()
+	}
+}
+
+// upgradeFix upgrades a supported OpenShell older than InstallerVersion in
+// place. DefenseClaw's install step upgrades only the OpenShell NVIDIA's
+// installer set up, whose gateway service it restarts the gateway through:
+// one installed another way (no gateway service: GatewayUnmanaged) is the
+// user's to upgrade. What the restart does depends on the configured
+// driver (PrepareUpgrade): on the MicroVM driver it would stop the running
+// sandboxes without a flush, so the upgrade waits until none runs.
+func (r *doctorRun) upgradeFix() *Fix {
+	if r.serviceMissing() {
+		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"}
+	}
+	if r.configured == DriverVM {
+		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway; stop the running MicroVM sandboxes first with `defenseclaw sandbox stop NAME`)",
+			Command: installOpenShellCommand}
+	}
+	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this pulls its supervisor images from ghcr.io and restarts the gateway, " +
+		"which drops the connections of every sandbox on it)", Command: installOpenShellCommand}
 }
 
 func (r *doctorRun) checkRegistration() {
@@ -1573,7 +1617,7 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	r.report.GatewayVersion = r.gateway.RawVersion
 	if err := r.gateway.CheckVersion(); err != nil {
 		version.Status, version.Detail = StatusFail, err.Error()
-		version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand})
+		version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + InstallerVersion, Command: installOpenShellCommand})
 	} else if r.cli != (Version{}) && r.cli.Compare(r.gateway.Version) != 0 {
 		version.Status = StatusWarn
 		version.Detail = fmt.Sprintf("gateway %s but CLI %s; keep them on the same release", r.gateway.Version, r.cli)

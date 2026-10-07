@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v7
+# defenseclaw-managed-hook v8
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -46,6 +46,16 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        how an operator tells "telemetry unattributed because the
 #        helper predates it" from "unattributed because the lookup
 #        failed".
+#   v8 — adds defenseclaw_gateway_post, the one gateway request path of the
+#        host hooks. It hands curl the Authorization header as a config line
+#        on a descriptor and the request body on another, so neither the
+#        gateway bearer nor the prompt or tool payload appears on a process
+#        command line, which every local account can read. Hooks rendered by
+#        this build call it directly: writeHookHelpers never replaces a newer
+#        helper with an older one, and older hooks do not call it.
+#        defenseclaw_harden_env also drops inherited variables named like the
+#        hooks' private values (API_TOKEN, PAYLOAD, ...), so neither the
+#        bearer nor the payload reaches a child process's environment.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -134,6 +144,12 @@ defenseclaw_harden_resources() {
 # spawns sees a known-good search path (no $HOME/bin first, no agent-
 # injected entries) and a git that ignores user / system config.
 defenseclaw_harden_env() {
+  # The hooks keep the bearer, the payload and the gateway's answer in these
+  # names. An assignment keeps the export bit of an inherited variable of the
+  # same name, which would copy the value into the environment of every child
+  # process (curl, jq, the cold-started gateway), so drop inherited ones first.
+  unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+
   # Per-hook ephemeral HOME so any tool that stores state under $HOME
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if
@@ -1426,4 +1442,70 @@ defenseclaw_session_facts_checked() {
   esac
   [ "${#1}" -le 1024 ] || return 0
   printf '%s' "$1"
+}
+
+# defenseclaw_gateway_post URL MAX_TIME BODY [CURL_ARGS...]
+#
+# POSTs BODY to the gateway at URL and prints "<response body>\n<http code>"
+# (curl -w), returning curl's exit status so the caller can tell a refused
+# connection (7) from other failures. Every host hook request to the gateway
+# goes through here.
+#
+# Neither the bearer nor the body ever reaches curl's command line: any local
+# account can read a process's arguments (ps, /proc/<pid>/cmdline), and exec
+# monitors (auditd, Tetragon, EDR) record them, so a literal -H or -d argument
+# would disclose the gateway credential and the prompt or tool payload. An
+# Authorization header among CURL_ARGS (-H "Authorization: ..." or --header)
+# reaches curl as a config line on descriptor 8 and BODY on descriptor 9; the
+# arguments carry only the descriptor paths. printf is a shell builtin, so the
+# process substitutions that write both values execute no program. The
+# descriptor-backed --config form works on curl releases older than 7.55.0,
+# which lack -H @file. An Authorization value with CR or LF, which would end
+# the config line, is refused without running curl. -q, which must be curl's
+# first argument, keeps it from reading a .curlrc: the hook replaces HOME, but
+# CURL_HOME and XDG_CONFIG_HOME come from the agent's environment, and a
+# .curlrc there could trace the bearer and body to a file or turn an HTTP 401
+# into a transport failure. Bash 3.2 compatible.
+defenseclaw_gateway_post() {
+  local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
+  local _dc_post_auth="" _dc_post_arg
+  local -a _dc_post_args _dc_post_auth_args
+  shift 3
+  _dc_post_args=()
+  _dc_post_auth_args=()
+  while [ "$#" -gt 0 ]; do
+    _dc_post_arg="$1"
+    shift
+    case "$_dc_post_arg" in
+      -H|--header)
+        if [ "$#" -gt 0 ]; then
+          case "$1" in
+            [Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:*)
+              _dc_post_auth="$1"
+              shift
+              continue
+              ;;
+          esac
+        fi
+        ;;
+    esac
+    _dc_post_args+=("$_dc_post_arg")
+  done
+  case "$_dc_post_auth" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  if [ -n "$_dc_post_auth" ]; then
+    # The two characters a quoted curl config value escapes.
+    _dc_post_auth="${_dc_post_auth//\\/\\\\}"
+    _dc_post_auth="${_dc_post_auth//\"/\\\"}"
+    _dc_post_auth_args=(--config /dev/fd/8)
+  fi
+  curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST "$_dc_post_url" \
+    "${_dc_post_args[@]+"${_dc_post_args[@]}"}" \
+    "${_dc_post_auth_args[@]+"${_dc_post_auth_args[@]}"}" \
+    --connect-timeout 2 \
+    --max-time "$_dc_post_max_time" \
+    --data-binary @/dev/fd/9 2>/dev/null \
+    8< <(printf 'header = "%s"\n' "$_dc_post_auth") \
+    9< <(printf '%s' "$_dc_post_body")
 }

@@ -587,29 +587,71 @@ func (m *Manager) driverGateway(ctx context.Context) (*Gateway, error) {
 	return m.recheckDriver(ctx, gw)
 }
 
-// recheckDriver asks a connection's gateway which compute driver it runs
-// now. A connection outlives a restart of its gateway (gRPC dials again on
-// its own), and `sandbox setup` or `sandbox doctor --fix` restart the
-// gateway on another driver: a connection whose gateway now runs another
-// driver, or does not say which, is dropped, and the connection that
-// replaces it reads the driver the gateway runs.
+// recheckDriver asks a connection's gateway which compute driver and
+// release it runs now. A connection outlives a restart of its gateway
+// (gRPC dials again on its own), and `sandbox setup` or `sandbox doctor
+// --fix` restart the gateway on another driver, or (setup's in-place
+// upgrade) on another release: a connection whose gateway now runs
+// another driver or release, or does not say which driver, is dropped, and
+// the connection that replaces it reads them, and checks the release
+// against the supported window.
 func (m *Manager) recheckDriver(ctx context.Context, gw *Gateway) (*Gateway, error) {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	d, err := connectedDriver(cctx, gw.Client)
+	info, err := gw.Client.GatewayInfo(cctx)
 	cancel()
-	if err == nil && d.Name == gw.Driver.Name {
+	var d openshell.Driver
+	if err != nil {
+		err = fmt.Errorf("ask the OpenShell gateway which compute driver it runs: %w", err)
+	} else {
+		d, err = openshell.GatewayDriver(info)
+	}
+	release := otherRelease(gw.Version, info)
+	if err == nil && d.Name == gw.Driver.Name && release == "" {
 		m.gwCheckedAt.Store(m.now().UnixNano())
 		return gw, nil
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if err == nil {
+	switch {
+	case err == nil && d.Name != gw.Driver.Name:
 		err = fmt.Errorf("the OpenShell gateway now runs the %s compute driver, not %s", d.Name, gw.Driver.Name)
+		m.logf("%v; connecting to it again", err)
+	case err == nil:
+		err = fmt.Errorf("the OpenShell gateway now runs release %s, not %s", release, gw.Version)
 		m.logf("%v; connecting to it again", err)
 	}
 	m.forgetGateway(gw, err)
 	return m.gateway(ctx)
+}
+
+// otherRelease is the release info reports when it is another than the
+// connection's (version, as the gateway's health reported it at connect):
+// "" when they agree or either cannot be read.
+func otherRelease(version string, info *openshell.GatewayInfo) string {
+	if info == nil {
+		return ""
+	}
+	was, err := openshell.ParseVersion(version)
+	if err != nil {
+		return ""
+	}
+	now, err := openshell.ParseVersion(info.Version)
+	if err != nil || now.Compare(was) == 0 {
+		return ""
+	}
+	return info.Version
+}
+
+// gatewayRelease is the release of the connected gateway as its health
+// reported it, without dialing; "" with no connection.
+func (m *Manager) gatewayRelease() string {
+	m.gwMu.RLock()
+	defer m.gwMu.RUnlock()
+	if m.gw == nil {
+		return ""
+	}
+	return m.gw.Version
 }
 
 // gatewayUp reports whether a gateway connection is held, without dialing.

@@ -33,6 +33,7 @@ func TestDisplayText(t *testing.T) {
 		{"bidi\u202egnp.exe", "bidi\ufffdgnp.exe"},
 		{"iso\u2066x\u2069", "iso\ufffdx\ufffd"},
 		{"bad\xffutf8", "bad�utf8"},
+		{"line\xe2\x80\xa8para\xe2\x80\xa9end", "line para end"},
 	} {
 		if got := DisplayText(tc.in); got != tc.want {
 			t.Errorf("DisplayText(%q) = %q, want %q", tc.in, got, tc.want)

@@ -276,6 +276,7 @@ Under the Secure Client profile none of these rows changes behavior.
 | --- | --- | --- |
 | Change or replace another user's agent config, DefenseClaw registration or project files | Denied | Home directory permissions. DefenseClaw writes each user's files as that user, so it never writes with more rights than the user has. |
 | Read another user's DefenseClaw hook token or authorization ledger rows | Denied | Each user's copy of a hook token is in that user's own files with owner-only access, and in the gateway's private state. The ledger is administrator-owned and readable only by administrators and the gateway. |
+| Read another user's hook token, prompt or tool input from the process list (`ps`, `/proc/<pid>/cmdline`) or an exec audit log | Denied | DefenseClaw's shell hooks, PATH shims and bridges give curl the token as a config line and the request body from file descriptors that the shell's built-in `printf` writes, and give every other helper the payload on standard input, so no command line carries either. Windows hooks run natively with fixed arguments. One exception, in [Residual risks](#codex-passes-each-turn-to-its-notify-program-as-an-argument): the turn record Codex hands its notify program. |
 | Send hook or telemetry requests that claim to be another user | Denied | Linux and macOS hooks: the gateway takes the caller's identity from the kernel (the peer uid on the hook socket), not from the request. On TCP (Windows hooks, and telemetry on every OS): each user's credential is bound to their uid or SID, and the gateway refuses identity headers that name anyone else. |
 | Plant a rewriting Codex or Claude Code hook in a shared project directory that another user works in | Denied for both on every OS; the hook never runs. | The vendor's managed-hooks-only lock. |
 | Enroll, exempt or remove another user | Denied | The target manifest and authorization ledger are administrator-owned. Only administrators (through the lifecycle), the enumerator and the guardian write them, from the administrator's config. |
@@ -412,6 +413,14 @@ Per-user agents below their supported minimum are the same: OpenHands 1.11.0 (th
 **Where:** Every OS.
 
 **What reduces it:** Use application control (WDAC or AppLocker on Windows, fapolicyd on Linux, Santa or similar on macOS) to allow only approved agent clients at or above the supported versions, including copies that a package runner such as `uvx` starts from its cache. Put `requiredMinimumVersion` in any higher-precedence Claude Code source you deploy.
+
+#### Codex passes each turn to its notify program as an argument
+
+After each turn Codex starts its `notify` program with the turn record as one command-line argument: the thread id, the working directory, the input messages and the last assistant message. While DefenseClaw's notify bridge runs, another local account can read that record from the process list (on Linux, `/proc/<pid>/cmdline`), and exec monitors record it. The bridge forwards the record to the gateway from a file descriptor, and the Codex token never appears on a command line. The bridge only records; Codex's hooks, which receive the same prompts and tool calls on standard input, do the inspection.
+
+**Where:** Codex, every OS. On Windows a standard user cannot read another user's command line, but exec monitors such as Sysmon record it.
+
+**What reduces it:** Treat Codex turn text as visible to exec monitoring on the hosts that run Codex, and do not give untrusted accounts a shell on them.
 
 #### Claude Code bare mode skips session-start hooks
 

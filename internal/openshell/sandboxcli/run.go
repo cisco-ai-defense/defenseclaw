@@ -172,10 +172,23 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return apiError(err)
 	}
+	// Every refusal on its own line: a repository policy that would loosen
+	// several settings names each of them.
+	var fatal []string
 	for _, v := range ex.Violations {
 		if v.Fatal {
-			return errors.New(violationMessage(&v, v.Message, v.Detail, v.Admin))
+			fatal = append(fatal, violationMessage(&v, v.Message, v.Detail, v.Admin))
 		}
+	}
+	if len(fatal) > 0 {
+		return errors.New(strings.Join(fatal, "\n"))
+	}
+	repo, err := parseRepoPolicy(ex.RepoPolicy)
+	if err != nil {
+		return err
+	}
+	if note := a.parentRepoPolicyNote(project, ex.RepoPolicy); note != "" {
+		a.warn(note)
 	}
 	// The flags replace the configured limits a clamp of which the
 	// preflight reported. A driver without per-sandbox limits takes neither
@@ -219,14 +232,16 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// sandbox keeps the settings it was created with, so flags that only a
 	// new sandbox takes (and it does not have already), and grants
 	// (credentials, host ports) it holds that this run did not ask for, turn
-	// the default answer to no. A sandbox the policy would not start is not
-	// offered.
+	// the default answer to no, as does a repository policy that changed
+	// since it was created (it keeps the copy its run read). A sandbox the
+	// policy would not start is not offered.
 	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach {
 		if sb := a.resumable(ctx, api, project, spec.Name); sb != nil {
-			if why := a.startRefusal(ctx, api, sb); why != "" {
+			kept := keptPolicy(ctx, api, sb)
+			if why := startRefusal(kept, sb); why != "" {
 				a.note(fmt.Sprintf("Sandbox %s (%s, %s) holds this folder but cannot start under the current policy (%s); `%s delete %s` removes it.",
 					sb.Name, sb.Phase, sb.WorkdirMode, why, CommandName, sb.Name))
-			} else if resumed, err := a.offerResume(ctx, o, sb, copyMode); resumed || err != nil {
+			} else if resumed, err := a.offerResume(ctx, o, sb, copyMode, repoPolicyChanged(ex, kept)); resumed || err != nil {
 				return err
 			}
 		}
@@ -259,6 +274,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	// The daemon reads the repository policy again and refuses the create
+	// when it changed since this preflight, whose copy a staged copy used.
+	req.RepoPolicyDigest = repoPolicyDigest(ex.RepoPolicy)
 	if llm.Credential != nil {
 		if err := harness.LaunchEnvProblem(llm.Credential.Profile, env); err != nil {
 			return err
@@ -310,7 +328,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 				return err
 			}
 		}
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv, repo); err != nil {
 			return err
 		}
 	}
@@ -330,7 +348,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			}
 		}
 		a.warn(a.needsCopyText(project, refusal, req.Name))
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv, repo); err != nil {
 			return err
 		}
 		sb, err = api.Create(ctx, req)
@@ -372,7 +390,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return fail(err)
 		}
 	}
-	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown, policy: ex.Settings})
+	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown, policy: ex.Settings, repo: ex.RepoPolicy})
 	if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
@@ -995,6 +1013,9 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) st
 			// organization.
 			return driverCopyNote(d)
 		}
+		if s.Source == string(packs.SourceRepo) {
+			return "copy mode: the project's repository policy (" + packs.RepoPolicyPath + ") asks for a copy; " + copyBackText
+		}
 		if s.Source != string(packs.SourceAdmin) {
 			continue
 		}
@@ -1091,8 +1112,9 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 // harness, and resumes it when the answer is yes. Flags sb does not
 // already have are named and turn the default to no; when the folder's
 // live mount is sb's, a new sandbox needs a copy (or sb deleted), and the
-// hint says so.
-func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode bool) (bool, error) {
+// hint says so. repoChanged names the project's repository policy, which
+// changed since sb was created, among what a resume ignores.
+func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode, repoChanged bool) (bool, error) {
 	run := a.runLaunchOf(sb)
 	held := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder", sb.Name, sb.Phase, sb.WorkdirMode)
 	if n := a.attachedSessions(sb.Name); n > 0 {
@@ -1105,6 +1127,9 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 		question += "It keeps grants this run did not ask for: " + strings.Join(grants, ", ") + ". "
 	}
 	ignored := resumeIgnores(o, sb, run)
+	if repoChanged {
+		ignored = append(ignored, "the changed repository policy "+packs.RepoPolicyPath)
+	}
 	if len(ignored) > 0 {
 		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". "
 	}
@@ -1128,14 +1153,24 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 	return true, a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
 }
 
-// startRefusal says why the current policy would refuse to start sb (a
-// setting it can no longer have, like a live mount the organization now
-// runs on a copy, or a harness it no longer allows), or "" when a start
-// would go ahead or the daemon cannot tell. The daemon checks the same at
-// the start.
-func (a *App) startRefusal(ctx context.Context, api API, sb *sandboxapi.Sandbox) string {
+// keptPolicy is the explain of sb's own policy, what a start of it
+// resolves (with the repository policy its run read), or nil when the
+// daemon cannot tell.
+func keptPolicy(ctx context.Context, api API, sb *sandboxapi.Sandbox) *sandboxapi.Explain {
 	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name})
 	if err != nil {
+		return nil
+	}
+	return ex
+}
+
+// startRefusal says why the current policy, as ex (keptPolicy) resolves
+// it, would refuse to start sb (a setting it can no longer have, like a
+// live mount the organization now runs on a copy, or a harness it no longer
+// allows), or "" when a start would go ahead or the daemon cannot tell (ex
+// nil). The daemon checks the same at the start.
+func startRefusal(ex *sandboxapi.Explain, sb *sandboxapi.Sandbox) string {
+	if ex == nil {
 		return ""
 	}
 	for _, v := range ex.Violations {
@@ -1384,8 +1419,10 @@ func explainRun(spec *harness.Spec, req sandboxapi.CreateRequest) *sandboxapi.Ex
 
 // stageCopy stages the copy-mode project with the effective workspace
 // policy.
-func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions, d openshell.Driver) (*workspace.CopyRecord, error) {
-	opts, err := a.copyStageOptions(packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Safe: o.Safe, Unmask: o.Unmask}, name)
+func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions, d openshell.Driver,
+	repo *packs.RepoPolicy) (*workspace.CopyRecord, error) {
+	opts, err := a.copyStageOptions(packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Safe: o.Safe,
+		Unmask: o.Unmask, RepoPolicy: repo}, name)
 	if err != nil {
 		return nil, err
 	}
@@ -1459,6 +1496,8 @@ type bannerInfo struct {
 	// policy is the effective policy the sandbox runs under (the daemon's
 	// explain): the banner names the large-upload block from it.
 	policy []sandboxapi.Setting
+	// repo is the project's repository policy the sandbox runs with.
+	repo *sandboxapi.RepoPolicy
 }
 
 // launchModel is the banner's model: the one a launch of sb with the
@@ -1540,6 +1579,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	}
 	if text := uploadBlockText(b.policy); text != "" {
 		row("Uploads", text)
+	}
+	if text := repoPolicyText(b.repo); text != "" {
+		row("Policy", text)
 	}
 	// Asks (a host port, a private address, a destination the profile
 	// does not list) wait for the user while the harness owns the terminal;

@@ -263,6 +263,13 @@ func (e *Effective) blockVerdict(key, host string) *Violation {
 			Message: packMessage(e.Pack.Name, key), Detail: host + " matches " + glob + " on the pack's block list",
 		}
 	}
+	if e.RepoPolicy != nil && MatchAnyHost(e.RepoPolicy.Block, host) {
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: RepoPolicyConstraint,
+			Message: "blocked by the repository policy " + RepoPolicyPath + ": " + key,
+			Detail:  host + " matches " + glob + " on the repository's block list; remove the entry from " + RepoPolicyPath + " to reach it",
+		}
+	}
 	if fwGlob, ok := firstMatch(e.firewallBlock, host); ok {
 		return &Violation{
 			Key: key, Source: SourceUser, Attempted: host, Constraint: "firewall.config_file",

@@ -33,10 +33,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
-// Installer installs OpenShell, and on a Mac what its MicroVM driver
-// needs (openshell.Installer).
+// Installer installs or upgrades OpenShell, and on a Mac what its MicroVM
+// driver needs (openshell.Installer).
 type Installer interface {
 	Install(ctx context.Context) (*openshell.InstallResult, error)
+	Upgrade(ctx context.Context) (*openshell.InstallResult, error)
 	InstallE2fsprogs(ctx context.Context) error
 	ResignVMDriver(ctx context.Context) error
 }
@@ -215,19 +216,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if rep.OpenShellInstallNeeded() {
 		install := o.InstallOpenShell
 		if !install && !o.NonInteractive {
-			// On macOS the installer installs a Homebrew formula, without sudo.
-			how := "sudo"
-			if a.GOOS == "darwin" {
-				how = "Homebrew"
-			}
 			var err error
-			install, err = a.ask("Install OpenShell "+openshell.SupportedMin+" with NVIDIA's installer? ("+how+"; sha256 verified)", false, o.Yes)
+			install, err = a.ask("Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's installer? ("+a.installerHow()+"; sha256 verified)", false, o.Yes)
 			if err != nil {
 				return err
 			}
 		}
 		if !install {
-			return fmt.Errorf("OpenShell %s is needed; rerun with --install-openshell, or install it yourself and rerun setup", openshell.SupportedMin)
+			return fmt.Errorf("OpenShell %s is needed; rerun with --install-openshell, or install it yourself and rerun setup", openshell.InstallerVersion)
 		}
 		inst := a.Installer(func(*openshell.InstallPlan) (bool, error) {
 			if o.InstallOpenShell || o.Yes {
@@ -250,11 +246,20 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
 		}
 		rep = a.runDoctor(ctx)
+	} else if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn &&
+		!slices.ContainsFunc(gatewayStops, func(id string) bool { return failed(rep, id) }) {
+		// A supported OpenShell older than the release DefenseClaw
+		// installs, whose gateway is usable: it works, and setup offers the
+		// upgrade. With a gateway check failing, setup stops on its fix
+		// first (below); the upgrade is offered on the next run.
+		var err error
+		if rep, err = a.offerOpenShellUpgrade(ctx, o, rep, *c); err != nil {
+			return err
+		}
 	}
 	// A stopped service leaves the gateway not answering, whose fix (start
 	// it) comes first; with the gateway answering, the service's own fix.
-	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
-		openshell.CheckIDGatewayService} {
+	for _, id := range gatewayStops {
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {
@@ -640,6 +645,119 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	return nil
 }
 
+// gatewayStops are the checks setup stops on, in this order, once
+// OpenShell is installed: the gateway must be usable before setup goes on.
+var gatewayStops = []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
+	openshell.CheckIDGatewayService}
+
+// installerHow says how NVIDIA's installer installs OpenShell here: on
+// macOS a Homebrew formula, without sudo.
+func (a *App) installerHow() string {
+	if a.GOOS == "darwin" {
+		return "Homebrew"
+	}
+	return "sudo"
+}
+
+// offerOpenShellUpgrade offers a supported OpenShell older than the
+// release DefenseClaw installs, whose CLI check (cli) warns, the in-place
+// upgrade (DoctorReport.OpenShellUpgradeAvailable). The question's default
+// is no, so --yes and --non-interactive keep the installed release, which
+// goes on working; --install-openshell upgrades it. NVIDIA's installer
+// restarts the gateway once it has installed the release, of every owner:
+// on the docker driver that drops the connections of the running
+// sandboxes, after Docker pulls the release's supervisor images; on the
+// MicroVM driver it would stop them without a flush, so while one runs
+// the upgrade is not offered, and openshell.PrepareUpgrade checks again
+// before the script. A refused upgrade ran nothing: setup warns and goes
+// on with the release installed. An OpenShell installed another way is
+// its user's to upgrade: the check's fix says how. It returns the doctor
+// report of the machine as it is then.
+func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {
+	keep := func() (*openshell.DoctorReport, error) {
+		a.note("OpenShell " + cli.Detail)
+		if cli.Fix != nil {
+			a.note("→ " + cli.Fix.Line())
+		}
+		return rep, nil
+	}
+	if !rep.OpenShellUpgradeAvailable() {
+		return keep()
+	}
+	microVM := rep.Driver == openshell.DriverVM
+	running, known := a.runningSandboxes(ctx)
+	if microVM && known && len(running) > 0 {
+		a.warn("OpenShell " + rep.CLIVersion + " is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the " +
+			plural(int64(len(running)), "MicroVM sandbox", "MicroVM sandboxes") + " running on it (" + shortList(running) + ") without a flush")
+		a.note("→ stop them first (`" + CommandName + " stop NAME` flushes their disks), then upgrade: `" + CommandName + " setup --install-openshell`")
+		return rep, nil
+	}
+	// What the restart does to the sandboxes on the gateway, of every
+	// owner.
+	how := a.installerHow() + "; sha256 verified; "
+	if !microVM {
+		how += "pulls OpenShell's " + openshell.InstallerVersion + " supervisor images from ghcr.io; "
+	}
+	stops := "it drops the connections of every sandbox on it"
+	switch {
+	case microVM && !known:
+		stops = "it does not run while a MicroVM sandbox does, and the sandboxes on it could not be listed"
+	case known && len(running) > 0:
+		stops = "it drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
+	case known:
+		stops = "no sandbox runs on it now"
+	}
+	upgrade := o.InstallOpenShell
+	if !upgrade && !o.NonInteractive {
+		var err error
+		upgrade, err = a.ask("Upgrade OpenShell "+rep.CLIVersion+" to "+openshell.InstallerVersion+" in place with NVIDIA's installer? ("+
+			how+"restarts the gateway: "+stops+")", false, o.Yes)
+		if err != nil {
+			return nil, err
+		}
+	} else if upgrade {
+		a.warn("upgrading OpenShell " + rep.CLIVersion + " to " + openshell.InstallerVersion + " restarts the gateway: " + stops)
+	}
+	if !upgrade {
+		return keep()
+	}
+	inst := a.Installer(func(*openshell.InstallPlan) (bool, error) {
+		if o.InstallOpenShell {
+			return true, nil
+		}
+		return a.ask("Run this plan?", false, false)
+	})
+	res, err := inst.Upgrade(ctx)
+	switch {
+	case errors.Is(err, openshell.ErrInstallDeclined):
+		return keep()
+	case errors.Is(err, openshell.ErrSandboxesRunning), errors.Is(err, openshell.ErrRuntimeImages):
+		// Nothing ran (openshell.PrepareUpgrade): the release installed
+		// goes on working.
+		a.warn("OpenShell " + rep.CLIVersion + " is kept: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		return rep, nil
+	case errors.Is(err, openshell.ErrHomebrewInstall):
+		a.bad("upgrade OpenShell: Homebrew could not install the nvidia/openshell formula")
+		a.note("→ " + homebrewInstallHint(err))
+		return nil, &Silent{Err: fmt.Errorf("upgrade OpenShell: %w", err)}
+	case err != nil:
+		return nil, fmt.Errorf("upgrade OpenShell: %w", err)
+	case res.Installed:
+		a.ok("OpenShell upgraded to " + res.CLIVersion.String() + ", gateway running")
+	default:
+		a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
+	}
+	rep = a.runDoctor(ctx)
+	if c := rep.Get(openshell.CheckIDGatewayVersion); c != nil && c.Status == openshell.StatusWarn {
+		// The gateway did not come back on the new release.
+		a.warn(c.Title + ": " + c.Detail)
+		if c.Fix != nil {
+			a.note("→ " + c.Fix.Line())
+		}
+	}
+	return rep, nil
+}
+
 // homebrewInstallHint says what to update when Homebrew did not install
 // the nvidia/openshell formula. With current Command Line Tools selected,
 // what it refuses is an older /Applications/Xcode.app, which it checks
@@ -984,6 +1102,9 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 				if rep.CLIVersion != "" {
 					label = "OpenShell " + rep.CLIVersion + " unsupported"
 				}
+			case c.Status == openshell.StatusWarn && rep.CLIVersion != "":
+				// Older than the release setup installs (offered next).
+				label, mark = "OpenShell "+rep.CLIVersion+" ("+openshell.InstallerVersion+" available)", a.style("⚠", ansiYellow)
 			case rep.CLIVersion != "":
 				label = "OpenShell " + rep.CLIVersion
 			}

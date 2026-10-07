@@ -144,10 +144,10 @@ func TestLoadRefusals(t *testing.T) {
 		})
 	}
 
-	if _, err := Validate(filepath.Join(teamDir, PackFileName)); err != nil {
+	if _, err := Validate(filepath.Join(teamDir, PackFileName), ""); err != nil {
 		t.Fatalf("Validate(valid pack): %v", err)
 	}
-	_, err := Validate(filepath.Join(root, "reserved"))
+	_, err := Validate(filepath.Join(root, "reserved"), "")
 	wantPackError(t, err, "reserved_name", "name")
 }
 
@@ -176,7 +176,7 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 		{teamDir, 0o775, 0o755, "group_writable"},
 	} {
 		chmod(tc.path, tc.mode)
-		_, err := LoadFile(teamDir)
+		_, err := Validate(teamDir, "")
 		wantPackError(t, err, tc.code, "")
 		if _, err := Load("team", root); err == nil {
 			t.Fatalf("a named pack loaded with %s at %o", tc.path, tc.mode)
@@ -191,7 +191,7 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 		t.Skip("sticky bit unsupported here")
 	}
 	fakeOwners(t, func(fs.FileInfo) int { return testUID })
-	_, err := LoadFile(teamDir)
+	_, err := Validate(teamDir, "")
 	if e := wantPackError(t, err, "world_writable", ""); !strings.Contains(e.Reason, "other users can write to") {
 		t.Fatalf("sticky directory: %v", e)
 	}
@@ -201,12 +201,12 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 		}
 		return 0
 	})
-	if _, err := LoadFile(teamDir); err != nil {
+	if _, err := Validate(teamDir, ""); err != nil {
 		t.Fatalf("root-owned pack in a sticky directory: %v", err)
 	}
 	// Without the sticky bit any user could replace even a root-owned file.
 	chmod(teamDir, 0o777)
-	_, err = LoadFile(teamDir)
+	_, err = Validate(teamDir, "")
 	wantPackError(t, err, "world_writable", "")
 }
 
@@ -252,15 +252,15 @@ func TestLoadRefusesPacksOtherUsersOwn(t *testing.T) {
 				return tc.file
 			})
 			for _, ref := range []string{teamDir, filepath.Join(teamDir, PackFileName)} {
-				pack, err := LoadFile(ref)
+				pack, err := Validate(ref, "")
 				if tc.code == "" {
 					if err != nil || pack.Name != "team" {
-						t.Fatalf("LoadFile(%s) = %v, %v", ref, pack, err)
+						t.Fatalf("Validate(%s) = %v, %v", ref, pack, err)
 					}
 					continue
 				}
 				if e := wantPackError(t, err, tc.code, ""); !strings.Contains(e.Reason, tc.subject) {
-					t.Fatalf("LoadFile(%s) = %v, want a refusal naming the %s", ref, e, tc.subject)
+					t.Fatalf("Validate(%s) = %v, want a refusal naming the %s", ref, e, tc.subject)
 				}
 			}
 			// Named packs and pack listings apply the same check.
@@ -273,7 +273,7 @@ func TestLoadRefusesPacksOtherUsersOwn(t *testing.T) {
 	previous := fileOwner
 	fileOwner = func(fs.FileInfo) (int, bool) { return 0, false }
 	t.Cleanup(func() { fileOwner = previous })
-	_, err := LoadFile(teamDir)
+	_, err := Validate(teamDir, "")
 	wantPackError(t, err, "unreadable", "")
 }
 

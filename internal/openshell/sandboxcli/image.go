@@ -580,6 +580,9 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 // the list, on a gateway known to boot only MicroVM images, the images
 // built for the docker driver (those recorded before MicroVM images
 // existed included) are superseded too (image.PruneOptions.MicroVMGateway).
+// The disks another OpenShell release than the gateway's prepared, which it
+// never boots (those of the release before an in-place upgrade), are
+// removed whatever the list says (staleVMDisks).
 func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	a.defaults()
 	opts := image.PruneOptions{DryRun: dryRun}
@@ -609,7 +612,8 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	if dryRun {
 		verb = "would remove"
 	}
-	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 {
+	stale, release := a.staleVMDisks(ctx)
+	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 && len(stale.disks) == 0 {
 		a.ok("nothing to prune")
 	}
 	for _, t := range rep.Removed {
@@ -649,7 +653,69 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 				plural(int64(len(set.disks)), "MicroVM disk", "MicroVM disks"), humanBytes(set.size), a.tildePath(set.dir)))
 		}
 	}
+	if len(stale.disks) > 0 {
+		a.removeStaleVMDisks(stale, release, dryRun)
+	}
 	return nil
+}
+
+// staleVMDisks lists the disks in the MicroVM driver's image cache that
+// another OpenShell release than the gateway's prepared (image.StaleVMDisks),
+// with the gateway's release: the driver prepares its own disk from each
+// image and never boots them, so after an in-place upgrade those of the
+// release before stay behind. None when the gateway does not answer with a
+// release.
+func (a *App) staleVMDisks(ctx context.Context) (vmDiskSet, string) {
+	set := vmDiskSet{dir: a.vmImageCache()}
+	if info, err := os.Stat(set.dir); err != nil || !info.IsDir() {
+		// No MicroVM ever ran here: nothing to ask the gateway about.
+		return set, ""
+	}
+	c, _, err := a.OpenShell(ctx)
+	if err != nil {
+		return set, ""
+	}
+	defer c.Close()
+	h, err := c.Health(ctx)
+	if err != nil || !h.Healthy || h.Version == (openshell.Version{}) {
+		return set, ""
+	}
+	release := h.Version.String()
+	set.disks = image.StaleVMDisks(set.dir, release)
+	for _, d := range set.disks {
+		set.size += d.Bytes
+	}
+	return set, release
+}
+
+// removeStaleVMDisks removes the disks staleVMDisks listed, which no
+// sandbox on the gateway of release boots; with dryRun it says what it
+// would remove.
+func (a *App) removeStaleVMDisks(set vmDiskSet, release string, dryRun bool) {
+	var releases []string
+	for _, d := range set.disks {
+		releases = append(releases, d.OpenShell)
+	}
+	slices.Sort(releases)
+	what := fmt.Sprintf("OpenShell %s prepared in %s, which the OpenShell %s gateway does not boot", strings.Join(slices.Compact(releases), ", "),
+		a.tildePath(set.dir), release)
+	if dryRun {
+		a.ok(fmt.Sprintf("would remove the %s %s (%s)", plural(int64(len(set.disks)), "MicroVM disk", "MicroVM disks"), what, humanBytes(set.size)))
+		return
+	}
+	var removed int
+	var freed int64
+	for _, d := range set.disks {
+		if err := image.RemoveVMDisk(d); err != nil {
+			a.warn("could not remove the MicroVM disk " + a.tildePath(d.Path) + ": " + err.Error())
+			continue
+		}
+		removed++
+		freed += d.Bytes
+	}
+	if removed > 0 {
+		a.ok(fmt.Sprintf("removed the %s %s, freeing %s", plural(int64(removed), "MicroVM disk", "MicroVM disks"), what, humanBytes(freed)))
+	}
 }
 
 // ImageRemoveOptions are the `image rm` flags.

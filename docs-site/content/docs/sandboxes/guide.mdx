@@ -184,7 +184,9 @@ What setup does, in order:
    the fix. On a Mac whose gateway does not run the MicroVM driver yet, the
    missing Landlock of Docker Desktop's VM does not stop setup: step 3
    offers the MicroVM driver, whose sandboxes do not use that VM.
-2. **Installs OpenShell 0.1.1** when it is missing or too old and you agree.
+2. **Installs OpenShell 0.1.2** when it is missing or too old and you agree
+   (on OpenShell 0.1.1, which still works, it offers the upgrade instead:
+   see [upgrade OpenShell](#upgrade-openshell)).
    NVIDIA's installer script is checked against a pinned SHA-256 before it
    runs. An early 0.0.x runtime cannot be upgraded in place, so setup first
    asks whether you backed it up and cleaned it up. On a Mac it installs the
@@ -269,7 +271,7 @@ What setup does, in order:
 | Flag | Effect |
 | --- | --- |
 | `--harness NAME` | A harness to set up; repeat it for more. It is added to `openshell.harnesses`, which keeps the harnesses set up before. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
-| `--install-openshell` | Install OpenShell without asking. |
+| `--install-openshell` | Install OpenShell without asking, or upgrade OpenShell 0.1.1 to 0.1.2 in place (which restarts the gateway). |
 | `--no-mounts` | Leave bind mounts off (Linux): no Claude Code or Codex sandbox can start, and other harnesses run on a copy. A Mac always works on a copy. |
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
 | `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. A Mac gateway that no Homebrew service runs keeps it on either way. |
@@ -385,6 +387,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
+| `Policy` | Shown when the project has a [repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml): `repo policy .defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)`, or that the policy was as strict already. |
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
@@ -658,7 +661,12 @@ registration is the agent's to edit, so for those the pack's
 `hooks.on_silence` decides what follows. Only work that goes on that long
 counts: an idle stretch as long as `silence_after` starts the count over, so
 a sandbox left idle is not flagged when its harness wakes up (a new prompt,
-a background request).
+a background request). That reset is also a limit: a harness whose hooks
+were switched off and that works in bursts shorter than `silence_after`,
+each after an idle stretch at least that long (a tool call that sleeps, for
+example), is never flagged, at the cost of sitting idle for more than half
+of the time. Silence detection is a backstop; the file and network
+boundaries are enforced outside the sandbox and hold either way.
 
 ```text
 14:21:07 myapp-7f3a ⚠ the harness is active but its hooks are silent; stopping the sandbox (hooks.on_silence: stop)
@@ -1129,10 +1137,18 @@ leaves MCP servers behind. See
 [sandbox policy packs](/docs/sandboxes/policy-packs) for the packs, custom
 packs, and the limits an organization can set.
 
-After a few sessions, `defenseclaw sandbox policy suggest` turns the sites
-your sandboxes reached into an `openshell.egress.allow` list you can paste
-into `config.yaml`; `defenseclaw sandbox policy allow HOST` and
-`defenseclaw sandbox policy block HOST` add one host at a time.
+After a few sessions, record, then lock:
+`defenseclaw sandbox policy suggest --sandbox NAME --pack-out FILE` writes a
+pack that extends `balanced` with the sites the sandbox reached (each with
+the programs that reached it), `--diff` shows what it would change and block,
+and `defenseclaw sandbox run --pack FILE` runs the project with it. See
+[Record, then lock](/docs/sandboxes/policy-packs#record-then-lock).
+`defenseclaw sandbox policy allow HOST` and
+`defenseclaw sandbox policy block HOST` add one host at a time, and
+`defenseclaw sandbox policy test --host HOST` says what the policy decides
+for a destination and why.
+A project can ask for a stricter sandbox itself with a
+[`.defenseclaw/sandbox.yaml` repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml).
 `defenseclaw sandbox policy explain` shows every setting a run would get and
 where each one comes from. It shortens long lists, such as the secret-file
 masks and the allowlist, and says so; `-o json` prints every value in full.
@@ -1381,7 +1397,7 @@ defenseclaw sandbox doctor
   ✓ OpenShell telemetry        OpenShell usage telemetry is off
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
   ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
-  ✓ DefenseClaw daemon         connected to OpenShell 0.1.1 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
+  ✓ DefenseClaw daemon         connected to OpenShell 0.1.2 gateway openshell; ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972
   ✓ Sandbox hooks              the hooks of 1 running sandbox reach DefenseClaw (ingress 127.0.0.1:18971)
   ⚠ Harness images             not built yet: codex (the first run builds it, which takes a while)
     → build the images now: defenseclaw sandbox image build codex
@@ -1419,7 +1435,7 @@ once the gateway is installed and started.
 ### OpenShell installed another way
 
 **You see:** the **Gateway** and **Gateway service** checks name the CLI
-(``the OpenShell 0.1.1 at <path> was installed another way``).
+(``the OpenShell <release> at <path> was installed another way``).
 
 **Why:** OpenShell came from somewhere other than the formula or NVIDIA's
 installer, such as the release binaries. `--install-openshell` installs
@@ -1439,6 +1455,8 @@ nothing where a supported OpenShell CLI is already installed.
 
 - **Older than 0.1.1, or missing:** setup offers the install, which upgrades
   it.
+- **0.1.1:** it works, and the **OpenShell CLI** check warns; setup offers
+  the upgrade to 0.1.2 in place (see [upgrade OpenShell](#upgrade-openshell)).
 - **Newer than DefenseClaw drives:** setup does not downgrade it. The
   **OpenShell CLI** fix is to remove it first.
 - **Installed, but a Gateway, Gateway service, registration or mTLS check
@@ -1449,6 +1467,56 @@ nothing where a supported OpenShell CLI is already installed.
   of **Install OpenShell** and leaves the box off, as it does for a failing
   **MicroVM driver** check, which setup fixes with the install's consent
   (step 2 of [one-time setup](#one-time-setup)).
+
+### Upgrade OpenShell
+
+**You see:** ``⚠ OpenShell CLI 0.1.1 at /usr/bin/openshell; OpenShell 0.1.2
+fixes a supervisor bug that can stall a sandbox's first connection, and cuts
+the CPU an idle sandbox uses``. The machine stays ready for sandboxes.
+
+**Why:** DefenseClaw installs OpenShell 0.1.2 and still drives 0.1.1. In
+0.1.1 a sandbox's first request through the egress proxy, or a hook call,
+can stall until the client's own timeout, and every idle sandbox uses about
+2% of a CPU core.
+
+**Do this:** run `defenseclaw sandbox setup` and answer yes to ``Upgrade
+OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer?``, or run
+`defenseclaw sandbox setup --install-openshell`. The question's default is
+no, so `--yes` and `--non-interactive` keep 0.1.1. In the TUI, turn
+**Install OpenShell** on: it stays off for an upgrade. On a Mac, first stop
+the running sandboxes with `defenseclaw sandbox stop <name>`.
+
+What the upgrade does:
+
+- NVIDIA's pinned installer installs the 0.1.2 package (with `sudo`) on
+  Linux, or reinstalls the `nvidia/openshell` Homebrew formula on a Mac.
+  Only then, after its downloads, does it restart the gateway, which affects
+  every sandbox on it, of every owner; setup names the running ones first.
+- On the docker driver the running sandboxes keep running and lose their
+  connections. The restarted gateway needs the 0.1.2 supervisor images
+  (`ghcr.io/nvidia/openshell/supervisor:0.1.2` and
+  `ghcr.io/nvidia/openshell/sandbox:0.1.2`) before it starts, so Docker pulls
+  them before the installer runs. When Docker cannot reach `ghcr.io`, setup
+  says so and keeps 0.1.1, and nothing is changed. Images that
+  `[openshell.drivers.docker]` in `gateway.toml` replaces
+  (`supervisor_image`, `sandbox_runtime_image`, `supervisor_bin`) are not
+  pulled.
+- On the MicroVM driver the restart stops every running sandbox. A MicroVM
+  stopped that way loses what it wrote since its last sync, and the restart
+  comes minutes after the installer starts, so setup does not upgrade while
+  a sandbox runs or starts: it keeps 0.1.1 and names the sandboxes to stop.
+  `defenseclaw sandbox stop <name>` flushes a sandbox's disk and stops it,
+  and `defenseclaw sandbox start <name>` starts it again after the upgrade.
+- OpenShell's patch releases do not intentionally break its stable
+  interfaces, so docker sandboxes made on 0.1.1 should start on 0.1.2. The
+  MicroVM driver is experimental upstream and makes no such promise.
+- On a Mac the first start of each harness image prepares its MicroVM disk
+  again (about a minute and 5 GB). The disks 0.1.1 prepared stay in
+  `~/.local/state/openshell/vm-driver/images` until
+  `defenseclaw sandbox image prune` removes them.
+- DefenseClaw does not upgrade an OpenShell installed another way (see
+  [OpenShell installed another way](#openshell-installed-another-way)): the
+  check's fix says to upgrade it the way you installed it.
 
 ### The gateway answers with another release
 

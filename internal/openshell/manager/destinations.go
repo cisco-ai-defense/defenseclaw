@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -483,36 +484,56 @@ func (r *destRow) lastBinary() string {
 	return r.Binaries[len(r.Binaries)-1]
 }
 
-// shadowAI records and shows a shadow AI destination of the sandbox.
+// shadowAI records and shows a shadow AI destination of the sandbox. The
+// host and binary come from the sandbox (a CONNECT target, an OCSF record),
+// so the finding's title, description and evidence show them made safe for
+// a terminal; the raw host is only checked for the block command, and the
+// target reference keeps it only when it is an identifier.
 func (m *Manager) shadowAI(ctx context.Context, info destinationInfo, host string, port int, kind, provider, binary string, reached bool, at time.Time) {
-	what := "an AI API of " + firstNonEmpty(provider, host)
+	shown := sandboxapi.DisplayText(host)
+	what := "an AI API of " + firstNonEmpty(provider, shown)
 	if kind == sandboxapi.DestinationUnknownAI {
 		what = "a host that looks like an AI inference endpoint the AI provider catalog does not know"
 	}
-	severity, title, did := "LOW", "Shadow AI: the sandbox tried to reach "+firstNonEmpty(provider, host), "tried to reach"
-	remediation := "Check what in the sandbox tries to call " + host + " (`defenseclaw sandbox destinations " + info.name + "`); " +
-		"the policy refused it, so nothing reached it."
+	severity, title, did := "LOW", "Shadow AI: the sandbox tried to reach "+firstNonEmpty(provider, shown), "tried to reach"
 	if reached {
-		severity, title, did = "MEDIUM", "Shadow AI: the sandbox reached "+firstNonEmpty(provider, host), "reached"
-		remediation = "Check what in the sandbox calls " + host + " (`defenseclaw sandbox destinations " + info.name + "`); " +
-			"if it is not expected, block it: defenseclaw sandbox policy block " + host + "."
+		severity, title, did = "MEDIUM", "Shadow AI: the sandbox reached "+firstNonEmpty(provider, shown), "reached"
 	}
-	evidence := fmt.Sprintf("host=%s kind=%s", sandboxapi.HostPort(host, port), kind)
+	remediation := shadowRemediation(info.name, host, reached)
+	evidence := fmt.Sprintf("host=%s kind=%s", sandboxapi.HostPort(shown, port), kind)
 	if provider != "" {
 		evidence += " provider=" + provider
 	}
 	if binary != "" {
-		evidence += " binary=" + binary
+		evidence += " binary=" + sandboxapi.DisplayText(binary)
 	}
 	m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 		Sandbox: info.id, Kind: audit.SandboxFindingShadowAI, Severity: severity, Title: truncate(title, 256),
 		Description: truncate(fmt.Sprintf("%s %s %s, %s, which is neither its model provider nor its harness's vendor.",
-			info.name, did, host, what), 1024),
+			info.name, did, shown, what), 1024),
 		Evidence: truncate(evidence, 512), TargetRef: host, Timestamp: at, Remediation: remediation,
 	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: info.name, Host: host, Port: port,
 		Severity: severity, Reason: sandboxapi.ReasonShadowAI,
-		Message: truncate("⚠ shadow AI: "+did+" "+sandboxapi.HostPort(host, port)+" ("+firstNonEmpty(provider, "unknown AI endpoint")+")", 300)})
+		Message: truncate("⚠ shadow AI: "+did+" "+sandboxapi.HostPort(shown, port)+" ("+firstNonEmpty(provider, "unknown AI endpoint")+")", 300)})
+}
+
+// shadowRemediation is a shadow AI finding's remediation for sandbox name.
+// The host comes from the sandbox (a CONNECT target, an OCSF record), so it
+// goes into the block command a user copies only as a host name or an IP
+// address in canonical form, which a shell reads literally; any other
+// spelling is shown made safe for a terminal, without the command.
+func shadowRemediation(name, host string, reached bool) string {
+	shown, look := sandboxapi.DisplayText(host), " (`defenseclaw sandbox destinations "+name+"`); "
+	if !reached {
+		return "Check what in the sandbox tries to call " + shown + look + "the policy refused it, so nothing reached it."
+	}
+	check := "Check what in the sandbox calls " + shown + look + "if it is not expected, "
+	if p, err := config.ParseOpenShellEgressPattern(host); err == nil && !p.Wildcard &&
+		(!p.Prefix.IsValid() || p.Prefix.IsSingleIP()) && p.String() == host {
+		return check + "block it: defenseclaw sandbox policy block " + host + "."
+	}
+	return check + "add it to openshell.egress.block."
 }
 
 // observeInference counts a model call OpenShell's inference route

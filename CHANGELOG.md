@@ -213,10 +213,60 @@ stopped`. Nothing is changed; use the install command above.
   record's sandbox name as the `defenseclaw.sandbox.name` log attribute (Loki
   structured metadata) so the variable and the filters never parse log bodies;
   the body is unchanged and sandbox names stay out of metric labels. The
-  Splunk Observability bundle splits the Egress blocks tile by source, adds a
-  Sandboxes dashboard and a sandbox egress-blocks detector (and the local
-  Prometheus rule `DefenseClawSandboxEgressBlocksSustained`), and drops the
-  unused "Egress blocks / min" tile.
+  Splunk Observability bundle adds an Egress blocks by source chart to
+  Security and Policy, a Sandboxes dashboard and a sandbox egress-blocks
+  detector (and the local Prometheus rule
+  `DefenseClawSandboxEgressBlocksSustained`), which count the sandbox egress
+  sources (`openshell`, `dc-egress-proxy`) only, and drops the unused
+  "Egress blocks / min" tile.
+
+### Sandbox policy: extend packs, repository policy, record then lock, test
+
+- A custom sandbox pack can extend one parent with `extends:` (a built-in
+  pack, or a custom pack in `openshell.pack_dir` by name) and set only what
+  it changes: lists such as `egress.allow`, the masks and the review list add
+  to the parent's, other keys replace it. At most four ancestors; cycles are
+  refused. The digest covers the chain (the parent's digest, then the file),
+  so a pinned `required_pack_digest` follows a change anywhere in it. `pack
+  show`, `pack list`, `pack validate` and `policy explain` show the chain.
+  Packs without `extends` keep their digests.
+- A project can ask for a stricter sandbox with `.defenseclaw/sandbox.yaml`:
+  network and approvals floors, block entries, fewer ports, a lower
+  large-upload threshold or the large-upload block, copy mode, more masks
+  and review globs, the harness's prompts kept, MCP servers left behind,
+  blocked MCP tools, a stop on hook tamper or on silent hooks
+  (`hooks.on_silence: stop`), the process tree turned on
+  (`observe.process_tree: true`). It can only tighten: a key that would
+  loosen refuses the run, one line per key. The file is untrusted
+  input (16 KiB, no links, strict YAML, no includes), read when the sandbox
+  is created; the sandbox keeps that copy, so an edit applies to the next
+  new sandbox (`sandbox run` names a changed file among what resuming the
+  folder's sandbox ignores, and defaults to a new one), and the file is on
+  every session's review list. The banner, `policy show` and `policy
+  explain` (source `repo`) say what it tightened. It applies to runs
+  started in the folder that holds it; a run in a subfolder of the
+  repository warns that the root's file does not apply there.
+- `defenseclaw sandbox policy suggest` now works from each sandbox's kept
+  destinations (they survive daemon restarts) instead of the in-memory
+  activity buffer, and suggests a pack that extends `balanced` with the hosts
+  reached that balanced does not cover, each with the programs that reached
+  it. Hosts only ever refused, shadow AI, blocklist-feed hosts and the
+  sandbox's model provider and `--credential` endpoints are listed apart.
+  Ports beyond balanced's 80 and 443 that the allowed hosts used go in
+  `egress.ports`; past what a pack holds (1024 allow entries with
+  balanced's, 64 KiB) the most requested hosts stay and a warning names the
+  rest. `--pack-out FILE` writes the
+  pack (a new file, relative paths in the current folder, checked like
+  `pack validate`), `--diff` shows the
+  settings it changes and the reached hosts it would block. The old
+  `openshell.egress.allow` snippet output and its JSON shape are gone.
+- New `defenseclaw sandbox policy test --host H [--port P] [--binary B]`
+  (and `POST /api/v1/sandbox/policy/test`): the egress decision, the rule
+  that decides and the setting behind it, from the same decider the proxy
+  uses. `--sandbox NAME` asks the daemon (unblocks included); `--pack`,
+  `--profile` and `--harness` resolve locally, with no daemon, for CI.
+  `--fixture FILE` checks a YAML or JSON list of `{host, port, binary,
+  expect, rule}` and exits 1 on a mismatch.
 
 ## [Unreleased] — Enterprise hardening
 
@@ -225,6 +275,57 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Security: hooks keep the gateway token and the hook payload off process
+  command lines and out of child environments.** The Claude Code,
+  Antigravity, Copilot, Cursor, Devin, Hermes, Kiro and OpenHands shell
+  hooks, the shared `inspect-*` hooks and the OpenClaw and ZeptoClaw PATH
+  shims gave curl the per-user gateway token as `-H "Authorization: Bearer …"`,
+  and the connector hooks also gave it the whole hook payload (prompt or tool
+  input, session id, transcript path, cwd) as `-d`, on Linux and macOS. Other
+  local accounts could read both from the process list (`ps`,
+  `/proc/<pid>/cmdline`), and exec monitors such as auditd, Tetragon and EDR
+  agents recorded them. The enterprise standalone hooks, which send no token
+  over the hook socket, still put the payload there. Every host hook now
+  sends its request through one helper, `defenseclaw_gateway_post` in
+  `hooks/_hardening.sh` (helper schema v8): curl reads the Authorization
+  header as a config line and the body from file descriptors that the
+  shell's built-in `printf` writes, as the Codex hook already did, so its
+  command line carries only the descriptor paths (this works with curl
+  releases older than 7.55). The PATH shims and the Hermes foreign-hook
+  guard's session report do the same, and `inspect-tool` and
+  `inspect-tool-response` give `jq` the tool input or output on standard
+  input instead of as an argument, so an input over 128 KiB no longer stops
+  `jq` from starting.
+  - The hooks no longer hand the token to the programs they start (curl, jq,
+    or the gateway a hook starts after a reboot) in
+    `DEFENSECLAW_GATEWAY_TOKEN`, which the Codex hook already dropped, and
+    they drop inherited variables named like their own (`PAYLOAD`,
+    `API_TOKEN`, …), which copied the prompt or the token into the
+    environment of every program they started.
+  - The PATH shims keep their own values in private names. When the agent's
+    environment exported `API_TOKEN`, the real npm, pip, curl, wget, ssh or
+    nc, and every process it started, got the DefenseClaw gateway token in
+    place of the user's own value (and the shim's values in place of
+    `API_ADDR`, `ACTION`, `RESULT` and others).
+  - Every gateway request from a hook, a PATH shim or the Codex notify bridge
+    runs `curl -q`, so a `.curlrc` in the agent's `CURL_HOME` or
+    `XDG_CONFIG_HOME` can no longer write the token and the payload to a
+    trace file or turn an HTTP 401 into an allow.
+  - A connector hook refuses a token that contains CR or LF as `invalid
+    gateway token` and handles it like a token the gateway rejects; the
+    `inspect-*` hooks fail closed on it, as on a 401. A PATH shim exits 1
+    with `shim gateway token is malformed — refusing to exec <tool>`.
+  - `defenseclaw doctor` reports Claude Code and Codex hooks rendered before
+    this fix as stale.
+
+  Fail modes and timeouts are otherwise unchanged. In OpenShell sandboxes
+  the token transport is unchanged (it already used a descriptor); sandbox
+  `inspect-tool-response` now also reads the tool output from standard input
+  (no `jq` argument, no 128 KiB limit) and blocks when it cannot build the
+  request body. The gateway rewrites the hooks when it starts (on enterprise
+  installs the guardian does), so an upgrade applies the fix. Windows is not
+  affected: its hooks run natively and the PowerShell adapters pass only
+  fixed arguments.
 - **Amp traces in a built-in mode reach Galileo.** Galileo needs a provider
   on an agent span, and Amp names no model in its built-in modes (such as
   `medium`), so those agent spans were left out of the Galileo export and
@@ -938,6 +1039,39 @@ deleted.
   OmniGent have no post-tool context field, so there only the terminal's
   live notice reports the block. Both drivers.
 
+### OpenShell 0.1.2
+
+- `defenseclaw sandbox setup` installs OpenShell 0.1.2 (NVIDIA's installer
+  from the v0.1.2 tag; the script is byte-identical to v0.1.1's, so its
+  pinned SHA-256 is unchanged). 0.1.2 fixes a supervisor bug on the path
+  every sandbox connection takes: a sandbox's first request through the
+  egress proxy, or a hook call, could stall until the client's own timeout.
+  It also stops idle sandboxes from using about 2% of a CPU core each.
+  DefenseClaw still drives OpenShell `>=0.1.1 <0.2.0`; the Go SDK pin is
+  unchanged (its code is identical in 0.1.2).
+- On OpenShell 0.1.1 the doctor's **OpenShell CLI** check warns (the machine
+  stays ready) and setup offers the upgrade to 0.1.2 in place:
+  ``Upgrade OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer?``,
+  no by default, so `--yes` and `--non-interactive` keep 0.1.1;
+  `--install-openshell` upgrades. NVIDIA's installer restarts the gateway
+  once it has installed the release, and setup names the running sandboxes
+  first. On the docker driver they keep running and lose their connections,
+  and Docker first pulls the 0.1.2 supervisor images from `ghcr.io`, which
+  the restarted gateway needs to start: when it cannot, setup keeps 0.1.1
+  and changes nothing. On the MicroVM driver the restart would stop running
+  sandboxes without a flush, so setup keeps 0.1.1 while one runs and says to
+  stop them first. An OpenShell installed another way is not upgraded; the
+  check says to upgrade it the way you installed it. The TUI wizard shows the upgrade with **Install OpenShell** off.
+  `sandbox doctor --json` reports `openshell_upgrade` and
+  `openshell_install_version`.
+- The daemon reconnects when the gateway answers with another release, so
+  `sandbox status` and the doctor name the release after an upgrade.
+- On a Mac the first start of each harness image after the upgrade prepares
+  its MicroVM disk again (about a minute and 5 GB): the explain note and
+  the daemon's disk-room check count only disks the gateway's release
+  prepared. `sandbox image prune` removes the disks of another release,
+  which the gateway never boots.
+
 ### OpenShell sandboxes on macOS (MicroVM driver)
 
 - Apple-silicon Macs run sandboxes on OpenShell's MicroVM (`vm`) compute
@@ -1389,6 +1523,9 @@ deleted.
   sandbox's `hooks.on_silence` / `hooks.silence_after` show the setting;
   with `pack` locked, a run cannot switch to a pack that alerts or waits
   longer. The threshold was a fixed 10 minutes and silence only alerted.
+  A harness with switched-off hooks that works in bursts shorter than
+  `silence_after`, idle at least that long between them, is not flagged;
+  the sandbox guide and the policy pack reference state this limit.
 - **The activity feed names its epoch.** Every activity event carries
   `epoch`, which names the daemon's in-memory feed; a restarted daemon
   numbers its events from one again under a new epoch. The TUI's Sandboxes
