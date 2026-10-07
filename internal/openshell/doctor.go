@@ -1874,8 +1874,17 @@ func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *Gateway
 	// The Homebrew service's wrapper sources gateway.env before it starts
 	// the gateway, which launchd cannot be asked to confirm: on a Mac the
 	// check says where the setting comes from.
-	where := ""
-	if r.GOOS == "darwin" {
+	where, change := "", "set "+EnvTelemetryEnabled+"=%s in gateway.env"
+	switch {
+	case !st.EnvExists:
+		// Before setup, or after a teardown removed the file DefenseClaw
+		// created: no file holds the setting (GAP-0148).
+		where = ", OpenShell's default (there is no " + st.EnvPath + ")"
+		if r.GOOS == "darwin" {
+			where = ", OpenShell's default (there is no " + st.EnvPath + ", which the Homebrew service would read)"
+		}
+		change = "write " + EnvTelemetryEnabled + "=%s to a new gateway.env"
+	case r.GOOS == "darwin":
 		where = " in " + st.EnvPath + ", which the Homebrew service reads"
 	}
 	switch {
@@ -1889,7 +1898,7 @@ func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *Gateway
 		want := strconv.FormatBool(*r.WantTelemetry)
 		tele.Status = StatusWarn
 		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s%s but openshell.upstream_telemetry is %s", state, where, want)
-		tele.Fix = r.gatewayChangeFix("set "+EnvTelemetryEnabled+"="+want+" in gateway.env", "",
+		tele.Fix = r.gatewayChangeFix(fmt.Sprintf(change, want), "",
 			r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}}))
 	case manual && r.restartPending(ctx, &envOnly):
 		tele.Status = StatusWarn
