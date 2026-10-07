@@ -215,6 +215,40 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	}
 }
 
+// GAP-0289: with AI discovery off the recorder's own inventory.db is pruned
+// by last seen like discovery's history, so the ledger does not grow
+// without bound.
+func TestAgentIdentityLedgerPrunedWithDiscoveryOff(t *testing.T) {
+	agentIdentityTestSetup(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	token := recorder.setStoreSource(func() *inventory.InventoryStore { return nil },
+		func() string { return dir }, func() int { return 1 })
+	t.Cleanup(func() { recorder.clearStoreSource(token) })
+	now := time.Now().UTC()
+	old := now.Add(-72 * time.Hour)
+	store := recorder.store()
+	if store == nil {
+		t.Fatal("recorder opened no store")
+	}
+	if err := store.UpsertAgentIdentities(ctx, []inventory.AgentIdentityRecord{
+		{AgentID: "agt-00000000000000d1", UserID: "4545", Connector: "codex", FirstSeen: old, LastSeen: old, SessionIDs: []string{"sess-old"}},
+		{AgentID: "agt-00000000000000d2", UserID: "4545", Connector: "claudecode", FirstSeen: now, LastSeen: now, SessionIDs: []string{"sess-new"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock := now
+	recorder.ownSweep.Now = func() time.Time { return clock }
+	recorder.sweepOwnStore(ctx) // starts the cadence
+	clock = clock.Add(3 * time.Minute)
+	recorder.sweepOwnStore(ctx)
+	rows, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil || len(rows) != 1 || rows[0].AgentID != "agt-00000000000000d2" {
+		t.Fatalf("rows after the sweep = %+v, err %v; want only the identity seen now", rows, err)
+	}
+}
+
 // GAP-0152: the route pages the stored and buffered identities instead of
 // stopping silently at 1000 rows, and says how many there are.
 func TestAgentIdentitiesRoutePages(t *testing.T) {
@@ -226,7 +260,7 @@ func TestAgentIdentitiesRoutePages(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	prev := sharedAgentIdentities
 	sharedAgentIdentities = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
-	sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore { return store }, nil)
+	sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore { return store }, nil, nil)
 	t.Cleanup(func() { sharedAgentIdentities = prev })
 	base := time.Now().Add(-48 * time.Hour)
 	batch := make([]inventory.AgentIdentityRecord, 0, agentIdentitiesPageLimit+1)

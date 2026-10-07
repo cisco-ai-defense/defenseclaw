@@ -1093,6 +1093,12 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			return cfg.DataDir
 		}
 		return ""
+	}, func() int {
+		// The audit retention window, as AI discovery's history uses.
+		if plan := s.observabilityV8ActivePlan(); plan != nil {
+			return plan.Snapshot().Local.RetentionDays
+		}
+		return config.ObservabilityV8DefaultRetentionDays
 	})
 	wg.Add(1)
 	go func() {
