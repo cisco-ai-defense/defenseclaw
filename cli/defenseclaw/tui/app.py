@@ -5322,6 +5322,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     f"  [bold {hue}]● {badge:<5}[/]  [bold]{rich_escape(plane.name)}[/]  "
                     f"[{TOKENS.text_secondary}]{rich_escape(detail)}[/]"
                 )
+                for extra in plane.detail_lines():
+                    lines.append(f"           [{TOKENS.text_secondary}]{rich_escape(extra)}[/]")
                 fix = model.plane_fix(plane)
                 if fix:
                     lines.append(f"           [{TOKENS.accent_cyan}]→ {rich_escape(fix)}[/]")
