@@ -758,7 +758,7 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		}
 		events = append(events, enforcementEvent)
 	}
-	profileTelemetry := guardrailProfileTelemetryFor(ctx)
+	profileTelemetry := proxyGuardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
@@ -845,7 +845,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		profileTelemetry := guardrailProfileTelemetryFor(ctx)
+		profileTelemetry := proxyGuardrailProfileTelemetryFor(ctx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,

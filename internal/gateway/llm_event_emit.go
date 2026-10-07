@@ -605,7 +605,7 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 		UserName:       user.Name,
 		UserEmail:      user.Email,
 		Identity:       user.Identity,
-		Profile:        guardrailProfileTelemetryFor(r.Context()),
+		Profile:        proxyGuardrailProfileTelemetryFor(r.Context()),
 		PolicyID:       firstNonEmpty(env.PolicyID, p.defaultPolicyID),
 		DestinationApp: env.DestinationApp,
 	}
