@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -82,6 +83,12 @@ func CheckRulePacks(cfg *config.Config) error {
 	tuned := profileConnectorNames(cfg)
 	for _, c := range configs {
 		for _, scope := range profileRulePackScopes(c.cfg, tuned) {
+			// The gateway opens a rule_pack_dir as written: ~ is not expanded
+			// and a relative path follows its working directory (GAP-0363).
+			if scope.ref.Name == "" && scope.dir != "" && !filepath.IsAbs(scope.dir) {
+				return fmt.Errorf("%s rule pack directory %q is not an absolute path; the gateway does not expand ~ "+
+					"or a relative path, so write the full path", c.label, scope.dir)
+			}
 			if builtinPackNotSeeded(scope) {
 				continue
 			}
@@ -133,12 +140,26 @@ func checkCandidateWebhooks(cfg *config.Config) error {
 	return nil
 }
 
-// builtinPackNotSeeded reports a built-in pack (or the default pack
-// directory) that is not on disk yet. That is installation state the
-// policy seeding fixes, not a reference a config change made, so the writer
-// does not refuse it.
+// builtinPackNotSeeded reports a built-in pack (or a rule_pack_dir naming
+// a built-in pack's guardrail/<name> folder, under policy_dir or a managed
+// layout's vendor policy folder) that is not on disk yet. That is
+// installation state the policy seeding fixes, not a reference a config
+// change made, so the writer does not refuse it. Any other missing directory
+// is refused: the gateway's reload refuses it too, and the writer accepted it
+// while the running gateway kept the previous policy (GAP-0363).
 func builtinPackNotSeeded(s rulePackScope) bool {
-	if s.dir == "" || (s.ref.Name != "" && !config.IsBuiltinRulePack(s.ref.Name)) {
+	if s.dir == "" {
+		return false
+	}
+	name := s.ref.Name
+	if name == "" {
+		dir := filepath.Clean(s.dir)
+		if filepath.Base(filepath.Dir(dir)) != "guardrail" {
+			return false
+		}
+		name = filepath.Base(dir)
+	}
+	if !config.IsBuiltinRulePack(name) {
 		return false
 	}
 	_, err := os.Stat(s.dir)
