@@ -8,6 +8,9 @@ on:
   # their checks (incl. the Windows hook path) never execute until the
   # change reaches a main-targeting PR.
   pull_request:
+  # Runs every suite on one commit. A busy PR branch supersedes its
+  # pull_request run on each push, so its longest jobs never finish there.
+  workflow_dispatch:
 
 # Top-level permissions are intentionally read-only. Per-job
 # permissions overrides (none required at the moment) must remain
@@ -19,8 +22,9 @@ permissions:
 
 concurrency:
   # Supersede old commits within one PR, but never cancel a previous main
-  # merge's exact-SHA release canary when another merge lands.
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  # merge's exact-SHA release canary when another merge lands. A dispatched
+  # run is keyed by its commit, so later pushes to the branch do not cancel it.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
