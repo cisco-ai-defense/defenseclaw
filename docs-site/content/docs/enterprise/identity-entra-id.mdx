@@ -335,11 +335,6 @@ One live run of the standalone enterprise profile on an Entra-joined Windows 11
 computer, with Entra users and a `groups` assignment by SID, did not complete.
 It found:
 
-- **An empty connector entry enrolls nobody.** `guardrail.connectors` with
-  `claudecode: {}` is dropped when the config loads, so the enumerator enrolled no
-  user and no Claude Code machine policy was written, while `verify` reported
-  success. Give each connector a key, as `admin-config.windows.example.yaml` does
-  with `enabled: true`.
 - **`enterprise windows profile-explain` cannot look up an Entra SID.** It
   answers `default_lookup_failed` with "No mapping between account names and
   security IDs was done". The same SID resolves in a per-user install that runs
