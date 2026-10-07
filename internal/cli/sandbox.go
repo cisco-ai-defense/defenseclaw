@@ -702,7 +702,9 @@ func newSandboxUnblockCmd() *cobra.Command {
 open, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for
 every sandbox (--always). It cannot lift a block-list entry: remove your own with
 ` + "`defenseclaw sandbox policy block --remove HOST`" + `; a pack's, the repository
-policy's (.defenseclaw/sandbox.yaml) and your organization's stay.`,
+policy's (.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open
+a private network (add the exact host to openshell.egress.allow), this machine (run
+the sandbox with --host-port PORT) or a cloud metadata or link-local address.`,
 		Args: cobra.ExactArgs(1),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			o.Host = args[0]

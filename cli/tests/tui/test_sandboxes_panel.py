@@ -249,16 +249,19 @@ def test_the_status_names_the_gateways_compute_driver(gateway: dict[str, Any], t
         assert model.headline(max_width=52) == "2 running · 3 total"
 
 
-def test_a_run_image_is_in_the_details() -> None:
-    image = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
-    row = decode_sandbox({**COPY, "run_image": image})
-    assert row is not None and row.run_image == image and row.copy_mode
+def test_the_details_name_the_image_sandbox_image_list_shows() -> None:
+    # GAP-0188: the detail named the MicroVM run image, a defenseclaw.invalid
+    # name that neither `sandbox image list` nor doctor shows.
+    run = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
+    image = "defenseclaw/sandbox:claudecode-0123456789ab-u501"
+    row = decode_sandbox({**COPY, "image": image, "run_image": run})
+    assert row is not None and row.image == image and row.copy_mode
     model = SandboxesPanelModel()
-    model.set_snapshot(STATUS, [{**COPY, "run_image": image}], [])
+    model.set_snapshot(STATUS, [{**COPY, "image": image, "run_image": run}], [])
     pairs = dict(model.detail_pairs()[1])
-    assert pairs["Run image"] == image
+    assert pairs["Image"] == image and "Run image" not in pairs
     assert pairs["Undo"] == "reverts the last pull --apply (U)" and pairs["Pull"].startswith("P brings the work back")
-    assert "Run image" not in dict(_model().detail_pairs()[1])
+    assert "Image" not in dict(_model().detail_pairs()[1])
 
 
 def test_the_process_tree_is_in_the_details() -> None:
@@ -621,6 +624,46 @@ TOOL_BLOCK = {
 
 def _blocked(seq: int, host: str, port: int, **fields: Any) -> dict[str, Any]:
     return {"seq": seq, "kind": "egress.blocked", "sandbox": "s", "host": host, "port": port, **fields}
+
+
+def test_a_destination_names_its_lineage_like_the_cli() -> None:
+    # GAP-0185: with the process tree on, `sandbox destinations` names the
+    # connecting program's lineage; the detail named only the binary.
+    curl = {
+        "host": "pypi.org",
+        "kind": "other",
+        "connections": 3,
+        "binaries": ["/usr/bin/curl"],
+        "lineage": [
+            {"pid": 41, "ppid": 40, "exe": "/usr/bin/curl", "comm": "curl"},
+            {"pid": 40, "ppid": 12, "exe": "/usr/bin/bash"},
+            {"pid": 12, "comm": "claude"},
+        ],
+    }
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [])
+    _title, pairs = model.detail_pairs({"destinations": [curl]})
+    assert [value for label, value in pairs if label == "Destination"] == [
+        "pypi.org — other · 3 requests · curl ← bash ← claude"
+    ]
+
+
+def test_an_approved_host_port_reads_like_the_cli_feed() -> None:
+    # GAP-0182: `sandbox activity` says "(port 8765 on this machine)" for the
+    # first connection to an approved --host-port; the panel showed the bare
+    # host:port, which reads like any other host.
+    model = _model()
+    model.add_events(
+        [
+            {"seq": 80, "kind": "egress.allowed", "sandbox": "s", "host": "host.openshell.internal", "port": 8765},
+            {"seq": 81, "kind": "egress.allowed", "sandbox": "s", "host": "pypi.org", "port": 443},
+        ]
+    )
+    model.view = "activity"
+    assert [row[3] for row in model.data_table_rows()] == [
+        "pypi.org",
+        "host.openshell.internal:8765 (port 8765 on this machine)",
+    ]
 
 
 def test_blocked_lines_read_like_the_cli_feed() -> None:

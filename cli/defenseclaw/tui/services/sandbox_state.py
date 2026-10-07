@@ -186,6 +186,10 @@ def metadata_or_link_local(host: str) -> bool:
 # A refused port 22 is git over SSH or ssh, which OpenShell never opens.
 SSH_PORT = 22
 
+# packs.OpenShellHostAlias: the name a sandbox reaches this machine by (a
+# --host-port service, a local model endpoint).
+OPENSHELL_HOST_ALIAS = "host.openshell.internal"
+
 
 def ssh_blocked_text(host: str) -> str:
     """sandboxapi.SSHBlockedText: OpenShell opens no SSH out of a sandbox, which no unblock changes."""
@@ -468,9 +472,10 @@ class SandboxRow:
     nested_repos: tuple[NestedRepoRow, ...] = ()
     warnings: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
-    # The image the sandbox runs when it is not the harness image: on the
-    # MicroVM (vm) driver, the image its per-run harness files are baked into.
-    run_image: str = ""
+    # The harness image, tagged as "sandbox image list" shows it. Not the
+    # run image a MicroVM boots (defenseclaw.invalid/sandbox-run:...), a
+    # name no other view shows (GAP-0188).
+    image: str = ""
     # The sandbox's processes are sampled while it runs (observe.process_tree).
     process_tree: bool = False
 
@@ -649,7 +654,7 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         nested_repos=nested,
         warnings=tuple(_text(w) for w in _list(item.get("warnings")) if w),
         violations=tuple(v for v in violations if v),
-        run_image=_text(item.get("run_image")),
+        image=_text(item.get("image")),
         process_tree=bool(item.get("process_tree")),
     )
 
@@ -781,6 +786,9 @@ class ActivityRow:
         if text[:1] in {"✓", "✗", "⚠", "?", "↺", "⊘"}:
             text = text[1:].strip()
         if self.kind == "egress.allowed":
+            if self.host == OPENSHELL_HOST_ALIAS and self.port > 0:
+                # As sandboxcli.activityLine words it (GAP-0154, GAP-0182).
+                return f"{host_port(self.host, self.port)} (port {self.port} on this machine)"
             return host_port(self.host, self.port) or text
         if self.kind == "egress.blocked":
             if not self.host:
@@ -935,7 +943,7 @@ _SHORT_ASK_REASONS: tuple[tuple[re.Pattern[str], str], ...] = (
 def _host_local(host: str) -> bool:
     """triage.IsHostLocal: this machine's names and loopback or unspecified addresses."""
     text = normalize_host(host)
-    if text in {"localhost", "host.openshell.internal", "host.docker.internal", "gateway.docker.internal"}:
+    if text in {"localhost", OPENSHELL_HOST_ALIAS, "host.docker.internal", "gateway.docker.internal"}:
         return True
     if text.endswith(".localhost"):
         return True
@@ -1936,8 +1944,8 @@ class SandboxesPanelModel:
             pairs.append(("Last tool block", verdict_reason(row.last_blocked)))
         if row.pending_approvals:
             pairs.append(("Asks waiting", str(row.pending_approvals)))
-        if row.run_image:
-            pairs.append(("Run image", row.run_image))
+        if row.image:
+            pairs.append(("Image", row.image))
         if row.process_tree:
             tree = self.processes.get(row.name) if row.running else None
             if tree:
@@ -2007,6 +2015,19 @@ _DESTINATION_KINDS = {
 DETAIL_DESTINATIONS = 12
 
 
+def _destination_program(row: dict[str, Any]) -> str:
+    """sandboxcli.destinationBinary: the program that last connected; with the
+    process tree on, its lineage, the process first, then its parents."""
+    lineage = [_dict(p) for p in _list(row.get("lineage"))]
+    if len(lineage) >= 2:
+        return " ← ".join(
+            _text(p.get("comm")) or _text(p.get("exe")).rsplit("/", 1)[-1] or str(_int(p.get("pid")))
+            for p in lineage
+        )
+    binaries = [_text(b) for b in _list(row.get("binaries")) if _text(b)]
+    return binaries[-1] if binaries else ""
+
+
 def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS) -> tuple[tuple[str, str], ...]:
     """The Destinations section of a sandbox's detail: one pair per host, shadow AI first, then the models."""
     item = _dict(response)
@@ -2028,9 +2049,8 @@ def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS
         requests = _int(row.get("connections")) + _int(row.get("tunnels"))
         refused = _int(row.get("refused")) + _int(row.get("blocked"))
         parts = [what, _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")]
-        binaries = [_text(b) for b in _list(row.get("binaries")) if _text(b)]
-        if binaries:
-            parts.append(binaries[-1])
+        if program := _destination_program(row):
+            parts.append(program)
         pairs.append(("Destination", f"{_text(row.get('host'))} — " + " · ".join(parts)))
     if len(rows) > limit:
         pairs.append(("Destinations", f"+{len(rows) - limit} more: defenseclaw sandbox destinations {name}"))

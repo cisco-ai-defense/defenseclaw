@@ -324,7 +324,14 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("connect",),
         "Resume a sandbox: start it if stopped and attach the harness",
-        long="Harness arguments go after --.",
+        long=(
+            "Resumes a sandbox: starts it when it is stopped and attaches the harness to your terminal, "
+            "or with --prompt (or the harness's own print flag after --) runs one prompt headless, which "
+            "needs no terminal. A sandbox this command started is stopped again when the session ends; "
+            "one that was already running, whose detached run is still going, or that another session is "
+            "attached to keeps running. --shell opens a login shell instead, reviewed at its end like a "
+            "harness session."
+        ),
         args=(_Arg("name"), _Arg("harness_args", required=False, many=True)),
         flags=(
             _Flag("shell", "bool", "open a shell in the sandbox instead of the harness"),
@@ -332,6 +339,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("rm", "bool", "delete the sandbox when the session ends"),
             _SESSION_YES,
             _Flag("prompt", "string", "run the harness headless with this prompt", short="p", metavar="TEXT"),
+        ),
+        example=(
+            "defenseclaw sandbox connect myapp-7f3a\n"
+            'defenseclaw sandbox connect myapp-7f3a --prompt "now add the tests"\n'
+            "defenseclaw sandbox connect myapp-7f3a --shell"
         ),
     ),
     _Cmd(
@@ -348,12 +360,25 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("stop",),
         "Stop a sandbox (it is kept for start or connect)",
+        long=(
+            "Stops a sandbox and keeps it for start or connect. When its detached run is still going, "
+            "the stop ends it: stop asks first on a terminal (--yes does not). Every stop, this one or "
+            "one from the TUI, the macOS app or undo, marks the run interrupted and keeps its log, so "
+            '"sandbox logs" still shows it.'
+        ),
         args=(_Arg("name"),),
         flags=(_Flag("yes", "bool", "stop without asking when a detached run is still going", short="y"),),
     ),
     _Cmd(
         ("start",),
         "Start a stopped sandbox for a new session",
+        long=(
+            "Starts a stopped sandbox for a new session. A mounted project gets a fresh undo snapshot, "
+            "unless the folder still holds changes an earlier session made that were neither undone nor "
+            "kept at its end (a detached run, or one without a terminal to ask on): then the earlier undo "
+            'point stays, so "sandbox undo" still reverts them. --new-snapshot accepts those changes and '
+            "takes a fresh snapshot."
+        ),
         args=(_Arg("name"),),
         flags=(
             _Flag("no-snapshot", "bool", "keep the previous session's snapshot instead of taking a new one"),
@@ -403,6 +428,15 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("undo",),
         "Restore the project folder to its pre-session snapshot",
+        long=(
+            "Restore a mounted project folder to its pre-session snapshot, after a preview. Files git "
+            "ignores (dependency directories, build output) have no copy in the snapshot: undo deletes "
+            "what the session wrote to Python bytecode caches and names the rest, with what to do about "
+            "them, unless openshell.workdir.undo_ignored has the snapshot keep a copy of node_modules, "
+            ".venv and the like, which undo then restores.\n\n"
+            "For a copy-mode sandbox (every sandbox on macOS), undo reverts its last `pull --apply` "
+            "instead; edits you made since stay."
+        ),
         args=(_Arg("name"),),
         flags=(
             _OUTPUT,
@@ -440,6 +474,15 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("unblock",),
         "Lift an egress block for one sandbox or for every sandbox",
+        long=(
+            "Lifts a block of the blocklist feed or of the profile's default (IP addresses under open, "
+            "hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for every "
+            "sandbox (--always). It cannot lift a block-list entry: remove your own with "
+            "`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository policy's "
+            "(.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open a private network "
+            "(add the exact host to openshell.egress.allow), this machine (run the sandbox with --host-port "
+            "PORT) or a cloud metadata or link-local address."
+        ),
         args=(_Arg("host"),),
         flags=(
             _Flag("sandbox", "string", "unblock for this sandbox only", metavar="NAME"),
@@ -449,6 +492,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("pull",),
         "Bring a copy-mode sandbox's work back (3-way apply, a branch, or a patch)",
+        long=(
+            "Brings a copy-mode sandbox's work back after a review: --apply merges it into your working "
+            "tree (3-way), --branch puts it on branch dc/<name>, --patch-out writes a patch. When --apply "
+            "cannot merge (a conflict, or git older than 2.38), your working tree is left as it was, the "
+            "changes go to branch dc/<name> and a patch instead, and pull exits with status 4."
+        ),
         args=(_Arg("name"),),
         flags=(
             _OUTPUT,
@@ -464,12 +513,29 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("discover",),
         "Find the AI components inside a running sandbox now (MCP servers, skills, CLIs, agents)",
+        long=(
+            "Reads what the agent installed and configured inside a running sandbox (MCP servers, skills, "
+            "rules, plugins, AI CLIs and agents, environment variable names, shell history mentions and, "
+            "for a copy, package manifests) and lists the AI components found. The daemon does this on "
+            "its own once the sandbox is ready and every ai_discovery.scan_interval_min while it runs; "
+            'the AI inventory ("defenseclaw agent usage --sandbox NAME") shows the result after its next '
+            "scan."
+        ),
         args=(_Arg("name"),),
         flags=(_OUTPUT, _JSON),
     ),
     _Cmd(
         ("ps",),
         "List the processes of a sandbox whose process tree is on",
+        long=(
+            "Lists the processes running in a sandbox whose process tree is on (a pack's "
+            'observe.process_tree: true, or "sandbox run --process-tree"): pid, parent, uptime and '
+            "command line, the values of arguments that name secrets replaced. --tree shows each process "
+            "under its parent. The daemon samples the sandbox every 5 seconds while it runs (every 15 "
+            "seconds on a Mac when sampling its MicroVM is slow) and adds what OpenShell reports of "
+            "processes starting and exiting, so a process that starts and ends between two samples, "
+            "unreported, is not seen. The agent chooses its processes' names and arguments."
+        ),
         args=(_Arg("name"),),
         flags=(_OUTPUT, _JSON, _Flag("tree", "bool", "show each process under its parent")),
     ),
@@ -483,6 +549,14 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("policy", "test"),
         "Show what the egress policy decides for a destination, the rule and where it comes from",
+        long=(
+            "Show what the egress policy decides for a destination: allowed or blocked, the rule of the "
+            "egress proxy's order that decides, and the setting that holds it. It asks the same decider "
+            "the egress proxy uses. --sandbox tests that sandbox's policy (its unblocks included); "
+            "otherwise --pack, --profile and --harness resolve the policy a run in this folder would get, "
+            "without the daemon. --fixture checks a YAML or JSON list of {host, port, binary, expect: "
+            "allow|block, rule} and exits 1 on any mismatch."
+        ),
         flags=(
             _OUTPUT,
             _JSON,
@@ -509,6 +583,14 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("policy", "suggest"),
         "Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations",
+        long=(
+            "Record, then lock: read the destinations your sandboxes reached (kept across daemon restarts "
+            "and stops) and suggest a pack that extends balanced with every host they reached that "
+            "balanced's curated allowlist does not cover. Hosts only ever refused, shadow AI, hosts on the "
+            "blocklist feed and the sandbox's own model provider and --credential endpoints are listed "
+            "apart, not suggested. --pack-out writes the pack to a new file, --diff shows what it changes "
+            "against the effective policy. Nothing is applied."
+        ),
         flags=(
             _OUTPUT,
             _JSON,
