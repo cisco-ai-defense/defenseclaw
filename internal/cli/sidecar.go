@@ -93,7 +93,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println(fleetBannerLine(cfg))
 	fmt.Printf("  Auto-approve: %v\n", cfg.Gateway.AutoApprove)
-	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg.Gateway.Token))
+	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg))
 	fmt.Printf("  API port:     %d\n", cfg.Gateway.APIPort)
 	for _, line := range watcherBannerLines(cfg) {
 		fmt.Println(line)
@@ -331,12 +331,20 @@ func sidecarDiagEnabled() bool {
 
 // tokenStatus says whether the gateway has a token, never any part of it: the
 // banner reaches the service journal and the lifecycle copies journal lines
-// into the package manager's log.
-func tokenStatus(token string) string {
+// into the package manager's log. Secure Client keeps the banner of main, the
+// token masked to its first and last 4 characters (GAP-0105, issue #1092).
+func tokenStatus(cfg *config.Config) string {
+	token := cfg.Gateway.Token
 	if token == "" {
 		return "none (will use device identity only)"
 	}
-	return "set"
+	if !cfg.SecureClientIntegration() {
+		return "set"
+	}
+	if len(token) > 8 {
+		return token[:4] + "..." + token[len(token)-4:]
+	}
+	return "***"
 }
 
 // fleetBannerLine names the OpenClaw gateway the sidecar dials, or says it
