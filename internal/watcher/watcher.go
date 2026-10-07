@@ -960,6 +960,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	// An MCP event's Path is its watcher key; the scanner gets the server.
 	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	if err == nil && !w.secureClientActive() {
+		err = scanner.JudgeFailure(result)
+	}
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
@@ -972,13 +975,27 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		// Treat scanner failures as fail-closed: enforce a block
 		// (which quarantines + disables per fallback policy) before
 		// surfacing the verdict to the sidecar.
-		w.enforceBlock(ctx, evt)
+		reason := fmt.Sprintf("scanner failure (fail-closed): %v", err)
+		if w.secureClientActive() {
+			w.enforceBlock(ctx, evt)
+		} else {
+			// The reason goes on the quarantine record (skill info) and
+			// in an alert, not only in gateway.log (GAP-0376).
+			w.enforceBlockWith(ctx, evt, true, reason)
+			_ = w.logger.LogEventCtx(ctx, audit.Event{
+				Action:   string(audit.ActionWatcherBlock),
+				Target:   evt.Path,
+				Actor:    "defenseclaw",
+				Details:  fmt.Sprintf("type=%s scan failed, blocked: %s", targetType, reason),
+				Severity: "HIGH",
+			})
+		}
 		_ = w.logger.LogAction("install-blocked", evt.Path,
 			fmt.Sprintf("type=%s reason=scanner-error scanner=%s (F-3187)",
 				targetType, s.Name()))
 		w.recordAdmission(ctx, "scan-error", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked,
-			Reason:        fmt.Sprintf("scanner failure (fail-closed): %v", err),
+			Reason:        reason,
 			InstallAction: "block",
 		}
 		return res
@@ -1176,7 +1193,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			// shorthand (install block, runtime disable, file none) leaves
 			// them where they are.
 			if fileAction == "quarantine" {
-				w.enforceBlockWith(ctx, evt, retainRestored)
+				w.enforceBlockWith(ctx, evt, retainRestored, "")
 			}
 		}
 	case "warning":
@@ -1292,19 +1309,20 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 }
 
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
-	w.enforceBlockWith(ctx, evt, true)
+	w.enforceBlockWith(ctx, evt, true, "")
 }
 
 // enforceBlockWith applies the block; honorRestore keeps the files of an
-// operator-restored asset whose earlier install block still stands.
-func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
+// operator-restored asset whose earlier install block still stands. reason,
+// when set, is the quarantine record's reason (skill info shows it).
+func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) {
 	switch evt.Type {
 	case InstallMCP:
 		// MCP servers have no filesystem artifact to quarantine. The sidecar's
 		// handleMCPAdmission applies the block verdict to the connector's MCP
 		// configuration from the admission result this watcher publishes.
 	case InstallSkill, InstallPlugin:
-		w.quarantineAssetWith(ctx, evt, honorRestore)
+		w.quarantineAssetWith(ctx, evt, honorRestore, reason)
 	}
 }
 
@@ -1313,10 +1331,10 @@ func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent,
 const pluginCategoryQuarantineDir = "plugin-categories"
 
 func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
-	w.quarantineAssetWith(ctx, evt, true)
+	w.quarantineAssetWith(ctx, evt, true, "")
 }
 
-func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
+func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) {
 	if w == nil || w.cfg == nil || w.store == nil {
 		w.emitQuarantineFailure(ctx, evt, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
 		return
@@ -1355,7 +1373,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,
 		OriginalPath: plan.SourcePath, QuarantinePath: plan.QuarantinePath,
-		ContentHash: plan.ContentHash, Reason: "watcher enforcement",
+		ContentHash: plan.ContentHash, Reason: coalesce(reason, "watcher enforcement"),
 		State: audit.QuarantineStatePending, OwnershipJSON: plan.OwnershipJSON,
 		// The physical owner and global action scope are committed together so
 		// either Go or Python restore clears the exact logical file decision.

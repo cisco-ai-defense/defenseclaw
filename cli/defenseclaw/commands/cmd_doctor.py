@@ -2619,6 +2619,55 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
         _emit("warn", "Scanner settings", issue, r=r)
     elif hasattr(cfg, "resolve_llm"):
         _emit("pass", "Scanner settings", "recommended: quiet policy with the LLM judge", r=r)
+    _check_recent_judge_outage(cfg, r)
+
+
+# The watcher's alert for a skill scan whose LLM judge did not run.
+_JUDGE_OUTAGE_MARKER = "the LLM judge did not run"
+
+
+def _check_recent_judge_outage(cfg, r: _DoctorResult, *, window_hours: int = 24) -> None:
+    """Warn when the install watcher's judge failed in the last day (GAP-0376).
+
+    Such a scan fails closed (the skill is blocked), so the outage must be as
+    visible as the block; the row is shown only when there was one.
+    """
+    import sqlite3
+
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT timestamp, target FROM audit_events WHERE action = 'watcher-block' "
+                "AND details LIKE ? ORDER BY timestamp DESC LIMIT 1",
+                (f"%{_JUDGE_OUTAGE_MARKER}%",),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return
+    if not row:
+        return
+    when, target = str(row[0] or ""), str(row[1] or "")
+    try:
+        seen = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - seen > timedelta(hours=window_hours):
+            return
+    except ValueError:
+        pass
+    name = os.path.basename(target.rstrip("/\\")) or target
+    _emit(
+        "warn",
+        "Skill judge",
+        f"the LLM judge did not answer during an install scan at {when[:19]} ({name} was blocked, fail-closed); "
+        "check the judge model, its key and the network, then run 'defenseclaw skill restore' for skills it blocked",
+        r=r,
+    )
 
 
 def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> None:

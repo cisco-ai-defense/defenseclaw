@@ -421,6 +421,38 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	return result, nil
 }
 
+// RuleLLMAnalysisFailed is the INFO finding skill-scanner reports when its
+// LLM judge started but did not answer (an outage, blocked egress, a model
+// error); the scan then finished with the deterministic analyzers only.
+const RuleLLMAnalysisFailed = "LLM_ANALYSIS_FAILED"
+
+// ErrJudgeDidNotRun marks a skill scan whose LLM judge did not run.
+var ErrJudgeDidNotRun = errors.New("the LLM judge did not run, so the scan is incomplete")
+
+// JudgeFailure returns an ErrJudgeDidNotRun error when result carries the
+// scanner's LLM_ANALYSIS_FAILED finding, nil otherwise. The install watcher
+// fails such a scan closed, as skill-scanner.mdx promises for a judge that
+// cannot run (GAP-0376); the INFO finding alone read as a clean scan.
+func JudgeFailure(result *ScanResult) error {
+	if result == nil {
+		return nil
+	}
+	for _, f := range result.Findings {
+		if f.RuleID != RuleLLMAnalysisFailed {
+			continue
+		}
+		detail := strings.Join(strings.Fields(f.Description), " ")
+		if len(detail) > 240 {
+			detail = detail[:240] + "..."
+		}
+		if detail == "" {
+			return ErrJudgeDidNotRun
+		}
+		return fmt.Errorf("%w: %s", ErrJudgeDidNotRun, detail)
+	}
+	return nil
+}
+
 type skillOutput struct {
 	Findings []skillFinding `json:"findings"`
 }

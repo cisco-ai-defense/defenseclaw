@@ -1088,3 +1088,33 @@ func TestEvaluateAdmissionFollowsThePolicySource(t *testing.T) {
 		t.Fatalf("verdict after the generation changed = %q, want warning", got)
 	}
 }
+
+// GAP-0376: with the judge unreachable the scanner finishes with its static
+// analyzers and reports an INFO LLM_ANALYSIS_FAILED finding. Admission read
+// that as a MEDIUM warning and left the skill loaded; the scan now fails
+// closed and says why on the quarantine record.
+func TestAdmissionFailsClosedWhenTheJudgeDidNotRun(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	fake := &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+		{ID: "m1", RuleID: "DATA-READ", Severity: scanner.SeverityMedium, Title: "reads shell history"},
+		{ID: "llm", RuleID: scanner.RuleLLMAnalysisFailed, Severity: scanner.SeverityInfo, Title: "LLM analysis failed",
+			Description: "The LLM analyzer encountered an error: APIConnectionError"},
+	}}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+	skillPath := filepath.Join(skillDir, "usage-stats")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "usage-stats", Path: skillPath, Timestamp: time.Now()})
+	if res.Verdict != VerdictBlocked || !strings.Contains(res.Reason, "the LLM judge did not run") {
+		t.Fatalf("verdict %q reason %q, want blocked because the judge did not run", res.Verdict, res.Reason)
+	}
+	if _, err := os.Lstat(skillPath); !os.IsNotExist(err) {
+		t.Fatalf("the skill stayed in place (lstat err %v)", err)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "usage-stats", "")
+	if err != nil || len(records) != 1 || !strings.Contains(records[0].Reason, "the LLM judge did not run") {
+		t.Fatalf("quarantine records %+v (err %v), want one naming the judge failure", records, err)
+	}
+}

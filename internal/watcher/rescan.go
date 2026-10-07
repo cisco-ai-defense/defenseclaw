@@ -780,6 +780,11 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	defer cancel()
 
 	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	if err == nil && !w.secureClientActive() {
+		// A scan without its judge is incomplete: it never becomes the
+		// baseline, so the next cycle scans again (GAP-0376).
+		err = scanner.JudgeFailure(result)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] scan %s: %v\n", evt.Path, err)
 		return nil, ""

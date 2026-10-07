@@ -104,6 +104,36 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     )
 
 
+# The INFO finding skill-scanner reports when its LLM judge started but did
+# not answer; the scan then ran the deterministic analyzers only.
+LLM_ANALYSIS_FAILED = "LLM_ANALYSIS_FAILED"
+
+
+class JudgeUnavailableError(RuntimeError):
+    """The LLM judge did not run, so the scan is incomplete (GAP-0376)."""
+
+
+def _raise_on_judge_failure(result: ScanResult) -> None:
+    """Fail a scan whose judge did not run, as skill-scanner.mdx promises.
+
+    The scanner reports the outage as an INFO finding and exits 0, so the
+    scan read as clean or MEDIUM while every judge-only detection was lost.
+    The install watcher blocks such a skill; the CLI exits non-zero.
+    """
+    for finding in result.findings:
+        if finding.rule_id != LLM_ANALYSIS_FAILED:
+            continue
+        detail = " ".join(str(finding.description or "").split())
+        if len(detail) > 240:
+            detail = detail[:240] + "..."
+        raise JudgeUnavailableError(
+            "the LLM judge did not run, so the scan is incomplete (static analysis only)"
+            + (f": {detail}" if detail else "")
+            + ". Check the judge model, its key and the network, or pass --no-use-llm "
+            "to scan with the static rules alone."
+        )
+
+
 class SkillScannerWrapper:
     """Wraps the cisco-ai-skill-scanner SDK.
 
@@ -201,6 +231,8 @@ class SkillScannerWrapper:
             elapsed = time.monotonic() - start
 
         result = self._convert(sdk_result, target, elapsed)
+        if judge:
+            _raise_on_judge_failure(result)
         # The scan says which policy and judge model it ran with (GAP-0047).
         result.settings = {"policy": settings.effective_policy(cfg), "judge": judge.get("llm_model") or "off"}
         return result

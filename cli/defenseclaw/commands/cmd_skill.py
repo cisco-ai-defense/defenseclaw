@@ -943,6 +943,10 @@ def _skill_info_card(
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
     info_map["disabled"] = _skill_effectively_disabled(info_map, action_entry)
+    if action_entry is not None and getattr(action_entry, "reason", ""):
+        # Why the watcher held the skill (a failed scan, a refused file, a
+        # failed quarantine), not only in gateway.log (GAP-0376).
+        info_map["reason"] = action_entry.reason
     if scan_entry is not None or action_entry is not None:
         label, _, reason = _skill_policy_verdict(
             app, skill_name, skill=info_map, scan_entry=scan_entry,
@@ -1007,6 +1011,8 @@ def _print_skill_info_card(
         style = _POLICY_VERDICT_STYLES.get(verdict, "white")
         click.echo()
         click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
+        if info_map.get("reason") and verdict in ("blocked", "rejected", "quarantined", "disabled"):
+            click.echo(f"  {ux.bold('Reason:')} {info_map['reason']}")
         note = _skill_policy_note(
             info_map.get("name", skill_name), verdict, held=held,
             connector=str(info_map.get("connector") or ""),
