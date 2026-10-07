@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
 
@@ -38,5 +39,17 @@ func TestEveryBlockedReasonReadsInWords(t *testing.T) {
 	}
 	if got := reasonText(string(triage.ReasonRuleShape)); !strings.HasPrefix(got, "no OpenShell rule allows it") {
 		t.Fatalf("unsupported_rule = %q", got)
+	}
+}
+
+// TestSSHBlocksSayUseHTTPS (GAP-0090, GAP-0111): git over SSH failed with
+// only the client's "Permission denied", and the feed offered an unblock
+// that cannot open port 22. A refused port 22 says to use an HTTPS remote.
+func TestSSHBlocksSayUseHTTPS(t *testing.T) {
+	ta := newTestApp(t, "")
+	line := ta.activityLine(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "github.com", Port: 22,
+		Reason: "transparent_tcp_policy_denied", Unblockable: true, Time: ta.Now()}, false)
+	if !strings.Contains(line, "github.com:22 (SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…))") || strings.Contains(line, "unblock") {
+		t.Fatalf("line = %q", line)
 	}
 }

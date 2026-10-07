@@ -164,13 +164,15 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	case sandboxapi.ActivityEgressBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
 		switch why := firstNonEmpty(ev.Category, ev.Reason); {
+		case sshPort(ev):
+			b.WriteString(" (" + sshBlockedText(ev.Host) + ")")
 		case ev.Category == sandboxapi.CategoryLargeUpload:
 			// The proxy's reason names the threshold the upload crossed.
 			b.WriteString(" (" + sandboxapi.LargeUploadBlockedText(ev.Reason) + ")")
 		case why != "":
 			b.WriteString(" (" + reasonText(why) + ")")
 		}
-		if ev.Unblockable && ev.Host != "" {
+		if ev.Unblockable && ev.Host != "" && !sshPort(ev) {
 			scope := ""
 			if ev.Sandbox != "" {
 				scope = " --sandbox " + ev.Sandbox
@@ -267,6 +269,15 @@ var reasonTexts = map[string]string{
 	"harness_background_fetch": "a background fetch of the harness, which it does without",
 	"rule_limit":               "the sandbox added its limit of rules this session",
 	"too_many_pending":         "too many approvals are waiting",
+}
+
+// sshPort reports a refused connection to port 22: git over SSH, ssh.
+// OpenShell opens no SSH out of a sandbox, which no unblock changes.
+func sshPort(ev sandboxapi.ActivityEvent) bool { return ev.Port == 22 }
+
+// sshBlockedText says what to do instead of SSH to host.
+func sshBlockedText(host string) string {
+	return "SSH does not leave a sandbox: use an HTTPS remote (https://" + host + "/…)"
 }
 
 // reasonText is the short explanation of a feed reason token; an unknown

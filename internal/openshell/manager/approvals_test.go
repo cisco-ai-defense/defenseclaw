@@ -133,6 +133,22 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	e.waitChunk("fetchbox", curl, "approved")
 }
 
+// TestSSHRefusalIsOneFeedLine (GAP-0090, GAP-0111): git over SSH to
+// github.com:22 showed "(no OpenShell rule allows it)" and then, from
+// triage's rejection of the drafted rule, "(port not allowed)" for the one
+// attempt. The rejection of a port-22 draft adds no line: OpenShell's
+// denial is on the feed, and the CLI says to use an HTTPS remote.
+func TestSSHRefusalIsOneFeedLine(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "sshbox"})
+	id := e.addChunk("sshbox", chunk("allow_github_com_22", "github.com", 22))
+	e.draft("sshbox")
+	e.waitChunk("sshbox", id, "rejected")
+	if got := e.events("sshbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 0 {
+		t.Fatalf("feed = %+v", got)
+	}
+}
+
 // TestProxyRefusedHarnessFetchIsQuiet (GAP-0095): OpenCode asks
 // models.opencode.ai for its model catalog at every start, through the
 // egress proxy, which balanced refuses: each start showed a blocked site

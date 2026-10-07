@@ -578,6 +578,12 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 		m.storeApproval(a)
 		m.rejectChunk(ctx, gw, p.Sandbox, p.ChunkID, d.Message)
 		m.recordApproval(ctx, id, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorPolicy)
+		if d.Port == 22 {
+			// SSH out of a sandbox: OpenShell's denial is on the feed
+			// already, saying what to do instead; a second line for the
+			// one attempt, with another reason, would only confuse.
+			return
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityEgressBlocked, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port, Source: sandboxapi.SourceOpenShell,
 			Category: string(d.Reason), Reason: string(d.Reason), Message: blockedMessage(d),
