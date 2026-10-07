@@ -715,23 +715,23 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			// The harness's own background request, which it does without.
 			return
 		}
+		category, text := string(e.Category), categoryText(e)
+		if blocked && e.Category == egress.CategoryOperatorBlock && eff != nil {
+			// The block list merges the pack's, the repository policy's
+			// and the user's own: the line and the destination say whose
+			// entry it was, where it is removed.
+			if c, t := blockOriginText(eff.BlockOrigin(e.Host)); c != "" {
+				category, text = c, t
+			}
+		}
 		m.observeDestination(ctx, b, destinationSighting{host: e.Host, port: e.Port, at: e.Time, proxy: true, denied: blocked,
-			category: string(e.Category)})
+			category: category})
 		if blocked || e.FirstSeen {
 			kind := sandboxapi.ActivityEgressAllowed
 			// The port tells an HTTPS request from a plain-HTTP one to
 			// the same host, which are refused one by one.
 			where := sandboxapi.HostPort(e.Host, e.Port)
 			msg := "✓ " + where
-			category, text := string(e.Category), categoryText(e)
-			if blocked && e.Category == egress.CategoryOperatorBlock && eff != nil {
-				// The block list merges the pack's, the repository
-				// policy's and the user's own: the line says whose entry
-				// it was, where it is removed.
-				if c, t := blockOriginText(eff.BlockOrigin(e.Host)); c != "" {
-					category, text = c, t
-				}
-			}
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
 				msg = "✗ " + where + " (" + text + ")" + more

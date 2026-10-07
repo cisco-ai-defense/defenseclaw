@@ -339,6 +339,18 @@ func (e *Effective) decideWith(d *egress.Decider, p egress.Principal, host strin
 		out.Match = dec.Entry
 	case RulePort:
 		out.Match = strconv.Itoa(port)
+	case RuleBlock:
+		// The proxy's reason speaks of the operator's configuration; the
+		// block list also holds the pack's and the repository policy's
+		// entries (GAP-0125).
+		switch e.BlockOrigin(host) {
+		case BlockFromPack:
+			out.Reason = "The sandbox's policy pack blocks this destination."
+		case BlockFromRepoPolicy:
+			out.Reason = "The repository policy (" + RepoPolicyPath + ") blocks this destination."
+		case BlockFromFirewall:
+			out.Reason = "A deny rule of the host egress firewall blocks this destination."
+		}
 	}
 	if e.NetworkMode == NetworkDeny {
 		switch out.Rule {

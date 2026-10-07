@@ -145,4 +145,18 @@ func TestRepoPolicyBlocksSayWhose(t *testing.T) {
 	if len(got) != 1 || got[0].Category != sandboxapi.CategoryRepoPolicyBlock || !strings.Contains(got[0].Message, packs.RepoPolicyPath) {
 		t.Fatalf("feed = %+v", got)
 	}
+	// So do the destinations and `policy test`, which said "The operator
+	// blocked this destination in DefenseClaw configuration."
+	d, err := e.m.Destinations(t.Context(), "repoblock")
+	must(t, err)
+	if len(d.Destinations) != 1 || d.Destinations[0].Category != sandboxapi.CategoryRepoPolicyBlock {
+		t.Fatalf("destinations = %+v", d.Destinations)
+	}
+	b := e.boxOf("repoblock")
+	e.m.mu.Lock()
+	eff := b.eff
+	e.m.mu.Unlock()
+	if chk := eff.CheckEgress(nil, egress.Principal{BindingID: "test"}, "example.org", 443); chk.Allowed || !strings.Contains(chk.Reason, "repository policy") {
+		t.Fatalf("check = %+v", chk)
+	}
 }
