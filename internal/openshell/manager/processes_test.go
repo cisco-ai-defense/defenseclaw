@@ -35,7 +35,7 @@ func sampleOf(procs ...string) *collection {
 	lines := []string{"T 100 1700000000"}
 	for _, p := range procs {
 		f := strings.Fields(p)
-		lines = append(lines, fmt.Sprintf("P %s %s 1000 %s S", f[0], f[1], f[2]), "Pc "+f[0]+" "+f[3])
+		lines = append(lines, fmt.Sprintf("P %s %s 1000 %s", f[0], f[1], f[2]), "Pc "+f[0]+" "+f[3])
 		for _, a := range f[3:] {
 			lines = append(lines, "Pa "+f[0]+" "+a)
 		}
@@ -64,7 +64,7 @@ func TestProcessTreeMergesSamples(t *testing.T) {
 	// for missing from it.
 	t2 := t1.Add(5 * time.Second)
 	tree.mu.Lock()
-	tree.live[77] = &procNode{PID: 77, Comm: "late", FirstSeen: t2.Add(time.Second), Source: processSourceOCSF}
+	tree.live[77] = &procNode{PID: 77, Comm: "late", FirstSeen: t2.Add(time.Second), Source: audit.SandboxProcessSourceOCSF}
 	tree.mu.Unlock()
 	_, exited = tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 99 python3"), t2, t2.Add(2*time.Second))
 	if len(exited) != 0 {
@@ -82,7 +82,7 @@ func TestProcessTreeKeepsLiveProcessesOnAPartialSample(t *testing.T) {
 	tree := newProcTree()
 	t0 := time.Now()
 	tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 30 node", "44 42 40 python3"), t0, t0)
-	head := collectSchema + "\nT 100 1700000000\nP 1 0 1000 10 S\nPc 1 init\nP 42 1 1000 20 S\nPc 42 claude\n"
+	head := collectSchema + "\nT 100 1700000000\nP 1 0 1000 10\nPc 1 init\nP 42 1 1000 20\nPc 42 claude\n"
 	partial := map[string]func() (*collection, error){
 		"cut": func() (*collection, error) {
 			return parseCollection([]byte(head+"P 43 42 10"), true, newCollectScope(), 1)
@@ -190,7 +190,7 @@ func psAnswer(lines ...string) *string {
 
 func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	var sample atomic.Pointer[string]
-	sample.Store(psAnswer("P 1 0 0 10 S", "Pc 1 init", "P 42 1 1000 20 S", "Pc 42 claude", "Pa 42 claude", "Pa 42 --token=dccertvalue",
+	sample.Store(psAnswer("P 1 0 0 10", "Pc 1 init", "P 42 1 1000 20", "Pc 42 claude", "Pa 42 claude", "Pa 42 --token=dccertvalue",
 		"L /proc/42 exe /usr/bin/node", "L /proc/42 cwd /sandbox/work/repo"))
 	e := treeEnv(t, "treebox", &sample)
 	b := e.boxOf("treebox")
@@ -203,7 +203,7 @@ func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	}
 	claude := list.Processes[1]
 	if claude.PID != 42 || claude.PPID != 1 || claude.Exe != "/usr/bin/node" || claude.Cwd != "/sandbox/work/repo" ||
-		strings.Contains(claude.Cmdline, "dccertvalue") || claude.Source != processSourceSample {
+		strings.Contains(claude.Cmdline, "dccertvalue") || claude.Source != audit.SandboxProcessSourceSample {
 		t.Fatalf("process = %+v", claude)
 	}
 	if lineage := e.m.Lineage("treebox", 42); len(lineage) != 2 || lineage[0].Comm != "claude" || lineage[1].PID != 1 {
@@ -216,7 +216,7 @@ func TestSampleProcessesRecordsTheTree(t *testing.T) {
 		t.Fatalf("interval = %d", list.IntervalSeconds)
 	}
 	// 42 ended between the samples.
-	sample.Store(psAnswer("P 1 0 0 10 S", "Pc 1 init"))
+	sample.Store(psAnswer("P 1 0 0 10", "Pc 1 init"))
 	time.Sleep(time.Millisecond)
 	e.m.sampleProcesses(context.Background(), b)
 	list, _ = e.m.Processes(context.Background(), "treebox")
@@ -246,7 +246,7 @@ func TestOCSFProcessRecordsJoinTheTree(t *testing.T) {
 	now := time.Now()
 	e.ocsf("ocsfbox", "PROC:LAUNCH [INFO] python3(4242) [cmd:python3 /app/main.py --password dccertvalue]", now)
 	list, _ := e.m.Processes(context.Background(), "ocsfbox")
-	if len(list.Processes) != 1 || list.Processes[0].Source != processSourceOCSF || strings.Contains(list.Processes[0].Cmdline, "dccertvalue") {
+	if len(list.Processes) != 1 || list.Processes[0].Source != audit.SandboxProcessSourceOCSF || strings.Contains(list.Processes[0].Cmdline, "dccertvalue") {
 		t.Fatalf("after the launch: %+v", list)
 	}
 	e.ocsf("ocsfbox", "PROC:TERMINATE [INFO] python3(4242) [exit:3]", now.Add(time.Second))
@@ -276,7 +276,7 @@ func TestProcessTreeIsOffByDefault(t *testing.T) {
 // A stop ends every live process of the tree.
 func TestStopEndsTheProcessTree(t *testing.T) {
 	var sample atomic.Pointer[string]
-	sample.Store(psAnswer("P 1 0 0 10 S", "Pc 1 init"))
+	sample.Store(psAnswer("P 1 0 0 10", "Pc 1 init"))
 	e := treeEnv(t, "stopbox", &sample)
 	e.m.sampleProcesses(context.Background(), e.boxOf("stopbox"))
 	e.stopBox("stopbox")
@@ -290,7 +290,7 @@ func TestStopEndsTheProcessTree(t *testing.T) {
 // its exit.
 func TestDeleteEndsTheProcessTree(t *testing.T) {
 	var sample atomic.Pointer[string]
-	sample.Store(psAnswer("P 1 0 0 10 S", "Pc 1 init", "P 42 1 1000 20 S", "Pc 42 claude"))
+	sample.Store(psAnswer("P 1 0 0 10", "Pc 1 init", "P 42 1 1000 20", "Pc 42 claude"))
 	e := treeEnv(t, "delbox", &sample)
 	e.m.sampleProcesses(context.Background(), e.boxOf("delbox"))
 	e.deleteBox("delbox", sandboxapi.DeleteRequest{})

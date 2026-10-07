@@ -112,8 +112,8 @@ var sandboxExecutableDirs = []string{
 // also each process's arguments or working directory), O env (discover
 // mode: also the names of the workload's environment variables).
 //
-// Records, one per line: "T 100 <boot epoch>", "P pid ppid uid start
-// state", "Pc pid comm", "Pa pid arg", "Pt pid argv0-target", "L /proc/pid
+// Records, one per line: "T 100 <boot epoch>", "P pid ppid uid start",
+// "Pc pid comm", "Pa pid arg", "Pt pid argv0-target", "L /proc/pid
 // exe|cwd target", "V name", "X size mtime path", "E type size mtime path"
 // (type f, d, l or another find %y letter), "F path" followed by the file's
 // base64 on the next line, "Q what" (a bound was reached) and "end". Paths
@@ -175,7 +175,7 @@ for d in /proc/[0-9]*; do
   n=$((n + 1))
   [ "$n" -le 4096 ] || { printf 'Q processes\n'; break; }
   set -f; set -- ${line##*) }; set +f
-  printf 'P %s %s %s %s %s\n' "$pid" "$2" "$u" "${20:-0}" "$1"
+  printf 'P %s %s %s %s\n' "$pid" "$2" "$u" "${20:-0}"
   comm=
   { read -r -d '' comm < "$d/comm"; } 2>/dev/null
   comm=${comm%$'\n'}
@@ -376,7 +376,6 @@ type collectedEntry struct {
 type collectedProcess struct {
 	PID, PPID, UID int
 	StartTicks     int64
-	State          string
 	Comm           string
 	Args           []string
 	Argv0Target    string
@@ -465,7 +464,7 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 				c.ProcessesCapped = true
 				continue
 			}
-			if len(f) != 5 {
+			if len(f) != 4 {
 				refuse()
 				continue
 			}
@@ -473,12 +472,11 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 			ppid, e2 := strconv.Atoi(f[1])
 			uid, e3 := strconv.Atoi(f[2])
 			start, e4 := strconv.ParseInt(f[3], 10, 64)
-			if e1 != nil || e2 != nil || e3 != nil || e4 != nil || pid <= 0 || ppid < 0 || uid < 0 || start < 0 ||
-				len(f[4]) != 1 || !isASCIILetter(f[4][0]) || procs[pid] != nil {
+			if e1 != nil || e2 != nil || e3 != nil || e4 != nil || pid <= 0 || ppid < 0 || uid < 0 || start < 0 || procs[pid] != nil {
 				refuse()
 				continue
 			}
-			p := &collectedProcess{PID: pid, PPID: ppid, UID: uid, StartTicks: start, State: f[4]}
+			p := &collectedProcess{PID: pid, PPID: ppid, UID: uid, StartTicks: start}
 			procs[pid] = p
 			c.Processes = append(c.Processes, p)
 		case "Pc", "Pa", "Pt":
@@ -678,8 +676,6 @@ func collectText(s string, limit int) string {
 	}, s)
 	return truncate(s, limit)
 }
-
-func isASCIILetter(b byte) bool { return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') }
 
 func appendOnce(list []string, s string) []string {
 	if slices.Contains(list, s) {

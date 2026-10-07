@@ -303,7 +303,7 @@ func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryRe
 	// A mounted project is the host's own folder, which the host's scan
 	// reads; only a copy's manifests are the sandbox's.
 	opts.IncludePackageManifests = opts.IncludePackageManifests && rec.WorkdirMode == config.OpenShellWorkdirCopy
-	scan := inventory.SandboxScan{Home: connector.SandboxHomeDir, Variables: sandboxDiscoveryVariables(rec.Harness)}
+	scan := inventory.SandboxScan{Home: connector.SandboxHomeDir, Variables: sandboxDiscoveryVariables()}
 	if w := rec.Workdir; w != "" && path.IsAbs(w) && path.Clean(w) == w {
 		scan.Workspace = w
 	}
@@ -381,7 +381,7 @@ func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryRe
 // paths. The collector reads environment variable names only, never values,
 // so these are the folders the harness launchers use: HOME, CODEX_HOME's
 // default and the HERMES_HOME the Hermes launcher pins.
-func sandboxDiscoveryVariables(string) map[string]string {
+func sandboxDiscoveryVariables() map[string]string {
 	home := connector.SandboxHomeDir
 	return map[string]string{"HOME": home, "CODEX_HOME": home + "/.codex", "HERMES_HOME": home + "/.hermes"}
 }

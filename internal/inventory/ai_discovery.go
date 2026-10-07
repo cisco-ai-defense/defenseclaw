@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -4674,10 +4675,12 @@ func isSafeLoopbackEndpoint(endpoint string) bool {
 
 func isProjectPackageManifest(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".csproj") ||
-		strings.HasSuffix(lower, ".fsproj") ||
-		strings.HasSuffix(lower, ".vbproj")
+	return slices.ContainsFunc(projectManifestSuffixes, func(suffix string) bool { return strings.HasSuffix(lower, suffix) })
 }
+
+// projectManifestSuffixes name the project files isProjectPackageManifest
+// reads as package manifests (lowercase).
+var projectManifestSuffixes = []string{".csproj", ".fsproj", ".vbproj"}
 
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
@@ -4811,13 +4814,12 @@ func projectRootForManifest(path string) string {
 // `__pycache__` and `library` (macOS) stay skipped because they never
 // contain manifest data we care about.
 func shouldSkipDiscoveryDir(name string) bool {
-	switch strings.ToLower(name) {
-	case ".git", ".cache", "cache", "dist", "build", "target", "__pycache__", "library":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(discoverySkipDirs, strings.ToLower(name))
 }
+
+// discoverySkipDirs are the folder names (lowercase) shouldSkipDiscoveryDir
+// skips; a sandbox scan's collector skips them too (PlanSandboxScan).
+var discoverySkipDirs = []string{".git", ".cache", "cache", "dist", "build", "target", "__pycache__", "library"}
 
 // pathHashKey is the per-installation HMAC key that turns the
 // otherwise-reversible path SHA-256 fingerprint into an

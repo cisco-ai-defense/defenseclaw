@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -272,8 +273,8 @@ func PlanSandboxScan(scan SandboxScan, opts SandboxScanOptions, catalog []AISign
 			out.Manifests = append(out.Manifests, name)
 		}
 		sort.Strings(out.Manifests)
-		out.ManifestSuffixes = []string{".csproj", ".fsproj", ".vbproj"}
-		out.SkipDirs = []string{".git", ".cache", "cache", "dist", "build", "target", "__pycache__", "library"}
+		out.ManifestSuffixes = slices.Clone(projectManifestSuffixes)
+		out.SkipDirs = slices.Clone(discoverySkipDirs)
 	}
 	return out, nil
 }

@@ -72,7 +72,7 @@ func discoveryAnswer(call openshelltest.ExecCall) openshelltest.ExecResponse {
 	if !isCollect(call) {
 		return openshelltest.ExecResponse{}
 	}
-	lines := []string{"T 100 1700000000", "P 42 1 1000 100 S", "Pc 42 claude", "Pa 42 claude", "V ANTHROPIC_API_KEY"}
+	lines := []string{"T 100 1700000000", "P 42 1 1000 100", "Pc 42 claude", "Pa 42 claude", "V ANTHROPIC_API_KEY"}
 	for _, kv := range collectPairs(call) {
 		if kv[0] == "C" && strings.HasSuffix(kv[1], "/mcp.json") && strings.HasPrefix(kv[1], "/sandbox/") {
 			lines = append(lines, "E f 40 1700000100 "+kv[1], "F "+kv[1], b64(`{"mcpServers":{"dccert-marker":{"command":"true"}}}`))

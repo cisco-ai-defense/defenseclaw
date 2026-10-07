@@ -64,12 +64,6 @@ const (
 	maxCmdlineBytes      = 1024
 )
 
-// Process sources (sandboxapi.Process.Source).
-const (
-	processSourceSample = "sample"
-	processSourceOCSF   = "ocsf"
-)
-
 // procNode is one process of the tree. startTicks is its start in clock
 // ticks since boot, 0 while only OpenShell reported it.
 type procNode struct {
@@ -198,7 +192,7 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		}
 		fresh := node == nil
 		if fresh {
-			node = &procNode{PID: p.PID, FirstSeen: now, Source: processSourceSample}
+			node = &procNode{PID: p.PID, FirstSeen: now, Source: audit.SandboxProcessSourceSample}
 			t.live[p.PID] = node
 		}
 		node.PPID, node.UID, node.startTicks, node.Start = p.PPID, p.UID, p.StartTicks, c.started(p)
@@ -249,20 +243,20 @@ func (m *Manager) observeOCSFProcess(ctx context.Context, b *box, r ocsf.Record,
 		return
 	}
 	m.mu.Lock()
-	on := b.processTreeOn()
+	if !b.processTreeOn() {
+		m.mu.Unlock()
+		return
+	}
 	t := b.tree()
 	id := b.identity()
 	m.mu.Unlock()
-	if !on {
-		return
-	}
 	var started, exited []*procNode
 	t.mu.Lock()
 	node := t.live[r.PID]
 	switch strings.ToUpper(r.Activity) {
 	case "LAUNCH":
 		if node == nil && len(t.live) < procTreeMaxLive {
-			node = &procNode{PID: r.PID, FirstSeen: at, Source: processSourceOCSF}
+			node = &procNode{PID: r.PID, FirstSeen: at, Source: audit.SandboxProcessSourceOCSF}
 			binary := collectText(r.Binary, collectMaxPathBytes)
 			node.Comm, node.Exe = collectText(path.Base(binary), collectMaxCommBytes), binary
 			if r.CmdLine != "" {

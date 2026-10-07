@@ -53,7 +53,7 @@ func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) 
 func TestParseCollectionKeepsWhatWasAsked(t *testing.T) {
 	out := answerOf(
 		"T 100 1700000000",
-		"P 42 1 1000 500 S", "Pc 42 dccert", "Pa 42 /sandbox/.local/bin/dccert", "Pt 42 /sandbox/.local/lib/dccert/cli.js",
+		"P 42 1 1000 500", "Pc 42 dccert", "Pa 42 /sandbox/.local/bin/dccert", "Pt 42 /sandbox/.local/lib/dccert/cli.js",
 		"L /proc/42 exe /usr/bin/node", "V DCCERT_MARKER", "V PATH",
 		"X 10 1700000001.5 /sandbox/.local/bin/dccert",
 		"E f 52 1700000002 /sandbox/.dccert/mcp.json",
@@ -246,9 +246,9 @@ func TestParseCollectionReadsHostileProcessLines(t *testing.T) {
 	c, err := parseCollection(answerOf(
 		"T 1000 1700000000",
 		"T 100 -5",
-		"P 7 1 1000 10 S",
-		"P 7 1 1000 10 S",
-		"P x 1 1000 10 S", "P -3 1 1000 10 S", "P 8 1 1000 10 SS", "P 9 1 1000 10 1", "P 10 1 1000", "P 11 1 1000 10 S extra",
+		"P 7 1 1000 10",
+		"P 7 1 1000 10",
+		"P x 1 1000 10", "P -3 1 1000 10", "P 8 1 1000 x", "P 9 -1 1000 10", "P 10 1 1000", "P 11 1 1000 10 extra",
 		"Pc 7 evil\x1b[2Jname\x07", "Pc 99 orphan",
 		"Pa 7 "+strings.Repeat("a", 1000),
 		"Pa 7 two", "Pa 7 three", "Pa 7 4", "Pa 7 5", "Pa 7 6", "Pa 7 7", "Pa 7 8", "Pa 7 9", "Pa 7 10", "Pa 7 11", "Pa 7 12", "Pa 7 13", "Pa 7 14", "Pa 7 15", "Pa 7 16", "Pa 7 17",
@@ -256,7 +256,7 @@ func TestParseCollectionReadsHostileProcessLines(t *testing.T) {
 		"V 1BAD", "V BAD-NAME", "V GOOD_NAME", "V GOOD_NAME",
 		"Z unknown",
 		collectEnd,
-		"P 12 1 1000 10 S",
+		"P 12 1 1000 10",
 	), false, testScope(), 1024)
 	if err != nil {
 		t.Fatal(err)
