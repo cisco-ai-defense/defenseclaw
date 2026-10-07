@@ -58,7 +58,7 @@ func (a *App) Destinations(ctx context.Context, name string, format OutputFormat
 		rows = append(rows, []string{
 			destinationHost(r), truncate(destinationKindCell(r), 48), truncate(firstNonEmpty(r.Provider, "-"), 32),
 			destinationRequests(r), humanBytes(r.BytesUp) + " / " + humanBytes(r.BytesDown),
-			truncate(firstNonEmpty(destinationBinary(r), "-"), 40), r.LastSeen.Local().Format("01-02 15:04"),
+			destinationBinaryCell(r), r.LastSeen.Local().Format("01-02 15:04"),
 		})
 	}
 	if len(rows) > 0 {
@@ -167,6 +167,17 @@ func destinationBinary(r sandboxapi.DestinationRow) string {
 		names = append(names, firstNonEmpty(p.Comm, path.Base(p.Exe), strconv.Itoa(p.PID)))
 	}
 	return strings.Join(names, " ← ")
+}
+
+// destinationBinaryCell is the BINARY cell: a program's path is cut from
+// the left, so its name stays (GAP-0198); a lineage from the right, after
+// the program that connected.
+func destinationBinaryCell(r sandboxapi.DestinationRow) string {
+	b := firstNonEmpty(destinationBinary(r), "-")
+	if len(r.Lineage) < 2 {
+		return truncateLeft(b, 40)
+	}
+	return truncate(b, 40)
 }
 
 func lastOf(list []string) string {

@@ -99,14 +99,16 @@ func TestDestinations(t *testing.T) {
 			PID: 77, Lineage: []sandboxapi.DestinationProcess{{PID: 77, Exe: "/usr/bin/wget"}, {PID: 42, Comm: "bash"}, {PID: 7, Comm: "claude"}}},
 		// GAP-0177: the PROVIDER cell holds an AI provider or -, never the
 		// egress category; a refusal's reason reads in words in KIND.
-		{Host: "pypi.org", Kind: "package_registry", Category: "package_registry", Connections: 2, LastSeen: seen},
+		// GAP-0198: a long program path keeps its file name.
+		{Host: "pypi.org", Kind: "package_registry", Category: "package_registry", Connections: 2, LastSeen: seen,
+			Binaries: []string{"/sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/python3.14"}},
 		{Host: "example.net", Kind: sandboxapi.DestinationBlocked, Category: "not_allowlisted", Blocked: 1, LastSeen: seen},
 	}, Models: []sandboxapi.ModelUse{{Provider: "anthropic", Model: "claude-haiku", Calls: 2, Failed: 1, LastSeen: seen}}}}
 	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputText))
 	out := ta.output()
 	has(t, out, "DESTINATION", "shadow AI", "model provider", "5, 2 model calls", "host.openshell.internal:8080,11434",
 		"0 (4 refused)", "/usr/bin/curl", "wget ← bash ← claude", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)",
-		"blocked (paste site)", "blocked (not on the allowlist)", "package registry")
+		"blocked (paste site)", "blocked (not on the allowlist)", "package registry", "…-3.14.3-linux-x86_64-gnu/bin/python3.14")
 	if strings.Contains(out, "package_registry") || strings.Contains(out, "not_allowlisted") || strings.Contains(out, "paste_site") {
 		t.Fatalf("a category slug reads in the table:\n%s", out)
 	}

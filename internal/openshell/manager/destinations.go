@@ -58,8 +58,8 @@ import (
 // is its vendor's; any other catalogued AI provider is shadow AI, and so is
 // a host shaped like an inference endpoint the catalog does not know; any
 // other is blocked when it was only ever refused, else takes the category
-// the proxy allowed it under (a feed's, such as package_registry), else is
-// other. A shadow AI host
+// the proxy allowed it under (a feed's, such as package_registry), else the
+// curated allowlist's category for it, else is other. A shadow AI host
 // raises one shadow_ai finding per provider per session: LOW while the
 // sandbox was only refused it, MEDIUM once it reached it (a refusal first
 // and a contact later raise both).
@@ -531,9 +531,17 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 		return sandboxapi.DestinationBlocked, "", ""
 	case r.Category != "":
 		return r.Category, "", ""
-	default:
-		return sandboxapi.DestinationOther, "", ""
 	}
+	// Reached without the allowlist's say (the open profile lets every
+	// host through uncategorised), a host the curated allowlist knows is
+	// still what it knows it as: package registry, source hosting
+	// (GAP-0198).
+	if allow, err := egress.BuiltinAllowlist(); err == nil {
+		if hit, ok := allow.Match(r.Host); ok {
+			return string(hit.Entry.Category), "", ""
+		}
+	}
+	return sandboxapi.DestinationOther, "", ""
 }
 
 // catalogProviderName is how a catalogued AI provider is named: by its

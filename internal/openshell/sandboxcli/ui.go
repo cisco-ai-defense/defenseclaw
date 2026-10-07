@@ -451,6 +451,17 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
+// truncateLeft is truncate keeping the end of s, such as a path's file
+// name.
+func truncateLeft(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return "…" + string(r[len(r)-(n-1):])
+}
+
 func humanDuration(d time.Duration) string {
 	switch {
 	case d <= 0:
