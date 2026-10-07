@@ -1,16 +1,31 @@
 # Deploying DefenseClaw managed enterprise with Microsoft Intune
 
-This guide deploys the standalone profile with Intune on each platform. It
-follows Microsoft's current Intune documentation. It has not been run
-against a live tenant, so run a pilot group first. The published versions of
-these guides are under
-<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/>.
+This folder holds the Intune-specific scripts. The step-by-step guides are published with
+the docs, the single source for them (this folder used to carry copies that drifted, so they
+were removed):
+
+| Guide | Published page |
+| --- | --- |
+| Prepare the tenant: licences, enrollment, groups, identity | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-tenant/> |
+| Windows: Win32 app and Remediations | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-windows/> |
+| macOS: shell script, or PKG app | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-macos/> |
+| Linux: platform script | <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-linux/> |
+
+| Folder | Content |
+| --- | --- |
+| `windows/` | `New-DefenseClawIntunePackage.ps1` (builds the Win32 app content), `Install-DefenseClawIntune.ps1` (the launcher), `Remediate-Detect.ps1` and `Remediate-Fix.ps1` |
+| `tenant/` | `intune_tenant.py`, a Microsoft Graph helper: check the tenant, create device groups, assign the app, create the Remediations package or a macOS shell script, report compliance. Previews by default. See its README |
+
+Validation status: the tenant setup, Windows and Linux enrollment and compliance, and the
+read-only and preview modes of `tenant/intune_tenant.py` were run on a test tenant. Delivering
+DefenseClaw through Intune (the Win32 app, Remediations, the macOS shell script, the Linux
+platform script) has not been run against a live tenant yet, so run a pilot group first.
 
 | Platform | Install | Detect | Keep healthy | Remove |
 | --- | --- | --- | --- | --- |
-| Windows 10/11 x64 | Win32 app (`windows.md`) | Registry rule on the marker version (`ProductVersion` ≥ the app version) | Remediations pair (`Remediate-Detect.ps1`, `Remediate-Fix.ps1`) | Win32 uninstall command |
-| macOS 13+ (Apple silicon) | Shell script (recommended) or unmanaged PKG app (`macos.md`) | `detect.sh` custom attribute; pkg receipt | Script frequency | `uninstall.sh` shell script |
-| Ubuntu, RHEL (the releases Intune supports) | Linux platform script (`linux.md`) | `detect.sh` as a second platform script; package database | Script frequency (default every 15 minutes) | `uninstall.sh` platform script |
+| Windows 10/11 x64 | Win32 app | Registry rule on the marker version (`ProductVersion` >= the app version) | Remediations pair (`Remediate-Detect.ps1`, `Remediate-Fix.ps1`) | Win32 uninstall command |
+| macOS 13+ (Apple silicon) | Shell script (recommended) or unmanaged PKG app | `detect.sh` custom attribute; pkg receipt | Script frequency | `uninstall.sh` shell script |
+| Ubuntu, RHEL (the releases Intune supports) | Linux platform script | `detect.sh` as a second platform script; package database | Script frequency (default every 15 minutes) | `uninstall.sh` platform script |
 
 Intune's execution contexts shape the design:
 
@@ -45,5 +60,5 @@ Real-tenant caveats:
 - Intune cannot enroll Windows Server, so test Windows on Windows 10/11.
 - Remediations need Windows Enterprise E3/E5, Education A3/A5, or Windows
   VDA per-user licenses.
-- Detection by version does not notice a config-only change on Windows; see
-  `windows.md` section 6.
+- Detection by version does not notice a config-only change on Windows; see the
+  Windows page, section 6.
