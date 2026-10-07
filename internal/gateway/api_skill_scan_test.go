@@ -155,3 +155,41 @@ func TestHandleSkillScanNamesAFolderTheGatewayCannotRead(t *testing.T) {
 		t.Fatalf("response = %d %q, want 403 naming the unreadable folder", w.Code, w.Body.String())
 	}
 }
+
+// A missing folder, or a skill whose SKILL.md the gateway cannot read, is named in
+// one sentence without the scanner's process name or exit code (GAP-0256).
+func TestHandleSkillScanSaysAMissingFolderAndAnUnreadableSkillFile(t *testing.T) {
+	scan := func(target string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(skillScanRequest{Target: target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		(&APIServer{}).handleSkillScan(w, httptest.NewRequest(http.MethodPost, "/v1/skill/scan", bytes.NewReader(body)))
+		return w
+	}
+
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	w := scan(missing)
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "the folder does not exist: ") ||
+		strings.Contains(w.Body.String(), "exited") {
+		t.Fatalf("missing folder response = %d %q, want 404 with a plain sentence", w.Code, w.Body.String())
+	}
+
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		return // a deny-read file needs a POSIX permission denial for a non-root user
+	}
+	skill := t.TempDir()
+	file := filepath.Join(skill, "SKILL.md")
+	if err := os.WriteFile(file, []byte("---\nname: x\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(file, 0o600) })
+	w = scan(skill)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "cannot read "+file) {
+		t.Fatalf("unreadable SKILL.md response = %d %q, want 403 naming the file", w.Code, w.Body.String())
+	}
+}
