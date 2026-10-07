@@ -823,8 +823,31 @@ def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) ->
 
     assert result.checks[0]["status"] == "fail"
     assert result.checks[0]["reason_code"] == "audit-db-custody-invalid"
+    # GAP-0337: a permission slip names the mode and the chmod, not a restore.
+    assert "mode 0644" in result.checks[0]["detail"]
+    assert result.checks[0]["remediation"] == f"chmod 600 {cfg.audit_db}"
     assert planned.state == "blocked"
     assert planned.blockers == ("audit-db-custody-invalid",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_world_readable_dotenv_fails_the_private_files_row(tmp_path) -> None:
+    # GAP-0336: plain doctor reported all passed for a 0644 .env.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    dotenv = data_dir / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    os.chmod(dotenv, 0o600)
+    clean = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, clean)
+    assert clean.checks[-1]["status"] == "pass"
+
+    os.chmod(dotenv, 0o644)
+    exposed = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, exposed)
+    assert exposed.checks[-1]["status"] == "fail"
+    assert "0644" in exposed.checks[-1]["detail"]
+    assert "defenseclaw doctor --fix --yes" in exposed.checks[-1]["remediation"]
 
 
 def test_audit_recovery_removes_stale_pid_dependency_in_one_run(tmp_path) -> None:

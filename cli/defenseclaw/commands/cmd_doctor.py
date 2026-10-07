@@ -2146,6 +2146,93 @@ def _fix_audit_store_reopen(cfg, *, assume_yes: bool, plan_only: bool = False) -
     return ("pass", "restarted the gateway; it writes to the audit.db on disk again")
 
 
+def _audit_db_exposing_modes(db_path: str) -> list[tuple[str, int]]:
+    """(path, mode) of audit.db and its directory when other accounts may read them (POSIX)."""
+    if os.name == "nt" or not db_path:
+        return []
+    found: list[tuple[str, int]] = []
+    for path in (db_path, os.path.dirname(db_path)):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISLNK(info.st_mode) and stat.S_IMODE(info.st_mode) & 0o077:
+            found.append((path, stat.S_IMODE(info.st_mode)))
+    return found
+
+
+def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
+    """FAIL when other local accounts can read DefenseClaw secrets or state.
+
+    .env holds the gateway token and device.key the device identity; only the
+    repair planner noticed a world-readable .env, so plain doctor reported all
+    passed (GAP-0336).
+    """
+    from defenseclaw.file_permissions import windows_acl_confidentiality_error
+
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return
+    gateway = getattr(cfg, "gateway", None)
+    targets = (
+        (os.path.join(data_dir, ".env"), False),
+        (str(getattr(gateway, "device_key_file", "") or os.path.join(data_dir, "device.key")), False),
+        (str(getattr(cfg, "audit_db", "") or os.path.join(data_dir, "audit.db")), False),
+        (data_dir, True),
+    )
+    exposed: list[str] = []
+    files: list[str] = []
+    for path, is_dir in targets:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            continue
+        if os.name == "nt":
+            problem = None if is_dir else windows_acl_confidentiality_error(path)
+            if problem and "read" in problem.lower():
+                exposed.append(f"{path} (its Windows ACL lets other accounts read it)")
+                files.append(path)
+            continue
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o077:
+            exposed.append(f"{path} (mode {mode:04o})")
+            if not is_dir:
+                files.append(path)
+    if not exposed:
+        _emit(
+            "pass",
+            "Private files",
+            "only this account can read .env, device.key, audit.db and the data directory",
+            r=r,
+            check_id="doctor.state.private-files",
+        )
+        return
+    steps = []
+    dotenv = os.path.join(data_dir, ".env")
+    if dotenv in files:
+        steps.append("defenseclaw doctor --fix --yes (rotates the exposed gateway token and makes .env private)")
+    others = [path for path in files if path != dotenv]
+    if os.name == "nt":
+        if others:
+            steps.append("remove the other accounts from the permissions of " + ", ".join(others))
+    else:
+        if others:
+            steps.append("chmod 600 " + " ".join(others))
+        if any(item.startswith(f"{data_dir} (") for item in exposed):
+            steps.append(f"chmod 700 {data_dir}")
+    _emit(
+        "fail" if files else "warn",
+        "Private files",
+        "other accounts can read " + ", ".join(exposed),
+        r=r,
+        check_id="doctor.state.private-files",
+        reason_code="private-files-exposed",
+        remediation="; ".join(steps),
+    )
+
+
 def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import (
         _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
@@ -2200,6 +2287,14 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
             remediation = (
                 "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
                 "and if it keeps failing, run 'defenseclaw-gateway restart'"
+            )
+        elif modes := _audit_db_exposing_modes(db_path):
+            # A permission slip, not damage: tighten, do not restore (GAP-0337).
+            detail = "; ".join(f"{path} has mode {mode:04o}" for path, mode in modes) + (
+                ", so other accounts can read the audit history; the content is intact"
+            )
+            remediation = " && ".join(
+                f"chmod {700 if os.path.isdir(path) else 600} {path}" for path, _mode in modes
             )
         else:
             detail = f"private custody validation failed ({reason})"
@@ -11012,6 +11107,7 @@ def doctor(
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
+    _check_private_file_exposure(cfg, r)
     _check_legacy_sandbox(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
