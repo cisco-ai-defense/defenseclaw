@@ -425,7 +425,7 @@ def _only_hot_config_changes(ctx: click.Context, cfg_path: str | None) -> bool:
     if before is None or after is None:
         return False
     try:
-        return not config_writer.restart_required(config_writer.diff_documents(before, after), before, after)
+        return not config_writer.restart_required(config_writer.diff_documents(before, after))
     except Exception:  # noqa: BLE001 - an unreadable document is not provably hot.
         return False
 

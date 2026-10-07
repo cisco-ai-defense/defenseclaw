@@ -74,7 +74,7 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
             "application_protection.connectors.codex.guardrail.block_at",
             "cisco_ai_defense.endpoint",
         ]
-    ) == ["guardrail.hook_self_heal", "guardrail.connectors.codex.enabled"]
+    ) == ["guardrail.hook_self_heal"]
 
 
 def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
@@ -447,37 +447,6 @@ def test_a_stray_deployment_pin_is_ignored_for_a_per_user_config(tmp_path, monke
     monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
     assert config_module.ignore_unmanaged_deployment_pins() == []
     assert os.environ["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
-
-
-def test_a_connector_enabled_equal_to_its_default_needs_no_restart(tmp_path, monkeypatch):
-    # GAP-0032: enabled: true is the unset default, so flipping between them is no change.
-    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
-    path = _config(tmp_path, "guardrail:\n  connectors:\n    codex: {mode: observe}\n")
-    on = config_writer.apply([Change("guardrail.connectors.codex.enabled", True)], "cli:test", "t", path=path)
-    assert on.changed and on.restart_required == []
-    off = config_writer.apply([Change("guardrail.connectors.codex.enabled", False)], "cli:test", "t", path=path)
-    assert off.restart_required == ["guardrail.connectors.codex.enabled"]
-
-
-def test_a_connector_flip_back_to_the_running_value_prints_no_restart_hint(tmp_path, monkeypatch):
-    # GAP-0221: the hint compares with what the gateway runs, not with the file before the edit.
-    from unittest.mock import patch
-
-    from click.testing import CliRunner
-    from defenseclaw.commands import cmd_config
-
-    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
-    local = "sha256:" + "a" * 64
-    for running, hint in ((local, False), ("sha256:" + "b" * 64, True), ("", True)):
-        _config(tmp_path, "guardrail:\n  connectors:\n    codex: {enabled: false}\n")
-        with (
-            patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
-            patch("defenseclaw.gateway.local_policy_digest", return_value={"effective_digest": local}),
-            patch("defenseclaw.gateway.running_policy_digest", return_value=running),
-        ):
-            out = CliRunner().invoke(cmd_config.config_cmd, ["set", "guardrail.connectors.codex.enabled", "true"])
-        assert out.exit_code == 0, out.output
-        assert ("Restart the gateway to apply guardrail.connectors.codex.enabled" in out.output) is hint
 
 
 def test_a_global_mode_change_names_the_connectors_that_keep_their_own_mode(tmp_path, monkeypatch):

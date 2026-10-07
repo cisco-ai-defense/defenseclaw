@@ -131,6 +131,7 @@ type Sidecar struct {
 	guardrailProxy           *GuardrailProxy
 	apiRestartCh             chan struct{}
 	watcherRestartCh         chan struct{}
+	guardrailRestartCh       chan struct{}
 	aiRestartCh              chan struct{}
 	aiRuntimeRestartCh       chan struct{}
 	runCancelMu              sync.Mutex
@@ -501,6 +502,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		osNotifier:              osNotifier,
 		apiRestartCh:            make(chan struct{}, 1),
 		watcherRestartCh:        make(chan struct{}, 1),
+		guardrailRestartCh:      make(chan struct{}, 1),
 		aiRestartCh:             make(chan struct{}, 1),
 		aiRuntimeRestartCh:      make(chan struct{}, 1),
 		alertCtx:                alertCtx,
@@ -1190,14 +1192,19 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
-	// Goroutine 4: guardrail proxy (opt-in via config)
+	// Goroutine 4: guardrail (connector hooks and the proxy). A reload that
+	// changes the connector set runs it again in-process.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runActiveGuardrail(runCtx); err != nil && runCtx.Err() == nil {
+		reported := false
+		s.runGuardrailRestartable(runCtx, func(err error) {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
-			errCh <- err
-		}
+			if !reported {
+				reported = true
+				errCh <- err
+			}
+		})
 	}()
 
 	// Goroutine 5: continuous AI discovery (opt-in via config)
@@ -1405,6 +1412,28 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 		s.health.SetGuardrail(StateError, err.Error(), guardrailFailureDetails(err))
 	}
 	return err
+}
+
+// runGuardrailRestartable runs the guardrail and runs it again when a reload
+// changes the connector set. A run that fails is passed to failed and then
+// waits for the next connector change, so a corrected connector set applies
+// without a gateway restart.
+func (s *Sidecar) runGuardrailRestartable(ctx context.Context, failed func(error)) {
+	for {
+		err := s.runRestartable(ctx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			failed(err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.guardrailRestartCh:
+			fmt.Fprintf(os.Stderr, "[sidecar] restarting guardrail after config reload\n")
+		}
+	}
 }
 
 func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-chan struct{}, run func(context.Context) error) error {
@@ -1851,7 +1880,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	current := s.currentConfig()
 
 	apiRestart := apiNeedsRestart(oldCfg, newCfg)
-	watcherRestart := watcherNeedsRestart(oldCfg, newCfg)
+	// A connector added, removed, enabled or disabled re-runs the connector
+	// setup in-process and restarts the install watcher, which watches the
+	// skill and plugin dirs of the connectors. Secure Client never gets here
+	// with such a change: diffConfigs keeps it restart-required.
+	guardrailRestart := connectorSetChanged(oldCfg, newCfg)
+	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || signaturePacksChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
 		oldCfg.Guardrail.AllowPrivateUpstreams,
@@ -2158,6 +2192,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if watcherRestart {
 		signalRestart(s.watcherRestartCh)
 	}
+	if guardrailRestart {
+		signalRestart(s.guardrailRestartCh)
+	}
 	if apiRestart {
 		signalRestart(s.apiRestartCh)
 	}
@@ -2245,8 +2282,17 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		oldG.Connector != newG.Connector || oldG.ScannerMode != newG.ScannerMode ||
 		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 		oldG.HookSelfHeal != newG.HookSelfHeal ||
-		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
-		!reflect.DeepEqual(connectorHookSettings(oldG.Connectors), connectorHookSettings(newG.Connectors))
+		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs
+}
+
+// connectorSetChanged reports a change to the set of connectors whose hooks
+// are installed: a connector added, removed, enabled or disabled. Off Secure
+// Client it applies in-process (guardrailRestartCh, spec section 4).
+func connectorSetChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
 }
 
 // connectorHookSettings keeps, per connector, only whether its hooks are
@@ -4072,6 +4118,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		publishConnectorRulePackOverrides(conn.Name(), compiledConnectorRules)
 	}
 
+	s.health.RetainConnectors(conn.Name())
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
 	proxy, err := NewGuardrailProxy(
@@ -4524,6 +4571,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
+		s.health.RetainConnectors()
 		s.health.SetGuardrail(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — tore down %d configured connector(s)\n", len(conns))
 		<-ctx.Done()
@@ -4556,6 +4604,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
+		s.health.RetainConnectors()
 		s.health.SetGuardrail(StateDisabled, "all configured connectors are individually disabled", nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] all %d configured connector(s) disabled per-connector — none active; idle until shutdown\n", len(configured))
 		<-ctx.Done()
@@ -4612,6 +4661,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Health: register every connector that came up so each appears in the
 	// roster with its own live counters, then mark the first (sorted) as the
 	// primary surfaced in the back-compat singular Connector field.
+	s.health.RetainConnectors(succeeded...)
 	for _, name := range succeeded {
 		if c, ok := registry.Get(name); ok {
 			s.health.RegisterConnector(c.Name(), c.ToolInspectionMode(), c.SubprocessPolicy())

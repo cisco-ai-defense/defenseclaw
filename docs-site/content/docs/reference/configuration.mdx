@@ -1393,7 +1393,7 @@ Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway resta
 | `data_dir`, `observability.local.path`, `observability.local.judge_bodies_path` | Storage identity: the files the process opened at start |
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
-| `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms`, `guardrail.connectors.<connector>.enabled` | The hook guard and which connectors have hooks installed |
+| `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms` | The hook guard |
 | `claw`, `agent`, `routing` | Paths, identity and the model router, captured at start |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network` | The deployment boundary |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |

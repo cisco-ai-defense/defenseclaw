@@ -1041,20 +1041,31 @@ func TestGuardrailRestartPredicateIncludesSingularConnector(t *testing.T) {
 	}
 }
 
-// A connector's enabled: true is the unset default, so it is no restart-
-// required change; disabling it is (GAP-0032).
-func TestGuardrailRestartPredicateTreatsEnabledTrueAsTheDefault(t *testing.T) {
+// The connector set applies in-process off Secure Client: disabling a
+// connector re-runs the connector setup (and the install watcher) without a
+// gateway restart, enabled: true is the unset default, and Secure Client
+// keeps the restart (GAP-0072, GAP-0032).
+func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	yes, no := true, false
-	withCodex := func(enabled *bool) *config.Config {
+	withCodex := func(enabled *bool, profile string) *config.Config {
 		cfg := config.DefaultConfig()
-		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}}
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}, "claudecode": {}}
+		if profile != "" {
+			cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+			cfg.Enterprise.Profile = profile
+		}
 		return cfg
 	}
-	if guardrailNeedsRestart(withCodex(nil), withCodex(&yes)) {
-		t.Fatal("enabled: true (the default) asked for a restart")
+	if connectorSetChanged(withCodex(nil, ""), withCodex(&yes, "")) {
+		t.Fatal("enabled: true (the default) changed the connector set")
 	}
-	if !guardrailNeedsRestart(withCodex(&yes), withCodex(&no)) {
-		t.Fatal("disabling a connector did not ask for a restart")
+	oldCfg, newCfg := withCodex(&yes, ""), withCodex(&no, "")
+	if diff := diffConfigs(oldCfg, newCfg); len(diff.RestartRequired) != 0 || !connectorSetChanged(oldCfg, newCfg) {
+		t.Fatalf("disable codex: diff = %+v, connector set changed = %v; want a hot connector-set change", diff, connectorSetChanged(oldCfg, newCfg))
+	}
+	sc := managed.ProfileSecureClient
+	if diff := diffConfigs(withCodex(&yes, sc), withCodex(&no, sc)); !slices.Contains(diff.RestartRequired, "guardrail.connectors") {
+		t.Fatalf("Secure Client disable codex: restart_required = %v, want guardrail.connectors", diff.RestartRequired)
 	}
 }
 

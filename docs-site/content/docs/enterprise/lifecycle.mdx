@@ -458,9 +458,11 @@ warning `ensure_config_applied`; no service stops and no agent fails closed.
 If the gateway does not report the policy in time, or the lifecycle lock is
 busy, `ensure` puts the previous config back and runs the full upgrade, as it
 did for every change before. A change to a process-level key restarts it:
-`gateway.*`, `guardrail.connectors.*.enabled`, `guardrail.hook_self_heal`,
-`enterprise.network` and the other keys that
-[Source of truth](/docs/reference/source-of-truth) lists.
+`gateway.*`, `guardrail.hook_self_heal`, `enterprise.network` and the other
+keys that [Source of truth](/docs/reference/source-of-truth) lists. A
+connector enabled flip (`guardrail.connectors.*.enabled`) also takes the full
+transaction, because the enterprise hook guardian installs and removes the
+hooks.
 
 ## Uninstall
 

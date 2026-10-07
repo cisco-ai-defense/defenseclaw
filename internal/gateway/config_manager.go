@@ -1323,10 +1323,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	if oldCfg.Guardrail.ScannerMode != newCfg.Guardrail.ScannerMode {
 		restart = append(restart, "guardrail.scanner_mode")
 	}
-	connectorsChanged := !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
-	if secureClient {
-		connectorsChanged = !reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
-	}
+	// The connector set (guardrail.connectors membership and enabled) applies
+	// in-process: the reload re-runs the connector setup and restarts the
+	// install watcher. Secure Client keeps its restart for every connector
+	// setting (issue #1092).
+	connectorsChanged := secureClient && !reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
 	if oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector || connectorsChanged {
 		restart = append(restart, "guardrail.connectors")
 	}
@@ -1370,21 +1371,6 @@ func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.Guar
 	g.Host, g.Port, g.Enabled, g.Connector = running.Host, running.Port, running.Enabled, running.Connector
 	g.ScannerMode, g.RetainJudgeBodies = running.ScannerMode, running.RetainJudgeBodies
 	g.HookSelfHeal, g.HookSelfHealDebounceMs = running.HookSelfHeal, running.HookSelfHealDebounceMs
-	// The connector set (the keys of guardrail.connectors) is the set of
-	// connectors whose hooks are installed, so it stays as it runs too.
-	var connectors map[string]config.PerConnectorGuardrailConfig
-	if running.Connectors != nil {
-		connectors = make(map[string]config.PerConnectorGuardrailConfig, len(running.Connectors))
-	}
-	for name, was := range running.Connectors {
-		pc, ok := g.Connectors[name]
-		if !ok {
-			pc = was
-		}
-		pc.Enabled = was.Enabled
-		connectors[name] = pc
-	}
-	g.Connectors = connectors
 }
 
 // effectiveGatewayConfigForDiff compares operator-controlled gateway state.

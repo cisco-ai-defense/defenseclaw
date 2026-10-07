@@ -253,9 +253,9 @@ def _toggle_connector_guardrail(
     """Enable/disable the guardrail for a SINGLE connector.
 
     Per-connector analog of the global enable/disable: it flips
-    ``guardrail.connectors[X].enabled`` and (on restart) lets the Go boot
-    loop run that one connector's ``Setup``/``Teardown`` via the existing
-    set-difference path — the others are untouched. The connector's other
+    ``guardrail.connectors[X].enabled``; the gateway (its config reload, or
+    the restart) runs that one connector's ``Setup``/``Teardown`` via the
+    existing set-difference path — the others are untouched. The connector's other
     policy fields (mode/hilt/rule_pack) are retained so re-enable
     restores it with no re-prompt.
 
@@ -324,8 +324,8 @@ def _toggle_connector_guardrail(
         )
     else:
         ux.subhead(
-            f"--no-restart specified: flag persisted but the connector {action} won't "
-            "run until you restart the gateway manually.",
+            f"--no-restart specified: a running gateway runs the connector {action} from "
+            "config.yaml without a restart (Secure Client: at the next restart).",
             indent="  ",
         )
     click.echo()
