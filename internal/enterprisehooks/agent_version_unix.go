@@ -72,6 +72,13 @@ type unixAgentProbe struct {
 	// whose dist-info directory carries the version, for Python CLIs that
 	// take too long to start for the --version probe.
 	uvTool [2]string
+	// stamp is a home-relative JSON install stamp that records the release
+	// ("displayVersion", else "baseVersion"), for CLIs that no longer print a
+	// version outside their own environment: a current Hermes refuses
+	// --version when no dependency environment is committed for the install
+	// the probe's scratch HERMES_HOME points at. Reading the stamp executes
+	// nothing.
+	stamp string
 }
 
 var unixAgentProbes = map[string]unixAgentProbe{
@@ -84,7 +91,7 @@ var unixAgentProbes = map[string]unixAgentProbe{
 	"opencode":   {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
 	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
 	"devin":      {binaries: []string{"devin"}},
-	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME"},
+	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME", stamp: ".hermes/hermes-agent/install-stamp.json"},
 	"openhands":  {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
 	"omnigent":   {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
 	// "antigravity" is the IDE launcher, a desktop surface that is never
@@ -294,6 +301,14 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 	if probe.uvTool[0] != "" {
 		if version := readUVToolVersion(home, probe.uvTool[0], probe.uvTool[1]); version != "" {
 			return version, ""
+		}
+	}
+	if probe.stamp != "" {
+		stamp := filepath.Join(home, filepath.FromSlash(probe.stamp))
+		if unixDiscoveryCandidateTrusted(home, stamp) {
+			if version := readUnixInstallStampVersion(stamp); version != "" {
+				return version, ""
+			}
 		}
 	}
 	if !allowExec {
@@ -555,6 +570,38 @@ func readUVToolVersion(home, tool, dist string) string {
 		return ""
 	}
 	return version
+}
+
+// readUnixInstallStampVersion reads the release from a bounded install
+// stamp: its displayVersion ("0.21.5+8332.g3d304a1", the form --version
+// prints) or, when that is not a usable version, its baseVersion.
+func readUnixInstallStampVersion(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, unixAgentVersionMaxBytes+1))
+	if err != nil || len(data) > unixAgentVersionMaxBytes {
+		return ""
+	}
+	var stamp struct {
+		DisplayVersion string `json:"displayVersion"`
+		BaseVersion    string `json:"baseVersion"`
+	}
+	if json.Unmarshal(data, &stamp) != nil {
+		return ""
+	}
+	for _, version := range []string{strings.TrimSpace(stamp.DisplayVersion), strings.TrimSpace(stamp.BaseVersion)} {
+		if validUnixAgentVersion(version) {
+			return version
+		}
+	}
+	return ""
 }
 
 type unixPackageJSON struct {

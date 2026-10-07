@@ -100,6 +100,25 @@ func TestSessionFactsHeaderCannotChangeVerifiedFacts(t *testing.T) {
 	}
 }
 
+// An SSH peer address that starts with a colon (the loopback ::1, an
+// IPv4-mapped ::ffff:a.b.c.d) stays on the record: the registry's
+// client.address pattern admits the compressed IPv6 forms (GAP-0127).
+func TestIdentityKeepsCompressedIPv6ClientAddress(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	for _, addr := range []string{"10.0.1.81", "::1", "::ffff:10.0.1.5"} {
+		id := &llmEventIdentity{Session: useridentity.SessionFacts{
+			Kind: useridentity.SessionSSH, ClientAddr: addr, Assurance: useridentity.AssuranceClaimed,
+		}}
+		if got, _ := id.v8().ClientAddress.Get(); got != addr {
+			t.Fatalf("client.address for %q = %q", addr, got)
+		}
+	}
+	if v8IdentityToken(":1", 256, false, true).IsPresent() {
+		t.Fatal("a single leading colon is not an address token")
+	}
+}
+
 func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 	applyIdentityPosture(&config.Config{DeploymentMode: "managed_enterprise"})
 	t.Cleanup(func() { setIdentityFactsEnabled(false); SetUserPrincipalCollectionEnabled(false) })
