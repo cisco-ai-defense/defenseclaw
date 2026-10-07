@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -322,6 +323,64 @@ func (adapter *aiRuntimeV8Adapter) emitKernelBlocks(ctx context.Context, snapsho
 		}
 	}
 	return firstErr
+}
+
+// notifyKernelBlocks hands the denials of DefenseClaw's kernel controls to
+// the notifier the way hook and guardrail blocks reach it (spec 9.1): the
+// block_enforced category and the hook source, with no source key of their
+// own, labelled kernel. It runs once per poll, beside the telemetry and
+// independent of it: an unreachable destination must not silence the
+// operator's notification. A would-block is not an enforcement and is not
+// notified.
+func notifyKernelBlocks(dispatcher *notifier.Dispatcher, snapshot sensor.Snapshot) {
+	if dispatcher == nil {
+		return
+	}
+	notified := 0
+	for _, event := range snapshot.KernelEvents {
+		if event.Outcome != plane.OutcomeBlocked {
+			continue
+		}
+		if notified >= maxKernelBlocksPerSnapshot {
+			return
+		}
+		notified++
+		dispatcher.OnBlock(kernelBlockNotification(event))
+	}
+}
+
+// kernelBlockNotification is one denial as a notification: the control and
+// the connector, and a fixed sentence for the control. Nothing a user did
+// (path, process, command line) is in it, as the path stays out of the
+// block.applied record; the record and `ai-runtime` name the rest.
+func kernelBlockNotification(event sensor.KernelEvent) notifier.BlockEvent {
+	ev := notifier.BlockEvent{
+		Source:    notifier.SourceHook,
+		Target:    "kernel control " + firstNonEmpty(event.Control, "unknown"),
+		Reason:    kernelDenialText(event.Control),
+		Severity:  string(observability.SeverityHigh),
+		Connector: event.Connector,
+		Event:     kernelNotificationLabel,
+	}
+	if event.RuleID != "" {
+		ev.RuleIDs = []string{event.RuleID}
+	}
+	return ev
+}
+
+// kernelNotificationLabel is the event label of a kernel denial's
+// notification (its subtitle reads "hook · HIGH · <connector> · kernel").
+const kernelNotificationLabel = "kernel"
+
+// kernelDenialText says what a kernel control denied, from its id alone.
+func kernelDenialText(control string) string {
+	switch control {
+	case "kernel.ssh_private_key_read":
+		return "Tetragon denied an agent's process a read of an SSH private key"
+	case "kernel.persistence_write":
+		return "Tetragon denied an agent's process a write to a shell profile or user autostart entry"
+	}
+	return "Tetragon denied an agent's process an open"
 }
 
 // kernelEnforcementID is a stable, content-free id for one denial. The path

@@ -188,6 +188,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 				continue
 			}
 			lastEmitted = snapshot.ScannedAt
+			notifyKernelBlocks(s.OSNotifier(), snapshot)
 			// Emission is best-effort and never blocks the planes. A
 			// destination being unreachable must not stop the sensor from
 			// observing; the snapshot the API serves is unaffected either way.
