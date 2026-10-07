@@ -935,6 +935,16 @@ func TestGatewayServiceState(t *testing.T) {
 			t.Fatalf("state = %+v, %v", st, err)
 		}
 	})
+	// GAP-0076: a service launchd has not loaded reported "is none".
+	t.Run("homebrew service not loaded", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"name":"openshell","running":false,"loaded":false,"status":"none","file":"/x.plist"}]`, nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || st.Active || st.Status != "not running (not loaded)" {
+			t.Fatalf("state = %+v, %v", st, err)
+		}
+	})
 	// Without the formula there is no service to ask brew about, and brew
 	// took about 40 s to say so on a Mac (manual test M4): the Homebrew
 	// prefix answers instead.

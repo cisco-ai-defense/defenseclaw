@@ -1871,8 +1871,20 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	}
 	i := infos[0]
 	st.Installed = i.File != "" || i.Loaded || i.Registered
-	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
+	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, brewStatusText(i.Status)
 	return st, nil
+}
+
+// brewStatusText says a `brew services` status in words: "none" is a
+// service launchd has not loaded, so not running.
+func brewStatusText(status string) string {
+	switch status {
+	case "none", "":
+		return "not running (not loaded)"
+	case "error":
+		return "failing (see `brew services info " + GatewayFormula + "`)"
+	}
+	return status
 }
 
 // jsonArrayStart is out from its first line that starts a JSON array (all
