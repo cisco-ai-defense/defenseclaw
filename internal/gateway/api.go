@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -2696,13 +2697,8 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify target exists on this host.
-	// If the path doesn't exist locally, the scanner will fail with a clear
-	// error — we still attempt the scan so that when the sidecar runs on the
-	// same host as OpenClaw (the intended remote deployment), it works.
-	if info, err := os.Stat(req.Target); err != nil || !info.IsDir() {
-		// Log a warning but proceed — the scanner will produce the definitive error.
-		fmt.Fprintf(os.Stderr, "[api] warning: target directory not found locally: %s\n", req.Target)
+	if a.rejectUnreadableScanTarget(w, "target directory", req.Target) {
+		return
 	}
 
 	if a.scannerCfg == nil {
@@ -2740,6 +2736,25 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
+}
+
+// rejectUnreadableScanTarget answers 403 with one actionable line when the
+// account the gateway runs as is not allowed to read a skill or plugin folder:
+// the scanner subprocess would otherwise die on the same permission error and
+// the caller would get its Python traceback (GAP-0229). A folder that is
+// missing or not a directory is only logged: the scanner reports it.
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string) bool {
+	info, err := os.Stat(target)
+	if errors.Is(err, fs.ErrPermission) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": fmt.Sprintf("the gateway's service account cannot read %s: copy the folder somewhere it can read, or grant that account read access", target),
+		})
+		return true
+	}
+	if err != nil || !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "[api] warning: %s not found locally: %s\n", what, target)
+	}
+	return false
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -2826,8 +2841,8 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if info, err := os.Stat(req.Target); err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "[api] warning: plugin target directory not found locally: %s\n", req.Target)
+	if a.rejectUnreadableScanTarget(w, "plugin target directory", req.Target) {
+		return
 	}
 
 	if a.scannerCfg == nil {

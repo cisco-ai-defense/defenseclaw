@@ -142,7 +142,10 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		if message == "" {
 			message = strings.TrimSpace(string(raw))
 		}
-		return fmt.Errorf("scan %s failed (HTTP %d): %s", kind, response.StatusCode, message)
+		if message == "" {
+			return fmt.Errorf("scan %s failed (HTTP %d)", kind, response.StatusCode)
+		}
+		return fmt.Errorf("scan %s: %s", kind, message)
 	}
 	fmt.Fprintf(out, "Scan %s: %s\n", kind, target)
 	keys := make([]string, 0, len(parsed.Settings))
