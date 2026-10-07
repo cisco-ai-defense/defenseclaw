@@ -78,6 +78,10 @@ type InstallOptions struct {
 	// standalone Amp and OpenCode plugins run for the foreign-hook guard
 	// (see connector.SetupOpts). Empty everywhere else.
 	ForeignHookGuardBinary string
+	// ManagedHookBinary is the administrator-owned hook binary a standalone
+	// Unix shell hook runs for the session facts (see connector.SetupOpts).
+	// Empty everywhere else.
+	ManagedHookBinary string
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -203,6 +207,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// OpenCode plugins carry, so a plugin rendered without it (before
 		// the guard existed, or edited) fails and the guardian re-renders it.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
+		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
 	if standalonePerUserRepair(uid) {
 		// Install renders some hooks for the guardrail mode (Cursor's action
@@ -399,6 +404,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HookCredentialIdentity: strings.TrimSpace(opts.HookCredentialIdentity),
 		// Only the standalone guardian sets this, for Amp and OpenCode.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
+		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {

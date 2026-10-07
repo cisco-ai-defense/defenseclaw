@@ -382,7 +382,6 @@ def _v8_status_payload(app: AppContext, status) -> dict:
             "logs": "logs" in selected,
         },
         "api_key": "configured" if _resolve_secret(app.cfg.data_dir) else "missing",
-        "config_version": 8,
     }
     if destination is None:
         return payload
@@ -442,7 +441,6 @@ def _status_rows(payload: dict) -> list[tuple[str, str]]:
         ("Endpoint", str(payload.get("endpoint") or "-")),
         ("Signals", ", ".join(selected) or "none"),
         ("API key", str(payload.get("api_key", ""))),
-        ("Config version", str(payload.get("config_version", ""))),
     ]
     health = payload.get("health")
     if not isinstance(health, dict):
