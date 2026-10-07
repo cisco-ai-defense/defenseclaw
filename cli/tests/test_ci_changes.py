@@ -228,6 +228,13 @@ def test_events_other_than_pull_request_run_everything(capsys) -> None:
         assert capsys.readouterr().out.strip() == "true"
         assert ci_changes.main(["--event", event, "--get", "py_select"]) == 0
         assert capsys.readouterr().out.strip() == ""
+    # A dispatch runs every suite on one commit, and pushes to the branch
+    # after it must not cancel it (only the pull_request run is superseded).
+    for name in ("ci.yml", "windows-native.yml"):
+        workflow = _workflow(name)
+        assert "workflow_dispatch" in workflow[True], name
+        group = workflow["concurrency"]["group"]
+        assert group.endswith("-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}"), name
 
 
 def test_every_tracked_path_is_classified() -> None:
