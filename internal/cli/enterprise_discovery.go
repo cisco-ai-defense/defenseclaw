@@ -346,6 +346,14 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	return writeEnterpriseDiscoveryReport(w, report, user, asJSON, heading)
 }
 
+// addWindowsDiscoveryUserFlag defines --user of `enterprise windows
+// discovery`. Secure Client matches the account name or SID only and keeps
+// the usage line of main (issue #1092).
+func addWindowsDiscoveryUserFlag(cmd *cobra.Command, user *string) {
+	cmd.Flags().StringVar(user, "user", "", "list one account's signals (account name, DOMAIN\\name or SID)")
+	_ = cmd.Flags().SetAnnotation("user", secureClientUsageAnnotation, []string{"list one account's signals (account name or SID)"})
+}
+
 // windowsDiscoveryAccountNotFound says why --user selected nothing: the
 // scan is off, found nothing yet, or found other accounts only (GAP-0079).
 func windowsDiscoveryAccountNotFound(user string, usage enterpriseGatewayAIUsage) string {

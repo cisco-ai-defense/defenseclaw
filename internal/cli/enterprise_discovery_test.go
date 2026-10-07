@@ -368,7 +368,10 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	root := &cobra.Command{Use: "defenseclaw-gateway"}
 	enterprise := &cobra.Command{Use: "enterprise"}
 	group := &cobra.Command{Use: "windows"}
-	group.AddCommand(&cobra.Command{Use: "discovery"})
+	discovery := &cobra.Command{Use: "discovery"}
+	var discoveryUser string
+	addWindowsDiscoveryUserFlag(discovery, &discoveryUser)
+	group.AddCommand(discovery)
 	group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
 	// Nor does it have enterprise acp setup or its help line (GAP-0302).
 	acpGroup := &cobra.Command{Use: "acp", Long: enterpriseACPCmd.Long, Annotations: enterpriseACPCmd.Annotations}
@@ -382,8 +385,9 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	}
 	secureClientHost = func() bool { return true }
 	keepCommandTreeOfMainOnSecureClient(root)
-	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" {
-		t.Fatalf("Secure Client group = %v, want discovery only", got)
+	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" ||
+		discovery.Flag("user").Usage != "list one account's signals (account name or SID)" {
+		t.Fatalf("Secure Client group = %v, --user %q, want discovery only with the usage of main", got, discovery.Flag("user").Usage)
 	}
 	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
 		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
