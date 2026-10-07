@@ -60,10 +60,12 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
+from defenseclaw.config_writer import ConfigWriteError
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.fail_mode import (
     _UPSTREAM_FAIL_OPEN_CONNECTORS,
+    FileSnapshot,
     fail_mode_transaction_lock,
     reconcile_connector_registration,
     resolve_connector_fail_mode,
@@ -1189,6 +1191,19 @@ def enable_cmd(
     )
 
 
+def _rollback_fail_mode_transaction(app: AppContext, snapshots: tuple[FileSnapshot, ...]) -> None:
+    """Undo a saved fail-mode change after its registration refresh failed.
+
+    The caller has already put the old values back in ``app.cfg``; saving
+    again through the single writer reverts only those fields (a concurrent
+    edit to config.yaml stays) and records the rollback as a generation.
+    Then the registration files go back to their snapshot.
+    """
+
+    app.cfg.save(reason="rollback: guardrail fail-mode")
+    restore_fail_mode_transaction(snapshots)
+
+
 def _apply_scoped_fail_mode_transaction(
     app: AppContext,
     *,
@@ -1225,11 +1240,12 @@ def _apply_scoped_fail_mode_transaction(
                 indent="  ",
             )
         except OSError as exc:
+            # A failed writer commit leaves config.yaml as it was, and no
+            # registration file has been touched yet.
             if old_entry is None:
                 conns.pop(key, None)
             else:
                 old_entry.hook_fail_mode = old_mode
-            restore_fail_mode_transaction(snapshots)
             ux.err(f"Failed to save config: {exc}", indent="  ")
             raise click.Abort() from exc
 
@@ -1242,8 +1258,8 @@ def _apply_scoped_fail_mode_transaction(
                 else:
                     old_entry.hook_fail_mode = old_mode
                 try:
-                    restore_fail_mode_transaction(snapshots)
-                except OSError as rollback_exc:
+                    _rollback_fail_mode_transaction(app, snapshots)
+                except (OSError, ConfigWriteError) as rollback_exc:
                     ux.err(f"Fail-mode update failed and rollback was incomplete: {rollback_exc}", indent="  ")
                     raise click.Abort() from rollback_exc
                 ux.err(f"Fail-mode update failed; previous config and registration restored: {exc}", indent="  ")
@@ -1471,13 +1487,14 @@ def _apply_global_fail_mode_transaction(
             else:
                 ux.ok(f"Config saved (guardrail.hook_fail_mode = {mode})", indent="  ")
         except OSError as exc:
+            # A failed writer commit leaves config.yaml as it was, and no
+            # registration file has been touched yet.
             gc.hook_fail_mode = old_global
             for name, (old_entry, old_mode) in old_entries.items():
                 if old_entry is None:
                     gc.connectors.pop(name, None)
                 else:
                     old_entry.hook_fail_mode = old_mode
-            restore_fail_mode_transaction(snapshots)
             ux.err(f"Failed to save config: {exc}", indent="  ")
             raise click.Abort() from exc
 
@@ -1528,8 +1545,8 @@ def _apply_global_fail_mode_transaction(
                     else:
                         old_entry.hook_fail_mode = old_mode
                 try:
-                    restore_fail_mode_transaction(snapshots)
-                except OSError as rollback_exc:
+                    _rollback_fail_mode_transaction(app, snapshots)
+                except (OSError, ConfigWriteError) as rollback_exc:
                     ux.err(f"Fail-mode update failed and rollback was incomplete: {rollback_exc}", indent="  ")
                     raise click.Abort() from rollback_exc
                 if used_full_restart:
