@@ -74,12 +74,19 @@ type profileGroupCheck struct {
 // the background, so a command never waits for the directory: it gets the last
 // pass, or, before the first has finished, waits for it at most wait.
 func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []string {
+	return set.unknownGroupWarningsWith(profileGroupExists, directoryCacheHealth, wait)
+}
+
+// unknownGroupWarningsWith is unknownGroupWarnings with the group lookup and
+// the directory cache health taken from the caller. A pass can outlive the
+// caller, so it uses these and never reads the package hooks tests replace.
+func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Context, string) (bool, error), health func() identityCacheHealth, wait time.Duration) []string {
 	if set == nil {
 		return nil
 	}
 	check := &set.groupCheck
 	check.mu.Lock()
-	if directoryCacheHealth().Failing > 0 {
+	if health().Failing > 0 {
 		check.warnings, check.checked = nil, false
 		check.mu.Unlock()
 		return nil
@@ -89,9 +96,9 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 		check.running = done
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
-			warnings := unknownAssignmentGroups(ctx, set.assignments, profileGroupExists)
+			warnings := unknownAssignmentGroups(ctx, set.assignments, exists)
 			cancel()
-			failing := directoryCacheHealth().Failing > 0
+			failing := health().Failing > 0
 			if failing {
 				warnings = nil
 			}
@@ -118,12 +125,15 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 	return append([]string(nil), check.warnings...)
 }
 
-// logUnknownGroups writes the unknown-group warnings to the gateway log; the
-// gateway calls it for a new set at start and at each reload.
+// logUnknownGroups writes the unknown-group warnings to the gateway log in the
+// background; the gateway calls it for a new set at start and at each reload.
 func (set *guardrailProfileSet) logUnknownGroups() {
-	for _, warning := range set.unknownGroupWarnings(profileGroupCheckBudget + time.Second) {
-		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
-	}
+	exists, health := profileGroupExists, directoryCacheHealth
+	go func() {
+		for _, warning := range set.unknownGroupWarningsWith(exists, health, profileGroupCheckBudget+time.Second) {
+			fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
+		}
+	}()
 }
 
 // unknownAssignmentGroups looks up each distinct group the assignments name
