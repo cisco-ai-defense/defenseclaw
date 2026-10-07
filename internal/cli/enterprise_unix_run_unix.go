@@ -234,6 +234,11 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
 	}
+	// The policy the lifecycle left in place (absent under Secure Client):
+	// an administrator reading the text must see the generation and digest.
+	if result.Policy != nil {
+		fmt.Fprintf(w, "  %s\n", result.Policy.Line())
+	}
 	// A busy status checked nothing else, but still reports the recorded
 	// deployment's version, as the docs say (GAP-2409).
 	if result.Action == enterpriseunix.ActionStatus && result.Installed && lifecycleResultHasError(result, "lifecycle_busy") {

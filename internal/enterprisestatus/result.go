@@ -16,6 +16,7 @@ package enterprisestatus
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 )
 
@@ -190,6 +191,38 @@ type PolicyState struct {
 	// lifecycle: its generation is not the one config.generation.json
 	// records, and the running gateway may already enforce it.
 	ConfigUnrecorded bool `json:"config_unrecorded,omitempty"`
+}
+
+// ShortDigest is "sha256:" and the first 12 hex digits of a digest, or "none".
+func ShortDigest(digest string) string {
+	if digest == "" {
+		return "none"
+	}
+	if len(digest) > len("sha256:")+12 {
+		return digest[:len("sha256:")+12]
+	}
+	return digest
+}
+
+// Line is the one human-readable line status, verify and ensure print for the
+// policy: the config generation, the effective digest and whether the gateway
+// enforces it. The same facts are in --json under "policy".
+func (p *PolicyState) Line() string {
+	line := fmt.Sprintf("policy: config generation %d, effective digest %s", p.ConfigGeneration, ShortDigest(p.EffectiveDigest))
+	switch {
+	case p.LastReloadError != "":
+		line += "; the gateway rejected its last reload (" + p.LastReloadError + ") and keeps enforcing the policy it last built"
+	case p.Applied:
+		line += "; applied by the gateway"
+	case p.GatewayReportedDigest == "":
+		line += "; the gateway did not report a policy, so it is not confirmed as applied"
+	default:
+		line += "; the gateway reports " + ShortDigest(p.GatewayReportedDigest) + " and applies this one on its next reload"
+	}
+	if p.ConfigUnrecorded {
+		line += "; config.yaml was changed outside the lifecycle"
+	}
+	return line
 }
 
 // PolicyStateFileName is the lifecycle state file holding the last applied

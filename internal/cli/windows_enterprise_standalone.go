@@ -1391,6 +1391,9 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)
+	if result.Policy != nil {
+		fmt.Fprintf(output, "  %s\n", result.Policy.Line())
+	}
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
 	}

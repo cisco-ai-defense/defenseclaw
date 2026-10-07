@@ -131,15 +131,7 @@ func boundedPolicyMessage(message string) string {
 }
 
 // shortPolicyDigest is "sha256:" and the first 12 hex digits, or "none".
-func shortPolicyDigest(digest string) string {
-	if digest == "" {
-		return "none"
-	}
-	if len(digest) > len("sha256:")+12 {
-		return digest[:len("sha256:")+12]
-	}
-	return digest
-}
+func shortPolicyDigest(digest string) string { return enterprisestatus.ShortDigest(digest) }
 
 // policyDigestCmd computes the effective policy digest from config.yaml and
 // the assets it references, the way the gateway does when it builds a
