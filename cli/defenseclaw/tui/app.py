@@ -5323,7 +5323,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     f"[{TOKENS.text_secondary}]{rich_escape(detail)}[/]"
                 )
                 for extra in plane.detail_lines():
-                    lines.append(f"           [{TOKENS.text_secondary}]{rich_escape(extra)}[/]")
+                    # One column in: the longest kernel line (73 columns)
+                    # must fit 80 columns without wrapping.
+                    lines.append(f" [{TOKENS.text_secondary}]{rich_escape(extra)}[/]")
                 fix = model.plane_fix(plane)
                 if fix:
                     lines.append(f"           [{TOKENS.accent_cyan}]→ {rich_escape(fix)}[/]")
