@@ -251,10 +251,10 @@ of the Splunk projection.
     Stop the conflicting service or run `defenseclaw setup splunk --disable --logs` and re-run after freeing the port. There's no `--port` flag today; ports `8000` and `8088` are checked at boot.
   </Accordion>
   <Accordion title="HEC rejects an index">
-    Run \`defenseclaw observability destination test <name> --write-probe\` after
+    Run `defenseclaw observability destination test <name> --write-probe` after
     setup. A handshake can pass even when HEC rejects events. A code 7 response
     means the configured index is missing or unavailable to the token; create
-    the index or correct \`--index\`, then retry the write probe.
+    the index or correct `--index`, then retry the write probe.
   </Accordion>
   <Accordion title="Enterprise HEC returns 403">
     Token is wrong or HEC isn't enabled on that Splunk endpoint. Test with curl: `curl -k $HEC_ENDPOINT -H "Authorization: Splunk $TOKEN" -d '{"event":"test"}'`. The CLI's `--skip-test` skips this same probe.

@@ -282,8 +282,9 @@ def test_cli_webhook_list_disable_remove_connector(ctx):
 
 
 def test_splunk_enterprise_private_endpoint_names_working_command(monkeypatch, capsys):
-    from defenseclaw.commands.cmd_setup import _apply_enterprise_config
     from types import SimpleNamespace
+
+    from defenseclaw.commands.cmd_setup import _apply_enterprise_config
 
     def reject(*_args, **_kwargs):
         raise ValueError("set allow_private_networks for an intentional private collector")
