@@ -47,6 +47,44 @@ func SecureClientPolicyLoadError(policyDir string) error {
 	return nil
 }
 
+// LoadSecureClientData is the 1.0 policy show data: exactly
+// <regoDir>/data.json with <regoDir>/data-sandbox.json merged over it.
+func LoadSecureClientData(regoDir string) (map[string]interface{}, error) {
+	data, err := readSecureClientJSONObject(filepath.Join(regoDir, "data.json"), "data.json")
+	if err != nil {
+		return nil, err
+	}
+	extra, err := readSecureClientJSONObject(filepath.Join(regoDir, "data-sandbox.json"), "data-sandbox.json")
+	if os.IsNotExist(err) {
+		return data, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range extra {
+		data[key] = value
+	}
+	return data, nil
+}
+
+func readSecureClientJSONObject(path, name string) (map[string]interface{}, error) {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) && name != "data.json" {
+		return nil, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("policy: read %s: %w", name, err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, fmt.Errorf("policy: parse %s: %w", name, err)
+	}
+	if data == nil {
+		return nil, fmt.Errorf("policy: parse %s: top-level value must be an object", name)
+	}
+	return data, nil
+}
+
 type secureClientFirstPartyEntry struct {
 	reason string
 	paths  []string

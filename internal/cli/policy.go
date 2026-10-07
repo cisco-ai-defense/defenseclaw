@@ -91,6 +91,9 @@ var policyValidateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if cfg != nil && cfg.SecureClientIntegration() {
+			return validateSecureClientPolicy(regoDir)
+		}
 
 		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
 			// The managed packages ship no Rego: the admission policy is
@@ -110,6 +113,28 @@ var policyValidateCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// validateSecureClientPolicy is policy validate of main, which a Secure
+// Client host keeps (issue #1092): data.json is required, then the Rego
+// modules compile.
+func validateSecureClientPolicy(regoDir string) error {
+	fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
+	data, err := policy.LoadSecureClientData(regoDir)
+	if err != nil {
+		return fmt.Errorf("policy: load failed: %w", err)
+	}
+	if _, err := policy.NewExact(regoDir); err != nil {
+		return fmt.Errorf("policy: compilation failed:\n%w", err)
+	}
+	fmt.Println("All Rego modules compiled successfully.")
+	for _, key := range []string{"config", "actions", "severity_ranking"} {
+		if _, ok := data[key]; !ok {
+			fmt.Fprintf(os.Stderr, "warning: data.json missing key: %s\n", key)
+		}
+	}
+	fmt.Println("data.json schema: OK")
+	return nil
 }
 
 var policyTestCmd = &cobra.Command{
@@ -201,14 +226,11 @@ var policyShowCmd = &cobra.Command{
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(_ *cobra.Command, _ []string) error {
-		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
 		if cfg != nil && cfg.SecureClientIntegration() {
-			view["guardrail"] = map[string]string{
-				"block_at":          cfg.Guardrail.BlockAt,
-				"alert_at":          cfg.Guardrail.AlertAt,
-				"cisco_trust_level": cfg.Guardrail.CiscoTrustLevel,
-			}
-		} else if cfg != nil {
+			return showSecureClientPolicy()
+		}
+		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
+		if cfg != nil {
 			// The levels the gateway resolves: block_at / alert_at over
 			// the rule pack's posture.
 			levels := gateway.ConfigThresholds(cfg, "")
@@ -226,6 +248,25 @@ var policyShowCmd = &cobra.Command{
 		fmt.Println(string(out))
 		return nil
 	},
+}
+
+// showSecureClientPolicy is policy show of main, which a Secure Client
+// host keeps (issue #1092): the data.json of the Rego directory.
+func showSecureClientPolicy() error {
+	paths, err := resolvePolicyPaths()
+	if err != nil {
+		return fmt.Errorf("policy: resolve paths: %w", err)
+	}
+	data, err := policy.LoadSecureClientData(paths.regoDir)
+	if err != nil {
+		return fmt.Errorf("policy: load effective data: %w", err)
+	}
+	out, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
 }
 
 var policyEvaluateCmd = &cobra.Command{
@@ -246,6 +287,12 @@ var policyEvaluateCmd = &cobra.Command{
 			return fmt.Errorf("--target-name is required")
 		}
 
+		if cfg != nil && cfg.SecureClientIntegration() {
+			// Secure Client keeps the data.json requirement of main (issue #1092).
+			if _, err := policy.LoadSecureClientData(paths.regoDir); err != nil {
+				return err
+			}
+		}
 		engine, err := policy.NewExact(paths.regoDir)
 		if err != nil {
 			return err

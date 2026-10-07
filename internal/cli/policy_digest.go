@@ -158,6 +158,11 @@ gateway applied this configuration.`,
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if cfg != nil && cfg.SecureClientIntegration() {
+			// main has no policy digest: Secure Client answers as it did
+			// (issue #1092).
+			return usageError(policyCmd, fmt.Errorf("unknown command %q for %q", "digest", policyCmd.CommandPath()))
+		}
 		out := cmd.OutOrStdout()
 		asJSON, _ := cmd.Flags().GetBool("json")
 		check, _ := cmd.Flags().GetBool("check-gateway")
