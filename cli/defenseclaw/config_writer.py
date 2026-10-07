@@ -720,7 +720,11 @@ def plain_error(exc: BaseException) -> str:
         detail = _RULE_PACK_PREFIX.sub("", parts[0])
         sentence = detail if detail.startswith(name) else f"{name}: {detail}"
         actions = [part for part in parts[1:] if not part.startswith("expected ")]
-        return sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
+        message = sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
+        if "rule-pack directory does not exist" in text:
+            # A pack folder deleted while the config still selects it blocks every other change too (GAP-0261).
+            message += " To stop using the deleted pack: defenseclaw guardrail use-pack default."
+        return message
     if code == "pattern":
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.

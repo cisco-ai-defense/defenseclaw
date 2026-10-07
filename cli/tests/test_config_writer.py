@@ -348,6 +348,18 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     rejected.__cause__ = inspected
     assert config_writer.plain_error(rejected) == "guardrail.rules.enable: unknown rule NOPE-X. Fix the reference, then retry."
 
+    # GAP-0261: the way out of a deleted pack folder is named, since each single change is refused meanwhile.
+    gone = (
+        '[config_semantic_invalid] config rule pack "/home/u/marker": rule pack directory_not_found at .: '
+        "rule-pack directory does not exist; fix the reference, then retry"
+    )
+    missing = ConfigInspectError(f"candidate field=$.guardrail; reason={gone}", field_path="$.guardrail", reason=gone)
+    refused = config_writer.ConfigWriteError("config.yaml change rejected")
+    refused.__cause__ = missing
+    assert config_writer.plain_error(refused).endswith(
+        "To stop using the deleted pack: defenseclaw guardrail use-pack default."
+    )
+
     pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the configuration schema and reference")
     assert config_writer.plain_error(pattern) == (
         "guardrail.custom_packs.bad.digest is not in the expected format (sha256: followed by 64 hex digits)."
