@@ -300,3 +300,27 @@ def test_duplicate_section_names_the_second_definition_line() -> None:
     assert cmd_config._plain_v8_issue(raw, "$.gateway", reason) == (
         "line 4: gateway appears twice; the first one is at line 2. Merge them into one."
     )
+
+
+def test_windows_per_user_group_assignment_warning_names_unmatchable_entry() -> None:
+    source = {"guardrail": {"profile_assignments": [{"profile": "team", "match": {"groups": ["DOMAIN\\team"]}}]}}
+    warnings = cmd_config._per_user_windows_group_warnings(source)
+    assert len(warnings) == 1
+    assert "profile_assignments[0].match.groups" in warnings[0]
+    assert "cannot match" in warnings[0]
+
+
+def test_generic_redaction_profile_refusal_names_unknown_and_defined(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 8\nobservability:\n  defaults:\n    redaction_profile: strickt\n",
+        encoding="utf-8",
+    )
+    refusal = ConfigInspectError(
+        "generic semantic refusal",
+        field_path="$.observability.defaults.redaction_profile",
+        reason="[config_semantic_invalid] configuration violates a semantic v8 constraint",
+    )
+    detail = cmd_config._v8_failure_detail(str(config_path), refusal)
+    assert "strickt" in detail and "defined:" in detail
+    assert "observability.defaults.redaction_profile" in detail

@@ -582,7 +582,9 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
         app.store = Store(app.cfg.audit_db)
         app.store.init()
     except Exception as exc:
-        ux.echo(f"Failed to open audit store: {exc}", err=True)
+        from defenseclaw.audit_capacity import audit_open_failure_notice
+
+        ux.echo(audit_open_failure_notice(app.cfg.audit_db, exc), err=True)
         ctx.exit(1)
     app.logger = Logger.from_config(app.cfg)
 

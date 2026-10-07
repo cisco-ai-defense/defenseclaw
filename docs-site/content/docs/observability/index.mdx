@@ -345,6 +345,10 @@ observability:
     retention_days: 7
 ```
 
+`observability.local.path` must resolve inside the DefenseClaw data directory
+(`~/.defenseclaw` for a per-user install). `defenseclaw doctor` reports an
+outside path as a custody failure; move the database under that directory.
+
 Seven days is also the default when `retention_days` is omitted. The gateway
 runs the graph-aware SQLite reaper after startup readiness and every six hours;
 CLI-only writes are reaped the next time the gateway starts. Existing v8

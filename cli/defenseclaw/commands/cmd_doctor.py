@@ -2041,6 +2041,9 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
                 "and if it keeps failing, run 'defenseclaw-gateway restart'"
             )
+        elif reason == "target-outside-data-dir":
+            detail = f"observability.local.path ({db_path}) must be inside {cfg.data_dir}"
+            remediation = "move observability.local.path into the DefenseClaw data directory"
         else:
             detail = f"private custody validation failed ({reason})"
             remediation = "restore the audit database from a trusted backup"
@@ -6903,6 +6906,8 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
     if name(script) in _HERMES_HOST_EXECUTABLES:
         return True  # a script launcher: python .../bin/hermes
     lowered = script.replace("\\", "/").lower()
+    if name(script).startswith("hermes_bootstrap") and "/.hermes/tools/" in lowered:
+        return True
     return None if "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
 
 
@@ -9489,8 +9494,20 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         _emit("fail", "Observability v8 effective plan", str(exc), r=r)
         return
     except OSError as exc:
-        # A config or snapshot the account cannot read or protect is a
-        # finding, not a crash of the whole report.
+        # A full volume prevents temporary effective-plan snapshots.
+        import errno
+
+        if exc.errno == errno.ENOSPC or "No usable temporary directory" in str(exc):
+            try:
+                full = os.statvfs(cfg.data_dir).f_bavail == 0
+            except (OSError, AttributeError):
+                full = exc.errno == errno.ENOSPC
+            if full:
+                _emit(
+                    "skip", "Observability v8 effective plan",
+                    "skipped because the disk is full; free space and rerun defenseclaw doctor", r=r,
+                )
+                return
         _emit("fail", "Observability v8 effective plan", f"cannot inspect the configuration: {exc}", r=r)
         return
     _check_observability_v8_status(
