@@ -11,7 +11,7 @@
 """Pick a named security policy, with a preview of what activating it changes.
 
 The list marks the active policy; the preview compares the active policy with
-the highlighted one (block, alert and install thresholds, firewall default,
+the highlighted one (block, alert and install thresholds,
 human approval, and side effects such as replacing webhooks). The screen only
 returns the chosen name; the app confirms and runs ``policy activate``.
 """

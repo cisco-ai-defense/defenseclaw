@@ -344,9 +344,18 @@ func TestBuildPostureIsVisibleOnlyOnceTheGenerationPublishes(t *testing.T) {
 	if got := packPosture(ref, "/packs/live"); got != "strict" {
 		t.Fatalf("posture before publish = %q, want strict", got)
 	}
+	// The threshold table the build precomputes for the proxy path is served
+	// once the generation publishes, so it carries the build's posture.
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "posture-pending-test"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"posture-pending-test": {Path: "/packs/live"}}
+	table := buildThresholdTable(cfg, nil)
 	publishPackPostures()
 	if got := packPosture(ref, "/packs/live"); got != "permissive" {
 		t.Fatalf("posture after publish = %q, want permissive", got)
+	}
+	if got, want := table[thresholdKey{}], resolveThresholds(cfg, ""); got != want {
+		t.Fatalf("precomputed levels = %+v, want %+v as resolved after publish", got, want)
 	}
 }
 

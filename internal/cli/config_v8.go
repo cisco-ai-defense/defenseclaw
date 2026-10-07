@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
@@ -331,6 +332,17 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 // credential references from credentialsDir; empty derives it from a
 // standalone source's own path.
 func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
+	return loadConfigV8Source(path, defaultDataDir, credentialsDir, false)
+}
+
+// loadConfigV8Source loads and strict-parses the file. With migrate, a
+// config_version 8 file is first converted in memory to the config_version 9
+// document the migration would write, and that document is what is parsed
+// and compiled (loaded.raw is it too): the keys the migration moves
+// (skill_actions and the like) are not in the current schema, so the strict
+// parse of the raw file would refuse the very file the migration exists to
+// fix. A failed migration refuses the file.
+func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate bool) (*loadedConfigV8File, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -342,6 +354,11 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 	raw, err := readConfigV8Source(absPath)
 	if err != nil {
 		return nil, err
+	}
+	if migrate {
+		if raw, err = config.MigrateV8InMemory(absPath, raw, guardrail.RulePackDigest); err != nil {
+			return nil, config.InMemoryMigrationError(absPath, err)
+		}
 	}
 
 	// Resolve the data directory from the already strict YAML projection before

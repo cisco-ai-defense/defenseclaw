@@ -877,6 +877,16 @@ class TestCompileAdmission(unittest.TestCase):
         cfg.admission.plugin.first_party_allow_list = []
         self.assertEqual(compile_admission(cfg, "plugin").first_party_allow, {})
         self.assertIn("codeguard", compile_admission(cfg, "skill").first_party_allow)
+        # Entries that share a name all apply, as in Go and Rego.
+        cfg.admission.skill.first_party_allow_list = [
+            AdmissionFirstParty(name="codeguard", source_path_contains=[".claude/skills/codeguard"]),
+            AdmissionFirstParty(name="codeguard", source_path_contains=[".cursor/skills/codeguard"]),
+        ]
+        self.assertEqual(
+            compile_admission(cfg, "skill").first_party_allow,
+            {"codeguard": [".claude/skills/codeguard", ".cursor/skills/codeguard"]},
+        )
+        cfg.admission.skill.first_party_allow_list = None
         skill = compile_admission(cfg, "skill")
         self.assertEqual(skill.source, "config:admission.skill.actions")
         self.assertEqual(skill.actions["CRITICAL"][0].file, "none")

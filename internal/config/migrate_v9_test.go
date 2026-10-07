@@ -830,3 +830,37 @@ observability: {}
 		t.Errorf("conflicts = %v, want %v", gotConflicts, wantConflicts)
 	}
 }
+
+// The migration opens audit.db by a file: URI built from the path, so a '#'
+// or '%' in a directory name (legal in a user profile) must stay in the path.
+func TestMigrateV9ReadsAuditDBUnderAnAwkwardPath(t *testing.T) {
+	auditDB := filepath.Join(t.TempDir(), "ops#1%41", "audit.db")
+	if err := os.MkdirAll(filepath.Dir(auditDB), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", auditDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_name TEXT NOT NULL,
+		  source_path TEXT, actions_json TEXT NOT NULL DEFAULT '{}', reason TEXT, updated_at DATETIME NOT NULL,
+		  connector TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO actions VALUES ('1','skill','bad-skill','','{"install":"block"}','operator','now','')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	rows, err := readV9ActionRows(auditDB)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %d, err = %v", len(rows), err)
+	}
+	if err := clearV9ActionRows(auditDB, rows); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if rows, err = readV9ActionRows(auditDB); err != nil || len(rows) != 0 {
+		t.Fatalf("rows after clear = %d, err = %v", len(rows), err)
+	}
+}

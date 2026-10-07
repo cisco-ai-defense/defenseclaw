@@ -322,6 +322,16 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             "line 2: gateway2: unknown field. All fields: defenseclaw config reference --format json-schema",
         )
 
+    def test_retired_key_names_its_replacement(self):
+        v8 = b"config_version: 8\nskill_actions:\n  medium: {install: block}\n"
+        self.assertEqual(
+            cmd_config._plain_v8_issue(v8, "$.skill_actions", self.REASON),
+            "line 2: skill_actions was replaced by admission.skill.actions in config_version 9; "
+            "run: defenseclaw migrate",
+        )
+        v9 = v8.replace(b"8", b"9", 1)
+        self.assertIn("move it to admission.skill.actions", cmd_config._plain_v8_issue(v9, "$.skill_actions", self.REASON))
+
 
 if __name__ == "__main__":
     unittest.main()
