@@ -19,7 +19,7 @@ const auditPlannerStatsInterval = 30 * time.Second
 // index seeks (see audit.Store.RefreshPlannerStatistics). The first pass runs
 // at start, which covers a database that grew before this release.
 func (s *Sidecar) runAuditPlannerStats(ctx context.Context) {
-	if s == nil || s.store == nil {
+	if s == nil || s.store == nil || s.currentConfig().SecureClientIntegration() {
 		return
 	}
 	ticker := time.NewTicker(auditPlannerStatsInterval)

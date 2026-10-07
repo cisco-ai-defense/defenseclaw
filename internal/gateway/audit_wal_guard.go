@@ -23,7 +23,7 @@ const (
 // runAuditWALGuard keeps the audit database's write-ahead log bounded under
 // sustained hook traffic (see audit.Store.CheckpointWALIfLarge).
 func (s *Sidecar) runAuditWALGuard(ctx context.Context) {
-	if s == nil || s.store == nil {
+	if s == nil || s.store == nil || s.currentConfig().SecureClientIntegration() {
 		return
 	}
 	ticker := time.NewTicker(auditWALGuardInterval)

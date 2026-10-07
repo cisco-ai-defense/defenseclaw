@@ -410,3 +410,20 @@ func TestCorrelationMiddleware_NilRegistryTolerated(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 }
+
+// Secure Client keeps the qualified account name sent by its hook helper.
+func TestCorrelationMiddlewareKeepsSecureClientQualifiedName(t *testing.T) {
+	setManagedEnterpriseRedactionPosture(true)
+	t.Cleanup(func() { setManagedEnterpriseRedactionPosture(false) })
+	var got AgentIdentity
+	handler := CorrelationMiddleware(NewAgentRegistry("", ""))(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got = AgentIdentityFromContext(r.Context())
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	req.Header.Set(llmEventUserNameHeader, "alice@corp.example")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if got.UserName != "alice@corp.example" {
+		t.Fatalf("Secure Client user name = %q", got.UserName)
+	}
+}
