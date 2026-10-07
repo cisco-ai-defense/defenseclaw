@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
+from defenseclaw.hook_metrics import aggregate_connector_hook_decision
 from defenseclaw.models import Event, compare_severity
 
 
@@ -289,6 +290,36 @@ class ModelsDbTests(unittest.TestCase):
         self.assertIsNone(self.store.get_counts(alert_count_seconds=0).alerts)
         self.assertEqual(self.store.get_counts(alert_count_seconds=60).alerts, 5000)
         self.assertEqual(self.store.get_counts().alerts, 5000)
+
+    def test_status_alert_count_skips_the_classifier_for_rows_that_say_they_were_not_enforced(self):
+        # GAP-0199: the hook classifier is a Python function SQLite calls per
+        # row, so 25,000 allowed hook rows used up the whole budget of the
+        # status alert count. The gateway states "not enforced" in the enforced
+        # column (NULL for false) and in the structured envelope, so only the
+        # enforced rows reach the classifier.
+        now = datetime.now(timezone.utc).isoformat()
+        details = "connector=codex action=block mode=observe"
+        rows = [(f"column-{index}", now, details, '{"action":"allow"}', 0) for index in range(10)]
+        rows += [(f"envelope-{index}", now, details, '{"action":"allow","enforced":false}', None) for index in range(10)]
+        rows.append(("blocked-column", now, details, '{"action":"block"}', 1))
+        rows.append(("blocked-envelope", now, details, '{"action":"block","enforced":true}', None))
+        self.store.db.executemany(
+            "INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json,"
+            " severity, connector, enforced) VALUES (?, ?, 'connector-hook', 'PreToolUse', 'a', ?, ?, 'INFO',"
+            " 'codex', ?)",
+            rows,
+        )
+        self.store.db.commit()
+        classified = []
+
+        def classify(details, structured, enforced):
+            classified.append(enforced)
+            return aggregate_connector_hook_decision(details, structured, enforced)
+
+        self.store.db.create_function("dc_hook_decision", 3, classify)
+
+        self.assertEqual(self.store.get_counts().alerts, 2)
+        self.assertEqual(sorted(classified, key=str), [1, None])
 
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()

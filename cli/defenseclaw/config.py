@@ -77,6 +77,12 @@ from defenseclaw.file_permissions import (
     read_regular_file_no_follow,
 )
 
+# libyaml parses a 150 KB policy config in tens of milliseconds where the
+# pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
+# than once (100 profiles and 2,000 assignments made each command take 7 to
+# 10 s). PyYAML builds without libyaml fall back to the pure-Python loader.
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
 _untrusted_managed_config_warned_paths: set[str] = set()
@@ -190,7 +196,7 @@ def source_config_version(*, path: str | None = None) -> int | None:
     cfg_file = path or str(config_path())
     try:
         with open(cfg_file, encoding="utf-8") as stream:
-            root = yaml.compose(stream)
+            root = yaml.compose(stream, Loader=YAML_LOADER)
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -4189,7 +4195,7 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
     """
     try:
         with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+            raw = yaml.load(f, Loader=YAML_LOADER) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
@@ -6198,7 +6204,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     raw: dict[str, Any] = {}
     try:
         with open(cfg_file) as f:
-            raw = yaml.safe_load(f) or {}
+            raw = yaml.load(f, Loader=YAML_LOADER) or {}
     except OSError:
         pass
     _warn_untrusted_managed_config(cfg_file, raw)

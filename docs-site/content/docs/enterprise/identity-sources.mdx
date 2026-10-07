@@ -319,7 +319,7 @@ group. Intune delivery of the local group membership was not tested.
 | `defenseclaw.user.tenant_id` | The cloud tenant, for an Entra-joined Windows account |
 | `defenseclaw.user.identity.source` | `nss_files`, `sssd`, `sssd_infopipe`, `winbind`, `nss_ldap`, `himmelblau`, `nss_aad`, `windows_lsa`, `windows_identity_store`, `macos_opendirectory`, `macos_platform_sso` or `hook_reported` |
 | `defenseclaw.user.principal.assurance` | `verified` or `claimed` |
-| `defenseclaw.session.kind`, `client.address` | `local`, `ssh`, `rdp` or `console`, and the client address, reported when the session has the same assurance as the directory facts |
+| `defenseclaw.session.kind`, `client.address` | `local`, `ssh`, `rdp` or `console`, and the client address, reported when the session has the same assurance as the directory facts. Only Linux verifies a session (logind, or utmp), so on Windows and macOS, where the hook reads its own session and the gateway can only call it claimed, a record of a user with verified directory facts carries neither, whether the session is a remote desktop or the console |
 | `defenseclaw.session.kerberos_principal` | The ticket cache's principal, always claimed. Sent only with `ai_discovery.include_user_principal` |
 
 A low-rate `identity.observed` record, once per user per cache lifetime,

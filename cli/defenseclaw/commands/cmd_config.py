@@ -1128,7 +1128,7 @@ def _looks_like_v8_config(path: str) -> bool:
     except OSError:
         return False
     try:
-        root = yaml.compose(raw)
+        root = yaml.compose(raw, Loader=config_module.YAML_LOADER)
     except (yaml.YAMLError, RecursionError, OverflowError):
         root = None
     if isinstance(root, yaml.MappingNode):

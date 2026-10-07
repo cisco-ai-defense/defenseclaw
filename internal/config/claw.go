@@ -692,6 +692,12 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 			return expandPath(configHome)
 		}
 		return filepath.Join(home, ".omnigent")
+	case "kiro":
+		// Kiro IDE and Kiro CLI share ~/.kiro; matches
+		// connector_paths.connector_home("kiro") on the Python side. It used to
+		// fall through to OpenClaw's home_dir, so Kiro's agent identity was
+		// keyed on ~/.openclaw.
+		return filepath.Join(home, ".kiro")
 	default:
 		if c == nil {
 			return expandPath("~/.openclaw")
