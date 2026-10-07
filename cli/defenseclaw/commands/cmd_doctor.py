@@ -9987,6 +9987,11 @@ def _check_observability_v8_status(
             if live.display_reason:
                 detail += f"/{live.display_reason}"
             detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
+            if destination.kind == "splunk_hec" and live.last_error_class in {"http_rejected", "hec_ack_rejected"}:
+                detail += (
+                    "; HEC rejected an event: check that the index exists and the token can write to it; "
+                    f"run defenseclaw observability destination test {shlex.quote(destination.name)} --write-probe"
+                )
             if live_state == "unavailable" and destination.kind != "sqlite":
                 tag = "warn"
             elif live_state in {"degraded", "initializing", "draining"}:
