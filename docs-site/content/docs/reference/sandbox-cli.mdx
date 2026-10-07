@@ -99,6 +99,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 | [`sandbox list`](#sandbox-list), [`status`](#sandbox-status) | List sandboxes, or show one in detail. |
 | [`sandbox stop`](#sandbox-stop), [`start`](#sandbox-start), [`delete`](#sandbox-delete) | Stop, start, or delete sandboxes. |
 | [`sandbox activity`](#sandbox-activity) | The live activity feed. |
+| [`sandbox destinations`](#sandbox-destinations) | What a sandbox reached or tried to reach, and which of it is shadow AI. |
 | [`sandbox approvals`](#sandbox-approvals), [`approve`](#sandbox-approve), [`reject`](#sandbox-reject) | The asks waiting for you, and your answers. |
 | [`sandbox unblock`](#sandbox-unblock) | Lift an egress block. |
 | [`sandbox review`](#sandbox-review), [`undo`](#sandbox-undo) | Review a mounted project's changes, or restore its undo point. |
@@ -815,10 +816,14 @@ policy, hook tamper tier, hook traffic, the verdicts per hook event under
 the harness's own event names ("Hook events  PreToolUse 12 · PostToolUse 11
 · Stop 2"), the last blocked tool call, the tool calls that ran without a DefenseClaw verdict (hook tamper), egress
 totals (destinations contacted and blocked, each counted once, as the
-activity feed names them; the JSON also has `blocked_requests`), credential
+activity feed names them; the JSON also has `blocked_requests`), followed
+by `; AI: N model APIs, M shadow AI` when the sandbox reached any (see
+[`sandbox destinations`](#sandbox-destinations)), credential
 endpoints, the undo point, waiting asks, nested
 repositories, and warnings, including a stopped sandbox the current policy
-would not start.
+would not start. Without a name, a red `Telemetry` row appears when the
+audit recorder refused sandbox records since the daemon started, with the
+count and the last error.
 
 ```bash
 defenseclaw sandbox status
@@ -963,8 +968,9 @@ boundary, and says what each one is:
   `api.openai.com` in a Codex sandbox);
 - **shadow AI**: another AI provider DefenseClaw's provider catalog knows,
   or **shadow AI?** for a host that only looks like an inference endpoint.
-  Each one raises a `shadow_ai` finding once per provider and session:
-  MEDIUM when the sandbox reached it, LOW when it was only refused;
+  Each provider raises a `shadow_ai` finding once a session: LOW the first
+  time the policy refuses it, MEDIUM the first time the sandbox reaches it
+  (a refusal and then a contact raise one of each);
 - otherwise the category the egress proxy allowed it under (for example
   `package registry`), **blocked** when it was only ever refused, or
   **other**.

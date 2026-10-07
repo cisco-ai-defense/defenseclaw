@@ -75,9 +75,11 @@ stopped`. Nothing is changed; use the install command above.
   daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
   sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
   detail sum it up; the detail lists the hosts.
-- New finding `shadow_ai`: once per AI provider and session a sandbox reaches
-  (MEDIUM) or tries to reach (LOW) that is neither its model provider nor its
-  harness's vendor, also on the activity feed.
+- New finding `shadow_ai`, also on the activity feed: an AI provider that is
+  neither the sandbox's model provider nor its harness's vendor, once a
+  session when the policy refuses it (LOW) and once when the sandbox reaches
+  it (MEDIUM). A `--credential` binding's endpoint is its own `credential`
+  destination, never shadow AI.
 - New v8 records: `log.egress.completed` (bytes and duration) and
   `log.egress.failed` (upstream failures and timeouts, and `cancelled` with
   the bytes for a connection the proxy cut short) for every allowed proxy

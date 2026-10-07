@@ -260,7 +260,7 @@ Two `degraded` records are the manager's own:
 | `hook_tamper` | A tool that ran without a DefenseClaw verdict: a `PostToolUse` whose `PreToolUse` was denied or never arrived | `SANDBOX-HOOK-TAMPER` |
 | `large_upload` | A large upload to a first-seen host | `SANDBOX-LARGE-UPLOAD` |
 | `nested_repo` | A repository that appeared inside a live-mounted project during a session | `SANDBOX-NESTED-REPO` |
-| `shadow_ai` | An AI API the sandbox reached (MEDIUM) or tried to reach (LOW) that is neither its model provider nor its harness's vendor: a catalogued AI provider or an inference-shaped host. Once per provider per session; the target is the host | `SANDBOX-SHADOW-AI` |
+| `shadow_ai` | An AI API the sandbox reached (MEDIUM) or tried to reach (LOW) that is neither its model provider nor its harness's vendor: a catalogued AI provider or an inference-shaped host. At most once per provider and severity per session: a refusal and then a contact raise one of each; the target is the host | `SANDBOX-SHADOW-AI` |
 
 A finding requires a severity (INFO, LOW, MEDIUM, HIGH or CRITICAL). A
 missing finding ID is generated; confidence, when reported, is in (0, 1].
@@ -326,10 +326,11 @@ record:
   an identifier is omitted.
 - The session and agent IDs come from the correlation envelope, which the
   agent fills through its session header and hook payload, and the session
-  from the sandbox's last hook. Egress, approval, process and inference
-  records carry them as `gen_ai.conversation.id` and `gen_ai.agent.id` only
-  when they are registered identifiers (trimmed, at most 256 bytes); any
-  other value is omitted.
+  from the sandbox's last hook. Egress and approval records carry them as
+  `gen_ai.conversation.id` and `gen_ai.agent.id`, and process and inference
+  records the session as `gen_ai.conversation.id`, only when they are
+  registered identifiers (trimmed, at most 256 bytes); any other value is
+  omitted.
 - An actor's or process's executable is cut to 1024 bytes and its process
   ID kept only in 1 to 4194304; an executable that is not UTF-8 is omitted.
   A process command line is cut to 4096 bytes. SSH and inference tokens

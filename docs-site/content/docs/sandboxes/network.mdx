@@ -269,8 +269,9 @@ sandbox's model provider, an AI API of the harness's own vendor, another AI
 provider (shadow AI), a host that looks like an inference endpoint, or an
 ordinary site. Shadow AI is code in the sandbox calling a model the harness
 does not use, with keys of its own. Each shadow AI provider raises a
-`shadow_ai` finding and a ⚠ in the feed once per session: MEDIUM when the
-sandbox reached it, LOW when the policy refused it.
+`shadow_ai` finding and a ⚠ in the feed once a session: LOW the first time
+the policy refuses it, MEDIUM the first time the sandbox reaches it (a
+refusal and then a contact raise one of each).
 
 ```text
 ⚠ shadow AI: reached api.openai.com (OpenAI)

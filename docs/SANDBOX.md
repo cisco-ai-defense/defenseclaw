@@ -2751,9 +2751,11 @@ on metrics.
 Hook decisions from a sandbox carry the sandbox ID and name taken from the
 binding that authenticated them. The gateway sidecar builds one
 `audit.NewSandboxRecorder` for the process and hands it to the manager,
-which wraps it (`manager/telemetry.go`): every record gets the sandbox's
-binding ID, the launching host account and the session its hooks last
-named, and a refused record is logged, counted on `sandbox status` and
+which wraps it (`manager/telemetry.go`): every record of a sandbox gets
+its binding ID; egress, approval, finding and activity records the
+launching host account; egress, approval, process and inference records
+the session its hooks last named; and a refused record is logged, counted
+on `sandbox status` and
 recorded as degraded health once per streak, so no producer swallows a
 failure. On daemon start the reconcile pass records a lifecycle event for
 every existing sandbox, so the active gauge is republished. The field-level
