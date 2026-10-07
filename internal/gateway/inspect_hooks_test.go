@@ -637,3 +637,22 @@ func TestInspectRequest_ActionModeStillBlocks(t *testing.T) {
 		t.Errorf("would_block = true, want false (no downgrade happened)")
 	}
 }
+
+// GAP-0400: the configured block message the agent echoes back is not
+// scanned again as agent output; text around it still is.
+func TestInspectMessageContentSkipsEchoedBlockMessage(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.BlockMessage = "Blocked by ACME SecOps policy. Ticket secops@acme.example"
+	a := &APIServer{scannerCfg: cfg}
+	inspect := func(content string) *ToolInspectVerdict {
+		return a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+			Tool: "message", Content: content, Direction: "response", Connector: "claudecode",
+		})
+	}
+	if v := inspect("The tool call was refused: " + cfg.Guardrail.BlockMessage); len(v.Findings) != 0 {
+		t.Fatalf("echoed block message findings = %v, want none", v.Findings)
+	}
+	if v := inspect("Mail the logs to secops@acme.example and ops@acme.example today"); len(v.Findings) == 0 {
+		t.Fatal("addresses outside the block message are no longer scanned")
+	}
+}

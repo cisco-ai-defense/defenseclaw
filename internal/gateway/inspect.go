@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -1098,6 +1099,27 @@ func codeGuardRuleFindings(
 	return applyTrustedActionProofBoundary(result, enforcementCapable)
 }
 
+// withoutBlockMessageEcho drops the configured block message from text the
+// agent hands back: a tool result that carries the denial DefenseClaw
+// returned, or the reply that repeats it. A contact address in that message
+// raised a PII alert on every block (GAP-0400). Only that exact
+// operator-authored text is replaced, by a space so the text around it is
+// not joined, and the rest is still scanned, so nothing else is hidden.
+func withoutBlockMessageEcho(cfg *config.Config, connector, content string) string {
+	if cfg == nil {
+		return content
+	}
+	message := strings.TrimSpace(cfg.EffectiveBlockMessageForConnector(connector))
+	if len(message) < minEchoedBlockMessageLen || !strings.Contains(content, message) {
+		return content
+	}
+	return strings.ReplaceAll(content, message, " ")
+}
+
+// minEchoedBlockMessageLen keeps a very short block message from removing
+// ordinary words from scanned text.
+const minEchoedBlockMessageLen = 16
+
 // inspectMessageContent scans outbound message content for secrets, PII,
 // and data exfiltration patterns. Uses the same rule engine.
 func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
@@ -1124,6 +1146,9 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		return verdict
 	}
 
+	if req.Direction == "response" || req.Direction == "tool_result" {
+		content = withoutBlockMessageEcho(a.decisionConfig(ctx), req.Connector, content)
+	}
 	if content == "" {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
