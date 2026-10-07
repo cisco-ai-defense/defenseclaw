@@ -87,7 +87,10 @@ func (s *helperPlaneSource) Start(ctx context.Context) error {
 	return nil
 }
 
-// drain reads event frames until the stream ends.
+// drain reads event frames until the stream ends. A coverage-only frame
+// replaces the coverage the helper stated: its backend changed mid-stream
+// (Tetragon fell back to cn_proc, or came back), and the stream itself goes
+// on.
 func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 	defer s.buffer.Close()
 	for {
@@ -106,7 +109,16 @@ func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var frame eventStreamFrame
-		if err := json.Unmarshal(response.Body, &frame); err != nil || frame.Event == nil {
+		if err := json.Unmarshal(response.Body, &frame); err != nil {
+			continue
+		}
+		if frame.Event == nil {
+			if frame.Coverage != nil {
+				coverage := decodeCoverage(*frame.Coverage)
+				s.mu.Lock()
+				s.coverage = coverage
+				s.mu.Unlock()
+			}
 			continue
 		}
 		s.buffer.Push(decodeEvent(*frame.Event))

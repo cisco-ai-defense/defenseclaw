@@ -126,47 +126,6 @@ func TestProcessTreeIsBounded(t *testing.T) {
 	}
 }
 
-func TestProcessCmdlineRedactsSecrets(t *testing.T) {
-	got := processCmdline([]string{"node", "cli.js", "--api-key", "dccert-block-marker", "--token=dccertvalue",
-		"PASSWORD=dccertvalue", "dccert0123456789dccert0123456789", "/sandbox/work/a-very-long-path-name-0123456789/x", "plain"})
-	for _, leak := range []string{" dccert-block-marker", "=dccertvalue", "dccert0123456789dccert0123456789"} {
-		if strings.Contains(got, leak) {
-			t.Fatalf("cmdline %q keeps %q", got, leak)
-		}
-	}
-	for _, kept := range []string{"node cli.js --api-key <redacted", "--token=<redacted", "PASSWORD=<redacted", "/sandbox/work/a-very-long-path-name-0123456789/x", "plain"} {
-		if !strings.Contains(got, kept) {
-			t.Fatalf("cmdline %q lacks %q", got, kept)
-		}
-	}
-	if long := processCmdline([]string{strings.Repeat("a ", 2000)}); len(long) > maxCmdlineBytes {
-		t.Fatalf("cmdline of %d bytes", len(long))
-	}
-	// Passwords in URLs, in user:password arguments and attached to a
-	// MySQL client's -p.
-	for _, argv := range [][]string{
-		{"curl", "-u", "dccertuser:dccertpass", "https://example.invalid/"},
-		{"curl", "--user=dccertuser:dccertpass", "https://example.invalid/"},
-		{"git", "clone", "https://dccertuser:dccertpass@example.invalid/r.git"},
-		{"psql", "postgresql://dccert:dccertpass@db.invalid/x"},
-		{"/usr/bin/mysql", "-udccert", "-pdccertpass"},
-	} {
-		got := processCmdline(argv)
-		if strings.Contains(got, "dccertpass") || !strings.Contains(got, "dccert") || !strings.Contains(got, "<redacted") {
-			t.Fatalf("cmdline %q of %q keeps the password", got, argv)
-		}
-	}
-	// Look-alikes stay as they are.
-	for _, argv := range [][]string{
-		{"python3", "-u", "main.py"}, {"ssh", "-p", "2222", "host"}, {"tar", "-pxf", "a.tar"},
-		{"curl", "https://example.invalid:8443/path"}, {"psql", "-U", "dccert"},
-	} {
-		if got := processCmdline(argv); got != strings.Join(argv, " ") {
-			t.Fatalf("cmdline %q of %q", got, argv)
-		}
-	}
-}
-
 // treeEnv is a running manager with one ready sandbox whose process tree is
 // on and whose ps samples answer *sample.
 func treeEnv(t *testing.T, name string, sample *atomic.Pointer[string]) *harnessEnv {

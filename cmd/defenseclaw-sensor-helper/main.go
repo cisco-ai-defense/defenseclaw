@@ -42,19 +42,26 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tetragon"
 )
 
 // Set by the release build's -ldflags -X, so a service log and --version name
@@ -89,12 +96,25 @@ func run() error {
 			"gateway account: permit its uid and give the socket its group (unless --allow-uid/--socket-gid are set)")
 		homesFromManifest = flag.String("home-dirs-from-manifest", "",
 			"protected guardian manifest whose enabled users' homes Plane C watches; restarts when it changes")
-		showVersion = flag.Bool("version", false, "print the helper's version and commit, then exit")
+		showVersion     = flag.Bool("version", false, "print the helper's version and commit, then exit")
+		tetragonCleanup = flag.Bool("tetragon-cleanup", false,
+			"remove the Tetragon policies this helper recorded loading, then exit (uninstall, purge, rollback, downgrade)")
+		cleanupCheck = flag.Bool("check", false,
+			"with --tetragon-cleanup: only report that this helper supports it (exit 0) and change nothing")
 	)
 	flag.Parse()
 	if *showVersion {
 		_, err := fmt.Fprintln(os.Stdout, versionString())
 		return err
+	}
+	if *cleanupCheck && !*tetragonCleanup {
+		return errors.New("--check needs --tetragon-cleanup")
+	}
+	if *tetragonCleanup {
+		// A one-shot for the lifecycle and the package scripts: no socket,
+		// no service log, output on stdout.
+		return runTetragonCleanup(*cleanupCheck, os.Stdout,
+			slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
 	// The log destination comes from the protected service environment, not
@@ -167,6 +187,33 @@ func runHelper(
 		ctx = watchManifest(ctx, homesFromManifest, manifestDigest, 30*time.Second, logger)
 	}
 
+	// Tetragon (managed Linux only): the lifecycle's drop-in names the
+	// intent; the reconciler starts once and resumes from its persisted
+	// state when the manifest watcher restarts the helper.
+	var tetragonConfig *acquire.TetragonConfig
+	if managedEnterprise && runtime.GOOS == "linux" {
+		config := tetragonIntent(envvars.Lookup, logger)
+		if config.Mode != "off" {
+			config.Dial = tetragon.NewDialer(tetragon.DialerConfig{Homes: homes, BinDir: helperBinDir()})
+		}
+		if kernelPolicy.start != nil {
+			targets, _, err := manifestTargets(homesFromManifest)
+			if err != nil {
+				logger.Warn("guardian manifest unreadable; the kernel-policy reconciler starts with no enrolled users", "error", err)
+			}
+			hooks := kernelPolicy.start(ctx, kernelPolicyInput{
+				Config: config, Lookup: envvars.Lookup, Manifest: homesFromManifest, Targets: targets,
+				Homes: homes, Logger: logger,
+			})
+			config.OwnObservePolicy, config.KernelStatus = hooks.OwnObservePolicy, hooks.Status
+			config.Tap, config.Stream = hooks.Tap, hooks.Stream
+		}
+		logger.Info("sensor helper Tetragon intent", "mode", config.Mode, "burn_in", config.BurnIn.String(),
+			"enforce_ack_set", config.EnforceAck != "", "enforce_connectors", config.EnforceConnectors,
+			"reconciler", kernelPolicy.start != nil)
+		tetragonConfig = &config
+	}
+
 	// Under the Windows SCM there is no console and no signal: the service
 	// control manager expects the process to report Running within seconds
 	// and to stop when told. runUnderServiceManager takes over the
@@ -175,7 +222,7 @@ func runHelper(
 	// killed with error 1053 -- a helper that can never start, on the one
 	// platform whose gateway most needs it.
 	return runUnderServiceManager(ctx, func(ctx context.Context) error {
-		return serve(ctx, path, uids, socketGID, homes, logger)
+		return serve(ctx, path, uids, socketGID, homes, tetragonConfig, logger)
 	})
 }
 
@@ -205,6 +252,7 @@ func serve(
 	uids []int,
 	socketGID int,
 	homeDirs []string,
+	tetragonConfig *acquire.TetragonConfig,
 	logger *slog.Logger,
 ) error {
 
@@ -233,6 +281,7 @@ func serve(
 		HomeDirs:    homeDirs,
 		AllowedUIDs: uids,
 		Logger:      logger,
+		Tetragon:    tetragonConfig,
 	})
 
 	logger.Info("sensor helper listening",
@@ -269,4 +318,151 @@ func parseUIDs(value string) ([]int, error) {
 		out = append(out, uid)
 	}
 	return out, nil
+}
+
+// The Tetragon drop-in the enterprise lifecycle renders
+// (30-defenseclaw-tetragon.conf) from enterprise.tetragon. Read only here,
+// only with --managed-enterprise on Linux, and only through envvars.Lookup.
+const (
+	envTetragonMode              = "DEFENSECLAW_SENSOR_TETRAGON_MODE"
+	envTetragonBurnIn            = "DEFENSECLAW_SENSOR_TETRAGON_BURN_IN"
+	envTetragonEnforceAck        = "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_ACK"
+	envTetragonEnforceConnectors = "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_CONNECTORS"
+)
+
+// Burn-in bounds (enterprise.tetragon.burn_in): 0 (skipped, with a warning)
+// or 24h to 2160h; 168h when absent.
+const (
+	defaultBurnIn = 168 * time.Hour
+	minBurnIn     = 24 * time.Hour
+	maxBurnIn     = 2160 * time.Hour
+)
+
+var (
+	enforceAckPattern = regexp.MustCompile(`^sha256:[0-9a-f]{12}$`)
+	connectorPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+)
+
+// tetragonIntent reads the drop-in. An absent drop-in is the default
+// (consume, 168h, no approval). It never fails and never widens: a
+// malformed mode is consume (read only), a malformed burn-in the default,
+// a malformed approval none, a malformed connector dropped; each is logged.
+// The reconciler applies the same rules to the same variables.
+func tetragonIntent(lookup func(string) (string, bool), logger *slog.Logger) acquire.TetragonConfig {
+	config := acquire.TetragonConfig{Mode: "consume", BurnIn: defaultBurnIn}
+	if value, ok := lookup(envTetragonMode); ok {
+		switch mode := strings.ToLower(strings.TrimSpace(value)); mode {
+		case "off", "consume", "observe", "enforce":
+			config.Mode = mode
+		default:
+			logger.Warn("malformed Tetragon mode in the helper drop-in; using consume", "variable", envTetragonMode)
+		}
+	}
+	if value, ok := lookup(envTetragonBurnIn); ok && strings.TrimSpace(value) != "" {
+		duration, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || duration < 0 || (duration != 0 && (duration < minBurnIn || duration > maxBurnIn)) {
+			logger.Warn("malformed Tetragon burn-in in the helper drop-in; using 168h", "variable", envTetragonBurnIn)
+		} else {
+			config.BurnIn = duration
+		}
+	}
+	if value, ok := lookup(envTetragonEnforceAck); ok {
+		if value = strings.TrimSpace(value); enforceAckPattern.MatchString(value) {
+			config.EnforceAck = value
+		} else if value != "" {
+			logger.Warn("malformed Tetragon enforce_ack in the helper drop-in; no approval", "variable", envTetragonEnforceAck)
+		}
+	}
+	if value, ok := lookup(envTetragonEnforceConnectors); ok {
+		seen := map[string]bool{}
+		for _, part := range strings.Split(value, ",") {
+			connector := strings.ToLower(strings.TrimSpace(part))
+			switch {
+			case connector == "" || seen[connector]:
+			case !connectorPattern.MatchString(connector):
+				logger.Warn("malformed connector in the helper drop-in; ignored", "variable", envTetragonEnforceConnectors)
+			default:
+				seen[connector] = true
+				config.EnforceConnectors = append(config.EnforceConnectors, connector)
+			}
+		}
+	}
+	return config
+}
+
+// helperBinDir is the managed install's binary directory, where the native
+// hook and DefenseClaw's own executables live.
+func helperBinDir() string {
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		return "/opt/defenseclaw/bin"
+	}
+	return layout.BinDir
+}
+
+// kernelPolicy connects the helper to its kernel-policy reconciler. The
+// reconciler's half of this command (tetragon_linux.go) fills it in an init;
+// a build without it has no reconciler and no cleanup, and the Tetragon
+// event stream still runs in consume.
+var kernelPolicy kernelPolicyHooks
+
+type kernelPolicyHooks struct {
+	// start runs the reconciler for the helper's lifetime, once. In off and
+	// consume that is the startup retire step of the names it recorded. It
+	// returns what the event stream and the broker need from it.
+	start func(ctx context.Context, input kernelPolicyInput) kernelPolicyRuntime
+	// cleanup is --tetragon-cleanup: retire every recorded name, write what
+	// it removed to out, and empty the record.
+	cleanup func(ctx context.Context, out io.Writer, logger *slog.Logger) error
+}
+
+// kernelPolicyInput is everything the reconciler is started with, all of it
+// from root-owned inputs.
+type kernelPolicyInput struct {
+	// Config is the drop-in intent as this command parsed it.
+	Config acquire.TetragonConfig
+	// Lookup is envvars.Lookup, for the reconciler's own reading of the
+	// same drop-in.
+	Lookup func(string) (string, bool)
+	// Manifest is the guardian manifest path; Targets its enabled rows.
+	Manifest string
+	Targets  []helperTarget
+	// Homes are the watched homes.
+	Homes  []string
+	Logger *slog.Logger
+}
+
+// kernelPolicyRuntime is what the reconciler hands back.
+type kernelPolicyRuntime struct {
+	// OwnObservePolicy reports DefenseClaw's recorded observe policy (the
+	// fanotify hand-off).
+	OwnObservePolicy func(name string) bool
+	// Status answers the broker's kernel_status op.
+	Status func(ctx context.Context) (acquire.KernelStatus, error)
+	// Tap and Stream receive the event stream's batches and its up/down.
+	Tap    func(plane.KernelBatch)
+	Stream func(connected bool)
+}
+
+// runTetragonCleanup is --tetragon-cleanup [--check]. Outside Linux there is
+// no Tetragon and nothing to remove. --check exits 0 only on a build that
+// can clean up, which is how an rpm %preun tells a Tetragon-aware helper
+// from an older one.
+func runTetragonCleanup(check bool, out io.Writer, logger *slog.Logger) error {
+	if runtime.GOOS != "linux" {
+		_, err := fmt.Fprintln(out, "tetragon cleanup: not applicable on "+runtime.GOOS)
+		return err
+	}
+	if kernelPolicy.cleanup == nil {
+		return errors.New("this helper build has no Tetragon cleanup")
+	}
+	if check {
+		_, err := fmt.Fprintln(out, "tetragon cleanup: supported")
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return kernelPolicy.cleanup(ctx, out, logger)
 }

@@ -45,6 +45,22 @@ Material modifications made by Cisco Systems, Inc.:
 
 This NOTICE preserves the attribution required by Apache License 2.0 section 4.
 
+VENDORED SOURCE: TETRAGON API
+
+third_party/tetragon/ carries the gRPC API definitions of Tetragon, which the
+Linux sensor helper uses to read a customer-run Tetragon agent.
+
+    Copyright Authors of Tetragon (Copyright Authors of Hubble in the .proto
+    headers)
+    https://github.com/cilium/tetragon
+    Licensed under the Apache License, Version 2.0
+    Upstream revision: api/v1.7.1 (commit 99ca93d98710b98a42551bf3c12613e32888885d)
+
+The five .proto files are unmodified. The Go stubs next to them were generated
+from those files by DefenseClaw with protoc-gen-go and protoc-gen-go-grpc; the
+only change from upstream's generation is the Go package path. Tetragon ships no
+NOTICE file. third_party/tetragon/README.md records the provenance checks.
+
 Declared third-party dependencies are listed in go.mod/go.sum (Go) and
 pyproject.toml/uv.lock (Python). The shipped OpenClaw TypeScript plugin is built
 from extensions/defenseclaw/package.json and
@@ -85,6 +101,7 @@ dependencies include:
   - UUID (github.com/google/uuid) — BSD-3-Clause
   - fsnotify (github.com/fsnotify/fsnotify) — BSD-3-Clause
   - gorilla/websocket (github.com/gorilla/websocket) — BSD-2-Clause
+  - Tetragon API definitions (github.com/cilium/tetragon/api, vendored) — Apache-2.0
   - Unicode Character Database 13.0 DerivedAge data — Unicode-DFS-2016
 
 The generated observability redaction repertoire includes data derived from the

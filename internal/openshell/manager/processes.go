@@ -19,7 +19,6 @@ package manager
 import (
 	"context"
 	"path"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -204,7 +203,7 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		}
 		node.Cwd = p.Cwd
 		if len(p.Args) > 0 {
-			node.Cmdline = processCmdline(p.Args)
+			node.Cmdline = redaction.CommandLine(p.Args, maxCmdlineBytes)
 		}
 		if fresh {
 			started = append(started, node)
@@ -260,7 +259,7 @@ func (m *Manager) observeOCSFProcess(ctx context.Context, b *box, r ocsf.Record,
 			binary := collectText(r.Binary, collectMaxPathBytes)
 			node.Comm, node.Exe = collectText(path.Base(binary), collectMaxCommBytes), binary
 			if r.CmdLine != "" {
-				node.Cmdline = processCmdline(strings.Fields(r.CmdLine))
+				node.Cmdline = redaction.CommandLine(strings.Fields(r.CmdLine), maxCmdlineBytes)
 			}
 			t.live[r.PID] = node
 			started = append(started, node)
@@ -435,72 +434,3 @@ func (n *procNode) view() sandboxapi.Process {
 		Cmdline: sandboxapi.DisplayText(n.Cmdline), Source: n.Source,
 	}
 }
-
-// secretArg is an argument that names a secret (--token=…, api_key=…), and
-// secretFlag a flag whose next argument is one (--password value).
-var (
-	secretArg  = regexp.MustCompile(`(?i)^(-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
-	secretFlag = regexp.MustCompile(`(?i)^-{1,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*$`)
-	// longToken is a bare argument shaped like a key: 32 or more letters,
-	// digits and key punctuation with both letters and digits.
-	longToken = regexp.MustCompile(`^[A-Za-z0-9_\-+/=.]{32,}$`)
-	// userFlag is a flag whose next argument may be user:password (curl -u,
-	// --user, --proxy-user, -U), and userArg one with it attached.
-	userFlag = regexp.MustCompile(`^(?:-u|-U|--user|--proxy-user)$`)
-	userArg  = regexp.MustCompile(`^(-u|-U|--user=|--proxy-user=)([^:]*:)(.+)$`)
-	// urlPassword is the password of a URL's userinfo
-	// (scheme://user:password@host).
-	urlPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^/@:\s]*:)([^/@\s]+)@`)
-)
-
-// processCmdline is a process's argument vector as the process tree keeps
-// and shows it: joined, the values of arguments that name secrets,
-// key-shaped arguments, URL passwords, the password of a user:password
-// argument (curl -u) and a MySQL client's attached -pPASSWORD replaced by
-// redaction placeholders, at most maxCmdlineBytes. Telemetry destinations
-// redact it again by their own profile (it is content).
-func processCmdline(args []string) string {
-	out := make([]string, 0, len(args))
-	mysql := len(args) > 0 && mysqlClient(args[0])
-	hideNext, userNext := false, false
-	for _, a := range args {
-		user := userNext
-		userNext = false
-		switch {
-		case hideNext:
-			a, hideNext = redaction.ForSinkEntity(a), false
-		case user && !strings.HasPrefix(a, "-") && strings.Contains(a, ":"):
-			name, password, _ := strings.Cut(a, ":")
-			a = name + ":" + redaction.ForSinkEntity(password)
-		case secretArg.MatchString(a):
-			m := secretArg.FindStringSubmatch(a)
-			a = m[1] + redaction.ForSinkEntity(m[2])
-		case secretFlag.MatchString(a):
-			hideNext = true
-		case userFlag.MatchString(a):
-			userNext = true
-		case userArg.MatchString(a):
-			m := userArg.FindStringSubmatch(a)
-			a = m[1] + m[2] + redaction.ForSinkEntity(m[3])
-		case mysql && len(a) > 2 && strings.HasPrefix(a, "-p"):
-			a = "-p" + redaction.ForSinkEntity(a[2:])
-		case longToken.MatchString(a) && strings.ContainsAny(a, "0123456789") && strings.IndexFunc(a, isLetter) >= 0 && !strings.Contains(a, "/"):
-			a = redaction.ForSinkEntity(a)
-		}
-		a = urlPassword.ReplaceAllStringFunc(a, func(m string) string {
-			sub := urlPassword.FindStringSubmatch(m)
-			return sub[1] + redaction.ForSinkEntity(sub[2]) + "@"
-		})
-		out = append(out, a)
-	}
-	return truncate(strings.Join(out, " "), maxCmdlineBytes)
-}
-
-// mysqlClient reports a MySQL or MariaDB client, which takes its password
-// attached to -p.
-func mysqlClient(argv0 string) bool {
-	name := path.Base(argv0)
-	return strings.HasPrefix(name, "mysql") || strings.HasPrefix(name, "mariadb")
-}
-
-func isLetter(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') }
