@@ -1226,6 +1226,10 @@ def discovery() -> None:
     ),
 )
 @click.option(
+    "--ide-inventory", type=click.Choice(("all", "ai_only", "off")), default=None,
+    help="IDE plugin inventory scope (all, ai_only or off).",
+)
+@click.option(
     "--enable-host-plane/--no-enable-host-plane",
     default=None,
     help=(
@@ -1262,6 +1266,7 @@ def discovery_enable(
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     enable_host_plane: bool | None,
+    ide_inventory: str | None,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1295,6 +1300,7 @@ def discovery_enable(
         lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
+        ide_inventory=ide_inventory,
     )
 
     from defenseclaw import ux
@@ -3240,6 +3246,7 @@ def _build_discovery_overrides(
     lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
+    ide_inventory: str | None = None,
 ) -> dict[str, Any]:
     """Collect non-None overrides into a stable, ordered mapping.
 
@@ -3283,6 +3290,8 @@ def _build_discovery_overrides(
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
         overrides["store_raw_local_paths"] = bool(store_raw_local_paths)
+    if ide_inventory is not None:
+        overrides["ide_inventory"] = ide_inventory
     return overrides
 
 

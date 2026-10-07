@@ -519,7 +519,9 @@ ai_discovery:
   ide_inventory: ai_only    # all | ai_only | off
 ```
 
-A running gateway applies the change on its next reload, and the inventory
+Set the scope with `defenseclaw agent discovery enable --ide-inventory ai_only --yes`
+(or choose `all` or `off`). This also enables discovery and runtime planes A
+and B. A running gateway applies the change on its next reload, and the inventory
 follows at the next full scan. On a managed host, edit the
 [machine configuration](/docs/enterprise/configuration#where-the-config-lives).
 When the scope is `off`, `defenseclaw agent ide-plugins` says so and exports
