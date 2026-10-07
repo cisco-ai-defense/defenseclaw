@@ -731,10 +731,13 @@ class SandboxPanelMixin:
     async def _open_sandbox_detail(self) -> None:
         model = self.sandbox_model
         selected = model.selected_sandbox() if model.view == "sandboxes" else None
-        if selected is not None and selected.process_tree and selected.running:
-            payload = await asyncio.to_thread(fetch_sandbox_processes, getattr(self, "config", None), selected.name)
-            if payload is not None:
-                model.set_processes(selected.name, payload)
+        if selected is not None and selected.process_tree:
+            # A stopped sandbox has no live processes, and a failed fetch has
+            # none to show: the last tree is never shown as current.
+            payload = None
+            if selected.running:
+                payload = await asyncio.to_thread(fetch_sandbox_processes, getattr(self, "config", None), selected.name)
+            model.set_processes(selected.name, payload)
         title, pairs = model.detail_pairs()
         keys, keys_hint = self._sandbox_detail_keys()
         key: str | None = None

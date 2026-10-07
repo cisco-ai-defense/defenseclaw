@@ -270,6 +270,12 @@ def test_the_process_tree_is_in_the_details() -> None:
     model.set_processes("fix-tests", many)
     assert dict(model.detail_pairs()[1])["Processes"].endswith("more (defenseclaw sandbox ps --tree)")
     assert "Processes" not in dict(_model().detail_pairs()[1])
+    # Once it stops, or a fetch fails, the last tree is not shown as current.
+    model.set_snapshot(STATUS, [{**COPY, "process_tree": True, "phase": "stopped"}], [])
+    assert dict(model.detail_pairs()[1])["Processes"] == "none while it is stopped"
+    model.set_snapshot(STATUS, [{**COPY, "process_tree": True}], [])
+    model.set_processes("fix-tests", None)
+    assert dict(model.detail_pairs()[1])["Processes"].startswith("none sampled yet")
 
 
 def test_hook_events_are_in_the_details() -> None:

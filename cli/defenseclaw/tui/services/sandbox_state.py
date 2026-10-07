@@ -1844,8 +1844,11 @@ class SandboxesPanelModel:
         if row.run_image:
             pairs.append(("Run image", row.run_image))
         if row.process_tree:
-            tree = self.processes.get(row.name)
-            pairs.append(("Processes", "\n".join(tree) if tree else "none sampled yet (every 5 s while it runs)"))
+            tree = self.processes.get(row.name) if row.running else None
+            if tree:
+                pairs.append(("Processes", "\n".join(tree)))
+            else:
+                pairs.append(("Processes", "none sampled yet (every 5 s while it runs)" if row.running else "none while it is stopped"))
         if row.copy_mode:
             pairs.append(("Pull", "P brings the work back: it shows the changes, then applies them or makes a branch"))
             pairs.append(("Undo", "reverts the last pull --apply (U)"))
