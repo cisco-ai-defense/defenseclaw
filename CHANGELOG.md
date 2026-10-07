@@ -71,6 +71,12 @@ stopped`. Nothing is changed; use the install command above.
   `use-pack default` switches away. On a per-user install the mismatch error
   from the config check and the gateway names the `config set` command that
   pins the new digest.
+- After a Codex update on Windows, `defenseclaw doctor`'s **Hook contract**
+  and **Codex hooks** rows name `defenseclaw setup codex --yes`, which
+  selects the new Codex executable. The gateway's hook guard reports a
+  self-heal that keeps failing the same way once (it raised a HIGH
+  guardrail-degraded alert and a log line on every 30 s check) and, on a
+  per-user install, points at `defenseclaw doctor`.
 
 ### Added
 
