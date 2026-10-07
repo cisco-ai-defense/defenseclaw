@@ -101,7 +101,7 @@ The `ide.plugin.*` records and the `identity.observed` record carry the same
 
 | Record | What it adds |
 | --- | --- |
-| `hook.decision`, `guardrail.evaluation`, `tool.activity` and the agent, model, tool and guardrail spans | The directory, session and agent identity attributes, and the guardrail profile on decisions and evaluations |
+| `hook.decision`, `guardrail.evaluation`, `tool.activity` and the agent, model, tool and guardrail spans | The account (`user.id`, `defenseclaw.user.id_kind`, `defenseclaw.user.name`), the directory, session and agent identity attributes, and the guardrail profile on decisions and evaluations |
 | `identity.observed` | Once per user per identity cache lifetime (15 minutes): the directory, source and assurance, and the group count |
 | `ai_component.*` and the endpoint inventory | The owning user's principal, domain, directory, assurance and agent identity |
 | `ide.plugin.discovered`, `changed` and `removed` | One IDE plugin and its enabled state, for the user who owns it |
