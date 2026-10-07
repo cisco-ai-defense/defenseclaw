@@ -69,7 +69,7 @@ az extension add --name ssh && az ssh vm -g my-rg -n my-vm
 ```
 
 Then install DefenseClaw as that user and copy keys from `per-user-profiles.example.yaml`
-into `~/.defenseclaw/config.yaml`. The config files use `config_version: 8`; validate them
+into `~/.defenseclaw/config.yaml`. The config files use `config_version: 9`; validate them
 with `defenseclaw config validate`.
 
 ## What was tested
