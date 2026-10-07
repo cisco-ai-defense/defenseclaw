@@ -2771,14 +2771,6 @@ func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
 	return out
 }
 
-// legacyExcludedExtensionIDs are the extension ids the catalog gained with
-// the IDE inventory. The Secure Client profile's historical detector skips
-// them so its output stays as it was.
-var legacyExcludedExtensionIDs = map[string]bool{
-	"anthropic.claude-code": true,
-	"openai.chatgpt":        true,
-}
-
 // detectEditorExtensionsLegacy is the historical detector the Secure Client
 // profile keeps: directory names under the editors' extension and
 // globalStorage folders, matched against the catalog's extension ids.
@@ -2822,9 +2814,6 @@ func (s *ContinuousDiscoveryService) detectEditorExtensionsLegacy() []AISignal {
 	for _, sig := range s.catalog {
 		for _, ext := range sig.ExtensionIDs {
 			ext = strings.ToLower(ext)
-			if legacyExcludedExtensionIDs[ext] {
-				continue
-			}
 			for _, entry := range entries {
 				if editorExtensionNameMatches(entry, ext) {
 					out = append(out, s.signalFromValue(sig, SignalEditorExtension, "editor_extension", ext))
