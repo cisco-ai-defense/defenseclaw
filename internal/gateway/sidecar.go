@@ -3613,7 +3613,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
-	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
+	conn, err := resolveActiveConnector(registry, guardrailConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
 		// not exist. Returning here aborts sidecar boot so the operator
@@ -5831,6 +5831,29 @@ func configuredConnectorName(cfg *config.Config) string {
 		return strings.ToLower(name)
 	}
 	return strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
+}
+
+// guardrailConnectorName is the connector a single-connector guardrail boot
+// sets up. guardrail.connectors without guardrail.connector (an
+// administrator config) names it; the claw.mode default does not: the
+// gateway set up an openclaw connector nobody configured at every start and
+// the guardrail exited on its missing extension (GAP-0361). claw.mode still
+// picks among the listed connectors, and decides alone without the map.
+func guardrailConnectorName(cfg *config.Config) string {
+	name := configuredConnectorName(cfg)
+	if cfg == nil || strings.TrimSpace(cfg.Guardrail.Connector) != "" || len(cfg.Guardrail.Connectors) == 0 {
+		return name
+	}
+	roster := cfg.ActiveConnectors()
+	for _, listed := range roster {
+		if listed == name {
+			return name
+		}
+	}
+	if len(roster) > 0 {
+		return roster[0]
+	}
+	return name
 }
 
 func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
