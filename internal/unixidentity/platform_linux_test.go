@@ -55,20 +55,24 @@ func init() { hostRealms = func(context.Context) []Realm { return nil } }
 // domain or a parent of it, or the only realm for a bare name. An SSSD
 // domain no joined realm covers gets no directory type. A local account
 // SSSD's files provider answers for (the implicit files domain of RHEL 8)
-// stays local: it was reported as the AD account lee@CORP.EXAMPLE.COM.
+// stays local: it was reported as the AD account lee@CORP.EXAMPLE.COM. A
+// winbind account of the realm reports its DNS domain, as Windows does, not
+// the NetBIOS name CORP; the NetBIOS domain of a trusted domain gets no
+// realm facts.
 func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
 	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
 	nsswitchPath = filepath.Join(t.TempDir(), "nsswitch.conf")
 	localPasswdPath = filepath.Join(t.TempDir(), "passwd")
-	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files systemd\n"), 0o644); err != nil {
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files winbind systemd\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(localPasswdPath, []byte("lee:x:1000:70000::/home/lee:/bin/bash\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	hostRealms = func(context.Context) []Realm {
-		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM", ServerSoftware: "active-directory"}}
+		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM", ServerSoftware: "active-directory",
+			ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{`CORP\%U`})}}
 	}
 	accounts := map[int]string{
 		70001: "alice@corp.example.com",
@@ -76,12 +80,19 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		70003: "carol",
 		70004: "dave@ldap.example.org",
 		1000:  "lee",
+		70005: `CORP\erin`,
+		70006: `EMEA\frank`,
 	}
+	winbind := map[int]bool{70005: true, 70006: true}
 	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
 		line := commandResult{stdout: []byte(name + ":*:" + strconv.Itoa(uid) + ":70000::/home/" + name + ":/bin/bash\n")}
 		f.results["passwd "+strconv.Itoa(uid)] = line
-		f.results["-s sss passwd "+strconv.Itoa(uid)] = line
+		service := "sss"
+		if winbind[uid] {
+			service = "winbind"
+		}
+		f.results["-s "+service+" passwd "+strconv.Itoa(uid)] = line
 		f.results["initgroups "+name] = commandResult{stdout: []byte(name + " 70000\n")}
 	}
 	type view struct {
@@ -95,6 +106,8 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		70003: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "carol@CORP.EXAMPLE.COM"},
 		70004: {"", sssd, "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@LDAP.EXAMPLE.ORG"},
 		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
+		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@CORP.EXAMPLE.COM"},
+		70006: {ad, useridentity.SourceWinbind, "emea", "", ""},
 	}
 	r := newFakeNSS(f)
 	for uid, expected := range want {
@@ -106,5 +119,10 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		if got != expected || facts.Assurance != useridentity.AssuranceVerified {
 			t.Errorf("uid %d (%s) = %+v, want %+v, verified", uid, accounts[uid], facts, expected)
 		}
+	}
+	// With winbind use default domain only the names of other domains are
+	// qualified, and realmd reports the format %U.
+	if realm, ok := realmFor("emea", []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}); ok {
+		t.Errorf("a trusted NetBIOS domain took the realm %+v", realm)
 	}
 }

@@ -29,10 +29,11 @@ import (
 // The backend that owns an account is found by asking each directory
 // service named on the passwd line of nsswitch.conf for the uid with
 // `getent -s <service>`; the first that answers owns it, and an account no
-// directory service knows, or one /etc/passwd holds, is local. The domain comes from the
-// fully-qualified name SSSD (alice@corp.example.com) or winbind
-// (CORP\alice) reports, and groups from initgroups plus group lookups for
-// all of their ids. The realm and directory type of an SSSD or winbind
+// directory service knows, or one /etc/passwd holds, is local. The domain
+// comes from the fully-qualified name SSSD (alice@corp.example.com) or
+// winbind (CORP\alice) reports, a NetBIOS domain by the DNS name of its
+// realm, and groups from initgroups plus group lookups for all of their
+// ids. The realm and directory type of an SSSD or winbind
 // account come from realmd, which any account may ask (realm_linux.go).
 // UPN and mail need SSSD InfoPipe, which only root may call, so the root
 // guardian adds them (enterprisehooks identity spool).
@@ -120,7 +121,10 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 				facts.UPN = useridentity.NormalizeUPN(account.Name)
 				facts.Principal = facts.UPN
 			} else if domain != "" {
-				facts.Domain = domain
+				// Lower case, as Windows reports a NetBIOS domain it knows
+				// no DNS name for; applyRealm gives the DNS name of the
+				// realm a NetBIOS domain names.
+				facts.Domain = strings.ToLower(domain)
 				if strings.Contains(domain, ".") {
 					facts.Realm = strings.ToUpper(domain)
 					// sAMAccountName@REALM, the Kerberos principal SSSD
