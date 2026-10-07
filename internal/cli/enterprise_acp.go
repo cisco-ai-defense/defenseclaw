@@ -138,6 +138,9 @@ type enterpriseACPEnrollment struct {
 	client    string
 	agent     string
 	profile   string
+	// accountGone marks a --uid no account has any more: verify and revoke
+	// act on its service record only (GAP-0367).
+	accountGone bool
 }
 
 func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnrollment, error) {
@@ -188,8 +191,30 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 			return enterpriseACPEnrollment{}, errors.New("enterprise ACP enrollment: --sid applies only on Windows; use --user or --uid")
 		}
 	}
+	userHome := enterpriseACPUserHome
+	if !cfg.SecureClientIntegration() && runtime.GOOS != "windows" && enterpriseACPUID >= 0 &&
+		strings.TrimSpace(enterpriseACPUser) == "" && strings.TrimSpace(userHome) == "" {
+		// --uid alone names the account; its home comes from the account
+		// database. A deleted account has none, and revoke used to refuse
+		// its service record until a --user-home was made up (GAP-0367).
+		home, found, lookupErr := enterpriseACPHomeForUID(enterpriseACPUID)
+		switch {
+		case lookupErr != nil:
+			return enterpriseACPEnrollment{}, fmt.Errorf("enterprise acp: look up uid %d: %w", enterpriseACPUID, lookupErr)
+		case found:
+			userHome = home
+		case requireAuthorization:
+			return enterpriseACPEnrollment{}, fmt.Errorf("enterprise acp: no account has uid %d on this computer", enterpriseACPUID)
+		default:
+			return enterpriseACPEnrollment{
+				target:    enterpriseHookTarget{uid: enterpriseACPUID, gid: enterpriseACPGID},
+				principal: fmt.Sprintf("uid:%d", enterpriseACPUID), client: client, agent: agent, profile: profile,
+				accountGone: true,
+			}, nil
+		}
+	}
 	target, err := resolveEnterpriseHookTargetValues(
-		enterpriseACPUser, enterpriseACPUserHome, enterpriseACPUID, enterpriseACPGID,
+		enterpriseACPUser, userHome, enterpriseACPUID, enterpriseACPGID,
 		enterpriseACPSID, enterpriseACPUserDataDir,
 	)
 	if err != nil {
@@ -353,6 +378,12 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	if enrollment.accountGone {
+		return enterpriseACPResult(cmd, nil, fmt.Errorf(
+			"enterprise acp: %s no longer exists, but its ACP enrollment for %s/%s in profile %s is still valid; revoke it with enterprise acp revoke --uid %d --client %s --agent %s --profile %s",
+			enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+			enrollment.target.uid, enrollment.client, enrollment.agent, enrollment.profile))
+	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(enrollment.dataDir, enrollment.client, enrollment.agent)
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
@@ -395,6 +426,14 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}); err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	if enrollment.accountGone {
+		// No account, so no home to clean.
+		return enterpriseACPResult(cmd, map[string]any{
+			"ok": true, "principal": enrollment.principal, "client": enrollment.client,
+			"agent": enrollment.agent, "profile": enrollment.profile, "centrally_revoked": true,
+			"note": enrollment.principal + " no longer exists; its home was not touched",
+		}, nil)
+	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(enrollment.dataDir, enrollment.client, enrollment.agent)
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
@@ -413,10 +452,24 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		return os.Remove(tokenPath)
 	})
 	err = enterpriseACPRefusal(err)
+	note := ""
+	if !cfg.SecureClientIntegration() && err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The home is gone with its account: nothing is left to remove,
+			// and the revoke used to end in an error (GAP-0367).
+			note, err = "the home "+enrollment.target.home+" no longer exists; nothing was left there to remove", nil
+		} else {
+			err = fmt.Errorf("enterprise acp: the service record was removed, so the credential no longer works, "+
+				"but the user's copy %s could not be removed: %w", tokenPath, err)
+		}
+	}
 	payload := map[string]any{
 		"ok": err == nil, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
 		"centrally_revoked": true,
+	}
+	if note != "" {
+		payload["note"] = note
 	}
 	return enterpriseACPResult(cmd, payload, err)
 }
@@ -452,6 +505,9 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 	}
 	if revoked, _ := payload["centrally_revoked"].(bool); revoked {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential revoked\n", Style("✓", "fg=green", "bold"))
+		if note, _ := payload["note"].(string); note != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", note)
+		}
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential verified\n", Style("✓", "fg=green", "bold"))
