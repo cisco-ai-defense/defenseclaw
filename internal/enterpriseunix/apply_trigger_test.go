@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -39,12 +40,11 @@ func touched(calls []string, unit string) []string {
 	return out
 }
 
-// A transaction's own writes (the snapshot links config.yaml, --config
-// rewrites it) fire the apply path unit, whose run then waits for the
-// lifecycle lock. Quiesce stopped that waiting run 27 ms later, so every
-// `ensure --config` left defenseclaw-enterprise-apply.service failed (seen
-// on RHEL and Ubuntu), and an administrator change that fired it was
-// dropped. The queued run is left alone through the change and a rollback.
+// A change made while a transaction runs fires the apply path unit, whose
+// run then waits for the lifecycle lock. Quiesce stopped that waiting run
+// 27 ms later, which left defenseclaw-enterprise-apply.service failed (seen
+// on RHEL and Ubuntu) and dropped the administrator change that fired it.
+// The queued run is left alone through the change and a rollback.
 func TestTransactionsLeaveAQueuedApplyRunAlone(t *testing.T) {
 	t.Run("linux", func(t *testing.T) {
 		h := newTestHost(t, "linux")
@@ -75,6 +75,27 @@ func TestTransactionsLeaveAQueuedApplyRunAlone(t *testing.T) {
 			t.Fatalf("ensure booted out or kickstarted the apply job: %v", calls)
 		}
 	})
+}
+
+// The snapshot hard-linked config.yaml while the apply path unit still
+// watched it; the link count change fired the unit, whose ensure queued
+// behind the transaction and held the lock after it, so a verify right
+// after every ensure --config failed lifecycle_busy (GAP-0354).
+func TestSnapshotLeavesTheWatchedConfigLinkCountAlone(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	snap, err := h.env.takeSnapshot("trigger", []string{h.env.Layout.ConfigPath}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.env.discardSnapshot(snap)
+	info, err := os.Stat(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if links := info.Sys().(*syscall.Stat_t).Nlink; links != 1 {
+		t.Fatalf("the snapshot linked the watched config.yaml (%d links)", links)
+	}
 }
 
 // A failed oneshot sat in status and verify as failed/failed under a green
