@@ -4186,7 +4186,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    skill_name = os.path.basename(name)
+    skill_name = asset_lists.policy_rule_name("skill", name)
     pe = PolicyEngine(app.store, app.cfg)
 
     if not reason:
@@ -4216,10 +4216,11 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         skill_path = _resolve_path(app, skill_name)
         if skill_path:
             pe.set_source_path("skill", skill_name, skill_path)
-        affected_connectors = [
+        # GAP-0416: one connector can hold several copies; name it once.
+        affected_connectors = list(dict.fromkeys(
             target_connector
             for target_connector, _path in _skill_match_dir_scopes(app, skill_name)
-        ]
+        ))
         # GAP-2085: a bare block is global; name it the way bare unblock does.
         click.secho(f"[skill] Blocked {skill_name!r} (every connector).", fg="red")
         if affected_connectors:
@@ -4469,7 +4470,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    skill_name = os.path.basename(name)
+    skill_name = asset_lists.policy_rule_name("skill", name)
     pe = PolicyEngine(app.store, app.cfg)
 
     if not reason:

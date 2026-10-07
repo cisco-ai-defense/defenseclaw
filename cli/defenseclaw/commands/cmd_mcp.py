@@ -1896,6 +1896,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
+    target = asset_lists.policy_rule_name("mcp", target)
     pe = PolicyEngine(app.store, app.cfg)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
     if connector_paths.is_bundled_mcp_server(target, connector=connector):
@@ -1965,6 +1966,7 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
+    target = asset_lists.policy_rule_name("mcp", target)
     pe = PolicyEngine(app.store, app.cfg)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
     _refuse_bundled_mcp_policy_mutation(app, target, connector, "allow")

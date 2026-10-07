@@ -57,6 +57,36 @@ MANAGED_REFUSAL = (
 )
 
 
+def policy_rule_name(target_type: str, name: str) -> str:
+    """The name a block or allow rule is keyed on, or a usage error (GAP-0416).
+
+    An empty or blank name wrote a rule that matches nothing, and a path such
+    as ``../../etc/x`` was quietly cut down to ``x``. Both are refused. A skill
+    is named by its folder, so any slash is a path; MCP and plugin names may
+    hold a slash (``@scope/name``, or an MCP URL), so only an absolute, home
+    or ``.``/``..`` path is refused there. ``unblock`` keeps accepting any
+    name so a rule an older build wrote can still be removed.
+    """
+    value = (name or "").strip()
+    if not value:
+        raise click.UsageError(f"{target_type} name must not be empty or blank: a rule needs a name to match")
+    if target_type == "mcp" and "://" in value:
+        return value
+    slashed = value.replace("\\", "/")
+    parts = slashed.split("/")
+    path_like = (
+        "\\" in value
+        or slashed.startswith(("/", "~"))
+        or any(part in (".", "..") for part in parts)
+        or (target_type == "skill" and "/" in slashed)
+    )
+    if path_like:
+        last = next((part for part in reversed(parts) if part not in ("", ".", "..")), "")
+        hint = f" (for example {last!r})" if last else ""
+        raise click.UsageError(f"{target_type} name {value!r} is a path; pass the {target_type} name{hint}")
+    return value
+
+
 class ManagedDeviceError(click.ClickException):
     """A local policy write on a managed standalone device (exit 3)."""
 

@@ -116,10 +116,16 @@ class TestSkillBlock(SkillCommandTestBase):
         self.assertEqual(len(actions), 1)
         self.assertIn("test", actions[0].details)
 
-    def test_block_uses_basename(self):
-        self.invoke(["block", "/path/to/evil-skill"])
-        pe = PolicyEngine(self.app.store, self.app.cfg)
-        self.assertTrue(pe.is_blocked("skill", "evil-skill"))
+    def test_block_and_allow_refuse_blank_and_path_names(self):
+        # GAP-0416: '' and ' ' wrote rules that match nothing, and a path was
+        # quietly cut to its last part.
+        for verb in ("block", "allow"):
+            for name in ("", " ", "../../etc/x", "/path/to/evil-skill"):
+                with self.subTest(verb=verb, name=name):
+                    result = self.invoke([verb, name])
+                    self.assertEqual(result.exit_code, 2, result.output)
+        self.assertEqual(self.app.cfg.asset_policy.skill.denied, [])
+        self.assertEqual(self.app.cfg.asset_policy.skill.allowed, [])
 
     def test_hermes_unchanged_bundled_skill_cannot_be_blocked_or_quarantined(self):
         hermes_home = os.path.join(self.tmp_dir, "hermes")

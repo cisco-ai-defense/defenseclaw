@@ -3890,6 +3890,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
+    name = asset_lists.policy_rule_name("plugin", name)
     connector = _resolve_connector_scope(app, connector_flag)
     _refuse_managed_bridge_action(
         app,
@@ -4121,6 +4122,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
+    name = asset_lists.policy_rule_name("plugin", name)
     # P-A connector-scoped allow: write the narrowed entry and clear residual
     # file/runtime state for that peer. The gateway runtime-enable dance below
     # is for the unscoped/OpenClaw runtime lane and stays on the bare path.
