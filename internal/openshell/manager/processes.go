@@ -460,24 +460,46 @@ var (
 	// urlPassword is the password of a URL's userinfo
 	// (scheme://user:password@host).
 	urlPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^/@:\s]*:)([^/@\s]+)@`)
+	// secretKey is a word that names a secret and ends where its value, the
+	// next word, starts (a header: "Authorization: Bearer …", "X-Api-Key: …");
+	// authScheme the scheme word an Authorization value starts with.
+	secretKey  = regexp.MustCompile(`(?i)^[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:]$`)
+	authScheme = regexp.MustCompile(`(?i)^(?:bearer|basic|token|digest|negotiate)$`)
+	// word is one word of an argument that holds several (a script).
+	word = regexp.MustCompile(`\S+`)
 )
 
 // processCmdline is a process's argument vector as the process tree keeps
 // and shows it: joined, the values of arguments that name secrets,
 // key-shaped arguments, URL passwords, the password of a user:password
 // argument (curl -u) and a MySQL client's attached -pPASSWORD replaced by
-// redaction placeholders, at most maxCmdlineBytes. Telemetry destinations
-// redact it again by their own profile (it is content).
+// redaction placeholders, at most maxCmdlineBytes. An argument of several
+// words (the script of sh -c '…' or eval '…', a header value) has its
+// words redacted the same way (GAP-0107). Telemetry destinations redact it
+// again by their own profile (it is content).
 func processCmdline(args []string) string {
+	return truncate(strings.Join(redactArgs(args), " "), maxCmdlineBytes)
+}
+
+// redactArgs redacts an argument vector, or the words of one argument, for
+// processCmdline. A word keeps the quotes around it.
+func redactArgs(args []string) []string {
 	out := make([]string, 0, len(args))
-	mysql := len(args) > 0 && mysqlClient(args[0])
+	mysql := len(args) > 0 && mysqlClient(strings.Trim(args[0], `'"`))
 	hideNext, userNext := false, false
-	for _, a := range args {
+	for _, arg := range args {
 		user := userNext
 		userNext = false
+		pre, a, post := unquote(arg)
 		switch {
+		case hideNext && authScheme.MatchString(a):
+			// The scheme of "Authorization: Bearer …" stays; its value goes.
 		case hideNext:
 			a, hideNext = redaction.ForSinkEntity(a), false
+		case strings.ContainsAny(a, " \t\r\n"):
+			a = redactWords(a)
+		case secretKey.MatchString(a):
+			hideNext = true
 		case user && !strings.HasPrefix(a, "-") && strings.Contains(a, ":"):
 			name, password, _ := strings.Cut(a, ":")
 			a = name + ":" + redaction.ForSinkEntity(password)
@@ -500,9 +522,37 @@ func processCmdline(args []string) string {
 			sub := urlPassword.FindStringSubmatch(m)
 			return sub[1] + redaction.ForSinkEntity(sub[2]) + "@"
 		})
-		out = append(out, a)
+		out = append(out, pre+a+post)
 	}
-	return truncate(strings.Join(out, " "), maxCmdlineBytes)
+	return out
+}
+
+// redactWords redacts the words of an argument that holds several, keeping
+// the space between them.
+func redactWords(s string) string {
+	at := word.FindAllStringIndex(s, -1)
+	words := make([]string, len(at))
+	for i, r := range at {
+		words[i] = s[r[0]:r[1]]
+	}
+	red := redactArgs(words)
+	var b strings.Builder
+	last := 0
+	for i, r := range at {
+		b.WriteString(s[last:r[0]])
+		b.WriteString(red[i])
+		last = r[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// unquote splits the shell quotes and brackets around a word from it.
+func unquote(s string) (pre, core, post string) {
+	core = strings.TrimLeft(s, `'"($`+"`")
+	pre = s[:len(s)-len(core)]
+	trimmed := strings.TrimRight(core, `'");`+"`")
+	return pre, trimmed, core[len(trimmed):]
 }
 
 // mysqlClient reports a MySQL or MariaDB client, which takes its password
