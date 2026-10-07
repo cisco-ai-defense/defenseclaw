@@ -215,6 +215,29 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	}
 }
 
+// GAP-0258: a Codex thread without a transcript (transcript_path null, the
+// helper thread a managed install's hooks reach) is not counted as a session;
+// a chat with a transcript is.
+func TestCodexTranscriptlessThreadIsNotASession(t *testing.T) {
+	agentIdentityTestSetup(t)
+	prev := sharedAgentIdentities
+	sharedAgentIdentities = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	t.Cleanup(func() { sharedAgentIdentities = prev })
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4747, Name: "erin", Home: t.TempDir()})
+	hook := func(session string, transcript any) AgentIdentity {
+		return agentIdentityForGenericHook(peer, agentHookRequest{
+			ConnectorName: "codex", SessionID: session, HookEventName: "SessionStart",
+			Payload: map[string]interface{}{"transcript_path": transcript},
+		})
+	}
+	chat := hook("thread-chat", "/home/erin/.codex/sessions/rollout.jsonl")
+	hook("thread-helper", nil)
+	pending, _ := sharedAgentIdentities.snapshot()
+	if rec := pending[chat.IdentityID]; rec.SessionsSeen != 1 || rec.LastSessionID != "thread-chat" {
+		t.Fatalf("recorded %+v, want only the chat counted", rec)
+	}
+}
+
 // GAP-0289: with AI discovery off the recorder's own inventory.db is pruned
 // by last seen like discovery's history, so the ledger does not grow
 // without bound.
