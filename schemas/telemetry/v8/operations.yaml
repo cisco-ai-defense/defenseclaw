@@ -1182,6 +1182,248 @@ attributes:
     overrides: {min: 0, max: 1000000}
     notes: Makes the host-plane lineage gate observable without exporting the excluded process or event content
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.plane_mechanism
+  type: string
+  brief: How a running plane observes the host, named on every cycle
+  examples:
+  - Tetragon 1.7.1 (unix socket); fanotify
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: Fixed mechanism text from the sensor backends, never process or path content. plane_reason carries the mechanism only while a cycle is clean and loses it on a partial one, so a reader could not tell which backend a degraded cycle ran on; this field is present on every cycle
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.plane_backend
+  type: string
+  brief: Process backend Plane C ran on during this cycle
+  examples:
+  - tetragon
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [tetragon, native]
+    notes: Plane C only. tetragon is the host's own Tetragon read by the root sensor helper; native is the cn_proc and fanotify sources, including after a fallback from Tetragon (the reason is in plane_reason or plane_mechanism)
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.events_lost
+  type: int64
+  brief: Events the Plane C backend reported losing since it started
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Cumulative since the backend's stream opened. It always counts the drops the stream itself reported (rate-limit drops); loss_known says whether the backend's own loss counters were readable as well, so zero with loss_known false means none seen, not none happened
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.loss_known
+  type: boolean
+  brief: Whether the Plane C backend can report its event losses at all
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: False means the backend's own loss counters could not be read, so events_lost covers only the drops its stream reported. The native sources cannot see their own drops and report no backend at all
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.container_events
+  type: int64
+  brief: Plane C events this cycle that came from container processes
+  examples: [12]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Counted and routed to the container bucket, never joined to a host agent session. A devcontainer that runs an agent shows here instead of as a host finding
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.login_id
+  type: string
+  brief: Audit login uid of the user behind a root process
+  examples:
+  - '1000'
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 10, pattern: '^[0-9]{1,10}$'}
+    notes: The Linux audit login uid, reported only when the process's own uid is 0 so sudo and su stay attributable. user.id is always the kernel uid and is never replaced by this value
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.event_source
+  type: string
+  brief: Sensor that observed the host-plane event
+  examples:
+  - tetragon
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [tetragon, cn_proc, fanotify, endpoint_security, etw, poll]
+    notes: The backend of the latest observation behind the record. Absent when the backend does not say
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.hook_seen
+  type: boolean
+  brief: Whether a managed hook decision covered the tool call this activity came from
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Managed hosts only. False is agent activity no hook decision covered (an agent's own shell escape, a detached job, an MCP server). The join labels and never blocks. Absent when it does not apply
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.hook_join
+  type: string
+  brief: How a hook decision was matched to the activity
+  examples:
+  - exact
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [exact, temporal]
+    notes: exact is a shell command whose redacted hash equals the decision's; temporal is the same agent and time only. Present only when hook_seen is true, together with the joined session and tool invocation ids
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.outcome
+  type: string
+  brief: What a DefenseClaw kernel control did about the access behind the activity
+  examples:
+  - would_block
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [observed, would_block, blocked]
+    notes: The strongest outcome seen for the tactic. observed is a file access the observe policy recorded; would_block is a control running in monitor mode that would have denied; blocked is a denial the kernel returned
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.control
+  type: string
+  brief: DefenseClaw kernel control behind the outcome
+  examples:
+  - kernel.ssh_private_key_read
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write]
+    notes: The two built-in controls. kernel.ssh_private_key_read maps to the guardrail rule PATH-SSH-KEY and kernel.persistence_write to persistence.shell_profile_write
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.event
+  type: string
+  brief: Kind of state change a kernel policy record reports
+  examples:
+  - uid_ready
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [loaded, mode_changed, removed, operator_override, paused, resumed, orphaned, reconcile_failed, ack_stale, uid_ready, uid_burnin, tetragon_restarted, fallback]
+    notes: One record per state change of the sensor helper's reconciler, never one per kernel event
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.family
+  type: string
+  brief: Family of DefenseClaw kernel policy a state change is about
+  examples:
+  - controls
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [observe, connect, controls, controls-burnin]
+    notes: observe records file accesses, connect records per-binary connections, controls holds the two enforce-capable controls for users whose burn-in is complete, and controls-burnin holds the same selectors in monitor mode for the rest
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.mode
+  type: string
+  brief: Mode a kernel policy runs in after the state change
+  examples:
+  - monitor
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [monitor, enforce]
+    notes: monitor counts and records, enforce denies with EPERM
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.state
+  type: string
+  brief: State Tetragon reports for a kernel policy
+  examples:
+  - TP_STATE_ENABLED
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Tetragon's own tracing policy state name, kept as reported
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.reason
+  type: string
+  brief: Why a kernel policy state change happened
+  examples:
+  - connector_set_changed
+  stability: stable
+  owner: defenseclaw
+  field_class: reason
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: Short reason code from the reconciler, such as kernel_enforce_ack_stale; never a path or a command
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.model.provenance.quantized
   type: boolean
   brief: Whether the discovered local model is positively identified as quantized
@@ -5289,6 +5531,38 @@ groups:
     requirement_level: required
   - ref: defenseclaw.ai.runtime.host_plane_gated
     requirement_level: required
+- id: body.ai.runtime.identity
+  type: body_group
+  brief: Who and what a host-plane record is about, which sensor saw it, and what a DefenseClaw kernel control did.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.login_id
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.event_source
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.outcome
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.control
+    requirement_level: recommended
 - id: body.ai.runtime.finding
   type: body_group
   brief: One scored AI discovery runtime finding.
@@ -5296,6 +5570,7 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - body.ai.runtime.coverage
+  - body.ai.runtime.identity
   attributes: []
   body_fields:
   - ref: defenseclaw.ai.runtime.finding_id
@@ -5323,7 +5598,8 @@ groups:
   brief: One observed host-plane tactic, attributed to an agent.
   stability: stable
   introduced_in: telemetry-registry-v1
-  extends: []
+  extends:
+  - body.ai.runtime.identity
   attributes: []
   body_fields:
   - ref: defenseclaw.ai.runtime.finding_id
@@ -5337,6 +5613,10 @@ groups:
   - ref: defenseclaw.ai.runtime.agent
     requirement_level: required
   - ref: defenseclaw.ai.runtime.process
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_seen
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_join
     requirement_level: recommended
 - id: body.ai.runtime.plane_health
   type: body_group
@@ -5354,6 +5634,42 @@ groups:
   - ref: defenseclaw.ai.runtime.plane_running
     requirement_level: required
   - ref: defenseclaw.ai.runtime.plane_reason
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.plane_mechanism
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.plane_backend
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.events_lost
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.loss_known
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.container_events
+    requirement_level: recommended
+- id: body.ai.runtime.kernel_policy
+  type: body_group
+  brief: One state change of DefenseClaw's kernel policies on a managed Linux host.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.kernel.event
+    requirement_level: required
+  - ref: defenseclaw.policy.id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.family
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.state
+    requirement_level: recommended
+  - ref: defenseclaw.policy.version
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.reason
     requirement_level: recommended
 - id: body.ai.discovery.run
   type: body_group
@@ -6430,6 +6746,28 @@ groups:
     allowed_outcomes:
     - completed
     - partial
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ai.runtime.kernel_policy
+  type: log
+  brief: One state change of DefenseClaw's kernel policies, never one per kernel event.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ai.runtime.kernel_policy
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ai.runtime.kernel_policy
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - failed
     route_selector: true
     mandatory_floor: []
     compatibility_profiles:
@@ -11025,6 +11363,9 @@ producer_identity_sets:
   - event_name: ai.runtime.finding
     bucket: ai.discovery
     family: log.ai.runtime.finding
+  - event_name: ai.runtime.kernel_policy
+    bucket: ai.discovery
+    family: log.ai.runtime.kernel_policy
   - event_name: ai.runtime.plane_health
     bucket: ai.discovery
     family: log.ai.runtime.plane_health
