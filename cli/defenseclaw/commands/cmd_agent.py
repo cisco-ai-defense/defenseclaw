@@ -1570,6 +1570,15 @@ def discovery_status(
         ),
     }
 
+    pack_total, refused_packs = ai_signatures.refused_packs(cfg)
+    packs = {
+        "configured": pack_total,
+        "not_loaded": [
+            {"path": pack.path, "reason": pack.reason, "digest": pack.digest, "pinned": pack.pinned}
+            for pack in refused_packs
+        ],
+    }
+
     live: dict[str, Any] = {
         "reachable": False,
         "enabled": None,
@@ -1623,6 +1632,7 @@ def discovery_status(
         click.echo(json.dumps(
             {
                 "on_disk": on_disk,
+                "signature_packs": packs,
                 "live": live,
                 "drift": drift,
                 "comparison": {
@@ -1648,6 +1658,15 @@ def discovery_status(
         "enabled" if on_disk["lookup_model_provenance_online"] else "disabled",
         indent="  ",
     )
+    if pack_total:
+        ux.kv(
+            "Signature packs",
+            f"{pack_total - len(refused_packs)} of {pack_total} loaded"
+            + (f", {len(refused_packs)} not loaded" if refused_packs else ""),
+            indent="  ",
+        )
+        for pack in refused_packs:
+            ux.warn(f"Not loaded: {pack.path}: {pack.reason}", indent="  ")
 
     click.echo()
     ux.section("Live (sidecar)")
@@ -3605,20 +3624,27 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
     """List the merged AI discovery signature catalog."""
     cfg = _load_config_best_effort(app)
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    pins, require_pins = ai_signatures.pack_pins(cfg)
     try:
-        sigs = ai_signatures.load_ai_signatures(
+        sigs, refused = ai_signatures.load_ai_signature_catalog(
             signature_packs=cfg.ai_discovery.signature_packs,
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,
+            pack_digests=pins,
+            require_digests=require_pins,
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
         click.echo(json.dumps([asdict(sig) for sig in sigs], indent=2, sort_keys=True))
-        return
-    click.echo(_render_signatures_table(sigs).rstrip())
+    else:
+        click.echo(_render_signatures_table(sigs).rstrip())
+    # A pack that fails its pin is not loaded: its signatures are not listed.
+    # Say so where the list is read (stderr keeps --json parseable).
+    for pack in refused:
+        click.echo(f"Not loaded: {pack.path}: {pack.reason}", err=as_json)
 
 
 @signatures.command("validate")

@@ -84,6 +84,13 @@ MANAGED_REFUSAL = (
     "(MDM or management plane), not on the device"
 )
 
+#: Shown instead of "run defenseclaw init" on a managed (standalone) device.
+MANAGED_NOT_INITIALIZED = (
+    "This device is managed: DefenseClaw is configured by your administrator (MDM or management "
+    "plane), so there is no per-user config to create and 'defenseclaw init' does not apply. "
+    "Nothing was changed."
+)
+
 # Keys a running gateway applies only after a restart: the process-level
 # keys, plus what its reload still treats as restart-required (claw, agent
 # and routing, read once at start; the guardrail listener and enablement;
@@ -303,6 +310,7 @@ def write_with(
     if not str(actor or "").strip():
         raise ConfigWriteError("a config writer actor is required")
     target = _resolve(path)
+    refuse_when_managed(target, actor)
     with hold_lock(target, timeout_s=timeout_s):
         return _transact(target, mutate, actor, reason, expect_sha256, verify)
 
@@ -589,6 +597,19 @@ def managed_refuses(current: bytes, actor: str) -> bool:
     return standalone_managed(current)
 
 
+def refuse_when_managed(path: str | os.PathLike[str], actor: str | None = None) -> None:
+    """Raise :class:`ManagedConfigWriteError` when the managed gate would refuse
+    this writer, before it takes ``config.yaml.lock`` or touches the folder: a
+    refused writer leaves nothing behind (an empty lock file in a service-owned
+    folder). The locked transaction checks the same gate again."""
+    try:
+        current, _mode, _exists = _read_current(_resolve(path))
+    except (ConfigWriteError, OSError):
+        return  # the locked transaction reports it
+    if managed_refuses(current, actor or current_actor(ACTOR_PREFIX_CLI)):
+        raise ManagedConfigWriteError(MANAGED_REFUSAL)
+
+
 # ---------------------------------------------------------------------------
 # Validation
 
@@ -681,7 +702,9 @@ def plain_error(exc: BaseException) -> str:
         return sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
     if code == "pattern":
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
-        return f"{name} is not in the expected format{hint}."
+        # A pattern of plain words (block_at) names them in the corrective action.
+        allowed = text if text.startswith("use one of ") else ""
+        return f"{name} is not in the expected format{hint}." + (f" {allowed[:1].upper()}{allowed[1:]}." if allowed else "")
     from defenseclaw.commands.cmd_config import _plain_v8_issue
 
     return _plain_v8_issue(None, path, reason)

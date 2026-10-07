@@ -14,8 +14,8 @@ set -u
 # dpkg runs "postinst abort-remove" after preremove refused a removal because
 # another lifecycle run kept the lock: nothing was removed, so there is
 # nothing to apply, and a second 10-minute wait on the same busy lock would
-# only stall apt. "abort-upgrade" is the same after preremove refused a
-# downgrade: nothing was replaced.
+# only stall apt. "abort-upgrade" is the same after a failed upgrade step:
+# the previous files are back, so there is nothing to apply.
 case "${1:-}" in
     abort-remove | abort-upgrade) exit 0 ;;
 esac

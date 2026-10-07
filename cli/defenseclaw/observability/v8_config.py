@@ -1031,7 +1031,11 @@ def _declared_action(keyword: str, error: Any) -> str:
             and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
             and all(isinstance(value, str) for value in values)
         ):
-            return "use one of " + ", ".join(values)
+            # An empty value is how a field inherits; list the words only.
+            words = [value for value in values if value]
+            if not words:
+                return ""
+            return "use one of " + ", ".join(words) + (" (empty inherits)" if len(words) < len(values) else "")
         return ""
     if keyword == "pattern":
         return _pattern_action(error.validator_value)
