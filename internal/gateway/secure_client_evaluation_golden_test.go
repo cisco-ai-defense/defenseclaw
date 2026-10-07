@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -386,6 +387,12 @@ var secureClientEvaluationVolatile = []struct {
 	{regexp.MustCompile(`("[A-Za-z0-9_.]*fingerprint"\s*:\s*)"[0-9a-f]+"`), `$1"<K>"`},
 }
 
+// secureClientEvaluationCardInUUID finds a random id whose run of 13 or more
+// digits the audit redaction took for a payment card number (GAP-0255, on
+// origin/main too), which made the goldens fail now and then. The token keeps
+// the redacted length, so a match that spans exactly a UUID is an id.
+var secureClientEvaluationCardInUUID = regexp.MustCompile(`([0-9a-fA-F-]*)\\+u003credacted type=pii\.payment_card v=\d+ key=\S*? len=(\d+) hmac=\S*?\\+u003e([0-9a-fA-F-]*)`)
+
 // secureClientEvaluationNormalize removes what changes from run to run: the
 // temp root, ids, timestamps and durations.
 func secureClientEvaluationNormalize(text, root string) string {
@@ -399,6 +406,13 @@ func secureClientEvaluationNormalize(text, root string) string {
 		escaped := regexp.QuoteMeta(strings.ReplaceAll(parent, `\`, `\\`))
 		text = regexp.MustCompile(escaped+`\\\\\\u003credacted [^\\]*\\u003e`).ReplaceAllString(text, "<ROOT>")
 	}
+	text = secureClientEvaluationCardInUUID.ReplaceAllStringFunc(text, func(match string) string {
+		parts := secureClientEvaluationCardInUUID.FindStringSubmatch(match)
+		if n, err := strconv.Atoi(parts[2]); err != nil || len(parts[1])+n+len(parts[3]) != 36 {
+			return match
+		}
+		return "<UUID>"
+	})
 	for _, v := range secureClientEvaluationVolatile {
 		text = v.re.ReplaceAllString(text, v.with)
 	}
