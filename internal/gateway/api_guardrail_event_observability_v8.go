@@ -199,7 +199,14 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 			DefenseClawAcpProfile:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.profile }),
 			DefenseClawAcpProtocolVersion:       optionalACPFact(facts.acp, func(_ *acpEvaluationV8Context) string { return acp.SchemaVersion }),
 		}
-		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		// The verified account behind the evaluation, as the hook decision
+		// and tool rows of the same user carry it: without it a record that
+		// says the principal is verified names nobody (GAP-0252).
+		caller := auditCallerIdentity(ctx)
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	facts.recordMetrics(ctx, metricRuntime)

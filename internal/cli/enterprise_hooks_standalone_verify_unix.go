@@ -159,6 +159,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 			ManagedServiceUID:      serviceUID,
 			HookCredentialIdentity: identity,
 			ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
+			ManagedHookBinary:      standaloneManagedHookBinary(),
 		}
 		index := len(run.Rows)
 		run.Rows = append(run.Rows, row)

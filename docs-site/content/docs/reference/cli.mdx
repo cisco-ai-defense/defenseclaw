@@ -481,12 +481,13 @@ Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded 
 | `defenseclaw acp adopt [--client X] [--activate] [--yes]` | Adopt the agents `detect` found. |
 | `defenseclaw acp catalog` | Show the pinned ACP schema and built-in client/agent inventory. |
 | `defenseclaw acp setup --client zed\|jetbrains --agent <name> [--activate]` | Install or reconfigure a managed guarded entry. Defaults to observe mode. |
-| `defenseclaw acp setup --managed ... --runtime-data-dir <dir> --token-file <path>` | Install only user-side editor/lock files for a centrally authorized enterprise enrollment. |
+| `defenseclaw acp setup --managed ... --runtime-data-dir <dir> --token-file <path>` | Install only user-side editor/lock files for a centrally authorized enterprise enrollment, on a computer that has this CLI. A managed computer uses `defenseclaw-gateway enterprise acp setup`. |
 | `defenseclaw acp status` | Show the ACP posture and configured bindings (`--json` for the machine-readable document). |
 | `defenseclaw acp remove --client <client> --agent <agent>` | Remove only the DefenseClaw-owned entry. |
 | `defenseclaw acp verify [--client X] [--agent Y]` | Fail when a managed editor entry or the guarded executable's digest has drifted. With no `--client`/`--agent`, every configured binding is checked. |
 | `defenseclaw acp refresh [--from-sha256 <digest>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). A changed agent binary or editor entry still needs `acp setup`. |
 | `defenseclaw-gateway enterprise acp enroll\|verify\|revoke ...` | Manage the protected per-principal/client/agent/profile credential and its private user copy. |
+| `defenseclaw-gateway enterprise acp setup --client X --agent Y --profile P [--activate] --api-port N` | Run by the enrolled user on a managed computer, with the command `enroll` reports: write the guarded editor entry and the contract lock. Reads no central configuration. |
 
 ## Guardrail
 

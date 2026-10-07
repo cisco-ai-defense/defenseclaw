@@ -448,9 +448,18 @@ func TestStandaloneForeignHookGuardBinaryOnlyForStandalonePlugins(t *testing.T) 
 			t.Fatalf("%s on %s: guard binary %q", name, runtime.GOOS, binary)
 		}
 	}
+	// Every connector's Linux and macOS shell hook gets the admin hook binary
+	// for the session facts, guard or not (GAP-0194); Windows renders none.
+	if binary := standaloneManagedHookBinary(); (runtime.GOOS == "windows") != (binary == "") ||
+		(binary != "" && !filepath.IsAbs(binary)) {
+		t.Fatalf("the standalone profile's session facts binary on %s: %q", runtime.GOOS, binary)
+	}
 	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
 	if binary := standaloneForeignHookGuardBinary("amp"); binary != "" {
 		t.Fatalf("the Secure Client profile must not render the guard: %q", binary)
+	}
+	if binary := standaloneManagedHookBinary(); binary != "" {
+		t.Fatalf("the Secure Client profile must not name a session facts binary: %q", binary)
 	}
 	cfg = nil
 	if binary := standaloneForeignHookGuardBinary("opencode"); binary != "" {

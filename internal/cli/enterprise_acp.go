@@ -44,10 +44,16 @@ var enterpriseACPCmd = &cobra.Command{
 Each enrollment receives a unique bearer scoped to one principal, editor,
 agent, and central policy profile. The service record remains in protected
 machine state; only the bearer copy is published into the target user's private
-ACP runtime. The gateway never writes an editor profile or user home.`,
+ACP runtime. The administrator commands never write an editor profile; the
+enrolled user runs "setup" to write their own editor entry.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if err := pinEnterpriseACPAdministratorEnv(cmd); err != nil {
-			return err
+		// The administrator commands read the managed deployment (GAP-0249).
+		// The user-side setup reads no central config and runs as the user
+		// (GAP-0254).
+		if cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true" {
+			if err := pinEnterpriseACPAdministratorEnv(cmd); err != nil {
+				return err
+			}
 		}
 		return rootPersistentPreRunNoAuditE(cmd, args)
 	},
@@ -233,16 +239,23 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	payload := map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
-		"next": enterpriseACPSetupCommand(enrollment, tokenPath),
+		"next": enterpriseACPSetupCommand(enrollment),
 	}
 	return enterpriseACPResult(cmd, payload, nil)
 }
 
-func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath string) string {
-	guard := "defenseclaw-acp"
-	if executable, err := os.Executable(); err == nil {
-		extension := filepath.Ext(executable)
-		guard = filepath.Join(filepath.Dir(executable), "defenseclaw-acp"+extension)
+// enterpriseACPSetupCommand is the user-side command an enrollment reports:
+// this executable's own setup subcommand, because a managed host has no other
+// DefenseClaw command to run (GAP-0254).
+func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment) string {
+	executable, guard := managedHostGatewayCommand(), "defenseclaw-acp"
+	if path, err := os.Executable(); err == nil {
+		executable = path
+		guard = filepath.Join(filepath.Dir(path), "defenseclaw-acp"+filepath.Ext(path))
+	}
+	invoke := fmt.Sprintf("%q", executable)
+	if runtime.GOOS == "windows" {
+		invoke = "& " + invoke
 	}
 	activate := ""
 	mode := strings.TrimSpace(cfg.ACP.Mode)
@@ -256,8 +269,8 @@ func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath str
 		activate = " --activate"
 	}
 	return fmt.Sprintf(
-		"defenseclaw acp setup --managed --client %s --agent %s --profile %s%s --runtime-data-dir %q --token-file %q --guard-binary %q",
-		enrollment.client, enrollment.agent, enrollment.profile, activate, enrollment.dataDir, tokenPath, guard,
+		"%s enterprise acp setup --client %s --agent %s --profile %s%s --data-dir %q --api-port %d --guard-binary %q",
+		invoke, enrollment.client, enrollment.agent, enrollment.profile, activate, enrollment.dataDir, cfg.Gateway.APIPort, guard,
 	)
 }
 
@@ -367,6 +380,11 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 	}
 	if next, ok := payload["next"].(string); ok {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential enrolled\n  Next (as target user): %s\n", Style("✓", "fg=green", "bold"), next)
+		return nil
+	}
+	if lock, ok := payload["contract_lock"].(string); ok {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s guarded %v entry written to %v (contract lock %s)\n",
+			Style("✓", "fg=green", "bold"), payload["agent"], payload["path"], lock)
 		return nil
 	}
 	if revoked, _ := payload["centrally_revoked"].(bool); revoked {
