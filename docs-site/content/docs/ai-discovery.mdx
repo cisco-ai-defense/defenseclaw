@@ -484,11 +484,12 @@ extension's own data. The only database read is the one key
 `extensionsIdentifiers/disabled` in a VS Code `state.vscdb`, opened read-only
 and immutable with a 2-second limit. Paths leave the host only as hashes.
 
-Every scan is bounded per home: at most 4,096 plugins, 16,384 files and 64 MiB
-of metadata, and 1 MiB per file. A home that exceeds a bound is reported as a
-partial installation rather than read further.
+Every scan is bounded: at most 4,096 plugins per IDE installation, 16,384
+files and 64 MiB of metadata per home, and 1 MiB per file. An IDE that
+exceeds a bound is reported as a partial installation rather than read further.
 
-The IDE rows describe plugin data found in each user profile. Removing an IDE
+Most IDE rows describe plugin data found in each user profile; Windows Visual
+Studio also has machine-wide rows. Removing an IDE
 application can leave those folders behind, so an `enabled` plugin row means
 its metadata is present and enabled in that saved profile; it does not prove
 that the IDE application is still installed.
@@ -496,7 +497,7 @@ that the IDE application is still installed.
 ### Folder coverage
 
 For VS Code, the scanner reads `~/.vscode/extensions` on macOS and Linux
-and `%USERPROFILE%\\.vscode\\extensions` on Windows, plus the default
+and `%USERPROFILE%\.vscode\extensions` on Windows, plus the default
 per-user data folders for the listed forks and their remote SSH servers.
 It does not read portable VS Code `data/extensions` beside the app, folders
 selected with `--extensions-dir` or `VSCODE_EXTENSIONS`, Linux XDG
