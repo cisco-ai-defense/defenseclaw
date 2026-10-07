@@ -123,6 +123,10 @@ func TestBareAccountNameKeepsTheV8UserName(t *testing.T) {
 			t.Fatalf("BareAccountName(%q) = %q, want %q", in, got, want)
 		}
 	}
+	// Outside Secure Client the identity facts posture reduces the name.
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
 	if got := newTrustedLLMEventUser("1005", "dcad-alice@dclab.test").Name; !hookModelV8Identifier(got) {
 		t.Fatalf("trusted SSSD account name %q fails the v8 identifier check", got)
 	}
