@@ -1864,7 +1864,8 @@ function Invoke-Install {
     $Wheel = "defenseclaw-$Ver-py3-none-any.whl"
     $Requirements = "defenseclaw-$Ver-requirements.txt"
 
-    Write-Info "Downloading and verifying release assets"
+    # -Local copies the assets, so it says so instead of "Downloading" (GAP-0190).
+    if ($LocalDir) { Write-Info "Verifying the release assets in $LocalDir" } else { Write-Info "Downloading and verifying release assets" }
     if (-not (Get-Asset "checksums.txt" (Join-Path $Staging "checksums.txt"))) { Die "Could not get checksums.txt for $Ver" }
     $cosign = Get-Cosign
     if ($cosign) {
@@ -1897,7 +1898,7 @@ function Invoke-Install {
     }
     $stagedGateway = Join-Path $Staging "bin\defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $stagedGateway)) { Die "$Archive has no defenseclaw-gateway.exe" }
-    if (-not (Get-NativeOutput $stagedGateway @("--version")).Contains($Ver)) { Die "The downloaded gateway does not report version $Ver" }
+    if (-not (Get-NativeOutput $stagedGateway @("--version")).Contains($Ver)) { Die "The gateway in $Archive does not report version $Ver" }
 
     # A first install with an empty uv cache downloads Python and every
     # package, then compiles the bytecode: about 7 minutes on a busy Windows

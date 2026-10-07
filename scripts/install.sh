@@ -604,7 +604,12 @@ fetch_failed() {
     die "Could not get ${asset} for ${VERSION}; nothing was changed"
 }
 
-info "Downloading and verifying release assets"
+# --local copies the assets, so it says so instead of "Downloading" (GAP-0190).
+if [[ -n "${LOCAL_DIR}" ]]; then
+    info "Verifying the release assets in ${LOCAL_DIR}"
+else
+    info "Downloading and verifying release assets"
+fi
 fetch checksums.txt "${STAGING}/checksums.txt" || fetch_failed checksums.txt
 checksum_ok() {
     local file="$1" name expected
@@ -657,7 +662,7 @@ for binary in ${MANAGED_BINARIES}; do
     fi
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
-    || die "The downloaded gateway does not report version ${VERSION}"
+    || die "The gateway in ${ARCHIVE} does not report version ${VERSION}"
 
 info "Building the Python environment (a first install can take several minutes)"
 make_venv() {

@@ -1118,6 +1118,22 @@ def test_the_two_python_environment_builds_are_named() -> None:
     assert 'New-Venv $Venv "the final environment"' in install_new
 
 
+@pytest.mark.parametrize(
+    ("local", "expected"),
+    [("/srv/assets", "Verifying the release assets in /srv/assets"), ("", "Downloading and verifying release assets")],
+)
+def test_the_asset_step_says_whether_it_downloads(tmp_path: Path, local: str, expected: str) -> None:
+    # GAP-0190: --local printed "Downloading and verifying release assets" although it only copies.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index('if [[ -n "${LOCAL_DIR}" ]]; then\n    info "Verifying')
+    script = tmp_path / "step.sh"
+    script.write_text(f'info() {{ echo "$*"; }}\nLOCAL_DIR="{local}"\n' + text[start : text.index("\nfi\n", start) + 4])
+    assert _run([str(script)], tmp_path).stdout.strip() == expected
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert 'if ($LocalDir) { Write-Info "Verifying the release assets in $LocalDir" } else {' in windows
+    assert "The downloaded gateway" not in text + windows
+
+
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write any prefix")
 def test_declining_openclaw_names_the_working_command_and_skips_quickstart(tmp_path: Path) -> None:
     # GAP-1798: the skip hint said plain "npm install -g" (EACCES on a
