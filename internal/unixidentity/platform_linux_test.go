@@ -51,9 +51,9 @@ func TestLinuxLocalAccountsAndDirectoryConfiguration(t *testing.T) {
 func init() { hostRealms = func(context.Context) ([]Realm, error) { return nil, nil } }
 
 // A per-user gateway resolves the directory type of an SSSD account from the
-// realm realmd reports, as the root guardian does: by the account's DNS
-// domain or a parent of it, or the only realm for a bare name. An SSSD
-// domain no joined realm covers gets no directory type. A local account
+// realm realmd reports, as the root guardian does: only when a qualified
+// account name names that realm and its NSS backend. A bare SSSD name or
+// an SSSD domain no joined realm covers gets no directory type. A local account
 // SSSD's files provider answers for (the implicit files domain of RHEL 8)
 // stays local: it was reported as the AD account lee@CORP.EXAMPLE.COM. A
 // winbind account of the realm reports its DNS domain, as Windows does, not

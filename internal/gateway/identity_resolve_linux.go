@@ -36,11 +36,15 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
+	account, err := resolver.LookupUID(uid)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, err
+	}
 	facts, err := resolver.DirectoryFactsForUID(uid, now)
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
-	if record, ok := readIdentitySpoolFacts(key, now); ok {
+	if record, ok := readIdentitySpoolFactsForAccount(key, account.Name, now); ok {
 		facts = mergeSpoolFacts(facts, record.Facts)
 	}
 	return facts, nil

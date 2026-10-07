@@ -106,7 +106,7 @@ func configuredRealms(ctx context.Context) ([]Realm, error) {
 	defer conn.Close()
 	var paths []dbus.ObjectPath
 	if err := conn.Object(realmdService, realmdPath).CallWithContext(ctx, dbusGetProperty, 0, realmdProvider, "Realms").Store(&paths); err != nil {
-		var busErr *dbus.Error
+		var busErr dbus.Error
 		if errors.As(err, &busErr) && busErr.Name == "org.freedesktop.DBus.Error.ServiceUnknown" {
 			return nil, nil
 		}
@@ -224,8 +224,8 @@ func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 }
 
 // applyRealm adds the facts of the realm that serves an SSSD or winbind
-// account: its DNS domain when the name carries none or only a NetBIOS
-// domain (CORP\alice), as Windows reports the same account; the Kerberos
+// account: its DNS domain when a winbind name carries none or only a
+// NetBIOS domain (CORP\alice), as Windows reports the same account; the Kerberos
 // realm; the directory type of an Active Directory or IPA realm; and the
 // sAMAccountName@REALM principal, in the UPN form, when there is none yet.
 func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {

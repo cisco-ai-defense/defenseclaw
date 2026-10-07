@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -36,8 +37,8 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // an account no longer enrolled. setOwnership gives each new file (and the
 // directory) the guardian authorization ownership, root:<gateway group>,
 // before it is renamed into place, so the gateway never reads a partial or
-// unreadable record. An account whose lookups fail keeps no record; the
-// gateway then reports only what it resolves itself.
+// unreadable record. A failed lookup retains an existing record only while
+// it still names the same account; the gateway checks the name again.
 //
 // The record of an account missing from accounts is removed only once it is
 // older than IdentitySpoolMaxAge, when the gateway ignores it anyway. A pass
@@ -67,6 +68,16 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			continue
 		}
 		name := strconv.Itoa(account.UID) + ".json"
+		if account.User != "" {
+			if previous, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); err == nil &&
+				previous.User != "" && !strings.EqualFold(previous.User, account.User) {
+				// A UID assigned to a different account must not retain its
+				// previous owner's privileged facts if this lookup fails.
+				if err := os.Remove(filepath.Join(dir, name)); err != nil {
+					return fmt.Errorf("remove reassigned identity spool record: %w", err)
+				}
+			}
+		}
 		keep[name] = true
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
 		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
