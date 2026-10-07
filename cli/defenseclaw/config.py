@@ -147,6 +147,17 @@ def not_initialized_error() -> ConfigVersionError:
     return ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
 
 
+def first_run_hint() -> str:
+    """What to tell an account that has no config.yaml: run init, except on a
+    managed standalone device, where the admin config rules and there is no
+    per-user setup."""
+    from defenseclaw.config_writer import machine_managed_standalone
+
+    if machine_managed_standalone():
+        return "this device is managed, so DefenseClaw is configured in the admin config, not per user"
+    return "run 'defenseclaw init' or 'defenseclaw quickstart'"
+
+
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
 # gateway's MaxSupportedConfigVersion.

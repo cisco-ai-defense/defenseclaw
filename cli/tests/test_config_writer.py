@@ -172,10 +172,15 @@ def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
     monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
     monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
-    for argv in (["skill", "block", "x"], ["guardrail", "protection", "enable", "x"], ["setup", "codex", "--yes"], ["init"]):
+    for argv in (
+        ["skill", "block", "x"], ["guardrail", "protection", "enable", "x"], ["setup", "codex", "--yes"], ["init"], ["quickstart"]
+    ):
         result = CliRunner().invoke(cli, argv)
         assert result.exit_code == 3, (argv, result.output)
         assert "This device is managed" in result.output and "run 'defenseclaw init'" not in result.output
+    # config get names no init step either (it has no write to refuse, so exit 1).
+    result = CliRunner().invoke(cli, ["config", "get", "guardrail.mode", "--effective"])
+    assert "device is managed" in result.output and "defenseclaw init" not in result.output
     assert not home.exists()
 
 

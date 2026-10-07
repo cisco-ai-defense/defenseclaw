@@ -119,7 +119,7 @@ def config_validate(quiet: bool) -> None:
     if result.exists:
         ux.ok("file exists", indent="  ")
     else:
-        ux.warn("file does not exist yet — run 'defenseclaw init' or 'defenseclaw quickstart'")
+        ux.warn(f"file does not exist yet — {config_module.first_run_hint()}")
 
     if result.parse_error:
         ux.err(f"parse error: {result.parse_error}", indent="  ")
@@ -688,9 +688,7 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
     if not os.path.isfile(cfg_path):
         # No config.yaml yet: show the defaults the CLI would run with.
         if source or effective or provenance:
-            raise click.ClickException(
-                "config.yaml does not exist yet; run 'defenseclaw init' or 'defenseclaw quickstart'"
-            )
+            raise click.ClickException(f"config.yaml does not exist yet; {config_module.first_run_hint()}")
         return _v8_defaults(app)
     resolved_only = effective or provenance
     masked: dict = {}
