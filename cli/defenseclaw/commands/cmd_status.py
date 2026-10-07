@@ -1290,6 +1290,14 @@ def _print_llm_judge(health: dict | None) -> None:
     state = str(details.get("judge_state"))
     total = details.get("judge_recent_calls", 0)
     failed = details.get("judge_failed_calls", 0)
+    if state == "unavailable":
+        # The enabled judge could not start (GAP-0383).
+        reason = str(details.get("judge_unavailable_reason") or "it could not start").strip()
+        _status_row(
+            "LLM judge",
+            ux._style(f"not running: {reason}; only the rules decide; run defenseclaw doctor", fg="yellow"),
+        )
+        return
     if state == "ok":
         _status_row("LLM judge", ux._style(f"working (last {total} call(s) completed)", fg="green"))
         return

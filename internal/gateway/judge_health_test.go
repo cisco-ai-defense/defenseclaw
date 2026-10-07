@@ -18,8 +18,10 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
@@ -46,5 +48,33 @@ func TestHealthSnapshotShowsFailingJudge(t *testing.T) {
 		gatewaylog.SeverityInfo, "", "", JudgeEmitOpts{})
 	if d := h.Snapshot().Guardrail.Details; d["judge_state"] != "degraded" || d["judge_recent_calls"] != 4 {
 		t.Fatalf("details after a good call = %v", d)
+	}
+}
+
+// GAP-0383: an enabled judge whose LLM has no key is reported as not
+// running, and the calls of the judge it replaced no longer read as working.
+func TestHealthSnapshotShowsAJudgeThatCouldNotStart(t *testing.T) {
+	h := NewSidecarHealth()
+	t.Cleanup(judgeHealth.reset)
+	t.Setenv("DEFENSECLAW_K4_JUDGE_KEY", "")
+	emitJudge(context.Background(), "pii", "m", gatewaylog.DirectionPrompt, 1, 1, "allow",
+		gatewaylog.SeverityInfo, "", "", JudgeEmitOpts{})
+
+	judge, reason := newLLMJudgeWithReason(
+		&config.JudgeConfig{Enabled: true},
+		config.LLMConfig{Provider: "openai", Model: "gpt-judge-x", APIKeyEnv: "DEFENSECLAW_K4_JUDGE_KEY"},
+		"", nil, nil,
+	)
+	if judge != nil || !strings.Contains(reason, "DEFENSECLAW_K4_JUDGE_KEY") {
+		t.Fatalf("judge=%v reason=%q, want no judge and a reason naming the key", judge, reason)
+	}
+	judgeHealth.applyJudge(judge, reason)
+	d := h.Snapshot().Guardrail.Details
+	if d["judge_state"] != "unavailable" || d["judge_unavailable_reason"] != reason || d["judge_recent_calls"] != nil {
+		t.Fatalf("details = %v", d)
+	}
+	judgeHealth.applyJudge(&LLMJudge{}, "")
+	if _, ok := h.Snapshot().Guardrail.Details["judge_state"]; ok {
+		t.Fatal("a running judge still reads as unavailable")
 	}
 }

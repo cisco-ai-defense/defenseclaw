@@ -8972,6 +8972,12 @@ def _check_private_upstream_refusals(cfg, r: _DoctorResult) -> None:
         )
 
 
+def _llm_identity(llm) -> tuple[str, str, str, str]:
+    return tuple(
+        str(getattr(llm, name, "") or "").strip() for name in ("provider", "model", "base_url", "api_key_env")
+    )
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -9007,6 +9013,13 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         # A judge-only setup (`setup llm --role judge`) leaves the unified
         # model empty; probe the judge LLM instead (GAP-1365).
         llm = cfg.resolve_llm("guardrail.judge")
+        prefix = "judge LLM: "
+    elif bool(getattr(judge, "enabled", False)) and _llm_identity(
+        judge_llm := cfg.resolve_llm("guardrail.judge")
+    ) != _llm_identity(llm):
+        # guardrail.judge.llm overrides the unified LLM: the judge calls that
+        # one, so probe it (GAP-0383).
+        llm = judge_llm
         prefix = "judge LLM: "
     if not (llm.model or "").strip():
         _emit(
@@ -9093,6 +9106,31 @@ _JUDGE_NETWORK_ERROR_MARKERS = (
 def _judge_error_is_network(text: str) -> bool:
     low = (text or "").lower()
     return any(marker in low for marker in _JUDGE_NETWORK_ERROR_MARKERS)
+
+
+def _check_judge_running(health: dict | None, r: _DoctorResult) -> bool:
+    """FAIL when the gateway reports that the enabled judge could not start.
+
+    Returns True when it did, so the judge-calls row does not count the calls
+    of the judge it replaced as working (GAP-0383).
+    """
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    if not isinstance(details, dict) or details.get("judge_state") != "unavailable":
+        return False
+    reason = str(details.get("judge_unavailable_reason") or "it could not start").strip()
+    _emit(
+        "fail",
+        "LLM judge",
+        f"enabled but not running: {reason}; the hook and proxy lanes decide on the rules only",
+        r=r,
+        reason_code="judge-unavailable",
+        remediation=(
+            "fix the judge LLM (defenseclaw setup llm --role judge, or defenseclaw keys set for its key), "
+            "then run: defenseclaw-gateway restart"
+        ),
+    )
+    return True
 
 
 def _check_judge_calls(cfg, r: _DoctorResult) -> None:
@@ -11259,7 +11297,8 @@ def doctor(
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
     _check_private_upstream_refusals(cfg, r)
-    _check_judge_calls(cfg, r)
+    if not _check_judge_running(sidecar_health, r):
+        _check_judge_calls(cfg, r)
     _check_regional_provider_config(cfg, r)
     _check_custom_provider_overlay(cfg, r)
     _check_cisco_ai_defense(cfg, r)

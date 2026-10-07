@@ -140,18 +140,27 @@ type toolJudgeContextEvent struct {
 // optional RulePack supplies externalized judge prompts, suppressions,
 // and severity overrides.
 func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack, providers *configs.ProvidersConfig) *LLMJudge {
+	judge, _ := newLLMJudgeWithReason(cfg, llm, dotenvPath, rp, providers)
+	return judge
+}
+
+// newLLMJudgeWithReason is NewLLMJudge that also says why an enabled judge
+// could not start ("" when it started or is disabled), so the health
+// snapshot reports it instead of the hook lane silently running on the
+// rules only (GAP-0383).
+func newLLMJudgeWithReason(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack, providers *configs.ProvidersConfig) (*LLMJudge, string) {
 	if cfg == nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: config is nil\n")
-		return nil
+		return nil, ""
 	}
 	if !cfg.Enabled {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge not enabled in config\n")
-		return nil
+		return nil, ""
 	}
 	model := llm.Model
 	if model == "" {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no model configured (set llm.model or guardrail.judge.llm.model)\n")
-		return nil
+		return nil, "no model is configured (set llm.model or guardrail.judge.llm.model)"
 	}
 
 	// API key resolution:
@@ -175,7 +184,7 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 			envName = config.DefenseClawLLMKeyEnv
 		}
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no API key found (env=%s, dotenv=%s)\n", envName, dotenvDisplay)
-		return nil
+		return nil, "no API key for its LLM: " + envName + " is not set (environment or ~/.defenseclaw/.env)"
 	}
 
 	// Build an effective LLMConfig with the resolved API key pinned
@@ -190,7 +199,7 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 	provider, err := NewProviderForLLMConfig(&effLLM, providers)
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: failed to create provider: %v\n", err)
-		return nil
+		return nil, boundedJudgeHealthValue("its LLM provider could not be created: "+err.Error(), 240)
 	}
 	if strings.TrimSpace(llm.InstanceName) != "" {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s, instance=%s)\n", model, llm.InstanceName)
@@ -200,7 +209,7 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 	return &LLMJudge{
 		cfg: cfg, model: model, providerName: llm.ProviderPrefix(),
 		provider: provider, rp: rp,
-	}
+	}, ""
 }
 
 // llmJudgeAllowsEmptyAPIKey reports whether the selected provider has a

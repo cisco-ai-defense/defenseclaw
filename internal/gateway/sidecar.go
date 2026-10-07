@@ -1757,12 +1757,12 @@ func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *con
 
 // buildSharedJudge builds the shared judge. providers is the candidate
 // generation's registry; nil uses the published one.
-func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *generationProviders) (*LLMJudge, error) {
+func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *generationProviders) (*LLMJudge, string, error) {
 	if cfg == nil || !cfg.Guardrail.Judge.Enabled {
-		return nil, nil
+		return nil, "", nil
 	}
 	if rp == nil {
-		return nil, fmt.Errorf("sidecar: guardrail judge requires a validated rule pack")
+		return nil, "", fmt.Errorf("sidecar: guardrail judge requires a validated rule pack")
 	}
 	dotenvPath := filepath.Join(cfg.DataDir, ".env")
 	judgeLLM := cfg.ResolveLLM("guardrail.judge")
@@ -1770,9 +1770,12 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 	if providers != nil {
 		registry = &configs.ProvidersConfig{Providers: providers.Providers, OllamaPorts: providers.OllamaPorts}
 	}
-	judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, registry)
+	judge, unavailable := newLLMJudgeWithReason(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, registry)
 	if judge == nil {
-		return nil, nil
+		if unavailable != "" {
+			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge is enabled but not running: %s; the rules decide alone\n", unavailable)
+		}
+		return nil, unavailable, nil
 	}
 
 	features := "tool-result-pii"
@@ -1783,7 +1786,7 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 	if hooks := cfg.Guardrail.Judge.HookConnectors; len(hooks) > 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane enabled for: %s\n", strings.Join(hooks, ", "))
 	}
-	return judge, nil
+	return judge, "", nil
 }
 
 // buildInitialSidecarJudge prepares the construction-time judge while the
@@ -1796,13 +1799,14 @@ func buildInitialSidecarJudge(
 	cfg *config.Config,
 	rp *guardrail.RulePack,
 ) (*LLMJudge, error) {
-	judge, err := buildSharedJudge(cfg, rp, nil)
+	judge, unavailable, err := buildSharedJudge(cfg, rp, nil)
 	if err != nil {
 		if client != nil {
 			_ = client.Close()
 		}
 		return nil, err
 	}
+	judgeHealth.applyJudge(judge, unavailable)
 	return judge, nil
 }
 
@@ -1962,8 +1966,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
 
 	var nextJudge *LLMJudge
+	var nextJudgeUnavailable string
 	if judgeChanged {
-		nextJudge, err = buildSharedJudge(&next, rulePackCandidate.active, nextGen.Providers)
+		nextJudge, nextJudgeUnavailable, err = buildSharedJudge(&next, rulePackCandidate.active, nextGen.Providers)
 		if err != nil {
 			return err
 		}
@@ -2071,6 +2076,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			s.observabilityV8Mu.Unlock()
 		}
 		s.setSharedJudge(nextJudge)
+		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
 		if s.router != nil {
 			s.router.SetJudge(nextJudge)
 		}
