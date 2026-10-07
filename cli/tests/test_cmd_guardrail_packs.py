@@ -129,6 +129,23 @@ def test_connector_scope_leaves_peers_alone(env):
     ]
 
 
+def test_connector_custom_path_cannot_replace_global_pack(env, tmp_path):
+    app, _root, custom, writes = env
+    app.cfg.guardrail.rule_pack = "team"
+    app.cfg.guardrail.custom_packs = {
+        "team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)
+    }
+    other = tmp_path / "another" / "team"
+    (other / "rules").mkdir(parents=True)
+
+    result = _run(app, ["use-pack", str(other), "--connector", "codex", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.output)["ok"] is False
+    assert app.cfg.guardrail.custom_packs["team"].path == str(custom)
+    assert writes == []
+
+
 def test_registered_custom_pack_key_is_selected_by_name(env):
     """GAP-0049: a guardrail.custom_packs key selects like config set guardrail.rule_pack does,
     keeping its pinned digest; a pack edited since it was pinned is refused."""

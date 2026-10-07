@@ -3651,9 +3651,20 @@ def use_pack_cmd(
         name = _RULE_PACK_NAME.sub("-", pack_name.lower()).strip("-_")[:64] or "custom"
         if name in policy_catalog.RULE_PACK_PRESETS:
             name = f"custom-{name}"
-        changes.append(
-            config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
-        )
+        existing = (getattr(gc, "custom_packs", None) or {}).get(name)
+        if existing is not None:
+            existing_path = policy_catalog.normalize_pack_path(str(getattr(existing, "path", "") or ""))
+            existing_digest = str(getattr(existing, "digest", "") or "").lower()
+            if existing_path != path or existing_digest != f"sha256:{digest.lower()}":
+                _fail(
+                    1,
+                    f"Custom pack name {name!r} is already registered at {existing_path}. "
+                    "Choose a different pack name or update the registered pack explicitly. Nothing was changed.",
+                )
+        else:
+            changes.append(
+                config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
+            )
     key = _scope_key(connector_key, None)
     changes.append(config_writer.Change(f"{key}.rule_pack", name))
     cleared: list[str] = []
