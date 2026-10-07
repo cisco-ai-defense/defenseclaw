@@ -69,7 +69,7 @@ def _cfg(tmp_path: Path):
     cfg = default_config()
     cfg.data_dir = str(tmp_path / "dc")
     cfg.policy_dir = str(tmp_path / "dc" / "policies")
-    cfg.guardrail.rule_pack_dir = DEFAULT
+    cfg.guardrail.rule_pack = "default"
     return cfg
 
 
@@ -77,9 +77,9 @@ def test_scope_postures_carry_the_resolved_levels_and_where_they_come_from(tmp_p
     cfg = _cfg(tmp_path)
     cfg.guardrail.block_at = "HIGH"
     cfg.guardrail.connectors = {
-        "codex": PerConnectorGuardrailConfig(rule_pack_dir=STRICT, alert_at="CRITICAL"),
+        "codex": PerConnectorGuardrailConfig(rule_pack="strict", alert_at="CRITICAL"),
         "claudecode": PerConnectorGuardrailConfig(block_at="MEDIUM"),
-        "hermes": PerConnectorGuardrailConfig(rule_pack_dir=STRICT),
+        "hermes": PerConnectorGuardrailConfig(rule_pack="strict"),
     }
     rows = {row.scope: row for row in pc.scope_postures(cfg)}
     got = {
@@ -100,7 +100,7 @@ def test_scope_postures_carry_the_resolved_levels_and_where_they_come_from(tmp_p
 
 def test_scope_postures_without_levels_keep_the_pack_levels(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
-    cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack_dir=STRICT)}
+    cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="strict")}
     rows = {row.scope: row for row in pc.scope_postures(cfg)}
     assert (rows["global"].block_at, rows["global"].alert_at, rows["global"].levels_source) == (
         "CRITICAL",

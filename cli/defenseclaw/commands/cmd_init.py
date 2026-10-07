@@ -397,7 +397,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     else:
         cfg = load()
         if not is_current_schema(getattr(cfg, "_source_config_version", None)):
-            raise click.ClickException("this configuration was written by an older DefenseClaw; run 'defenseclaw migrate' first")
+            raise click.ClickException(
+                "this configuration was written by an older DefenseClaw"
+                "; run 'defenseclaw migrate' first"
+            )
         click.echo("  Config:        " + ux.dim("preserved existing"))
 
     cfg.environment = env
@@ -2389,7 +2392,7 @@ def _activate_additional_connectors(
 
 
 # Per-connector guardrail settings init never prompts for (GAP-1713).
-_KEPT_CONNECTOR_FIELDS = ("rule_pack_dir", "rule_pack", "block_at", "alert_at", "block_message")
+_KEPT_CONNECTOR_FIELDS = ("rule_pack", "block_at", "alert_at", "block_message")
 
 
 def _saved_connector_overrides() -> dict[str, object]:

@@ -16166,12 +16166,12 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     # while the TUI keeps rendering the inherited global observe/defaults.
     effective_guardrail_enabled = bool(getattr(guardrail, "enabled", False))
     effective_guardrail_mode = str(getattr(guardrail, "mode", "") or "observe")
-    effective_rule_pack_dir = str(getattr(guardrail, "rule_pack_dir", "") or "")
+    effective_rule_pack_dir = ""
     if hasattr(guardrail, "effective_rule_pack_dir"):
         try:
-            # The global pack: config_version 9 rule_pack, else the v8 dir.
+            # The global pack: its config_version 9 rule_pack.
             effective_rule_pack_dir = str(guardrail.effective_rule_pack_dir() or "")
-        except Exception:  # noqa: BLE001 - retain the raw v8 value.
+        except Exception:  # noqa: BLE001 - leave the pack unset.
             pass
     effective_hilt = hilt
     if len(actives) == 1 and guardrail is not None:
@@ -16228,8 +16228,8 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
                         mode = (guardrail.effective_mode(conn) or "").strip()
                     except Exception:
                         mode = ""
-                # Effective rule-pack label = basename of the per-connector
-                # rule_pack_dir (falling back to the global one), so the
+                # Effective rule-pack label = basename of the connector's
+                # pack directory (falling back to the global one), so the
                 # roster shows "strict"/"permissive"/"default" per connector.
                 pack = ""
                 if guardrail is not None and hasattr(guardrail, "effective_rule_pack_dir"):

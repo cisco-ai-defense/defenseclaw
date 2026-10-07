@@ -1,0 +1,338 @@
+---
+title: Deploy with Microsoft Entra ID
+description: Use Microsoft Entra ID users with DefenseClaw on Entra-joined Windows and on Azure Linux VMs with Entra SSH sign-in. Prepare the tenant, read group SIDs, set up sign-in, map users and groups to guardrail profiles, and check what DefenseClaw records. Starter scripts and configs included.
+keywords:
+  - DefenseClaw Entra ID
+  - Microsoft Entra ID
+  - Entra joined Windows
+  - Entra SSH login Linux
+  - AADSSHLoginForLinux
+  - Entra group SID
+  - guardrail profiles Entra
+---
+
+DefenseClaw never calls Microsoft Entra ID or Microsoft Graph. A user signs in
+to the computer with Entra ID, the computer gives that user an operating system
+account, and DefenseClaw reads the account the way it reads any other: the SID
+and sign-in token on Windows, NSS on Linux. So deploying DefenseClaw for Entra
+users is first an Entra and operating system task. This guide gives the steps in
+order, the starter scripts that do them, and what DefenseClaw records at the
+end. The background on what is read from where is in
+[How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
+
+Guardrail profiles apply to per-user installs and to the standalone enterprise
+profile. The Secure Client profile rejects them and keeps its behavior as it
+was, so nothing here applies to a Secure Client computer.
+
+<Callout title="What was run live">
+On a live Entra tenant with a per-user DefenseClaw install and Claude Code:
+
+- an Entra-joined Windows 11 computer, signed in over remote desktop as an
+  Entra user;
+- an Ubuntu 22.04 Azure VM with Entra SSH sign-in (`AADSSHLoginForLinux`).
+
+Not verified yet: a group-based profile decision on a standalone enterprise
+Windows computer with Entra sign-in, delivering the local group membership
+through Intune, hybrid-joined Windows, Entra Kerberos, the himmelblau module,
+macOS with Platform SSO, the standalone package on an Entra Linux VM, and an
+Entra outage. Each is marked where it comes up.
+</Callout>
+
+## Pick your setup
+
+| Setup | Users sign in with | DefenseClaw sees | A `groups` assignment can name |
+| --- | --- | --- | --- |
+| Entra-joined Windows 10 or 11 | Entra ID at the Windows sign-in screen | Directory `entra_id`, the user SID, the UPN and the tenant ID | Standalone enterprise profile: an Entra group by SID, once a built-in local group lists it ([step 2](#2-windows-entra-joined-computers)). Per-user install: no groups, use `users` |
+| Azure Linux VM with Entra SSH sign-in | `az ssh vm`, with the `aad` module | Directory `entra_id`, source `nss_aad`, the UPN | No Entra group: the module gives the account only a private group. Use `users` |
+| Linux desktop enrolled in Intune | A local account; Intune enrolls the device and does not sign users in | Directory `local`, expected. Not observed with DefenseClaw installed | Local groups |
+| Hybrid-joined Windows, Entra Kerberos, himmelblau, macOS Platform SSO | | The readers exist ([identity sources](/docs/enterprise/identity-sources)) | Not run on a live tenant |
+
+## Starter kit
+
+The scripts and example configs are in
+[`packaging/identity/entra`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/packaging/identity/entra).
+Every script has `--help` (or `Get-Help`), reads credentials from the
+environment and never from arguments, and changes nothing until you say so:
+the Python and Azure scripts print a plan unless you pass `--apply`, and the
+PowerShell script supports `-WhatIf`.
+
+| File | Use |
+| --- | --- |
+| `entra_setup.py` | Microsoft Graph helper: create groups and users from a JSON file, read the Windows SID of a group or user, compute a SID from an object id offline |
+| `setup-entra-ssh-linux.sh` | Azure CLI wrapper: enable Entra SSH sign-in on an Azure Linux VM and grant the sign-in role |
+| `Add-EntraGroupToLocalGroup.ps1` | Put an Entra group's SID into a built-in local group, the step that makes the group appear in sign-in tokens |
+| `Get-DefenseClawEntraIdentity.ps1` | Read-only: show the join state, the Entra accounts, the token's groups and what DefenseClaw answers |
+| `admin-config.windows.example.yaml`, `per-user-profiles.example.yaml`, `tenant.example.json` | Starting points for the standalone config, a per-user config and the tenant setup file |
+
+## 1. Prepare the tenant
+
+DefenseClaw needs nothing special from the tenant. You need the groups and
+users your profiles will name, and the SID of each group.
+
+The live tests ran on a tenant with no paid licence. They turned security
+defaults off so a scripted password sign-in works; that is a test convenience,
+not a DefenseClaw requirement.
+
+Create an app registration with the application permissions `Group.ReadWrite.All`
+and `User.ReadWrite.All` (read-only use needs `Group.Read.All` and
+`User.Read.All`), grant admin consent, and give the script its credentials
+through the environment:
+
+```bash
+export AZURE_TENANT_ID=00000000-0000-0000-0000-000000000000
+export AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000000
+read -rs AZURE_CLIENT_SECRET && export AZURE_CLIENT_SECRET   # type it; it stays out of your history
+
+python3 entra_setup.py check                                  # tenant, domains, security defaults
+cp tenant.example.json tenant.json                            # edit the domain, groups and users
+python3 entra_setup.py apply --config tenant.json             # a preview; changes nothing
+python3 entra_setup.py apply --config tenant.json --apply --password-file users.txt
+python3 entra_setup.py sids --group defenseclaw-ml-team
+```
+
+A token in `GRAPH_ACCESS_TOKEN` works instead of the app registration. The
+script creates objects that do not exist and leaves the others alone, so it is
+safe to run again. New users get a generated password that goes only to the
+`--password-file` (mode 0600), never to the screen.
+
+`sids` prints the object ID and the Windows SID of the group:
+
+```text
+group defenseclaw-ml-team
+      object id  6f1c9a0e-3b2d-4c58-9e71-a4b5c6d7e8f9
+      SID        S-1-12-1-1864145422-1280850733-3047453086-4192786374
+```
+
+Windows shows an Entra group only by this SID. The SID is four 32-bit words of
+the object ID, so `entra_setup.py sid-from-object-id 6f1c9a0e-...` computes it
+without a tenant. On a live tenant the Graph `securityIdentifier` of two groups
+and a user matched both the computed value and the SID in a Windows sign-in
+token.
+
+## 2. Windows: Entra-joined computers
+
+### Join and sign in
+
+Join the computer to Entra ID in **Settings** > **Accounts** > **Access work or
+school** > **Join this device to Microsoft Entra ID**. The user who joins is a
+local administrator by default, so remove that account from Administrators if
+your users should be standard users. On an Azure VM, the `AADLoginForWindows`
+extension joins it, and each user needs the **Virtual Machine User Login**
+role.
+
+Users sign in with their Entra ID; over remote desktop the live test signed in
+as `AzureAD\alice@contoso.onmicrosoft.com`. Windows gives the account a name of
+its own, not the UPN (`AzureAD\EntraAlice` for `entra-alice@...` in the live
+test), and a SID that starts with `S-1-12-1-`.
+
+### See what the computer exposes
+
+Run the read-only diagnostic as the user you want to check. Run it again as
+SYSTEM to read the identity store, which the live test read as SYSTEM.
+
+```powershell
+.\Get-DefenseClawEntraIdentity.ps1
+.\Get-DefenseClawEntraIdentity.ps1 -GroupSid S-1-12-1-1864145422-1280850733-3047453086-4192786374
+```
+
+It prints the `dsregcmd /status` join state, the Entra accounts in the
+identity store (SID, UPN, provider), the tenant, the groups in the sign-in
+token with the Entra SIDs marked, the built-in local groups that list an Entra
+SID, and, when DefenseClaw is installed, the answer of `guardrail profile
+explain`. With `-GroupSid` it says whether each group is in this token.
+
+### Put an Entra group into the sign-in token
+
+An Entra-joined computer puts an Entra group's SID into a sign-in token only
+when a built-in local group lists it. Without that, a `groups` assignment or an
+enrollment group filter that names the group matches no one. The rule and its
+limits are in
+[Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows).
+
+For a fleet, use an Intune policy; see
+[Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant#identity-through-intune).
+Delivery through Intune has not been tested. To make the membership on one
+computer, or from a platform script, run the script elevated:
+
+```powershell
+.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1864145422-1280850733-3047453086-4192786374 -WhatIf
+.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1864145422-1280850733-3047453086-4192786374
+```
+
+The script adds the SID to the built-in **Users** group with
+`NetLocalGroupAddMembers`, the API the Intune policies use. It is idempotent: it
+reports `Added`, `AlreadyMember`, `Removed` or `NotMember`. `-Remove` undoes it.
+It warns when you name a group other than the six Windows reads, and when you
+name Administrators, because that makes every member of the Entra group a local
+administrator.
+
+The script ran on Windows Server 2025 in Windows PowerShell 5.1 and PowerShell
+7 against a throwaway local group. The same API call put an Entra group into
+the sign-in token of an Entra-joined Windows 11 user in the live test. After
+the membership exists, the user signs out and back in. `net localgroup` may not
+list an Entra SID the computer cannot resolve; use the diagnostic's `-GroupSid`
+check, which reads the token.
+
+### Install DefenseClaw
+
+Install per user as in [Install](/docs/get-started/install), or deploy the
+standalone enterprise profile with Setup or your MDM
+([Enterprise on Windows](/docs/enterprise/windows),
+[Intune on Windows](/docs/enterprise/mdm/intune-windows)).
+
+A per-user install has no group list on Windows, so only `users`, `connectors`
+and `agents` assignments can match there. The standalone enterprise profile
+reads each user's token groups through the SYSTEM enumerator.
+
+## 3. Linux: Azure VMs with Entra SSH sign-in
+
+Enable the sign-in on the VM. The script enables the VM's system-assigned
+identity, installs the `AADSSHLoginForLinux` extension and grants the
+**Virtual Machine User Login** role (`--admin` grants **Virtual Machine
+Administrator Login**, which carries sudo rights). It prints a plan until you
+add `--apply`:
+
+```bash
+./setup-entra-ssh-linux.sh -g my-rg -n my-vm --user alice@contoso.onmicrosoft.com --group defenseclaw-ml-team
+./setup-entra-ssh-linux.sh -g my-rg -n my-vm --user alice@contoso.onmicrosoft.com --apply
+```
+
+Users sign in with the Azure CLI:
+
+```bash
+az extension add --name ssh
+az ssh vm -g my-rg -n my-vm
+```
+
+The `aad` module adds itself to `passwd` and `group` in
+`/etc/nsswitch.conf`, and the account is named by the UPN:
+
+```text
+$ id
+uid=9246366(alice@contoso.onmicrosoft.com) gid=9246366(alice@contoso.onmicrosoft.com) groups=9246366(alice@contoso.onmicrosoft.com)
+$ getent group defenseclaw-ml-team
+$
+```
+
+The module derives the uid from the user. The account has only its private group: `getent group` finds no Entra group.
+So a `groups` assignment cannot name an Entra group on this setup. Assign
+profiles by `users`, or add a local group of your own.
+
+Install DefenseClaw per user as that user, as in [Install](/docs/get-started/install).
+The Entra role is only for sign-in; DefenseClaw does not use it. The standalone
+enterprise package on an Entra Linux VM was not tested.
+
+Enrolling a Linux desktop in Intune is a different path: the device gets an
+Entra identity for compliance, but the accounts on it stay local. See
+[Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant#identity-through-intune).
+
+## 4. Map users and groups to profiles
+
+Write the assignments with the UPN for users and the SID for groups. Starter
+files: `per-user-profiles.example.yaml` for a user's own config and
+`admin-config.windows.example.yaml` for the standalone profile. The keys are
+the ones in [User- and group-based policies](/docs/guardrail/user-and-group-policies);
+a UPN compares without regard to case.
+
+```yaml
+guardrail:
+  profiles:
+    strict: {mode: action, block_at: MEDIUM}
+    ml-team: {mode: observe}
+  profile_assignments:
+    - profile: ml-team
+      match:
+        users: ["alice@contoso.onmicrosoft.com"]
+    - profile: ml-team                       # standalone enterprise on Windows only
+      match:
+        groups: ["S-1-12-1-1864145422-1280850733-3047453086-4192786374"]
+  default_profile: strict
+ai_discovery:
+  include_user_principal: true               # put the UPN in records; off by default
+```
+
+<Callout type="warn" title="A per-user config belongs to the user">
+A per-user install reads `~/.defenseclaw/config.yaml` (Windows:
+`%USERPROFILE%\.defenseclaw\config.yaml`) from the user's own profile, so the user
+can change their profile. To enforce a policy the user cannot change, use the
+standalone enterprise profile, which reads the machine config.
+</Callout>
+
+| Where | `users` by UPN | `groups` by Entra group |
+| --- | --- | --- |
+| Windows, per-user | Matched in the live test | No: a per-user install has no group list |
+| Windows, standalone enterprise | Expected (the same reader); not run live | By SID, after the local group step. Token facts tested live; a profile decision on a managed computer not yet recorded |
+| Linux `aad`, per-user | Matched in the live test | No: the module gives no Entra groups |
+
+Set a strict `default_profile`: a failed lookup lands on it
+([why](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile)).
+
+## 5. Check
+
+Ask the gateway which profile a user gets. On Windows, name an Entra user by
+SID or as `AzureAD\Name`; the computer cannot look up a UPN.
+
+```powershell
+defenseclaw guardrail profile explain --user AzureAD\Alice --connector claudecode
+defenseclaw guardrail profile explain --connector claudecode    # the account that runs it
+```
+
+```bash
+defenseclaw guardrail profile explain --connector claudecode
+```
+
+In the live tests, `profile` named the profile from the `users` assignment and
+`match` said `user`. On the standalone profile use
+`defenseclaw.exe enterprise windows profile-explain --user <SID> --connector claudecode`
+from an elevated prompt.
+
+These are the fields the records carried for an Entra user (the complete table is
+[Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields-as-seen-live)):
+
+| Field | Windows | Linux `aad` |
+| --- | --- | --- |
+| `defenseclaw.user.name` | The account name Windows assigns (`EntraAlice`), not the UPN | The UPN's account part |
+| `defenseclaw.user.principal` | The UPN | The UPN, in lower case |
+| `defenseclaw.user.directory`, `.identity.source` | `entra_id`, `windows_identity_store` | `entra_id`, `nss_aad` |
+| `defenseclaw.user.tenant_id` | The tenant ID | Not reported |
+| `defenseclaw.user.group_count` | `0` on a per-user install | `1`, the private group |
+
+## 6. What to expect in operation
+
+- **A group change on Windows** reaches DefenseClaw when the user signs in
+  again: the token is fixed at sign-in. The enumerator decides a signed-out
+  user from the token it saw at the last sign-in. Microsoft documents that a
+  new token can take up to 4 hours to carry a change; that was not measured
+  here.
+- **A user who has not signed in yet.** An Entra user who has never signed in to
+  a Windows computer has no account there yet, so there is no SID to match. On
+  the Azure Linux VM, the module resolved such a user by name but not by uid,
+  and `profile explain` said `unixidentity: not found`.
+- **An Entra outage or a computer with no network** was not tested. DefenseClaw
+  does not contact Entra: on Windows it reads the identity store, the join state
+  and the token on the computer. On Linux, a lookup that fails falls back to
+  `default_profile` with the reason `default_lookup_failed`, after the gateway's
+  cached answer expires (up to an hour); see the
+  [lookup rules](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile).
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| A `groups` assignment with an Entra group never matches on Windows | The group is not in the token. Name it by SID (the computer cannot resolve names), have a built-in local group list it, and have the user sign out and in. Check with `Get-DefenseClawEntraIdentity.ps1 -GroupSid` |
+| `profile explain --user alice@contoso.com` on Windows says "No mapping between account names and security IDs" | A Windows computer cannot look up a UPN. Pass the SID or `AzureAD\Name` |
+| `group_count` is `0` and `groups` never match on a per-user Windows install | Expected: use `users`, or the standalone enterprise profile |
+| `getent group` finds no Entra group on the Linux VM | Expected: the `aad` module gives no Entra groups. Use `users` |
+| `profile explain` says `unixidentity: not found` for an Entra user on Linux | The OS names the account but cannot map its uid back to it, as seen for users who had not signed in. Have the user sign in, then ask again |
+| Records have no principal | `ai_discovery.include_user_principal` is off, the default |
+| `az ssh vm` is refused | Microsoft requires the `AADSSHLoginForLinux` extension on the VM and a VM login role for the user. `setup-entra-ssh-linux.sh` without `--apply` lists what is missing |
+| `Add-EntraGroupToLocalGroup.ps1` says to run elevated | It changes a local group. Run it as an administrator or as SYSTEM, or use `-WhatIf` |
+
+## Next steps
+
+<Cards>
+  <Card title="Entra groups on Windows" href="/docs/enterprise/identity-sources#entra-groups-on-windows" description="The token rule, the Intune recipe and the limits." />
+  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write assignments, read the audit record, ship to managed hosts." />
+  <Card title="Prepare your Intune tenant" href="/docs/enterprise/mdm/intune-tenant" description="Licences, enrollment, groups and the scripts that set them up." />
+  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types and the other guides." />
+</Cards>

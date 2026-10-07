@@ -560,6 +560,34 @@ func TestCLIObservabilityV8RecordsContextRequiredSetupActions(t *testing.T) {
 	}
 }
 
+// GAP-0019/GAP-0167: a refused config write on a managed device is audited as
+// the generic "action" row, which keeps the key and the refusal details. The
+// "config-update" action would be recorded as an applied config change.
+func TestCLIObservabilityV8KeepsTheDetailsOfARefusedConfigWrite(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	body := `{"kind":"action","run_id":"gap-0167","action":{"name":"action","target":"guardrail.mode","details":"outcome=refused reason=managed_device command=config set"}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var target, details string
+	if err := database.QueryRow(`SELECT COALESCE(target,''), COALESCE(details,'')
+		FROM audit_events WHERE run_id = 'gap-0167' AND action = 'action'`,
+	).Scan(&target, &details); err != nil {
+		t.Fatal(err)
+	}
+	if target != "guardrail.mode" || !strings.Contains(details, "outcome=refused reason=managed_device") {
+		t.Fatalf("refusal row target=%q details=%q", target, details)
+	}
+}
+
 // GAP-2644: model spans the CLI submits (plugin and skill scans) carry the
 // calling user and the CLI run id, like the gateway's own model and judge
 // spans, so per-user attribution in Tempo and Galileo includes them.

@@ -1641,14 +1641,15 @@ def _build_skill_scanner(
         app.cfg.cisco_ai_defense,
         llm=llm,
     )
-    # R4: overlay the configured guardrail rule pack (and guardrail.rules) so
-    # `skill scan` flags what the gateway's rule lanes would catch, and what the
-    # install watcher flags. No-op when neither is set.
+    # R4: overlay the guardrail rule pack (and guardrail.rules) so `skill scan`
+    # flags what the gateway's rule lanes would catch, and what the install
+    # watcher flags: the default pack when the scope selects none (GAP-0164).
     return maybe_wrap(
         scanner,
         app.cfg,
         connector,
         pack_cache=pack_cache,
+        default_pack=True,
     )
 
 
@@ -4169,6 +4170,7 @@ def _refuse_bundled_skill_policy_action(
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install block list.
 
@@ -4292,6 +4294,7 @@ def _report_inherited_skill_state(
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove a skill's logical enforcement state.
 
@@ -4450,6 +4453,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install allow list.
 

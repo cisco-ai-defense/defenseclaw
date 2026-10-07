@@ -1304,8 +1304,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "codex": PerConnectorGuardrailConfig(),
             "claudecode": PerConnectorGuardrailConfig(),
         }
-        gc.connectors["codex"].rule_pack_dir = "/tmp/old-codex-pack"
-        gc.connectors["claudecode"].rule_pack_dir = "/tmp/old-claude-pack"
+        gc.connectors["codex"].rule_pack = "permissive"
+        gc.connectors["claudecode"].rule_pack = "default"
         self.app.cfg.claw.home_dir = self.tmp_dir
 
         result = self.runner.invoke(
@@ -1322,16 +1322,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(
-            Path(gc.rule_pack_dir).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
+        self.assertEqual(gc.rule_pack, "strict")
         for connector in ("codex", "claudecode"):
-            self.assertEqual(gc.connectors[connector].rule_pack_dir, "")
-            self.assertEqual(
-                Path(gc.effective_rule_pack_dir(connector)).parts[-3:],
-                ("policies", "guardrail", "strict"),
-            )
+            self.assertEqual(gc.connectors[connector].rule_pack, "")
+            self.assertEqual(gc.effective_rule_pack(connector), "strict")
 
     def test_scoped_rule_pack_updates_only_requested_connector(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1361,35 +1355,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(gc.rule_pack_dir, "")
-        self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
-        self.assertEqual(
-            Path(gc.connectors["claudecode"].rule_pack_dir).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
-
-    def test_rule_pack_dir_missing_is_rejected_before_save(self):
-        from defenseclaw.commands.cmd_setup import setup
-
-        self.app.cfg.claw.home_dir = self.tmp_dir
-        missing = os.path.join(self.tmp_dir, "missing-pack")
-        result = self.runner.invoke(
-            setup,
-            [
-                "guardrail",
-                "--rule-pack-dir",
-                missing,
-                "--yes",
-                "--no-restart",
-                "--no-verify",
-            ],
-            obj=self.app,
-        )
-
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--rule-pack-dir", result.output)
-        self.assertIn("does not exist", result.output)
-        self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
+        self.assertEqual(gc.rule_pack, "")
+        self.assertEqual(gc.connectors["codex"].rule_pack, "")
+        self.assertEqual(gc.connectors["claudecode"].rule_pack, "strict")
 
     def test_block_message_written_to_config_yaml(self):
         from defenseclaw.commands.cmd_setup import setup

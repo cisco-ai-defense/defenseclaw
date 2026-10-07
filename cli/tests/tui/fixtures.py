@@ -62,7 +62,7 @@ def snapshot_config(tmp_path) -> SimpleNamespace:
             mode="observe",
             connector="openclaw",
             scanner_mode="local",
-            rule_pack_dir="",
+            rule_pack="",
             port=4141,
             model="gpt-5-mini",
             strategy="default",

@@ -12,7 +12,7 @@
 """Tests for the rule-pack overlay scanner (R4).
 
 These pin the behavior that closes R4: the install-time Python scanners now
-load and apply the SAME ``guardrail.rule_pack_dir`` the Go gateway uses, so a
+load and apply the SAME ``guardrail.rule_pack`` the Go gateway uses, so a
 configured rule pack influences ``skill|mcp|plugin scan`` output — and, just as
 importantly, that scans are UNCHANGED when no rule pack is configured.
 """
@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner import rulepack
 
-from tests.helpers import cleanup_app, make_app_context
+from tests.helpers import cleanup_app, make_app_context, select_pack
 
 
 def _write_pack(root: str) -> str:
@@ -294,15 +294,15 @@ class TestOverlayHonorsConfig(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_no_pack_configured_returns_empty(self):
-        # rule_pack_dir unset -> honor-when-set means no overlay (R4 scope).
-        self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
+        # rule_pack unset -> honor-when-set means no overlay (R4 scope).
+        self.assertEqual(self.app.cfg.guardrail.rule_pack, "")
         out = rulepack.overlay_findings(
             self.app.cfg, text="key sk-ant-abcdefghij0123456789KLM"
         )
         self.assertEqual(out, [])
 
     def test_configured_pack_overlays_text(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         out = rulepack.overlay_findings(
             self.app.cfg, text="key = sk-ant-abcdefghij0123456789KLM"
         )
@@ -312,9 +312,8 @@ class TestOverlayHonorsConfig(unittest.TestCase):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
-        gc.connectors = {
-            "openclaw": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir)
-        }
+        gc.connectors = {"openclaw": PerConnectorGuardrailConfig()}
+        select_pack(self.app.cfg, gc.connectors["openclaw"], self.pack_dir)
         out = rulepack.overlay_findings(
             self.app.cfg, "openclaw", text="sk-ant-abcdefghij0123456789KLM"
         )
@@ -353,8 +352,18 @@ class TestMaybeWrap(unittest.TestCase):
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
         self.assertIs(wrapped, inner)
 
+    def test_a_skill_scan_acts_on_the_default_pack_when_nothing_is_selected(self):
+        # The install watcher scans a skill with the default pack on a default
+        # install, so the skill scan does too; MCP and plugin scans do not (GAP-0164).
+        inner = _FakeScanner()
+        with patch("defenseclaw.policy_catalog.preset_pack_dir", return_value=self.pack_dir):
+            self.assertIs(rulepack.maybe_wrap(inner, self.app.cfg), inner)
+            wrapped = rulepack.maybe_wrap(inner, self.app.cfg, default_pack=True)
+        self.assertIsInstance(wrapped, rulepack.RulePackOverlayScanner)
+        self.assertIn("SEC-ANTHROPIC", {r.rule_id for r in wrapped.pack.rules})
+
     def test_wrap_appends_findings_and_preserves_existing(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         inner = _FakeScanner()
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
         self.assertIsNot(wrapped, inner)
@@ -374,7 +383,7 @@ class TestMaybeWrap(unittest.TestCase):
         self.assertIn("analyzer:rule-pack", overlay.tags)
 
     def test_wrap_overlays_mcp_server_text(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         inner = _FakeScanner()
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
 
@@ -389,7 +398,7 @@ class TestMaybeWrap(unittest.TestCase):
         self.assertTrue(any(f.id == "SEC-ANTHROPIC" for f in result.findings))
 
     def test_overlay_failure_never_breaks_scan(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         inner = _FakeScanner()
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
         # Sabotage the pack so the overlay raises internally; the inner result
@@ -420,10 +429,12 @@ class TestMaybeWrap(unittest.TestCase):
                 "    tags: [custom]\n"
             )
 
-        self.app.cfg.guardrail.connectors = {
-            "codex": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir),
-            "cursor": PerConnectorGuardrailConfig(rule_pack_dir=cursor_pack),
+        connectors = self.app.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "cursor": PerConnectorGuardrailConfig(),
         }
+        select_pack(self.app.cfg, connectors["codex"], self.pack_dir)
+        select_pack(self.app.cfg, connectors["cursor"], cursor_pack)
         artifact = os.path.join(self.tmp_dir, "two-pack-artifact")
         os.makedirs(artifact)
         with open(os.path.join(artifact, "payload.txt"), "w", encoding="utf-8") as fh:
@@ -456,10 +467,12 @@ class TestMaybeWrap(unittest.TestCase):
     def test_shared_connector_pack_cache_loads_once(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
-        self.app.cfg.guardrail.connectors = {
-            "codex": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir),
-            "cursor": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir),
+        connectors = self.app.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "cursor": PerConnectorGuardrailConfig(),
         }
+        select_pack(self.app.cfg, connectors["codex"], self.pack_dir)
+        select_pack(self.app.cfg, connectors["cursor"], self.pack_dir)
         cache: dict[str, rulepack.RulePack] = {}
         with patch.object(
             rulepack,

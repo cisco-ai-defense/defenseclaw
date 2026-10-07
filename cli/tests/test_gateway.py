@@ -155,6 +155,20 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
         with patch.object(gateway.shutil, "which", return_value=None):
             self.assertEqual(gateway.resolve_gateway_binary(), canonical)
 
+    @unittest.skipIf(os.name == "nt", "the managed runtime descriptor is a Linux and macOS contract")
+    def test_managed_host_falls_back_to_the_package_gateway(self):
+        # GAP-0168: an administrator's shell has the managed gateway on no
+        # PATH, and "run defenseclaw upgrade" is not an answer there.
+        packaged = os.path.join(self._tmp.name, "defenseclaw-gateway")
+        self._make_executable(packaged)
+        descriptor = "/opt/cisco/defenseclaw/etc/managed-runtime.json"
+        with (
+            patch.object(gateway.shutil, "which", return_value=None),
+            patch.dict(gateway._MANAGED_GATEWAY_BINARIES, {descriptor: packaged}),
+            patch("defenseclaw.upgrade_shim.managed_descriptor", return_value=descriptor),
+        ):
+            self.assertEqual(gateway.resolve_gateway_binary(), packaged)
+
     def test_returns_none_when_nothing_resolves(self):
         # Canonical dir exists (it's the tmpdir) but no binary inside.
         with patch.object(gateway.shutil, "which", return_value=None):

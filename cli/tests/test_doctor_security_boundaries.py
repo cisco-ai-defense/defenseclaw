@@ -39,6 +39,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
         "DEFENSECLAW_DAEMON",
         "DEFENSECLAW_DISABLE_REDACTION",
+        "DEFENSECLAW_DEPLOYMENT_MODE",
         "DEFENSECLAW_ENTERPRISE_PROFILE",
         "CLAUDE_CONFIG_DIR",
         "SSL_CERT_FILE",
@@ -65,6 +66,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         b"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n"
         b"DEFENSECLAW_DAEMON=1\n"
         b"DEFENSECLAW_DISABLE_REDACTION=1\n"
+        b"DEFENSECLAW_DEPLOYMENT_MODE=oss\n"
         b"DEFENSECLAW_ENTERPRISE_PROFILE=standalone\n"
         b"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n"
         b"SSL_CERT_FILE=/tmp/attacker-ca.pem\n"
