@@ -837,13 +837,17 @@ func TestPathShimsRefuseAMalformedToken(t *testing.T) {
 // disclose: a credential, the hook payload, or a body or config given inline
 // rather than from a descriptor. Process substitutions on the command
 // (N< <(printf ...)) are descriptors, not arguments, and must be written by
-// the printf builtin.
+// the printf builtin. It also reports any other program (jq, mostly) given
+// the hook payload as an argument rather than on standard input.
 func curlArgvViolations(script string) []string {
 	var out []string
 	for _, line := range shellLogicalLines(script) {
 		line = templateDirective.ReplaceAllString(line, "")
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
+		}
+		if payloadArgument.MatchString(line) {
+			out = append(out, "the hook payload as a program argument: "+strings.TrimSpace(line))
 		}
 		if authArgsUse.MatchString(line) && !authArgsCaller.MatchString(line) {
 			out = append(out, "Authorization header array expanded outside defenseclaw_gateway_post/defenseclaw_sandbox_post: "+strings.TrimSpace(line))
@@ -883,6 +887,7 @@ var (
 	templateDirective   = regexp.MustCompile(`\{\{[^}]*\}\}`)
 	curlCommand         = regexp.MustCompile(`(?:^|[\s;|&(])(?:curl|"\$_DC_SHIM_CURL")\s`)
 	processSubstitution = regexp.MustCompile(`\d+<\s*<\(printf '[^']*'(?:\s+"[^"]*")*\)|\d+<\s*<\([^)]*\)`)
+	payloadArgument     = regexp.MustCompile(`(?:--arg|--argjson|--args)\s+(?:\w+\s+)?"?\$\{?(?:PAYLOAD|CONTENT|TOOL_INPUT|TOOL_OUTPUT)\b`)
 	curlRequest         = regexp.MustCompile(`--data-binary|-X\s+POST|https?://`)
 	curlNoRC            = regexp.MustCompile(`^(?:[\s;|&(])?(?:curl|"\$_DC_SHIM_CURL")\s+-q\s`)
 	authArgsUse         = regexp.MustCompile(`"\$\{AUTH_HEADER_ARGS\[@\]`)
@@ -929,6 +934,8 @@ func TestCurlArgvCheckCatchesTheOldHookTransport(t *testing.T) {
 		`curl -s --data-binary @/dev/fd/9 http://x 9< <(/usr/bin/printf '%s' "$PAYLOAD")`,
 		`defenseclaw_hook_post() { other_helper "http://x" "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}"; }`,
 		`curl -s --noproxy '*' -X POST "http://x" --config /dev/fd/8 --data-binary @/dev/fd/9 8< <(printf '%s\n' "$A") 9< <(printf '%s' "$B")`,
+		// The sandbox inspect-tool-response body before GAP-0027.
+		`INSPECT_BODY="$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" '{tool: $tool, output: $output}')"`,
 	} {
 		if len(curlArgvViolations(script)) == 0 {
 			t.Errorf("the check accepts a command line that discloses a secret or the payload:\n%s", script)
@@ -938,6 +945,7 @@ func TestCurlArgvCheckCatchesTheOldHookTransport(t *testing.T) {
 		`curl -q -s -w '\n%{http_code}' -X POST "$_dc_post_url" "${_dc_post_args[@]+"${_dc_post_args[@]}"}" --config /dev/fd/8 --data-binary @/dev/fd/9 2>/dev/null 8< <(printf 'header = "%s"\n' "$_dc_post_auth") 9< <(printf '%s' "$_dc_post_body")`,
 		`printf '%s' "$JSON" | curl -q -s -X POST "http://x" --config /dev/fd/7 --data-binary @- 7< <(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN") || true`,
 		`RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/x" 5 "$CONTENT" -H "Content-Type: application/json" "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {`,
+		`INSPECT_BODY="$(printf '%s' "$TOOL_OUTPUT" | jq -Rs --arg tool "$TOOL_NAME" '{tool: $tool, output: .}')" || {`,
 	} {
 		if v := curlArgvViolations(script); len(v) != 0 {
 			t.Errorf("the check rejects a descriptor transport: %v\n%s", v, script)
@@ -1056,6 +1064,42 @@ func TestRenderedHookScriptsKeepSecretsOffCurlCommandLines(t *testing.T) {
 	}
 	if curlScripts < 20 {
 		t.Fatalf("only %d of %d rendered scripts run curl; the check would pass without looking", curlScripts, len(scripts))
+	}
+}
+
+// TestSandboxHooksKeepTokenAndPayloadOffEveryCommandLine runs the OpenShell
+// sandbox render of every hook through the recorder. The sandbox hooks share
+// their templates with the host hooks, and an exec monitor on the host sees
+// every process a sandbox starts.
+func TestSandboxHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
+	const token = "dccert-fake-token-sandbox"
+	m := hookArgvPayloadMarker
+	marked := strings.NewReplacer(`"ls"`, `"ls `+m+`"`, `"ok"`, `"`+m+`"`, `"hi"`, `"`+m+`"`)
+	rec := newHookArgvRecorder(t)
+	for _, tc := range sandboxHookCases() {
+		tc := tc
+		t.Run(tc.connector+"/"+tc.script, func(t *testing.T) {
+			h := newSandboxHookHarnessFiles(t, sandboxArtifactsFor(t, tc.provider, tc.version).Files, rec.dir+":"+SandboxHookPATH)
+			stdin := marked.Replace(tc.stdin)
+			if !strings.Contains(stdin, m) {
+				t.Fatalf("the %s payload carries no marker: %s", tc.script, stdin)
+			}
+			rec.reset(t)
+			run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, stdin,
+				map[string]string{SandboxTokenEnv: token, "CLAUDE_TOOL_NAME": "Bash"}, []string{allowResponse})
+			if run.exitCode != 0 || tc.blocked(run) || len(run.calls) != 1 {
+				t.Fatalf("exit %d, %d ingress calls, stdout %q; stderr=%s", run.exitCode, len(run.calls), run.stdout, run.stderr)
+			}
+			call := run.calls[0]
+			if !strings.Contains(call.body, m) || call.headers["authorization"] != "Bearer "+token {
+				t.Fatalf("the ingress got a body with the marker %v and authorization %q; want both",
+					strings.Contains(call.body, m), call.headers["authorization"])
+			}
+			if argv := strings.Join(call.argv, " "); strings.Contains(argv, token) || strings.Contains(argv, m) {
+				t.Fatalf("curl's command line carries the token or the payload: %s", argv)
+			}
+			rec.requireNone(t, token, m)
+		})
 	}
 }
 
