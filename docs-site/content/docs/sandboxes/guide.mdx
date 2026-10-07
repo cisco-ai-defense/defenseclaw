@@ -209,7 +209,11 @@ What setup does, in order:
    DefenseClaw mounts only the folder you launch from and the read-only
    settings Claude Code and Codex sandboxes need. Say no, or pass
    `--no-mounts`, and no Claude Code or Codex sandbox can start, a `--copy`
-   run included; other harnesses run on a copy.
+   run included; other harnesses run on a copy. A Linux gateway whose
+   configuration selects a compute driver DefenseClaw does not drive, such
+   as `podman`, is switched to `docker` in the same plan when you agree
+   (see [sandboxes on Linux](/docs/sandboxes/linux#understand-what-it-changed));
+   sandboxes made on the old driver cannot start after the switch.
 
    On a Mac, setup asks instead whether to run sandboxes in OpenShell
    MicroVMs (the default answer is yes, which `--yes` and
