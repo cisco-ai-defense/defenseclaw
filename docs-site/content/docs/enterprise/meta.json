@@ -18,6 +18,7 @@
     "machine-policy",
     "identity-and-authentication",
     "identity-sources",
+    "identity-okta",
     "foreign-hook-guard",
     "ai-defense-key",
     "---Operate---",
