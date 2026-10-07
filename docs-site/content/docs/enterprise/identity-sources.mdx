@@ -128,9 +128,17 @@ install does, never falls back to its own account.
 | Domain | The fully qualified name SSSD (`alice@corp.example.com`) or winbind (`CORP\alice`) reports | Verified |
 | Groups | `initgroups` plus a group lookup through NSS | Verified |
 | Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, or the only joined realm for a name without a DNS domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
-| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `GetUserAttr` for `userPrincipalName`, and, when realmd names no realm for the account, the id provider of its SSSD domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@REALM`. An Entra ID account of the `aad` or himmelblau module is named by its UPN, which is reported as its UPN and principal on every install | Verified |
+| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `GetUserAttr` for `userPrincipalName`, and, when realmd names no realm for the account, the id provider of its SSSD domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@REALM`. An Entra ID account the `aad` module names, or Himmelblau with `cn_name_mapping = false`, is named by its UPN, which is reported as its UPN and principal on every install. Himmelblau's default (`cn_name_mapping = true`) names it by the short name, which carries no UPN or domain | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
 | Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
+
+Himmelblau answers a group only by gid or Entra object ID, not by name
+(`getent group ml-team` finds nothing while `id` names it), so on a host whose
+`group` line lists `himmelblau` DefenseClaw does not warn that an assignment's
+group is unknown. With SSSD's qualified names, the warning for a short name
+names the qualified group the host knows. An answer with a group that is only a
+number (a directory that did not answer for it) is kept 2 minutes instead of
+15, and the next request after that waits for a fresh lookup.
 
 The NSS and realmd lookups run on every Linux install, without privilege and
 without a call to the directory. The root guardian adds the InfoPipe facts on
@@ -165,8 +173,9 @@ the 15-minute cache.
 | Account name and groups | Open Directory, through the account database. Every install reports directory `local` and source `macos_opendirectory` | Verified |
 | Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
 | AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
-| Device SSO provider (Entra or Okta) | `app-sso platform -s`: Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
-| The user's Platform SSO login | Not read | None |
+| Device SSO provider (Entra or Okta) | `app-sso platform -s` (JSON on macOS 15, a property list on older releases): Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
+| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account and only root reads. It is the account's UPN and principal; only an account that carries it is reported with the SSO provider's directory, so local accounts that never registered stay `local`. Standalone enterprise only | Verified |
+| Entra or Okta groups through Platform SSO | None reach the macOS group database (macOS 15.8, Company Portal, live) | None |
 | Kerberos principal of the session | The default principal of the default `API:` cache, from `/usr/bin/klist --json` at most once per 5 minutes, or of a `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` | Claimed |
 | SSH session | `SSH_CONNECTION` | Claimed |
 
@@ -181,10 +190,10 @@ standalone enterprise profile.
 | Account, name, uid or SID | Gateway | Gateway |
 | Linux groups, domain, source | Gateway, through NSS | Gateway, through NSS |
 | Linux directory type and realm | Gateway, through realmd | Gateway, through realmd |
-| Linux UPN, and the directory type of a domain no realm covers | Only the UPN of an Entra (`aad`, himmelblau) account | Root guardian; the UPN of an Entra account from the gateway |
+| Linux UPN, and the directory type of a domain no realm covers | Only the UPN of an Entra account (`aad`, or Himmelblau with `cn_name_mapping = false`) | Root guardian; the UPN of an Entra account from the gateway |
 | Windows groups | Not available | SYSTEM enumerator |
 | Windows AD UPN, Entra UPN and tenant | Gateway | Gateway |
-| macOS directory, domain and SSO provider | Not available | Root enumerator |
+| macOS directory, domain, SSO provider and Platform SSO UPN | Not available | Root enumerator |
 | Session and Kerberos principal | Hook, claimed (Linux SSH confirmed by the gateway) | Hook, claimed (Linux SSH confirmed by the gateway) |
 
 Under the Secure Client profile none of these facts are collected and the
@@ -200,11 +209,13 @@ machine.
 | --- | --- |
 | Okta provisions users into AD, and the machine is AD-joined (SSSD, winbind, Windows domain or an AD-bound Mac) | The AD account: directory `active_directory`, the AD UPN, groups and domain |
 | The host reads the Okta LDAP Interface through SSSD (`id_provider = ldap`) or `nss_ldap` | The LDAP account: its uid, name and Okta groups, verified, also on a per-user install. Directory `ldap` through `nss_ldap`, and through SSSD on standalone enterprise. No domain unless SSSD uses fully qualified names. No UPN unless SSSD maps the Okta login to it. Tested live on RHEL 9; see [Okta on Linux](/docs/enterprise/identity-okta) |
-| Mac with Platform SSO or Okta Device Access and Okta Verify | The device's SSO provider: directory `okta`, source `macos_platform_sso` (standalone enterprise only). Not tested live |
+| Mac with Platform SSO or Okta Device Access and Okta Verify | An account registered with Platform SSO: directory `okta`, source `macos_platform_sso`, its login UPN (standalone enterprise only). Not tested live |
 | Linux with an Okta agent that creates local accounts | The local account, directory `local`. No Okta NSS module is recognized |
 | Entra-joined or hybrid-joined Windows | Directory `entra_id`, source `windows_identity_store`, the UPN as principal and the tenant ID. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists, and only with the standalone enterprise profile ([below](#entra-groups-on-windows)) |
-| Mac with Platform SSO and Company Portal | The device's SSO provider: directory `entra_id`, source `macos_platform_sso` (standalone enterprise only) |
-| Linux with the himmelblau or `aad` NSS module | Directory `entra_id`, source `himmelblau` or `nss_aad`, the UPN as principal and its domain. The `aad` module (Entra ID sign-in for Azure Linux VMs) gives the account only its own private group, no Entra groups, so a `groups` assignment cannot name an Entra group there |
+| Mac with Platform SSO and Company Portal | An account registered with Platform SSO: directory `entra_id`, source `macos_platform_sso`, the UPN as principal and its domain (standalone enterprise only). No Entra groups: Platform SSO gives the Mac none ([Entra groups on Linux and macOS](#entra-groups-on-linux-and-macos)) |
+| Linux with the `aad` NSS module | Directory `entra_id`, source `nss_aad`, the UPN as principal and its domain. The module (Entra ID sign-in for Azure Linux VMs) gives the account only its own private group, no Entra groups, so a `groups` assignment cannot name an Entra group there |
+| Linux with Himmelblau | Directory `entra_id`, source `himmelblau`, and the user's Entra groups by name. The UPN and domain only with `cn_name_mapping = false` |
+| Linux joined to Microsoft Entra Domain Services (realmd, SSSD) | The AD account of the managed domain: directory `active_directory`, the synced Entra groups (`name@domain` unless SSSD uses short names), the UPN through InfoPipe on standalone enterprise |
 | Entra accounts synced into on-premises AD | The AD account, as above |
 
 ### Entra groups on Windows
@@ -235,6 +246,21 @@ To use an Entra group:
 
 The starter scripts in `packaging/identity/entra` read the SID, make the
 membership on one computer and check the token; see
+[Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
+
+### Entra groups on Linux and macOS
+
+- **Linux, `aad` module:** no Entra groups. Use `users` assignments.
+- **Linux, Himmelblau:** `id` and initgroups name the user's Entra groups, and a
+  `groups` assignment by that name matches (Ubuntu 24.04, Himmelblau 5.0.0,
+  live).
+- **Linux, Microsoft Entra Domain Services:** SSSD reads the synced groups as
+  AD groups; name them as `id -Gn` prints them (RHEL 9.8, live).
+- **macOS, Platform SSO:** no Entra group reaches the Mac, not even with the
+  Platform SSO `AdditionalGroups` or `AdministratorGroups` settings, which
+  create empty local groups. A local group has to carry the membership.
+
+The steps, measured delays and caveats of each are in
 [Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
 
 ### Entra ID fields, as seen live
@@ -269,8 +295,10 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
 - **Local accounts have no directory groups.** A local account has only the
   groups its OS account database lists, no domain and no UPN.
 - **Group changes take time.** The gateway caches a user's directory facts for
-  15 minutes and refreshes them in the background. A Windows user must also
-  sign out and back in.
+  15 minutes and refreshes them in the background (2 minutes for an answer with
+  a group that has no name, or an SSSD account still waiting for its UPN on
+  standalone enterprise). A Windows user must also sign out and back in, and
+  Himmelblau and SSSD add their own caches.
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
   take seconds. The first request waits up to two seconds, then the default
   profile applies for 15 seconds until the lookup is retried.
@@ -288,8 +316,8 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   `defenseclaw.session.kerberos_principal`. Hooks that go through the
   DefenseClaw hook runner read it.
 - **Okta through the Okta LDAP Interface and Entra ID were tested live; the
-  other cloud paths are parsed from OS state.** The Okta Device Access,
-  bound-Mac, Platform SSO and himmelblau readers are covered by tests against
+  other cloud paths are parsed from OS state.** The Okta Device Access and
+  bound-Mac readers, and Platform SSO with Okta, are covered by tests against
   recorded OS output, not against a live tenant.
 
 What was exercised end to end on real hosts, with a Samba Active Directory
@@ -302,7 +330,7 @@ over SSH with their Okta passwords, on per-user installs and on standalone
 enterprise. Their uid, name and Okta groups were verified, the groups chose
 guardrail profiles on live Claude Code hooks, an Okta group change reached
 the profile, and an Okta outage fell back as documented. Okta Device Access
-and macOS Platform SSO were not tested live. Microsoft Entra ID was
+was not tested live. Microsoft Entra ID was
 exercised on a live tenant: per-user installs on an Entra-joined Windows 11
 computer and on Ubuntu 22.04 with Entra ID SSH sign-in (the `aad` module),
 with the fields [above](#entra-id-fields-as-seen-live), and Entra group SIDs in
@@ -311,6 +339,11 @@ group. On standalone enterprise on that computer, a `groups` assignment that
 names the Entra group by SID selected its profile while Users listed the group,
 and the default profile after the group was taken out of Users and the user
 signed in again. Intune delivery of the local group membership was not tested.
+Entra groups on Linux were exercised with Himmelblau 5.0.0 on Ubuntu 24.04 and
+with Microsoft Entra Domain Services and SSSD on RHEL 9.8, each per user and on
+standalone enterprise; a group member got the group profile on live Claude Code
+hooks. On macOS 15.8 with Platform SSO no Entra group reached the Mac, and a
+local group that carried the membership selected the profile.
 
 ## What a record carries
 
