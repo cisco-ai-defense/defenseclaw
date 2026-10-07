@@ -76,3 +76,37 @@ func TestReadyScriptUserKeepsMonitorCoverage(t *testing.T) {
 		t.Fatal("script user missing from status")
 	}
 }
+
+func TestDeletedBurninFamilyStaysDeletedWhenReadyUserHasNoDenyAnchor(t *testing.T) {
+	h := newHarness(t, enforceIntent(Digest()), baseTargets)
+	h.procs = twoUserProcs()
+	h.pass()
+	h.burnedIn(1001, 24*time.Hour)
+	h.burnedIn(1002, 24*time.Hour)
+	h.pass()
+	burnin, ok := h.tg.find(FamilyBurnin)
+	if !ok {
+		t.Fatal("expected monitor policy before the operator deletion")
+	}
+	h.tg.remove(burnin.Name)
+
+	absent := func(when string) {
+		t.Helper()
+		if _, ok := h.tg.find(FamilyBurnin); ok {
+			t.Fatalf("%s: the deleted burn-in family came back", when)
+		}
+		if o, ok := h.status().Overrides[FamilyBurnin]; !ok || o.Kind != OverrideDeleted {
+			t.Fatalf("%s: deletion override lost: %v", when, h.status().Overrides)
+		}
+	}
+	h.pass()
+	absent("first pass")
+	h.pass()
+	absent("second pass")
+	h.tg.restart()
+	h.pass()
+	absent("after a Tetragon restart")
+	h.start(h.intent)
+	h.pass()
+	absent("after a helper restart")
+}

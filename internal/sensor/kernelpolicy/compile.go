@@ -52,9 +52,11 @@ type Input struct {
 	Observe bool
 	Connect bool
 	// Controls and Burnin select the controls families; nil omits the family.
-	// Compile also adds ready users without a safe enforcing anchor to Burnin.
-	Controls *Scope
-	Burnin   *Scope
+	// Compile also adds ready users without a safe enforcing anchor to Burnin,
+	// unless an operator deleted that family.
+	Controls      *Scope
+	Burnin        *Scope
+	BurninDeleted bool
 }
 
 // Compiled is the result of a Compile.
@@ -127,7 +129,10 @@ func Compile(in Input) (Compiled, error) {
 		return Compiled{}, err
 	}
 	burnin := in.Burnin
-	if in.Controls != nil && in.Controls.Mode == PolicyEnforce {
+	if in.BurninDeleted {
+		burnin = nil
+	}
+	if in.Controls != nil && in.Controls.Mode == PolicyEnforce && !in.BurninDeleted {
 		// The enforcing policy has at most one binary uid. Ready users it
 		// cannot safely deny stay measured by the monitor-only family.
 		enforced := map[int]bool{}

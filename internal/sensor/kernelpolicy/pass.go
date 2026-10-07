@@ -116,6 +116,7 @@ func (c *Controller) pass(ctx context.Context, trigger string) {
 	compiled, err := Compile(Input{
 		Enrollment: c.enrollment, Installs: c.installs, Roots: c.roots.Roots, FS: c.cfg.FS,
 		Observe: plan.Observe, Connect: plan.Connect, Controls: plan.Controls, Burnin: plan.Burnin,
+		BurninDeleted: c.st.Overrides[FamilyBurnin].Kind == OverrideDeleted,
 	})
 	if err != nil {
 		c.cfg.Logger.Error("kernel policy did not compile", "error", err)
