@@ -202,6 +202,11 @@ func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 		if err != nil || !strings.Contains(output, "compiled from config.yaml alone") || !strings.Contains(output, "admission.skill: actions from") {
 			t.Fatalf("output = %q, error = %v", output, err)
 		}
+		setPolicyPathTestFlags(t)
+		output, err = capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+		if err != nil || !strings.Contains(output, `"verdict"`) {
+			t.Fatalf("evaluate without Rego = %q, error = %v", output, err)
+		}
 	})
 
 	// An upgraded 0.8 install can still hold the firewall and audit modules

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -159,6 +160,16 @@ func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 	observe("dc-ml-team@dclab.test", "dc-devs@dclab.test")
 	observe("dc-devs@dclab.test", "dc-ml-team@dclab.test")
 	observe("dc-ml-team@dclab.test", "dc-devs@dclab.test", "dc-sre@dclab.test")
+	// Stale facts, served while a refresh is in flight, are not reported
+	// (GAP-0172).
+	observeIdentity(context.Background(), capture, VerifiedSubject{
+		UserID: "1291", IDKind: useridentity.KindPOSIXUID, UserName: "dcad-alice",
+		Directory: useridentity.DirectoryFacts{
+			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+			Groups: []string{"dc-devs@dclab.test"}, Source: useridentity.SourceSSSDInfoPipe,
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now().Add(-identityDirectoryTTL - time.Minute),
+		},
+	}, useridentity.SessionFacts{})
 	records := capture.snapshot()
 	if len(records) != 2 || string(records[0].EventName()) != observability.TelemetryEventIdentityObserved {
 		t.Fatalf("records = %d, want two identity.observed", len(records))
@@ -167,6 +178,29 @@ func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 		if got := fmt.Sprint(canonicalBody(t, records[i])[observability.TelemetryAttributeDefenseClawUserGroupCount]); got != want {
 			t.Fatalf("record %d group_count = %s, want %s", i, got, want)
 		}
+	}
+}
+
+// The process-owner fallback of the profile selector carries the directory
+// facts the verified paths use, not the groups os/user lists (GAP-0174).
+func TestProcessOwnerProfileSubjectUsesDirectoryFacts(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	original := managedHookPeerDirectory
+	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) {
+		return useridentity.DirectoryFacts{
+			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory, ResolvedAt: time.Now(),
+			Groups: []string{"domain users@dclab.test", "dc-ml-team@dclab.test"},
+		}, true
+	}
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+	subject, ok := processOwnerProfileSubject()
+	if !ok || subject.LookupFailed || !subject.viaProcessOwner || !slices.Contains(subject.Groups, "dc-ml-team@dclab.test") {
+		t.Fatalf("subject = %+v, ok %v; want the directory's groups", subject, ok)
+	}
+	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return useridentity.DirectoryFacts{}, false }
+	if subject, _ := processOwnerProfileSubject(); !subject.LookupFailed {
+		t.Fatalf("a directory that did not answer must read as a failed lookup: %+v", subject)
 	}
 }
 

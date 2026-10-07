@@ -165,20 +165,25 @@ func windowsEnterpriseHotConfigApply(
 
 	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
 	generationPath := configwrite.GenerationPath(layout.ConfigPath)
-	generationBefore, generationErr := os.ReadFile(generationPath)
+	_, generationErr := os.Stat(generationPath)
+	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
+	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, "enterprise windows ensure"); err != nil {
 		return false
 	}
-	// Undoing puts back the config and the generation record as they were,
-	// so a hand-edited config is not recorded as a lifecycle generation by
-	// the attempt that did not stick.
+	// Undoing puts the config back. A config the record named is recorded
+	// again as a new generation: the counter never goes back, because the
+	// gateway may already have reported the number the attempt took. A hand
+	// edit stays unrecorded, and a record the attempt created goes away.
 	undo := func() {
-		_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, "enterprise windows ensure (config change not applied)")
+		if recordedBefore {
+			_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, "enterprise windows ensure (config change not applied)")
+		} else {
+			_ = writeFileKeepingDACL(layout.ConfigPath, previous, layout.ConfigPath)
+		}
 		if generationErr != nil {
 			_ = os.Remove(generationPath)
-			return
 		}
-		_ = writeFileKeepingDACL(generationPath, generationBefore, generationPath)
 	}
 	if _, err := windowsEnterpriseHotConfigValidate(layout.ConfigPath, layout.DataDir, layout.ServiceUser, false); err != nil {
 		undo()

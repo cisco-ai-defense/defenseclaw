@@ -165,7 +165,18 @@ func identityFactsFingerprint(facts useridentity.DirectoryFacts) string {
 // observeIdentity emits identity.observed for a verified subject whose
 // directory facts resolved. It carries the group count, never the names.
 func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject VerifiedSubject, session useridentity.SessionFacts) {
-	if emitter == nil || subject.Directory.Empty() || !identityObservedDue(subject.UserID, subject.Directory, time.Now()) {
+	if emitter == nil || subject.Directory.Empty() {
+		return
+	}
+	// Facts older than the cache lifetime are the stale ones the cache serves
+	// while one background lookup replaces them. Reporting them would put the
+	// account's pre-change group count on a record that is not repeated for
+	// another lifetime; the first request after the refresh reports the
+	// current facts (GAP-0172).
+	if resolved := subject.Directory.ResolvedAt; !resolved.IsZero() && time.Since(resolved) >= identityDirectoryTTL {
+		return
+	}
+	if !identityObservedDue(subject.UserID, subject.Directory, time.Now()) {
 		return
 	}
 	// identity.observed belongs to the gateway activity producer's

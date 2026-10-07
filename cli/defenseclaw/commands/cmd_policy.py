@@ -433,7 +433,7 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
     fw = data.get("firewall", {})
     if fw:
         click.echo()
-        click.echo("Firewall:")
+        click.echo("Firewall (stored in the preset; the gateway does not enforce it):")
         click.echo(f"  default_action:        {fw.get('default_action', 'deny')}")
         click.echo(f"  blocked_destinations:  {len(fw.get('blocked_destinations', []))} entries")
         click.echo(f"  allowed_domains:       {len(fw.get('allowed_domains', []))} entries")

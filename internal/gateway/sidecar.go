@@ -6088,7 +6088,10 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		// when discovery found no OpenClaw behind a loopback host.
 		return !openClawImpliedButNotInstalled(cfg) && !openClawNotInstalledLocally(cfg)
 	case "zeptoclaw":
-		return true
+		// Like OpenClaw, skip the loopback fleet address on a machine where
+		// discovery found no ZeptoClaw: it would dial ws://127.0.0.1:18789
+		// every 15 s for ever (GAP-0185).
+		return !(isLoopbackGatewayHost(cfg.Gateway.Host) && connector.CachedAgentNotFound(cfg.DataDir, "zeptoclaw"))
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
 	default:

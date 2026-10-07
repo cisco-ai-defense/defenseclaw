@@ -2913,6 +2913,7 @@ groups:
   - correlation.interaction
   - correlation.agent
   - correlation.identity
+  - correlation.sandbox
   - genai.tool
   attributes: []
   body_fields:

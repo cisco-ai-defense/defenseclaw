@@ -396,6 +396,24 @@ func (w *InstallWatcher) isOwnPlugin(path string) bool {
 	return w.isManagedArtifact(path) || (w.bundledPlugin != nil && w.bundledPlugin(path))
 }
 
+// secureClientActive reports the Secure Client deployment, whose install
+// watcher keeps its audit rows and admission behavior as they were.
+func (w *InstallWatcher) secureClientActive() bool {
+	return w.cfg != nil && w.cfg.SecureClientIntegration()
+}
+
+// allowedAuditReason names why install admission allowed an asset before any
+// scan: the operator turned admission.<type>.scan_on_install off, or the asset
+// is on an allow list (or first-party allow list). The audit row used to say
+// "allow-listed" for both, so an MCP server admitted only because
+// scan_on_install is false looked like an allow-list entry (GAP-0203).
+func (w *InstallWatcher) allowedAuditReason(verdictReason string) string {
+	if !w.secureClientActive() && strings.HasPrefix(verdictReason, "scan_on_install disabled") {
+		return "scan-disabled"
+	}
+	return "allow-listed"
+}
+
 func (w *InstallWatcher) isManagedArtifact(path string) bool {
 	for _, managedPath := range w.managedArtifacts {
 		if sameWatcherPath(path, managedPath) {
@@ -510,6 +528,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					if info, statErr := os.Stat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
 						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+						w.queueExistingClaudePlugins(ctx, event.Name, depth)
 					}
 					if depth != 3 {
 						continue
@@ -839,7 +858,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	case "allowed":
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
-			fmt.Sprintf("type=%s reason=allow-listed", targetType))
+			fmt.Sprintf("type=%s reason=%s", targetType, w.allowedAuditReason(out.Reason)))
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 		return res
@@ -1404,6 +1423,41 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 		}
 	}
 	return restored
+}
+
+// queueExistingClaudePlugins queues the <marketplace>/<plugin>/<version>
+// folders that already exist below a new folder of Claude Code's plugin
+// cache. A marketplace or plugin tree created in one go (a copy, an
+// extracted archive, mkdir -p) has its version folder in place before the
+// watch on its parent exists, so no later create event names it and the
+// plugin never reached admission until the hourly rescan, which only
+// baselines it. depth is how far below the cache root dir sits (1 =
+// marketplace, 2 = plugin). The Secure Client deployment keeps the watcher it
+// had.
+func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir string, depth int) {
+	if w.secureClientActive() {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		child := filepath.Join(dir, entry.Name())
+		if depth+1 < 3 {
+			w.queueExistingClaudePlugins(ctx, child, depth+1)
+			continue
+		}
+		w.recordWatcherEvent(ctx, "create", w.classifyEvent(child).Type.String(), "")
+		w.mu.Lock()
+		if _, exists := w.pending[child]; !exists {
+			w.pending[child] = time.Now()
+		}
+		w.mu.Unlock()
+	}
 }
 
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {

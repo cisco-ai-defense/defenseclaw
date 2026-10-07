@@ -335,6 +335,15 @@ func runWindowsEnterpriseLifecycle(
 	if opts == nil {
 		return failPreflight(errors.New("Windows enterprise lifecycle options are unavailable"))
 	}
+	// A standard account cannot change the managed deployment whatever file
+	// it passes, so the elevation refusal comes before --config is read,
+	// parsed or compiled: it used to be told to fix a file that no fix would
+	// let it apply (GAP-0120).
+	if windowsEnterpriseMutationAction(action) && !windowsEnterpriseIsElevated() &&
+		(action == "ensure" || managed.IsStandaloneProfile(opts.profile)) {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
+			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
+	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
 		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
@@ -1511,6 +1520,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		serviceAccount string
 		jsonOutput     bool
 		record         bool
+		recordRestored bool
 	)
 	cmd := &cobra.Command{
 		Use:          "validate-service-config",
@@ -1518,6 +1528,9 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if recordRestored {
+				return recordRestoredWindowsServiceConfig(cmd, configPath, dataDir, serviceAccount, jsonOutput)
+			}
 			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount, record)
 			if jsonOutput {
 				if err != nil {
@@ -1543,9 +1556,33 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
 	cmd.Flags().BoolVar(&record, "record-lifecycle", false,
 		"migrate a config_version 8 config and record the installed config generation (install-like lifecycle only)")
+	cmd.Flags().BoolVar(&recordRestored, "record-restored", false,
+		"record the config a lifecycle rollback restored as a new generation, without validating or migrating it")
 	_ = cmd.MarkFlagRequired("config")
 	_ = cmd.MarkFlagRequired("data-dir")
 	return cmd
+}
+
+// recordRestoredWindowsServiceConfig is the rollback step of the standalone
+// lifecycle: see recordRestoredManagedStandaloneConfig.
+func recordRestoredWindowsServiceConfig(cmd *cobra.Command, configPath, dataDir, serviceAccount string, jsonOutput bool) error {
+	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+	restore := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv:            configPath,
+		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
+		managed.WindowsServiceAccountEnv: strings.TrimSpace(serviceAccount),
+		"DEFENSECLAW_HOME":               strings.TrimSpace(dataDir),
+	})
+	defer restore()
+	err = recordRestoredManagedStandaloneConfig(cmd.Context(), configPath)
+	if jsonOutput {
+		_ = newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "ok": err == nil})
+	}
+	return err
 }
 
 // validateWindowsServiceConfig checks the installed config. Only the

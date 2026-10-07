@@ -8006,6 +8006,19 @@ function New-DefenseClawTransaction {
     # Standalone only: the Secure Client snapshot is unchanged.
     if (Test-DefenseClawStandaloneProfile) {
         foreach ($destination in @(Get-DefenseClawConfigSidecarPaths -Layout $Layout)) {
+            # An existing generation record is not snapshotted: the counter
+            # never goes back, so a rollback leaves it and records the
+            # restored config as a new generation (Register-
+            # DefenseClawRestoredConfigGeneration). One this transaction
+            # creates is snapshotted as absent and goes away with it.
+            if ([string]::Equals(
+                    [IO.Path]::GetFileName([string]$destination),
+                    'config.generation.json',
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $destination -PathType Leaf)) {
+                continue
+            }
             $destinations.Add([string]$destination)
         }
     }
@@ -9850,6 +9863,11 @@ function Restore-DefenseClawTransaction {
         elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $destination -PathType Leaf) {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $destination -Force
         }
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        Register-DefenseClawRestoredConfigGeneration `
+            -Layout $Layout `
+            -GatewayServiceName ([string]$snapshot.gateway_service)
     }
     $snapshotApplicationControl = $snapshot.PSObject.Properties[
         'agent_application_control_attested'
@@ -15727,6 +15745,43 @@ function Get-DefenseClawConfigSidecarPaths {
         (Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'config.yaml.v8.bak'),
         (Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'migration-v9.json')
     )
+}
+
+function Register-DefenseClawRestoredConfigGeneration {
+    <#
+        After a standalone rollback put config.yaml back, records it as a new
+        config generation (actor lifecycle), as the Unix lifecycle does. The
+        rejected run may already have recorded, and the gateway reported, a
+        generation for the config it installed, and the counter never goes
+        back. Best effort: a restored gateway that predates the command leaves
+        the record for the next install-like run to replace, which also takes
+        a new number.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    foreach ($path in @(
+            $Layout.ConfigPath,
+            $Layout.GatewayPath,
+            (Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'config.generation.json')
+        )) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return
+        }
+    }
+    [void](Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments @(
+            'enterprise', 'windows', 'validate-service-config',
+            '--config', $Layout.ConfigPath,
+            '--data-dir', $Layout.RuntimeDirectory,
+            '--service-account', "NT SERVICE\$GatewayServiceName",
+            '--record-restored', '--json'
+        ) `
+        -Capture `
+        -AllowFailure)
 }
 
 function Get-DefenseClawTransactionFileSnapshotEntry {

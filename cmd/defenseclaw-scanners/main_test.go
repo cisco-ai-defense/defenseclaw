@@ -7,6 +7,8 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,5 +32,28 @@ func TestUnpackRefusesEscapingEntries(t *testing.T) {
 	_ = w.Close()
 	if err := unpack(buf.Bytes(), t.TempDir()); err != nil {
 		t.Fatalf("unpack of a plain entry: %v", err)
+	}
+}
+
+// A folder that carries the public completion marker is not trusted:
+// prepare compares every archived file with the embedded archive.
+func TestVerifyRuntimeRejectsAChangedFile(t *testing.T) {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	f, _ := w.Create("python/python.exe")
+	_, _ = f.Write([]byte("genuine"))
+	_ = w.Close()
+	dir := t.TempDir()
+	if err := unpack(buf.Bytes(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRuntime(dir, buf.Bytes()); err != nil {
+		t.Fatalf("verify an untouched tree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "python", "python.exe"), []byte("planted!"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRuntime(dir, buf.Bytes()); err == nil {
+		t.Fatal("a changed python.exe verified")
 	}
 }

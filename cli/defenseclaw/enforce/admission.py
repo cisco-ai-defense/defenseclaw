@@ -326,10 +326,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
         # An explicit empty list allows nothing first party (Go firstParty
         # treats a non-nil empty list the same way); None inherits.
         if entries is not None:
-            first_party = {
-                str(getattr(e, "name", "")): list(getattr(e, "source_path_contains", []) or [])
-                for e in entries
-            }
+            # Entries that share a name all apply (Go and Rego match any of
+            # them), so their markers are merged, not replaced.
+            first_party = {}
+            for e in entries:
+                markers = first_party.setdefault(str(getattr(e, "name", "")), [])
+                markers.extend(m for m in (getattr(e, "source_path_contains", []) or []) if m not in markers)
             sources["first_party_allow_list"] = f"config:admission.{label}.first_party_allow_list"
             break
     return CompiledAdmission(

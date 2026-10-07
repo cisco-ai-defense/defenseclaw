@@ -258,7 +258,7 @@ func init() {
 // timeout), and 'watchdog status' called it disabled while doctor said it was
 // enabled but not running (GAP-1310).
 func loadWatchdogConfig() (*config.Config, error) {
-	loaded, err := loadConfigV8File(config.ConfigPath(), config.DefaultDataPath())
+	loaded, err := loadConfigV8Source(config.ConfigPath(), config.DefaultDataPath(), "", true)
 	if err != nil {
 		return nil, err
 	}

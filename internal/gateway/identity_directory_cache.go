@@ -165,6 +165,22 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	return entry.facts, entry.ok
 }
 
+// failing reports a key whose lookups fail and that has no facts to serve:
+// its requests get default_lookup_failed until a lookup succeeds. reason is
+// the resolver's own text for the failure.
+func (c *identityCache[T]) failing(key string) (since time.Time, reason string, ok bool) {
+	if c == nil {
+		return time.Time{}, "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || entry.ok || entry.failedSince.IsZero() {
+		return time.Time{}, "", false
+	}
+	return entry.failedSince, entry.lastErr, true
+}
+
 // peek returns key's cached facts and when they were fetched, without
 // starting a lookup or waiting for one.
 func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
