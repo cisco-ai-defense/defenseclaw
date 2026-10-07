@@ -316,8 +316,8 @@ The scan verdict is the default. Operators always have manual override (block / 
 defenseclaw mcp list                                         # what is configured + state across configured connectors
 defenseclaw mcp list --connector opencode                    # one connector's MCP source
 defenseclaw mcp list --connector amp                         # Amp settings + skill-bundled mcp.json
-defenseclaw mcp set context7 --command uvx --args context7-mcp
-defenseclaw mcp set context7 --command uvx --args context7-mcp --connector opencode
+defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'
+defenseclaw mcp set time --command uvx --args mcp-server-time --connector opencode
 defenseclaw mcp unset context7 --connector opencode
 defenseclaw mcp block untrusted-fs --reason "exfil tool found"
 defenseclaw mcp allow cisco-internal --reason "first-party"
@@ -370,6 +370,26 @@ settings through Amp tooling) for schema-preserving writes and workspace
 approval, then re-run `defenseclaw mcp scan --connector amp`.
 
 Every action is audited (`block-mcp`, etc.) so the trail is intact even when the manual override contradicts a scan verdict.
+
+### Local servers: npx and uvx only
+
+`mcp set` and `mcp scan` start a local (stdio) server only when its command is
+`npx` or `uvx` with a package argument (on Windows, `npx.cmd` and `uvx.exe` are
+the same launchers). The scan never runs another program, so a server started
+with `node`, `python3`, `docker` or a binary is refused with "not an
+allowlisted stdio launcher (allowed: npx, uvx)". For such a server:
+
+- publish it as an npm or PyPI package and start it with `npx` or `uvx`;
+- or serve it over HTTP and add it with `--url`;
+- or review it yourself, allow that exact definition with
+  `defenseclaw mcp allow <name> --command <cmd> --args '<json array>'`, then run
+  the same `mcp set` again: the pinned allow skips the scan for that
+  definition only.
+
+On Windows the launcher must sit in a trusted folder (the Node.js installer folder and
+uv's default `%USERPROFILE%\.local\bin` are trusted by default). The error names the file it found;
+`defenseclaw setup trusted-paths add "<folder>"` trusts an admin-owned folder.
+When the server exits before it answers, its last stderr lines are printed.
 
 ## How the settings reach the scanner
 

@@ -2499,7 +2499,10 @@ def _opencode_command_trust_error(cmd: str) -> str | None:
 
 @mcp.command("set")
 @click.argument("name")
-@click.option("--command", "cmd", default="", help="Server command (e.g. npx, uvx)")
+@click.option(
+    "--command", "cmd", default="",
+    help="Server launcher: npx or uvx (the only commands a scan starts; use --url for others)",
+)
 @click.option("--args", "args_str", default="", help="Command args (JSON array or comma-separated)")
 @click.option("--url", default="", help="Server URL (for SSE/HTTP transport)")
 @click.option("--transport", default="", help="Transport type (stdio, sse)")
@@ -2543,12 +2546,16 @@ def set_server(
     Scans the server before adding unless --skip-scan is set.
     Rejects servers with HIGH/CRITICAL findings.
 
+    A local (stdio) server is scanned only when it starts with npx or uvx:
+    the scan never runs another program. Add other servers by URL, or review
+    them and allow the definition with 'defenseclaw mcp allow'.
+
     \b
     Examples:
-      defenseclaw mcp set context7 --command uvx --args context7-mcp
+      defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'
+      defenseclaw mcp set time --command uvx --args mcp-server-time
       defenseclaw mcp set deepwiki --url https://mcp.deepwiki.com/mcp
-      defenseclaw mcp set myserver --command npx --args '["-y", "@myorg/mcp-server"]'
-      defenseclaw mcp set myserver --command node --args server.js --env API_KEY=xxx
+      defenseclaw mcp set myserver --command npx --args '["-y", "@myorg/mcp-server"]' --env API_KEY=xxx
       defenseclaw mcp set untrusted --url http://example.com/mcp --skip-scan
       defenseclaw mcp set local --url http://127.0.0.1:8080/mcp --allow-private
     """

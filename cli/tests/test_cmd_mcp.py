@@ -2136,6 +2136,25 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
 # _parse_args
 # ---------------------------------------------------------------------------
 
+class TestMCPSetHelpExamples(unittest.TestCase):
+    def test_every_stdio_example_uses_a_scannable_launcher(self):
+        # GAP-0373/GAP-0406: the help showed uvx context7-mcp (no such PyPI
+        # package) and node server.js, which the scan refuses.
+        import shlex
+
+        from defenseclaw.commands.cmd_mcp import set_server
+        from defenseclaw.scanner.mcp import is_safe_stdio_scan_command
+
+        examples = [line.split() for line in set_server.help.splitlines() if "--command" in line]
+        self.assertTrue(examples)
+        for line in examples:
+            argv = shlex.split(" ".join(line))
+            command = argv[argv.index("--command") + 1]
+            args = _parse_args(argv[argv.index("--args") + 1]) if "--args" in argv else []
+            self.assertTrue(is_safe_stdio_scan_command(command, args), argv)
+        self.assertNotIn("context7-mcp\n", set_server.help)
+
+
 class TestParseArgs(unittest.TestCase):
     def test_json_array(self):
         result = _parse_args('["-y", "@modelcontextprotocol/server-filesystem", "~/Documents"]')
