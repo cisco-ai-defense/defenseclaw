@@ -318,6 +318,11 @@ func runWindowsScannerRuntime(executable, step string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), windowsScannerPrepareTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, executable, step).CombinedOutput()
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// GAP-0297: Windows reports a process the deadline killed as a bare
+		// "exit status 1", which hid the cause.
+		return fmt.Errorf("%s the scanner runtime: timed out after %s", step, windowsScannerPrepareTimeout)
+	}
 	if err != nil {
 		return fmt.Errorf("%s the scanner runtime: %v: %s", step, err, windowsEnterpriseBoundedDiagnostic(strings.TrimSpace(string(out))))
 	}

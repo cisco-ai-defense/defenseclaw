@@ -139,3 +139,20 @@ func TestWindowsScannerRuntimeIsAdmittedByThePayloadTrustPolicy(t *testing.T) {
 		t.Fatalf("a pinned digest was refused: %v", err)
 	}
 }
+
+// GAP-0297: a prepare the deadline killed says it timed out, instead of the
+// bare "exit status 1" Windows reports for a killed process.
+func TestWindowsScannerRuntimeTimeoutIsNamed(t *testing.T) {
+	if os.Getenv("DC_SCANNER_RUNTIME_HELPER") == "sleep" {
+		time.Sleep(30 * time.Second)
+		return
+	}
+	seam := windowsScannerPrepareTimeout
+	t.Cleanup(func() { windowsScannerPrepareTimeout = seam })
+	windowsScannerPrepareTimeout = 500 * time.Millisecond
+	t.Setenv("DC_SCANNER_RUNTIME_HELPER", "sleep")
+	err := runWindowsScannerRuntime(os.Args[0], "-test.run=^TestWindowsScannerRuntimeTimeoutIsNamed$")
+	if err == nil || !strings.Contains(err.Error(), "timed out after 500ms") {
+		t.Fatalf("err = %v, want it to name the timeout", err)
+	}
+}
