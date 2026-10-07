@@ -205,9 +205,12 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 	defer fm.mu.Unlock()
 
 	if existing, ok := fm.devices[fullID]; ok {
-		// Update safe fields on re-registration, preserve counters
+		// Update safe fields on re-registration, preserve counters.
+		// Policy version must not regress (anti-rollback on re-registration).
 		existing.FWVersion = fwVersion
-		existing.PolicyVersion = policyVersion
+		if policyVersion > existing.PolicyVersion {
+			existing.PolicyVersion = policyVersion
+		}
 		existing.HWProfile = hwProfile
 		existing.Capabilities = capabilities
 		if fm.store != nil {
