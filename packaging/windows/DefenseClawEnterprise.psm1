@@ -9387,6 +9387,30 @@ function Remove-DefenseClawCommittedManagedHooksSerializationLocks {
     }
 }
 
+# The hooks keep a runtime selector (state and lock) for Claude Code, Codex
+# and Cursor in each agent's machine-policy folder. Both files are
+# DefenseClaw's, and a selection left behind made every later ensure refuse
+# the users it names (GAP-0262), so a standalone purge removes them, each
+# only as a regular file no untrusted principal can write. The folders stay
+# as found. Writes "path: reason" for a file it could not remove.
+function Remove-DefenseClawRuntimeSelectorState {
+    param([Parameter(Mandatory)][AllowEmptyString()][string[]]$Directories)
+    foreach ($directory in $Directories) {
+        if ([string]::IsNullOrWhiteSpace($directory)) {
+            continue
+        }
+        foreach ($leaf in @('.defenseclaw-managed-runtime-selector.state', '.defenseclaw-managed-runtime-selector.lock')) {
+            $path = [IO.Path]::Combine($directory, $leaf)
+            try {
+                Remove-DefenseClawManagedHooksSerializationLock -Path $path -Label 'runtime selector state'
+            }
+            catch {
+                "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            }
+        }
+    }
+}
+
 # Setup creates Claude Code's managed-settings.d (and ClaudeCode) for its
 # drop-ins. The finalize purge cannot remove them: the Claude serialization
 # lock is still inside until the step above drops it (GAP-0100). A purge
@@ -21568,7 +21592,14 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout
     $machineStateRemaining = [string[]]@()
     if ($Purge -and (Test-DefenseClawStandaloneProfile)) {
-        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)
+        $machineStateRemaining = [string[]]@(
+            @(Remove-DefenseClawRuntimeSelectorState -Directories @(
+                    [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d'),
+                    [string]$Layout.CodexMachinePolicyDirectory,
+                    [IO.Path]::Combine($script:ProgramData, 'Cursor')
+                )) +
+            @(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)
+        )
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Revoke-DefenseClawStateAncestorTraverse `

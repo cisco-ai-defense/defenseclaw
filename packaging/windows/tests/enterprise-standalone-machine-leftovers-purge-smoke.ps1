@@ -13,8 +13,10 @@
 # PowerShell exits); one it cannot remove is reported. GAP-2057: stale
 # DefenseClaw-Installer-<32 hex> staging folders in ProgramData and
 # DefenseClaw-Bootstrap-<32 hex> folders in Windows\Temp go the same way,
-# except the bootstrap folder this run's TEMP points into. Runs in a
-# disposable scratch directory; no service or machine root is touched.
+# except the bootstrap folder this run's TEMP points into. GAP-0262: the
+# hooks' runtime selector state and lock go, so the Claude Code folders they
+# kept go too. Runs in a disposable scratch directory; no service or machine
+# root is touched.
 
 [CmdletBinding()]
 param()
@@ -130,6 +132,23 @@ $failures = & $module {
         [void]@(Remove-DefenseClawStaleRunDirectories -ProgramData $programData -WindowsTemp $windowsTemp)
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ownBootstrap)) {
             $failures.Add("removed this run's bootstrap folder: $ownBootstrap")
+        }
+
+        # GAP-0262 (the ACL check is still replaced, as above).
+        $selector = Microsoft.PowerShell.Management\Join-Path $Scratch 'selector'
+        $selectorDropIns = [IO.Path]::Combine($selector, 'ClaudeCode', 'managed-settings.d')
+        [void][IO.Directory]::CreateDirectory($selectorDropIns)
+        foreach ($leaf in @('.defenseclaw-managed-runtime-selector.state', '.defenseclaw-managed-runtime-selector.lock')) {
+            $file = [IO.Path]::Combine($selectorDropIns, $leaf)
+            [IO.File]::WriteAllText($file, '{}')
+            [IO.File]::SetAttributes($file, [IO.FileAttributes]::Hidden)
+        }
+        $left = @(
+            @(Remove-DefenseClawRuntimeSelectorState -Directories @($selectorDropIns, '', [IO.Path]::Combine($selector, 'absent'))) +
+            @(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $selector)
+        )
+        if ($left.Count -ne 0 -or (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($selector, 'ClaudeCode')))) {
+            $failures.Add("the runtime selector state kept ClaudeCode\managed-settings.d: $($left -join '; ')")
         }
     }
     finally {
