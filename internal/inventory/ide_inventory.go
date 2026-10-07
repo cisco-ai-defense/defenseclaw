@@ -203,13 +203,13 @@ func (idx ideAIIndex) match(family, id string) (AISignature, bool) {
 // Exact IDs cover established products; the narrow description rule covers
 // new publishers that describe their own extension as an AI coding tool.
 var marketplaceAIExtensions = map[string]bool{
-	"augment.vscode-augment": true,
-	"kilocode.kilo-code": true,
-	"rjmacarthy.twinny": true,
-	"genieai.chatgpt-vscode": true,
-	"gitlab.gitlab-workflow": true,
+	"augment.vscode-augment":                 true,
+	"kilocode.kilo-code":                     true,
+	"rjmacarthy.twinny":                      true,
+	"genieai.chatgpt-vscode":                 true,
+	"gitlab.gitlab-workflow":                 true,
 	"google.gemini-cli-vscode-ide-companion": true,
-	"sst-dev.opencode": true,
+	"sst-dev.opencode":                       true,
 	"visualstudioexptteam.vscodeintellicode": true,
 }
 

@@ -203,13 +203,13 @@ func ScanMachine(goos string, limits Limits) []Install {
 }
 
 type scanner struct {
-	goos    string
-	limits  Limits
-	layout  layout
-	files   int
-	bytes   int64
-	full    bool
-	out     []Install
+	goos   string
+	limits Limits
+	layout layout
+	files  int
+	bytes  int64
+	full   bool
+	out    []Install
 }
 
 func newScanner(goos string, limits Limits) *scanner {
