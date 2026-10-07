@@ -1229,11 +1229,6 @@ func setSpanMetadata(attributes map[string]any, status any, resource any) {
 					metadata[key] = value
 				}
 			}
-			if _, ok := metadata["deployment.environment.name"]; !ok {
-				if value, ok := stringAttribute(resourceAttributes, "deployment.environment"); ok && value != "" {
-					metadata["deployment.environment.name"] = value
-				}
-			}
 		}
 	}
 	for _, key := range userMetadataKeys {

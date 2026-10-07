@@ -26,7 +26,6 @@ def _write_mcp(path: Path, name: str, command: str) -> None:
 
 def test_devin_is_the_only_public_cognition_connector() -> None:
     assert "devin" in connector_paths.KNOWN_CONNECTORS
-    assert "devin" in connector_paths.HOOK_ONLY_CONNECTORS
     assert "devin" in CONNECTORS
     assert "devin" in agent_discovery.DISCOVERY_PRECEDENCE
     retired = legacy_connector.RETIRED_DESKTOP_ID

@@ -118,7 +118,7 @@ func TestInboundImportedTracePreservesNativeCustomAndMergesExternalResource(t *t
 	native := findTrace("otlp.native.span.v8.span.config.reload")
 	nativeInput := validInboundImportedTraceInput(t, native)
 	nativeCustom, err := NewTelemetryCustomResourceAttributes(
-		map[string]string{"operator.profile": "upstream"}, false,
+		map[string]string{"operator.profile": "upstream"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +140,7 @@ func TestInboundImportedTracePreservesNativeCustomAndMergesExternalResource(t *t
 	externalInput := validInboundImportedTraceInput(t, external)
 	localCustom, err := NewTelemetryCustomResourceAttributes(map[string]string{
 		"operator.profile": "local", "operator.region": "east",
-	}, true)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestInboundImportedTracePreservesNativeCustomAndMergesExternalResource(t *t
 		t.Fatal(err)
 	}
 	sourceCustom, err := NewTelemetryCustomResourceAttributes(
-		map[string]string{"operator.profile": "source"}, false,
+		map[string]string{"operator.profile": "source"},
 	)
 	if err != nil {
 		t.Fatal(err)

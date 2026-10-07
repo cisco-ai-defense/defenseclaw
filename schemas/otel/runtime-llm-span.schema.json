@@ -80,10 +80,7 @@
       "properties": {
         "tenant.id": { "type": "string" },
         "workspace.id": { "type": "string" },
-        "deployment.environment": { "type": "string" },
-        "deployment.mode": { "type": "string" },
         "discovery.source": { "type": "string" },
-        "defenseclaw.device.id": { "type": "string" },
         "gen_ai.operation.name": { "type": "string", "const": "chat" },
         "gen_ai.system": { "type": "string" },
         "gen_ai.provider.name": { "type": "string" },

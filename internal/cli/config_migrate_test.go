@@ -85,3 +85,26 @@ func TestConfigMigrateResolvesCredentialsFromDotEnv(t *testing.T) {
 		t.Fatalf("dry-run migration with the key in .env: %v", err)
 	}
 }
+
+// A Secure Client config stays on config_version 8: `config migrate` refuses
+// it and writes nothing (GAP-0110, issue #1092).
+func TestConfigMigrateLeavesASecureClientConfigUnchanged(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	previousPath, previousTo := configMigratePath, configMigrateTo
+	t.Cleanup(func() { configMigratePath, configMigrateTo = previousPath, previousTo })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	v8 := []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, v8, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configMigratePath, configMigrateTo = path, config.ConfigVersionV9
+	if err := configMigrateCmd.RunE(configMigrateCmd, nil); err == nil {
+		t.Fatal("config migrate accepted a Secure Client config")
+	}
+	entries, _ := os.ReadDir(dir)
+	if raw, _ := os.ReadFile(path); string(raw) != string(v8) || len(entries) != 1 {
+		t.Fatalf("config migrate changed the Secure Client directory: %d entries", len(entries))
+	}
+}

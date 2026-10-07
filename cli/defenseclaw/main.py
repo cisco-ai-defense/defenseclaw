@@ -572,11 +572,6 @@ def _whole_words_help_tree(command: click.Command, seen: set[int] | None = None)
 _whole_words_help_tree(cli)
 
 
-def _ensure_codeguard_skill(cfg) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = cfg
-
-
 def _try_launch_tui() -> bool:
     """When invoked with no arguments on a TTY, launch the Textual TUI.
 

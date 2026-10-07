@@ -230,7 +230,6 @@ def test_setup_v8_add_environment_tags_gateway_telemetry(
     assert result.exit_code == 0, result.output
     source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
     assert source["observability"]["resource"]["attributes"] == {
-        "deployment.environment": "lab-win2",
         "deployment.environment.name": "lab-win2",
     }
     blank = CliRunner().invoke(observability, [*args[:-1], "  "], obj=app)

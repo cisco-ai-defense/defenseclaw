@@ -124,6 +124,11 @@ type HookAuditEnvelope struct {
 	UserID     string `json:"user.id,omitempty"`
 	UserIDKind string `json:"defenseclaw.user.id_kind,omitempty"`
 	UserName   string `json:"defenseclaw.user.name,omitempty"`
+
+	// AuditActionOverride steers the audit row action (not the envelope
+	// JSON): the Secure Client synthetic Codex notify path writes its row
+	// under ActionConnectorHookSynthetic (issue #1092).
+	AuditActionOverride string `json:"-"`
 }
 
 // renderHookAuditEnvelope serializes the envelope as a compact JSON

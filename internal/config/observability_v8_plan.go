@@ -70,12 +70,11 @@ type ObservabilityV8EffectiveLocal struct {
 }
 
 type ObservabilityV8EffectiveTracePolicy struct {
-	Sampler              string                             `json:"sampler"`
-	SamplerArg           string                             `json:"sampler_arg,omitempty"`
-	SemanticProfile      string                             `json:"semantic_profile"`
-	SemanticProfileLock  ObservabilityV8SemanticProfileLock `json:"semantic_profile_lock"`
-	CompatibilityAliases bool                               `json:"compatibility_aliases"`
-	Limits               ObservabilityV8TraceLimitsSource   `json:"limits"`
+	Sampler             string                             `json:"sampler"`
+	SamplerArg          string                             `json:"sampler_arg,omitempty"`
+	SemanticProfile     string                             `json:"semantic_profile"`
+	SemanticProfileLock ObservabilityV8SemanticProfileLock `json:"semantic_profile_lock"`
+	Limits              ObservabilityV8TraceLimitsSource   `json:"limits"`
 }
 
 type ObservabilityV8SemanticProfileLock struct {
@@ -223,7 +222,8 @@ type ObservabilityV8Provenance struct {
 type ObservabilityV8EffectivePlan struct {
 	BucketCatalogVersion int `json:"bucket_catalog_version"`
 	// ResourceAttributes is the normalized registered-core plus custom resource
-	// map. Compatibility aliases are canonicalized before the plan is frozen.
+	// map. The retired deployment.environment spelling is canonicalized before
+	// the plan is frozen.
 	ResourceAttributes map[string]string `json:"resource_attributes"`
 	// ResourceAttributeEntries is the generated, sealed custom-only projection.
 	// Runtime builders combine it with typed registered-core inputs. It is

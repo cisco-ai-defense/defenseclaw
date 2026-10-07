@@ -48,11 +48,7 @@ import click
 from defenseclaw import terminal_checkbox, ux
 from defenseclaw.config import (
     DEFENSECLAW_LLM_KEY_ENV,
-    AzureKeyConfig,
-    BedrockKeyConfig,
     LLMConfig,
-    LLMTLSConfig,
-    VertexKeyConfig,
 )
 from defenseclaw.llm_keys import looks_like_key_shape
 
@@ -673,40 +669,6 @@ def pick_key_env(
     return name
 
 
-def pick_instance_name(
-    *,
-    data_dir: str,
-    current: str,
-    flag_value: str | None,
-    non_interactive: bool,
-    flag_name: str = "--instance-name",
-) -> str:
-    """Pick a custom-provider instance by name. Returns empty when no
-    custom instances are configured / the operator skipped.
-    """
-    if flag_value is not None:
-        return flag_value.strip()
-    if non_interactive:
-        return current or ""
-    instances = list_custom_instances(data_dir)
-    if not instances:
-        return ""
-    names = [str(i.get("name", "")) for i in instances if i.get("name")]
-    click.echo()
-    ux.subhead("Configured custom-provider instances:")
-    for n in names:
-        click.echo(f"    - {n}")
-    click.echo("    (blank skips and uses a stock provider)")
-    choice = click.prompt(
-        "  Use a custom-provider instance? (name or blank)",
-        default=current or "",
-        show_default=bool(current),
-    ).strip()
-    if choice and choice not in names:
-        ux.echo(f"    Note: no instance named {choice!r} — will be created if you run setup provider add.")
-    return choice
-
-
 # ---------------------------------------------------------------------------
 # Inherit-preflight: detect sibling components that already have a usable
 # LLM config, so the wizard can offer "reuse this" instead of prompting
@@ -883,30 +845,6 @@ def preflight_inherit(
 # ---------------------------------------------------------------------------
 # Apply structured selections back onto LLMConfig
 # ---------------------------------------------------------------------------
-
-
-def ensure_bedrock(llm: LLMConfig) -> BedrockKeyConfig:
-    if llm.bedrock is None:
-        llm.bedrock = BedrockKeyConfig()
-    return llm.bedrock
-
-
-def ensure_vertex(llm: LLMConfig) -> VertexKeyConfig:
-    if llm.vertex is None:
-        llm.vertex = VertexKeyConfig()
-    return llm.vertex
-
-
-def ensure_azure(llm: LLMConfig) -> AzureKeyConfig:
-    if llm.azure is None:
-        llm.azure = AzureKeyConfig()
-    return llm.azure
-
-
-def ensure_tls(llm: LLMConfig) -> LLMTLSConfig:
-    if llm.tls is None:
-        llm.tls = LLMTLSConfig()
-    return llm.tls
 
 
 # ---------------------------------------------------------------------------

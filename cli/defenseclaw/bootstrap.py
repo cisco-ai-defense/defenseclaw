@@ -112,15 +112,6 @@ class StepResult:
         }
 
 
-# ``init --sandbox`` is accepted so existing automation keeps working; the
-# legacy openshell-sandbox (0.0.x) standalone mode it drove was removed.
-SANDBOX_FLAG_DEPRECATION = (
-    "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
-    "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
-    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
-)
-
-
 @dataclass
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
@@ -134,7 +125,6 @@ class FirstRunOptions:
     with_judge: bool = False
     judge_hook_connectors: list[str] | None = None
     skip_install: bool = False
-    sandbox: bool = False
     start_gateway: bool = False
     verify: bool = True
     force: bool = False
@@ -946,16 +936,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
         rollback_first_run_transaction = any(step.status == "fail" for step in setup)
         setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
-
-        if options.sandbox:
-            setup.append(
-                StepResult(
-                    "Sandbox",
-                    "warn",
-                    SANDBOX_FLAG_DEPRECATION,
-                    "defenseclaw sandbox legacy-cleanup --dry-run",
-                )
-            )
 
         if options.start_gateway:
             gateway_step = _start_gateway_structured(

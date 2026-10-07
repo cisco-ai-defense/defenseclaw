@@ -2549,21 +2549,6 @@ def _plugin_list_json_items(
     return items
 
 
-def _print_plugin_list_json(
-    plugins: list[dict[str, Any]],
-    scan_map: dict[str, dict[str, Any]],
-    actions_map: dict[str, Any],
-    connector: str = "",
-) -> None:
-    click.echo(
-        json.dumps(
-            _plugin_list_json_items(plugins, scan_map, actions_map, connector=connector),
-            indent=2,
-            default=str,
-        )
-    )
-
-
 def _print_plugin_list_table(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
@@ -3413,17 +3398,6 @@ def _parse_plugin_list_json(text: str) -> list[dict[str, Any]]:
     if not isinstance(plugins, list):
         return []
     return [p for p in plugins if isinstance(p, dict)]
-
-
-def _parse_plugin_list_text(text: str) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith(("name", "plugin")):
-            continue
-        name = line.split()[0]
-        out.append({"id": name, "name": name})
-    return out
 
 
 def _list_openclaw_plugins(connector: str = "") -> list[dict]:

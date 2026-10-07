@@ -192,9 +192,20 @@ func managedResourceSnapshot(source map[string]string) (map[string]string, strin
 	if !validManagedAnchor(deviceID) || !validManagedAnchor(hostname) {
 		return nil, "", "", false
 	}
-	// This compatibility alias is release-owned for the managed sink only. It
-	// does not depend on, or mutate, the operator's global compatibility_aliases.
-	values["defenseclaw.device.id"] = deviceID
+	// The managed AI Defense wire contract is the resource the sink sent
+	// before telemetry dropped its alias attributes, so Secure Client output
+	// stays byte-identical: the sink derives the three alias spellings from
+	// the canonical values itself, and no other destination carries them.
+	// Drop this when the managed backend keys only on the canonical names.
+	for canonical, wire := range map[string]string{
+		"deployment.environment.name":               "deployment.environment",
+		"defenseclaw.deployment.mode":               "deployment.mode",
+		"defenseclaw.device.public_key_fingerprint": "defenseclaw.device.id",
+	} {
+		if value := values[canonical]; value != "" {
+			values[wire] = value
+		}
+	}
 	return values, deviceID, hostname, true
 }
 

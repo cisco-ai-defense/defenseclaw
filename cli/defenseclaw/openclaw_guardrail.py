@@ -576,6 +576,3 @@ def _backup(path: str) -> None:
             chown(bak, st.st_uid, st.st_gid)
 
 
-def _install_codeguard_skill_deferred(openclaw_config_file: str) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = openclaw_config_file

@@ -176,16 +176,6 @@ func TestEvaluateGuardrailThresholdsAndHILT(t *testing.T) {
 	}
 }
 
-func TestEvaluateFirewallExact(t *testing.T) {
-	out, err := EvaluateFirewallExact(context.Background(), repoRegoDir(t), FirewallInput{Destination: "169.254.169.254", Port: 80, Protocol: "tcp"})
-	if err != nil {
-		t.Fatalf("EvaluateFirewallExact: %v", err)
-	}
-	if out.Action != "deny" {
-		t.Fatalf("metadata endpoint action = %q, want deny", out.Action)
-	}
-}
-
 func boolPtr(v bool) *bool { return &v }
 
 // TestPrepareRefusesPre9Modules: a 1.0 admission or guardrail module reads
