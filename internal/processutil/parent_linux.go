@@ -14,19 +14,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
+//go:build linux
 
 package processutil
 
-import "os/exec"
+import (
+	"os/exec"
+	"syscall"
+)
 
-func configureCapturedCommand(_ *exec.Cmd) {}
-
-func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
-	return cmd.CombinedOutput()
-}
-
-func runTree(cmd *exec.Cmd, _ bool) error {
-	exitWithParent(cmd)
-	return cmd.Run()
+// exitWithParent has the kernel kill cmd when this process dies.
+func exitWithParent(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
 }

@@ -2663,7 +2663,7 @@ def _apply_scan_enforcement(
             _verify_scan_action_persisted(
                 app, skill_name, "install", "block", scoped_connector,
             )
-            applied_actions.append("added to block list")
+            applied_actions.append("install blocked by this scan")
         except Exception as exc:  # noqa: BLE001 - preserve other defense-in-depth actions.
             click.echo(
                 f"[scan] install-block persistence failed for {skill_name!r}: {exc}",
@@ -5568,7 +5568,7 @@ def _scan_installed_skill_for_connector(
 
     if action_cfg.install == "block":
         pe.record_scan_block("skill", skill_name, connector, enforcement_reason)
-        applied_actions.append("added to block list")
+        applied_actions.append("install blocked by this scan")
 
     pe.set_source_path("skill", skill_name, skill_path, connector)
 

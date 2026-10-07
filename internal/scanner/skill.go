@@ -386,7 +386,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
+	err = processutil.RunTree(cmd)
 	result.Duration = time.Since(start)
 	stderrStr := stderr.String()
 

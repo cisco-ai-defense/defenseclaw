@@ -1349,3 +1349,28 @@ func TestBulkDropIsAdmittedInParallelAndShownPending(t *testing.T) {
 		t.Fatalf("admission state file left after every admission ended (err %v)", err)
 	}
 }
+
+// GAP-0418: the HIGH finding that quarantined a skill (a location-less
+// analyzability finding) was missing from alerts; the watcher's block now
+// names the deciding findings in its alert and journal reason.
+func TestBlockReasonNamesTheDecidingFinding(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+			{ID: "m1", RuleID: "DATA-READ", Severity: scanner.SeverityMedium, Title: "reads files"},
+			{ID: "h1", RuleID: "LOW_ANALYZABILITY", Severity: scanner.SeverityHigh, Title: "Critically low analyzability score"},
+		}}
+	}
+	skillPath := filepath.Join(skillDir, "huge-blob")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "huge-blob", Path: skillPath, Timestamp: time.Now()})
+	entry, err := store.GetAction("skill", "huge-blob")
+	if err != nil || entry == nil || !strings.Contains(entry.Reason, "LOW_ANALYZABILITY Critically low analyzability score") ||
+		strings.Contains(entry.Reason, "DATA-READ") {
+		t.Fatalf("journal %+v (err %v), want the reason to name only the HIGH finding", entry, err)
+	}
+}

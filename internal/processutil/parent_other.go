@@ -14,19 +14,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
+//go:build !windows && !linux
 
 package processutil
 
 import "os/exec"
 
-func configureCapturedCommand(_ *exec.Cmd) {}
-
-func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
-	return cmd.CombinedOutput()
-}
-
-func runTree(cmd *exec.Cmd, _ bool) error {
-	exitWithParent(cmd)
-	return cmd.Run()
-}
+// exitWithParent has no kernel support here (macOS); cmd runs as is.
+func exitWithParent(_ *exec.Cmd) {}

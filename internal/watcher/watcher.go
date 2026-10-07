@@ -1256,6 +1256,11 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 
 		if w.takeActionFor(evt) {
 			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
+			if !w.secureClientActive() {
+				// Name the findings that decided it, so the alert and skill
+				// info show why the skill was blocked (GAP-0418).
+				blockReason += decidingFindings(result)
+			}
 			// An operator restore keeps the files only while the install
 			// block it left in place remains. Decide that before this scan
 			// adds its own block: after an unblock + restore, the block below
@@ -1406,6 +1411,34 @@ func (w *InstallWatcher) withRulePackOverlay(inner scanner.Scanner, evt InstallE
 		return inner
 	}
 	return guardrail.NewArtifactOverlay(inner, w.rulePackSource(w.eventConnector(evt)))
+}
+
+// decidingFindings names up to three findings at the scan's top severity,
+// as ": RULE title; RULE title", or "" when there are none.
+func decidingFindings(result *scanner.ScanResult) string {
+	if result == nil {
+		return ""
+	}
+	top := result.MaxSeverity()
+	var named []string
+	for _, f := range result.Findings {
+		if f.Severity != top {
+			continue
+		}
+		label := strings.TrimSpace(f.RuleID + " " + f.Title)
+		if label == "" {
+			continue
+		}
+		if len(named) == 3 {
+			named = append(named, "...")
+			break
+		}
+		named = append(named, label)
+	}
+	if len(named) == 0 {
+		return ""
+	}
+	return ": " + strings.Join(named, "; ")
 }
 
 // journalScope is the connector the watcher's automatic enforcement rows

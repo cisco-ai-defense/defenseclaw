@@ -14,19 +14,24 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
+//go:build linux
 
 package processutil
 
-import "os/exec"
+import (
+	"context"
+	"syscall"
+	"testing"
+)
 
-func configureCapturedCommand(_ *exec.Cmd) {}
-
-func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
-	return cmd.CombinedOutput()
-}
-
-func runTree(cmd *exec.Cmd, _ bool) error {
-	exitWithParent(cmd)
-	return cmd.Run()
+// GAP-0418: a killed gateway left its skill-scanner running; RunTree asks the
+// kernel to kill the child with its parent.
+func TestRunTreeChildExitsWithItsParent(t *testing.T) {
+	cmd := CommandContext(context.Background(), "true")
+	if err := RunTree(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Pdeathsig != syscall.SIGKILL {
+		t.Fatalf("SysProcAttr = %+v, want Pdeathsig SIGKILL", cmd.SysProcAttr)
+	}
 }

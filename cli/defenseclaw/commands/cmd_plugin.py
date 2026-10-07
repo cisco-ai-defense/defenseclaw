@@ -2060,7 +2060,7 @@ def _scan_installed_plugin_for_connector(
 
     if action_cfg.install == "block":
         pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
-        applied_actions.append("added to block list")
+        applied_actions.append("install blocked by this scan")
 
     pe.set_source_path("plugin", plugin_name, plugin_path, connector)
 
