@@ -88,10 +88,17 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
 		sandboxapi.Setting{Key: "network.mode", Value: "open", Source: "pack", Origin: "profile open"},
 		sandboxapi.Setting{Key: "approvals.mode", Value: "auto", Source: "pack", Origin: "pack open"})
+	// GAP-0112: a MicroVM gateway holds the sandbox to a copy, which the
+	// diff listed as "workdir.mode copy → mount", a change no run gets.
+	for i := range ta.daemon.explain.Settings {
+		if ta.daemon.explain.Settings[i].Key == "workdir.mode" {
+			ta.daemon.explain.Settings[i] = sandboxapi.Setting{Key: "workdir.mode", Value: "copy", Source: string(packs.SourceGateway), Origin: "compute driver", Requested: "mount"}
+		}
+	}
 	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{Sandbox: "web", Diff: true}))
 	has(t, ta.output(), "pack web-recorded against the policy of sandbox web (pack open)", "network.mode", "open → allowlist",
 		"approvals.mode", "auto → triage", "reached now, blocked with the pack:", "api.openai.com — network_allowlist", "pastebin.com — feed")
-	lacks(t, ta.output(), "artifacts.example.com —", "registry.npmjs.org —", "api.anthropic.com —", "api.stripe.com —")
+	lacks(t, ta.output(), "artifacts.example.com —", "registry.npmjs.org —", "api.anthropic.com —", "api.stripe.com —", "workdir.mode")
 }
 
 // A recorded host that is not a host name is whatever text the sandbox's

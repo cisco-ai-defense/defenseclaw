@@ -670,12 +670,16 @@ func (a *App) suggestionDiff(ctx context.Context, api API, sandbox string, s *su
 	}
 	diff := &suggestionDiff{Against: against + " (pack " + current.Pack + ")", Settings: []settingChange{}}
 	now := map[string]string{}
+	forced := map[string]bool{}
 	for _, st := range current.Settings {
 		now[st.Key] = st.Value
+		// The gateway's compute driver holds it (a MicroVM gateway works on
+		// a copy): whatever the pack says, a run gets the same.
+		forced[st.Key] = st.Source == string(packs.SourceGateway)
 	}
 	for _, st := range eff.Explain() {
 		from, ok := now[st.Key]
-		if !ok || from == st.Value || st.Key == "pack" {
+		if !ok || from == st.Value || st.Key == "pack" || forced[st.Key] {
 			continue
 		}
 		diff.Settings = append(diff.Settings, settingChange{Key: st.Key, From: from, To: st.Value})
