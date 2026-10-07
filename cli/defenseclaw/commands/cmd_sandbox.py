@@ -533,6 +533,32 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("kernel-feed",),
+        "Feed Tetragon's exec records into your docker sandboxes' process trees (Linux, a root service)",
+        long=(
+            "The sandbox kernel feed is a small root service for a Linux host whose administrator runs "
+            "Tetragon: it reads Tetragon's exec and exit records of the processes in OpenShell docker sandboxes "
+            "and streams each sandbox's to its owner's DefenseClaw gateway, which adds them to the sandbox's "
+            "process tree (sandbox run --process-tree). It only reads Tetragon, serves members of the docker "
+            "group, and gives each of them only their own sandboxes' records."
+        ),
+    ),
+    _Cmd(
+        ("kernel-feed", "install"),
+        "Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon)",
+        long=(
+            "Copies this install's defenseclaw-sensor-helper to /usr/local/libexec/defenseclaw, checks that "
+            "Tetragon serves a root-owned unix socket and that Docker answers, then writes and starts "
+            "defenseclaw-sandbox-feed.service. Run it again after an upgrade to update the feed."
+        ),
+    ),
+    _Cmd(("kernel-feed", "uninstall"), "Stop and remove the sandbox kernel feed service (as root)"),
+    _Cmd(
+        ("kernel-feed", "status"),
+        "Show whether the sandbox kernel feed is installed, running and matches this gateway",
+        flags=(_OUTPUT, _JSON),
+    ),
+    _Cmd(
         ("enable",),
         "Make the harness command run sandboxed (a marked block in your shell rc)",
         args=(_Arg("harness"),),
