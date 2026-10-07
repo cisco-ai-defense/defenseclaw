@@ -1017,6 +1017,49 @@ func TestAdmission_FallbackOnlyOnOPAError(t *testing.T) {
 	}
 }
 
+// deadlineScanner records how long the scan context it was given has left.
+type deadlineScanner struct {
+	countingScanner
+	remaining time.Duration
+}
+
+func (s *deadlineScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	if d, ok := ctx.Deadline(); ok {
+		s.remaining = time.Until(d)
+	}
+	return s.countingScanner.Scan(ctx, target)
+}
+
+// A skill scan runs for scanners.skill_scanner.timeouts.scan_s in the install
+// watcher and in the rescan: a fixed five minutes cut off every scan an
+// administrator had allowed longer. Plugin and MCP scans keep five minutes.
+func TestSkillScanFollowsScanS(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Scanners.SkillScanner.Timeouts.ScanS = 900
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	fake := &deadlineScanner{countingScanner: countingScanner{name: "skill-scanner"}}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+
+	skillPath := filepath.Join(skillDir, "large-skill")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	evt := InstallEvent{Type: InstallSkill, Name: "large-skill", Path: skillPath, Timestamp: time.Now()}
+
+	w.runAdmission(context.Background(), evt)
+	if fake.calls != 1 || fake.remaining < 14*time.Minute {
+		t.Fatalf("admission scan: calls=%d, time left=%s; want 1 call with about 15m", fake.calls, fake.remaining)
+	}
+	fake.remaining = 0
+	w.scanAndEmit(context.Background(), evt)
+	if fake.calls != 2 || fake.remaining < 14*time.Minute {
+		t.Fatalf("rescan: calls=%d, time left=%s; want 2 calls with about 15m", fake.calls, fake.remaining)
+	}
+	if got := w.scanTimeout(InstallEvent{Type: InstallPlugin}); got != 5*time.Minute {
+		t.Fatalf("plugin scan timeout = %s, want 5m", got)
+	}
+}
+
 // TestEvaluateAdmissionFollowsThePolicySource: admission evaluates the live
 // generation's prepared OPA on every event, so a changed Rego module applies
 // without /policy/reload or a gateway restart.

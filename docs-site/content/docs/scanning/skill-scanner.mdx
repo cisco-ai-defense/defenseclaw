@@ -210,7 +210,7 @@ scanners:
 | `llm_consensus_runs` | `0` | Run the judge this many times and combine the answers (`0` is off). |
 | `lenient` | `true` | Tolerate malformed skills instead of failing them. |
 | `analyzers.virustotal`, `.aidefense`, `.osv` | off | Optional analyzers (see below). |
-| `timeouts.scan_s` | `300` | Seconds one gateway scan may run (`0` means the default). The install watcher cuts a scan off at five minutes and the REST scan endpoint at two, so this key shortens a scan but cannot stretch it past those. |
+| `timeouts.scan_s` | `300` | Seconds one scan may run in the install watcher and its rescans (`0` means the default). Raise it for large skills scanned with the judge. The REST scan endpoint and the scans an agent hook starts stop at two minutes whatever this key says, and `defenseclaw skill scan` has no time limit. |
 | `timeouts.llm_s` | `60` | Accepted by the schema, but not read in this release. |
 
 `defenseclaw config get scanners.skill_scanner.policy --effective` prints the value in force. For a key you have not set it prints the default and says so; the gate keys print nothing when unset, so read the resolved gate with `defenseclaw config get admission.skill.actions --effective` (see [Gate and review queue](#gate-and-review-queue)).
@@ -465,7 +465,7 @@ Running a one-shot scan is a starting point. The real value is the **install wat
   <Edge from="policy" to="q" label="block" />
 </Flow>
 
-The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (a scan is cut off after `timeouts.scan_s`, and never runs past five minutes in the watcher), so an agent session that is already open can see it in that window. A scan that fails counts as a block. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
+The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (a scan is cut off after `timeouts.scan_s`), so an agent session that is already open can see it in that window. A scan that fails counts as a block. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
 
 You don't have to wire any of that yourself. To record the severity verdicts without acting on them, set `gateway.watcher.skill.take_action` to `false`; block-list matches and failed scans are still quarantined.
 

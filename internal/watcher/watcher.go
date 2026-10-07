@@ -955,7 +955,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 
-	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	scanCtx, cancel := context.WithTimeout(ctx, w.scanTimeout(evt))
 	defer cancel()
 
 	// An MCP event's Path is its watcher key; the scanner gets the server.
@@ -1244,6 +1244,21 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	default:
 		return nil
 	}
+}
+
+// defaultScanTimeout bounds a plugin or MCP scan, which have no timeout key.
+const defaultScanTimeout = 5 * time.Minute
+
+// scanTimeout is how long one watcher scan of evt may run. A skill scan
+// follows scanners.skill_scanner.timeouts.scan_s, the bound the skill scanner
+// puts on its own child process, so raising it for a large judge-on scan lets
+// the install and every rescan finish; a fixed five minutes here made the key
+// unable to stretch a scan. Plugin and MCP scans keep five minutes.
+func (w *InstallWatcher) scanTimeout(evt InstallEvent) time.Duration {
+	if evt.Type == InstallSkill {
+		return time.Duration(w.cfg.Scanners.SkillScanner.ScanTimeoutSeconds()) * time.Second
+	}
+	return defaultScanTimeout
 }
 
 // withRulePackOverlay adds the connector's guardrail rule pack to a skill
