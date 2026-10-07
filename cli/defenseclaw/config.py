@@ -84,6 +84,38 @@ from defenseclaw.file_permissions import (
 # 10 s). PyYAML builds without libyaml fall back to the pure-Python loader.
 YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+
+
+class _GatewayBooleanLoader(YAML_LOADER):  # type: ignore[misc, valid-type]
+    """YAML_LOADER that reads only true/false as booleans, as the gateway does."""
+
+
+_GatewayBooleanLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+    for first, resolvers in YAML_LOADER.yaml_implicit_resolvers.items()
+}
+_GatewayBooleanLoader.add_implicit_resolver(
+    _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
+
+def parse_config_yaml(text: str) -> Any:
+    """Parse config.yaml text the way the gateway reads it.
+
+    The gateway (yaml.v3, YAML 1.2 core schema) and the v8 source validator
+    read only true/false as booleans. PyYAML follows YAML 1.1, where yes, no,
+    on and off are booleans too, so a hand-written ``ide_inventory: off`` came
+    back as False: the CLI read it as ``all`` and a save wrote back a boolean
+    the v8 schema rejects. A pre-v8 document keeps the YAML 1.1 reading, the
+    one the v7 upgrade converter uses.
+    """
+    raw = yaml.load(text, Loader=_GatewayBooleanLoader)
+    if not isinstance(raw, dict) or _exact_config_version(raw.get("config_version")) == 8:
+        return raw
+    return yaml.load(text, Loader=YAML_LOADER)
+
+
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
 _untrusted_managed_config_warned_paths: set[str] = set()
@@ -4015,7 +4047,7 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
     """
     try:
         with open(path) as f:
-            raw = yaml.load(f, Loader=YAML_LOADER) or {}
+            raw = parse_config_yaml(f.read()) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
@@ -5919,7 +5951,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     raw: dict[str, Any] = {}
     try:
         with open(cfg_file) as f:
-            raw = yaml.load(f, Loader=YAML_LOADER) or {}
+            raw = parse_config_yaml(f.read()) or {}
     except OSError:
         pass
     _warn_untrusted_managed_config(cfg_file, raw)
