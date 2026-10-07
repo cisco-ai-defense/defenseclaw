@@ -158,7 +158,9 @@ func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	return out, nil
 }
 
-// groupBatchNames asks one getent group call for the names of ids.
+// groupBatchNames asks one getent group call for the names of ids. The
+// member lists getent prints are dropped as they arrive (query), so a batch
+// of large directory groups stays within the output limit.
 func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 	keys := make([]string, 0, len(ids))
 	for _, id := range ids {
