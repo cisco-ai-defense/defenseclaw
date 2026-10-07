@@ -40,3 +40,18 @@ func TestEnterpriseProfileExplainReadsTheManagedGateway(t *testing.T) {
 		t.Fatalf("printed %q", out.String())
 	}
 }
+
+func TestEnterpriseProfileExplainRequiresUserForAgent(t *testing.T) {
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	enterpriseIdentityViewGet = func(_ string, out any) (string, error) { return "", json.Unmarshal([]byte("{}"), out) }
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[0])
+	cmd.SetArgs([]string{"--agent", "agt-0123456789abcdef"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("an agent alone was silently ignored")
+	}
+}

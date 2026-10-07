@@ -28,7 +28,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -310,5 +312,22 @@ func TestIDEPluginFiltersAndInstallHintKeepWindowsSpelling(t *testing.T) {
 	hint := claimedInstallHint(map[string]interface{}{"transcript_path": `C:\Users\dcad-alice\altcfg\projects\p\s.jsonl`})
 	if hint != `C:\Users\dcad-alice\altcfg` {
 		t.Fatalf("install hint = %q", hint)
+	}
+}
+
+func TestSecureClientDiscoveryRejectsIDEInventoryMember(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	service := inventory.NewContinuousDiscoveryServiceWithOptions(
+		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir(), SecureClient: true}, nil)
+	t.Cleanup(func() { _, _ = service.CloseIfNeverStarted() })
+	api.SetAIDiscoveryService(service)
+	body := `{"summary":{"scan_id":"scan-1"},"signals":[],"ide_inventory":{"scope":"all","installations":[],"plugins":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai-usage/discovery", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleAIUsageDiscovery(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid JSON body") {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 }

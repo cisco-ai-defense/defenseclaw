@@ -3540,6 +3540,8 @@ def _trigger_post_enable_scan(
     discovery_off = False
     for delay in delays:
         time.sleep(delay)
+        # Only the latest attempt can establish why the scan did not run.
+        discovery_off = False
         try:
             client = _usage_client(
                 app,
@@ -5839,7 +5841,9 @@ def identities(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.agent_identities_all(user=user, connector=connector_name, limit=limit or 0)
+        payload = client.agent_identities_all(
+            user=user, connector=normalize_connector(connector_name) if connector_name else None, limit=limit or 0
+        )
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:

@@ -156,6 +156,9 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 					query.Set(flag[1], values[i])
 				}
 			}
+			if view.use == "profile-explain" && query.Get("user") == "" {
+				return invalidLifecycleArguments(fmt.Errorf("--user is required to explain a guardrail profile"))
+			}
 			if aiOnly {
 				query.Set("ai_only", "true")
 			}

@@ -1139,7 +1139,7 @@ def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
 _SANDBOX_GATEWAY_DEPENDENCY = "depends on: OpenShell gateway"
 # Services that are simply not running; an install or policy problem stays a
 # failure even before the first sandbox run.
-_SANDBOX_RUNTIME_CHECKS = frozenset({"docker", "gateway-version", "gateway-service", "defenseclaw-daemon"})
+_SANDBOX_RUNTIME_CHECKS = frozenset({"docker", "gateway-service", "defenseclaw-daemon"})
 
 
 def _sandbox_checks_by_root_cause(checks: list) -> list[dict]:
@@ -1192,7 +1192,14 @@ def _sandbox_checks_by_root_cause(checks: list) -> list[dict]:
             row["status"] = "skip"
             row["detail"] = f"{_SANDBOX_GATEWAY_DEPENDENCY} ({reason})" if reason else _SANDBOX_GATEWAY_DEPENDENCY
             row.pop("fix", None)
-        elif unused and row_status == "fail" and row_id in _SANDBOX_RUNTIME_CHECKS:
+        elif (
+            unused
+            and row_status == "fail"
+            and (
+                row_id in _SANDBOX_RUNTIME_CHECKS
+                or (row_id == "gateway-version" and row_detail.startswith("the gateway is not answering"))
+            )
+        ):
             row["status"] = "warn"
             row["detail"] = (
                 f"{row_detail}; no sandbox has run yet (no harness image is built), so this blocks only the first run"

@@ -48,12 +48,12 @@ func TestLinuxLocalAccountsAndDirectoryConfiguration(t *testing.T) {
 }
 
 // Tests never ask the host's realmd; the ones about realms set hostRealms.
-func init() { hostRealms = func(context.Context) []Realm { return nil } }
+func init() { hostRealms = func(context.Context) ([]Realm, error) { return nil, nil } }
 
 // A per-user gateway resolves the directory type of an SSSD account from the
-// realm realmd reports, as the root guardian does: by the account's DNS
-// domain or a parent of it, or the only realm for a bare name. An SSSD
-// domain no joined realm covers gets no directory type. A local account
+// realm realmd reports, as the root guardian does: only when a qualified
+// account name names that realm and its NSS backend. A bare SSSD name or
+// an SSSD domain no joined realm covers gets no directory type. A local account
 // SSSD's files provider answers for (the implicit files domain of RHEL 8)
 // stays local: it was reported as the AD account lee@CORP.EXAMPLE.COM. A
 // winbind account of the realm reports its DNS domain, as Windows does, not
@@ -70,9 +70,9 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	if err := os.WriteFile(localPasswdPath, []byte("lee:x:1000:70000::/home/lee:/bin/bash\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hostRealms = func(context.Context) []Realm {
+	hostRealms = func(context.Context) ([]Realm, error) {
 		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM", ServerSoftware: "active-directory",
-			ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{`CORP\%U`})}}
+			ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{`CORP\%U`})}}, nil
 	}
 	accounts := map[int]string{
 		70001: "alice@corp.example.com",
@@ -101,9 +101,9 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	ad, sssd := useridentity.DirectoryActiveDirectory, useridentity.SourceSSSD
 	want := map[int]view{
-		70001: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "alice@corp.example.com"},
-		70002: {ad, sssd, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@emea.corp.example.com"},
-		70003: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "carol@corp.example.com"},
+		70001: {"", sssd, "corp.example.com", "CORP.EXAMPLE.COM", "alice@corp.example.com"},
+		70002: {"", sssd, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@emea.corp.example.com"},
+		70003: {"", sssd, "", "", ""},
 		70004: {"", sssd, "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@ldap.example.org"},
 		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
 		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@corp.example.com"},
@@ -122,7 +122,59 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	// With winbind use default domain only the names of other domains are
 	// qualified, and realmd reports the format %U.
-	if realm, ok := realmFor("emea", []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}); ok {
+	if realm, ok := realmFor("emea", useridentity.SourceWinbind, []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}); ok {
 		t.Errorf("a trusted NetBIOS domain took the realm %+v", realm)
+	}
+}
+
+func TestBareSSSDAccountDoesNotInheritUnverifiedRealm(t *testing.T) {
+	realm := []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM",
+		ServerSoftware: "active-directory", ClientSoftware: "sssd"}}
+	facts := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "ldap"}
+	applyRealm(&facts, "bob@LDAP", realm)
+	if facts.Directory != "" || facts.Domain != "ldap" || facts.Realm != "" || facts.Principal != "" {
+		t.Fatalf("unrelated SSSD account inherited AD realm: %+v", facts)
+	}
+}
+
+func TestFailedRealmdQueryDoesNotCacheEmptyRealms(t *testing.T) {
+	realmCache.mu.Lock()
+	oldRealms, oldFetched := realmCache.realms, realmCache.fetched
+	realmCache.realms, realmCache.fetched = nil, time.Time{}
+	realmCache.mu.Unlock()
+	t.Cleanup(func() {
+		realmCache.mu.Lock()
+		realmCache.realms, realmCache.fetched = oldRealms, oldFetched
+		realmCache.mu.Unlock()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cachedRealms(ctx)
+	realmCache.mu.Lock()
+	fetched := realmCache.fetched
+	realmCache.mu.Unlock()
+	if !fetched.IsZero() {
+		t.Fatal("a failed realmd query was cached as an empty answer")
+	}
+	oldRealmsFn, oldNSS, oldPasswd := hostRealms, nsswitchPath, localPasswdPath
+	t.Cleanup(func() { hostRealms, nsswitchPath, localPasswdPath = oldRealmsFn, oldNSS, oldPasswd })
+	hostRealms = func(context.Context) ([]Realm, error) { return nil, context.DeadlineExceeded }
+	dir := t.TempDir()
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const name = "alice@corp.example.com"
+	f := &fakeRun{results: map[string]commandResult{
+		"passwd 80001":        {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
+		"-s sss passwd 80001": {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
+		"initgroups " + name:  {stdout: []byte(name + " 80001\n")},
+		"group 80001":         {stdout: []byte(name + ":*:80001:\n")},
+	}}
+	if facts, err := newFakeNSS(f).DirectoryFactsForUID(80001, time.Now()); err == nil {
+		t.Fatalf("realmd failure produced cacheable facts: %+v", facts)
 	}
 }
