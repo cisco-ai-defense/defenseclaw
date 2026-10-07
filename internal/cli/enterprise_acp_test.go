@@ -73,8 +73,11 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 
 	enrolled := run(runEnterpriseACPEnroll)
-	if next, _ := enrolled["next"].(string); !strings.Contains(next, " --activate") {
-		t.Fatalf("inherited action mode was omitted from setup command: %q", next)
+	if next, _ := enrolled["next"].(string); !strings.Contains(next, " --activate") ||
+		!strings.Contains(next, " enterprise acp setup --client zed --agent kiro --profile locked") {
+		// The reported command must exist on a managed host, which has only the
+		// gateway binary (GAP-0254).
+		t.Fatalf("setup command lost the inherited action mode or names a command a managed host lacks: %q", next)
 	}
 	tokenPath, _ := enrolled["token_file"].(string)
 	if tokenPath != filepath.Join(userData, "acp", "zed-kiro.token") {

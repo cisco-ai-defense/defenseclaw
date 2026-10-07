@@ -14,6 +14,11 @@ package enterprisepolicy
 // block comments outside strings are dropped and trailing commas before a
 // closing bracket are removed. Mirrors internal/config's reader.
 
+// StripJSONC drops the comments and trailing commas of a JSONC document.
+func StripJSONC(data []byte) []byte {
+	return stripJSONCTrailingCommas(stripJSONCComments(data))
+}
+
 func stripJSONCComments(data []byte) []byte {
 	out := make([]byte, 0, len(data))
 	inString := false
