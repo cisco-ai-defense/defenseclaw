@@ -393,17 +393,19 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 // verifyStarted runs the workload check of a sandbox a start just made
 // ready, against what its create recorded, and keeps the hostname it
 // found. A sandbox that fails it is stopped again before the error
-// returns, so one not as prepared never keeps running. Of a record from
-// before the check only the identity is checked: what its create delivered
-// is not known.
+// returns, so one not as prepared never keeps running. Every create records
+// what the check expects (create.go); a record without it cannot be
+// checked, and is refused the same way.
 func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec record) error {
-	var want verifyRecord
-	if rec.Verify != nil {
-		want = *rec.Verify
-	} else {
-		want.UID, want.GID = m.runAs()
+	const outcome = "DefenseClaw stopped it again (its work is kept)"
+	if rec.Verify == nil {
+		m.logf("%s: sandbox %s has no workload check in its record; stopping it again", gatewaylog.ErrCodeOpenShellPolicyRejected, rec.Name)
+		m.stopUnverified(ctx, gw, b)
+		return &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
+			Message: "sandbox " + rec.Name + " does not run as DefenseClaw prepared it; " + outcome,
+			Detail:  "its record does not say what its create delivered, so it cannot be checked: pull its work, delete it and run it again"}
 	}
-	facts, err := m.verifyWorkload(ctx, gw, rec.Name, want, "DefenseClaw stopped it again (its work is kept)")
+	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, outcome)
 	if err != nil {
 		m.stopUnverified(ctx, gw, b)
 		return err

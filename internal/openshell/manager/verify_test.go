@@ -488,6 +488,32 @@ func TestStartOnDockerStopsASandboxNotAsPrepared(t *testing.T) {
 	}
 }
 
+// A record that does not say what its create delivered (every create
+// records it) cannot be checked: its start is refused the same way, and
+// the sandbox stopped again.
+func TestStartRefusesARecordWithoutItsCheck(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "nocheck"})
+	e.stopBox("nocheck")
+	b := e.boxOf("nocheck")
+	e.m.mu.Lock()
+	b.rec.Verify = nil
+	e.m.mu.Unlock()
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	_, err := e.m.Start(t.Context(), "nocheck", sandboxapi.StartRequest{})
+	if apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected); !strings.HasSuffix(apiErr.Message, "DefenseClaw stopped it again (its work is kept)") ||
+		!strings.Contains(apiErr.Detail, "cannot be checked") {
+		t.Fatalf("refusal = %+v", apiErr)
+	}
+	if got, _ := e.client.GetSandbox(t.Context(), "nocheck"); got.Status.Phase != openshell.PhaseStopped ||
+		e.fake.Calls(openshelltest.MethodStopSandbox) != stops+1 {
+		t.Fatalf("after the refusal: phase %s, stops %d", got.Status.Phase, e.fake.Calls(openshelltest.MethodStopSandbox)-stops)
+	}
+	if calls := e.workloadCheckCalls("nocheck"); len(calls) != 1 {
+		t.Fatalf("workload checks = %d, want only the create's", len(calls))
+	}
+}
+
 // A start keeps the hostname the check finds.
 func TestStartRecordsTheHostname(t *testing.T) {
 	e := newVMEnv(t, nil)
