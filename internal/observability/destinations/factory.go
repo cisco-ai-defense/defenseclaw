@@ -272,8 +272,9 @@ func (factory *Factory) prepareManagedAID(
 			SchemaURL: resourceContext.SchemaURL(), Values: resourceContext.Values(),
 			DroppedAttributesCount: resourceContext.ResourceDroppedAttributesCount(),
 		},
-		Network:  push.NetworkOptions{Resolver: factory.resolver, Dialer: factory.dialer},
-		Warnings: factory.warnings,
+		DeploymentAliases: config.ObservabilityV8ManagedAIDDeploymentAliases(destination),
+		Network:           push.NetworkOptions{Resolver: factory.resolver, Dialer: factory.dialer},
+		Warnings:          factory.warnings,
 	}, factory.managedProvider)
 	if err != nil {
 		return nil, noResource, newError(ErrorAdapterPrepare)

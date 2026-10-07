@@ -182,7 +182,10 @@ func validateManagedGatewayEvent(event gatewaylog.Event) ([]byte, bool) {
 	return encoded, true
 }
 
-func managedResourceSnapshot(source map[string]string) (map[string]string, string, string, bool) {
+func managedResourceSnapshot(
+	source map[string]string,
+	deploymentAliases bool,
+) (map[string]string, string, string, bool) {
 	values := make(map[string]string, len(source)+1)
 	for key, value := range source {
 		values[key] = value
@@ -193,17 +196,21 @@ func managedResourceSnapshot(source map[string]string) (map[string]string, strin
 		return nil, "", "", false
 	}
 	// The managed AI Defense wire contract is the resource the sink sent
-	// before telemetry dropped its alias attributes, so Secure Client output
-	// stays byte-identical: the sink derives the three alias spellings from
-	// the canonical values itself, and no other destination carries them.
-	// Drop this when the managed backend keys only on the canonical names.
-	for canonical, wire := range map[string]string{
-		"deployment.environment.name":               "deployment.environment",
-		"defenseclaw.deployment.mode":               "deployment.mode",
-		"defenseclaw.device.public_key_fingerprint": "defenseclaw.device.id",
-	} {
-		if value := values[canonical]; value != "" {
-			values[wire] = value
+	// before telemetry dropped its alias attributes, and no other destination
+	// carries them. The sink always added defenseclaw.device.id itself.
+	// deployment.environment and deployment.mode came from the provider
+	// while trace_policy.compatibility_aliases was on, so they follow that
+	// switch. Drop this when the managed backend keys only on the canonical
+	// names.
+	values["defenseclaw.device.id"] = deviceID
+	if deploymentAliases {
+		for canonical, wire := range map[string]string{
+			"deployment.environment.name": "deployment.environment",
+			"defenseclaw.deployment.mode": "deployment.mode",
+		} {
+			if value := values[canonical]; value != "" {
+				values[wire] = value
+			}
 		}
 	}
 	return values, deviceID, hostname, true

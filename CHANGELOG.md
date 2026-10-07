@@ -111,7 +111,9 @@ line in `migration-v9.json`.
   `defenseclaw_device_id` is now `defenseclaw_device_public_key_fingerprint`.
   The bundled Grafana and Splunk Observability dashboards are updated; custom
   dashboards need a hand edit. The managed AI Defense sink output is
-  unchanged: it still sends the three alias spellings on its own resource.
+  unchanged: it still sends `defenseclaw.device.id` on its own resource, and
+  `deployment.environment` and `deployment.mode` unless a Secure Client file
+  turns `compatibility_aliases` off.
   The `local-observability-v1` profile attributes and the Splunk HEC v7 flat
   fields are not part of this change.
 - **0.8.x: the config key `observability.trace_policy.compatibility_aliases`**
