@@ -216,5 +216,36 @@ func (l *lifecycle) recordActivationFailure(ctx context.Context) string {
 	if err := os.MkdirAll(env.P(env.Layout.LifecycleDir), 0o700); err == nil {
 		_ = env.writeFileAtomic(env.activationFailurePath(), []byte(output), 0o600, rootOwner())
 	}
+	if env.GOOS == "linux" {
+		return gatewayOutputExcerpt(lastStartAttempt(output))
+	}
 	return gatewayOutputExcerpt(output)
+}
+
+// lastStartAttempt keeps the journal lines of the last start attempt that
+// say why it failed: the gateway Error line and the systemd lines about the
+// failure. The journal tail also holds the previous gateway instance (its
+// reload errors, the stop, its CPU accounting), which buried the cause in a
+// 2 KB result line (GAP-0175). The kept output file keeps everything.
+func lastStartAttempt(output string) string {
+	lines := strings.Split(output, "\n")
+	start := 0
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "Starting ") {
+			start = i + 1
+		}
+	}
+	window := lines[start:]
+	kept := []string{}
+	for _, line := range window {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Error:") || strings.HasPrefix(trimmed, "Failed to start") ||
+			strings.Contains(trimmed, "Main process exited") || strings.Contains(trimmed, "Failed with result") {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return strings.Join(window, "\n")
+	}
+	return strings.Join(kept, "\n")
 }

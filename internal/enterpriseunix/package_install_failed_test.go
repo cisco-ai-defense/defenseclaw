@@ -94,7 +94,35 @@ func TestFailedPkgInstallUninstallNoopNextStepsAgree(t *testing.T) {
 	}
 }
 
+// A failed package run the host recovered from out of band (systemd started
+// the gateway again) left its result and the kept gateway output in place:
+// ensure --from-package then found the host healthy and did nothing
+// (GAP-0174).
+func TestHealthyNoopEnsureFromPackageClearsTheFailedPackageResult(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	dir := h.env.P(h.env.Layout.LifecycleDir)
+	leftovers := []string{filepath.Join(dir, lastPackageResultFile), filepath.Join(dir, lastPackageLogFile), h.env.activationFailurePath()}
+	failed := `{"ok":false,"action":"ensure","errors":[{"code":"activation_failed","message":"gateway exited"}]}`
+	for _, path := range leftovers {
+		if err := os.WriteFile(path, []byte(failed), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := h.run(Options{Action: ActionEnsure, FromPackage: true})
+	requireOK(t, r)
+	if !r.Noop {
+		t.Fatalf("ensure --from-package on a healthy host was not a no-op: %+v", r.Changes)
+	}
+	for _, path := range leftovers {
+		if exists(path) {
+			t.Fatalf("a healthy no-op ensure --from-package left %s", filepath.Base(path))
+		}
+	}
+}
+
 // A package upgrade whose activation was rolled back left
+
 // last-package-result.json at ok:false after ensure recovered the host
 // (GAP-0151), and last-activation-failure.log with it (GAP-0162). A later run
 // that commits a deployment removes both; the package's own run leaves the

@@ -351,10 +351,18 @@ func (l *lifecycle) run(ctx context.Context) int {
 			}
 			l.settleRejectedConfig()
 			l.describe(ctx, record, false)
+			// The host runs this package and is healthy, so what a failed
+			// package run left (its result and the kept gateway output) is
+			// stale, as after a run that commits a deployment; the run that
+			// found it so used to keep it (GAP-0174).
+			if l.opts.FromPackage && len(r.Errors) == 0 {
+				l.clearSupersededFailures()
+			}
 			return 0
 		}
 		return l.settleInputChanges(ctx, l.apply(ctx, record))
 	case ActionReconcile:
+
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
 			return 0

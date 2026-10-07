@@ -62,7 +62,14 @@ func TestLinuxGatewayRefusingTheConfigIsNamedByEveryResult(t *testing.T) {
 	// An older gateway prints its token, masked, in the start banner; the
 	// service restarts and prints the error again.
 	banner := "╔════╗\n║  DefenseClaw Gateway Sidecar  ║\n╚════╝\n  Gateway:      none\n  Auth:         abcd...wxyz\n  API port:     18970\n  Guardrail:    port=4000 mode=observe\n"
-	journal := "starting\n" + banner + "Error: " + refusal + "\nMain process exited\n" + banner + "Error: " + refusal + "\nMain process exited\n"
+	// The journal tail starts with the previous gateway instance, and
+	// systemd tried to start the new one twice (GAP-0175).
+	start := "Starting DefenseClaw Gateway (managed enterprise)...\n"
+	exited := unitGateway + ": Main process exited, code=exited, status=1/FAILURE\n"
+	journal := "[config] reload failed: config reload rule pack preflight: the previous instance\n" +
+		"Stopping DefenseClaw Gateway (managed enterprise)...\n" + unitGateway + ": Consumed 6.653s CPU time, 189.3M memory peak.\n" +
+		start + banner + "Error: " + refusal + "\n" + exited +
+		start + banner + "Error: " + refusal + "\n" + exited + unitGateway + ": Failed with result exit-code.\nFailed to start DefenseClaw Gateway (managed enterprise).\n"
 	h.runner.replies = map[string]fakeReply{
 		"journalctl --unit " + unitGateway + " --lines 40 --no-pager --output cat": {result: CommandResult{Stdout: []byte(journal)}},
 		binGateway + " policy digest --json":                                       {result: CommandResult{ExitCode: 1, Stderr: []byte("[sidecar] OPA policy unavailable\nError: policy digest: " + refusal + "\n")}, err: errors.New("exit 1")},
@@ -92,6 +99,11 @@ func TestLinuxGatewayRefusingTheConfigIsNamedByEveryResult(t *testing.T) {
 	if got := strings.Count(activate, "Error: "+refusal); got != 1 {
 		t.Fatalf("activation error lists the repeated gateway error %d times: %q", got, activate)
 	}
+	if strings.Contains(activate, "previous instance") || strings.Contains(activate, "Consumed") || strings.Contains(activate, "Stopping") ||
+		!strings.Contains(activate, "Failed to start") {
+		t.Fatalf("activation error is not the last start attempt: %q", activate)
+	}
+
 	if got := messagesOf(r.Errors, codeRollbackFailed); !strings.Contains(got, "gateway refuses the configuration the same way") {
 		t.Fatalf("rollback error wording: %q", got)
 	}
