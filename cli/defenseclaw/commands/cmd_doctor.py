@@ -8655,6 +8655,14 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
             r=r,
         )
         return
+    if not api_key and llm.provider_prefix() in {"bedrock", "amazon-bedrock"}:
+        _emit(
+            "skip",
+            "LLM API key",
+            "no Bedrock bearer key configured; AWS credential chain is checked by LLM reachable",
+            r=r,
+        )
+        return
     if not api_key:
         _emit(
             "fail",

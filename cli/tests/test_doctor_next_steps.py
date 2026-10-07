@@ -361,12 +361,12 @@ def test_bedrock_instance_role_judge_needs_no_api_key(tmp_path, monkeypatch) -> 
     assert "auth_mode=instance_role" in r.checks[-1]["detail"]
 
 
-def test_bedrock_api_key_judge_without_key_fails_with_next_step(tmp_path, monkeypatch) -> None:
+def test_bedrock_judge_without_bearer_key_uses_aws_credentials(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("DEFENSECLAW_LLM_KEY", raising=False)
     r = _DoctorResult()
     cmd_doctor._check_llm_api_key(_bedrock_judge_cfg(tmp_path, "api_key"), r)
-    assert r.checks[-1]["status"] == "fail"
-    assert "defenseclaw setup llm" in r.checks[-1]["remediation"]
+    assert r.checks[-1]["status"] == "skip"
+    assert "AWS credential chain" in r.checks[-1]["detail"]
 
 
 def test_setup_llm_summary_says_why_no_key_is_needed() -> None:
