@@ -120,6 +120,13 @@ type SetupOpts struct {
 	// plugins call the gateway directly and never run `defenseclaw hook`.
 	// Empty (per-user installs, Secure Client) keeps the plugin unchanged.
 	ForeignHookGuardBinary string
+	// ManagedHookBinary is the administrator-owned hook binary of a
+	// standalone managed Unix install. A connector shell hook with a hook
+	// socket runs it as `hook session-facts` for what a shell cannot read,
+	// the user's Kerberos credential cache, because a managed user has no
+	// per-user gateway binary to ask (GAP-0194). Empty (per-user installs,
+	// Secure Client, Windows) keeps every hook unchanged.
+	ManagedHookBinary string
 	// ManagedInstallMarker is an administrator-owned directory that exists
 	// exactly while the managed deployment rendering an in-agent plugin
 	// (OpenCode, Amp) is installed; the Windows standalone guardian passes

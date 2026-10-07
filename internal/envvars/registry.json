@@ -6414,7 +6414,7 @@
       "name": "DEFENSECLAW_SESSION_FACTS_BIN",
       "category": "hook_internal",
       "purpose": "Administrator-owned hook binary a rendered standalone managed Unix hook runs as `hook session-facts` to read the user's Kerberos credential cache, which a shell cannot read. The socket transport block assigns it after the hook hardening drops any inherited value, so only a managed hook that names one uses it.",
-      "default": "(rendered by setup for standalone managed Unix installs with a foreign-hook guard binary; absent everywhere else)",
+      "default": "(rendered by setup for standalone managed Unix installs; absent everywhere else)",
       "accepted_values": [
         "absolute-path"
       ],

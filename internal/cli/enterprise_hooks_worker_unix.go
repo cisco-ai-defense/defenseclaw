@@ -116,6 +116,7 @@ type enterpriseHookWorkerOptions struct {
 	ManagedServiceUID                  int    `json:"managed_service_uid,omitempty"`
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
+	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
 }
 
 type enterpriseHookWorkerTarget struct {
@@ -606,6 +607,7 @@ func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry
 		ManagedServiceUID:                  o.ManagedServiceUID,
 		HookCredentialIdentity:             o.HookCredentialIdentity,
 		ForeignHookGuardBinary:             o.ForeignHookGuardBinary,
+		ManagedHookBinary:                  o.ManagedHookBinary,
 	}
 }
 
@@ -633,6 +635,7 @@ func enterpriseHookWorkerOptionsFrom(opts enterprisehooks.InstallOptions) enterp
 		ManagedServiceUID:                  opts.ManagedServiceUID,
 		HookCredentialIdentity:             opts.HookCredentialIdentity,
 		ForeignHookGuardBinary:             opts.ForeignHookGuardBinary,
+		ManagedHookBinary:                  opts.ManagedHookBinary,
 	}
 }
 
