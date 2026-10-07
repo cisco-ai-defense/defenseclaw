@@ -510,6 +510,46 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 	if _, ok := byName["manifest-only"]; !ok {
 		t.Fatalf("scanable forged identity missing from live expansion: %+v", events)
 	}
+
+	// GAP-0285: the managed gateway also watches each user's own Hermes
+	// root, which IsRoot does not resolve; its category folders are not
+	// skills there either, and a bundle that account could forge (manifest
+	// and checkout are its own) is still rescanned.
+	profileHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileRoot := filepath.Join(profileHome, ".hermes", "skills")
+	k8s := filepath.Join(profileRoot, "devops", "k8s")
+	if err := os.MkdirAll(k8s, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(k8s, "SKILL.md"), []byte("---\nname: k8s\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		filepath.Join(profileRoot, "productivity", "vendor-docs"),
+		filepath.Join(profileHome, ".hermes", "hermes-agent", "skills", "productivity", "vendor-docs"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), bundledMarker, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(profileRoot, ".bundled_manifest"), []byte(fmt.Sprintf("vendor-docs:%x\n", bundledHash)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, target := range New(cfg, []string{profileRoot}, nil, store, logger, nil, nil).enumerateTargets() {
+		if target.Type == InstallSkill {
+			names[target.Name] = true
+		}
+	}
+	if names["devops"] || !names["k8s"] || !names["vendor-docs"] {
+		t.Fatalf("profile Hermes root targets = %v, want the k8s and vendor-docs skills and not the devops category", names)
+	}
 }
 
 func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {

@@ -109,6 +109,12 @@ type DirectoryFacts struct {
 	// Groups are the account's group identifiers (SIDs on Windows, group
 	// names or gids elsewhere). Telemetry carries only their count.
 	Groups []string `json:"groups,omitempty"`
+	// GroupsPartial marks Windows groups the SYSTEM enumerator took from the
+	// account's last signed-in session token, not a current one: it had no
+	// active session then, so a group change since is not in them. A cache
+	// refreshes such facts soon, and explain says the profile is not final
+	// (GAP-0243).
+	GroupsPartial bool `json:"groups_partial,omitempty"`
 	// Source is the OS facility that resolved these facts, one of the
 	// Source* constants (defenseclaw.user.identity.source).
 	Source string `json:"source,omitempty"`

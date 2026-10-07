@@ -50,6 +50,24 @@ def test_graph_client_copies_are_identical() -> None:
     assert region(ENTRA) == region(INTUNE)
 
 
+def test_graph_add_member_treats_an_existing_member_as_done() -> None:
+    # GAP-0235: a rerun right after an add (the members list lags) got 400 and failed.
+    intune = _load(INTUNE)
+    graph = intune.Graph("token")
+
+    def answer(status: int, message: str):
+        def request(*_args, **_kwargs):
+            raise intune.GraphError(status, "Request_BadRequest", message)
+
+        return request
+
+    graph.request = answer(400, "One or more added object references already exist for the following modified properties")
+    assert graph.add_member("group", "device") is False
+    graph.request = answer(403, "Insufficient privileges to complete the operation.")
+    with pytest.raises(intune.GraphError):
+        graph.add_member("group", "device")
+
+
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
     entra = _load(ENTRA)
     # Data1 = 1; Data2 and Data3 share one little-endian word; Data4 is two more.

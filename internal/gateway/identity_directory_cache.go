@@ -74,6 +74,11 @@ type identityCache[T any] struct {
 	// incomplete, when set, marks an answer to refresh after
 	// identityDirectoryIncompleteTTL.
 	incomplete func(T) bool
+	// partial, when set, marks an answer built from stale inputs (Windows
+	// groups from an account's last signed-in session, GAP-0243): it is
+	// refreshed as soon as a lookup may retry, so a sign-in shows within
+	// about one enumerator cycle.
+	partial func(T) bool
 	// logf, when set, reports a key's first failure and its recovery.
 	logf func(format string, args ...any)
 	// maxAge, when set, is the age past which facts are no longer served.
@@ -139,7 +144,8 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		}
 	}
 	stale := !entry.ok || age >= identityDirectoryTTL ||
-		(age >= identityDirectoryIncompleteTTL && c.incomplete != nil && c.incomplete(entry.facts))
+		(age >= identityDirectoryIncompleteTTL && c.incomplete != nil && c.incomplete(entry.facts)) ||
+		(age >= identityDirectoryRetry && c.partial != nil && c.partial(entry.facts))
 	if stale && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
 	}

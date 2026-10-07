@@ -77,6 +77,10 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, s
 			}
 		}
 		facts.Groups = groups
+		// Without an active session this cycle the groups are the last
+		// session token, which can miss a group the account has gained
+		// since (an Entra group after a restart, GAP-0243).
+		facts.GroupsPartial = !cache.SignedIn[sid]
 		if facts.ResolvedAt.IsZero() {
 			facts.ResolvedAt = now
 		}

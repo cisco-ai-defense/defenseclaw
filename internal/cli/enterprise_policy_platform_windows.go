@@ -22,7 +22,9 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // pinStandaloneManagedEnv points an elevated administrator's (or
@@ -81,13 +83,27 @@ func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, strin
 	return layout, programFiles, programData, err
 }
 
+// enterprisePolicyTarget names the account through the LSA and finds its
+// profile in ProfileList, as profile explain does. os/user also looks up the
+// account primary group in the account domain, which fails for every Entra
+// ID account: the AzureAD domain has no SID mapping (GAP-0242).
 func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, error) {
-	account, err := user.Lookup(name)
+	sid, _, err := enterprisePolicyAccount(name)
 	if err != nil {
 		return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
 	}
-	return enterprisehooks.TargetCredentials{UserHome: account.HomeDir, UID: -1, GID: -1, SID: account.Uid}, nil
+	home := enterprisePolicyProfileHome(sid)
+	if home == "" {
+		return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %s has no profile on this computer yet (it has not signed in here)", name, sid)
+	}
+	return enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid}, nil
 }
+
+// The LSA and ProfileList lookups; replaceable in tests.
+var (
+	enterprisePolicyAccount     = gateway.LookupWindowsAccount
+	enterprisePolicyProfileHome = useridentity.HomeForID
+)
 
 // runAsEnterprisePolicyTarget impersonates the target user (or runs
 // directly when this process already is that user).

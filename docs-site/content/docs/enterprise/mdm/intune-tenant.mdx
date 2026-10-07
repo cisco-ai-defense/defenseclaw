@@ -18,12 +18,13 @@ never calls Intune or Graph; the helper is for you, the administrator.
 <Callout type="warn" title="Validation status">
 Run on a test tenant: the licences, users and groups; automatic enrollment;
 the Apple push certificate; a Windows 11 and an Ubuntu 24.04 Desktop device
-enrolled and compliant; and the read-only and preview modes of the helper.
+enrolled and compliant; the read-only and preview modes of the helper; and its
+create, update and assign calls and `status`, with throwaway objects and no
+device reporting yet.
 
 Not run yet: delivering DefenseClaw through Intune (the Win32 app, the
-Remediations package, the macOS shell script, the Linux platform script), and
-the create and assign calls of the helper. The MDM certification round runs
-them. Treat every "would" below as untested until then.
+Remediations package, the macOS shell script, the Linux platform script). The
+MDM certification round runs it.
 </Callout>
 
 ## What to prepare
@@ -165,9 +166,10 @@ PASS  group defenseclaw-windows           1 member(s)
 INFO  managed devices                     linux (ubuntu)/compliant: 1, windows/compliant: 1
 ```
 
-`status` reads the install state of the app and the run state of the
-Remediations package per device. It was not run yet, because the test tenant
-held neither.
+`status` reads the install state of the app per device (from the Intune
+install status report) and the run state of the Remediations package per
+device. `assign-app` refuses an app whose upload has not finished in the admin
+center: Intune assigns only a published app.
 
 ## Identity through Intune
 
