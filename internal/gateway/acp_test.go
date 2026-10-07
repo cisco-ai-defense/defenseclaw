@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -351,44 +352,104 @@ func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 	}
 }
 
-// A managed ACP request is attributed to the account its enrollment
-// credential belongs to (uid:N, sid:S-...), so its decision records carry the
-// verified user and agent identity; only a per-user gateway's did before
-// (GAP-0206). The home-directory fallback principal names no account.
+// A managed gateway runs as a service account, and a managed ACP request is
+// attributed to the account its enrollment credential belongs to (uid:N,
+// sid:S-...), as a per-user hook credential binds its uid: the evaluation
+// gets that verified user and the user's guardrail profile, and a forged
+// X-DefenseClaw-User-* pair names no one (GAP-0200, GAP-0206). The
+// home-directory fallback principal names no account, and with identity
+// facts off (Secure Client) nothing is bound.
 func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
 	}
 	setIdentityFactsEnabled(true)
-	t.Cleanup(func() { setIdentityFactsEnabled(false) })
-	dataDir := t.TempDir()
-	credential, err := acp.EnsureEnterpriseCredential(dataDir, "uid:501", "zed", "kiro", "locked")
-	if err != nil {
-		t.Fatal(err)
+	priorHosted := managedServiceHosted.Load()
+	setManagedServiceHosted(true)
+	restoreName := userScopedIdentityName
+	userScopedIdentityName = func(id string) string {
+		if id == "4301" {
+			return "dcad-acp"
+		}
+		return ""
 	}
-	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "managed_enterprise")}
-	var subject VerifiedSubject
-	var attached bool
-	server := httptest.NewServer(api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	t.Cleanup(func() {
+		setIdentityFactsEnabled(false)
+		setManagedServiceHosted(priorHosted)
+		userScopedIdentityName = restoreName
+		liveGuardrailProfiles.Store(nil)
+	})
+	dataDir := t.TempDir()
+	cfg := acpGatewayTestConfig(dataDir, "managed_enterprise")
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"acp-user": {Mode: "action"}, "watch": {Mode: "observe"}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "acp-user", Match: config.ProfileMatch{Users: []string{"4301"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	api := &APIServer{scannerCfg: cfg}
+	api.initGuardrailProfiles(cfg)
+
+	type seen struct {
+		subject  VerifiedSubject
+		verified bool
+		caller   string
+		profile  profileDecision
+	}
+	got := make(chan seen, 1)
+	chain := CorrelationMiddleware(NewAgentRegistry("", ""))(api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/acp/evaluate" {
-			subject, attached = verifiedSubjectFromContext(r.Context())
+			subject, ok := verifiedSubjectFromContext(r.Context())
+			got <- seen{subject, ok, auditCallerIdentity(r.Context()).ID, api.resolveProfile(r.Context())}
 			api.handleACPEvaluate(w, r)
 			return
 		}
 		api.handleACPChallenge(w, r)
 	}))))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The standalone TCP listener marks every request as served by a
+		// service account (BaseContext).
+		r = r.WithContext(withServiceAccountGateway(r.Context()))
+		r.Header.Set(llmEventUserIDHeader, "4242")
+		r.Header.Set(llmEventUserNameHeader, "forged")
+		chain.ServeHTTP(w, r)
+	}))
 	defer server.Close()
-	evaluator, err := acp.NewHTTPEvaluator(server.URL, credential.Token)
-	if err != nil {
-		t.Fatal(err)
+	evaluate := func(principal string) seen {
+		t.Helper()
+		credential, err := acp.EnsureEnterpriseCredential(dataDir, principal, "zed", "kiro", "locked")
+		if err != nil {
+			t.Fatal(err)
+		}
+		evaluator, err := acp.NewHTTPEvaluator(server.URL, credential.Token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err != nil {
+			t.Fatal(err)
+		}
+		return <-got
 	}
-	if _, err := evaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err != nil {
-		t.Fatal(err)
+
+	bound := evaluate("uid:4301")
+	if !bound.verified || bound.subject.UserID != "4301" || bound.subject.UserName != "dcad-acp" ||
+		bound.subject.Source != subjectSourceUserCredential || bound.caller != "4301" {
+		t.Fatalf("enrolled uid: subject=%+v verified=%v caller=%q, want verified 4301 dcad-acp", bound.subject, bound.verified, bound.caller)
 	}
-	if !attached || subject.UserID != "501" || subject.Source != subjectSourceUserCredential {
-		t.Fatalf("verified subject = %+v (attached %v), want uid 501 from the enrollment credential", subject, attached)
+	if bound.profile.Name != "acp-user" || bound.profile.Match != profileMatchUser {
+		t.Fatalf("enrolled uid: profile = %+v, want acp-user by user", bound.profile)
 	}
-	for principal, want := range map[string]string{"uid:7": "7", "sid:S-1-5-21-1-2-3-1001": "S-1-5-21-1-2-3-1001", "home:abc": "", "uid:x": ""} {
+	unbound := evaluate("home:" + strings.Repeat("ab", 32))
+	if unbound.verified || unbound.caller != "" || unbound.profile.Match != profileMatchDefaultUnverified {
+		t.Fatalf("home: credential: verified=%v caller=%q profile=%+v, want unverified", unbound.verified, unbound.caller, unbound.profile)
+	}
+	setIdentityFactsEnabled(false)
+	if off := evaluate("uid:4301"); off.verified || off.caller != "" {
+		t.Fatalf("identity facts off: verified=%v caller=%q, want nothing bound", off.verified, off.caller)
+	}
+	for principal, want := range map[string]string{
+		"uid:7": "7", "sid:S-1-5-21-1-2-3-1001": "S-1-5-21-1-2-3-1001", "home:abc": "", "uid:x": "", "uid:S-1-5-21-1-2-3-1001": "",
+	} {
 		if got := acpPrincipalIdentity(principal); got != want {
 			t.Fatalf("acpPrincipalIdentity(%q) = %q, want %q", principal, got, want)
 		}

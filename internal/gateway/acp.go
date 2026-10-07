@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -581,12 +582,14 @@ func acpEnterpriseCredentialFromContext(ctx context.Context) (acp.EnterpriseCred
 	return credential, ok
 }
 
-// attachACPSubject names the account behind a signed ACP request. A managed
-// request carries the credential the administrator minted for one principal
-// (uid:N or sid:S-...) and published only to that user, so presenting it
-// proves the account as a per-user hook credential does; without this a
-// managed ACP decision carried no user, agent identity or session. A
-// per-user gateway's caller is its own account.
+// attachACPSubject names the account behind an authenticated ACP request.
+// A managed request carries the credential `enterprise acp enroll` issued
+// for one principal (uid:N or sid:S-...): the gateway keeps the record in
+// its protected state and only the bearer copy is in that user's private
+// ACP runtime, so presenting it proves the account as a per-user hook
+// credential does (GAP-0200, GAP-0206). A home: principal names no account
+// and binds none. A per-user gateway's caller is its own account. Under
+// the Secure Client integration identity facts are off and nothing is bound.
 func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
 	ctx = PromoteSessionIfAuthenticated(ctx)
 	credential, enrolled := acpEnterpriseCredentialFromContext(ctx)
@@ -594,7 +597,7 @@ func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
 		return a.attachProcessOwnerSubject(ctx)
 	}
 	identity := acpPrincipalIdentity(credential.Principal)
-	if identity == "" {
+	if identity == "" || !identityFactsEnabled.Load() {
 		return ctx
 	}
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
@@ -602,13 +605,23 @@ func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
 		sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
 }
 
-// acpPrincipalIdentity is the user id of an enrollment principal (uid:1001,
-// sid:S-1-5-21-...), or "" for the home-directory fallback, which names no
-// account.
+// acpPrincipalIdentity is the canonical uid or SID of an enrollment
+// principal (uid:1001, sid:S-1-5-21-...), or "" for any other one, such as
+// the home-directory fallback, which names no account.
 func acpPrincipalIdentity(principal string) string {
-	for _, prefix := range []string{"uid:", "sid:"} {
-		if id, ok := strings.CutPrefix(principal, prefix); ok && useridentity.KindForID(id) != "" {
-			return id
+	kind, value, _ := strings.Cut(strings.TrimSpace(principal), ":")
+	identity, ok := connector.CanonicalUserScopedIdentity(value)
+	if !ok {
+		return ""
+	}
+	switch useridentity.KindForID(identity) {
+	case useridentity.KindPOSIXUID:
+		if kind == "uid" {
+			return identity
+		}
+	case useridentity.KindWindowsSID:
+		if kind == "sid" {
+			return identity
 		}
 	}
 	return ""

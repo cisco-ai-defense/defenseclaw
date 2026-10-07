@@ -78,9 +78,10 @@ token that carries the Intune permissions.
 ## Not possible with Graph here
 
 - The automatic enrollment MDM user scope, the Windows Hello for Business default and the Apple
-  push certificate upload are admin center steps. Graph refused an app-only token for them on the
-  test tenant (`Unsupported app-only call`, and 403 `Tenant is not Global Admin or Intune Service
-  Admin`). `check` reads what it can and says so for the rest.
+  push certificate upload are admin center steps. Graph refused an app-only token for the first
+  two on the test tenant (`Unsupported app-only call`, and 403 `Tenant is not Global Admin or
+  Intune Service Admin`); a Graph upload of the push certificate was not tested. `check` reads
+  what it can and says so for the rest.
 - Uploading a Win32 app is an admin center step (see `../windows`); `assign-app` assigns it afterwards.
 - A Linux platform script is created in the admin center; there is no Linux command here.
 - The tenant helper does not assign licences or create users; `../../identity/entra/entra_setup.py`
