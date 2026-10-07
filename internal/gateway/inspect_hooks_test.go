@@ -490,6 +490,53 @@ func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 	}
 }
 
+// TestHookToolResultAlertsFromEvaluatedResponse pins GAP-0095: the response a
+// real Claude Code or Codex PostToolUse evaluation returns carries the findings
+// finalizeAgentHook counts, so a listed tool alerts on the live hook path and an
+// unlisted one does not.
+func TestHookToolResultAlertsFromEvaluatedResponse(t *testing.T) {
+	api := testAPIServerWithConfig(t, "observe")
+	pack, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatalf("load default pack: %v", err)
+	}
+	pack.SensitiveTools = &guardrail.SensitiveToolsConfig{
+		Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 1}},
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{"global": pack}}
+	})
+	response := map[string]interface{}{"stdout": "AWS_SECRET_ACCESS_KEY=AKIA7G4N2K9Q6M8R3T5V"}
+	for _, tool := range []string{"unlisted_tool", "listed_tool"} {
+		api.scannerCfg.Guardrail.Connector = "claudecode"
+		claude := claudeCodeResponseToAgentHookResponse(api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+			HookEventName: "PostToolUse", ToolName: tool, ToolResponse: response,
+		}))
+		api.scannerCfg.Guardrail.Connector = "codex"
+		codex := codexResponseToAgentHookResponse(api.evaluateCodexHook(t.Context(), codexHookRequest{
+			HookEventName: "PostToolUse", ToolName: tool, ToolResponse: response,
+		}))
+		for connector, resp := range map[string]agentHookResponse{"claudecode": claude, "codex": codex} {
+			req := agentHookRequest{ConnectorName: connector, HookEventName: "PostToolUse", ToolName: tool}
+			api.finalizeAgentHook(t.Context(), connector, req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+		}
+	}
+	events, err := api.store.ListEvents(100)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var alerted []string
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			alerted = append(alerted, event.Connector+":"+event.Target)
+		}
+	}
+	slices.Sort(alerted)
+	if want := []string{"claudecode:listed_tool", "codex:listed_tool"}; !slices.Equal(alerted, want) {
+		t.Fatalf("tool-result-pii-alert rows = %v, want %v", alerted, want)
+	}
+}
+
 func TestInspectToolResponse_ObserveDoesNotBlock(t *testing.T) {
 	api := testAPIServerWithConfig(t, "observe")
 	_, verdict := postInspectToolResponse(t, api,

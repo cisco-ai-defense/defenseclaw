@@ -139,6 +139,18 @@ def test_use_pack_writes_rule_pack_and_pins_custom_digest(env, tmp_path) -> None
     ]
 
 
+def test_managed_device_refuses_before_the_scope_is_checked(env, monkeypatch) -> None:
+    # GAP-0168: a scope problem or "already on" must not be the answer.
+    from defenseclaw.enforce import asset_lists
+
+    app, _root, writes = env
+    monkeypatch.setattr(asset_lists, "is_managed_standalone", lambda _cfg: True)
+    result = _run(app, "protection", "enable", DB, "--connector", "nosuch")
+    assert result.exit_code == 3
+    assert "This device is managed" in result.output
+    assert not writes
+
+
 def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
     app, _root, _writes = env
 
@@ -150,7 +162,7 @@ def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
     assert result.exit_code == 3
     assert "managed" in result.output
     app.logger.log_action.assert_called_once_with(
-        "guardrail-config",
+        "action",
         "guardrail.rules.protections",
         f"outcome=refused reason=managed_device command=guardrail protection enable {DB}",
     )

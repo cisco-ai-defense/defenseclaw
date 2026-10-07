@@ -1885,6 +1885,7 @@ def _refuse_bundled_mcp_policy_mutation(
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_BLOCK_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("mcp", asset_lists.OP_BLOCK, "target")
 def block(app: AppContext, target: str, reason: str, connector_flag: str) -> None:
     """Block an MCP server (by name or URL).
 
@@ -1952,6 +1953,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("mcp", asset_lists.OP_ALLOW, "target")
 def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> None:
     """Allow an MCP server (by name or URL).
 
@@ -2122,6 +2124,7 @@ def _mcp_rescan_hint(app: AppContext, target: str, connector: str) -> None:
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("mcp", asset_lists.OP_UNBLOCK, "target")
 def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     """Remove an MCP server's block or allow entry.
 

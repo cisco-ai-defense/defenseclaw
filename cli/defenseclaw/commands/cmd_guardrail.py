@@ -3257,6 +3257,28 @@ def _scope_words(connector_key: str | None, profile: str | None) -> str:
     return "every connector"
 
 
+def _refuse_managed_write(target: str, reason: str, fail) -> None:
+    """Audit a guardrail change refused on a managed device, then report it
+    (exit 3) through *fail(exit_code, message)*."""
+    from defenseclaw.enforce.asset_lists import audit_managed_config_refusal
+
+    audit_managed_config_refusal(target, reason)
+    fail(
+        3,
+        "This device is managed: change the guardrail in the admin config (MDM or management plane). "
+        "Nothing was changed.",
+    )
+
+
+def _refuse_if_managed_device(app: AppContext, reason: str, fail) -> None:
+    """A managed device refuses every guardrail writer before any argument,
+    scope or state check, so no other answer comes first."""
+    from defenseclaw.enforce.asset_lists import is_managed_standalone
+
+    if is_managed_standalone(app.cfg):
+        _refuse_managed_write("guardrail", reason, fail)
+
+
 def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
     reports a refused or failed write and exits."""
@@ -3267,14 +3289,7 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             changes, _cli_actor(), reason, path=str(config_path_for_data_dir(app.cfg.data_dir))
         )
     except config_writer.ManagedConfigWriteError:
-        from defenseclaw.enforce.asset_lists import audit_managed_refusal
-
-        audit_managed_refusal("guardrail-config", getattr(changes[0], "path", "") or "guardrail", f"command={reason}")
-        fail(
-            3,
-            "This device is managed: change the guardrail in the admin config (MDM or management plane). "
-            "Nothing was changed.",
-        )
+        _refuse_managed_write(getattr(changes[0], "path", "") or "guardrail", reason, fail)
     except config_writer.ConfigWriteError as exc:
         fail(1, f"Failed to save config: {config_writer.plain_error(exc)}")
     return None
@@ -3405,6 +3420,7 @@ def use_pack_cmd(
     scope = "connector" if connector else "global"
     connector_key: str | None = None
     gc = app.cfg.guardrail
+    _refuse_if_managed_device(app, f"guardrail use-pack {'--clear' if clear else (pack or '').strip()}".strip(), _fail)
 
     if clear and not connector:
         raise click.UsageError("--clear needs --connector NAME (the global pack can't be cleared, only switched).")
@@ -3736,6 +3752,7 @@ def _change_protection(
         _finish(ok=False, exit_code=exit_code, message=message)
 
     profile_name: str | None = None
+    _refuse_if_managed_device(app, f"guardrail protection {'enable' if enable else 'disable'} {name}", _fail)
     profile_name = _resolve_profile(app, profile, _fail)
     if connector:
         if profile_name:
@@ -3825,6 +3842,7 @@ def _change_rule_lists(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
+    _refuse_if_managed_device(app, f"guardrail rule {'enable' if enable else 'disable'} {rule_id.strip()}", _fail)
     rule_id = rule_id.strip()
     if not _RULE_ID.fullmatch(rule_id):
         _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
@@ -3907,6 +3925,7 @@ def rule_severity_cmd(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
+    _refuse_if_managed_device(app, f"guardrail rule severity {rule_id.strip()} {severity.upper()}", _fail)
     rule_id = rule_id.strip()
     if not _RULE_ID.fullmatch(rule_id):
         _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
@@ -4011,6 +4030,7 @@ def _change_suppression(
     def _fail(exit_code: int, message: str) -> None:
         _done(False, exit_code, message)
 
+    _refuse_if_managed_device(app, f"guardrail suppress {'add' if entry is not None else 'remove'} {sid}", _fail)
     if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,127}", sid):
         _fail(1, f"{sid!r} isn't a suppression ID (letters, digits, _ and -). Nothing was changed.")
     profile_name = _resolve_profile(app, profile, _fail)
@@ -4749,17 +4769,12 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     Without --user it explains the account running the command, also for
     --connector and --agent, as live requests always carry a user.
     """
-    import getpass
-
     import requests
 
-    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+    from defenseclaw.gateway import OrchestratorClient, current_profile_account, gateway_api_client_host
 
     if not user:
-        try:
-            user = getpass.getuser()
-        except Exception:  # noqa: BLE001 - fall through to the error below.
-            user = ""
+        user = current_profile_account()[0]
         if not (user or connector or agent):
             ux.err("Name at least one of --user, --connector or --agent.")
             raise SystemExit(2)

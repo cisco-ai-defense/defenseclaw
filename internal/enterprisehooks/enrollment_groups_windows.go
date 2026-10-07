@@ -28,10 +28,11 @@ import (
 
 // enterprise.enrollment.include_groups and exclude_groups on Windows.
 //
-// A signed-in user's session token lists every group the user belongs to:
-// local groups, Active Directory groups and the Microsoft Entra ID groups a
-// cloud sign-in carries. The enumerator reads the token of each active
-// session and caches its group SIDs, so a signed-out user is decided from
+// A signed-in user's session token lists the user's local and Active
+// Directory groups, and only those Microsoft Entra ID groups that a built-in
+// local group (Administrators, Users, Remote Desktop Users, ...) lists:
+// Windows leaves every other Entra group out of the token. The enumerator
+// reads the token of each active session and caches its group SIDs, so a signed-out user is decided from
 // the membership seen at their last sign-in. Local groups are also read from
 // the local account database, which lists the direct members of a local
 // group at any time; it decides local accounts completely (a local account

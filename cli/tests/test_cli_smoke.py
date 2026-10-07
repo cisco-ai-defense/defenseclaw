@@ -491,7 +491,7 @@ class CliSmokeTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 1, result.output)
-            self.assertIn("Configuration schema v8 is required", result.output)
+            self.assertIn("written by an older DefenseClaw", result.output)
             self.assertEqual(config_file.read_text(encoding="utf-8"), original)
             self.assertFalse((home / "audit.db").exists())
 
