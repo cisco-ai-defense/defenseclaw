@@ -30,9 +30,10 @@ import json
 import os
 import shlex
 import stat
-import tomllib
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 _LOCK_LIMIT = 4 * 1024 * 1024
 
@@ -104,6 +105,17 @@ def non_executable_hook_scripts(cfg: Any, connector: str) -> list[Path]:
     return found
 
 
+_DISABLED_PLACEHOLDER_MARKER = b"# defenseclaw-managed-hook v0 (disabled tombstone)"
+
+
+def _is_disabled_placeholder(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            return _DISABLED_PLACEHOLDER_MARKER in stream.read(512)
+    except OSError:
+        return False
+
+
 def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     """Return short descriptions of drifted hook files for *connector*."""
 
@@ -119,6 +131,15 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     for script in scripts:
         expected = digests.get(script.name)
         if expected and _sha256_regular_file(script) != expected:
+            if _is_disabled_placeholder(script):
+                # A rollback after a failed gateway start leaves this; the
+                # cause is the start, not an edit (GAP-0367).
+                problems.append(
+                    f"hook script {script} changed since setup: it is the disabled placeholder left when the "
+                    "gateway failed to set up this connector (or by a teardown), so its tool calls are not "
+                    "checked; see `defenseclaw-gateway status` for the error, then run `defenseclaw-gateway start`"
+                )
+                break
             problems.append(
                 f"hook script {script} changed since setup (an edit, or a copy from another build; "
                 "it does not match hook_contract_lock.json)"

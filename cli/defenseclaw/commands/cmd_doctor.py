@@ -5094,7 +5094,19 @@ def _check_claudecode_hooks(
         with open(settings_path, encoding="utf-8") as fh:
             settings = json.load(fh)
     except (json.JSONDecodeError, OSError) as exc:
-        _emit("fail", "Claude Code hooks", f"cannot read {settings_path}: {exc}", r=r)
+        # The gateway refuses to set up Claude Code until the file parses
+        # again; the other connectors still start (GAP-0368).
+        _emit(
+            "fail",
+            "Claude Code hooks",
+            f"cannot read {settings_path}: {exc}",
+            r=r,
+            remediation=(
+                f"fix the JSON in {settings_path} (or restore it from a backup), then run: defenseclaw-gateway restart"
+                if isinstance(exc, json.JSONDecodeError)
+                else _CLAUDECODE_HOOKS_FIX
+            ),
+        )
         return
     hooks = settings.get("hooks", {})
     if not hooks:

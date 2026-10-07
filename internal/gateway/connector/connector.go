@@ -250,6 +250,12 @@ type SetupOpts struct {
 	// without one), and setup never launches the user's agent executable
 	// from the guardian process. Empty everywhere else.
 	ManagedTargetSID string
+
+	// FailedSetupFailClosed is set on the Teardown that rolls back a Setup
+	// the gateway could not finish for a fail-closed connector. The connector
+	// is still configured, so a cached hook path keeps blocking and names the
+	// failed start instead of exiting 0 unguarded (GAP-0367).
+	FailedSetupFailClosed bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

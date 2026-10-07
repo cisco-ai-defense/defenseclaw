@@ -7,7 +7,9 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -95,4 +97,54 @@ func mustReadClaudeSettingsForTest(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// GAP-0368: a malformed settings.json refuses Setup before anything changes,
+// naming the file and position, so the gateway keeps the earlier hooks and
+// starts the other connectors. GAP-0367: if a fail-closed connector is rolled
+// back after a failed start, its cached hook path keeps blocking with the
+// cause instead of exiting 0.
+func TestClaudeCode_MalformedSettingsRefusedAndRollbackKeepsBlocking(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+	if err := os.WriteFile(settingsPath, []byte("{\"model\": \"x\"}\n{ broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:       filepath.Join(dir, "self"),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "api-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+		HookFailMode:  "closed",
+	}
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := NewClaudeCodeConnector()
+	err := c.Setup(context.Background(), opts)
+	if !errors.Is(err, ErrSetupRefusedUnchanged) || !strings.Contains(err.Error(), settingsPath) || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("Setup error = %v, want an unchanged refusal naming %s and line 2", err, settingsPath)
+	}
+	hookScript := filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")
+	if _, statErr := os.Stat(hookScript); !os.IsNotExist(statErr) {
+		t.Fatalf("Setup wrote %s before refusing: %v", hookScript, statErr)
+	}
+
+	opts.FailedSetupFailClosed = HookFailClosed(opts, c)
+	if !opts.FailedSetupFailClosed {
+		t.Fatal("a closed Claude Code connector is not reported fail-closed")
+	}
+	if err := writeDisabledHookTombstone(opts, "claude-code-hook.sh", "Claude Code"); err != nil {
+		t.Fatal(err)
+	}
+	out, runErr := exec.Command(hookScript).CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 2 || !strings.Contains(string(out), "defenseclaw-gateway start") {
+		t.Fatalf("placeholder: err=%v out=%q, want exit 2 naming defenseclaw-gateway start", runErr, out)
+	}
 }

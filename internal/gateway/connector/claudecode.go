@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -73,6 +74,9 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
 	}
 	opts.OTLPPathToken = otlpToken
+	if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
+		return setupRefusedUnchanged{err: err}
+	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: hand the connector itself so HookScriptOwner is the
@@ -113,6 +117,37 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	return nil
+}
+
+// claudeCodeSettingsParseable refuses a settings file that is not a JSON
+// object before Setup changes anything. A hand-edit slip in settings.json
+// failed the hooks patch after the hook scripts were rewritten, the rollback
+// could not restore the file either, and the whole gateway stopped for every
+// connector with an error that did not name the file (GAP-0368). Refusing
+// unchanged keeps the earlier hooks and lets the other connectors start.
+func claudeCodeSettingsParseable(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		return nil // a missing or unreadable file is reported by the patch
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return fmt.Errorf("Claude Code settings file %s is not valid JSON (%s); fix the file, then run: defenseclaw-gateway restart", path, jsonErrorPosition(data, err))
+	}
+	return nil
+}
+
+// jsonErrorPosition renders a JSON decode error with the 1-based line and
+// column of the offending byte when the decoder reports one.
+func jsonErrorPosition(data []byte, err error) string {
+	var syntax *json.SyntaxError
+	if !errors.As(err, &syntax) || syntax.Offset < 1 || syntax.Offset > int64(len(data)) {
+		return err.Error()
+	}
+	before := data[:syntax.Offset-1]
+	line := bytes.Count(before, []byte("\n")) + 1
+	column := len(before) - bytes.LastIndexByte(before, '\n')
+	return fmt.Sprintf("line %d, column %d: %v", line, column, err)
 }
 
 func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) error {
