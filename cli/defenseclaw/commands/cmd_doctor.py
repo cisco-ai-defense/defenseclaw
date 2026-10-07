@@ -275,6 +275,7 @@ class _DoctorResult:
         "list_processes",
         "quiet",
         "gateway_down",
+        "sidecar_unverified",
     )
 
     def __init__(
@@ -306,6 +307,9 @@ class _DoctorResult:
         # account's gateway is not serving the API port; later rows that would
         # only repeat it stay quiet.
         self.gateway_down = ""
+        # True once the Sidecar API row found a listener on the API port that
+        # is not this account's verified gateway (its /health still answers).
+        self.sidecar_unverified = False
 
     @property
     def passive_reason(self) -> str:
@@ -3068,6 +3072,10 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 r=r,
                 remediation=move,
             )
+            # Its effective policy is no evidence about this account's gateway:
+            # Policy compared another account's digest with config.yaml and
+            # failed (GAP-0384).
+            r.sidecar_unverified = True
 
         try:
             health = json.loads(body)
@@ -9031,6 +9039,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     label = "Policy"
     if not isinstance(live_health, dict):
         _emit_policy_without_gateway(cfg, r, label, "the gateway is not running")
+        return
+    if r.sidecar_unverified:
+        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
         return
     policy = live_health.get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
