@@ -1159,6 +1159,42 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
+def test_a_full_disk_does_not_stop_the_restore_of_the_previous_install(tmp_path: Path) -> None:
+    # GAP-0375: with no room for the .failed-<time> copy, its mkdir ended the
+    # restore under set -e: no CLI, no gateway, and no word of what to do.
+    home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = home / "previous.new"
+    for path in (snap / "bin", snap / "venv" / "bin", snap / "data", home / ".venv" / "bin", bin_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    (snap / "data" / "config.yaml").write_text("old\n", encoding="utf-8")
+    (home / "config.yaml").write_text("new\n", encoding="utf-8")
+    (snap / "venv" / "OLD").write_text("", encoding="utf-8")
+    (snap / "bin" / "defenseclaw-gateway").write_text("old gateway", encoding="utf-8")
+    (snap / "bin" / "defenseclaw").symlink_to(home / ".venv" / "bin" / "defenseclaw")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + 'info() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\nerr() { echo "err: $*"; }\nrestart_old() { :; }\n'
+        # The disk is full: a new folder cannot be made.
+        + 'mkdir() { case "$*" in *.failed-*) echo "mkdir: No space left on device" >&2; return 1 ;; esac; command mkdir "$@"; }\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" SNAP="{snap}" VENV="{home}/.venv" INSTALLER_DIR="{home}/installer"\n'
+        + 'APP_PATH="" VERSION=1.0.1 PREV_VERSION=1.0.0\nrestore_snapshot\necho "done"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert out.rstrip().endswith("done"), out
+    assert "warn: There was no room to keep the failed 1.0.1 install for troubleshooting, so it was deleted" in out
+    assert (home / ".venv" / "OLD").exists() and (home / "config.yaml").read_text(encoding="utf-8") == "old\n"
+    assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "old gateway"
+    assert (bin_dir / "defenseclaw").is_symlink() and not snap.exists()
+    assert not list(home.glob(".failed-*"))
+
+
 def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> None:
     # GAP-1349: the restore said "Your previous install is back" while the
     # gateway that ran before stayed down.

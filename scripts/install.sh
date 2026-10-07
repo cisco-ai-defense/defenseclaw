@@ -1097,6 +1097,8 @@ recover_interrupted_run() {
             VERSION_BEFORE="${VERSION}"; VERSION="(interrupted)"
             restore_snapshot
             VERSION="${VERSION_BEFORE}"
+            # A restore that could not finish keeps the slot: never install over it.
+            [[ ! -e "${slot}" ]] || die "Could not finish putting back the install an earlier run replaced; ${slot} holds it (see above)"
         else
             # The snapshot never finished, so live data was only copied, not changed.
             undo_snapshot
@@ -1236,43 +1238,64 @@ swap_app() {
 }
 
 restore_snapshot() {
-    local failed binary link name
+    local failed binary link name kept=true restored=true free_mb
     # Only the latest failed install is kept: with a large audit database
     # each copy holds gigabytes, and an earlier one is not used again.
     for failed in "${DEFENSECLAW_HOME}"/.failed-*; do
-        if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}"; fi
+        if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}" || true; fi
     done
     failed="${DEFENSECLAW_HOME}/.failed-$(date +%Y%m%dT%H%M%S)"
-    mkdir -p "${failed}/data"
+    # Putting the snapshot back only renames; keeping the failed install needs
+    # a new folder. On a full disk that mkdir failed and, under set -e, ended
+    # the restore before it began: no CLI, no gateway, no word (GAP-0375).
+    # Then the failed install is deleted instead, which also frees space.
+    mkdir -p "${failed}/data" 2>/dev/null || { kept=false; rm -rf "${failed}" 2>/dev/null || true; }
+    if [[ -d "${VENV}" ]]; then
+        { [[ "${kept}" == true ]] && mv "${VENV}" "${failed}/venv"; } || rm -rf "${VENV}" || restored=false
+    fi
+    if [[ -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}" || restored=false; fi
     for binary in ${MANAGED_BINARIES}; do
         if [[ -f "${SNAP}/bin/${binary}" ]]; then
-            cp -p "${SNAP}/bin/${binary}" "${BIN_DIR}/.${binary}.old" && mv -f "${BIN_DIR}/.${binary}.old" "${BIN_DIR}/${binary}"
+            { cp -p "${SNAP}/bin/${binary}" "${BIN_DIR}/.${binary}.old" && mv -f "${BIN_DIR}/.${binary}.old" "${BIN_DIR}/${binary}"; } \
+                || { rm -f "${BIN_DIR}/.${binary}.old"; restored=false; }
         else
-            rm -f "${BIN_DIR:?}/${binary}"
+            rm -f "${BIN_DIR:?}/${binary}" || restored=false
         fi
     done
     for link in ${MANAGED_LINKS}; do
-        rm -f "${BIN_DIR:?}/${link}"
-        [[ -L "${SNAP}/bin/${link}" ]] && cp -P "${SNAP}/bin/${link}" "${BIN_DIR}/${link}"
+        rm -f "${BIN_DIR:?}/${link}" || restored=false
+        if [[ -L "${SNAP}/bin/${link}" ]]; then cp -P "${SNAP}/bin/${link}" "${BIN_DIR}/${link}" || restored=false; fi
     done
-    if [[ -d "${VENV}" ]]; then mv "${VENV}" "${failed}/venv"; fi
-    if [[ -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}"; fi
-    rm -rf "${INSTALLER_DIR}"
-    if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}"; fi
+    rm -rf "${INSTALLER_DIR}" || restored=false
+    if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || restored=false; fi
     while IFS= read -r name; do
-        mv "${DEFENSECLAW_HOME}/${name}" "${failed}/data/" 2>/dev/null || rm -rf "${DEFENSECLAW_HOME:?}/${name}"
+        { [[ "${kept}" == true ]] && mv "${DEFENSECLAW_HOME}/${name}" "${failed}/data/" 2>/dev/null; } \
+            || rm -rf "${DEFENSECLAW_HOME:?}/${name}" || restored=false
     done < <(data_entries)
     for name in "${SNAP}/data"/* "${SNAP}/data"/.[!.]* "${SNAP}/data"/..?*; do
-        [[ -e "${name}" || -L "${name}" ]] && mv "${name}" "${DEFENSECLAW_HOME}/"
+        if [[ -e "${name}" || -L "${name}" ]]; then mv "${name}" "${DEFENSECLAW_HOME}/" || restored=false; fi
     done
     if [[ -n "${APP_PATH}" && -d "${SNAP}/DefenseClawMac.app" ]]; then
-        rm -rf "${APP_PATH}" && mv "${SNAP}/DefenseClawMac.app" "${APP_PATH}"
+        { rm -rf "${APP_PATH}" && mv "${SNAP}/DefenseClawMac.app" "${APP_PATH}"; } || restored=false
     fi
-    restore_external_config "${SNAP}"
-    rm -rf "${SNAP}"
+    restore_external_config "${SNAP}" || restored=false
+    if [[ "${restored}" != true ]]; then
+        # The snapshot stays (with COMPLETE), so the next run puts the rest back first.
+        free_mb="$(df -Pk "${DEFENSECLAW_HOME}" 2>/dev/null | awk 'NR==2{print int($4/1024)}')"
+        RESTORED_NOTE="Your previous install is NOT back yet: ${SNAP} still holds it."
+        err "Could not put ${PREV_VERSION:-the previous install} back completely (see the errors above); ${free_mb:-?} MB is free next to ${DEFENSECLAW_HOME}"
+        err "Free some space on that filesystem (df -h ${DEFENSECLAW_HOME}), then run the install command again: it puts the previous install back before anything else"
+        return 0
+    fi
+    rm -rf "${SNAP}" || true
     restart_old
-    warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
-    info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
+    if [[ "${kept}" == true ]]; then
+        warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
+        info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
+    else
+        warn "There was no room to keep the failed ${VERSION} install for troubleshooting, so it was deleted"
+        info "Your previous install and its data are back"
+    fi
 }
 
 restart_old() {
