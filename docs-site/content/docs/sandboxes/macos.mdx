@@ -369,6 +369,28 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
   Docker driver cannot start on MicroVMs, so setup lists them first; after
   the switch they can only be deleted.
 
+## One OpenShell gateway per Mac
+
+OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs
+as the Homebrew service of the account that started it. A Mac runs one
+gateway, so only that account can run sandboxes. In a second account,
+`defenseclaw sandbox doctor` says that the gateway's port is held by a
+process of another account. When the Homebrew prefix belongs to the first
+account, the doctor also says that its gateway configuration belongs to
+that account, so the compute driver is not known in the second account.
+
+To hand sandboxes to another account, stop the gateway in the account that
+runs it:
+
+```bash
+brew services stop nvidia/openshell/openshell
+```
+
+Then run `defenseclaw sandbox setup` in the other account. When that
+account cannot use the Homebrew prefix, setup says which account owns it.
+Several users on one machine are tracked upstream in
+[NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+
 ## Common problems
 
 | You see | Do this |
@@ -381,6 +403,8 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | `no sandbox can start on this gateway: it runs sandboxes on the docker driver` | Run `defenseclaw sandbox setup` and answer yes to the MicroVM question. |
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
 | **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`, then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
+| The **Gateway service** check says `127.0.0.1:17670, the gateway's port, is held by a process of another account` | Another account on this Mac runs its OpenShell gateway. See [one OpenShell gateway per Mac](#one-openshell-gateway-per-mac). |
+| **Gateway service** fails: `` `brew services` refuses to run in a tmux session that has no access to this account's macOS login session `` | Run the doctor outside tmux, or in a tmux you start from Terminal in your desktop session. |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

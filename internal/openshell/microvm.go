@@ -149,10 +149,16 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 		// What a switch to MicroVMs needs is checked when the doctor
 		// offers one.
 		vmDriver := Check{ID: CheckIDVMDriver, Title: "MicroVM driver", Status: StatusSkip, Detail: "the gateway runs the docker driver"}
+		skip := "the gateway runs the docker driver (a switch to MicroVMs sets it)"
+		if r.config == nil && r.running.Name == "" {
+			// Neither its configuration nor the gateway says which driver
+			// it runs: docker is only the default (GAP-0191).
+			skip = "the gateway's compute driver is " + r.configUnknown()
+			vmDriver.Detail = skip
+		}
 		if landlock.Status != StatusPass {
 			vmDriver = r.vmDriverCheck(ctx)
 		}
-		skip := "the gateway runs the docker driver (a switch to MicroVMs sets it)"
 		checks = []Check{landlock, docker, r.buildKit, hostNet, sharing, vmDriver,
 			{ID: CheckIDVMIdentity, Title: "MicroVM sandbox user", Status: StatusSkip, Detail: skip},
 			{ID: CheckIDVMResources, Title: "MicroVM resources", Status: StatusSkip, Detail: skip}, disk}

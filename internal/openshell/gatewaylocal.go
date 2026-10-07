@@ -28,6 +28,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // The package gateway of an account that never ran NVIDIA's installer (the
@@ -171,9 +173,15 @@ func (r *doctorRun) gatewayPortHeld() (held string, other bool) {
 		return "", false
 	}
 	who := "another process"
-	if holder, err := r.PortHolder("127.0.0.1", port); err == nil {
+	switch holder, err := r.PortHolder("127.0.0.1", port); {
+	case err == nil:
 		who = holder.String(r.Geteuid())
 		other = holder.UID >= 0 && holder.UID != r.Geteuid()
+	case r.GOOS == "darwin" && errors.Is(err, daemon.ErrNoListener):
+		// lsof lists this account's processes only: a port none of them
+		// holds is another account's, the first account's gateway on a
+		// Mac several people use (GAP-0192).
+		who, other = "a process of another account", true
 	}
 	return addr + ", the gateway's port, is held by " + who, other
 }

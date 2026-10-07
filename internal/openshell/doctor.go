@@ -527,9 +527,10 @@ type doctorRun struct {
 	service *ServiceState
 
 	// config is the gateway configuration read up front (nil when it
-	// cannot be read; checkGatewayConfig says why), configured the compute
-	// driver it selects.
+	// cannot be read: configErr; checkGatewayConfig says why), configured
+	// the compute driver it selects.
 	config     *GatewayConfigState
+	configErr  error
 	configured ComputeDriver
 	// running is the compute driver the answering gateway reports, once
 	// checkGateway has asked (zero Name until then, or when it reports one
@@ -595,6 +596,8 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		if st.ComputeDriver != "" {
 			r.configured = st.ComputeDriver
 		}
+	} else {
+		r.configErr = err
 	}
 	r.report.ConfiguredDriver, r.report.Driver = r.configured, r.configured
 	r.checkUser()
@@ -1058,8 +1061,16 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	st, err := r.Gateway.ServiceState(ctx)
 	if err != nil {
 		c.Status, c.Detail = StatusFail, err.Error()
-		if r.GOOS == "linux" {
+		switch {
+		case r.GOOS == "linux":
 			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}
+		case errors.Is(err, ErrBrewServicesTmux):
+			c.Fix = &Fix{Summary: "run the doctor outside tmux, or in a tmux started from Terminal in your desktop session"}
+		}
+		// Whatever the service manager says, another account's gateway on
+		// the port is what keeps this account's from running (GAP-0192).
+		if held, other := r.gatewayPortHeld(); other {
+			c.Detail, c.Fix, r.portHeld = held, r.portHeldFix(true), true
 		}
 		return
 	}
@@ -1791,6 +1802,11 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 	if err != nil {
 		mounts.Status, mounts.Detail = StatusFail, err.Error()
 		tele.Status, tele.Detail = StatusSkip, "gateway configuration unreadable"
+		if errors.Is(err, ErrForeignGatewayConfig) {
+			// Nothing this account could change (GAP-0191): the gateway
+			// to run sandboxes on is the other account's.
+			mounts.Status, mounts.Detail = StatusSkip, r.configUnknown()
+		}
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
@@ -1861,6 +1877,16 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		mounts.Status, mounts.Detail = StatusPass, "enabled for the docker driver"
 	}
 	r.telemetryCheck(ctx, &tele, st, envErr)
+}
+
+// configUnknown says why the gateway's settings, its compute driver among
+// them, are not known here: another account's configuration this account
+// may not read, or one that cannot be read at all.
+func (r *doctorRun) configUnknown() string {
+	if errors.Is(r.configErr, ErrForeignGatewayConfig) {
+		return "not known here: " + strings.TrimPrefix(r.configErr.Error(), "openshell: ")
+	}
+	return "not known here: the gateway configuration is unreadable"
 }
 
 // telemetryCheck compares OpenShell's usage telemetry with
