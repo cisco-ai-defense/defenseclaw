@@ -710,6 +710,17 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			DecisionCode: decisionCode(e), Reason: truncate(reason, 512),
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
 		}
+		category, text := string(e.Category), categoryText(e)
+		if blocked && e.Category == egress.CategoryOperatorBlock && eff != nil {
+			// The block list merges the pack's, the repository policy's
+			// and the user's own: the line, the destination and the audit
+			// record (an alert) say whose entry it was, where it is removed
+			// (GAP-0136).
+			if c, t := blockOriginText(eff.BlockOrigin(e.Host)); c != "" {
+				category, text = c, t
+				ev.DecisionCode, ev.Reason = "SANDBOX_EGRESS_"+strings.ToUpper(c), truncate(t+more, 512)
+			}
+		}
 		fetch := blocked && harnessFetchHost(harnessName, e.Host, e.Port)
 		if fetch {
 			// The harness's own background request, which it does without:
@@ -719,15 +730,6 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		m.tel.RecordSandboxEgress(ctx, ev)
 		if fetch {
 			return
-		}
-		category, text := string(e.Category), categoryText(e)
-		if blocked && e.Category == egress.CategoryOperatorBlock && eff != nil {
-			// The block list merges the pack's, the repository policy's
-			// and the user's own: the line and the destination say whose
-			// entry it was, where it is removed.
-			if c, t := blockOriginText(eff.BlockOrigin(e.Host)); c != "" {
-				category, text = c, t
-			}
 		}
 		m.observeDestination(ctx, b, destinationSighting{host: e.Host, port: e.Port, at: e.Time, proxy: true, denied: blocked,
 			category: category})

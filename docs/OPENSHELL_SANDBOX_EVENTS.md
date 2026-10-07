@@ -163,6 +163,12 @@ A denied connection to a host port is recorded with `server.address`
 `host.openshell.internal`, not OpenShell's synthetic address. A sandbox
 whose policy turned its web egress off while it ran is refused by the proxy
 with category `egress_off` (decision code `SANDBOX_EGRESS_EGRESS_OFF`).
+A refusal by the merged block list names whose entry it was, as the feed
+does: decision code `SANDBOX_EGRESS_PACK_BLOCK`,
+`SANDBOX_EGRESS_REPO_POLICY_BLOCK` or `SANDBOX_EGRESS_FIREWALL_BLOCK` with
+the feed's words as the reason ("on the repository policy's block list,
+.defenseclaw/sandbox.yaml"); the user's own entries keep
+`SANDBOX_EGRESS_OPERATOR_BLOCK`.
 OpenShell's allowed connections to a host port other than this install's
 own (a `--host-port` service, a local model endpoint) are recorded as
 allowed with `server.address` `host.openshell.internal`.

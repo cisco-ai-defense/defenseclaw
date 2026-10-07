@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -144,6 +145,11 @@ func TestRepoPolicyBlocksSayWhose(t *testing.T) {
 	got := e.events("repoblock", sandboxapi.ActivityEgressBlocked, "")
 	if len(got) != 1 || got[0].Category != sandboxapi.CategoryRepoPolicyBlock || !strings.Contains(got[0].Message, packs.RepoPolicyPath) {
 		t.Fatalf("feed = %+v", got)
+	}
+	// So does the audit record, an alert (GAP-0136).
+	recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "example.org" })
+	if len(recs) != 1 || recs[0].DecisionCode != "SANDBOX_EGRESS_REPO_POLICY_BLOCK" || !strings.Contains(recs[0].Reason, packs.RepoPolicyPath) {
+		t.Fatalf("audited %+v", recs)
 	}
 	// So do the destinations and `policy test`, which said "The operator
 	// blocked this destination in DefenseClaw configuration."
