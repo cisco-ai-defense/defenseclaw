@@ -822,3 +822,19 @@ func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
 		t.Fatalf("explain = %s", rec.Body.String())
 	}
 }
+
+func TestProfileExplainWarnsUnknownConnectorNames(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Connectors: map[string]config.PerConnectorGuardrailConfig{"claude": {}}},
+	}
+	set := &guardrailProfileSet{
+		base:        cfg,
+		assignments: []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"claude"}}}},
+	}
+	warnings := profileExplainWarnings(set, profileDecision{}, &profileSubject{LookupFailed: true})
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "profile_assignments[0].match.connectors") ||
+		!strings.Contains(warnings[1], `profiles["strict"].connectors`) {
+		t.Fatalf("unknown connector warnings = %q", warnings)
+	}
+}
