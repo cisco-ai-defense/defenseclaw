@@ -26,3 +26,6 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 		return false, err
 	}
 }
+
+// accountGroupIDs lists an OS account's group SIDs.
+var accountGroupIDs = func(account *osuser.User) ([]string, error) { return account.GroupIds() }
