@@ -285,3 +285,23 @@ func readWindowsStandaloneScannerSettings() (string, string) {
 	}
 	return policy, model
 }
+
+// writeWindowsEnterpriseScanners prints the scanners line of a status
+// summary: state, the pinned versions, the policy and the judge model.
+func writeWindowsEnterpriseScanners(output io.Writer, scanners *enterprisestatus.ScannerRuntime) {
+	if scanners == nil {
+		return
+	}
+	versions := make([]string, 0, len(scanners.Versions))
+	for _, name := range []string{"skill-scanner", "mcp-scanner", "litellm", "python"} {
+		if version := scanners.Versions[name]; version != "" {
+			versions = append(versions, name+" "+version)
+		}
+	}
+	judge := scanners.JudgeModel
+	if judge == "" {
+		judge = "none"
+	}
+	fmt.Fprintf(output, "  Scanners: %s (%s); policy %s; judge %s\n",
+		scanners.State, strings.Join(versions, ", "), scanners.Policy, judge)
+}
