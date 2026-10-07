@@ -11,6 +11,7 @@
     "policies",
     "scanning",
     "ai-discovery",
+    "segmentation",
     "sandboxes",
     "acp-guard",
     "hitl",

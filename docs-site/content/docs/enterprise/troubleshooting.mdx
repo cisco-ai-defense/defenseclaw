@@ -135,6 +135,41 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | `ensure_install`, `ensure_upgrade`, `ensure_repair` | Windows | The action that `ensure` chose, and why |
 | `registration_failed`, `lifecycle_log_failed` | Windows | The registry marker, the Add/Remove Programs entry, or the lifecycle log could not be written. The result itself stands |
 
+## Kernel sensor warnings
+
+These appear in `status` and `verify` on Linux when the sensor helper uses
+Tetragon (see [AI Discovery Plane C (Tetragon)](/docs/enterprise/linux#ai-discovery-plane-c-tetragon)).
+They are warnings. A problem with your Tetragon never fails `verify`, and
+`security_complete` does not depend on it. `defenseclaw doctor` shows the
+matching rows under **Kernel sensor (Tetragon)**.
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `tetragon_unavailable` | Tetragon is installed or expected but the helper cannot read it (stopped, no socket, or a failing stream). Plane C runs on `cn_proc` and `fanotify` and reports why | Start Tetragon: `systemctl status tetragon`. Nothing is wrong with DefenseClaw; kernel enforcement is off until it returns |
+| `tetragon_tcp_api` | Tetragon serves its API on a TCP address. The helper never dials TCP, so it stays on `cn_proc` and `fanotify`, and `observe` and `enforce` are refused. Any local account can load kernel policies through that address | Set `server-address` to `unix:///var/run/tetragon/tetragon.sock` in `/etc/tetragon/tetragon.conf.d` and restart Tetragon |
+| `tetragon_unsupported_version` | The Tetragon version is not one the helper supports for this mode: `observe` and `enforce` need 1.7, `consume` works on 1.6 and 1.7, and anything else falls back | Upgrade Tetragon to 1.7.x, or set `mode: consume` |
+| `tetragon_persistent_sensors` | Tetragon runs with `keep-sensors-on-exit`, or its config cannot be read, so stopping it would leave programs enforcing with nobody updating them. `enforce` is refused and the controls stay in monitor mode | Remove `keep-sensors-on-exit` from the Tetragon config, restart it, and remove old pins under `/sys/fs/bpf/tetragon` if any remain |
+| `tetragon_plane_c_off` | `enterprise.tetragon` is set, but Plane C is not selected, so the effective mode is `off` | Set `ai_discovery.runtime.enable_host_plane: true`, or remove the Tetragon setting |
+| `tetragon_not_applicable` | macOS: the config carries `enterprise.tetragon`, which only Linux uses | None. Remove the key if you like |
+| `kernel_enforce_ack_missing` | `mode: enforce` has no `enforce_ack`, so the controls run in monitor mode | Read the digest with `enterprise linux tetragon status`, then set `enforce_ack` |
+| `kernel_enforce_ack_stale` | `enforce_ack` is not the current control-set digest, usually after a DefenseClaw upgrade that changed a control. Every user is back in monitor mode | Review `tetragon status` and set `enforce_ack` to the new digest |
+| `kernel_enforce_guardrail_observe:<connector>` | The connector is in observe mode, so its agents are monitored and never denied | Switch the connector to `action` mode, or accept monitor-only for it |
+| `kernel_enforce_paused` | Enforcement is paused from the computer. The warning gives the expiry and who set it | `enterprise linux tetragon resume`, or wait for the expiry |
+| `kernel_enforce_inactive` | No control can be enforced, for example no enrolled user has a supported agent installed (`no anchors`) | Enroll a user with an installed command-line agent, or ignore it |
+| `kernel_burn_in_skipped` | `burn_in` is `0`, so users are enforced without a measured window | Set `burn_in` to at least `24h` |
+| `kernel_policy_operator_override:<family>` | A policy family was moved to monitor mode or deleted with `tetra`, and the helper is honoring that | Change `enforce_ack` or `mode` in the config to clear it, or leave it as your decision |
+| `kernel_policy_not_applied` | The helper applied a different control-set digest than the configuration computes to | Wait for the helper's next pass (about a minute), or restart `defenseclaw-sensor-helper` |
+| `kernel_roots_over_limit` | More than 64 agent processes for a control. The extra ones are observed, not enforced | None; the count is reported |
+| `kernel_reconcile_failed` | The helper could not load or update a policy. Policies stay in or return to monitor mode | Read the helper's journal: `journalctl -u defenseclaw-sensor-helper` |
+| `tetragon_foreign_defenseclaw_name` | A policy in Tetragon has a `defenseclaw-` name that this helper did not record loading, such as one of yours. It is never deleted | Rename your policy if the name is confusing |
+
+`verify` fails only for state DefenseClaw owns:
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `kernel_policy_orphaned` | A policy the helper recorded is still loaded in Tetragon while the mode is `off` or `consume`, or while the helper is not running | Start the helper, or run `sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup`. As a last resort, `systemctl restart tetragon` drops every policy loaded over its API |
+| A recorded policy is missing or in error | In `observe` or `enforce`, a policy the helper loaded is not in Tetragon, or Tetragon reports a load error, after a reconcile pass | Read the problem's message and the helper's journal; then restart the helper |
+
 ## MDM wrapper error codes
 
 The wrapper scripts in `packaging/mdm` check their inputs before they start

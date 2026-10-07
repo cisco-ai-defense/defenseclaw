@@ -489,6 +489,10 @@ Full Disk Access to that path by hand in System Settings > Privacy & Security >
 Full Disk Access. Then restart the helper with
 `sudo launchctl kickstart -k system/com.cisco.defenseclaw.sensor-helper`.
 
+A config that carries `enterprise.tetragon` is accepted and ignored on macOS,
+because Tetragon has no macOS agent; `enterprise macos status` reports
+`tetragon_not_applicable`.
+
 ## Machine policy
 
 For Codex, Claude Code, Cursor, GitHub Copilot and OpenCode, DefenseClaw adds

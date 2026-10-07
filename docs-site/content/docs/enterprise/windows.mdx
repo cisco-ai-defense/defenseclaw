@@ -511,6 +511,11 @@ signals; it takes the account name or SID), then the runtime discovery
 planes (`ai_discovery.runtime`) with their state, last poll and findings.
 Standard accounts cannot run it.
 
+A config that carries `enterprise.tetragon` is accepted and ignored on
+Windows, because Tetragon has no Windows agent, and Windows `status` is
+unchanged. The setting acts only on Linux; see
+[AI Discovery Plane C (Tetragon)](/docs/enterprise/linux#ai-discovery-plane-c-tetragon).
+
 Skills and MCP servers are inventoried, not scanned: a managed deployment
 does not run the skill or MCP scanners. The `discovery` view names each
 skill and MCP server per user. Your observability destinations get the

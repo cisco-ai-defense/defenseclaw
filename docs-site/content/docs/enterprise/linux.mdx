@@ -34,6 +34,7 @@ the same config.
 | SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
 | Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
+| Tetragon | Optional. 1.7.x on RHEL 9 x86_64 is verified. See [AI Discovery Plane C (Tetragon)](#ai-discovery-plane-c-tetragon). |
 
 The systemd version decides how the gateway reads secrets:
 
@@ -63,6 +64,7 @@ lists each directive and the version it needs.
 | Machine-policy summary | `/etc/defenseclaw/machine-policy.json` | Readable by users |
 | Lifecycle state | `/var/lib/defenseclaw-enterprise`: lock, snapshots, deployment record, `last-package-result.json`, `last-activation-failure.log`, the last applied config and a rejected one | `root`, `0700` |
 | Transaction snapshots on other filesystems | `/opt/defenseclaw/.lifecycle-snapshots`, `/etc/defenseclaw/.lifecycle-snapshots`: only during a lifecycle transaction (or while a rollback waits for a retry) when `/var` is on its own filesystem. They hold the snapshot's hard links to the files there. | `root`, `0700` |
+| Sensor helper state | `/var/lib/defenseclaw-sensor`: the DefenseClaw policy names loaded into Tetragon, their state, per-user readiness and a pause record. Written only when the helper uses Tetragon; see [AI Discovery Plane C (Tetragon)](#ai-discovery-plane-c-tetragon) | `root`, `0700` |
 | Gateway data | `/var/lib/defenseclaw` | `defenseclaw`, `0700` (the device identity key needs a private directory) |
 | Authorization ledger | `/var/lib/defenseclaw-hook-guardian`, with each enrolled user's latest AI Discovery scan in `ai-discovery/` | `root:defenseclaw`, `0750` |
 | Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there; the services log to the journal ([Logs and events](/docs/enterprise/operations#logs-and-events)) | `defenseclaw`, `0750` |
@@ -82,13 +84,13 @@ The units:
 | `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. The same worker runs each enrolled user's AI Discovery scan ([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)). It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
-| `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |
+| `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests. Starts after `tetragon.service`, and reads the Tetragon that is running when there is one ([AI Discovery Plane C (Tetragon)](#ai-discovery-plane-c-tetragon)) |
 | `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes. `enterprise secret set` and `remove` pause it while they write the credential, because they apply the change themselves |
 | `defenseclaw-enterprise-verify.timer` | PID 1 | Runs `verify` daily, with up to one hour of random delay |
 
 The package installs the units in `/usr/lib/systemd/system`. A tarball install
 writes them to `/etc/systemd/system`. Either way, host-specific drop-ins go
-in `/etc/systemd/system/<unit>.d/`.
+in `/etc/systemd/system/<unit>.d/`. The one drop-in the lifecycle writes itself is the sensor helper's `30-defenseclaw-tetragon.conf`, and only when `enterprise.tetragon` is not at its defaults. `verify` tracks it and does not report it as a local override.
 
 How a hook reaches the gateway:
 
@@ -455,6 +457,324 @@ use bubblewrap, which needs user namespaces:
 DefenseClaw's hooks inspect each tool call whether or not the agent's own
 sandbox runs.
 
+## AI Discovery Plane C (Tetragon)
+
+AI Discovery's runtime detection has three *planes*: A watches for inference
+compute, B attributes network traffic to processes, and C records agent
+actions from kernel events (see
+[Runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran)).
+Plane C (`ai_discovery.runtime.enable_host_plane: true` with `c` in
+`ai_discovery.runtime.planes`) runs in the root sensor helper,
+`/opt/defenseclaw/bin/defenseclaw-sensor-helper`. Without Tetragon the helper
+reads process events from the kernel's `cn_proc` connector and file events
+from `fanotify`. If the computer already runs
+[Tetragon](https://tetragon.io), the helper uses it as a better source for the
+same plane, and can load a small fixed set of DefenseClaw kernel controls
+through it. How this fits with hooks, sandboxes and the egress proxy is on
+[Agent segmentation, visibility and enforcement](/docs/segmentation).
+
+DefenseClaw does not install, configure or update Tetragon. It uses the one
+you run, and never writes to `/etc/tetragon`.
+
+### What you get
+
+| Need | Without Tetragon | With Tetragon |
+| --- | --- | --- |
+| Process starts | `cn_proc`, then a read of `/proc`; a short-lived process can exit first and lose its name and arguments | The binary, arguments, working directory, user and parent, recorded in the kernel at the exec |
+| Agent identity | The executable's base name, which for a native Claude Code is a version number | The executable path, so the agent is identified by what it is |
+| Process reuse | Guessed from a name change | Exec identifiers, so a reused pid is not confused with the earlier process |
+| Containers | A program in a container looks like a host process | Events carry the container, and are counted but never joined to a host agent's session |
+| Connections | Polled every 30 seconds, so short connects are missed | Kernel `tcp_connect` events per binary (`observe` and `enforce`) |
+| Agent activity without a hook | Not seen (the `!` shell mode, programs inside a script, detached jobs) | Seen in every mode; a hook decision is joined when there is one, and `hook_seen=false` says there was none |
+
+### Requirements
+
+| Requirement | Detail |
+| --- | --- |
+| Tetragon | Optional. 1.7.x is verified on RHEL 9 x86_64 for `consume`, `observe` and `enforce`. 1.6.x supports `consume` only, and is expected to work but was not verified. Other versions fall back to `cn_proc` and `fanotify` and report `tetragon_unsupported_version` |
+| Kernel | `consume` works wherever Tetragon runs. `enforce` needs BPF LSM: `lsm` must show as enabled in Tetragon's probes. RHEL 8 (kernel 4.18) is not supported |
+| Platform | Verified: RHEL 9, x86_64. Ubuntu 22.04 and 24.04 and arm64: `consume` only, expected and not verified |
+| Plane C | `ai_discovery.runtime.enable_host_plane: true`. With Plane C off, the effective mode is `off` and status reports `tetragon_plane_c_off` |
+| Deployment | Linux standalone only. macOS and Windows accept the setting and ignore it. The Secure Client profile refuses it |
+
+### Harden Tetragon first
+
+The helper trusts Tetragon's API only as far as it can verify it. Set these
+on the computer, in the files under `/etc/tetragon/tetragon.conf.d` (one
+file per setting, named for the flag):
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `server-address` | `unix:///var/run/tetragon/tetragon.sock` | Tetragon's default is a TCP port on localhost. Any local account can load kernel policies through it. The helper never connects to TCP: it stays on `cn_proc` and `fanotify`, and status reports `tetragon_tcp_api` |
+| Socket ownership | `root:root`, mode `0660`, in a root-owned directory | The helper connects only when the socket file and its directory belong to root, the server behind the socket runs as root, and it is the process named in `/var/run/tetragon/tetragon-info.json` |
+| `health-server-address` | `127.0.0.1:6789` | The default listens on every interface |
+| `metrics-server` | `127.0.0.1:2112` | The helper reads loss counters only from a loopback address whose listener is Tetragon. They are shown, never acted on |
+| `redaction-filters` | Your filters for secrets in command lines | Tetragon's own export file holds every user's arguments. DefenseClaw never reads or widens it |
+| `enable-ancestors` | `kprobe,lsm` | Lets kernel events name the process that caused them. The helper asks for no ancestors on its own stream |
+| `keep-sensors-on-exit` | `false` (the default) | With `true`, stopping Tetragon leaves its programs enforcing with nobody updating their scope. `enforce` is refused and the floor stays in monitor mode (`tetragon_persistent_sensors`) |
+
+Policies that use `uprobe` (for example DNS naming through `getaddrinfo`) pin
+about 137 MB of kernel memory. DefenseClaw loads none.
+
+### Modes
+
+`consume` is the default: with no setting at all, the helper reads Tetragon
+when it is present and uses `cn_proc` and `fanotify` when it is not.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  profile: standalone
+  tetragon:
+    mode: observe      # off | consume (default) | observe | enforce
+    burn_in: 168h      # covered agent-hours per user before enforcement. 0, or 24h to 2160h
+    enforce_ack: ""    # with mode enforce: the kernel_policy digest you approved
+ai_discovery:
+  runtime:
+    enabled: true
+    enable_host_plane: true
+```
+
+| Mode | Process events | File events | DefenseClaw policies in Tetragon | Enforcement |
+| --- | --- | --- | --- | --- |
+| `off` | `cn_proc` | `fanotify` | None | None |
+| `consume` | Tetragon | `fanotify` | None | None |
+| `observe` | Tetragon | Tetragon's `defenseclaw-observe` policy, with `fanotify` alongside until the policy has run healthy for ten minutes | `defenseclaw-observe`, `defenseclaw-connect` and `defenseclaw-controls` (monitor mode) | None. What the controls would have denied is counted |
+| `enforce` | As `observe` | As `observe` | As `observe`. `controls` is in enforce mode for users who are ready, and `controls-burnin` holds the others in monitor mode | `EPERM` for ready users, when `enforce_ack` matches and every cap below passes |
+
+The policy names end in eight hex digits of the rendered policy's hash, for
+example `defenseclaw-controls-3f9c2a7d`. DefenseClaw adds, changes and deletes
+only names it recorded itself. A policy of yours, even one with a
+`defenseclaw-` name, is never touched; status reports it as
+`tetragon_foreign_defenseclaw_name`.
+
+What the helper may ask of Tetragon depends on the mode:
+
+| Mode | Calls to Tetragon |
+| --- | --- |
+| `off`, `consume` | Read-only: version, info, events and the policy list. At start, one pass that deletes names its own state file recorded |
+| `observe`, `enforce` | The read-only calls, plus add, configure and delete for `defenseclaw-*` policies |
+
+A change to `enterprise.tetragon` is rendered into a drop-in for the helper
+(`defenseclaw-sensor-helper.service.d/30-defenseclaw-tetragon.conf`) and the
+helper restarts into it. The helper never reads `config.yaml` itself: it acts
+only on what `ensure` accepted. An absent block and `mode: consume` with the
+default `burn_in` produce the same policy digest and no drop-in.
+
+Every semantic condition is a cap, never a rejection, because a rejected
+config blocks unrelated changes on a managed computer:
+
+| Condition | Effect | Status reason |
+| --- | --- | --- |
+| Plane C not selected | Effective mode `off` | `tetragon_plane_c_off` |
+| `enforce` without `enforce_ack`, or an ack that does not match the current control set | Monitor mode | `kernel_enforce_ack_missing`, `kernel_enforce_ack_stale` |
+| A connector's guardrail mode is not `action` | That connector is not anchored for enforcement | `kernel_enforce_guardrail_observe:<connector>` |
+| Tetragon's `keep-sensors-on-exit` is on, or its config cannot be read | Monitor mode | `tetragon_persistent_sensors` |
+| Tetragon 1.6.x | `observe` and `enforce` refused | `tetragon_unsupported_version` |
+
+### The kernel controls
+
+Two controls exist. There are no per-control settings in this release.
+
+| Control | Denies | Does not deny |
+| --- | --- | --- |
+| `kernel.ssh_private_key_read` | Opening `~/.ssh/id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa` | `.pub` files and certificates. `ssh`, `ssh-keygen` and `ssh-add` are exempt, so SSH commit signing and `ssh-add` keep working |
+| `kernel.persistence_write` | Opening for write `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`, and files under `~/.config/systemd/user/` and `~/.config/autostart/`, including truncation, which is denied before it happens | Reading. Replacing or removing a file by rename or unlink |
+
+Who a control applies to is deliberately narrow. Each control covers only:
+
+- an enrolled user (a row in `targets.yaml`),
+- whose enrolled connector is a command-line agent (Claude Code, Codex,
+  Cursor's `cursor-agent`, GitHub Copilot CLI, OpenCode, Amp, Devin, Hermes,
+  OpenHands, OmniGent or Kiro CLI) that is installed,
+- and the processes that descend from that agent's own processes, in the host
+  process namespace.
+
+While the controls run in monitor mode, every such connector is counted. To
+deny, a connector must also be in `action` mode; a connector in observe mode
+stays monitor-only (`kernel_enforce_guardrail_observe:<connector>`).
+
+The same user's normal shell, other users, IDE terminals, containers, and
+programs that only look like an agent by name are observed, never denied.
+Status lists them as "observed, not enforced" with the reason: `ide_hosted`,
+`heuristic_root`, `not_enrolled` or `guardrail_observe`. A user with no agent
+installed has no control at all. At most 64 running agent processes per
+control are anchored; the rest are counted as `kernel_roots_over_limit`.
+
+Paths are the exact names in each enrolled home. The controls do not cover
+agent configuration files, repository files such as `AGENTS.md` or `.mcp.json`,
+provider credentials, the hook runtime, root-owned system paths or program
+execution.
+
+Known limits of these controls:
+
+- A rule matches the name that is opened. A second name for the same file,
+  created beforehand (a link), is outside the control.
+- Replacing a shell profile by rename, or removing it, is not denied.
+  Hook rules still see the command, and the `observe` policy records the open.
+- A library-based SSH tool (for example one built on libssh2 or paramiko)
+  inside an agent's process tree is denied like any other reader. The burn-in
+  shows these first.
+
+### Read the readiness report, then approve
+
+Enforcement is explicit. Nothing promotes on its own, and a timer alone never
+starts it. The helper measures, and you approve a specific control set.
+
+1. Set `mode: observe` in the administrator config and apply it. The controls
+   now run in monitor mode: they deny nothing and count what they would have
+   denied.
+2. Read the report as root:
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status --json
+   ```
+
+   It prints Tetragon's version and the socket check, `keep-sensors-on-exit`,
+   the effective mode, each DefenseClaw policy (name, family, mode, state and
+   error), the `kernel_policy` digest, each enrolled user's readiness, the
+   agents observed but not enforced, any pause or operator override, and any
+   orphaned policy name.
+
+3. Decide. Each user has a burn-in: covered agent time that must reach
+   `burn_in` (default 168 hours) with zero would-block hits. Covered time
+   accrues only while all of these hold: the Tetragon stream is connected; no
+   event throttling or rate-limit drop happened that minute; the user's
+   policy is enabled; at least one anchored agent process of that user is
+   alive; and enforcement is not paused. An idle computer accrues nothing. A
+   hit sends the user back to the start of a fresh window. The burn-in resets
+   when the control set changes or when the user gains a connector.
+
+   A `burn_in` of `0` skips the wait, and status warns
+   `kernel_burn_in_skipped` for as long as it applies. Otherwise `burn_in` is
+   24h to 2160h.
+
+4. Approve. The report prints the digest to use, for example
+   `approve with enforce_ack: sha256:3f9c2a7d41b0`. Set both keys and apply:
+
+   ```yaml title="config.yaml (excerpt)"
+   enterprise:
+     tetragon:
+       mode: enforce
+       enforce_ack: sha256:3f9c2a7d41b0
+   ```
+
+   The digest covers only the embedded control set. A DefenseClaw release that
+   changes a control changes the digest, so the old ack goes stale: every user
+   falls back to monitor mode and status reports `kernel_enforce_ack_stale`
+   until you approve the new one.
+
+5. Check. Users who finished their burn-in are now in the enforcing policy
+   and the rest stay in monitor mode (`controls-burnin`). A denied open returns
+   "Operation not permitted" to the agent's process and is recorded as a
+   `log.enforcement.block.applied` event with the rule `PATH-SSH-KEY` or
+   `persistence.shell_profile_write`.
+
+### Pause enforcement
+
+When a control blocks something you need, stop enforcement at once from the
+computer. Pausing is a runtime action, not a config write, so it works on a
+managed computer:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon pause --for 4h --reason "investigating a blocked build"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume
+```
+
+The helper moves the enforcing policy to monitor mode within about five
+seconds. Visibility continues. The pause lasts across restarts of the helper
+and of Tetragon, across `ensure` runs and across reboots, and the helper
+checks it before every policy change. The default is `--for 4h`; the longest
+is `7d`. `--until-reboot` keeps the pause in `/run` so a reboot clears it.
+Status and `verify` warn `kernel_enforce_paused` with the expiry and who set
+it. A paused period adds no covered burn-in time.
+
+A pause ends by itself. To end enforcement for good, set the mode to
+`observe` or `off` in the administrator config.
+
+Stopping Tetragon is not a kill switch: with `keep-sensors-on-exit` on, its
+programs would keep enforcing.
+
+If you change or delete a DefenseClaw policy with `tetra` (for example
+`tetra tracingpolicy set-mode <name> monitor` or `delete <name>`), the helper
+treats it as your decision. It does not put the policy back after a helper or
+Tetragon restart; it warns `kernel_policy_operator_override:<family>`. A new
+`enforce_ack` or mode in the config clears the override.
+
+### Failure behavior
+
+| Event | Behavior |
+| --- | --- |
+| Tetragon stops | No kernel enforcement (fail open). Plane C falls back to `cn_proc` and `fanotify` in the same stream; status warns `tetragon_unavailable`; `verify` still passes |
+| Tetragon restarts | The policies it held are gone. The helper loads them again within a pass (about a minute), honoring the pause and any operator override |
+| The helper stops | Loaded policies keep running with the scope they had. Start the helper again, or run the cleanup below |
+| Events are lost | Enforcement is unaffected. Coverage is reported as partial, and burn-in time stops |
+| A policy does not load | It stays in or returns to monitor mode and status reports `kernel_reconcile_failed`. `verify` fails if a policy the helper recorded is missing or in error after a pass, in `observe` or `enforce` |
+
+A Tetragon outage is your computer's state, not DefenseClaw's, so it is a
+warning and never fails `verify` or `security_complete`.
+
+### Privacy
+
+- The helper redacts every command line it reads from Tetragon (secret flags,
+  key-shaped tokens, URL passwords) before it reaches the gateway.
+- The arguments of Codex's notify program are withheld entirely, because they
+  carry the turn's content.
+- The helper asks Tetragon for no environment variables, capabilities,
+  namespaces or pod metadata.
+- Raw Tetragon events are never sent to the gateway or to an exporter.
+- The DefenseClaw hook's own short-lived helper processes are summarized as one
+  count per hook. Any other child of a hook, and any process that does not
+  match the exact rendered hook command, is reported in full.
+
+### Units and files
+
+| Item | Path | Owner and mode |
+| --- | --- | --- |
+| Helper drop-in, written only when the settings are not the defaults | `/etc/systemd/system/defenseclaw-sensor-helper.service.d/30-defenseclaw-tetragon.conf` | `root`, `0644` |
+| Helper state | `/var/lib/defenseclaw-sensor/`: `tetragon-loaded` (the policy names DefenseClaw loaded), `tetragon-state.json`, `burnin.json`, `tetragon-pause` | `root`, `0700` |
+| Rendered policy copies | `/run/defenseclaw-sensor/tetragon/` | `root` |
+| Helper unit | `defenseclaw-sensor-helper.service`, started after `tetragon.service` | `root` |
+
+`verify` tracks the drop-in and reports drift. Do not edit the helper's
+state files.
+
+### Remove the policies, or downgrade
+
+DefenseClaw-loaded policies outlive the helper, so every removal path deletes
+them first, with the helper that loaded them:
+
+| Action | What happens |
+| --- | --- |
+| `enterprise linux uninstall` (with or without `--purge`), `apt remove`, `dnf remove` | Deletes the recorded `defenseclaw-*` policy names before any file is removed, then removes the state directory |
+| A failed `ensure` that rolls back | Runs the same cleanup before the files are restored. The restored helper loads what its own drop-in asks for |
+| Package downgrade to a release before Tetragon support | The package's pre-removal script runs the cleanup with the helper that is still installed; for an older helper that lacks the cleanup, it deletes the recorded names with `tetra` when `tetra` is on root's `PATH`, and otherwise prints the names and tells you to run `systemctl restart tetragon` |
+| `ensure --allow-downgrade` from a payload | Run `enterprise linux tetragon pause`, set `mode: consume` and apply it, or run `sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup` before downgrading below the first release with Tetragon support |
+
+To run the cleanup by hand, or only check that a helper supports it:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup
+sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup --check
+```
+
+As a last resort, `systemctl restart tetragon` drops every policy that was
+loaded over its API on Tetragon 1.6 and 1.7, DefenseClaw's and anyone else's.
+On a computer with `keep-sensors-on-exit` on, also remove the pinned programs
+under `/sys/fs/bpf/tetragon`.
+
+`verify` reports a recorded policy that is still loaded while the mode is
+`off` or `consume`, or while the helper is not running, as the problem
+`kernel_policy_orphaned`. For warnings and their fixes, see
+[Troubleshooting](/docs/enterprise/troubleshooting#kernel-sensor-warnings).
+
+### macOS and Windows
+
+A standalone computer on macOS or Windows accepts `enterprise.tetragon` and
+ignores it: Tetragon has no agent for either. macOS `status` reports
+`tetragon_not_applicable`. On macOS, Plane C reads Endpoint Security instead
+([macOS](/docs/enterprise/macos#ai-discovery-plane-c-endpoint-security)).
+
 ## Per-user installs
 
 On a computer with `/etc/defenseclaw/managed-runtime.json`, the per-user
@@ -486,7 +806,10 @@ stopped. The install, `status` and `verify` name each such account with the
 
 Run these as root from `/opt/defenseclaw/bin`. Uninstall removes each user's
 DefenseClaw hook registrations and DefenseClaw's own machine-policy entries
-first. Administrator entries in those files stay as they were.
+first. Administrator entries in those files stay as they were. If the
+sensor helper loaded policies into Tetragon, uninstall deletes those
+`defenseclaw-*` policies before it removes any file (see
+[Remove the policies, or downgrade](#remove-the-policies-or-downgrade)).
 Each user keeps `~/.defenseclaw` unless you purge; the result's `kept:` line
 names the accounts that still have `~/.defenseclaw` or per-user binaries in
 `~/.local/bin`. With `--purge` it also
@@ -545,4 +868,5 @@ On a tarball host, `uninstall --purge` removes everything, including
 - **Change the config.** Replace `/etc/defenseclaw/config.yaml`. The apply
   path unit runs `ensure`, which validates the new file and applies it, or
   rolls back. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
+- **Downgrade.** Before you go below the first release that supports Tetragon, read [Remove the policies, or downgrade](#remove-the-policies-or-downgrade): DefenseClaw policies loaded into Tetragon outlive the helper.
 - **Failures.** See [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes).
