@@ -1537,6 +1537,11 @@ func writeWindowsEnterpriseStandaloneRefusal(
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 
+// windowsEnterpriseHealthNotChecked is the warning of a request refused
+// before any health check ran: its result reports only the recorded
+// deployment and the service states.
+const windowsEnterpriseHealthNotChecked = "health_not_checked"
+
 // windowsEnterpriseServiceState is a service's state as the installer
 // names it (running, stopped, absent, ...); tests replace it.
 var windowsEnterpriseServiceState = windowsEnterpriseSCMServiceState
@@ -1584,7 +1589,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 				result.Readiness.SensorHelper = state == "running"
 			}
 		}
-		result.AddWarning("health_not_checked", "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
+		result.AddWarning(windowsEnterpriseHealthNotChecked, "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
 			"coverage_complete and security_complete were not checked (they read false); only the recorded deployment and the service states are reported. "+
 			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
 		return
