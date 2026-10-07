@@ -1882,6 +1882,11 @@ def _version_for_binary(
             capture_output=True,
             text=False,
             env=env,
+            # A vendor CLI that reads the terminal is stopped by SIGTTIN when
+            # discovery runs in a background job (an install started with &,
+            # cron, timeout): give it no stdin and its own session (GAP-0376).
+            stdin=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
         )
     except subprocess.TimeoutExpired:
         return "", VERSION_PROBE_TIMED_OUT
