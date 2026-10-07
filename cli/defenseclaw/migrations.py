@@ -3537,7 +3537,12 @@ def migrate(
         )
     ctx.openclaw_home = os.path.expanduser(openclaw_home or _configured_openclaw_home(config_path))
 
-    steps = _pending_migration_steps(version, from_version, data_dir, config_path, CURRENT_CONFIG_VERSION)
+    target = (
+        _FIRST_V8_CONFIG_VERSION
+        if version <= _FIRST_V8_CONFIG_VERSION and _secure_client_stays_on_v8(config_path)
+        else CURRENT_CONFIG_VERSION
+    )
+    steps = _pending_migration_steps(version, from_version, data_dir, config_path, target)
     names = [name for name, _step in steps]
     if check:
         _check_connector_roster(
@@ -3559,7 +3564,7 @@ def migrate(
             if _V9_STEP_NAME in names:
                 _preview_config_v9(config_path, gateway_binary)
             _check_staged_gateway_accepts(config_path, data_dir, gateway_binary)
-        return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
+        return MigrateResult(version, target, names)
 
     if steps:
         _tighten_group_writable(ctx, [config_path, os.path.join(data_dir, ".env")])
@@ -3575,17 +3580,15 @@ def migrate(
         reached = source_config_version(path=config_path)
     except ConfigVersionError as exc:
         raise MigrationError(str(exc)) from exc
-    if reached != CURRENT_CONFIG_VERSION:
-        raise MigrationError(
-            f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
-        )
+    if reached != target:
+        raise MigrationError(f"{config_path} is at config_version {reached} after migrating; expected {target}")
     _refresh_local_observability_bundle(data_dir, __version__)
     _refresh_guardrail_profiles(data_dir, config_path)
     # A 0.8.x release may already have written config_version 8 (GAP-1390), so
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
-    return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+    return MigrateResult(version, target, names, changed=bool(names))
 
 
 def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
@@ -3696,6 +3699,15 @@ def display_step_name(name: str) -> str:
     description; JSON keeps the full step names.
     """
     return _LEGACY_STEP_PREFIX.sub("", name)
+
+
+def _secure_client_stays_on_v8(config_path: str) -> bool:
+    """A Secure Client config stays on config_version 8 (issue #1092): the
+    8 -> 9 step has nothing to do for it, as when 8 was the current version."""
+    from defenseclaw.config_writer import secure_client_managed
+
+    text = _read_config_text(config_path)
+    return text is not None and secure_client_managed(text.encode("utf-8"))
 
 
 def _pending_migration_steps(
