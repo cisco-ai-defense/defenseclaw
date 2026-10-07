@@ -28,7 +28,9 @@ fi
 # The bearer and the request body reach curl on descriptors 8 and 9, never on
 # its command line, which every local account can read; printf is a shell
 # builtin. The descriptor-backed --config form works on curl releases older
-# than 7.55.0, which lack -H @file. The tool arguments are this shim's own.
+# than 7.55.0, which lack -H @file. -q, curl's first argument, keeps a .curlrc
+# from the agent's CURL_HOME, XDG_CONFIG_HOME or HOME out of the request. The
+# tool arguments are this shim's own.
 _DC_SHIM_AUTH=""
 _DC_SHIM_AUTH_ARGS=()
 if [ -n "${_DC_SHIM_TOKEN}" ]; then
@@ -48,7 +50,7 @@ _DC_SHIM_BODY="$(jq -cn --arg tool "ssh" --args \
   '{tool: $tool, args: {argv: ([$tool] + $ARGS.positional)}}' \
   -- "$@")" || _DC_SHIM_BODY=""
 
-_DC_SHIM_RESPONSE=$("$_DC_SHIM_CURL" -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${_DC_SHIM_ADDR}/api/v1/inspect/tool" \
+_DC_SHIM_RESPONSE=$("$_DC_SHIM_CURL" -q -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${_DC_SHIM_ADDR}/api/v1/inspect/tool" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: shim/ssh/2.0" \
   "${_DC_SHIM_AUTH_ARGS[@]+"${_DC_SHIM_AUTH_ARGS[@]}"}" \

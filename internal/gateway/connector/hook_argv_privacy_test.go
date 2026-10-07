@@ -170,6 +170,29 @@ func (r *hookArgvRecorder) requireCurlUsesDescriptors(t *testing.T, authenticate
 	t.Fatalf("no curl call read its body from a descriptor; recorded:\n%s", strings.Join(r.records(t), "\n"))
 }
 
+// hookArgvCurlrcEnv points both places curl reads a .curlrc from before HOME
+// (which the hooks replace) at one that traces every request, bearer and body
+// included, to the returned file. The agent controls this environment; with
+// -q as its first argument curl reads no .curlrc at all.
+func hookArgvCurlrcEnv(t *testing.T) (env []string, trace string) {
+	t.Helper()
+	dir := t.TempDir()
+	trace = filepath.Join(dir, "trace")
+	for _, name := range []string{".curlrc", "curlrc"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("trace-ascii = \""+trace+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return []string{"CURL_HOME=" + dir, "XDG_CONFIG_HOME=" + dir}, trace
+}
+
+func requireNoCurlTrace(t *testing.T, trace string) {
+	t.Helper()
+	if _, err := os.Stat(trace); err == nil {
+		t.Fatalf("a gateway request read the agent's .curlrc and traced itself to %s", trace)
+	}
+}
+
 // hookArgvGateway records each request and answers allow.
 type hookArgvGateway struct {
 	mu       sync.Mutex
@@ -326,7 +349,9 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				rec.reset(t)
 				gateway.take()
 				home := t.TempDir()
-				code, stdout, stderr := runHookArgvCase(t, hookDir, tc, []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home})
+				curlrcEnv, trace := hookArgvCurlrcEnv(t)
+				code, stdout, stderr := runHookArgvCase(t, hookDir, tc, append([]string{"HOME=" + home, "DEFENSECLAW_HOME=" + home}, curlrcEnv...))
+				requireNoCurlTrace(t, trace)
 				requests := gateway.take()
 				if code != 0 || len(requests) != 1 {
 					t.Fatalf("%s: exit %d, %d gateway requests, want an allowed call with one request\nstdout=%s\nstderr=%s", tc.script, code, len(requests), stdout, stderr)
@@ -452,10 +477,12 @@ func TestPathShimsKeepTokenOffEveryCommandLine(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, systemBashForTest(t), filepath.Join(shimDir, name), "--version", hookArgvPayloadMarker)
-			cmd.Env = append(hookArgvBaseEnv(), "HOME="+t.TempDir(), "PATH="+shimDir+":"+rec.dir+":/usr/bin:/bin")
+			curlrcEnv, trace := hookArgvCurlrcEnv(t)
+			cmd.Env = append(append(hookArgvBaseEnv(), curlrcEnv...), "HOME="+t.TempDir(), "PATH="+shimDir+":"+rec.dir+":/usr/bin:/bin")
 			var out bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &out, &out
 			_ = cmd.Run() // the real tool may be missing; the inspection request came first
+			requireNoCurlTrace(t, trace)
 			requests := gateway.take()
 			if len(requests) != 1 || requests[0].path != "/api/v1/inspect/tool" || requests[0].authorization != "Bearer "+token ||
 				!strings.Contains(requests[0].body, hookArgvPayloadMarker) {
@@ -645,6 +672,12 @@ func curlArgvViolations(script string) []string {
 				out = append(out, rule.what+": "+strings.TrimSpace(line))
 			}
 		}
+		// A .curlrc in the agent's CURL_HOME or XDG_CONFIG_HOME could trace
+		// the bearer and body to a file, or turn an HTTP 401 into a transport
+		// failure; curl skips every .curlrc only when -q comes first.
+		if curlRequest.MatchString(argv) && !curlNoRC.MatchString(argv) {
+			out = append(out, "a curl request that reads a .curlrc (-q is not its first argument): "+strings.TrimSpace(line))
+		}
 	}
 	return out
 }
@@ -653,6 +686,8 @@ var (
 	templateDirective   = regexp.MustCompile(`\{\{[^}]*\}\}`)
 	curlCommand         = regexp.MustCompile(`(?:^|[\s;|&(])(?:curl|"\$_DC_SHIM_CURL")\s`)
 	processSubstitution = regexp.MustCompile(`\d+<\s*<\(printf '[^']*'(?:\s+"[^"]*")*\)|\d+<\s*<\([^)]*\)`)
+	curlRequest         = regexp.MustCompile(`--data-binary|-X\s+POST|https?://`)
+	curlNoRC            = regexp.MustCompile(`^(?:[\s;|&(])?(?:curl|"\$_DC_SHIM_CURL")\s+-q\s`)
 	authArgsUse         = regexp.MustCompile(`"\$\{AUTH_HEADER_ARGS\[@\]`)
 	authArgsCaller      = regexp.MustCompile(`^\s*(?:RESPONSE="?\$\()?(?:defenseclaw_gateway_post|defenseclaw_sandbox_post)\s`)
 	curlArgvRules       = []struct {
@@ -696,13 +731,14 @@ func TestCurlArgvCheckCatchesTheOldHookTransport(t *testing.T) {
 		`curl -s --config "$HOME/.curlrc-token" --data-binary @/dev/fd/9 http://x 9< <(printf '%s' "$PAYLOAD")`,
 		`curl -s --data-binary @/dev/fd/9 http://x 9< <(/usr/bin/printf '%s' "$PAYLOAD")`,
 		`defenseclaw_hook_post() { other_helper "http://x" "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}"; }`,
+		`curl -s --noproxy '*' -X POST "http://x" --config /dev/fd/8 --data-binary @/dev/fd/9 8< <(printf '%s\n' "$A") 9< <(printf '%s' "$B")`,
 	} {
 		if len(curlArgvViolations(script)) == 0 {
 			t.Errorf("the check accepts a command line that discloses a secret or the payload:\n%s", script)
 		}
 	}
 	for _, script := range []string{
-		`curl -s -w '\n%{http_code}' -X POST "$_dc_post_url" "${_dc_post_args[@]+"${_dc_post_args[@]}"}" --config /dev/fd/8 --data-binary @/dev/fd/9 2>/dev/null 8< <(printf 'header = "%s"\n' "$_dc_post_auth") 9< <(printf '%s' "$_dc_post_body")`,
+		`curl -q -s -w '\n%{http_code}' -X POST "$_dc_post_url" "${_dc_post_args[@]+"${_dc_post_args[@]}"}" --config /dev/fd/8 --data-binary @/dev/fd/9 2>/dev/null 8< <(printf 'header = "%s"\n' "$_dc_post_auth") 9< <(printf '%s' "$_dc_post_body")`,
 		`printf '%s' "$JSON" | curl -q -s -X POST "http://x" --config /dev/fd/7 --data-binary @- 7< <(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN") || true`,
 		`RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/x" 5 "$CONTENT" -H "Content-Type: application/json" "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {`,
 	} {

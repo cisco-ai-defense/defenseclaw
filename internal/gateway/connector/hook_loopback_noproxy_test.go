@@ -51,7 +51,7 @@ func TestHookAndShimGatewayCallsBypassProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(hardening), `curl -s --noproxy '*' -w '\n%{http_code}' -X POST "$_dc_post_url"`) {
-		t.Fatal("defenseclaw_gateway_post sends hook requests without --noproxy '*'")
+	if !strings.Contains(string(hardening), `curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST "$_dc_post_url"`) {
+		t.Fatal("defenseclaw_gateway_post sends hook requests without -q first and --noproxy '*'")
 	}
 }

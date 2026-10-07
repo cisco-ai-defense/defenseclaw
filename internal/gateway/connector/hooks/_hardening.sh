@@ -1452,7 +1452,11 @@ defenseclaw_session_facts_checked() {
 # process substitutions that write both values execute no program. The
 # descriptor-backed --config form works on curl releases older than 7.55.0,
 # which lack -H @file. An Authorization value with CR or LF, which would end
-# the config line, is refused without running curl. Bash 3.2 compatible.
+# the config line, is refused without running curl. -q, which must be curl's
+# first argument, keeps it from reading a .curlrc: the hook replaces HOME, but
+# CURL_HOME and XDG_CONFIG_HOME come from the agent's environment, and a
+# .curlrc there could trace the bearer and body to a file or turn an HTTP 401
+# into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg
@@ -1487,7 +1491,7 @@ defenseclaw_gateway_post() {
     _dc_post_auth="${_dc_post_auth//\"/\\\"}"
     _dc_post_auth_args=(--config /dev/fd/8)
   fi
-  curl -s --noproxy '*' -w '\n%{http_code}' -X POST "$_dc_post_url" \
+  curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST "$_dc_post_url" \
     "${_dc_post_args[@]+"${_dc_post_args[@]}"}" \
     "${_dc_post_auth_args[@]+"${_dc_post_auth_args[@]}"}" \
     --connect-timeout 2 \
