@@ -5805,7 +5805,9 @@ def identities(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.agent_identities_all(user=user, connector=connector_name, limit=limit or 0)
+        payload = client.agent_identities_all(
+            user=user, connector=normalize_connector(connector_name) if connector_name else None, limit=limit or 0
+        )
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
