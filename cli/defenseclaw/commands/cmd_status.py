@@ -1700,7 +1700,7 @@ def _status_payload(app) -> dict:
 
 
 def _fetch_fleet_health(client) -> dict | None:
-    """GET /api/v1/fleet/fleet/health from the gateway; None when unavailable."""
+    """GET /api/v1/fleet/health from the gateway; None when unavailable."""
     import os
 
     try:
@@ -1711,7 +1711,7 @@ def _fetch_fleet_health(client) -> dict | None:
             headers["Authorization"] = f"Bearer {fleet_token}"
 
         resp = client._session.get(
-            f"{client.base_url}/api/v1/fleet/fleet/health",
+            f"{client.base_url}/api/v1/fleet/health",
             timeout=client.timeout,
             allow_redirects=False,
             headers=headers,

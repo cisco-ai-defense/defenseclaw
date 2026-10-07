@@ -22,10 +22,14 @@ static dclaw_tool_request_t make_request(const char *name, uint8_t caps, const c
 static void test_allowed_local_decision(void) {
     dclaw_tool_request_t req = make_request("read-sensor", DCLAW_CAP_SENSOR_READ, NULL);
     dclaw_verdict_t v = dclaw_evaluate(&req);
-    /* No deny hash, no sequence match, no dest check — goes to cache (miss) then escalate.
-     * With speculative enabled and SENSOR_READ: should be PENDING */
+#if DCLAW_SPECULATIVE_EXECUTION
     assert(v.mode == DCLAW_VERDICT_PENDING);
     printf("  PASS: sensor_read with no local rule -> PENDING (speculative)\n");
+#else
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
+    printf("  PASS: sensor_read with no cloud -> BLOCK (no speculative)\n");
+#endif
 }
 
 static void test_sync_block_cap_blocks(void) {
@@ -49,9 +53,14 @@ static void test_destination_deny(void) {
 static void test_allowed_destination(void) {
     dclaw_tool_request_t req = make_request("api-call", DCLAW_CAP_NET_FETCH, "api.openai.com");
     dclaw_verdict_t v = dclaw_evaluate(&req);
-    /* Allowed dest, speculative cap -> PENDING */
+#if DCLAW_SPECULATIVE_EXECUTION
     assert(v.mode == DCLAW_VERDICT_PENDING);
     printf("  PASS: allowed destination + speculative cap -> PENDING\n");
+#else
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
+    printf("  PASS: allowed destination + no cloud -> BLOCK (no speculative)\n");
+#endif
 }
 
 static void test_capability_sequence_block(void) {
@@ -91,6 +100,7 @@ static void test_invalid_input_blocks(void) {
     printf("  PASS: invalid cap_flags -> BLOCK with INVALID_INPUT\n");
 }
 
+#if DCLAW_CONTENT_SCAN
 static void test_content_scan_blocks_secret_in_pipeline(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
@@ -129,13 +139,12 @@ static void test_no_content_field_backward_compat(void) {
     dclaw_sha256((const uint8_t *)"read_sensor", strlen("read_sensor"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_SENSOR_READ;
     req.session_id = 101;
-    /* content is NULL, content_len is 0 — Phase 1 behavior */
 
     dclaw_verdict_t v = dclaw_evaluate(&req);
-    /* Should NOT be CONTENT_BLOCK — should proceed to later stages */
     assert(v.reason != DCLAW_REASON_CONTENT_BLOCK);
     printf("  PASS: no content field = backward compatible (no content block)\n");
 }
+#endif
 
 static void test_hash_mismatch_blocks(void) {
     /* Submit exec_shell's name but with sensor_read's hash — should be blocked
@@ -167,11 +176,17 @@ int main(void) {
     test_capability_sequence_block();
     test_rate_limit_triggers();
     test_invalid_input_blocks();
+#if DCLAW_CONTENT_SCAN
     test_content_scan_blocks_secret_in_pipeline();
     test_ssrf_blocks_private_ip_in_pipeline();
     test_no_content_field_backward_compat();
+#endif
     test_hash_mismatch_blocks();
+#if DCLAW_CONTENT_SCAN
     printf("  ALL PASSED (11 tests)\n");
+#else
+    printf("  ALL PASSED (8 tests)\n");
+#endif
 
     dclaw_shutdown();
     return 0;

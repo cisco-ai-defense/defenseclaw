@@ -41,7 +41,7 @@ func setupAPI() *API {
 
 func TestGetFleetHealth(t *testing.T) {
 	api := setupAPI()
-	req := authedRequest("GET", "/fleet/health", nil)
+	req := authedRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -214,6 +214,7 @@ func TestSendCommandWithMQTT(t *testing.T) {
 }
 
 func TestDecommissionBatch(t *testing.T) {
+	os.Setenv("DCLAW_FLEET_API_TOKEN", testFleetToken)
 	mgr := manager.New(nil)
 	mgr.RegisterDevice(1, 1, 10, "sbc", "1.0.0", 5, 0xFF)
 	mgr.RegisterDevice(1, 1, 20, "mcu", "1.0.0", 5, 0x0F)

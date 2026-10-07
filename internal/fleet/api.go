@@ -165,7 +165,7 @@ func (a *API) registerRoutes() {
 	a.mux.HandleFunc("POST /devices", wrap(a.registerDevice))
 	a.mux.HandleFunc("GET /devices/{id}", wrap(a.getDevice))
 	a.mux.HandleFunc("POST /devices/{id}/command", wrap(a.sendCommand))
-	a.mux.HandleFunc("GET /fleet/health", wrap(a.getFleetHealth))
+	a.mux.HandleFunc("GET /health", wrap(a.getFleetHealth))
 	a.mux.HandleFunc("POST /policy/simulate", wrap(a.simulatePolicy))
 	a.mux.HandleFunc("POST /policy/push", wrap(a.pushPolicy))
 	a.mux.HandleFunc("GET /policy/versions", wrap(a.listPolicyVersions))

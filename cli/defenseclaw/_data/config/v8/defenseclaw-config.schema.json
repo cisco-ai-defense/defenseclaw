@@ -171,9 +171,6 @@
     },
     "routing": {
       "$ref": "#/$defs/routing"
-    },
-    "training": {
-      "$ref": "#/$defs/training"
     }
   },
   "$defs": {
@@ -2104,7 +2101,7 @@
       "oneOf": [
         {
           "type": "string",
-          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*$"
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"
         },
         {
           "type": "integer",
@@ -4199,40 +4196,9 @@
         }
       }
     },
-    "training": {
-      "type": "object",
-      "description": "GRPO training pipeline configuration for model improvement.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "backend": {
-          "type": "string"
-        },
-        "models_dir": {
-          "type": "string"
-        },
-        "llama_server_port": {
-          "type": "integer"
-        },
-        "training_timeout_hours": {
-          "type": "integer"
-        },
-        "trace_retention_days": {
-          "type": "integer"
-        },
-        "base_models": {
-          "type": "array"
-        },
-        "categories": {
-          "type": "array"
-        }
-      }
-    },
     "acpPairName": {
       "type": "string",
-      "description": "Per-pair binding key, \"<client>/<agent>\" \u2014 the identifier `defenseclaw acp status` prints.",
+      "description": "Per-pair binding key, \"<client>/<agent>\" — the identifier `defenseclaw acp status` prints.",
       "pattern": "^[a-z0-9][a-z0-9_-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$"
     },
     "acpPairBindings": {

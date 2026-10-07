@@ -315,7 +315,7 @@ def health(app: AppContext, as_json: bool) -> None:
     """Show edge connector health summary (online/offline counts)."""
     c = _client(app)
     try:
-        resp = c.get("/fleet/health")
+        resp = c.get("/health")
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
@@ -547,7 +547,7 @@ def test_fleet(
     """Test the full edge-connector fleet pipeline.
 
     Checks:\n
-      1. Gateway fleet API is reachable (GET /fleet/health)\n
+      1. Gateway fleet API is reachable (GET /health)\n
       2. MQTT broker accepts TCP connections\n
       3. Devices registered and their count\n
       4. Last heartbeat age for online devices\n
@@ -567,7 +567,7 @@ def test_fleet(
     c = _client(app)
     health_data: dict | None = None
     try:
-        resp = c.get("/fleet/health")
+        resp = c.get("/health")
         if 200 <= resp.status_code < 300:
             health_data = _body(resp) or {}
             results["gateway"] = {"status": "ok", **health_data}
