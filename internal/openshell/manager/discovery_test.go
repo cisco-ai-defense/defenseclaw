@@ -239,6 +239,53 @@ func TestDiscoverIsOffWithAIDiscoveryOff(t *testing.T) {
 	if _, err := e.m.Discover(context.Background(), "offbox"); !sandboxapi.IsCode(err, sandboxapi.CodeDisabled) {
 		t.Fatalf("discover = %v, want disabled", err)
 	}
+	// Nor does the cadence read the sandbox.
+	e.m.scheduledDiscovery(context.Background(), e.boxOf("offbox"))
+	if calls := discoverCalls(e, "offbox"); len(calls) != 0 {
+		t.Fatalf("collector calls = %d with AI discovery off", len(calls))
+	}
+}
+
+// A sandbox is inventoried on its own once it is ready and checked: a
+// create and a start ask for a discovery at once.
+func TestAReadySandboxIsDiscoveredOnItsOwn(t *testing.T) {
+	e := discoveringEnv(t, "autobox", nil)
+	eventually(t, "the create's discovery", func() bool {
+		_, err := inventory.ReadSandboxScanRecord(e.m.scanRecordPath("autobox"))
+		return err == nil
+	})
+	e.stopBox("autobox")
+	n := len(discoverCalls(e, "autobox"))
+	e.startBox("autobox", sandboxapi.StartRequest{})
+	eventually(t, "the start's discovery", func() bool { return len(discoverCalls(e, "autobox")) > n })
+}
+
+// A mounted project is the host's own folder: only a copy's package
+// manifests are read in the sandbox.
+func TestDiscoverReadsManifestsOfACopyOnly(t *testing.T) {
+	walks := func(e *harnessEnv, name string) []string {
+		t.Helper()
+		if _, err := e.m.Discover(context.Background(), name); err != nil {
+			t.Fatal(err)
+		}
+		calls := discoverCalls(e, name)
+		var out []string
+		for _, kv := range collectPairs(calls[len(calls)-1]) {
+			if kv[0] == "W" {
+				out = append(out, kv[1])
+			}
+		}
+		return out
+	}
+	manifests := func(c *config.Config) { c.AIDiscovery.IncludePackageManifests = true }
+	if got := walks(discoveringEnv(t, "mountbox", manifests), "mountbox"); len(got) != 0 {
+		t.Fatalf("a mounted project was walked: %v", got)
+	}
+	e := discoveringEnv(t, "seedbox", manifests)
+	e.live(sandboxapi.CreateRequest{Name: "copybox", Copy: true, Project: e.otherProject("copied")})
+	if got := walks(e, "copybox"); !slices.Equal(got, []string{"/sandbox/work/copied"}) {
+		t.Fatalf("the copy's walks = %v", got)
+	}
 }
 
 // The tree a discovery writes (copies of the sandbox's MCP configurations

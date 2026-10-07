@@ -194,25 +194,34 @@ func (m *Manager) observeLoop(ctx context.Context, b *box, run *observeRun) {
 			m.scheduledDiscovery(ctx, b)
 			next.Reset(m.discoveryInterval())
 		case <-sample.C:
-			// One exec a sample, and none while the tree is off. On the vm
-			// driver, where every exec crosses into a MicroVM, a slow sample
-			// sets the pace for the rest of the session.
+			// One exec a sample, and none while the tree is off.
 			took, sampled := m.sampleProcesses(ctx, b)
-			if sampled && !slow && took > processSampleSlow && m.driverName() == openshell.DriverVM {
-				slow = true
-				m.logf("sandbox %s: a process sample took %s on the vm driver; its processes are sampled every %s instead of %s",
-					b.name(m), took.Round(time.Millisecond), processSampleIntervalVM, processSampleInterval)
-			}
-			interval := processSampleInterval
-			if slow {
-				interval = processSampleIntervalVM
-			}
-			if sampled {
-				m.setSampleInterval(b, interval)
-			}
+			var interval time.Duration
+			interval, slow = m.paceSamples(b, took, sampled, slow, m.driverName())
 			sample.Reset(interval)
 		}
 	}
+}
+
+// paceSamples is the interval to the next process sample after one that
+// took took (sampled: it ran) on driver: processSampleInterval, and on the
+// vm driver, where every exec crosses into a MicroVM, processSampleIntervalVM
+// from the first slow sample on (slow) for the rest of the session. The
+// process list reports the pace.
+func (m *Manager) paceSamples(b *box, took time.Duration, sampled, slow bool, driver openshell.ComputeDriver) (time.Duration, bool) {
+	if sampled && !slow && took > processSampleSlow && driver == openshell.DriverVM {
+		slow = true
+		m.logf("sandbox %s: a process sample took %s on the vm driver; its processes are sampled every %s instead of %s",
+			b.name(m), took.Round(time.Millisecond), processSampleIntervalVM, processSampleInterval)
+	}
+	interval := processSampleInterval
+	if slow {
+		interval = processSampleIntervalVM
+	}
+	if sampled {
+		m.setSampleInterval(b, interval)
+	}
+	return interval, slow
 }
 
 // driverName is the compute driver of the connected gateway, empty while

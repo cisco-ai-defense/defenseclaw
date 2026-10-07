@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -209,9 +210,23 @@ func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	if lineage := e.m.Lineage("treebox", 42); len(lineage) != 2 || lineage[0].Comm != "claude" || lineage[1].PID != 1 {
 		t.Fatalf("lineage = %+v", lineage)
 	}
-	// The list says how often the sandbox is sampled now (the vm driver's
-	// slower pace once a sample is slow).
-	e.m.setSampleInterval(b, processSampleIntervalVM)
+	// On docker a slow sample keeps the pace; on the vm driver it sets the
+	// slower one for the rest of the session, and the list says so.
+	if d, slow := e.m.paceSamples(b, 2*time.Second, true, false, openshell.DriverDocker); d != processSampleInterval || slow {
+		t.Fatalf("docker pace = %s, %v", d, slow)
+	}
+	if d, slow := e.m.paceSamples(b, 100*time.Millisecond, true, false, openshell.DriverVM); d != processSampleInterval || slow {
+		t.Fatalf("vm pace after a fast sample = %s, %v", d, slow)
+	}
+	if list, _ := e.m.Processes(context.Background(), "treebox"); list.IntervalSeconds != 5 {
+		t.Fatalf("interval = %d", list.IntervalSeconds)
+	}
+	if d, slow := e.m.paceSamples(b, 2*time.Second, true, false, openshell.DriverVM); d != processSampleIntervalVM || !slow {
+		t.Fatalf("vm pace after a slow sample = %s, %v", d, slow)
+	}
+	if d, slow := e.m.paceSamples(b, 0, false, true, openshell.DriverVM); d != processSampleIntervalVM || !slow {
+		t.Fatalf("vm pace stays slow = %s, %v", d, slow)
+	}
 	if list, _ := e.m.Processes(context.Background(), "treebox"); list.IntervalSeconds != 15 {
 		t.Fatalf("interval = %d", list.IntervalSeconds)
 	}
