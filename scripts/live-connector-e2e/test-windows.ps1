@@ -2786,6 +2786,23 @@ threading.Event().wait()
         [regex]::Matches($nativeHarnessText, 'Test-PathWithin \$root \$approvedStateBase').Count -eq 1 -and
         [regex]::Matches($wizardHarnessText, 'Test-PathWithin \$state \$_').Count -eq 1) `
         'setup cleanup and wizard gates require strict descendants while general state validation can recheck its exact approved root'
+    $wizardObservation = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Get-WizardObservation\b.*?(?=\r?\n\$connectorIndices = )'
+    ).Value
+    $observedPathProbe = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Test-ObservedPath\b.*?(?=\r?\n\r?\nfunction )'
+    ).Value
+    $deniedProbe = & {
+        function Test-Path { $false; throw [UnauthorizedAccessException]::new('Access to the path is denied.') }
+        . ([scriptblock]::Create($observedPathProbe))
+        Test-ObservedPath 'C:\setup-temp\payload\manifest.json' Leaf
+    }
+    Assert-True ($wizardObservation -match 'Test-ObservedPath' -and
+        $wizardObservation -notmatch 'Test-Path ' -and
+        $deniedProbe -is [bool] -and -not $deniedProbe) `
+        'wizard observer treats a path Setup is deleting (access denied) as absent instead of failing the run'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
     foreach ($testName in @(
         'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
