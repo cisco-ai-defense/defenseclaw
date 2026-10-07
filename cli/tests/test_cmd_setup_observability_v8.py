@@ -236,6 +236,10 @@ def test_setup_v8_add_environment_tags_gateway_telemetry(
     blank = CliRunner().invoke(observability, [*args[:-1], "  "], obj=app)
     assert blank.exit_code != 0 and "nonblank" in blank.output
 
+    different = CliRunner().invoke(observability, [*args[:-1], "other"], obj=app)
+    assert different.exit_code != 0
+    assert "gateway-wide" in different.output and "all destinations" in different.output
+
 
 def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
     tmp_path: Path,

@@ -666,6 +666,12 @@ def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[An
     path = config_path_for_data_dir(data_dir)
     source = load_validate_v8(path.read_bytes(), source_name=str(path)).source
     attributes = ((source.get("observability") or {}).get("resource") or {}).get("attributes") or {}
+    current = attributes.get("deployment.environment.name") if isinstance(attributes, dict) else None
+    if current and current != value:
+        raise ValueError(
+            f"--environment is gateway-wide and applies to all destinations; "
+            f"it is already {current!r}. Edit the gateway resource tag explicitly to change it."
+        )
     if isinstance(attributes, dict) and "deployment.environment" in attributes:
         mutations.append(V8YAMLMutation.set((*prefix, "deployment.environment"), value))
     return mutations
