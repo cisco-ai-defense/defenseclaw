@@ -18,6 +18,14 @@ import (
 	"strings"
 )
 
+// GroupNameLookupDefinitive is always true on macOS: Open Directory looks
+// groups up by name.
+func GroupNameLookupDefinitive() bool { return true }
+
+// QualifiedGroupName has nothing to offer on macOS, whose group names carry
+// no domain.
+func QualifiedGroupName(context.Context, Resolver, string) string { return "" }
+
 const darwinDSCL = "/usr/bin/dscl"
 
 // DefaultUIDRange is the interactive-account uid range. macOS local

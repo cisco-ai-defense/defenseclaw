@@ -131,13 +131,14 @@ type profileGroupCheck struct {
 // the background, so a command never waits for the directory: it gets the last
 // pass, or, before the first has finished, waits for it at most wait.
 func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []string {
-	return set.unknownGroupWarningsWith(profileGroupExists, directoryCacheHealth, wait)
+	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, directoryCacheHealth, wait)
 }
 
 // unknownGroupWarningsWith is unknownGroupWarnings with the group lookup and
 // the directory cache health taken from the caller. A pass can outlive the
 // caller, so it uses these and never reads the package hooks tests replace.
-func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Context, string) (bool, error), health func() identityCacheHealth, wait time.Duration) []string {
+func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Context, string) (bool, error), qualify func(context.Context, string) string,
+	health func() identityCacheHealth, wait time.Duration) []string {
 	if set == nil {
 		return nil
 	}
@@ -153,7 +154,7 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 		check.running = done
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
-			warnings := unknownAssignmentGroups(ctx, set.assignments, exists)
+			warnings := unknownAssignmentGroups(ctx, set.assignments, exists, qualify)
 			cancel()
 			failing := health().Failing > 0
 			if failing {
@@ -185,9 +186,9 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 // logUnknownGroups writes the unknown-group warnings to the gateway log in the
 // background; the gateway calls it for a new set at start and at each reload.
 func (set *guardrailProfileSet) logUnknownGroups() {
-	exists, health := profileGroupExists, directoryCacheHealth
+	exists, qualify, health := profileGroupExists, profileGroupQualifiedName, directoryCacheHealth
 	go func() {
-		for _, warning := range set.unknownGroupWarningsWith(exists, health, profileGroupCheckBudget+time.Second) {
+		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, health, profileGroupCheckBudget+time.Second) {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 		}
 	}()
@@ -195,10 +196,14 @@ func (set *guardrailProfileSet) logUnknownGroups() {
 
 // unknownAssignmentGroups looks up each distinct group the assignments name
 // and warns for those exists reports as definitely absent. SIDs and ids are
-// not names and are not looked up.
-func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error)) []string {
+// not names and are not looked up. qualify, when set, names the qualified
+// form the host knows an absent short name by, which the warning then
+// suggests (GAP-0332).
+func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error),
+	qualify func(context.Context, string) string) []string {
 	var warnings []string
-	absent := map[string]bool{} // by folded name; present for every group looked up
+	absent := map[string]bool{}      // by folded name; present for every group looked up
+	qualified := map[string]string{} // by folded name: the form the host knows an absent group by
 	for i, assignment := range assignments {
 		for _, group := range assignment.Match.Groups {
 			group = strings.TrimSpace(group)
@@ -214,8 +219,16 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 				known, err := exists(ctx, group)
 				dead = err == nil && !known
 				absent[key] = dead
+				if dead && qualify != nil {
+					qualified[key] = qualify(ctx, group)
+				}
 			}
-			if dead {
+			switch {
+			case dead && qualified[key] != "":
+				warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host by that name, so it selects nobody; "+
+					"the host knows it as %q (SSSD use_fully_qualified_names = True): write that name, or set "+
+					"use_fully_qualified_names = False in sssd.conf", i+1, group, qualified[key]))
+			case dead:
 				warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", i+1, group))
 			}
 		}

@@ -13,8 +13,11 @@
 package unixidentity
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -83,7 +86,7 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 		ResolvedAt: now,
 	}
 	if data, readErr := readSmallFile(nsswitchPath, 1<<20); readErr == nil {
-		for _, service := range ParseNSSwitchPasswdServices(string(data)) {
+		for _, service := range ParseNSSwitchServices(string(data), "passwd") {
 			known, ok := directoryServices[service]
 			if !ok {
 				continue
@@ -181,15 +184,16 @@ func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 	return names, nil
 }
 
-// ParseNSSwitchPasswdServices lists the services on the passwd line of an
-// nsswitch.conf, in order, lower-cased, without actions.
-func ParseNSSwitchPasswdServices(content string) []string {
+// ParseNSSwitchServices lists the services on the line of database
+// ("passwd", "group") of an nsswitch.conf, in order, lower-cased, without
+// actions.
+func ParseNSSwitchServices(content, database string) []string {
 	for _, line := range strings.Split(content, "\n") {
 		if i := strings.IndexByte(line, '#'); i >= 0 {
 			line = line[:i]
 		}
 		key, sources, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if !ok || strings.TrimSpace(key) != "passwd" {
+		if !ok || strings.TrimSpace(key) != database {
 			continue
 		}
 		var out []string
@@ -201,6 +205,59 @@ func ParseNSSwitchPasswdServices(content string) []string {
 		return out
 	}
 	return nil
+}
+
+// Group lookups by name.
+//
+// Profile assignments name groups, and the gateway warns when the host does
+// not know a group by the name an assignment spells (renamed or deleted in
+// the directory). Two directory setups make that answer misleading:
+//
+//   - Himmelblau answers an Entra group only by gid or object id: `getent
+//     group NAME` finds nothing by design, while `id` and initgroups name the
+//     group. Its "no such group" by name says nothing (GAP-0292).
+//   - SSSD joined with realm join names groups name@domain
+//     (use_fully_qualified_names = True), so the short name an assignment
+//     spells is unknown while the qualified one exists (GAP-0332).
+
+// groupNameUnsearchableServices are NSS group services that cannot look a
+// group up by its name.
+var groupNameUnsearchableServices = map[string]bool{"himmelblau": true}
+
+// GroupNameLookupDefinitive reports whether a "no such group" answer to a
+// lookup by name is definitive on this host: false when the group line of
+// nsswitch.conf names a service that cannot look groups up by name, or the
+// file cannot be read.
+func GroupNameLookupDefinitive() bool {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	for _, service := range ParseNSSwitchServices(string(data), "group") {
+		if groupNameUnsearchableServices[service] {
+			return false
+		}
+	}
+	return true
+}
+
+// QualifiedGroupName returns name@domain for the first realm the host is
+// joined to (realmd) that has a group of that name, or "" when name is
+// already qualified or no realm has it.
+func QualifiedGroupName(ctx context.Context, r Resolver, name string) string {
+	if r == nil || name == "" || strings.ContainsAny(name, `@\`) {
+		return ""
+	}
+	for _, realm := range hostRealms(ctx) {
+		if realm.Domain == "" {
+			continue
+		}
+		candidate := name + "@" + realm.Domain
+		if _, err := r.LookupGroup(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // parseGroupName reads the name and gid of a group(5) line. Unlike

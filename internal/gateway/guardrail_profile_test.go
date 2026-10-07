@@ -540,10 +540,24 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		}
 		return false, nil
 	}
-	got := unknownAssignmentGroups(context.Background(), assignments, exists)
+	got := unknownAssignmentGroups(context.Background(), assignments, exists, nil)
 	if len(got) != 2 || !strings.HasPrefix(got[0], `assignment 1: group "dc-rename-me@dclab.test" is not known`) ||
 		!strings.HasPrefix(got[1], `assignment 2: group "DC-RENAME-ME@dclab.test" is not known`) {
 		t.Fatalf("warnings = %q, want the renamed group in assignments 1 and 2 only", got)
+	}
+
+	// GAP-0332: SSSD names realm groups name@domain, so a short name is
+	// absent while the qualified one exists; the warning names it.
+	qualify := func(_ context.Context, name string) string {
+		if name == "dc-ml-short" {
+			return "dc-ml-short@dclab.test"
+		}
+		return ""
+	}
+	short := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-ml-short"}}}}
+	if got := unknownAssignmentGroups(context.Background(), short, exists, qualify); len(got) != 1 ||
+		!strings.Contains(got[0], `the host knows it as "dc-ml-short@dclab.test"`) {
+		t.Fatalf("short-name warnings = %q, want the qualified name", got)
 	}
 
 	// A command does not wait for a slow directory: the pass runs in the
