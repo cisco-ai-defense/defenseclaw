@@ -195,6 +195,10 @@ type InterceptionHealth struct {
 	Verified           bool   `json:"verified"`
 	LastVerifiedAt     string `json:"last_verified_at,omitempty"`
 	LastAgentTrafficAt string `json:"last_agent_traffic_at,omitempty"`
+	// LastAgentModelActivityAt is when the agent last completed a model call, as
+	// the gateway event stream reports it. A call that completed with no proxy
+	// hop (LastAgentTrafficAt) near it did not go through the proxy.
+	LastAgentModelActivityAt string `json:"last_agent_model_activity_at,omitempty"`
 }
 
 type SidecarHealth struct {
@@ -263,10 +267,11 @@ type SidecarHealth struct {
 	// installer already applied (CR spec-003:PRRT_kwDORuAK-s6al7aV).
 	guardianStateReaderEpoch uint64
 
-	interceptionReported    bool
-	interceptionVerified    bool
-	interceptionVerifiedAt  time.Time
-	lastAgentProxyTrafficAt time.Time
+	interceptionReported     bool
+	interceptionVerified     bool
+	interceptionVerifiedAt   time.Time
+	lastAgentProxyTrafficAt  time.Time
+	lastAgentModelActivityAt time.Time
 
 	// subscribers receive a non-blocking notification after every Set*
 	// call, so long-lived consumers (like the IPC GetHealth stream)
@@ -764,6 +769,19 @@ func (h *SidecarHealth) RecordAgentProxyTraffic() {
 	}
 	h.mu.Lock()
 	h.lastAgentProxyTrafficAt = time.Now().UTC()
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// RecordAgentModelActivity records that the agent completed a model call, as
+// the OpenClaw gateway event stream reports it. Doctor compares it with the
+// proxy hops to tell a self-test that passes from traffic that is intercepted.
+func (h *SidecarHealth) RecordAgentModelActivity() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.lastAgentModelActivityAt = time.Now().UTC()
 	h.mu.Unlock()
 	h.notifySubscribers()
 }
@@ -1534,7 +1552,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 			snap.Connector = &ch
 		}
 	}
-	if h.interceptionReported || !h.lastAgentProxyTrafficAt.IsZero() {
+	if h.interceptionReported || !h.lastAgentProxyTrafficAt.IsZero() || !h.lastAgentModelActivityAt.IsZero() {
 		verified := h.interceptionVerified
 		if verified && (h.interceptionVerifiedAt.IsZero() || time.Since(h.interceptionVerifiedAt) > InterceptionSelfTestFreshness) {
 			verified = false
@@ -1545,6 +1563,9 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		}
 		if !h.lastAgentProxyTrafficAt.IsZero() {
 			info.LastAgentTrafficAt = h.lastAgentProxyTrafficAt.UTC().Format(time.RFC3339)
+		}
+		if !h.lastAgentModelActivityAt.IsZero() {
+			info.LastAgentModelActivityAt = h.lastAgentModelActivityAt.UTC().Format(time.RFC3339)
 		}
 		snap.Interception = info
 	}

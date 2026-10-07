@@ -243,6 +243,13 @@ func TestSidecarHealthInterceptionSnapshot(t *testing.T) {
 	if snap.Interception.LastAgentTrafficAt == "" {
 		t.Fatal("expected last_agent_traffic_at after an X-DC-Target-URL hop")
 	}
+	if snap.Interception.LastAgentModelActivityAt != "" {
+		t.Fatal("no model call was reported yet")
+	}
+	h.RecordAgentModelActivity()
+	if h.Snapshot().Interception.LastAgentModelActivityAt == "" {
+		t.Fatal("expected last_agent_model_activity_at after a completed model call")
+	}
 
 	h.RecordInterceptionResult(false)
 	if h.Snapshot().Interception.Verified {

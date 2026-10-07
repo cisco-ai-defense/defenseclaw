@@ -354,6 +354,33 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("self-test", result.checks[0]["detail"])
         self.assertIn("agent traffic", result.checks[0]["detail"])
 
+    def test_proxy_interception_warns_when_a_model_call_missed_the_proxy(self):
+        # GAP-0190: a passing self-test is not proof that real model calls take the proxy.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        now = datetime.now(timezone.utc)
+
+        def stamp(minutes_ago: int) -> str:
+            return (now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        for traffic, missed in ((None, True), (stamp(30), True), (stamp(1), False)):
+            info = {"verified": True, "last_verified_at": stamp(0), "last_agent_model_activity_at": stamp(0)}
+            if traffic:
+                info["last_agent_traffic_at"] = traffic
+            result = _DoctorResult()
+            _check_proxy_interception(cfg, result, live_health={"interception": info})
+            self.assertEqual((result.passed, result.warned), (0, 1) if missed else (1, 0), result.checks)
+            if missed:
+                self.assertIn("did not go through the guardrail proxy", result.checks[0]["detail"])
+
     def test_proxy_interception_fails_when_self_test_is_stale(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",

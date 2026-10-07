@@ -42,6 +42,8 @@ type EventRouter struct {
 	store  *audit.Store
 	logger *audit.Logger
 	policy *enforce.PolicyEngine
+	// health receives the agent model activity the event stream reports.
+	health *SidecarHealth
 	// The process-owned v8 capabilities are published atomically under one lock.
 	// EventRouter never retains a runtime generation lease or generated trace
 	// handle across WebSocket deliveries.
@@ -97,6 +99,9 @@ type EventRouter struct {
 	// admission policy. Populated at bootstrap via SetDefaultPolicyID.
 	defaultPolicyID string
 }
+
+// SetHealth lets the router report completed model calls to the sidecar health snapshot.
+func (r *EventRouter) SetHealth(h *SidecarHealth) { r.health = h }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
 func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, autoApprove bool) *EventRouter {
@@ -666,6 +671,9 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// operation. The source reports no start instant, so the adapter
 		// records a truthful zero-duration span and retains only its ended
 		// W3C context for a subsequent tool or approval child.
+		if msg.Role == "assistant" && msg.Model != "" {
+			r.health.RecordAgentModelActivity()
+		}
 		if msg.Role == "assistant" && msg.Model != "" && emitModelOperation {
 			promptTokens, completionTokens := int64(0), int64(0)
 			if msg.Usage != nil {
