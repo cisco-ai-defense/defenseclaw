@@ -157,7 +157,9 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 func (c *managedHookPeerHomeCache) directoryCache() *identityDirectoryCache {
 	c.directoriesOnce.Do(func() {
 		c.directories = newIdentityDirectoryCache(resolvePeerDirectoryFacts)
-		c.directories.incomplete = hasUnnamedGroup
+		c.directories.incomplete = func(facts useridentity.DirectoryFacts) bool {
+			return hasUnnamedGroup(facts) || awaitingSpoolUPN(facts)
+		}
 	})
 	return c.directories
 }

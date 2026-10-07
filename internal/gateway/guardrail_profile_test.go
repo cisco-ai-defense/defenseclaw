@@ -482,6 +482,12 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 		awaitingSpool(useridentity.DirectoryFacts{Groups: []string{"S-1-1-0", "Everyone"}}) {
 		t.Fatal("facts without groups must await the record, facts with groups must not")
 	}
+	// GAP-0334: an SSSD account without the guardian's UPN is refreshed
+	// early on a gateway that reads the spool; with the UPN it is not.
+	if !awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Principal: "bob@CORP.EXAMPLE"}) ||
+		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceSSSDInfoPipe, UPN: "bob@corp.example"}) {
+		t.Fatal("SSSD facts without a UPN must await the guardian record, facts with it must not")
+	}
 	setIdentitySpoolDir("")
 	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
 		t.Fatal("a gateway without a spool has no record to wait for")
