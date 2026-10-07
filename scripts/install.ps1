@@ -2073,7 +2073,13 @@ function Invoke-Install {
             Write-Host "  Turn it back on with: defenseclaw setup guardrail" -ForegroundColor Cyan
         } else {
             Write-Warn "The gateway is not running, so agent hooks are not guarded until it is"
-            Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
+            # GAP-0384: when another process holds its API port, that start fails too.
+            $portProblem = (Get-NativeOutput (Join-Path $BinDir "defenseclaw-gateway.exe") @("check-api-port", "--installed")).Trim()
+            if ($LASTEXITCODE -ne 0 -and $portProblem) {
+                Write-Info ($portProblem -replace '^Error: ', '')
+            } else {
+                Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
+            }
         }
     }
     if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {

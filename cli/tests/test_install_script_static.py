@@ -774,6 +774,8 @@ def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> Non
         # GAP-2481: after 'uninstall --binaries' the guardrail is off, and a
         # gateway start alone does not guard the hooks again.
         assert "Turn it back on with:" in text and "defenseclaw setup guardrail" in text, path
+        # GAP-0384: a port another process holds fails that start too; say so.
+        assert '"check-api-port", "--installed"' in text or "check-api-port --installed" in text, path
 
 _GUARDRAIL_CONFIGS = {
     # What 'uninstall --binaries' and 'setup guardrail --disable' save.

@@ -860,7 +860,12 @@ if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
         printf "  Turn it back on with: ${CYAN}defenseclaw setup guardrail${NC}\n"
     else
         warn "The gateway is not running, so agent hooks are not guarded until it is"
-        printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+        # GAP-0384: when another process holds its API port, that start fails too.
+        if port_problem="$("${BIN_DIR}/defenseclaw-gateway" check-api-port --installed 2>&1)"; then
+            printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+        else
+            info "${port_problem#Error: }"
+        fi
     fi
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then

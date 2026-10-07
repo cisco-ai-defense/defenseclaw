@@ -190,26 +190,36 @@ func TestCheckAPIPortRefusesOnlyAnotherAccountsListener(t *testing.T) {
 	gatewayPortAnswers = func(string) bool { return true }
 
 	holder(daemon.PortHolder{PID: 77, UID: os.Getuid()}, nil)
-	if err := checkAPIPort(path); err != nil {
+	if err := checkAPIPort(path, false); err != nil {
 		t.Fatalf("this account's own gateway refused: %v", err)
 	}
 	holder(daemon.PortHolder{UID: os.Getuid() + 1}, nil)
-	err := checkAPIPort(path)
+	err := checkAPIPort(path, false)
 	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:19321 is held by a process of another account") ||
 		!strings.Contains(err.Error(), "defenseclaw setup gateway --api-port ") ||
 		!strings.Contains(err.Error(), "upgrade again") {
 		t.Fatalf("another account's listener: %v", err)
 	}
+	// GAP-0384: the closing summary of an upgrade that left the gateway
+	// stopped; any listener then is another process's, also where the
+	// holder has no account (Windows).
+	holder(daemon.PortHolder{PID: 4242, UID: -1}, nil)
+	if err := checkAPIPort(path, true); err == nil ||
+		!strings.Contains(err.Error(), "127.0.0.1:19321 is held by PID 4242") ||
+		!strings.Contains(err.Error(), "then start it with: defenseclaw-gateway start") {
+		t.Fatalf("installed wording: %v", err)
+	}
+	holder(daemon.PortHolder{UID: os.Getuid() + 1}, nil)
 	// macOS lsof does not list another account's sockets: an answering port nobody lists is theirs.
 	holder(daemon.PortHolder{UID: -1}, daemon.ErrNoListener)
-	if err := checkAPIPort(path); err == nil {
+	if err := checkAPIPort(path, false); err == nil {
 		t.Fatal("an unlisted listener that answers was not refused")
 	}
 	gatewayPortAnswers = func(string) bool { return false }
-	if err := checkAPIPort(path); err != nil {
+	if err := checkAPIPort(path, false); err != nil {
 		t.Fatalf("a free port refused: %v", err)
 	}
-	if err := checkAPIPort(filepath.Join(t.TempDir(), "missing.yaml")); err != nil {
+	if err := checkAPIPort(filepath.Join(t.TempDir(), "missing.yaml"), false); err != nil {
 		t.Fatalf("a missing config refused: %v", err)
 	}
 }
