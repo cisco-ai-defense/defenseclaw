@@ -173,3 +173,32 @@ func TestWindowsEnterpriseEnsureKeepsAHandEditedConfig(t *testing.T) {
 		t.Fatalf("rejected-config.yaml = %q", got)
 	}
 }
+
+// GAP-0180: the policy digest call carries the service pins whichever console
+// runs it. An administrator or SYSTEM console carries none of them and the
+// managed-host guard refused the call there, so status, verify and every
+// ensure but the hot config path left policy out of the result.
+func TestWindowsEnterprisePolicyDigestRunsUnderTheServicePins(t *testing.T) {
+	host, _ := newHotConfigHost(t, "config_version: 9\n", "config_version: 9\n")
+	t.Setenv(managed.ConfigPathEnv, "C:\\console\\other.yaml")
+	t.Setenv(managed.DeploymentModeEnv, "")
+
+	command, err := windowsEnterprisePolicyDigestCommand(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, entry := range command.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		got[strings.ToUpper(name)] = append(got[strings.ToUpper(name)], value)
+	}
+	layout, _ := windowsEnterpriseHotConfigLayout()
+	for name, want := range windowsEnterpriseServicePins(layout) {
+		if values := got[strings.ToUpper(name)]; len(values) != 1 || values[0] != want {
+			t.Fatalf("%s = %q, want exactly %q", name, values, want)
+		}
+	}
+	if got[managed.ConfigPathEnv][0] != host.configPath || len(got["PATH"]) != 1 {
+		t.Fatalf("config %q, PATH %q: want the installed config and the console PATH kept", got[managed.ConfigPathEnv], got["PATH"])
+	}
+}
