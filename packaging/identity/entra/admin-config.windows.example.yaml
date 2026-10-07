@@ -16,7 +16,7 @@
 #      group SID in a sign-in token only then.
 #   3. Users sign out and back in.
 # A users: assignment by UPN needs none of that.
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 # Leave data_dir unset: the services use C:\ProgramData\Cisco\DefenseClaw\runtime.
 enterprise:
@@ -28,7 +28,6 @@ ai_discovery:
   include_user_principal: true   # put the UPN in records; off by default
 guardrail:
   enabled: true
-  rule_pack_dir: ""              # use the built-in rule packs
   mode: observe                  # the posture when no profile applies
   connectors:
     claudecode: {}
