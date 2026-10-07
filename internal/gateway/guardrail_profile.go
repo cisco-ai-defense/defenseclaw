@@ -234,10 +234,11 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 const profileRulePackRetryInterval = 30 * time.Second
 
 type profileRulePackRetry struct {
-	profile string
-	cfg     *config.Config
-	scope   rulePackScope
-	loaded  atomic.Pointer[compiledRulePackCategories]
+	profile    string
+	cfg        *config.Config
+	scope      rulePackScope
+	loaded     atomic.Pointer[compiledRulePackCategories]
+	loadedPack atomic.Pointer[guardrail.RulePack]
 
 	mu      sync.Mutex
 	lastErr string
@@ -267,9 +268,18 @@ func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories 
 		r.lastErr = err.Error()
 		return nil
 	}
+	r.loadedPack.Store(rp)
 	r.loaded.Store(compiled)
 	fmt.Fprintf(os.Stderr, "[guardrail] profile %s: rule pack %s loaded; it did not load when the gateway started\n", r.profile, r.scope.key())
 	return compiled
+}
+
+// pack returns the composed pack behind the rules the retry published.
+func (r *profileRulePackRetry) pack(now time.Time) *guardrail.RulePack {
+	if r.rules(now) == nil {
+		return nil
+	}
+	return r.loadedPack.Load()
 }
 
 // pendingRulePackNote is the explain warning for a profile whose rule pack

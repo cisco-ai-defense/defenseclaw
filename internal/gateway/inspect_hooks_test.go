@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -460,6 +462,65 @@ func TestInspectToolResponse_SensitiveToolRaisesResultAlert(t *testing.T) {
 	if len(alerted) != 1 || alerted[0] != "listed_tool" {
 		t.Fatalf("tool-result-pii-alert targets = %v, want [listed_tool]", alerted)
 	}
+}
+
+// A connector-only assignment selects its profile before a hook result is
+// finalized. The alert must use that profile's sensitive-tool configuration.
+func TestHookToolResultAlertUsesSelectedProfile(t *testing.T) {
+	stubProfileSources(t)
+	packDir := filepath.Join(t.TempDir(), "contractors")
+	writeRulePackFixtureFile(t, packDir, "rules/entities.yaml", `version: 1
+category: enterprise-data
+rules:
+  - id: PROFILE-ENTITY
+    pattern: 'profile_entity_[a-z]+'
+    title: profile entity
+    severity: HIGH
+    confidence: 0.99
+    tags: [pii]
+`)
+	cfg := config.DefaultConfig()
+	enabled := true
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"contractors": {RulePackDir: packDir, Rules: &config.GuardrailRulesConfig{
+			SensitiveTools: []config.GuardrailSensitiveTool{{
+				Name: "crm_export", ResultInspection: &enabled,
+				MinEntitiesForAlert: 2,
+			}},
+		}},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+	}
+	store, logger := testStoreAndLogger(t)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api.store, api.logger = store, logger
+	set := api.guardrailProfileSet()
+	if set == nil {
+		t.Fatal("profile set was not built")
+	}
+	base, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{Profiles: set, RulePacks: map[string]*guardrail.RulePack{"global": base}}
+	})
+	ctx := api.withGuardrailProfileDecision(t.Context(), "codex")
+	req := agentHookRequest{ToolName: "crm_export", HookEventName: "PostToolUse",
+		Payload: map[string]interface{}{"tool_response": "profile_entity_a profile_entity_b"}}
+	api.alertSensitiveHookToolResult(ctx, "codex", req, agentHookResponse{Severity: "HIGH", Findings: []string{"ENT-EMAIL-BULK"}})
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" && event.Target == "crm_export" &&
+			strings.Contains(event.Details, "entities=2") {
+			return
+		}
+	}
+	t.Fatalf("profile-sensitive tool produced no two-entity alert: %+v", events)
 }
 
 // TestHookToolResultRaisesSensitiveToolAlert pins GAP-0041 on the connector hook
