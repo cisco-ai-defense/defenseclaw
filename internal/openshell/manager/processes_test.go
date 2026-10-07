@@ -271,6 +271,27 @@ func TestOCSFProcessRecordsJoinTheTree(t *testing.T) {
 	}
 }
 
+// With the process tree on, a destination names the lineage of the process
+// that connected, from the tree (the process first).
+func TestDestinationsNameTheProcessTreesLineage(t *testing.T) {
+	var sample atomic.Pointer[string]
+	sample.Store(psAnswer("P 1 0 0 10", "Pc 1 init", "P 42 1 1000 20", "Pc 42 bash", "P 77 42 1000 30", "Pc 77 curl",
+		"L /proc/77 exe /usr/bin/curl"))
+	e := treeEnv(t, "linbox", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
+		t.Fatal("no sample")
+	}
+	e.ocsf("linbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(77) -> example.org:443/tcp [policy:allow_example engine:opa]", time.Now())
+	row, ok := destinationKinds(t, e, "linbox")["example.org"]
+	if !ok {
+		t.Fatal("no example.org destination")
+	}
+	if l := row.Lineage; row.PID != 77 || len(l) != 3 || l[0].PID != 77 || l[0].Comm != "curl" || l[0].Exe != "/usr/bin/curl" ||
+		l[1].PID != 42 || l[1].Comm != "bash" || l[2].PID != 1 {
+		t.Fatalf("row %+v, lineage %+v", row, row.Lineage)
+	}
+}
+
 // Off by default: no sample runs, OpenShell's PROC records are not kept,
 // and the API says the tree is off.
 func TestProcessTreeIsOffByDefault(t *testing.T) {
@@ -285,6 +306,11 @@ func TestProcessTreeIsOffByDefault(t *testing.T) {
 	}
 	if sb := e.get("plainbox"); sb.ProcessTree {
 		t.Fatal("the view says the process tree is on")
+	}
+	// Its destinations name the connecting process, without a lineage.
+	e.ocsf("plainbox", "NET:OPEN [INFO] ALLOWED /usr/bin/python3(4242) -> example.org:443/tcp [policy:allow_example engine:opa]", time.Now())
+	if row := destinationKinds(t, e, "plainbox")["example.org"]; row.PID != 4242 || row.Lineage != nil {
+		t.Fatalf("row %+v", row)
 	}
 }
 

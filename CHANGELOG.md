@@ -71,7 +71,8 @@ stopped`. Nothing is changed; use the install command above.
   reached or tried to reach, through the egress proxy or around it, with its
   kind: model provider, the harness's vendor, shadow AI (another AI provider,
   or an inference-shaped host), the egress category, blocked or other. It
-  shows the requests, refusals, bytes and the binary that connected, survives
+  shows the requests, refusals, bytes and the binary that connected (with
+  the opt-in process tree on, that process and its parents), survives
   daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
   sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
   detail sum it up; the detail lists the hosts.

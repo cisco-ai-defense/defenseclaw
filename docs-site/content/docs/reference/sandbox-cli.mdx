@@ -977,8 +977,9 @@ boundary, and says what each one is:
 Each row shows the requests and refusals both boundaries counted, the bytes
 the proxy relayed, and the last binary OpenShell named making the
 connection. The binary is what the process in the sandbox claims to be.
-With the [process tree](/docs/sandboxes/policy-packs) on, `--output json`
-adds the process and its parents (`lineage`). A second table lists the
+With the [process tree](/docs/sandboxes/policy-packs) on, the binary column
+shows that process and its parents instead (`curl ← bash ← claude`), and
+`--output json` adds them (`lineage`). A second table lists the
 models OpenShell's inference route reported calls to. The view survives
 daemon restarts and stops, keeps at most 512 hosts (the oldest that are not
 AI destinations make room; when every row is one, a provider the catalog

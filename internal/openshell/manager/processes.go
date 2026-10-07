@@ -388,7 +388,7 @@ func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
 		if node == nil {
 			break
 		}
-		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.Comm, Exe: node.Exe})
+		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.Comm, Exe: node.Exe, Start: node.Start})
 		pid = node.PPID
 	}
 	return out

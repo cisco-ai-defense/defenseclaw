@@ -196,9 +196,6 @@ type Options struct {
 	// gitsafe).
 	Guard         GuardFunc
 	GuardGitlinks func(ctx context.Context, root string) ([]string, error)
-	// Processes resolves a sandbox process to its lineage for the
-	// destinations view (the opt-in process index); nil leaves it out.
-	Processes ProcessLookup
 }
 
 // Manager implements the gateway's SandboxController.
@@ -272,7 +269,8 @@ type Manager struct {
 	destMu sync.Mutex
 	dests  map[string]*destTable
 	// catalog classifies destinations (destinationCatalog); procs gives
-	// their lineage.
+	// their lineage: the manager's own process tree (Lineage), which knows
+	// a sandbox's processes only while its process tree is on.
 	catalogOnce sync.Once
 	catalog     *catalog.Catalog
 	procs       ProcessLookup
@@ -365,9 +363,9 @@ func New(opts Options) (*Manager, error) {
 		approvals:  map[string]*approval{},
 		startedAt:  opts.Now(),
 		dests:      map[string]*destTable{},
-		procs:      opts.Processes,
 		procGate:   newRateGate(activityBurst, activityRate),
 	}
+	m.procs = m
 	m.sink = newEgressSink(m)
 	debounce := time.Duration(config.DefaultOpenShellApprovalDebounceMs) * time.Millisecond
 	if cfg := opts.Config(); cfg != nil && cfg.OpenShell.Approvals.DebounceMs > 0 {

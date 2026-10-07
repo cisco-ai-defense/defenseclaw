@@ -79,9 +79,9 @@ const (
 )
 
 // ProcessLookup resolves a sandbox process to its lineage: the process
-// first, then its parent and theirs. The opt-in process index
-// (observe.process_tree) implements it; without one (nil) destinations have
-// no lineage.
+// first, then its parent and theirs. Manager.Lineage, the opt-in process
+// tree (observe.process_tree, processes.go), implements it: a sandbox whose
+// tree is off has destinations without lineage.
 type ProcessLookup interface {
 	Lineage(sandboxName string, pid int) []ProcessRef
 }
@@ -100,6 +100,9 @@ func (m *Manager) lineage(sandbox string, pid int) []sandboxapi.DestinationProce
 		return nil
 	}
 	refs := m.procs.Lineage(sandbox, pid)
+	if len(refs) == 0 {
+		return nil
+	}
 	out := make([]sandboxapi.DestinationProcess, 0, len(refs))
 	for _, p := range refs {
 		out = append(out, sandboxapi.DestinationProcess{PID: p.PID, PPID: p.PPID,

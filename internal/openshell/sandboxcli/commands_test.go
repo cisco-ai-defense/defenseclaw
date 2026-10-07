@@ -94,13 +94,17 @@ func TestDestinations(t *testing.T) {
 			Sources: []string{sandboxapi.SourceOpenShell}, LastSeen: seen},
 		{Host: "host.openshell.internal", Ports: []int{8080, 11434}, Kind: sandboxapi.DestinationOther, Connections: 1, LastSeen: seen},
 		{Host: "pastebin.com", Kind: sandboxapi.DestinationBlocked, Category: "paste_site", Blocked: 4, LastSeen: seen},
+		// With the process tree on, the binary is its lineage.
+		{Host: "example.org", Kind: sandboxapi.DestinationOther, Connections: 1, Binaries: []string{"/usr/bin/wget"}, LastSeen: seen,
+			PID: 77, Lineage: []sandboxapi.DestinationProcess{{PID: 77, Exe: "/usr/bin/wget"}, {PID: 42, Comm: "bash"}, {PID: 7, Comm: "claude"}}},
 	}, Models: []sandboxapi.ModelUse{{Provider: "anthropic", Model: "claude-haiku", Calls: 2, Failed: 1, LastSeen: seen}}}}
 	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputText))
 	has(t, ta.output(), "DESTINATION", "shadow AI", "model provider", "5, 2 model calls", "host.openshell.internal:8080,11434",
-		"0 (4 refused)", "/usr/bin/curl", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)")
+		"0 (4 refused)", "/usr/bin/curl", "wget ← bash ← claude", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)")
 	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputJSON))
 	var d sandboxapi.Destinations
-	if err := json.Unmarshal(ta.out.Bytes(), &d); err != nil || len(d.Destinations) != 4 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI {
+	if err := json.Unmarshal(ta.out.Bytes(), &d); err != nil || len(d.Destinations) != 5 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI ||
+		len(d.Destinations[4].Lineage) != 3 {
 		t.Fatalf("destinations json = %s, %v", ta.out.String(), err)
 	}
 	ta.ok(t, ta.fresh().Status(bg, "box", OutputText))

@@ -19,6 +19,7 @@ package sandboxcli
 import (
 	"context"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 
@@ -57,7 +58,7 @@ func (a *App) Destinations(ctx context.Context, name string, format OutputFormat
 		rows = append(rows, []string{
 			destinationHost(r), destinationKindText(r.Kind), truncate(firstNonEmpty(r.Provider, r.Category, "-"), 32),
 			destinationRequests(r), humanBytes(r.BytesUp) + " / " + humanBytes(r.BytesDown),
-			truncate(firstNonEmpty(lastOf(r.Binaries), "-"), 40), r.LastSeen.Local().Format("01-02 15:04"),
+			truncate(firstNonEmpty(destinationBinary(r), "-"), 40), r.LastSeen.Local().Format("01-02 15:04"),
 		})
 	}
 	if len(rows) > 0 {
@@ -128,6 +129,19 @@ func destinationRequests(r sandboxapi.DestinationRow) string {
 		s += fmt.Sprintf(", %d model calls", r.ModelTurns)
 	}
 	return s
+}
+
+// destinationBinary is the program that last connected; with the sandbox's
+// process tree on, its lineage: the process, then its parent and theirs.
+func destinationBinary(r sandboxapi.DestinationRow) string {
+	if len(r.Lineage) < 2 {
+		return lastOf(r.Binaries)
+	}
+	names := make([]string, 0, len(r.Lineage))
+	for _, p := range r.Lineage {
+		names = append(names, firstNonEmpty(p.Comm, path.Base(p.Exe), strconv.Itoa(p.PID)))
+	}
+	return strings.Join(names, " ← ")
 }
 
 func lastOf(list []string) string {
