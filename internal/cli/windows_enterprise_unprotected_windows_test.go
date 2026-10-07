@@ -86,6 +86,38 @@ func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 	}
 }
 
+// A config that enrols no connector (before GAP-0221 the loader dropped the
+// documented claudecode: {} entries) left every service healthy and verify
+// passing while DefenseClaw protected no agent: verify fails on it, status
+// warns, and a config that enrols a connector reports nothing.
+func TestWindowsStandaloneVerifyFailsWhenNoConnectorIsEnrolled(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previous := windowsEnterpriseEnrolledConnectors
+	t.Cleanup(func() { windowsEnterpriseEnrolledConnectors = previous })
+	var enrolled []string
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return enrolled, nil }
+	run := func(action string) *enterprisestatus.Result {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
+		applyWindowsEnterpriseInstallerReport(result, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+			OK: true, Installed: true, SecurityComplete: true, GuardianReady: true, GatewayReady: true,
+		}, windowsEnterpriseStandaloneRun{})
+		return result
+	}
+	verify := run("verify")
+	if !strings.Contains(fmt.Sprint(verify.Errors), "no_connectors_enabled") || verify.SecurityComplete {
+		t.Fatalf("verify with no enrolled connector = errors %+v security_complete %t", verify.Errors, verify.SecurityComplete)
+	}
+	status := run("status")
+	if strings.Contains(fmt.Sprint(status.Errors), "no_connectors_enabled") ||
+		!strings.Contains(fmt.Sprint(status.Warnings), "no_connectors_enabled") || status.SecurityComplete {
+		t.Fatalf("status with no enrolled connector = %+v", status)
+	}
+	enrolled = []string{"claudecode"}
+	if verify := run("verify"); strings.Contains(fmt.Sprint(verify.Errors, verify.Warnings), "no_connectors_enabled") {
+		t.Fatalf("verify with claudecode enrolled = %+v", verify)
+	}
+}
+
 // Status names why an installed gateway is not running, from the last error
 // it logged, and reports the rows DefenseClaw keeps for a deleted account
 // whose profile folder is still there.

@@ -195,7 +195,7 @@ func compatibilityAuditV8Body(event Event) (map[string]any, map[string]observabi
 	// copy inside details or the structured envelope would be free-form content
 	// that carries a home directory (and an SSSD fully qualified account name)
 	// through the sensitive profile unchanged (GAP-0131).
-	if dir := strings.TrimSpace(event.RulePackDir); dir != "" {
+	if dir := strings.TrimSpace(event.RulePackDir); dir != "" && !event.RulePackDirInEnvelope {
 		body["rule_pack_dir"] = dir
 		classes["/rule_pack_dir"] = observability.FieldClassPath
 	}

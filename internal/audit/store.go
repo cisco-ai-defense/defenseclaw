@@ -135,6 +135,10 @@ type Event struct {
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
+	// RulePackDirInEnvelope marks a Secure Client hook row, whose directory
+	// rides in the structured envelope and the raw column as on main, not in
+	// a path-class record field (issue #1092).
+	RulePackDirInEnvelope bool `json:"-"`
 
 	// SandboxID and SandboxName attribute an event to the OpenShell
 	// sandbox whose request produced it. They are filled from the
