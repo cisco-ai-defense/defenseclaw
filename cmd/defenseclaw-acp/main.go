@@ -175,36 +175,33 @@ func run(args []string) error {
 		return fail(err)
 	}
 
-	token := ""
 	if *tokenFile == "" {
 		return fail(errors.New("--token-file is required for guarded ACP execution"))
 	}
-	if *tokenFile != "" {
-		clean := filepath.Clean(*tokenFile)
-		info, err := os.Lstat(clean)
-		if err != nil {
-			return fail(fmt.Errorf("stat token file: %w", err))
-		}
-		if !info.Mode().IsRegular() {
-			return fail(errors.New("token file is not a regular file"))
-		}
-		if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-			return fail(errors.New("token file permissions are too broad"))
-		}
-		if err := safefile.ValidatePrivateFile(clean); err != nil {
-			return fail(errors.New("token file protection is unsafe"))
-		}
-		if info.Size() > 16<<10 {
-			return fail(errors.New("token file is unexpectedly large"))
-		}
-		body, err := safefile.ReadRegularFileBounded(clean, 16<<10)
-		if err != nil {
-			return fail(fmt.Errorf("read token file: %w", err))
-		}
-		token = strings.TrimSpace(string(body))
-		if token == "" {
-			return fail(errors.New("token file is empty"))
-		}
+	clean := filepath.Clean(*tokenFile)
+	info, err := os.Lstat(clean)
+	if err != nil {
+		return fail(fmt.Errorf("stat token file: %w", err))
+	}
+	if !info.Mode().IsRegular() {
+		return fail(errors.New("token file is not a regular file"))
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return fail(errors.New("token file permissions are too broad"))
+	}
+	if err := safefile.ValidatePrivateFile(clean); err != nil {
+		return fail(errors.New("token file protection is unsafe"))
+	}
+	if info.Size() > 16<<10 {
+		return fail(errors.New("token file is unexpectedly large"))
+	}
+	body, err := safefile.ReadRegularFileBounded(clean, 16<<10)
+	if err != nil {
+		return fail(fmt.Errorf("read token file: %w", err))
+	}
+	token := strings.TrimSpace(string(body))
+	if token == "" {
+		return fail(errors.New("token file is empty"))
 	}
 	evaluator, err := acp.NewHTTPEvaluator(*gateway, token)
 	if err != nil {
