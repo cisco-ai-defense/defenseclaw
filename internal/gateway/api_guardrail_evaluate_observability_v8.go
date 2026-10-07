@@ -341,7 +341,13 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 			GenAIRequestModel:                   facts.model,
 			ConditionSecuritySeverityAvailable:  true,
 		}
-		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(ctx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
@@ -469,6 +475,12 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		ConditionConnectorKnown:             facts.routeConnector() != "",
 		ConditionOperationTerminal:          true,
 	}
-	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	}
+	caller.Identity.applyTo(&input)
 	return input, true
 }

@@ -116,6 +116,9 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 		row.Body["defenseclaw.guardrail.finding_count"] != float64(2) ||
 		row.Body["defenseclaw.guardrail.detector.name"] != "opa-guardrail" ||
 		row.Body["defenseclaw.user.directory"] != "active_directory" ||
+		row.Body["user.id"] != "1201" ||
+		row.Body["defenseclaw.user.id_kind"] != "posix_uid" ||
+		row.Body["defenseclaw.user.name"] != "dcad-alice" ||
 		!ok || len(sources) != 1 || sources[0] != "scanner" ||
 		!rulesOK || len(rules) != 2 || rules[0] != "SEC-LOCAL" || rules[1] != "SEC-CISCO" {
 		t.Fatalf("generated OPA guardrail row=%+v", row)
@@ -165,7 +168,9 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 		attributes["defenseclaw.guardrail.phase"] != "policy" ||
 		attributes["defenseclaw.guardrail.detector.name"] != "opa-guardrail" ||
 		attributes["defenseclaw.guardrail.mode"] != "enforce" ||
-		attributes["defenseclaw.user.domain"] != "dclab.test" {
+		attributes["defenseclaw.user.domain"] != "dclab.test" ||
+		attributes["user.id"] != "1201" ||
+		attributes["defenseclaw.user.name"] != "dcad-alice" {
 		t.Fatalf("generated OPA span parent=%s/%t record=%v", spanParent, hasParent, attributes)
 	}
 }
