@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -46,21 +47,7 @@ import (
 //   - is the root CLI: `enterprise linux tetragon status|pause|resume`, which
 //     reads the helper's state files and writes only the pause file.
 
-// codeKernelPolicyOrphaned names DefenseClaw policies that may still be
-// loaded in Tetragon with nothing reconciling them. verify fails on it; an
-// uninstall or rollback that could not remove them warns with it.
-const codeKernelPolicyOrphaned = "kernel_policy_orphaned"
-
-// codeKernelStateUnreadable says the helper's state files could not be read.
-const codeKernelStateUnreadable = "kernel_state_unreadable"
-
-// codeKernelPolicyNotApplied says the sensor helper runs another control set
-// or intent than this deployment renders: it did not restart into it.
-const codeKernelPolicyNotApplied = "kernel_policy_not_applied"
-
-// codeTetragonTCPAPI is the helper's reason for never dialling a Tetragon
-// that serves its API on TCP.
-const codeTetragonTCPAPI = "tetragon_tcp_api"
+// The warning and problem codes and their words are in tetragon_codes.go.
 
 // tetragonInfoPath is the world-readable file Tetragon describes itself in.
 const tetragonInfoPath = "/var/run/tetragon/tetragon-info.json"
@@ -189,9 +176,6 @@ func (e *Env) recordedKernelPolicies() ([]string, error) {
 	return kernelpolicy.Recorded(e.sensorDirs())
 }
 
-// kernelPolicyAdvice is how an administrator removes policies by hand.
-const kernelPolicyAdvice = "delete each with `tetra tracingpolicy delete <name>`, or run `systemctl restart tetragon`, which drops every policy added over its API"
-
 // retireKernelPolicies runs the installed helper's --tetragon-cleanup: the
 // policies it loaded into Tetragon outlive it, so every path that stops it
 // for good removes them first, with the binary that loaded them and before
@@ -206,7 +190,7 @@ func (l *lifecycle) retireKernelPolicies(ctx context.Context) []string {
 	}
 	recorded, err := env.recordedKernelPolicies()
 	if err != nil {
-		r.AddWarning(codeKernelPolicyOrphaned, "could not read the sensor helper's record of the Tetragon policies it loaded: "+err.Error())
+		r.AddWarning(codeKernelPolicyOrphaned, tetragonMessage(codeKernelPolicyOrphaned, tetragonFacts{Variant: variantUnreadable, Error: err.Error()}))
 		return nil
 	}
 	if len(recorded) == 0 {
@@ -218,8 +202,7 @@ func (l *lifecycle) retireKernelPolicies(ctx context.Context) []string {
 		if len(names) == 0 {
 			return
 		}
-		r.AddWarning(codeKernelPolicyOrphaned, fmt.Sprintf("%s; DefenseClaw's Tetragon policies %s may still be loaded with no sensor helper to manage them: %s. Their names stay in %s, so a sensor helper installed later removes them",
-			why, strings.Join(names, ", "), kernelPolicyAdvice, filepath.Join(kernelpolicy.DefaultStateDir, "tetragon-loaded")))
+		r.AddWarning(codeKernelPolicyOrphaned, tetragonMessage(codeKernelPolicyOrphaned, tetragonFacts{Variant: variantLeft, Why: why, Names: names}))
 	}
 	if !exists(helper) {
 		left("the sensor helper binary is gone")
@@ -353,133 +336,179 @@ type tetragonFinding struct {
 	Problem bool
 }
 
+// perInstanceCodes keep their ":detail" suffix as part of the code: one
+// warning per connector, family, policy or variable.
+var perInstanceCodes = map[string]bool{
+	kernelpolicy.WarnForeignName:      true,
+	kernelpolicy.WarnConfigInvalid:    true,
+	kernelpolicy.WarnGuardrailObserve: true,
+	kernelpolicy.WarnOperatorOverride: true,
+	kernelpolicy.WarnPolicyLoadError:  true,
+	codeCustomerEventsCapped:          true,
+}
+
 // tetragonFindings derives the warnings and problems of enterprise.tetragon
 // from the intent, the helper's published state and whether the helper runs.
 // A customer Tetragon outage is a warning, never a problem; problems are
 // only DefenseClaw-owned state: policies that may be loaded with nothing
-// reconciling them, or a policy of DefenseClaw's that failed to load.
-func tetragonFindings(goos string, intent tetragonIntent, haveIntent bool, state kernelpolicy.State, running bool, host tetragonHost) []tetragonFinding {
+// reconciling them, or a policy of DefenseClaw's that failed to load. The
+// words come from the code table (tetragon_codes.go).
+func tetragonFindings(in tetragonInputs) []tetragonFinding {
+	goos, intent, haveIntent, state, running, host := in.GOOS, in.Intent, in.HaveIntent, in.State, in.Running, in.Host
 	var out []tetragonFinding
 	seen := map[string]bool{}
-	add := func(problem bool, code, format string, args ...any) {
+	add := func(problem bool, code string, facts tetragonFacts) {
 		if seen[code] {
 			return
 		}
 		seen[code] = true
-		out = append(out, tetragonFinding{Code: code, Message: fmt.Sprintf(format, args...), Problem: problem})
+		out = append(out, tetragonFinding{Code: code, Message: tetragonMessage(code, facts), Problem: problem})
 	}
 	if goos != "linux" {
 		if haveIntent && intent.Reason == config.TetragonReasonNotApplicable {
-			add(false, config.TetragonReasonNotApplicable, "enterprise.tetragon is set, but Tetragon runs only on Linux; this host ignores the block")
+			add(false, config.TetragonReasonNotApplicable, tetragonFacts{})
 		}
 		return out
 	}
 	digest := kernelpolicy.Digest()
 	if haveIntent {
 		if intent.Reason == config.TetragonReasonPlaneCOff {
-			add(false, config.TetragonReasonPlaneCOff, "enterprise.tetragon.mode is %s, but AI Discovery Plane C is off (ai_discovery.runtime.enabled and enable_host_plane), so the sensor helper runs with Tetragon off: kernel controls whose events nobody records are not loaded", intent.Configured)
+			add(false, config.TetragonReasonPlaneCOff, tetragonFacts{Mode: intent.Configured})
 		}
 		if intent.Mode == config.TetragonModeEnforce {
 			switch {
 			case len(intent.EnforceAck) == 0:
-				add(false, kernelpolicy.WarnEnforceAckMissing, "enterprise.tetragon.mode is enforce, but enforce_ack is empty, so the kernel controls stay in monitor mode; review `enterprise linux tetragon status` and approve with `enforce_ack: %s`", digest)
+				add(false, kernelpolicy.WarnEnforceAckMissing, tetragonFacts{Digest: digest})
 			case !intent.approves(digest):
-				add(false, kernelpolicy.WarnEnforceAckStale, "enforce_ack %s approves another control set than the %s this build ships, so the kernel controls stay in monitor mode; review `enterprise linux tetragon status` and approve the new digest", intent.ack(), digest)
+				add(false, kernelpolicy.WarnEnforceAckStale, tetragonFacts{Digest: digest, Ack: intent.ack()})
 			}
 			if intent.BurnIn == "0" {
-				add(false, kernelpolicy.WarnBurnInSkipped, "enterprise.tetragon.burn_in is 0: users are enforced without a measured burn-in")
+				add(false, kernelpolicy.WarnBurnInSkipped, tetragonFacts{})
 			}
 			for _, connector := range intent.GuardrailObserve {
-				add(false, kernelpolicy.WarnGuardrailObserve+":"+connector, "the %s guardrail is not in action mode, so its agents are observed, not enforced, by the kernel controls", connector)
+				add(false, kernelpolicy.WarnGuardrailObserve+":"+connector, tetragonFacts{})
 			}
 		}
 	}
 	if host.TCP {
-		add(false, codeTetragonTCPAPI, "Tetragon serves its API on %s, which any local account can use to load kernel policies; the sensor helper never dials it, so it uses cn_proc and fanotify and refuses observe and enforce. Set Tetragon's server-address to a unix socket", host.Address)
+		add(false, codeTetragonTCPAPI, tetragonFacts{Address: host.Address})
 	}
 	mode := intent.helperMode()
 	loadsPolicies := mode == config.TetragonModeObserve || mode == config.TetragonModeEnforce
 	if state.Pause != nil {
-		switch {
-		case state.Pause.Pause != nil && state.Pause.Pause.UntilReboot:
-			add(false, kernelpolicy.WarnEnforcePaused, "kernel enforcement is paused until the next reboot (set by uid %d at %s%s); resume with `enterprise linux tetragon resume`",
-				state.Pause.Pause.SetByUID, state.Pause.Pause.SetAt.UTC().Format(time.RFC3339), pauseReason(state.Pause.Pause))
-		case state.Pause.Pause != nil:
-			add(false, kernelpolicy.WarnEnforcePaused, "kernel enforcement is paused until %s (set by uid %d at %s%s); resume with `enterprise linux tetragon resume`",
-				state.Pause.Pause.Until.UTC().Format(time.RFC3339), state.Pause.Pause.SetByUID, state.Pause.Pause.SetAt.UTC().Format(time.RFC3339), pauseReason(state.Pause.Pause))
-		default:
-			add(false, kernelpolicy.WarnPauseInvalid, "a pause file is present but not trusted or not readable (%s), so kernel enforcement stays paused; remove it with `enterprise linux tetragon resume`", state.Pause.Invalid)
+		if p := state.Pause.Pause; p != nil {
+			add(false, kernelpolicy.WarnEnforcePaused, tetragonFacts{Pause: p, SetBy: userLabel(p.SetByUID)})
+		} else {
+			add(false, kernelpolicy.WarnPauseInvalid, tetragonFacts{PauseInvalid: state.Pause.Invalid})
 		}
 	}
 	for _, family := range sortedFamilies(state.Overrides) {
 		override := state.Overrides[family]
-		add(false, kernelpolicy.WarnOperatorOverride+":"+string(family), "an operator %s the %s policy in Tetragon at %s; the sensor helper does not undo it until enterprise.tetragon.mode or enforce_ack changes",
-			overrideVerb(override.Kind), family, override.At.UTC().Format(time.RFC3339))
+		add(false, kernelpolicy.WarnOperatorOverride+":"+string(family), tetragonFacts{Verb: overrideVerb(override.Kind), At: override.At})
 	}
 	updated := !state.UpdatedAt.IsZero()
 	if running && updated {
 		switch {
 		case state.KernelPolicy != "" && state.KernelPolicy != digest:
-			add(false, codeKernelPolicyNotApplied, "the sensor helper applies control set %s, but this build ships %s; restart it with `%s` or `systemctl restart defenseclaw-sensor-helper`", state.KernelPolicy, digest, "enterprise linux ensure")
+			add(false, codeKernelPolicyNotApplied, tetragonFacts{Variant: variantDigest, Applied: state.KernelPolicy, Digest: digest})
 		case haveIntent && state.Intent.Mode != "" && string(state.Intent.Mode) != mode:
-			add(false, codeKernelPolicyNotApplied, "the sensor helper runs Tetragon mode %s, but the deployment renders %s; run `enterprise linux ensure` so it restarts with the current drop-in", state.Intent.Mode, mode)
+			add(false, codeKernelPolicyNotApplied, tetragonFacts{Variant: variantMode, Applied: string(state.Intent.Mode), Mode: mode})
 		case loadsPolicies && state.Tetragon.Reachable && !state.InSync:
-			add(false, codeKernelPolicyNotApplied, "the sensor helper's last pass did not leave Tetragon with the policies enterprise.tetragon calls for; they stay in or move to monitor mode until a pass succeeds (see `enterprise linux tetragon status`)")
+			add(false, codeKernelPolicyNotApplied, tetragonFacts{Variant: variantNotInSync})
 		}
 	}
 	for _, warning := range state.Warnings {
 		code, detail, _ := strings.Cut(warning, ":")
-		switch code {
-		case kernelpolicy.WarnTetragonUnavailable:
+		detail = strings.TrimSpace(detail)
+		switch {
+		case code == kernelpolicy.WarnTetragonUnavailable:
 			// The helper names a refused endpoint (tetragon_tcp_api,
 			// tetragon_untrusted_endpoint, tetragon_unsupported_version) in
 			// its reason; that code is the warning.
-			if reasonCode, _, ok := strings.Cut(state.Tetragon.Reason, ":"); ok && strings.HasPrefix(reasonCode, "tetragon_") && reasonCode != code {
-				add(false, reasonCode, "%s (sensor helper); Plane C uses cn_proc and fanotify, and no kernel control is enforced", state.Tetragon.Reason)
+			if reasonCode, reasonDetail, ok := strings.Cut(state.Tetragon.Reason, ":"); ok && strings.HasPrefix(reasonCode, "tetragon_") && reasonCode != code {
+				add(false, reasonCode, refusedEndpointFacts(reasonCode, strings.TrimSpace(reasonDetail), state, host, mode))
 				continue
 			}
 			if !loadsPolicies && !host.Installed {
 				continue // consume on a host without Tetragon: native Plane C, nothing to say
 			}
-			add(false, code, "Tetragon is not reachable from the sensor helper (%s); Plane C uses cn_proc and fanotify, and no kernel control is enforced", defaultReason(state.Tetragon.Reason))
-		case kernelpolicy.WarnPolicyLoadError:
+			add(false, code, tetragonFacts{Detail: strings.TrimSpace(state.Tetragon.Reason)})
+		case code == kernelpolicy.WarnPolicyLoadError:
 			if loadsPolicies && running {
-				add(true, warning, "DefenseClaw's Tetragon policy %s did not load; see `enterprise linux tetragon status`", detail)
+				add(true, warning, tetragonFacts{})
 			}
-		case kernelpolicy.WarnForeignName:
-			add(false, warning, "Tetragon has a policy named %s in DefenseClaw's name pattern that the sensor helper did not load; it is left alone", detail)
-		case kernelpolicy.WarnRootsOverLimit:
-			add(false, code, "%s live agent processes are over the %d-pid anchor limit, so they are observed, not enforced", detail, kernelpolicy.MaxPIDs)
-		case kernelpolicy.WarnConfigInvalid:
-			add(false, warning, "the sensor helper ignored a malformed %s in its drop-in and used the safe default; run `enterprise linux repair`", detail)
-		case "":
+		case code == kernelpolicy.WarnEnforceInactive:
+			add(false, code, inactiveFacts(detail, intent, state))
+		case code == kernelpolicy.WarnUnsupportedVersion:
+			add(false, code, tetragonFacts{Version: state.Tetragon.Version, Mode: mode})
+		case code == "":
+		case perInstanceCodes[code]:
+			add(false, warning, tetragonFacts{Count: in.Extra.dropped(detail)})
 		default:
-			if detail != "" {
-				add(false, warning, "%s (sensor helper)", warning)
-			} else {
-				add(false, code, "%s (sensor helper)", tetragonWarningText(code))
-			}
+			add(false, code, tetragonFacts{Detail: detail, Digest: digest, Ack: intent.ack()})
 		}
 	}
 	if len(state.Loaded) > 0 {
-		names := strings.Join(state.Loaded, ", ")
 		switch {
 		case !running:
-			add(true, codeKernelPolicyOrphaned, "the sensor helper is not running, so DefenseClaw's Tetragon policies %s may be loaded with frozen anchors and nothing reconciling them; start it with `systemctl start defenseclaw-sensor-helper`, or remove them with `%s --tetragon-cleanup`",
-				names, filepath.Join("/opt/defenseclaw/bin", binSensorHelper))
+			add(true, codeKernelPolicyOrphaned, tetragonFacts{Variant: variantNotRunning, Names: state.Loaded})
 		case !loadsPolicies && updated && state.Tetragon.Reachable && !state.Intent.Mode.LoadsPolicies():
-			add(true, codeKernelPolicyOrphaned, "enterprise.tetragon.mode is %s, but DefenseClaw's Tetragon policies %s are still recorded as loaded after the sensor helper's retire step; run `%s --tetragon-cleanup`",
-				mode, names, filepath.Join("/opt/defenseclaw/bin", binSensorHelper))
+			add(true, codeKernelPolicyOrphaned, tetragonFacts{Variant: variantRetired, Mode: mode, Names: state.Loaded})
 		}
 	}
 	if loadsPolicies && running {
 		for _, policy := range state.Policies {
 			if policy.State == kernelpolicy.StateLoadError || policy.State == kernelpolicy.StateError {
-				add(true, kernelpolicy.WarnPolicyLoadError+":"+policy.Name, "DefenseClaw's Tetragon policy %s is in state %s: %s", policy.Name, policy.State, defaultReason(policy.Error))
+				add(true, kernelpolicy.WarnPolicyLoadError+":"+policy.Name, tetragonFacts{Variant: variantState, State: string(policy.State), Error: policy.Error})
 			}
 		}
 	}
 	return out
+}
+
+// refusedEndpointFacts are the facts of an endpoint the helper refused, with
+// what the CLI's own look at Tetragon's info file adds.
+func refusedEndpointFacts(code, detail string, state kernelpolicy.State, host tetragonHost, mode string) tetragonFacts {
+	facts := tetragonFacts{Detail: detail, Mode: mode}
+	switch code {
+	case codeTetragonTCPAPI:
+		facts.Address = defaultStr(host.Address, detail)
+	case codeTetragonUntrusted:
+		facts.Path, facts.Owner, facts.Perm = host.UntrustedPath, host.UntrustedOwner, host.UntrustedPerm
+	case kernelpolicy.WarnUnsupportedVersion:
+		facts.Variant, facts.Version = variantFallback, defaultStr(state.Tetragon.Version, detail)
+	}
+	return facts
+}
+
+// inactiveFacts say why no control can be enforced: no anchor at all (the
+// users without an agent, and enrolled connectors no user has a row for), or
+// no user that finished burn-in yet (and when the next one is ready).
+func inactiveFacts(detail string, intent tetragonIntent, state kernelpolicy.State) tetragonFacts {
+	if strings.Contains(detail, "burn-in") {
+		facts := tetragonFacts{Variant: variantNoReadyUser}
+		if eta, ok := nextReady(state, state.UpdatedAt); ok {
+			facts.ETA = humanDuration(eta)
+		}
+		return facts
+	}
+	facts := tetragonFacts{Variant: variantNoAnchors}
+	rows := map[string]bool{}
+	for _, user := range state.UIDs {
+		for _, connector := range user.Connectors {
+			rows[connector] = true
+		}
+		if user.State == kernelpolicy.UIDInactive && user.Reason == kernelpolicy.ReasonNoAnchors {
+			facts.Users = append(facts.Users, userName(user))
+		}
+	}
+	for _, connector := range append(append([]string{}, intent.EnforceConnectors...), intent.GuardrailObserve...) {
+		if !rows[connector] {
+			facts.Connectors = append(facts.Connectors, connector)
+		}
+	}
+	sort.Strings(facts.Connectors)
+	return facts
 }
 
 func sortedFamilies(overrides map[kernelpolicy.Family]kernelpolicy.Override) []kernelpolicy.Family {
@@ -505,32 +534,6 @@ func pauseReason(p *kernelpolicy.Pause) string {
 	return ": " + p.Reason
 }
 
-func defaultReason(reason string) string {
-	if strings.TrimSpace(reason) == "" {
-		return "no detail"
-	}
-	return reason
-}
-
-// tetragonWarningText says what a helper warning code means.
-func tetragonWarningText(code string) string {
-	switch code {
-	case codeTetragonTCPAPI:
-		return "tetragon_tcp_api: Tetragon serves its API on TCP, which any local account can use to load kernel policies; the helper never dials it, so observe and enforce are refused. Set server-address to a unix socket"
-	case kernelpolicy.WarnUnsupportedVersion:
-		return "tetragon_unsupported_version: this Tetragon release is outside the supported window (observe and enforce need 1.7)"
-	case kernelpolicy.WarnPersistentSensors:
-		return "tetragon_persistent_sensors: Tetragon runs with keep-sensors-on-exit (or its configuration is unreadable), so enforcement is refused and the controls stay in monitor mode"
-	case kernelpolicy.WarnLSMUnavailable:
-		return "kernel_lsm_unavailable: Tetragon reports no BPF LSM support, so the controls cannot deny and stay in monitor mode"
-	case kernelpolicy.WarnEnforceInactive:
-		return "kernel_enforce_inactive: no enrolled agent could be anchored, so no kernel control is loaded for enforcement"
-	case kernelpolicy.WarnReconcileFailed:
-		return "kernel_reconcile_failed: the last reconcile pass failed; the policies stay in or moved to monitor mode"
-	}
-	return code
-}
-
 // describeTetragon adds enterprise.tetragon's warnings to a status or verify
 // result and returns its problems.
 func (l *lifecycle) describeTetragon(ctx context.Context) []string {
@@ -542,13 +545,17 @@ func (l *lifecycle) describeTetragon(ctx context.Context) []string {
 		var err error
 		state, err = kernelpolicy.ReadState(env.sensorDirs())
 		if err != nil {
-			r.AddWarning(codeKernelStateUnreadable, "could not read the sensor helper's Tetragon state: "+err.Error())
+			r.AddWarning(codeKernelStateUnreadable, tetragonMessage(codeKernelStateUnreadable, tetragonFacts{Error: err.Error()}))
 			return nil
 		}
 		running = l.helperRunning(ctx)
 	}
 	var problems []string
-	for _, finding := range tetragonFindings(env.GOOS, intent, haveIntent, state, running, env.tetragonHost()) {
+	in := tetragonInputs{GOOS: env.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: running, Host: env.tetragonHost()}
+	if env.GOOS == "linux" {
+		in.Extra = env.readHelperExtras()
+	}
+	for _, finding := range tetragonFindings(in) {
 		switch {
 		case finding.Problem:
 			problems = append(problems, finding.Code+": "+finding.Message)
@@ -782,7 +789,7 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 	}
 	switch {
 	case env.GOOS != "linux":
-		rep.addError(codeUnsupportedPlatform, "Tetragon is a Linux sensor; `enterprise linux tetragon` runs on Linux hosts")
+		rep.addError(codeUnsupportedPlatform, "Tetragon is a Linux sensor; enterprise linux tetragon runs on Linux hosts only")
 		return finish(enterprisestatus.UnixExitInvalidArgs)
 	case env.Geteuid() != 0:
 		rep.addError(codeNotRoot, "run this command as root (sudo or the MDM agent): the sensor helper's state is root-only")
@@ -805,11 +812,12 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 			rep.addError(codeChange, "write the pause: "+err.Error())
 			return finish(enterprisestatus.UnixExitFailure)
 		}
-		if pause.UntilReboot {
-			rep.Changes = append(rep.Changes, "paused kernel enforcement until the next reboot; the sensor helper moves enforcing controls to monitor mode within seconds and keeps them visible")
-		} else {
-			rep.Changes = append(rep.Changes, "paused kernel enforcement until "+pause.Until.UTC().Format(time.RFC3339)+"; the sensor helper moves enforcing controls to monitor mode within seconds and keeps them visible")
+		until := "until the next reboot"
+		if !pause.UntilReboot {
+			until = "until " + pause.Until.UTC().Format(time.RFC3339)
 		}
+		rep.Changes = append(rep.Changes, "paused kernel enforcement for every user on this host "+until+
+			"; the sensor helper moves enforcing controls to monitor mode within seconds and keeps them visible")
 	case TetragonActionResume:
 		had := kernelpolicy.ReadPause(dirs, env.Now()).Active()
 		if err := kernelpolicy.ClearPause(dirs); err != nil {
@@ -817,7 +825,7 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 			return finish(enterprisestatus.UnixExitFailure)
 		}
 		if had {
-			rep.Changes = append(rep.Changes, "resumed kernel enforcement; the sensor helper re-applies enterprise.tetragon on its next pass")
+			rep.Changes = append(rep.Changes, "resumed kernel enforcement for every user on this host; the sensor helper re-applies enterprise.tetragon on its next pass")
 		} else {
 			rep.Changes = append(rep.Changes, "no pause was in force")
 		}
@@ -828,14 +836,15 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 	l := &lifecycle{env: env, opts: Options{Action: ActionStatus}, result: enterprisestatus.New(ActionStatus, "standalone", env.GOOS, env.ProductVersion)}
 	state, err := kernelpolicy.ReadState(dirs)
 	if err != nil {
-		rep.addError(codeKernelStateUnreadable, "read the sensor helper's state: "+err.Error())
+		rep.addError(codeKernelStateUnreadable, tetragonMessage(codeKernelStateUnreadable, tetragonFacts{Error: err.Error()}))
 		return finish(0)
 	}
 	intent, haveIntent := env.installedTetragonIntent()
 	running := l.helperRunning(ctx)
 	host := env.tetragonHost()
 	rep.fill(env, intent, haveIntent, state, running, host)
-	for _, finding := range tetragonFindings(env.GOOS, intent, haveIntent, state, running, host) {
+	in := tetragonInputs{GOOS: env.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: running, Host: host, Extra: env.readHelperExtras()}
+	for _, finding := range tetragonFindings(in) {
 		if finding.Problem {
 			rep.addError(finding.Code, finding.Message)
 			if finding.Code == codeKernelPolicyOrphaned {
@@ -846,7 +855,8 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 		rep.addWarning(finding.Code, finding.Message)
 	}
 	if !haveIntent {
-		rep.addWarning(codeConfig, "the installed config could not be read or does not validate; showing the helper's state against the defaults (run `enterprise linux status`)")
+		rep.addWarning(codeConfig, "the installed config could not be read or does not validate (this shows the helper's state against the defaults); see "+
+			literal(adminCommand("enterprise", "linux", "status")))
 	}
 	return finish(0)
 }
@@ -974,6 +984,137 @@ func nonNil(values []string) []string {
 	return append([]string{}, values...)
 }
 
+// tetragonInputs are what the findings and the readiness checks read: the
+// intent the deployment renders, the helper's published state, whether the
+// helper runs, Tetragon's info file, and the parts of the helper's state the
+// kernelpolicy reader does not model.
+type tetragonInputs struct {
+	GOOS       string
+	Intent     tetragonIntent
+	HaveIntent bool
+	State      kernelpolicy.State
+	Running    bool
+	Host       tetragonHost
+	Extra      helperExtras
+}
+
+// maxCustomerPolicies bounds the customer policies the CLI shows.
+const maxCustomerPolicies = 64
+
+// helperExtras are the parts of tetragon-state.json the root CLI reads
+// beside kernelpolicy.State: the customer's own Tetragon policies with their
+// counts (item 1; the helper never changes them) and Tetragon's metrics and
+// health listeners. A helper that does not publish them leaves them empty.
+type helperExtras struct {
+	CustomerPolicies []customerPolicyStatus `json:"customer_policies"`
+	CustomerEvents   *customerEventCounts   `json:"customer_events"`
+	Tetragon         struct {
+		MetricsAddress string `json:"metrics_address"`
+		HealthAddress  string `json:"health_address"`
+	} `json:"tetragon"`
+}
+
+// customerPolicyStatus is one of the customer's Tetragon policies as the
+// helper last listed it, with the events it saw from that policy.
+type customerPolicyStatus struct {
+	Name    string   `json:"name"`
+	Mode    string   `json:"mode,omitempty"`
+	State   string   `json:"state,omitempty"`
+	Sensors []string `json:"sensors,omitempty"`
+	Error   string   `json:"error,omitempty"`
+	// Counters are Tetragon's own action counters of the policy (post,
+	// override, monitor_override, signal, ...): exact, for every process.
+	Counters map[string]uint64 `json:"counters,omitempty"`
+	// Seen, Forwarded and Dropped count the policy's events the helper saw,
+	// forwarded (from AI agents) and did not forward (over the budget).
+	Seen      uint64    `json:"seen"`
+	Forwarded uint64    `json:"forwarded"`
+	Dropped   uint64    `json:"dropped"`
+	LastEvent time.Time `json:"last_event_at,omitempty"`
+}
+
+// customerEventCounts are the helper's totals over the customer's policies.
+type customerEventCounts struct {
+	Seen      uint64 `json:"seen"`
+	Forwarded uint64 `json:"forwarded"`
+	Dropped   uint64 `json:"dropped"`
+	Container uint64 `json:"container"`
+}
+
+// blocked is how often Tetragon denied or killed for the policy: its
+// override, signal and notify_enforcer counters.
+func (p customerPolicyStatus) blocked() uint64 {
+	return p.Counters["override"] + p.Counters["signal"] + p.Counters["notify_enforcer"]
+}
+
+// enforcing reports whether the policy runs in Tetragon's enforce mode.
+func (p customerPolicyStatus) enforcing() bool { return strings.EqualFold(p.Mode, "enforce") }
+
+// dropped is how many events of the customer policy name the helper did not
+// forward, when it publishes the count.
+func (x helperExtras) dropped(name string) int {
+	for _, policy := range x.CustomerPolicies {
+		if policy.Name == name {
+			return int(policy.Dropped)
+		}
+	}
+	return 0
+}
+
+// readHelperExtras reads the extras from tetragon-state.json; a missing or
+// unreadable file (status reports that through kernelpolicy.ReadState) or a
+// helper that does not publish them gives none.
+func (e *Env) readHelperExtras() helperExtras {
+	var out helperExtras
+	data, err := readBounded(e.P(e.sensorDirs().StateFile()), 4<<20)
+	if err != nil || json.Unmarshal(data, &out) != nil {
+		return helperExtras{}
+	}
+	if len(out.CustomerPolicies) > maxCustomerPolicies {
+		out.CustomerPolicies = out.CustomerPolicies[:maxCustomerPolicies]
+	}
+	sort.Slice(out.CustomerPolicies, func(i, j int) bool { return out.CustomerPolicies[i].Name < out.CustomerPolicies[j].Name })
+	return out
+}
+
+// tetragonAccount resolves a uid to its account name and home directory
+// through NSS; both are "" when the uid is unknown. Replaceable in tests.
+var tetragonAccount = func(uid int) (name, home string) {
+	account, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return "", ""
+	}
+	return account.Username, account.HomeDir
+}
+
+// userLabel is "alice (uid 1001)", or "uid 1001" for an unknown uid.
+func userLabel(uid int) string {
+	if name, _ := tetragonAccount(uid); name != "" {
+		return fmt.Sprintf("%s (uid %d)", name, uid)
+	}
+	return fmt.Sprintf("uid %d", uid)
+}
+
+// userName labels an enrolled user, preferring the name the helper's
+// enrollment carries.
+func userName(user kernelpolicy.UIDStatus) string {
+	if user.User != "" {
+		return fmt.Sprintf("%s (uid %d)", user.User, user.UID)
+	}
+	return userLabel(user.UID)
+}
+
+// homeRelative shows a path under the user's home as ~/...: the root view
+// names the user's own files on this host, and nothing leaves the host.
+func homeRelative(path string, uid int) string {
+	_, home := tetragonAccount(uid)
+	home = strings.TrimSuffix(home, "/")
+	if home != "" && strings.HasPrefix(path, home+"/") {
+		return "~/" + strings.TrimPrefix(path, home+"/")
+	}
+	return path
+}
+
 // tetragonHost is what Tetragon's own info file says about its API.
 type tetragonHost struct {
 	Installed bool
@@ -981,6 +1122,10 @@ type tetragonHost struct {
 	Address, Verdict string
 	// TCP is set when the API is served on TCP, which the helper never dials.
 	TCP bool
+	// Path is the socket; Untrusted* name the file or directory that failed
+	// the ownership check, its owner and its mode.
+	Path                                         string
+	UntrustedPath, UntrustedOwner, UntrustedPerm string
 }
 
 // tetragonHost reads Tetragon's info file (never its socket) and says
@@ -1010,6 +1155,7 @@ func (e *Env) tetragonHost() tetragonHost {
 		host.TCP, host.Verdict = true, "refused: "+codeTetragonTCPAPI+" (the helper never dials a TCP API)"
 		return host
 	}
+	host.Path = path
 	for _, candidate := range []string{path, filepath.Dir(path)} {
 		info, err := os.Stat(e.P(candidate))
 		if err != nil {
@@ -1019,6 +1165,11 @@ func (e *Env) tetragonHost() tetragonHost {
 		uid, _, err := e.OwnerOf(e.P(candidate))
 		if err != nil || uid != 0 || info.Mode().Perm()&0o002 != 0 {
 			host.Verdict = "refused: " + candidate + " is not root-owned or is world-writable"
+			host.UntrustedPath, host.UntrustedPerm = candidate, fmt.Sprintf("%04o", info.Mode().Perm())
+			host.UntrustedOwner = "unknown"
+			if err == nil {
+				host.UntrustedOwner = userLabel(uid)
+			}
 			return host
 		}
 	}
@@ -1083,7 +1234,7 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 		mode += ", running as " + rep.Helper.EffectiveMode
 	}
 	fmt.Fprintf(w, "  Mode:           %s, burn-in %s\n", mode, rep.Intent.BurnIn)
-	fmt.Fprintf(w, "  Kernel policy:  %s (approve with `%s`)", rep.KernelPolicy, rep.ApproveWith)
+	fmt.Fprintf(w, "  Kernel policy:  %s (approve with %s)", rep.KernelPolicy, rep.ApproveWith)
 	switch rep.Intent.Approval {
 	case "approved":
 		fmt.Fprint(w, ", approved")

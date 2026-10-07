@@ -587,7 +587,7 @@ func TestTetragonPauseAndResume(t *testing.T) {
 	ctx := context.Background()
 	start := time.Now()
 	rep := RunTetragon(ctx, h.env, TetragonOptions{Action: TetragonActionPause, For: time.Hour, Reason: "dccert maintenance window"})
-	if !rep.OK || len(rep.Changes) != 1 || !strings.Contains(rep.Changes[0], "paused kernel enforcement until") {
+	if !rep.OK || len(rep.Changes) != 1 || !strings.Contains(rep.Changes[0], "paused kernel enforcement for every user on this host until") {
 		t.Fatalf("pause: %+v", rep)
 	}
 	var pause kernelpolicy.Pause
@@ -747,7 +747,7 @@ func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 	for _, want := range []string{
 		"Tetragon:       v1.7.1, pid 777, reachable, keep-sensors-on-exit false, BPF LSM true",
 		"API socket:     trusted (root-owned unix socket) at unix:///var/run/tetragon/tetragon.sock",
-		"Kernel policy:  " + kernelpolicy.Digest() + " (approve with `enforce_ack: " + kernelpolicy.Digest() + "`)",
+		"Kernel policy:  " + kernelpolicy.Digest() + " (approve with enforce_ack: " + kernelpolicy.Digest() + ")",
 		"Pause:          in force (untrusted pause file: ",
 		"Override:       connect deleted",
 		"defenseclaw-controls-0a1b2c3d", "dcr-std1 (1001)", "12.0h of 168.0h", "ssh_private_key_read 1 /home/dcr-std1/.ssh/id_ed25519 by /usr/bin/cat",
@@ -869,51 +869,51 @@ func TestTetragonFindings(t *testing.T) {
 		return warnings, problems
 	}
 
-	if w, p := codes(tetragonFindings("linux", observe, true, running, true, installed)); len(w)+len(p) != 0 {
+	if w, p := codes(findingsOf("linux", observe, true, running, true, installed)); len(w)+len(p) != 0 {
 		t.Fatalf("a healthy observe host: %v %v", w, p)
 	}
 	stale := running
 	stale.KernelPolicy = "sha256:ffffffffffff"
-	if w, _ := codes(tetragonFindings("linux", observe, true, stale, true, installed)); !reflect.DeepEqual(w, []string{codeKernelPolicyNotApplied}) {
+	if w, _ := codes(findingsOf("linux", observe, true, stale, true, installed)); !reflect.DeepEqual(w, []string{codeKernelPolicyNotApplied}) {
 		t.Fatalf("a helper on another control set: %v", w)
 	}
 	moved := running
 	moved.Intent.Mode = kernelpolicy.ModeConsume
-	if w, _ := codes(tetragonFindings("linux", observe, true, moved, true, installed)); !reflect.DeepEqual(w, []string{codeKernelPolicyNotApplied}) {
+	if w, _ := codes(findingsOf("linux", observe, true, moved, true, installed)); !reflect.DeepEqual(w, []string{codeKernelPolicyNotApplied}) {
 		t.Fatalf("a helper still on the previous drop-in: %v", w)
 	}
 	behind := running
 	behind.InSync = false
-	if w, _ := codes(tetragonFindings("linux", observe, true, behind, true, installed)); !reflect.DeepEqual(w, []string{codeKernelPolicyNotApplied}) {
+	if w, _ := codes(findingsOf("linux", observe, true, behind, true, installed)); !reflect.DeepEqual(w, []string{codeKernelPolicyNotApplied}) {
 		t.Fatalf("a pass that did not apply the plan: %v", w)
 	}
 	behind.Tetragon.Reachable = false
-	if w, _ := codes(tetragonFindings("linux", observe, true, behind, true, installed)); len(w) != 0 {
+	if w, _ := codes(findingsOf("linux", observe, true, behind, true, installed)); len(w) != 0 {
 		t.Fatalf("an unreachable Tetragon is reported by the helper's own warning: %v", w)
 	}
 	paused := running
 	paused.Pause = &kernelpolicy.PauseState{Pause: &kernelpolicy.Pause{Until: now.Add(time.Hour), SetByUID: 1000, SetAt: now, Reason: "dccert"}}
-	if w, _ := codes(tetragonFindings("linux", observe, true, paused, true, installed)); !reflect.DeepEqual(w, []string{kernelpolicy.WarnEnforcePaused}) {
+	if w, _ := codes(findingsOf("linux", observe, true, paused, true, installed)); !reflect.DeepEqual(w, []string{kernelpolicy.WarnEnforcePaused}) {
 		t.Fatalf("paused: %v", w)
 	}
 	untrusted := running
 	untrusted.Pause = &kernelpolicy.PauseState{Invalid: "tetragon-pause: not a root-owned regular file"}
-	if w, _ := codes(tetragonFindings("linux", observe, true, untrusted, true, installed)); !reflect.DeepEqual(w, []string{kernelpolicy.WarnPauseInvalid}) {
+	if w, _ := codes(findingsOf("linux", observe, true, untrusted, true, installed)); !reflect.DeepEqual(w, []string{kernelpolicy.WarnPauseInvalid}) {
 		t.Fatalf("an untrusted pause: %v", w)
 	}
 
 	down := running
 	down.Tetragon = kernelpolicy.TetragonStatus{Reason: "dial unix /var/run/tetragon/tetragon.sock: connect: no such file"}
 	down.Warnings = []string{kernelpolicy.WarnTetragonUnavailable}
-	if w, p := codes(tetragonFindings("linux", observe, true, down, true, tetragonHost{})); !reflect.DeepEqual(w, []string{kernelpolicy.WarnTetragonUnavailable}) || len(p) != 0 {
+	if w, p := codes(findingsOf("linux", observe, true, down, true, tetragonHost{})); !reflect.DeepEqual(w, []string{kernelpolicy.WarnTetragonUnavailable}) || len(p) != 0 {
 		t.Fatalf("an outage in observe is a warning only: %v %v", w, p)
 	}
 	consume := tetragonIntent{Configured: "consume", Mode: "consume", BurnIn: "168h"}
 	down.Intent.Mode = kernelpolicy.ModeConsume
-	if w, _ := codes(tetragonFindings("linux", consume, true, down, true, tetragonHost{})); len(w) != 0 {
+	if w, _ := codes(findingsOf("linux", consume, true, down, true, tetragonHost{})); len(w) != 0 {
 		t.Fatalf("consume without Tetragon installed: %v", w)
 	}
-	if w, _ := codes(tetragonFindings("linux", consume, true, down, true, installed)); !reflect.DeepEqual(w, []string{kernelpolicy.WarnTetragonUnavailable}) {
+	if w, _ := codes(findingsOf("linux", consume, true, down, true, installed)); !reflect.DeepEqual(w, []string{kernelpolicy.WarnTetragonUnavailable}) {
 		t.Fatalf("consume with Tetragon installed but unreachable: %v", w)
 	}
 
@@ -921,36 +921,36 @@ func TestTetragonFindings(t *testing.T) {
 	refused := down
 	refused.Tetragon.Reason = "tetragon_tcp_api: the info file names localhost:54321"
 	tcp := tetragonHost{Installed: true, Address: "localhost:54321", TCP: true}
-	if w, _ := codes(tetragonFindings("linux", consume, true, refused, true, tcp)); !reflect.DeepEqual(w, []string{codeTetragonTCPAPI}) {
+	if w, _ := codes(findingsOf("linux", consume, true, refused, true, tcp)); !reflect.DeepEqual(w, []string{codeTetragonTCPAPI}) {
 		t.Fatalf("a TCP API: %v", w)
 	}
-	if w, _ := codes(tetragonFindings("linux", consume, true, kernelpolicy.State{}, true, tcp)); !reflect.DeepEqual(w, []string{codeTetragonTCPAPI}) {
+	if w, _ := codes(findingsOf("linux", consume, true, kernelpolicy.State{}, true, tcp)); !reflect.DeepEqual(w, []string{codeTetragonTCPAPI}) {
 		t.Fatalf("a TCP API the helper never reported: %v", w)
 	}
 	refused.Tetragon.Reason = "tetragon_untrusted_endpoint: /var/run/tetragon is world-writable"
-	if w, _ := codes(tetragonFindings("linux", consume, true, refused, true, installed)); !reflect.DeepEqual(w, []string{"tetragon_untrusted_endpoint"}) {
+	if w, _ := codes(findingsOf("linux", consume, true, refused, true, installed)); !reflect.DeepEqual(w, []string{"tetragon_untrusted_endpoint"}) {
 		t.Fatalf("an untrusted endpoint: %v", w)
 	}
 
 	left := running
 	left.Loaded = recordedTetragonPolicies
-	if _, p := codes(tetragonFindings("linux", observe, true, left, true, installed)); len(p) != 0 {
+	if _, p := codes(findingsOf("linux", observe, true, left, true, installed)); len(p) != 0 {
 		t.Fatalf("recorded policies with the helper running are its own: %v", p)
 	}
-	if _, p := codes(tetragonFindings("linux", observe, true, left, false, installed)); !reflect.DeepEqual(p, []string{codeKernelPolicyOrphaned}) {
+	if _, p := codes(findingsOf("linux", observe, true, left, false, installed)); !reflect.DeepEqual(p, []string{codeKernelPolicyOrphaned}) {
 		t.Fatalf("recorded policies with no helper: %v", p)
 	}
 	retired := left
 	retired.Intent.Mode = kernelpolicy.ModeConsume
-	if _, p := codes(tetragonFindings("linux", consume, true, retired, true, installed)); !reflect.DeepEqual(p, []string{codeKernelPolicyOrphaned}) {
+	if _, p := codes(findingsOf("linux", consume, true, retired, true, installed)); !reflect.DeepEqual(p, []string{codeKernelPolicyOrphaned}) {
 		t.Fatalf("recorded policies after the consume retire step: %v", p)
 	}
 	retired.Tetragon.Reachable = false
-	if _, p := codes(tetragonFindings("linux", consume, true, retired, true, installed)); len(p) != 0 {
+	if _, p := codes(findingsOf("linux", consume, true, retired, true, installed)); len(p) != 0 {
 		t.Fatalf("an unreachable Tetragon is never a problem: %v", p)
 	}
 
-	if w, _ := codes(tetragonFindings("darwin", tetragonIntent{Reason: config.TetragonReasonNotApplicable}, true, kernelpolicy.State{}, false, tetragonHost{})); !reflect.DeepEqual(w, []string{config.TetragonReasonNotApplicable}) {
+	if w, _ := codes(findingsOf("darwin", tetragonIntent{Reason: config.TetragonReasonNotApplicable}, true, kernelpolicy.State{}, false, tetragonHost{})); !reflect.DeepEqual(w, []string{config.TetragonReasonNotApplicable}) {
 		t.Fatalf("macOS: %v", w)
 	}
 }
