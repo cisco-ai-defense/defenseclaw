@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	kernelcontrols "github.com/defenseclaw/defenseclaw/policies/kernel"
 )
 
 // TestEffectivePolicyDigestAndHealth covers effective_policy_digest: two
@@ -121,5 +123,60 @@ func TestConfigDigestNormalizesTetragonDefaults(t *testing.T) {
 			}
 			seen[got] = different
 		}
+	}
+}
+
+// TestKernelPolicyComponent: the kernel_policy component is the sensor
+// helper's short kernel_policy digest (the value enforce_ack approves), and it
+// is present only where the helper loads the controls: a Linux standalone
+// deployment whose effective Tetragon mode is observe or enforce.
+func TestKernelPolicyComponent(t *testing.T) {
+	build := func(profile, mode string, planeC bool) *config.Config {
+		cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+		cfg.Enterprise.Profile = profile
+		cfg.Enterprise.Tetragon = config.EnterpriseTetragonConfig{Mode: mode}
+		cfg.AIDiscovery.Runtime = config.AIRuntimeConfig{Enabled: true, EnableHostPlane: planeC}
+		return cfg
+	}
+	standalone := managed.ProfileStandalone
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		goos string
+		want bool
+	}{
+		{"observe", build(standalone, "observe", true), "linux", true},
+		{"enforce", build(standalone, "enforce", true), "linux", true},
+		{"default consume", build(standalone, "", true), "linux", false},
+		{"consume", build(standalone, "consume", true), "linux", false},
+		{"off", build(standalone, "off", true), "linux", false},
+		{"plane c off", build(standalone, "enforce", false), "linux", false},
+		{"macos", build(standalone, "enforce", true), "darwin", false},
+		{"windows", build(standalone, "observe", true), "windows", false},
+		{"secure client", build(managed.ProfileSecureClient, "observe", true), "linux", false},
+		{"unmanaged", &config.Config{}, "linux", false},
+		{"nil", nil, "linux", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := ""
+			if tc.want {
+				want = kernelcontrols.Digest()
+			}
+			if got := kernelPolicyComponent(tc.cfg, tc.goos); got != want {
+				t.Fatalf("kernelPolicyComponent = %q, want %q", got, want)
+			}
+		})
+	}
+	if got := kernelPolicyComponent(build(standalone, "observe", true), "linux"); !kernelcontrols.AckMatches(got) {
+		t.Fatalf("component %q is not the value enforce_ack approves", got)
+	}
+	if runtime.GOOS != "linux" {
+		return
+	}
+	if got := assetDigestComponents(build(standalone, "enforce", true))["kernel_policy"]; got != kernelcontrols.Digest() {
+		t.Fatalf("assetDigestComponents kernel_policy = %q, want %q", got, kernelcontrols.Digest())
+	}
+	if got, ok := assetDigestComponents(build(standalone, "consume", true))["kernel_policy"]; ok {
+		t.Fatalf("consume carries a kernel_policy component %q", got)
 	}
 }

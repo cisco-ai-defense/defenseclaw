@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -31,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
+	kernelcontrols "github.com/defenseclaw/defenseclaw/policies/kernel"
 )
 
 // The effective policy digest (spec section 5) is
@@ -211,7 +213,26 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	if digest := builtinPolicyDigest(); digest != "" {
 		out["builtin"] = digest
 	}
+	if digest := kernelPolicyComponent(cfg, runtime.GOOS); digest != "" {
+		out["kernel_policy"] = digest
+	}
 	return out
+}
+
+// kernelPolicyComponent is the kernel_policy component (spec 12.2): the
+// digest of the kernel control set compiled into this binary, present only
+// where the sensor helper loads it, a Linux standalone deployment whose
+// effective enterprise.tetragon mode is observe or enforce. It is the short
+// form ("sha256:" and 12 hex) that the helper reports in kernel_status and
+// that enforce_ack approves, so doctor, enterprise status and the kernel
+// denial records compare the same value. A new build with another control
+// set therefore moves the effective digest.
+func kernelPolicyComponent(cfg *config.Config, goos string) string {
+	switch mode, _ := cfg.TetragonMode(goos); mode {
+	case config.TetragonModeObserve, config.TetragonModeEnforce:
+		return kernelcontrols.Digest()
+	}
+	return ""
 }
 
 // assetRefDigest is a reference's pinned digest, else the file's.
