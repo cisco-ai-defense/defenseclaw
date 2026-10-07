@@ -2022,11 +2022,25 @@ func readWindowsManagedHooksTeardownJournal(
 	return journal, nil
 }
 
+// windowsManagedHooksTeardownJournalForWrite writes the empty Codex
+// enrollment of a standalone deployment as [], not null: the reader takes a
+// null codex_targets as missing, so an activated deployment that enrolled no
+// Codex user could not uninstall (GAP-0248). A Secure Client journal is
+// written as before.
+func windowsManagedHooksTeardownJournalForWrite(
+	journal windowsManagedHooksTeardownJournal,
+) windowsManagedHooksTeardownJournal {
+	if journal.CodexTargets == nil && enterprisehooks.WindowsStandaloneProcess() {
+		journal.CodexTargets = []connector.WindowsCodexManagedRuntimeTarget{}
+	}
+	return journal
+}
+
 func writeWindowsManagedHooksTeardownJournal(
 	path string,
 	journal windowsManagedHooksTeardownJournal,
 ) error {
-	body, err := json.MarshalIndent(journal, "", "  ")
+	body, err := json.MarshalIndent(windowsManagedHooksTeardownJournalForWrite(journal), "", "  ")
 	if err != nil {
 		return err
 	}

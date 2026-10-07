@@ -12,6 +12,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 )
 
+// withEnterpriseACPServiceOwner runs fn as is: on Windows the elevated
+// caller hardens the records with ACLs for the gateway service afterwards
+// (alignEnterpriseACPCredentialOwner).
+func withEnterpriseACPServiceOwner(_ string, fn func() error) error { return fn() }
+
 func alignEnterpriseACPCredentialOwner(dataDir, principal, client, agent, profile, token string) error {
 	path, err := acp.EnterpriseCredentialPath(dataDir, principal, client, agent, profile)
 	if err != nil {

@@ -347,8 +347,8 @@ A pin names one install, so keep three things in mind:
 
 `explain` asks the running gateway, which resolves the user through the OS
 the way it does for a live request. With no `--user` it explains the account
-that runs the command. On Windows, name an Entra ID user by SID or as
-`AzureAD\<name>`: the computer cannot look up a UPN.
+that runs the command. On Windows, name an Entra ID user by SID, as
+`AzureAD\<name>`, by the bare name or by the UPN.
 
 ```bash
 defenseclaw guardrail profile show contractors
