@@ -614,6 +614,8 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 		c.Problems = append(c.Problems, fmt.Sprintf("%d file(s) over %d bytes were not read", oversize, maxFileBytes))
 	}
 	if truncated {
+		// A cut answer is not complete, even when its end made it in.
+		c.Ended = false
 		c.Problems = append(c.Problems, fmt.Sprintf("the collector's answer was cut at %d bytes", collectStreamBytes))
 	} else if !c.Ended {
 		c.Problems = append(c.Problems, "the collector's answer was cut short")

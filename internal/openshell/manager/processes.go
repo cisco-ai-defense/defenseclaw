@@ -175,13 +175,16 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 
 // merge folds one sample, taken from sampledAt on, into the tree and returns
 // the processes that started and exited. A pid the sample shows with
-// another start time is a new process; a live process the sample lacks has
-// exited, unless it joined the tree after the sample was taken.
+// another start time is a new process; a live process a complete sample
+// lacks has exited, unless it joined the tree after the sample was taken.
+// A sample cut short, without its end, or stopped at a process bound does
+// not show every process: it ends none.
 func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exited []*procNode) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sampledAt = now
-	t.truncated = c.ProcessesCapped || len(c.Processes) > procTreeMaxLive
+	complete := c.Ended && !c.ProcessesCapped && len(c.Processes) <= procTreeMaxLive
+	t.truncated = !complete
 	seen := map[int]bool{}
 	for _, p := range c.Processes {
 		if len(seen) >= procTreeMaxLive {
@@ -212,6 +215,9 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		if fresh {
 			started = append(started, node)
 		}
+	}
+	if !complete {
+		return started, exited
 	}
 	for pid, node := range t.live {
 		if !seen[pid] && node.FirstSeen.Before(sampledAt) {

@@ -75,6 +75,39 @@ func TestProcessTreeMergesSamples(t *testing.T) {
 	}
 }
 
+// Only a complete sample ends the live processes it lacks: one cut at the
+// stream's bound, without its end or stopped at the process bound may just
+// not have reached them.
+func TestProcessTreeKeepsLiveProcessesOnAPartialSample(t *testing.T) {
+	tree := newProcTree()
+	t0 := time.Now()
+	tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 30 node", "44 42 40 python3"), t0, t0)
+	head := collectSchema + "\nT 100 1700000000\nP 1 0 1000 10 S\nPc 1 init\nP 42 1 1000 20 S\nPc 42 claude\n"
+	partial := map[string]func() (*collection, error){
+		"cut": func() (*collection, error) {
+			return parseCollection([]byte(head+"P 43 42 10"), true, newCollectScope(), 1)
+		},
+		"no end": func() (*collection, error) { return parseCollection([]byte(head), false, newCollectScope(), 1) },
+		"capped": func() (*collection, error) {
+			return parseCollection([]byte(head+"Q processes\n"+collectEnd+"\n"), false, newCollectScope(), 1)
+		},
+	}
+	for name, parse := range partial {
+		c, err := parse()
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now()
+		if _, exited := tree.merge(c, at, at); len(exited) != 0 || !tree.truncated {
+			t.Fatalf("%s sample: exited %+v truncated %v, want none ended", name, exited, tree.truncated)
+		}
+	}
+	at := time.Now()
+	if _, exited := tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "44 42 40 python3"), at, at); len(exited) != 1 || exited[0].PID != 43 || tree.truncated {
+		t.Fatalf("complete sample: exited %+v, want 43", exited)
+	}
+}
+
 func TestProcessTreeIsBounded(t *testing.T) {
 	tree := newProcTree()
 	var procs []string
