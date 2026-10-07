@@ -337,13 +337,15 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
         from defenseclaw import config_writer
         from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
 
-        raw = b"config_version: 8\nskill_actions:\n  medium: {install: block}\n"
+        # update_check is a key the config_version 8 schema still rejects; skill_actions and its
+        # siblings are accepted there so the upgrade check can read a 1.0.0 file before it migrates.
+        raw = b"config_version: 8\nupdate_check: true\n"
         with self.assertRaises(V8ConfigError) as caught:
             load_validate_v8(raw, source_name="config.yaml")
         self.assertIn("run: defenseclaw migrate", str(caught.exception))
         self.assertEqual(
             config_writer.plain_error(_chained(caught.exception)),
-            "skill_actions was replaced by admission.skill.actions in config_version 9; run: defenseclaw migrate",
+            "update_check was replaced by update.check in config_version 9; run: defenseclaw migrate",
         )
 
     def test_a_newer_config_version_is_not_sent_to_migrate(self):
