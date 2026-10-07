@@ -416,6 +416,31 @@ func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
 	}
 }
 
+// TestExplainNamesWindowsGroupsWithoutAnIdentityRecord pins GAP-0121 and
+// GAP-0136: an account without a guardian identity record has unknown groups,
+// not none, and groups the guardian could not name stay bare SIDs; both are
+// said, and facts awaiting the record are refreshed early.
+func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
+	previous := currentIdentitySpoolDir()
+	t.Cleanup(func() { setIdentitySpoolDir(previous) })
+	setIdentitySpoolDir(t.TempDir())
+	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()); !strings.Contains(note, "no identity record for this account yet") {
+		t.Fatalf("spool note = %q", note)
+	}
+	if !awaitingSpool(useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}) ||
+		awaitingSpool(useridentity.DirectoryFacts{Groups: []string{"S-1-1-0", "Everyone"}}) {
+		t.Fatal("facts without groups must await the record, facts with groups must not")
+	}
+	setIdentitySpoolDir("")
+	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
+		t.Fatal("a gateway without a spool has no record to wait for")
+	}
+	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
+	if note := unnamedGroupsNote(named); !strings.Contains(note, "2 of this account's 3 group(s) have no name, only a SID") {
+		t.Fatalf("unnamed SID note = %q", note)
+	}
+}
+
 // TestExplainReportsGroupsThatCannotBeListed pins GAP-0201: an account whose
 // groups the OS database cannot list is a failed lookup in explain too, with
 // the reason, not an account with no groups that gets the plain default.

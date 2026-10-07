@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +32,11 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := unnamedGroupsNote(subject); note != "" {
 		warnings = append(warnings, note)
 	}
+	if runtime.GOOS == "windows" && subject != nil {
+		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
+			warnings = append(warnings, note)
+		}
+	}
 	return warnings
 }
 
@@ -42,18 +49,42 @@ func unnamedGroupsNote(subject *profileSubject) string {
 	if subject == nil || subject.LookupFailed {
 		return ""
 	}
-	unnamed := 0
-	for _, group := range subject.Groups {
-		if group != "" && strings.Trim(group, "0123456789") == "" {
-			unnamed++
+	groups := subject.Groups
+	isSID := func(group string) bool { return strings.HasPrefix(strings.ToUpper(group), "S-1-") }
+	sidForm := slices.ContainsFunc(groups, isSID)
+	unnamed, total := 0, len(groups)
+	if sidForm {
+		// Windows lists each group's SID followed by its DOMAIN\name; a SID
+		// followed by another SID (or the end) was not named. The guardian
+		// names at most 128 groups per account, within 2 s, so a large token
+		// or a slow domain controller leaves the rest as bare SIDs (GAP-0136).
+		total = 0
+		for i, group := range groups {
+			if !isSID(group) {
+				continue
+			}
+			total++
+			if i+1 >= len(groups) || isSID(groups[i+1]) {
+				unnamed++
+			}
+		}
+	} else {
+		for _, group := range groups {
+			if group != "" && strings.Trim(group, "0123456789") == "" {
+				unnamed++
+			}
 		}
 	}
 	if unnamed == 0 {
 		return ""
 	}
+	if sidForm {
+		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
+			"or the SID does not resolve); an assignment that names such a group as DOMAIN\\name cannot match, so name it by its SID", unnamed, total)
+	}
 	return fmt.Sprintf("%d of this account's %d group(s) are shown by number because no group answered for them; "+
 		"the directory may be unreachable or the group missing, and an assignment that names such a group cannot match",
-		unnamed, len(subject.Groups))
+		unnamed, total)
 }
 
 // Groups an assignment names that the host does not know.
