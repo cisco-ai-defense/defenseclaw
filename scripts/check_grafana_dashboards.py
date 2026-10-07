@@ -161,6 +161,7 @@ VARIABLES = {
     "$__range": "5m",
     "$scope_label": "gen_ai_agent_id",
     "$connector": "codex",
+    "$sandbox": ".+",
     "$agent": ".*",
     "$lifecycle": ".*",
     "$execution": ".*",

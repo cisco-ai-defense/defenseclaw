@@ -340,6 +340,7 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
     "defenseclaw-runtime",
+    "defenseclaw-sandboxes",
     "defenseclaw-scanners",
     "defenseclaw-security",
     "defenseclaw-traffic",
