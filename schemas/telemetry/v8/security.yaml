@@ -2448,6 +2448,29 @@ groups:
     requirement_level: required
   - ref: defenseclaw.enforcement.effective_action
     requirement_level: required
+- id: body.enforcement.kernel_block
+  type: body_group
+  brief: A kernel denial by a DefenseClaw control, with the policy that applied it and the user behind the process.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.enforcement.action
+  - correlation.policy.effective
+  - correlation.identity
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.guardrail.rule_id
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.control
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.login_id
+    requirement_level: recommended
 - id: body.asset.scan
   type: body_group
   brief: Asset scan process and result body.
@@ -3279,7 +3302,7 @@ groups:
   stability: stable
   introduced_in: telemetry-registry-v1
   extends:
-  - body.enforcement.action
+  - body.enforcement.kernel_block
   attributes: []
   body_fields: []
   log:

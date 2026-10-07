@@ -481,7 +481,7 @@
       "gridPos": {
         "x": 0,
         "y": 6,
-        "w": 24,
+        "w": 14,
         "h": 9
       },
       "targets": [
@@ -506,6 +506,106 @@
           "noValue": "No plane health samples in range"
         },
         "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Plane C source \u2014 which backend, and what it lost",
+      "description": "The process backend behind Plane C per host: the DefenseClaw-side `native` sources (cn_proc, fanotify) or the host's own Tetragon read by the root sensor helper. Events lost comes from the backend's own counters and shows `unknown` when they could not be read. Container events were counted and kept out of host agent sessions.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 6,
+        "w": 10,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "sum by (host_name, backend, mechanism) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | label_format backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mechanism=\"{{.body_defenseclaw_ai_runtime_plane_mechanism}}\")[$__range]))",
+          "refId": "CYCLES",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "expr": "max by (host_name, backend, mechanism) (max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_loss_known=\"true\" | label_format backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mechanism=\"{{.body_defenseclaw_ai_runtime_plane_mechanism}}\" | unwrap body_defenseclaw_ai_runtime_events_lost | __error__=\"\")[$__range]))",
+          "refId": "LOST",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "expr": "sum by (host_name, backend, mechanism) (sum_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | label_format backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mechanism=\"{{.body_defenseclaw_ai_runtime_plane_mechanism}}\" | unwrap body_defenseclaw_ai_runtime_container_events | __error__=\"\")[$__range]))",
+          "refId": "CONTAINER",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regexp": "Value #(\\w+)",
+            "renamePattern": "$1"
+          }
+        },
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "host_name": "Host",
+              "backend": "Backend",
+              "mechanism": "Mechanism",
+              "CYCLES": "Cycles",
+              "LOST": "Events lost",
+              "CONTAINER": "Container events"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No Plane C poll data",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Events lost"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "unknown"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
       }
     },
     {
@@ -790,6 +890,649 @@
       "fieldConfig": {
         "defaults": {
           "noValue": "No Plane C tactics in range"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Kernel floor (Linux) \u2014 what DefenseClaw's kernel controls did",
+      "gridPos": {
+        "x": 0,
+        "y": 53,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Hosts with enforcing controls",
+      "description": "Hosts whose `controls` policy was loaded in, or switched to, enforce mode in the range. Enforcement needs `enterprise.tetragon.mode: enforce`, an `enforce_ack` that matches the control-set digest, and a finished per-user burn-in; everything else runs in monitor mode and only counts.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "count(sum by (host_name) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.kernel_policy\" | body_defenseclaw_ai_runtime_kernel_family=\"controls\" | body_defenseclaw_ai_runtime_kernel_mode=\"enforce\")[$__range]))) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "None in range",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Kernel denials",
+      "description": "Accesses a DefenseClaw kernel control refused with EPERM (`enforcement.block.applied`, initiator `kernel`). An in-place write to a shell rc file or user autostart unit, or a read of an ssh private key, by an enrolled agent's process tree.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 54,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\")[$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No denials",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Would-block (monitor)",
+      "description": "Activity a control in monitor mode would have denied. This is the burn-in evidence: a user with hits stays in monitor until a fresh window of covered time shows none.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 54,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.activity\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\")[$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No would-blocks",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Agent activity with no hook decision",
+      "description": "Host-plane activity on a managed host that no hook decision covered: an agent's own shell escape, a detached job, an MCP server. The join only labels; it never blocks.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 54,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.activity\" | body_defenseclaw_ai_runtime_hook_seen=\"false\")[$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "None in range",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Paused hosts and operator overrides",
+      "description": "Break-glass pauses (`enterprise linux tetragon pause`) and policies an operator moved to monitor or deleted. Both persist across helper and Tetragon restarts until the intent changes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 54,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.kernel_policy\" | body_defenseclaw_ai_runtime_kernel_event=~\"paused|operator_override\")[$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "None in range",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Reconcile failures and orphans",
+      "description": "The sensor helper could not bring Tetragon to the policies it wants, or found DefenseClaw policies loaded that it no longer intends. Policies stay in or move to monitor; they never widen.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 54,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.kernel_policy\" | body_defenseclaw_ai_runtime_kernel_event=~\"reconcile_failed|orphaned\")[$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "None in range",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Kernel denials by control and connector",
+      "description": "Denials over time, split by the control that refused the access and the connector whose agent made it.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (control, connector) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\")[$__interval]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "legendFormat": "{{control}} \u00b7 {{connector}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No kernel denials in range",
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Would-block in monitor mode, by control",
+      "description": "What the controls would have denied while running in monitor mode (observe mode, and users still in burn-in).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 59,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (control) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.activity\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\")[$__interval]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "legendFormat": "{{control}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No would-blocks in range",
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "DefenseClaw kernel policies",
+      "description": "State changes of the policies the sensor helper loaded into the host's Tetragon, by name, family, mode and state, with how many times each happened in the range. The log below has the timeline.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 67,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "sum by (host_name, policy, family, mode, state, event) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.kernel_policy\" | body_defenseclaw_policy_id!=\"\" | label_format policy=\"{{.body_defenseclaw_policy_id}}\", family=\"{{.body_defenseclaw_ai_runtime_kernel_family}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_mode}}\", state=\"{{.body_defenseclaw_ai_runtime_kernel_state}}\", event=\"{{.body_defenseclaw_ai_runtime_kernel_event}}\")[$__range]))",
+          "refId": "CHANGES",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regexp": "Value #(\\w+)",
+            "renamePattern": "$1"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "host_name": "Host",
+              "policy": "Policy",
+              "family": "Family",
+              "mode": "Mode",
+              "state": "State",
+              "event": "Change",
+              "CHANGES": "Times"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No kernel policy changes in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Times",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "Burn-in readiness per user",
+      "description": "A user enters the enforcing scope only after a per-user burn-in of covered agent time with no would-block hits. `uid_ready` is that transition; `uid_burnin` is a user that started, restarted (new connector, changed control set) or was held back by hits.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 67,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "sum by (host_name, user, event, reason) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.kernel_policy\" | body_defenseclaw_ai_runtime_kernel_event=~\"uid_ready|uid_burnin\" | label_format user=\"{{.body_user_id}}\", event=\"{{.body_defenseclaw_ai_runtime_kernel_event}}\", reason=\"{{.body_defenseclaw_ai_runtime_kernel_reason}}\")[$__range]))",
+          "refId": "CHANGES",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regexp": "Value #(\\w+)",
+            "renamePattern": "$1"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "host_name": "Host",
+              "user": "User (uid)",
+              "event": "State",
+              "reason": "Reason",
+              "CHANGES": "Times"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No burn-in changes in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Times",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Kernel policy changes",
+      "description": "One record per state change of the sensor helper's reconciler (loaded, mode changed, removed, paused, operator override, ack stale, uid ready, Tetragon restarted, fallback). Never one per kernel event.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 76,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.kernel_policy\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No kernel policy changes in range"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Kernel denials",
+      "description": "Each denial carries the Tetragon policy name, the control-set digest, the guardrail rule it mirrors (`PATH-SSH-KEY`, `persistence.shell_profile_write`) and the user. The path and the command line are not exported.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 76,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No kernel denials in range"
         },
         "overrides": []
       }
