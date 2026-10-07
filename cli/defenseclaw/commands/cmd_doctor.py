@@ -10000,7 +10000,7 @@ def _check_observability_v8_status(
                 tag = "fail"
             if live.circuit_state == "half_open":
                 tag = "warn"
-                detail += "; one bounded recovery probe is in progress"
+                detail += "; awaiting or running one bounded recovery probe"
             local_stack_stopped = _local_observability_stack_stopped(destination, live, tag)
             if local_stack_stopped:
                 # Nothing to repair: the bundled stack is not running, and
