@@ -1118,3 +1118,34 @@ func TestAdmissionFailsClosedWhenTheJudgeDidNotRun(t *testing.T) {
 		t.Fatalf("quarantine records %+v (err %v), want one naming the judge failure", records, err)
 	}
 }
+
+// GAP-0393: quarantining Claude Code's skill-creator recorded the block and
+// the runtime disable for every connector, so Codex's vendor-bundled
+// skill-creator read as quarantined and disabled. The rows now belong to the
+// connector that holds the copy.
+func TestAutomaticEnforcementIsScopedToTheConnectorWithTheCopy(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.SetRootConnectors(map[string]string{skillDir: "claudecode"})
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+			{ID: "c1", RuleID: "CMD-INJECTION", Severity: scanner.SeverityCritical, Title: "command injection"},
+		}}
+	}
+	skillPath := filepath.Join(skillDir, "skill-creator")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "skill-creator", Path: skillPath, Timestamp: time.Now()})
+	if res.Verdict != VerdictRejected {
+		t.Fatalf("verdict %q, want rejected", res.Verdict)
+	}
+	pe := enforce.NewPolicyEngine(store)
+	if disabled, _ := pe.IsDisabledForConnector("skill", "skill-creator", "claudecode"); !disabled {
+		t.Fatal("claudecode copy is not disabled")
+	}
+	if disabled, _ := pe.IsDisabledForConnector("skill", "skill-creator", "codex"); disabled {
+		t.Fatal("the claudecode verdict disabled codex's skill-creator too")
+	}
+}

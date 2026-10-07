@@ -935,6 +935,10 @@ def _skill_info_card(
 
     if connector:
         info_map["connector"] = connector
+    if info_map.get("bundled"):
+        # Discovery-only: no scan or enforcement verdict applies (GAP-0393).
+        scan_entry = None
+        actions_map.pop(skill_name, None)
     if scan_entry is not None:
         info_map["scan"] = scan_entry
     action_entry = actions_map.get(skill_name)
@@ -1438,6 +1442,16 @@ def _collect_skills_for_connector(
             known_names.add(name)
 
     _mark_quarantined_phantoms(app, skills)
+
+    # Vendor-bundled skills are discovery-only: DefenseClaw never scans or
+    # blocks them, so a verdict on another connector's skill with the same
+    # name (or an older unscoped row) must not mark them quarantined or
+    # disabled (GAP-0393). The callers' maps drop those names.
+    bundled = {s.get("name", "") for s in skills if s.get("bundled")}
+    bundled -= {s.get("name", "") for s in skills if not s.get("bundled")}
+    for name in bundled:
+        actions_map.pop(name, None)
+        scan_map.pop(name, None)
 
     for discovered in skills:
         name = discovered.get("name", "")

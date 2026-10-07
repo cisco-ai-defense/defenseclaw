@@ -875,7 +875,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 	}
 
-	pe := enforce.NewPolicyEngine(w.store)
 	targetType := string(evt.Type)
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
 	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID)
@@ -1041,7 +1040,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	}
 
 	out = w.evaluateAdmission(ctx, input)
-	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
+	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
 	res = AdmissionResult{
@@ -1144,7 +1143,7 @@ func (w *InstallWatcher) evaluateAdmission(ctx context.Context, input policy.Adm
 // perform itself. It respects file_action and install_action from OPA output.
 //
 // The caller has already returned for block- and allow-listed items.
-func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enforce.PolicyEngine, out *policy.AdmissionOutput, evt InstallEvent, targetType string, result *scanner.ScanResult, scannerName string) {
+func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *policy.AdmissionOutput, evt InstallEvent, targetType string, result *scanner.ScanResult, scannerName string) {
 	switch out.Verdict {
 	case "clean":
 		_ = w.logger.LogAction(string(audit.ActionInstallClean), evt.Path,
@@ -1166,11 +1165,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			installAction := coalesce(out.InstallAction, "block")
 			runtimeAction := coalesce(out.RuntimeAction, "allow")
 			fileAction := coalesce(out.FileAction, "none")
+			scope := w.journalScope(w.eventConnector(evt))
 
 			if installAction == "block" {
-				_ = pe.Block(targetType, evt.Name, blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", blockReason)
 			}
-			pe.SetSourcePath(targetType, evt.Name, evt.Path)
+			_ = w.store.SetSourcePathForConnector(targetType, evt.Name, scope, evt.Path)
 
 			enforcement := map[string]string{
 				"source_path": evt.Path,
@@ -1180,10 +1180,10 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			}
 
 			if fileAction == "quarantine" && !retainRestored {
-				_ = pe.Quarantine(targetType, evt.Name, blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "file", "quarantine", blockReason)
 			}
 			if runtimeAction == "block" {
-				_ = pe.Disable(targetType, evt.Name, blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "runtime", "disable", blockReason)
 			}
 
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
@@ -1290,6 +1290,20 @@ func (w *InstallWatcher) withRulePackOverlay(inner scanner.Scanner, evt InstallE
 		return inner
 	}
 	return guardrail.NewArtifactOverlay(inner, w.rulePackSource(w.eventConnector(evt)))
+}
+
+// journalScope is the connector the watcher's automatic enforcement rows
+// belong to: the connector that holds the scanned copy, so blocking one
+// connector's skill no longer disables another connector's skill (a
+// vendor-bundled one included) that only shares its name (GAP-0393).
+// OpenClaw, whose gateway enforces by name, and the Secure Client watcher
+// keep the global row.
+func (w *InstallWatcher) journalScope(connector string) string {
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	if w.secureClientActive() || connector == "openclaw" {
+		return ""
+	}
+	return connector
 }
 
 // takeActionFor returns whether enforcement actions should be applied for the

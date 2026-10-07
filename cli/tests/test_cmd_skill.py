@@ -2041,6 +2041,26 @@ class TestSkillList(SkillCommandTestBase):
         )
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_bundled_skill_ignores_a_verdict_on_another_copy(self, mock_list):
+        """GAP-0393: another connector's quarantined skill-creator marked the
+        vendor-bundled skill-creator quarantined and disabled."""
+        mock_list.return_value = {
+            "skills": [
+                {"name": "skill-creator", "description": "", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "bundled", "bundled": True, "homepage": ""},
+            ]
+        }
+        self.app.store.set_action_field("skill", "skill-creator", "file", "quarantine", "watcher")
+        self.app.store.set_action_field("skill", "skill-creator", "runtime", "disable", "watcher")
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertFalse(item["disabled"])
+        self.assertNotIn("actions", item)
+        self.assertEqual(item["verdict"], "-")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_table_title_shows_connector_in_scope(self, mock_list):
         # Mirror the MCP table's (connector=...) banner so the active
         # connector the list is scoped to is discoverable.

@@ -529,7 +529,10 @@ other Codex skill, including CodeGuard under `.agents/skills`, is scanned. For
 [Hermes](/docs/connectors/hermes), a skill under `$HERMES_HOME/skills` is
 inventory only when it matches the installer's `.bundled_manifest` and the
 bundled source exactly; modified, extra or unverifiable copies are scanned.
-`aibom scan` counts these skills as discovery-only.
+`aibom scan` counts these skills as discovery-only. A watcher verdict on
+another connector's skill with the same name never applies to them: the
+watcher records its block, quarantine and runtime disable for the connector
+that holds the scanned copy only.
 </Callout>
 
 A named policy sets these actions for every asset type at once, as an explicit map (so it replaces the scanner gate, as noted above):
