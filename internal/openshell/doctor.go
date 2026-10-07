@@ -1029,7 +1029,10 @@ func (r *doctorRun) checkLinger(ctx context.Context) {
 	c := Check{ID: CheckIDLinger, Title: "systemd linger"}
 	defer func() { r.add(c) }()
 	if r.GOOS != "linux" {
-		c.Status, c.Detail = StatusSkip, "Homebrew services run while you are logged in"
+		// A Mac has no systemd: the row says what keeps the gateway
+		// running there (GAP-0193).
+		c.Title = "Login session"
+		c.Status, c.Detail = StatusSkip, "Homebrew services, the OpenShell gateway among them, run while you are logged in"
 		return
 	}
 	name, err := r.Username()

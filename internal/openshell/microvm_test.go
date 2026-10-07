@@ -135,6 +135,17 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	}
 }
 
+// TestDoctorNamesTheMacLoginSession (GAP-0193): on a Mac the row Linux
+// calls systemd linger is named for what keeps the gateway running there.
+func TestDoctorNamesTheMacLoginSession(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onMicroVMs()
+	c := expectCheck(t, f.run(), openshell.CheckIDLinger, openshell.StatusSkip, "Homebrew services, the OpenShell gateway among them, run while you are logged in")
+	if c.Title != "Login session" {
+		t.Fatalf("title = %q, want Login session", c.Title)
+	}
+}
+
 // TestDoctorOnAMacWithoutBuildx: DefenseClaw builds a MicroVM's images in
 // Docker too, so on a Mac whose docker does not find its buildx plugin (a
 // HOME without Docker Desktop's ~/.docker/cli-plugins) the BuildKit check
