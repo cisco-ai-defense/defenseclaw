@@ -172,19 +172,29 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 // another start time is a new process; a live process a complete sample
 // lacks has exited, unless it joined the tree after the sample was taken.
 // A sample cut short, without its end, or stopped at a process bound does
-// not show every process: it ends none.
+// not show every process: it ends none. Whatever the samples, the tree holds
+// at most procTreeMaxLive live processes: a new one past the bound is left
+// out (the tree says it is truncated) until others end.
 func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exited []*procNode) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sampledAt = now
 	complete := c.Ended && !c.ProcessesCapped && len(c.Processes) <= procTreeMaxLive
 	t.truncated = !complete
-	seen := map[int]bool{}
-	for _, p := range c.Processes {
-		if len(seen) >= procTreeMaxLive {
-			break
+	if complete {
+		// The processes a complete sample lacks end first, so they do not
+		// hold room the ones it shows need.
+		seen := make(map[int]bool, len(c.Processes))
+		for _, p := range c.Processes {
+			seen[p.PID] = true
 		}
-		seen[p.PID] = true
+		for pid, node := range t.live {
+			if !seen[pid] && node.FirstSeen.Before(sampledAt) {
+				exited = append(exited, t.exitLocked(node, now, nil))
+			}
+		}
+	}
+	for _, p := range c.Processes {
 		node := t.live[p.PID]
 		if node != nil && node.startTicks != 0 && node.startTicks != p.StartTicks {
 			exited = append(exited, t.exitLocked(node, now, nil))
@@ -192,6 +202,10 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		}
 		fresh := node == nil
 		if fresh {
+			if len(t.live) >= procTreeMaxLive {
+				t.truncated = true
+				continue
+			}
 			node = &procNode{PID: p.PID, FirstSeen: now, Source: audit.SandboxProcessSourceSample}
 			t.live[p.PID] = node
 		}
@@ -208,14 +222,6 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		}
 		if fresh {
 			started = append(started, node)
-		}
-	}
-	if !complete {
-		return started, exited
-	}
-	for pid, node := range t.live {
-		if !seen[pid] && node.FirstSeen.Before(sampledAt) {
-			exited = append(exited, t.exitLocked(node, now, nil))
 		}
 	}
 	return started, exited

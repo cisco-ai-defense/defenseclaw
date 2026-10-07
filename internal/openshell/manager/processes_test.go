@@ -128,6 +128,40 @@ func TestProcessTreeIsBounded(t *testing.T) {
 	}
 }
 
+// The bound holds across samples that end nothing: the new processes of
+// partial samples join only while the tree has room, and a complete sample
+// ends the ones it lacks before it adds its own.
+func TestProcessTreeStaysBoundedAcrossPartialSamples(t *testing.T) {
+	tree := newProcTree()
+	now := time.Now()
+	for round := range 3 {
+		lines := []string{"T 100 1700000000"}
+		for i := range 3000 {
+			pid := 2 + round*3000 + i
+			lines = append(lines, fmt.Sprintf("P %d 1 1000 %d", pid, pid), fmt.Sprintf("Pc %d p%d", pid, pid))
+		}
+		// No end line: the sample may not show every process.
+		c, err := parseCollection(answerOf(lines...), false, newCollectScope(), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := now.Add(time.Duration(round) * time.Second)
+		started, exited := tree.merge(c, at, at)
+		if len(tree.live) > procTreeMaxLive || len(exited) != 0 || !tree.truncated {
+			t.Fatalf("round %d: live = %d started = %d exited = %d truncated = %v, want at most %d live",
+				round, len(tree.live), len(started), len(exited), tree.truncated, procTreeMaxLive)
+		}
+	}
+	if len(tree.live) != procTreeMaxLive {
+		t.Fatalf("live = %d, want the bound of %d", len(tree.live), procTreeMaxLive)
+	}
+	at := now.Add(time.Minute)
+	started, exited := tree.merge(sampleOf("1 0 1 init", "90000 1 5 claude"), at, at)
+	if len(started) != 2 || len(exited) != procTreeMaxLive || len(tree.live) != 2 || tree.truncated {
+		t.Fatalf("complete sample: started %d exited %d live %d truncated %v", len(started), len(exited), len(tree.live), tree.truncated)
+	}
+}
+
 func TestProcessCmdlineRedactsSecrets(t *testing.T) {
 	got := processCmdline([]string{"node", "cli.js", "--api-key", "dccert-block-marker", "--token=dccertvalue",
 		"PASSWORD=dccertvalue", "dccert0123456789dccert0123456789", "/sandbox/work/a-very-long-path-name-0123456789/x", "plain"})
