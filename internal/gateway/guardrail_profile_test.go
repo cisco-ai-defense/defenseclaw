@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	osuser "os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -351,6 +352,56 @@ rules:
 	}
 	if ids := findingIDs(ScanAllRulesForConnector("codex", "profile_marker_token", "exec")); containsRuleID(ids, "PROFILE-MARKER") {
 		t.Fatalf("profile rule pack leaked into the base rule set: %v", ids)
+	}
+}
+
+// TestProfileRulePackLoadedAfterStart pins GAP-0333: a profile whose rule
+// pack directory did not exist when the gateway started scans with the base
+// rule set only until a retry loads the pack, and explain says so meanwhile.
+func TestProfileRulePackLoadedAfterStart(t *testing.T) {
+	stubProfileSources(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	priorManaged := ManagedEnterpriseActive()
+	setManagedEnterpriseRedactionPosture(false)
+	t.Cleanup(func() { setManagedEnterpriseRedactionPosture(priorManaged) })
+	packDir := filepath.Join(t.TempDir(), "late-pack")
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action", RulePackDir: packDir}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	set := api.guardrailProfileSet()
+	scan := func() []string {
+		ctx := context.WithValue(context.Background(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+		return findingIDs(scanAllRulesForConnectorFor(api.withGuardrailProfileDecision(ctx, "codex"), "codex", "profile_marker_token", "exec"))
+	}
+	if set == nil || containsRuleID(scan(), "PROFILE-MARKER") {
+		t.Fatal("a profile whose pack is missing must scan with the base rule set")
+	}
+	if note := set.pendingRulePackNote("strict", set.profiles["strict"].Config, "codex"); !strings.Contains(note, "did not load") {
+		t.Fatalf("explain note = %q, want the missing pack", note)
+	}
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: PROFILE-MARKER
+    pattern: "profile_marker_token"
+    title: late pack fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	for _, retry := range set.missing {
+		retry.mu.Lock()
+		retry.nextTry = time.Time{}
+		retry.mu.Unlock()
+	}
+	if ids := scan(); !containsRuleID(ids, "PROFILE-MARKER") {
+		t.Fatalf("the pack created after start was not used: %v", ids)
+	}
+	if note := set.pendingRulePackNote("strict", set.profiles["strict"].Config, "codex"); note != "" {
+		t.Fatalf("explain note = %q after the pack loaded", note)
 	}
 }
 
