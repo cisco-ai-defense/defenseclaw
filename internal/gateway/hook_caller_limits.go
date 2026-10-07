@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,16 @@ import (
 // verified caller identity (uid or SID) therefore gets its own token bucket
 // and in-flight cap. A caller over either gets an immediate 429 with a
 // stable reason; other callers are not affected.
+//
+// The caller limits cap one account, not the host: 200 accounts at 32 requests
+// each are all admitted, the requests share the CPU and the audit writer
+// fairly, and all of them finish together after longer than the hook deadline
+// (600 simultaneous hooks took about 25 s on 8 processors, every client had
+// given up by then, and the gateway still evaluated and audited each one).
+// The gateway therefore also bounds the requests it holds at once across all
+// callers, in proportion to its processors. A request over the bound gets the
+// same immediate 429, with its own reason, instead of a timeout, and the
+// requests inside the bound finish in time.
 //
 // Within its in-flight cap a caller also runs at most half as many requests
 // at a time as the gateway has processors (at least one); the rest wait for
@@ -53,21 +64,33 @@ const (
 	// hookCallerInFlight bounds one caller's concurrent requests, running
 	// or waiting.
 	hookCallerInFlight = 32
+	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
+	// the gateway holds at once for all callers together: 16 per processor,
+	// at least 32. A processor serves about 3 hooks a second, so a full
+	// gateway answers its last admitted request in about 5 s, inside the
+	// shortest hook deadline (10 s).
+	hookGlobalInFlightPerProc = 16
+	hookGlobalInFlightMin     = 32
 	// hookCallerIdle is how long an idle caller's budget is kept.
 	hookCallerIdle = 5 * time.Minute
 	// hookCallerLogInterval paces the refusal log line per caller.
 	hookCallerLogInterval = 10 * time.Second
 
 	managedHookReasonRateLimited = "enterprise_managed_rate_limited"
+	managedHookReasonOverloaded  = "enterprise_managed_overloaded"
 )
 
 type hookCallerLimiter struct {
 	mu        sync.Mutex
 	callers   map[string]*hookCallerBudget
 	lastSweep time.Time
+	// total is the number of admitted requests that have not finished, for
+	// all callers; lastOverloadLog paces the log line of a full gateway.
+	total           int
+	lastOverloadLog time.Time
 	// Test overrides; zero values select the defaults above.
-	now                            func() time.Time
-	rate, burst, inFlight, running int
+	now                                            func() time.Time
+	rate, burst, inFlight, running, globalInFlight int
 }
 
 type hookCallerBudget struct {
@@ -84,6 +107,14 @@ func (l *hookCallerLimiter) clock() time.Time {
 		return l.now()
 	}
 	return time.Now()
+}
+
+// globalLimit is the most requests held at once for all callers.
+func (l *hookCallerLimiter) globalLimit() int {
+	if l.globalInFlight > 0 {
+		return l.globalInFlight
+	}
+	return max(hookGlobalInFlightMin, hookGlobalInFlightPerProc*runtime.GOMAXPROCS(0))
 }
 
 func (l *hookCallerLimiter) limits() (rps, burst, inFlight, running int) {
@@ -104,11 +135,12 @@ func (l *hookCallerLimiter) limits() (rps, burst, inFlight, running int) {
 	return rps, burst, inFlight, running
 }
 
-// acquire admits one request of caller. When it returns true, the request
-// may run once it holds a token of run, and release must be called once the
-// request is done. When it returns false, logNow reports whether this
-// refusal should be logged (at most once per interval).
-func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan struct{}, ok, logNow bool) {
+// acquire admits one request of caller. When it returns an empty refusal, the
+// request may run once it holds a token of run, and release must be called
+// once the request is done. Otherwise refusal is the reason to answer 429
+// with, and logNow reports whether this refusal should be logged (at most
+// once per interval).
+func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan struct{}, refusal string, logNow bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock()
@@ -123,6 +155,17 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 			}
 		}
 	}
+	// Telemetry batches are not hooks: a refused hook denies the tool call
+	// while an exporter retries, so they stay out of the gateway-wide bound
+	// (they keep their own per-caller budget).
+	counted := !strings.HasSuffix(caller, hookCallerTelemetryBudget)
+	if counted && l.total >= l.globalLimit() {
+		logNow = now.Sub(l.lastOverloadLog) >= hookCallerLogInterval
+		if logNow {
+			l.lastOverloadLog = now
+		}
+		return nil, nil, managedHookReasonOverloaded, logNow
+	}
 	rps, burst, inFlight, running := l.limits()
 	budget := l.callers[caller]
 	if budget == nil {
@@ -135,18 +178,24 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		if logNow {
 			budget.lastLog = now
 		}
-		return nil, nil, false, logNow
+		return nil, nil, managedHookReasonRateLimited, logNow
 	}
 	budget.inFlight++
+	if counted {
+		l.total++
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			l.mu.Lock()
 			budget.inFlight--
+			if counted {
+				l.total--
+			}
 			budget.lastSeen = l.clock()
 			l.mu.Unlock()
 		})
-	}, budget.running, true, false
+	}, budget.running, "", false
 }
 
 // hookCallerTelemetryBudget suffixes the budget key of a caller's OTLP
@@ -173,8 +222,13 @@ func hookCallerBudgetKey(identity, path string) string {
 // function is nil after answering 429 or when the client went away while it
 // waited.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	release, run, ok, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
-	if ok {
+	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
+	if refusal == "" {
+		if r.Context().Err() != nil {
+			// The client left before it had a slot: nothing to serve.
+			release()
+			return r, nil
+		}
 		select {
 		case run <- struct{}{}:
 			slot := &hookRunSlot{run: run, held: true}
@@ -189,16 +243,20 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 	}
 	if logNow {
 		fmt.Fprintf(os.Stderr,
-			"[sidecar-api] hook caller rate limited identity=%s route=%s reason=%s\n",
-			identity, route, managedHookReasonRateLimited)
+			"[sidecar-api] hook caller refused identity=%s route=%s reason=%s\n",
+			identity, route, refusal)
+	}
+	message := "DefenseClaw is limiting the hook requests of this account; retry shortly"
+	if refusal == managedHookReasonOverloaded {
+		message = "DefenseClaw is handling as many hook requests as it can; retry shortly"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Retry-After", "1")
 	w.WriteHeader(http.StatusTooManyRequests)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":   "rate_limited",
-		"reason":  managedHookReasonRateLimited,
-		"message": "DefenseClaw is limiting this account's hook requests; retry shortly",
+		"reason":  refusal,
+		"message": message,
 	})
 	return r, nil
 }

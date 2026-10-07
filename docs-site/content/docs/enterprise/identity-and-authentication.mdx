@@ -65,8 +65,9 @@ DefenseClaw reads identity only from the operating system the agent runs on.
 Each fact has an assurance level, sent as
 `defenseclaw.user.principal.assurance`: `verified` when the gateway or the
 root guardian resolved it for a uid or SID the gateway took from how it
-authenticated the caller (the kernel's peer credentials, a per-user
-credential, or on a per-user install the account the gateway runs as),
+authenticated the caller (the kernel's peer credentials, a per-user or
+enterprise ACP credential, or on a per-user install the account the gateway
+runs as),
 `claimed` when the hook reported it from the user's own session and the user
 could change it. The reference for what is read on each
 OS is [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
