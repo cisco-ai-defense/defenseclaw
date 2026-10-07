@@ -622,6 +622,10 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert panel.data_table_columns() == ("Connector", "User", "ID", "Source", "Model", "Workspace", "Default")
     assert len(panel.data_table_rows()) == 3
     assert panel.data_table_rows()[1] == ("codex", "bob", "agt-0123456789abcdef", "agent identity", "", "", "")
+    long_user = "A" * 300
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [identity("agt-long", long_user)]}))
+    assert panel.data_table_rows()[-1][1] == "A" * 29 + "..."
+
     panel.set_cursor(1)
     assert dict(panel.detail_info().fields)["Sessions"] == "3"
     # GAP-0152: a list cut at its bound says so on the sub-tab.

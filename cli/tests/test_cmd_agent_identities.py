@@ -69,3 +69,30 @@ def test_identities_forwards_filters_and_renders_rows(stub_client: _StubClient) 
     as_json = CliRunner().invoke(cli, ["agent", "identities", "--json"])
     assert as_json.exit_code == 0, as_json.output
     assert json.loads(as_json.output) == {"enabled": True, "identities": [_ROW, _ROW2], "total": 2, "next_cursor": ""}
+
+
+def test_identity_filters_name_empty_results_and_reject_invalid_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class EmptyClient:
+        def agent_identities_all(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"enabled": True, "identities": [], "total": 0}
+
+        def agent_identities(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"total": 2621}
+
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: EmptyClient())
+    runner = CliRunner()
+    empty = runner.invoke(cli, ["agent", "identities", "--user", "nosuchuser"])
+    assert empty.exit_code == 0, empty.output
+    assert "No agent identity matches --user nosuchuser (2621 identities exist" in empty.output
+    unknown = runner.invoke(cli, ["agent", "identities", "--connector", "bogus"])
+    assert unknown.exit_code != 0 and "valid names" in unknown.output
+    huge = runner.invoke(cli, ["agent", "identities", "--limit", "99999999999999999999"])
+    assert huge.exit_code != 0 and "limit too large" in huge.output
+
+
+def test_identity_table_uses_cell_width_and_removes_control_characters() -> None:
+    row = {**_ROW, "user_name": "李雷	name"}
+    rendered = cmd_agent._render_agent_identities([row])
+    assert "	" not in rendered
+    heading, value = rendered.splitlines()
+    assert heading.index("Connector") == value.index("claudecode")
