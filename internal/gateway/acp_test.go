@@ -569,6 +569,24 @@ func TestACPUnboundFrameDoesNotJoinAnotherAgentSession(t *testing.T) {
 	}
 }
 
+func TestACPAggregateCarriesTheTurnSession(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	frame := json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"turn-session-1","update":{"content":{"text":"safe"}}}}`)
+	payload, err := acp.BuildTurnEvaluationPayload([]json.RawMessage{frame})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := deniedACPTestEvaluation()
+	req.Payload, req.Aggregate = payload, true
+	ctx := acpEvaluationContext(t.Context(), req, "kiro")
+	if got := SessionIDFromContext(ctx); got != "turn-session-1" {
+		t.Fatalf("aggregate session = %q", got)
+	}
+	if got := AgentIdentityFromContext(ctx).AgentInstanceID; got == "" {
+		t.Fatal("aggregate omitted its agent instance")
+	}
+}
+
 func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
 	return api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

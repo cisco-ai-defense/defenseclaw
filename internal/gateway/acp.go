@@ -341,10 +341,17 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 
 // acpFrameSessionID is the ACP sessionId a single frame names, or "".
 func acpFrameSessionID(req acp.Evaluation) string {
+	payload := req.Payload
 	if req.Aggregate {
-		return ""
+		var turn struct {
+			Frames []json.RawMessage `json:"frames"`
+		}
+		if json.Unmarshal(payload, &turn) != nil || len(turn.Frames) == 0 {
+			return ""
+		}
+		payload = turn.Frames[0]
 	}
-	msg, err := acp.ParseMessage(req.Payload)
+	msg, err := acp.ParseMessage(payload)
 	if err != nil || len(msg.Params) == 0 {
 		return ""
 	}
