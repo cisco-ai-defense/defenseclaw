@@ -217,6 +217,27 @@ func TestDestinationsTellCredentialEndpointsFromTheModelProvider(t *testing.T) {
 	}
 }
 
+// The model provider row is named by the sandbox's --llm provider, not by
+// OpenShell's provider rule (named after the sandbox), and shows the binary
+// whose model calls got through, not one only refused the host (GAP-0079).
+func TestDestinationsNameTheModelProviderAndItsBinary(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "brbox",
+		LLM: &sandboxapi.LLMCredential{Profile: profiles.ClaudeBedrockMantleID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "dccert-block-marker"}}})
+	now, host := time.Now(), "bedrock-mantle.us-east-1.api.aws"
+	e.ocsf("brbox", "NET:OPEN [INFO] ALLOWED "+testClaudeBin+"(7) -> "+host+":443/tcp [policy:_provider_brbox_llm engine:opa]", now)
+	e.ocsf("brbox", "NET:OPEN [MED] DENIED /usr/bin/curl(9) -> "+host+":443/tcp [policy:- engine:opa] [reason:unsupported_rule]", now)
+	r := destinationKinds(t, e, "brbox")[host]
+	if r.Kind != sandboxapi.DestinationModelProvider || r.Provider != "Amazon Bedrock" || len(r.Binaries) != 2 || r.Binaries[1] != testClaudeBin {
+		t.Fatalf("model provider row = %+v", r)
+	}
+	for _, id := range profiles.IDs() {
+		if id != profiles.IngressID && llmProviderName(id) == "" {
+			t.Errorf("profile %s has no provider name", id)
+		}
+	}
+}
+
 // The destinations are kept across daemon restarts; a delete removes them.
 func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	e := liveEnv(t, "keepbox", nil)

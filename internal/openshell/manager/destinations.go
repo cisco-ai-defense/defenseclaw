@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
@@ -211,13 +212,43 @@ type destinationInfo struct {
 	// credentialHosts are the endpoints of the sandbox's --credential
 	// bindings that are not also its model provider's.
 	credentialHosts []string
+	// llm names the sandbox's model provider (llmProviderName).
+	llm string
+}
+
+// llmProviderName names the provider of a --llm credential profile
+// template: what the view calls the sandbox's model provider. Never
+// OpenShell's provider rule, which DefenseClaw names after the sandbox
+// (_provider_<name>_llm), and not only the catalog, which knows no Amazon
+// Bedrock host.
+func llmProviderName(template string) string {
+	switch template {
+	case profiles.AnthropicID, profiles.ClaudeOAuthID, profiles.OpenCodeAnthropicID, profiles.CopilotAnthropicID:
+		return "Anthropic"
+	case profiles.OpenAIID, profiles.OpenCodeOpenAIID:
+		return "OpenAI"
+	case profiles.ClaudeBedrockMantleID, profiles.CodexBedrockMantleID, profiles.OpenCodeBedrockMantleID,
+		profiles.CopilotBedrockMantleID, profiles.BedrockMantleOpenAIID:
+		return "Amazon Bedrock"
+	case profiles.GeminiID:
+		return "Google Gemini"
+	case profiles.CopilotGitHubID:
+		return "GitHub Copilot"
+	case profiles.AmpID:
+		return "Amp"
+	case profiles.CursorID:
+		return "Cursor"
+	case profiles.KiroID:
+		return "Kiro"
+	}
+	return ""
 }
 
 func (m *Manager) destinationInfo(b *box) destinationInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	info := destinationInfo{name: b.rec.Name, harness: b.rec.Harness, bindingID: b.rec.BindingID, session: b.rec.Sessions,
-		id: b.identity(), gone: b.deleted || b.retained}
+		id: b.identity(), gone: b.deleted || b.retained, llm: llmProviderName(b.rec.CredentialProfile)}
 	var modelHosts []string
 	for _, ep := range b.rec.ProviderEndpoints {
 		if ep.Role == roleLLM {
@@ -356,9 +387,19 @@ func (r *destRow) note(s destinationSighting) {
 		}
 	}
 	if s.binary != "" {
+		// The last binary is the one a view shows for the row: the latest
+		// whose traffic got through, once one did. A refusal does not move
+		// a binary up, and one only ever refused a host the sandbox reached
+		// goes first (the first to go when the list is full).
 		bin := truncate(s.binary, maxDestinationText)
-		r.Binaries = slices.DeleteFunc(r.Binaries, func(b string) bool { return b == bin })
-		r.Binaries = append(r.Binaries, bin)
+		switch listed := slices.Contains(r.Binaries, bin); {
+		case s.denied && listed:
+		case s.denied && r.Reached:
+			r.Binaries = slices.Insert(r.Binaries, 0, bin)
+		default:
+			r.Binaries = slices.DeleteFunc(r.Binaries, func(b string) bool { return b == bin })
+			r.Binaries = append(r.Binaries, bin)
+		}
 		if len(r.Binaries) > maxDestinationBins {
 			r.Binaries = r.Binaries[len(r.Binaries)-maxDestinationBins:]
 		}
@@ -373,7 +414,6 @@ func (r *destRow) note(s destinationSighting) {
 func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 	switch hit := r.hit; {
 	case r.ProviderRule:
-		provider = strings.TrimPrefix(r.Rule, providerRulePrefix)
 		if hit != nil {
 			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
@@ -626,7 +666,7 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 	if t != nil {
 		m.mergeLiveLocked(t, live, info.harness)
 		for _, r := range t.rows {
-			out.Destinations = append(out.Destinations, r.view(info.harness))
+			out.Destinations = append(out.Destinations, r.view(info))
 		}
 		for _, u := range t.models {
 			out.Models = append(out.Models, *u)
@@ -663,8 +703,11 @@ func destinationRank(kind string) int {
 
 // view renders a row for the API. Its text is the workload's, so it is made
 // safe to print.
-func (r *destRow) view(harnessName string) sandboxapi.DestinationRow {
-	kind, provider, vendor := r.classify(harnessName)
+func (r *destRow) view(info destinationInfo) sandboxapi.DestinationRow {
+	kind, provider, vendor := r.classify(info.harness)
+	if kind == sandboxapi.DestinationModelProvider && info.llm != "" {
+		provider = info.llm
+	}
 	total := r.total()
 	v := sandboxapi.DestinationRow{
 		Host: sandboxapi.DisplayText(r.Host), Ports: slices.Clone(r.Ports), Kind: kind, Provider: sandboxapi.DisplayText(provider),
