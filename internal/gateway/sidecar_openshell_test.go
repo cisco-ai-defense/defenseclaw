@@ -132,3 +132,14 @@ func TestLegacySandboxHealthIsDegradedWithCleanupRemediation(t *testing.T) {
 		t.Fatalf("host-mode install reported a sandbox subsystem: %#v", got)
 	}
 }
+// A custom provider edit must rebuild the judge that holds its endpoint.
+func TestJudgeNeedsRebuildForProviderEdit(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{}
+	oldCfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "review", BaseURL: "https://old.example"}}
+	newCfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "review", BaseURL: "https://new.example"}}
+	if !judgeNeedsRebuild(oldCfg, newCfg, false) {
+		t.Fatal("custom provider endpoint edit left the judge bound to the old registry")
+	}
+}
+

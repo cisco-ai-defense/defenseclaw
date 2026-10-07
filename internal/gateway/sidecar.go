@@ -1957,9 +1957,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if previousGen != nil && previousGen.active != nil {
 		rulePackChanged = previousGen.active.Summary().Digest != rulePackCandidate.active.Summary().Digest
 	}
-	judgeChanged := rulePackChanged ||
-		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+	judgeChanged := judgeNeedsRebuild(oldCfg, newCfg, rulePackChanged)
 
 	var nextJudge *LLMJudge
 	if judgeChanged {
@@ -2337,6 +2335,13 @@ func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailCon
 		out[name] = config.PerConnectorGuardrailConfig{Enabled: &enabled}
 	}
 	return out
+}
+
+func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool) bool {
+	return rulePackChanged ||
+		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
+		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
 }
 
 func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
