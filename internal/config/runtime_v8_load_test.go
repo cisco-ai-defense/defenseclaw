@@ -468,6 +468,21 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 	}
 }
 
+// GAP-0295/GAP-0301: scanners.mcp_scanner.api, .timeouts and
+// scanners.skill_scanner.timeouts.llm_s were read by no scan and are gone. A
+// file a pre-release build wrote with them still loads, with them ignored.
+func TestRuntimeV8IgnoresTheRemovedScannerKeys(t *testing.T) {
+	raw := []byte("config_version: 8\nscanners:\n  skill_scanner:\n    timeouts: {scan_s: 600, llm_s: 60}\n" +
+		"  mcp_scanner:\n    api: {endpoint: https://aid.example.test}\n    timeouts: {stdio_s: 5, remote_s: 5, llm_s: 5}\nobservability: {}\n")
+	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatalf("a config holding the removed scanner keys must load: %v", err)
+	}
+	if got := cfg.Scanners.SkillScanner.ScanTimeoutSeconds(); got != 600 {
+		t.Errorf("scan_s = %d, want 600 kept", got)
+	}
+}
+
 // A config_version 8 document that skips the in-memory migration (a Secure
 // Client one) still enables VirusTotal and AI Defense through its v8 keys; the
 // model carries them only as analyzers (GAP-0157).

@@ -238,15 +238,9 @@ defenseclaw setup llm --provider vllm --model acme-judge-8b --base-url http://12
 
 Until a judge works, automatic selection runs YARA alone, so the server is still scanned, and each scan prints `LLM analyzer skipped` with the name of the missing key. Treat that as a gap to close, not a setup: YARA matches known patterns, and it is the judge that reads a tool's description against what the tool does.
 
-## Keys accepted but not applied yet
+## Removed keys
 
-<Callout type="warn" title="These keys do nothing in this release">
-`scanners.mcp_scanner` also accepts the keys below, and `config set` validates them, but the MCP scan does not read them yet. Do not rely on them for security.
-
-- `api.endpoint`, `api.api_key_env`: the `api` analyzer uses `cisco_ai_defense.endpoint` and `cisco_ai_defense.api_key_env`.
-- `yara.include_bundled`, `yara.extra_rules` (a list of `path` and `digest`): a scan loads the scanner's own rules and DefenseClaw's bundled MCP rules, and no extra rule file. The files are part of the effective policy digest, but they are not loaded.
-- `timeouts.stdio_s`, `remote_s`, `llm_s`: not read. A local stdio scan on native Windows stops the server's process tree after 60 seconds; see the warning below.
-</Callout>
+`scanners.mcp_scanner.api` and `scanners.mcp_scanner.timeouts` are not configuration keys: no scan read them, so they were removed. The `api` analyzer uses `cisco_ai_defense.endpoint` and `cisco_ai_defense.api_key_env`, and a local stdio scan on native Windows stops the server's process tree after 60 seconds (see the warning below). A `config.yaml` written by a pre-release build that still holds them loads with them ignored, the next write leaves them out, and `defenseclaw config set` refuses them.
 
 ## Pinned version
 

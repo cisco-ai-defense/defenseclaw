@@ -210,8 +210,7 @@ scanners:
 | `llm_consensus_runs` | `0` | Run the judge this many times and combine the answers (`0` is off). |
 | `lenient` | `true` | Tolerate malformed skills instead of failing them. |
 | `analyzers.virustotal`, `.aidefense`, `.osv` | off | Optional analyzers (see below). |
-| `timeouts.scan_s` | `300` | Seconds one scan may run in the install watcher and its rescans (`0` means the default). Raise it for large skills scanned with the judge. The REST scan endpoint and the scans an agent hook starts stop at two minutes whatever this key says, and `defenseclaw skill scan` has no time limit. |
-| `timeouts.llm_s` | `60` | Accepted by the schema, but not read in this release. |
+| `timeouts.scan_s` | `300` | Seconds one scan the gateway starts may run: the install watcher and its rescans, the REST scan endpoint and the scans an agent hook starts (`0` means the default). Raise it for large skills scanned with the judge. `defenseclaw skill scan` has no time limit. |
 
 `defenseclaw config get scanners.skill_scanner.policy --effective` prints the value in force. For a key you have not set it prints the default and says so; the gate keys print nothing when unset, so read the resolved gate with `defenseclaw config get admission.skill.actions --effective` (see [Gate and review queue](#gate-and-review-queue)).
 
