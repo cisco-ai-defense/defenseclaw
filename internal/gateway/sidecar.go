@@ -152,6 +152,7 @@ type Sidecar struct {
 	exporterHealthMetricMu         sync.Mutex
 	exporterHealthMetricGeneration uint64
 	exporterHealthMetricCounters   map[exporterHealthMetricKey]uint64
+	destinationLossMetricCounters  map[exporterHealthMetricKey]destinationLossMetricCounters
 	// destinationCircuit* retains only the last-observed circuit state per
 	// destination for the active graph generation. It exists so a durable
 	// health log is emitted exactly once per state transition instead of once

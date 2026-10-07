@@ -248,8 +248,9 @@ failure reopens it. A gateway restart loses queued optional exports, and
 records permanently rejected by a collector or exhausted by the bounded retry
 window are not automatically replayed. The local SQLite event history retains
 them; export that history separately if backfill matters. Doctor shows dropped
-and rejected counts per destination, and destination metrics expose the same
-counters.
+and rejected counts per destination. The  delta
+metric reports those record losses per  queue,
+with  or  as the reason.
 
 Gateway health and `defenseclaw doctor` expose the circuit state, consecutive
 failures, bounded failure class, and open deadline. Transient-open and

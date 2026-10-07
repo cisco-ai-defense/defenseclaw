@@ -39,6 +39,11 @@ type exporterHealthMetricKey struct {
 	signal      observability.Signal
 }
 
+type destinationLossMetricCounters struct {
+	dropped  uint64
+	rejected uint64
+}
+
 type exporterHealthMetricV8Runtime interface {
 	hookLifecycleMetricV8Runtime
 	GeneratedMetricFamilyEnabled(context.Context, observability.EventName) (bool, error)
@@ -96,10 +101,13 @@ func (s *Sidecar) recordExporterHealthMetricsV8(
 	// The destination snapshot itself is shared with the sibling circuit-
 	// health log recorder so both consumers observe the same tick's data
 	// instead of racing two independent polls.
-	enabled, err := runtime.GeneratedMetricFamilyEnabled(
+	errorsEnabled, errorsErr := runtime.GeneratedMetricFamilyEnabled(
 		ctx, observability.EventName(observability.TelemetryInstrumentDefenseClawTelemetryExporterErrors),
 	)
-	if err != nil || !enabled {
+	lossEnabled, lossErr := runtime.GeneratedMetricFamilyEnabled(
+		ctx, observability.EventName(observability.TelemetryInstrumentDefenseClawQueueDrops),
+	)
+	if (errorsErr != nil || !errorsEnabled) && (lossErr != nil || !lossEnabled) {
 		return
 	}
 
@@ -108,9 +116,13 @@ func (s *Sidecar) recordExporterHealthMetricsV8(
 	if s.exporterHealthMetricGeneration != health.Generation {
 		s.exporterHealthMetricGeneration = health.Generation
 		s.exporterHealthMetricCounters = make(map[exporterHealthMetricKey]uint64)
+		s.destinationLossMetricCounters = make(map[exporterHealthMetricKey]destinationLossMetricCounters)
 	}
 	if s.exporterHealthMetricCounters == nil {
 		s.exporterHealthMetricCounters = make(map[exporterHealthMetricKey]uint64)
+	}
+	if s.destinationLossMetricCounters == nil {
+		s.destinationLossMetricCounters = make(map[exporterHealthMetricKey]destinationLossMetricCounters)
 	}
 
 	for _, destination := range health.Destinations {
@@ -124,44 +136,112 @@ func (s *Sidecar) recordExporterHealthMetricsV8(
 				continue
 			}
 			key := exporterHealthMetricKey{destination: destination.Name, signal: signal}
-			previous := s.exporterHealthMetricCounters[key]
-			current := source.Counters.Failed
-			if current < previous {
-				// Counters must be monotonic within one generation. Treat an
-				// unexpected reset as a new local baseline without synthesizing a
-				// huge wrapped delta.
-				previous = 0
+			if errorsErr == nil && errorsEnabled {
+				previous := s.exporterHealthMetricCounters[key]
+				current := source.Counters.Failed
+				if current < previous {
+					previous = 0
+				}
+				if delta := current - previous; delta > 0 {
+					if delta > math.MaxInt64 {
+						delta = math.MaxInt64
+					}
+					reason := source.Reason
+					if reason == "" {
+						reason = "delivery_failed"
+					}
+					item := exporterErrorMetricItem(
+						ctx, observedAt, health.Generation, destination.Name, signal, reason, int64(delta),
+					)
+					if _, recordErr := runtime.RecordGeneratedMetricBatch(
+						ctx, []observabilityruntime.GeneratedMetricBatchItem{item},
+					); recordErr == nil {
+						s.exporterHealthMetricCounters[key] = previous + delta
+					}
+				} else {
+					s.exporterHealthMetricCounters[key] = current
+				}
+				if !source.LastSuccess.IsZero() {
+					item := exporterLastSuccessMetricItem(
+						ctx, observedAt, health.Generation, destination.Name, signal, source.LastSuccess,
+					)
+					_, _ = runtime.RecordGeneratedMetricBatch(
+						ctx, []observabilityruntime.GeneratedMetricBatchItem{item},
+					)
+				}
 			}
-			if delta := current - previous; delta > 0 {
-				if delta > math.MaxInt64 {
-					delta = math.MaxInt64
-				}
-				reason := source.Reason
-				if reason == "" {
-					reason = "delivery_failed"
-				}
-				item := exporterErrorMetricItem(
-					ctx, observedAt, health.Generation, destination.Name, signal, reason, int64(delta),
+			if lossErr == nil && lossEnabled {
+				previous := s.destinationLossMetricCounters[key]
+				previous.dropped = recordDestinationLossMetric(
+					ctx, observedAt, health.Generation, runtime, destination.Name, signal,
+					"retry_exhausted", previous.dropped, source.Counters.Dropped,
 				)
-				if _, recordErr := runtime.RecordGeneratedMetricBatch(
-					ctx, []observabilityruntime.GeneratedMetricBatchItem{item},
-				); recordErr == nil {
-					s.exporterHealthMetricCounters[key] = previous + delta
-				}
-			} else {
-				s.exporterHealthMetricCounters[key] = current
+				previous.rejected = recordDestinationLossMetric(
+					ctx, observedAt, health.Generation, runtime, destination.Name, signal,
+					"rejected", previous.rejected, source.Counters.Rejected,
+				)
+				s.destinationLossMetricCounters[key] = previous
 			}
-			if source.LastSuccess.IsZero() {
-				continue
-			}
-			item := exporterLastSuccessMetricItem(
-				ctx, observedAt, health.Generation, destination.Name, signal, source.LastSuccess,
-			)
-			_, _ = runtime.RecordGeneratedMetricBatch(
-				ctx, []observabilityruntime.GeneratedMetricBatchItem{item},
-			)
 		}
 	}
+}
+
+func recordDestinationLossMetric(
+	ctx context.Context,
+	observedAt time.Time,
+	generation uint64,
+	runtime exporterHealthMetricV8Runtime,
+	destination string,
+	signal observability.Signal,
+	reason string,
+	previous uint64,
+	current uint64,
+) uint64 {
+	if current < previous {
+		previous = 0
+	}
+	delta := current - previous
+	if delta == 0 {
+		return current
+	}
+	if delta > math.MaxInt64 {
+		delta = math.MaxInt64
+	}
+	item := destinationLossMetricItem(ctx, observedAt, generation, destination, signal, reason, int64(delta))
+	if _, err := runtime.RecordGeneratedMetricBatch(
+		ctx, []observabilityruntime.GeneratedMetricBatchItem{item},
+	); err != nil {
+		return previous
+	}
+	return previous + delta
+}
+
+func destinationLossMetricItem(
+	ctx context.Context,
+	observedAt time.Time,
+	generation uint64,
+	destination string,
+	signal observability.Signal,
+	reason string,
+	value int64,
+) observabilityruntime.GeneratedMetricBatchItem {
+	return newGatewayGeneratedMetricItem(
+		ctx, observedAt, observability.SourceSystem, "", sidecarCapacityV8Producer,
+		observability.EventName(observability.TelemetryInstrumentDefenseClawQueueDrops),
+		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			if envelope.Provenance.ConfigGeneration < 0 ||
+				uint64(envelope.Provenance.ConfigGeneration) != generation {
+				return observability.Record{}, fmt.Errorf("gateway: destination loss generation changed")
+			}
+			return builder.BuildMetricDefenseClawQueueDrops(
+				observability.MetricDefenseClawQueueDropsInput{
+					Envelope: envelope, Value: value,
+					DefenseClawMetricQueue:  observability.Present("destination." + destination + "." + string(signal)),
+					DefenseClawMetricReason: observability.Present(reason),
+				},
+			)
+		},
+	)
 }
 
 func exporterErrorMetricItem(
