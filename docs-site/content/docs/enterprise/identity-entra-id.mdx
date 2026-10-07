@@ -25,15 +25,18 @@ profile. The Secure Client profile rejects them and keeps its behavior as it
 was, so nothing here applies to a Secure Client computer.
 
 <Callout title="What was run live">
-On a live Entra tenant with a per-user DefenseClaw install and Claude Code:
+On a live Entra tenant with Claude Code:
 
-- an Entra-joined Windows 11 computer, signed in over remote desktop as an
-  Entra user;
-- an Ubuntu 22.04 Azure VM with Entra SSH sign-in (`AADSSHLoginForLinux`).
+- a per-user DefenseClaw install on an Entra-joined Windows 11 computer,
+  signed in over remote desktop as an Entra user;
+- a per-user install on an Ubuntu 22.04 Azure VM with Entra SSH sign-in
+  (`AADSSHLoginForLinux`);
+- the standalone enterprise profile on the same Windows 11 computer, installed
+  with Setup as LocalSystem, with a `groups` assignment by Entra group SID: the
+  prompts of a group member got the assigned profile, those of another Entra
+  user got `default_profile`.
 
-Not working yet: the standalone enterprise profile on an Entra-joined Windows
-computer. One live run did not complete; see [Known issues](#known-issues).
-Not tested: delivering the local group membership through Intune, hybrid-joined Windows, Entra Kerberos, the himmelblau module,
+Not tested: a `users` assignment on the standalone profile, delivering the local group membership through Intune, hybrid-joined Windows, Entra Kerberos, the himmelblau module,
 macOS with Platform SSO, the standalone package on an Entra Linux VM, and an
 Entra outage. Each is marked where it comes up.
 </Callout>
@@ -261,7 +264,7 @@ standalone enterprise profile, which reads the machine config.
 | Where | `users` by UPN | `groups` by Entra group |
 | --- | --- | --- |
 | Windows, per-user | Matched in the live test | No: a per-user install has no group list |
-| Windows, standalone enterprise | Not working yet ([Known issues](#known-issues)) | By SID, after the local group step. Token facts tested live; a profile decision on a managed computer not recorded yet |
+| Windows, standalone enterprise | Not tested live | By SID, after the local group step. Matched in the live test |
 | Linux `aad`, per-user | Matched in the live test | No: the module gives no Entra groups |
 
 Set a strict `default_profile`: a failed lookup lands on it
@@ -270,7 +273,7 @@ Set a strict `default_profile`: a failed lookup lands on it
 ## 5. Check
 
 Ask the gateway which profile a user gets. On Windows, name an Entra user by
-SID or as `AzureAD\Name`; the computer cannot look up a UPN.
+SID, as `AzureAD\Name`, by the bare name or by the UPN.
 
 ```powershell
 defenseclaw guardrail profile explain --user AzureAD\Alice --connector claudecode
@@ -281,11 +284,12 @@ defenseclaw guardrail profile explain --connector claudecode    # the account th
 defenseclaw guardrail profile explain --connector claudecode
 ```
 
-In the live tests, `profile` named the profile from the `users` assignment and
-`match` said `user`. On the standalone profile use
+In the per-user live tests, `profile` named the profile from the `users`
+assignment and `match` said `user`. On the standalone profile use
 `defenseclaw.exe enterprise windows profile-explain --user <SID> --connector claudecode`
-from an elevated prompt. For an Entra user it does not give an answer yet; see
-[Known issues](#known-issues).
+from an elevated prompt. In the live test it named the group profile with
+`match` `group` for a member of the group, and `default_profile` for another
+Entra user.
 
 These are the fields the records carried for an Entra user (the complete table is
 [Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields-as-seen-live)):
@@ -321,32 +325,13 @@ These are the fields the records carried for an Entra user (the complete table i
 | Symptom | Cause and fix |
 | --- | --- |
 | A `groups` assignment with an Entra group never matches on Windows | The group is not in the token. Name it by SID (the computer cannot resolve names), have a built-in local group list it, and have the user sign out and in. Check with `Get-DefenseClawEntraIdentity.ps1 -GroupSid` |
-| `profile explain --user alice@contoso.com` on Windows says "No mapping between account names and security IDs" | A Windows computer cannot look up a UPN. Pass the SID or `AzureAD\Name` |
+| `profile explain --user <name>` on Windows says "Windows has no account by this name" | The user has not signed in to this computer yet, or the name is misspelled. Pass the SID, `AzureAD\Name` or the UPN |
 | `group_count` is `0` and `groups` never match on a per-user Windows install | Expected: use `users`, or the standalone enterprise profile |
 | `getent group` finds no Entra group on the Linux VM | Expected: the `aad` module gives no Entra groups. Use `users` |
 | `profile explain` says `unixidentity: not found` for an Entra user on Linux | The OS names the account but cannot map its uid back to it, as seen for users who had not signed in. Have the user sign in, then ask again |
 | Records have no principal | `ai_discovery.include_user_principal` is off, the default |
 | `az ssh vm` is refused | Microsoft requires the `AADSSHLoginForLinux` extension on the VM and a VM login role for the user. `setup-entra-ssh-linux.sh` without `--apply` lists what is missing |
 | `Add-EntraGroupToLocalGroup.ps1` says to run elevated | It changes a local group. Run it as an administrator or as SYSTEM, or use `-WhatIf` |
-
-## Known issues
-
-One live run of the standalone enterprise profile on an Entra-joined Windows 11
-computer, with Entra users and a `groups` assignment by SID, did not complete.
-It found:
-
-- **`enterprise windows profile-explain` cannot look up an Entra SID.** It
-  answers `default_lookup_failed` with "No mapping between account names and
-  security IDs was done". The same SID resolves in a per-user install that runs
-  as the user. Use `Get-DefenseClawEntraIdentity.ps1` to check the token.
-- **Hooks of standard users were refused** with
-  `enterprise_machine_policy_summary_untrusted` on a computer where Setup created
-  `C:\ProgramData\Cisco`, as on a computer with no other Cisco software. The
-  hook could not read the permissions of that folder.
-
-Until these are fixed and the run is repeated, use per-user installs with `users`
-assignments for Entra users on Windows, or test the standalone profile on your own
-computers first.
 
 ## Next steps
 
