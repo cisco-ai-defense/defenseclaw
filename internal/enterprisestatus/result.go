@@ -153,8 +153,8 @@ type Result struct {
 	// Scanners is the standalone Windows scanner runtime (skill, MCP and
 	// plugin scanners); nil (omitted) everywhere else.
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`
-	LogPath  string       `json:"log_path,omitempty"`
-	ExitCode int          `json:"exit_code"`
+	LogPath  string          `json:"log_path,omitempty"`
+	ExitCode int             `json:"exit_code"`
 }
 
 // ScannerRuntime reports the scanners a standalone Windows deployment runs.
