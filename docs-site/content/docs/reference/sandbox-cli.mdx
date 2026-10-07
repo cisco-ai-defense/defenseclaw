@@ -397,6 +397,87 @@ defenseclaw sandbox teardown --yes --keep-images
 | `-y`, `--yes` | switch |  | Do not ask. |
 {/* AUTOGEN-END: sandbox-flags */}
 
+### `sandbox kernel-feed`
+
+On a Linux host whose administrator runs Tetragon, the sandbox kernel feed
+adds every process the kernel starts in your docker sandboxes to their process
+trees, including the many that live for milliseconds, which the 5-second
+sample never sees. It is a small root service
+(`defenseclaw-sandbox-feed.service`, the `defenseclaw-sensor-helper` binary in
+feed mode). It only reads Tetragon (its version and its exec and exit events,
+never a policy call), serves members of the `docker` group, and gives each of
+them only their own sandboxes' records. Members of the `docker` group can
+already see every container, so that filter is a courtesy between users, not a
+security boundary. A sandbox's process tree must be on (`sandbox run
+--process-tree`, or a pack's `observe.process_tree: true`); `sandbox ps` then
+says `source: kernel`. Without the feed nothing changes. macOS (MicroVM
+sandboxes) and the Linux vm driver are not covered: their guest kernel is not
+the host's.
+
+```bash
+defenseclaw sandbox kernel-feed status
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags kernel-feed */}
+| Subcommand | Purpose |
+| --- | --- |
+| [`sandbox kernel-feed install`](#sandbox-kernel-feed-install) | Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon). |
+| [`sandbox kernel-feed status`](#sandbox-kernel-feed-status) | Show whether the sandbox kernel feed is installed, running and matches this gateway. |
+| [`sandbox kernel-feed uninstall`](#sandbox-kernel-feed-uninstall) | Stop and remove the sandbox kernel feed service (as root). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox kernel-feed install`
+
+Installs or updates the feed, as root. It copies this install's
+`defenseclaw-sensor-helper` to `/usr/local/libexec/defenseclaw/`, checks that
+Tetragon serves a root-owned unix socket (a TCP API is refused) and that Docker
+answers, then writes and starts `defenseclaw-sandbox-feed.service`. Run it
+again after `defenseclaw upgrade`, which says so when the feed is older than
+the new release. Run as yourself, it prints the exact `sudo` command for this
+install. It is refused on a managed host, where sandboxes are not supported.
+
+```bash
+defenseclaw sandbox kernel-feed install
+sudo "$(command -v defenseclaw-gateway)" sandbox kernel-feed install
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags kernel-feed install */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox kernel-feed status`
+
+Shows whether the feed is installed and running, its version and protocol,
+whether this account can read it (members of the `docker` group can), whether
+its Tetragon stream is up, and whether it needs an update for this gateway.
+
+```bash
+defenseclaw sandbox kernel-feed status --json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags kernel-feed status */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox kernel-feed uninstall`
+
+Stops and removes the service and its copy of the helper, as root.
+`defenseclaw uninstall` leaves the feed in place and prints this command; once
+the gateway is gone, `sudo
+/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper --sandbox-feed
+--uninstall` does the same.
+
+```bash
+defenseclaw sandbox kernel-feed uninstall
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags kernel-feed uninstall */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
 ## Run and manage sandboxes
 
 ### `sandbox run`
@@ -1292,7 +1373,12 @@ starting and exiting, so a process that starts and ends between two samples,
 and that OpenShell does not report, is not seen. The agent chooses its
 processes' names and arguments: they are shown, never acted on. The same tree
 is in the TUI's sandbox detail and in the `sandbox.process_tree` telemetry
-records.
+records. On a Linux host with the sandbox kernel feed installed
+([`sandbox kernel-feed`](#sandbox-kernel-feed)), every exec and exit the
+kernel sees in a docker sandbox is recorded as well, and the listing says
+`source: kernel`. A process the feed reported without its in-sandbox pid is
+listed among the ended ones with its `host_pid`; `--json` has a `kernel` block
+with the feed's state and counters.
 
 ```bash
 defenseclaw sandbox ps myapp-7f3a --tree
