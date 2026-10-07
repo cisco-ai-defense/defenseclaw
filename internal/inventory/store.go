@@ -826,7 +826,11 @@ func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDE
 			return fmt.Errorf("inventory store: insert ide installation: %w", err)
 		}
 	}
-	for _, p := range inv.Plugins {
+	plugins := inv.Plugins
+	if inv.savedPlugins != nil {
+		plugins = inv.savedPlugins
+	}
+	for _, p := range plugins {
 		var installed sql.NullTime
 		if p.InstalledAt != nil {
 			installed = sql.NullTime{Time: p.InstalledAt.UTC(), Valid: true}
@@ -897,10 +901,6 @@ func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, err
 	return out, rows.Err()
 }
 
-func nullString(value string) sql.NullString {
-	if value == "" {
-		return sql.NullString{}
-	}
 // LatestIDEInventoryRecordedAt also works for an empty recorded inventory.
 func (s *InventoryStore) LatestIDEInventoryRecordedAt(ctx context.Context) (time.Time, error) {
 	if s == nil || s.db == nil || s.legacySchema {
@@ -916,6 +916,10 @@ func (s *InventoryStore) LatestIDEInventoryRecordedAt(ctx context.Context) (time
 	return at, err
 }
 
+func nullString(value string) sql.NullString {
+	if value == "" {
+		return sql.NullString{}
+	}
 	return sql.NullString{String: value, Valid: true}
 }
 
