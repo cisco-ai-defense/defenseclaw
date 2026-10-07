@@ -117,6 +117,10 @@ var (
 	// on a change (Write). Rollback returns it once it has restored the
 	// files.
 	ErrNoGatewayService = errors.New("openshell: no gateway service runs the gateway")
+	// ErrBrewNeedsTerminal means Homebrew refused `brew services` because
+	// the shell runs under tmux: it answers nothing about the gateway
+	// service there (GAP-0274).
+	ErrBrewNeedsTerminal = errors.New("openshell: brew services needs a normal terminal: Homebrew refuses to run it under tmux")
 )
 
 // What the MicroVM (vm) driver gives every sandbox when
@@ -1870,7 +1874,10 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	}
 	out, err := g.Runner.Output(ctx, Command{Name: g.BrewCommand(), Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
-		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, strings.TrimSpace(string(out)))
+		if bytes.Contains(out, []byte("cannot run under tmux")) {
+			return nil, ErrBrewNeedsTerminal
+		}
+		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, brewErrorLine(out))
 	}
 	var infos []struct {
 		Running    bool   `json:"running"`
@@ -1886,6 +1893,18 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	st.Installed = i.File != "" || i.Loaded || i.Registered
 	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
 	return st, nil
+}
+
+// brewErrorLine is the error brew printed, without the usage text it
+// prints after an error: its first "Error:" line, else its first line.
+func brewErrorLine(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "Error:") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return strings.TrimSpace(lines[0])
 }
 
 // brewQuietEnv turns off the warning Homebrew prints before the JSON of

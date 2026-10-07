@@ -941,6 +941,19 @@ func TestGatewayServiceState(t *testing.T) {
 			t.Fatalf("brew services info ran with env %v", env)
 		}
 	})
+	// GAP-0274: Homebrew refuses `brew services` under tmux and prints its
+	// whole usage after the error; the check says one line instead.
+	t.Run("homebrew under tmux", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json",
+			"Error: Invalid usage: brew services cannot run under tmux!\nUsage: brew services [subcommand]\n\nManage background services.\n", errors.New("exit status 1"))
+		_, err := f.cfg.ServiceState(context.Background())
+		if !errors.Is(err, openshell.ErrBrewNeedsTerminal) || strings.Contains(err.Error(), "Usage") {
+			t.Fatalf("error = %v", err)
+		}
+	})
 	// GAP-0286: a per-user Homebrew whose brew the shell has not loaded is
 	// still the prefix the OpenShell CLI (openshell.binary) lives in; its
 	// service and gateway.toml are asked there.
