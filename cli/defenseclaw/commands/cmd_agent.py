@@ -5800,6 +5800,8 @@ def identities(
     and gateway restarts. Each session of an agent has its own ais- id.
     Every identity is listed, most recently seen first.
     """
+    if limit is not None and limit > 1000:
+        raise click.BadParameter("limit too large (maximum 1000)", param_hint="--limit")
     client = _usage_client(
         app,
         gateway_host=gateway_host,
