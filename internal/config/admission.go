@@ -44,10 +44,12 @@ const (
 // AdmissionConfig is the admission: section (config_version 9). It is the
 // only source of install-time admission policy: policies/rego/data.json and
 // the skill_actions/mcp_actions/plugin_actions keys are v8 migration input.
-// Every asset type inherits Defaults field by field. When Skill.Actions or
-// MCP.Actions is unset, the action map is derived from the scanner gate
-// (scanners.<scanner>.fail_on_severity / review_queue_min) at generation
-// build. The gateway compiles this into policy.CompiledAdmission per type.
+// Every asset type inherits Defaults field by field. When Skill.Actions is
+// unset, the action map is derived from the scanner gate
+// (scanners.skill_scanner.fail_on_severity / review_queue_min) at generation
+// build; only skills have a scanner gate, so the other asset types take their
+// actions from their own block or Defaults. The gateway compiles this into
+// policy.CompiledAdmission per type.
 type AdmissionConfig struct {
 	Defaults AdmissionAssetType `yaml:"defaults,omitempty"`
 	Skill    AdmissionAssetType `yaml:"skill,omitempty"`

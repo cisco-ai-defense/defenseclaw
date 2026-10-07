@@ -5132,7 +5132,7 @@
     "admission": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Install-time admission policy (replaces policies/rego/data.json and the *_actions keys). Every asset type inherits defaults field by field. When admission.skill.actions or admission.mcp.actions is unset it is derived from the scanner gate.",
+      "description": "Install-time admission policy (replaces policies/rego/data.json and the *_actions keys). Every asset type inherits defaults field by field. When admission.skill.actions is unset it is derived from the scanner gate (scanners.skill_scanner); only skills have a scanner gate, so every other asset type takes its actions from its own admission block or admission.defaults.",
       "properties": {
         "defaults": {
           "$ref": "#/$defs/admissionAssetType"

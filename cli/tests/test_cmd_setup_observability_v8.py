@@ -1104,6 +1104,37 @@ def test_v8_secret_dry_run_sanitizes_and_reports_selected_data_dir(tmp_path: Pat
     assert not (selected / ".env").exists()
 
 
+def test_a_destination_that_is_not_a_mapping_gets_one_short_line() -> None:
+    # GAP-0211: the message listed every destination kind's keys (759 bytes).
+    from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+
+    with pytest.raises(V8ConfigError) as refused:
+        load_validate_v8(b"config_version: 9\nobservability:\n  destinations: [5]\n", source_name="config.yaml")
+    assert refused.value.corrective_action == "use a mapping with name and kind"
+
+
+def test_galileo_project_with_a_dollar_sign_is_refused_in_plain_words() -> None:
+    # GAP-0212: this guard is reachable (a --project such as "a${B}c"); only its wording was internal.
+    with pytest.raises(ValueError, match="may contain '[$]' only as one whole"):
+        _build_v8_preset_destination(
+            PRESETS["galileo"], {"endpoint": "", "project": "a${B}c", "logstream": "x"},
+            name="g", enabled=True, signals=None, target=None,
+        )
+
+
+def test_splunk_hec_http_endpoint_is_one_plain_sentence() -> None:
+    # GAP-0209: the config check named tls.insecure_skip_verify, a field the user never set.
+    # Certificates are verified by default (GAP-0208), so an http:// endpoint gets plain
+    # http with no tls block, whatever the TLS setting (the local Splunk bridge sets false).
+    def build(**inputs: str):
+        return _build_v8_preset_destination(
+            PRESETS["splunk-hec"], {"endpoint": "http://hec.example.test:8088", **inputs},
+            name="hec", enabled=True, signals=None, target=None,
+        )
+
+    assert "tls" not in build() and "tls" not in build(verify_tls="true") and "tls" not in build(verify_tls="false")
+
+
 def test_splunk_verify_tls_rejects_non_boolean_input() -> None:
     with pytest.raises(ValueError, match="verify_tls must be a boolean"):
         _build_v8_preset_destination(
@@ -1717,7 +1748,8 @@ def test_setup_restarts_the_gateway_only_for_a_key_it_reads_at_start(tmp_path: P
 
 def test_no_restart_connector_setup_says_a_hot_change_applies_on_its_own(tmp_path: Path) -> None:
     # GAP-0199: a rule pack on a connector that is already in the roster is a
-    # hot key; a new roster entry, or a stopped gateway, waits for a restart.
+    # hot key, and so is a new roster entry (GAP-0072); a stopped gateway
+    # waits for a start.
     from defenseclaw.commands import cmd_setup
 
     app = _setup_app(tmp_path)
@@ -1741,6 +1773,9 @@ def test_no_restart_connector_setup_says_a_hot_change_applies_on_its_own(tmp_pat
 
     rule_pack = base.replace("{mode: observe}", "{mode: observe, rule_pack: strict}")
     assert "applies it on its own, without a restart" in run(rule_pack)
-    assert "once the gateway restarts" in run(rule_pack, gateway_running=False)
+    # GAP-0204: a stopped gateway is told to start, not restart.
+    stopped = run(rule_pack, gateway_running=False)
+    assert "once the gateway starts" in stopped and "defenseclaw-gateway start" in stopped
+    assert "restart" not in stopped
     roster = base.replace("{codex: {mode: observe}}", "{codex: {mode: observe}, claudecode: {mode: observe}}")
-    assert "once the gateway restarts" in run(roster)
+    assert "applies it on its own, without a restart" in run(roster)

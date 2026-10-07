@@ -111,6 +111,10 @@ def virustotal_key_env(sc: Any) -> str:
     return (getattr(vt, "api_key_env", "") or "").strip() or "VIRUSTOTAL_API_KEY"
 
 
+#: The analyzers ``scanners.mcp_scanner.analyzers`` accepts (the config schema's enum).
+MCP_ANALYZERS = ("api", "yara", "llm", "behavioral", "readiness")
+
+
 def normalize_mcp_analyzers(raw: Any) -> list[str]:
     """The MCP analyzer list; ``[]`` is auto (YARA, plus the LLM when ready).
 

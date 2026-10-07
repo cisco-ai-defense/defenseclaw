@@ -541,8 +541,6 @@ def _add_v8_destination(
         for index, existing in enumerate(authored)
         if existing.get("name") == destination_name
     ]
-    if len(matches) > 1:
-        raise ValueError(f"destination {destination_name!r} appears more than once in config.yaml")
     if matches:
         index, existing = matches[0]
         if existing.get("kind") != destination["kind"]:
@@ -746,7 +744,9 @@ def _v8_header_value(value: str) -> Any:
     if composite:
         return {"env": composite.group(1)}
     if "${" in value:
-        raise ValueError("secret-backed headers must be a whole environment reference")
+        # Reached by a Galileo --project or --logstream such as "a${B}c": the value would be
+        # read as a secret reference.
+        raise ValueError("a header value may contain '$' only as one whole ${NAME} secret reference; remove the '$'")
     return value
 
 

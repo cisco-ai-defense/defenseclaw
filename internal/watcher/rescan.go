@@ -1239,6 +1239,8 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 	}
 
 	event := audit.Event{
+		// The row id is the webhook's event id (GAP-0218): the logger stamps its own copy.
+		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    string(audit.ActionDrift),
 		Target:    evt.Path,

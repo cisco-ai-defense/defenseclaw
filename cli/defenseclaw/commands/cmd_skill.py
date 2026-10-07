@@ -1613,7 +1613,8 @@ def _build_skill_scanner(
     ``use_llm`` tri-states the ``--use-llm/--no-use-llm`` option:
 
     * ``None``  → auto: enable the LLM analyzer iff a unified model resolves
-      for ``scanners.skill``. The scanner itself still fails safe — if the
+      for ``scanners.skill`` and ``scanners.skill_scanner.use_llm`` is not
+      false. The scanner itself still fails safe — if the
       model later can't be built it logs-and-skips the LLM analyzer.
     * ``True``  → force the LLM lane on.
     * ``False`` → force it off (local analyzers only).
@@ -1629,9 +1630,11 @@ def _build_skill_scanner(
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     llm = app.cfg.resolve_llm("scanners.skill")
-    effective = bool(litellm_model(llm)) if use_llm is None else use_llm
-
     cfg = app.cfg.scanners.skill_scanner
+    # Auto turns the judge on when a model resolves, unless config.yaml turned it off
+    # (scanners.skill_scanner.use_llm: false); --use-llm still forces it on (GAP-0055).
+    effective = (cfg.use_llm and bool(litellm_model(llm))) if use_llm is None else use_llm
+
     if cfg.use_llm != effective:
         cfg = dataclasses.replace(cfg, use_llm=effective)
 

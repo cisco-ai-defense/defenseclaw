@@ -51,14 +51,14 @@ def test_setup_llm_refuses_a_pasted_key_in_api_key_env() -> None:
 
 def test_setup_guardrail_refuses_a_pasted_key_in_judge_api_key_env() -> None:
     # GAP-2593: the key was saved as guardrail.judge.llm.api_key_env and llm.api_key_env.
-    argv = ["guardrail", "--non-interactive", "--no-restart", "--no-verify", "--judge-api-key-env", _PASTED_KEY]
+    argv = ["guardrail", "--non-interactive", "--no-restart", "--judge-api-key-env", _PASTED_KEY]
     result, cfg = _setup(argv)
     _assert_refused(result, "--judge-api-key-env")
     assert _PASTED_KEY not in (cfg.guardrail.judge.llm.api_key_env, cfg.llm.api_key_env)
 
 
 def test_connector_alias_refuses_a_pasted_key_in_judge_api_key_env() -> None:
-    argv = ["openclaw", "--yes", "--no-restart", "--no-verify", "--judge-api-key-env", _PASTED_KEY]
+    argv = ["openclaw", "--yes", "--no-restart", "--judge-api-key-env", _PASTED_KEY]
     with mock.patch("defenseclaw.commands.cmd_setup._setup_guardrail_connector_alias") as alias:
         result, _ = _setup(argv)
     _assert_refused(result, "--judge-api-key-env")

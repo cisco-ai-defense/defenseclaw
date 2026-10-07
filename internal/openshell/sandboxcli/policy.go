@@ -517,12 +517,19 @@ func (a *App) adminAllows(entry string) error {
 	return nil
 }
 
+// managedConfigRefusal is the refusal of a local config edit on a managed
+// device: the organization's sentence, and exit 3 like every other local writer
+// (GAP-0052).
+func managedConfigRefusal() error {
+	return &ExitError{Code: 3, Err: errors.New(sandboxapi.AdminMessage + ": the configuration is administrator-owned")}
+}
+
 // patchConfig writes keys to config.yaml through the single config writer,
 // which validates the change before anything is written.
 func (a *App) patchConfig(updates map[string]any) error {
 	a.defaults()
 	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
-		return errors.New(sandboxapi.AdminMessage + ": the configuration is administrator-owned")
+		return managedConfigRefusal()
 	}
 	keys := make([]string, 0, len(updates))
 	for key := range updates {
@@ -538,7 +545,7 @@ func (a *App) patchConfig(updates map[string]any) error {
 		Reason: "defenseclaw-gateway sandbox",
 	})
 	if errors.Is(err, configwrite.ErrManaged) {
-		return errors.New(sandboxapi.AdminMessage + ": the configuration is administrator-owned")
+		return managedConfigRefusal()
 	}
 	if err != nil {
 		return fmt.Errorf("%s was not changed: %w", a.ConfigPath, err)

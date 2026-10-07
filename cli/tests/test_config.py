@@ -878,7 +878,8 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(raw["asset_policy"]["mode"], "action")
             self.assertTrue(raw["asset_policy"]["mcp"]["registry_required"])
             self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["name"], "github")
-            self.assertFalse(raw["asset_policy"]["skill"]["runtime_detection"]["enabled"])
+            # GAP-0060: only what differs from the defaults is written.
+            self.assertEqual(raw["asset_policy"]["skill"], {"default": "deny"})
 
             with patch("defenseclaw.config.default_data_path") as mock_dp:
                 mock_dp.return_value = Path(tmpdir)

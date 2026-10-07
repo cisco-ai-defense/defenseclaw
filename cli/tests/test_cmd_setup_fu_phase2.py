@@ -543,7 +543,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--non-interactive",
                     "--no-restart",
-                    "--no-verify",
                     "--connector",
                     "codex",
                     "--mode",
@@ -589,7 +588,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--yes",
                     "--no-restart",
-                    "--no-verify",
                     "--mode",
                     "observe",
                 ],
@@ -613,7 +611,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--yes",
                     "--no-restart",
-                    "--no-verify",
                     "--block-message",
                     "Global block 2",
                 ],
@@ -634,7 +631,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
         with _stub_side_effects():
             res = _invoke(
-                ["guardrail", "--yes", "--no-restart", "--no-verify"],
+                ["guardrail", "--yes", "--no-restart"],
                 self.app,
             )
         self.assertEqual(res.exit_code, 0, msg=res.output)
@@ -993,7 +990,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -1070,7 +1066,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             "--mode",
                             requested_mode,
                             "--no-restart",
-                            "--no-verify",
                         ],
                         self.app,
                         catch=True,
@@ -1141,7 +1136,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             "--mode",
                             requested_mode,
                             "--no-restart",
-                            "--no-verify",
                         ],
                         self.app,
                         catch=True,
@@ -1200,7 +1194,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -1279,7 +1272,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                 "--connector",
                                 "opencode",
                                 "--no-restart",
-                                "--no-verify",
                             ],
                             self.app,
                             catch=True,
@@ -1376,7 +1368,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                     "--connector",
                                     "opencode",
                                     "--no-restart",
-                                    "--no-verify",
                                 ],
                                 self.app,
                                 catch=True,
@@ -1467,7 +1458,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         "--connector",
                         "opencode",
                         "--no-restart",
-                        "--no-verify",
                     ],
                     self.app,
                     catch=True,
@@ -1568,7 +1558,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         "guardrail",
                         "--connector",
                         "opencode",
-                        "--no-verify",
                     ]
                     if failure_phase != "readiness":
                         args.append("--no-restart")
@@ -2025,7 +2014,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                 "--connector",
                                 "opencode",
                                 "--no-restart",
-                                "--no-verify",
                             ],
                             self.app,
                             catch=True,
@@ -2343,7 +2331,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                 "--connector",
                                 "opencode",
                                 "--no-restart",
-                                "--no-verify",
                             ],
                             self.app,
                             catch=True,
@@ -2451,7 +2438,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--connector",
                     "opencode",
-                    "--no-verify",
                 ]
                 if failure_phase != "readiness":
                     args.append("--no-restart")
@@ -2559,7 +2545,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--judge-model",
                     "disposable-model-marker",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -2626,7 +2611,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         "--judge-model",
                         "disposable-model-marker",
                         "--no-restart",
-                        "--no-verify",
                     ]
                     if target_case == "explicit":
                         args[2:2] = ["--connector", "opencode"]
@@ -2718,7 +2702,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             ) as secret_write,
         ):
             result = _invoke(
-                ["guardrail", "--no-restart", "--no-verify"],
+                ["guardrail", "--no-restart"],
                 self.app,
                 catch=True,
             )
@@ -2770,7 +2754,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -2831,7 +2814,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -2887,7 +2869,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -4239,8 +4220,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--detection-strategy-completion", "regex_judge",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--detection-strategy-completion", "regex_judge",
                 ],
                 self.app,
             )
@@ -4252,8 +4232,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--mode", "action",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action",
                     "--detection-strategy", "regex_judge",
                 ],
                 self.app,
@@ -4282,8 +4261,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
             res = _invoke(
                 [
                     "guardrail", "--non-interactive", "--connector", "hermes",
-                    "--mode", "observe", "--no-restart", "--no-verify",
-                ],
+                    "--mode", "observe", "--no-restart", ],
                 self.app,
             )
 
@@ -4302,8 +4280,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--mode", "action",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action",
                     "--detection-strategy", "regex_judge",
                     "--detection-strategy-completion", "regex_only",
                 ],
@@ -4324,8 +4301,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--mode", "action", "--detection-strategy", "regex_judge",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action", "--detection-strategy", "regex_judge",
                 ],
                 self.app,
             )
@@ -4339,7 +4315,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
-                ["guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify"],
+                ["guardrail", "--non-interactive", "--connector", "codex", "--no-restart"],
                 self.app,
             )
         self.assertEqual(res.exit_code, 0, msg=res.output)

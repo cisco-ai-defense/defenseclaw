@@ -1280,7 +1280,6 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "strict",
                 "--yes",
                 "--no-restart",
-                "--no-verify",
             ],
             obj=self.app,
         )
@@ -1316,7 +1315,6 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "strict",
                 "--yes",
                 "--no-restart",
-                "--no-verify",
             ],
             obj=self.app,
         )
@@ -1349,7 +1347,6 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "strict",
                 "--yes",
                 "--no-restart",
-                "--no-verify",
             ],
             obj=self.app,
         )

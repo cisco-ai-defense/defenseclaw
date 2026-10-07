@@ -103,6 +103,26 @@ def refuse_if_managed(cfg: Any, *, target_type: str = "", op: str = "", name: st
         raise ManagedDeviceError()
 
 
+def refuse_config_writer_on_managed_device(cfg: Any, command: str, target: str = "config") -> None:
+    """Refuse a local config writer (``registry``, ``setup redaction``) on a managed
+    standalone device: audited, plain and exit 3, before the command previews, prompts or
+    touches a file. Without it the same refusal came late, as exit 1 after a preview or
+    wrapped in 'previous configuration restored' (GAP-0052)."""
+    from defenseclaw import config_writer
+    from defenseclaw.config import config_path_for_data_dir
+
+    managed = is_managed_standalone(cfg)
+    if not managed and getattr(cfg, "data_dir", ""):
+        # The writer's own gate: the deployment pin in the environment counts too.
+        try:
+            config_writer.refuse_when_managed(config_path_for_data_dir(cfg.data_dir))
+        except config_writer.ManagedConfigWriteError:
+            managed = True
+    if managed:
+        audit_managed_config_refusal(target, command)
+        raise ManagedDeviceError(config_writer.MANAGED_REFUSAL)
+
+
 def refuse_on_managed_device(target_type: str, op: str, name_arg: str = "name"):
     """Decorator for a block, allow or unblock command (under ``@pass_ctx``).
 
@@ -423,6 +443,7 @@ def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) 
         _load_existing_config_yaml,
         _merge_asset_rules,
         _merge_asset_tool_policy,
+        default_asset_policy_baseline,
     )
 
     if not os.path.isfile(path):
@@ -439,7 +460,11 @@ def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) 
     snapshot = getattr(cfg, "_loaded_v8_modeled_snapshot", None)
     if isinstance(snapshot, dict):
         current = _config_to_dict(cfg).get("asset_policy", {}).get(target_type, {})
-        base = snapshot.setdefault("asset_policy", {}).setdefault(target_type, {})
+        # A load that saw no asset_policy left the key out of the snapshot; seed the
+        # defaults so the save writes this rule alone, not every default (GAP-0060).
+        if not isinstance(snapshot.get("asset_policy"), dict):
+            snapshot["asset_policy"] = default_asset_policy_baseline()
+        base = snapshot["asset_policy"].setdefault(target_type, {})
         for key in ("denied", "allowed"):
             base[key] = copy.deepcopy(current.get(key, []))
 

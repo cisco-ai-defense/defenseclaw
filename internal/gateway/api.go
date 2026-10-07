@@ -2705,7 +2705,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.rejectUnreadableScanTarget(w, "target directory", req.Target) {
+	if a.rejectUnreadableScanTarget(w, "target directory", req.Target, "SKILL.md") {
 		return
 	}
 
@@ -2746,23 +2746,50 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
 }
 
-// rejectUnreadableScanTarget answers 403 with one actionable line when the
-// account the gateway runs as is not allowed to read a skill or plugin folder:
-// the scanner subprocess would otherwise die on the same permission error and
-// the caller would get its Python traceback (GAP-0229). A folder that is
-// missing or not a directory is only logged: the scanner reports it.
-func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string) bool {
+// rejectUnreadableScanTarget answers with one plain line when the folder to
+// scan is not there (404) or the account the gateway runs as is not allowed to
+// read it, or a file the scanner must read in it (403): the scanner subprocess
+// would otherwise die on the same error and the caller would get its process
+// name, its exit code or its Python traceback (GAP-0229, GAP-0256). A path that
+// exists but is not a directory is only logged: the scanner reports it.
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
 	info, err := os.Stat(target)
 	// Secure Client keeps the scan of main, which the scanner fails on
-	// (issue #1092).
-	if errors.Is(err, fs.ErrPermission) && !a.managedAIDOnly() {
+	// (issue #1092): nothing below applies to it.
+	if a.managedAIDOnly() {
+		if err != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "[api] warning: %s not found locally: %s\n", what, target)
+		}
+		return false
+	}
+	if errors.Is(err, fs.ErrPermission) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": fmt.Sprintf("the gateway's service account cannot read %s: copy the folder somewhere it can read, or grant that account read access", target),
 		})
 		return true
 	}
+	if errors.Is(err, fs.ErrNotExist) {
+		a.writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": fmt.Sprintf("the folder does not exist: %s", target),
+		})
+		return true
+	}
 	if err != nil || !info.IsDir() {
 		fmt.Fprintf(os.Stderr, "[api] warning: %s not found locally: %s\n", what, target)
+		return false
+	}
+	for _, name := range mustRead {
+		file := filepath.Join(target, name)
+		handle, openErr := os.Open(file)
+		if errors.Is(openErr, fs.ErrPermission) {
+			a.writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("the gateway's service account cannot read %s: grant that account read access to the file", file),
+			})
+			return true
+		}
+		if openErr == nil {
+			_ = handle.Close()
+		}
 	}
 	return false
 }

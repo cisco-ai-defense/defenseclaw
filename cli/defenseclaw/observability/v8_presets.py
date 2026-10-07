@@ -96,7 +96,12 @@ def adapter_destination_fields(preset: Preset, inputs: dict[str, str]) -> dict[s
         # GAP-0208: every HEC preset verifies TLS and stays off private
         # networks unless the operator opts out (--no-verify-tls,
         # --allow-private-networks), as splunk-enterprise and otlp do.
-        if "verify_tls" in inputs and not parse_bool(inputs["verify_tls"]):
+        # Skipping certificate checks only means something over https: on an
+        # http:// endpoint the config check refused tls.insecure_skip_verify with a
+        # JSON path and an error code (GAP-0209), so plain http (the local Splunk
+        # bridge, --no-verify-tls) gets no tls block.
+        insecure = "verify_tls" in inputs and not parse_bool(inputs["verify_tls"])
+        if insecure and not endpoint.lower().startswith("http://"):
             fields["tls"] = {"insecure_skip_verify": True}
         return fields
     if preset.adapter_kind == "http_jsonl":

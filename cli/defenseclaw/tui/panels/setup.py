@@ -3519,7 +3519,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
             "Re-run setup for a connector",
             summary="Set up one connector again, for example to change its guardrail mode.",
             presets={"@Action": "setup"},
-            fields=("Connector", "Action", "Guardrail Mode", "Scanner Mode", "Verify After Setup"),
+            fields=("Connector", "Action", "Guardrail Mode", "Scanner Mode"),
         ),
         WizardGoal(
             "remove",
@@ -4891,7 +4891,6 @@ _GUARDRAIL_CONNECTOR_SETUP_FLAGS: frozenset[str] = frozenset(
         "--human-approval",
         "--hilt-min-severity",
         "--restart",
-        "--verify",
     }
 )
 
@@ -6073,13 +6072,6 @@ def connector_setup_wizard_fields(
             hint="Also start the local Prometheus/Loki/Tempo/Grafana stack.",
         ),
         WizardFormField(
-            "Verify After Setup",
-            "bool",
-            value="yes",
-            default="yes",
-            hint="Check that the connector reaches the guardrail once setup is done.",
-        ),
-        WizardFormField(
             "Force Last Connector Removal",
             "bool",
             value="no",
@@ -6088,13 +6080,13 @@ def connector_setup_wizard_fields(
         ),
     )
     if not is_guardrail_supporting(connector):
-        # Only the proxy connectors take --scanner-mode / --verify; the form
-        # offered them for Claude Code too, where they did nothing (GAP-2059).
+        # Only the proxy connectors take --scanner-mode; the form offered it for
+        # Claude Code too, where it did nothing (GAP-2059).
         fields = tuple(field for field in fields if field.label not in _PROXY_ONLY_CONNECTOR_FIELDS)
     return _overlay_field_overrides(fields, overrides)
 
 
-_PROXY_ONLY_CONNECTOR_FIELDS = frozenset({"Scanner Mode", "Verify After Setup"})
+_PROXY_ONLY_CONNECTOR_FIELDS = frozenset({"Scanner Mode"})
 
 
 # ---------------------------------------------------------------------------
@@ -7040,7 +7032,6 @@ def _guardrail_wizard_fields_for(
         ),
         WizardFormField("Post-Setup", "section"),
         WizardFormField("Restart After", "bool", "--restart", "--no-restart", value="yes", default="yes"),
-        WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         WizardFormField(
             "Disable Selected Connector",
             "bool",
@@ -7521,12 +7512,10 @@ def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str,
     if wizard_bool_value(fields, "Restart Gateway", "yes") == "no":
         out.append("--no-restart")
     if is_guardrail_supporting(connector):
-        # Only the proxy connectors take ``--scanner-mode`` /
-        # ``--verify``; hook connectors use ``--with-local-stack``.
+        # Only the proxy connectors take ``--scanner-mode``; hook connectors use
+        # ``--with-local-stack``.
         if scanner := wizard_field_value(fields, "Scanner Mode"):
             out.extend(("--scanner-mode", scanner))
-        if wizard_bool_value(fields, "Verify After Setup", "yes") == "no":
-            out.append("--no-verify")
         return tuple(out)
     if wizard_bool_value(fields, "Replace Existing", "no") == "yes":
         out.append("--replace")

@@ -564,7 +564,8 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
     fields = _with_field(fields, "Guardrail Mode", "action")
     fields = _with_field(fields, "Scanner Mode", "both")
     fields = _with_field(fields, "Restart Gateway", "no")
-    fields = _with_field(fields, "Verify After Setup", "no")
+    # GAP-0226: the retired Verify After Setup row is gone; doctor is the check.
+    assert "Verify After Setup" not in {field.label for field in fields}
     assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
         "setup",
         "openclaw",
@@ -574,7 +575,6 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "--no-restart",
         "--scanner-mode",
         "both",
-        "--no-verify",
     )
     fields = connector_setup_wizard_fields({})
     fields = _with_field(fields, "Connector", "codex")

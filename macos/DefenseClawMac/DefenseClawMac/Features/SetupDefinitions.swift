@@ -111,9 +111,6 @@ enum TUIWizards {
                         defaultValue: "local",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         visibleWhen2: (key: "connector", equals: proxyConnectors)),
-            WizardField(key: "verify", label: "Verify after setup", kind: .bool, defaultValue: "yes",
-                        visibleWhen: (key: "action", equals: ["setup"]),
-                        visibleWhen2: (key: "connector", equals: proxyConnectors)),
             WizardField(key: "replace", label: "Replace existing", kind: .bool, defaultValue: "no",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         visibleWhen2: (key: "connector", equals: hookConnectors),
@@ -162,7 +159,6 @@ enum TUIWizards {
         if restartOff { args.append("--no-restart") }
         if proxyConnectors.contains(connector) {
             append(v, "scanner-mode", flag: "--scanner-mode", to: &args)
-            if value(v, "verify", "yes") == "no" { args.append("--no-verify") }
             return [args]
         }
         flag(v, "replace", "--replace", to: &args)
@@ -210,7 +206,7 @@ enum TUIWizards {
 
     private static let aiDefense = WizardDefinition(
         id: "ai-defense", title: "Cisco AI Defense", icon: "shield.lefthalf.filled",
-        blurb: "Configure the cloud inspection endpoint, credential, scanner mode, and connectivity verification.",
+        blurb: "Configure the cloud inspection endpoint, credential and scanner mode. Check the result with `defenseclaw doctor`.",
         baseArgs: ["setup", "guardrail"],
         commandBuilder: aiDefenseCommands,
         secretInputField: "secret",
@@ -255,7 +251,9 @@ enum TUIWizards {
                 defaultValue: "no"
             ),
             WizardField(key: "restart", label: "Restart gateway", kind: .bool, defaultValue: "yes"),
-            WizardField(key: "verify", label: "Verify connectivity", kind: .bool, defaultValue: "yes"),
+            WizardField(key: "verify", label: "Verify the skill scanner", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "skill-scanner", equals: ["yes"]),
+                        help: "Checks the skill scanner after saving. Check the guardrail with `defenseclaw doctor`."),
         ]
     )
 
@@ -990,7 +988,6 @@ enum TUIWizards {
         append(v, "timeout-ms", flag: "--cisco-timeout-ms", to: &guardrail)
         append(v, "scanner-mode", flag: "--scanner-mode", to: &guardrail)
         guardrail.append(yes(v, "restart") ? "--restart" : "--no-restart")
-        guardrail.append(yes(v, "verify") ? "--verify" : "--no-verify")
         guardrail.append("--non-interactive")
         commands.append(guardrail)
 

@@ -3668,6 +3668,17 @@ class TestSkillScannerLLMDefault(SkillCommandTestBase):
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     @patch("defenseclaw.scanner._llm_env.litellm_model", return_value="some/model")
+    def test_config_use_llm_false_wins_over_auto(self, _mock_model, mock_wrapper):
+        # GAP-0055: scanners.skill_scanner.use_llm: false is honoured when a model resolves.
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+        self.app.cfg.scanners.skill_scanner.use_llm = False
+        _build_skill_scanner(self.app, None)
+        self.assertFalse(mock_wrapper.call_args.args[0].use_llm)
+        _build_skill_scanner(self.app, True)
+        self.assertTrue(mock_wrapper.call_args.args[0].use_llm)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    @patch("defenseclaw.scanner._llm_env.litellm_model", return_value="some/model")
     def test_no_use_llm_forces_off_despite_model(self, _mock_model, mock_wrapper):
         from defenseclaw.commands.cmd_skill import _build_skill_scanner
         _build_skill_scanner(self.app, False)

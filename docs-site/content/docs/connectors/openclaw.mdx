@@ -77,7 +77,7 @@ The flags above explicitly set: connector, mode, optional HITL, and optional rul
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/observability/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
+| Check the result | `defenseclaw doctor` | none: setup no longer runs its own connectivity check |
 
 See [the full flag reference](/docs/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
 

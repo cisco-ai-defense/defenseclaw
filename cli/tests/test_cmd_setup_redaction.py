@@ -144,6 +144,27 @@ def test_defaults_set_omitted_collection_flags_are_not_deleted(tmp_path: Path, m
     ]
 
 
+def test_redaction_writers_refuse_on_a_managed_device_before_any_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0052: apply printed its whole preview and then exited 1; a managed device exits 3 first.
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_managed_standalone", lambda _cfg: True)
+    app = _app(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+
+    for args in (
+        ["apply", "--scope", "defaults", "--profile", "strict", "--yes"],
+        ["remove-all", "--yes"],
+        ["defaults", "set", "--no-logs", "--yes"],
+    ):
+        result = CliRunner().invoke(redaction, args, obj=app, catch_exceptions=False)
+        assert result.exit_code == 3, (args, result.output)
+        assert "This device is managed" in result.output and "Effective legs" not in result.output
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+
 def test_bucket_set_accepts_false_as_an_explicit_only_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured = []
     monkeypatch.setattr(

@@ -335,6 +335,9 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
             "defenseclaw.agent.id",
             "defenseclaw.health.subsystem",
         )
+        # A legacy.audit.* compat row (tool-result-pii-alert) has no target_ref; its own
+        # target is the tool, as the CLI table and the detail pane show (GAP-0217).
+        or (row.target or "").strip()
         or row.event_name
     )
     summary = (

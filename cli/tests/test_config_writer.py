@@ -22,6 +22,7 @@ import os
 import stat
 
 import pytest
+import yaml
 from defenseclaw import config_writer
 from defenseclaw.config import locked_config_yaml
 from defenseclaw.config_writer import Change
@@ -340,6 +341,9 @@ def test_operator_block_from_a_stale_config_keeps_a_concurrent_block(tmp_path, m
 
     on_disk = config_module.load(data_dir=str(tmp_path)).asset_policy.skill.denied
     assert [rule.name for rule in on_disk] == ["evil-a", "evil-b"]
+    # GAP-0060: the file holds the two names, not the default asset_policy tree or empty rule fields.
+    written = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))["asset_policy"]
+    assert written == {"skill": {"denied": [{"name": "evil-a"}, {"name": "evil-b"}]}}
 
 
 def test_plain_error_names_the_key_without_the_validator_internals():

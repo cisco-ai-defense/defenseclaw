@@ -291,8 +291,12 @@ class _GatewayRuntimeGeneration:
     replacement_not_before: float
 
 
+_SETUP_CHILD_ARGS_KEY = "defenseclaw.setup.child_args"
 _SETUP_OFFLINE_NOTED_KEY = "defenseclaw.setup.offline_noted"
 _SETUP_OFFLINE_AUDIT_NOTE_KEY = "defenseclaw.setup.offline_audit_note"
+#: Set once the run has told the user to start a stopped gateway, so the audit note
+#: and the closing line do not give a second, differently worded next step (GAP-0204).
+_SETUP_START_HINT_KEY = "defenseclaw.setup.start_hint"
 
 
 def _log_setup_action(
@@ -333,12 +337,16 @@ def _log_setup_action(
                 "the command's offline option (--no-restart or --no-verify, where it has one) to "
                 "stage the change for the next gateway start."
             ) from exc
-        note = (
-            offline_note
-            or "  ⚠ Change saved, but the gateway isn't running, so the setup audit event was not "
-            "recorded. Start it with 'defenseclaw-gateway start' before the next change."
-        )
         current = click.get_current_context(silent=True)
+        if offline_note:
+            note = offline_note
+        elif current is not None and current.meta.get(_SETUP_START_HINT_KEY):
+            note = "  ⚠ Change saved, but the gateway isn't running, so the setup audit event was not recorded."
+        else:
+            note = (
+                "  ⚠ Change saved, but the gateway isn't running, so the setup audit event was not "
+                "recorded. Start it with 'defenseclaw-gateway start' before the next change."
+            )
         # A multi-connector run audits once per connector; say it once (GAP-1951).
         if current is not None and current.meta.get(_SETUP_OFFLINE_AUDIT_NOTE_KEY) == note:
             return
@@ -374,6 +382,9 @@ class _SetupGroup(click.Group):
 
     def resolve_command(self, ctx: click.Context, args: list[str]):
         name, command, rest = super().resolve_command(ctx, args)
+        # click clears ctx.args before this group's callback runs; keep the child's own
+        # arguments (its subcommand verb) for the callback's pre-checks (GAP-0219).
+        ctx.meta[_SETUP_CHILD_ARGS_KEY] = list(rest)
         return (command.name if command is not None else name), command, rest
 
 
@@ -434,22 +445,26 @@ def _echo_saved_without_restart(*, plural: bool = False) -> None:
     """Closing line of a connector setup run with ``--no-restart`` (GAP-0199).
 
     A running gateway applies a hot key (a rule pack, a mode) from its next
-    config generation on its own; anything else waits for a restart.
+    config generation on its own; anything else waits for a restart. A stopped
+    gateway needs a start, not a restart: that is the one next step (GAP-0204).
     """
     ctx = click.get_current_context(silent=True)
     app = ctx.find_object(AppContext) if ctx is not None else None
-    if (
-        ctx is not None
-        and app is not None
-        and app.cfg is not None
-        and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
-        and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx))
-    ):
+    known = ctx is not None and app is not None and app.cfg is not None
+    running = known and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    noun = "connectors" if plural else "connector"
+    if running and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx)):
         ux.echo("  ℹ Saved. The running gateway applies it on its own, without a restart.")
         return
+    if known and not running:
+        ux.echo(
+            f"  ℹ Saved. It takes effect once the gateway starts and confirms the {noun} (defenseclaw-gateway start)."
+        )
+        ctx.meta[_SETUP_START_HINT_KEY] = True
+        ctx.meta[_SETUP_OFFLINE_NOTED_KEY] = True
+        return
     ux.echo(
-        "  ℹ Saved. It takes effect once the gateway restarts and confirms the "
-        f"{'connectors' if plural else 'connector'} (defenseclaw-gateway restart)."
+        f"  ℹ Saved. It takes effect once the gateway restarts and confirms the {noun} (defenseclaw-gateway restart)."
     )
 
 
@@ -594,6 +609,24 @@ def setup(
     )
 
 
+_WEBHOOK_URL_ISSUE = re.compile(r"^(?:line \d+: )?webhooks\[\d+\]\.url: ")
+
+
+def _webhook_url_cleanup(ctx: click.Context, result: Any) -> bool:
+    """Whether ``setup webhook list|disable|remove`` may run on a config whose only
+    errors are webhook URLs (a loopback or private address, for example)."""
+    child_args = ctx.meta.get(_SETUP_CHILD_ARGS_KEY) or []
+    verb = child_args[0] if child_args else ""
+    return (
+        ctx.invoked_subcommand == "webhook"
+        and verb in ("list", "disable", "remove")
+        and not getattr(result, "parse_error", "")
+        and not getattr(result, "timed_out", False)
+        and bool(result.errors)
+        and all(_WEBHOOK_URL_ISSUE.match(str(issue)) for issue in result.errors)
+    )
+
+
 def _exit_not_initialized(ctx: click.Context) -> None:
     """Stop with the missing-config message: run init, or on a managed
     device that it is managed (exit 3)."""
@@ -619,7 +652,12 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     from defenseclaw.commands.cmd_config import validate_config
 
     result = validate_config()
-    if not result.ok:
+    if not result.ok and _webhook_url_cleanup(ctx, result):
+        # The message says "fix the url, or remove the webhook": list, disable and remove
+        # have to run for that to be possible (GAP-0219).
+        for issue in result.errors:
+            ux.echo(f"  ⚠ {issue}", err=True)
+    elif not result.ok:
         timed_out = getattr(result, "timed_out", False)
         ux.echo("Config check did not finish:" if timed_out else "Config validation failed:", err=True)
         if result.parse_error:
@@ -2888,7 +2926,11 @@ def setup_mcp_scanner(
 
     if non_interactive:
         if analyzers is not None:
-            mc.analyzers = ",".join(scanner_settings.normalize_mcp_analyzers(analyzers)) or "auto"
+            names = scanner_settings.normalize_mcp_analyzers(analyzers)
+            problem = _unknown_mcp_analyzers(names)
+            if problem:
+                raise click.BadParameter(problem, param_hint="'--analyzers'")
+            mc.analyzers = ",".join(names) or "auto"
         # The judge's base URL is set with `setup skill-scanner --llm-base-url`
         # or `setup llm`; both scanners share the top-level llm: block.
         _apply_scanner_llm_flags(llm, llm_provider, llm_model, None)
@@ -2938,6 +2980,21 @@ def setup_mcp_scanner(
         _log_setup_action(app, ACTION_SETUP_MCP_SCANNER, " ".join(parts), allow_offline=True)
 
 
+def _unknown_mcp_analyzers(names: list[str]) -> str:
+    """The message for analyzers the MCP scanner does not have, or "" (GAP-0055).
+
+    The skill scanner has a virustotal analyzer; the MCP scanner does not, and the
+    config schema rejects the name at save time.
+    """
+    unknown = [name for name in names if name not in scanner_settings.MCP_ANALYZERS]
+    if not unknown:
+        return ""
+    return (
+        f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not an MCP scanner analyzer; "
+        f"use {', '.join(scanner_settings.MCP_ANALYZERS)} or auto."
+    )
+
+
 def _validated_api_key_env_name(
     value: str,
     param_hint: str = "'--api-key-env'",
@@ -2984,13 +3041,18 @@ def _interactive_mcp_setup(mc, cfg) -> None:
     click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
-    raw = click.prompt(
-        "  Analyzers (comma-separated, e.g. yara,llm,behavioral; auto = YARA plus a ready LLM)",
-        default=",".join(scanner_settings.normalize_mcp_analyzers(mc.analyzers)) or "auto",
-    )
-    # "auto" inside a list stands for YARA: appending llm to "auto" used to
-    # save "auto,llm", which ran the LLM alone and dropped YARA.
-    names = scanner_settings.normalize_mcp_analyzers(raw)
+    while True:
+        raw = click.prompt(
+            "  Analyzers (comma-separated, e.g. yara,llm,behavioral; auto = YARA plus a ready LLM)",
+            default=",".join(scanner_settings.normalize_mcp_analyzers(mc.analyzers)) or "auto",
+        )
+        # "auto" inside a list stands for YARA: appending llm to "auto" used to
+        # save "auto,llm", which ran the LLM alone and dropped YARA.
+        names = scanner_settings.normalize_mcp_analyzers(raw)
+        problem = _unknown_mcp_analyzers(names)
+        if not problem:
+            break
+        click.echo(f"  {problem}")
 
     use_llm = click.confirm("  Enable LLM analyzer?", default=bool(llm.model))
     if use_llm:
@@ -6428,7 +6490,6 @@ def _resolve_judge_hook_gate(
 @click.option(
     "--restart/--no-restart", default=True, help="Restart gateway and the active connector after setup (default: on)"
 )
-@click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option(
     "--non-interactive",
     "--accept-defaults",
@@ -6487,7 +6548,6 @@ def setup_guardrail(
     hilt_min_severity,
     workspace_dir: str | None,
     restart: bool,
-    verify: bool,
     non_interactive: bool,
     _prior_snapshot: _SetupConfigSnapshot | None = None,
 ) -> None:
@@ -6509,6 +6569,7 @@ def setup_guardrail(
       action  - block prompts/responses that match security policies
 
     Use --disable to turn off the guardrail and restore direct LLM access.
+    To check the result afterwards, run: defenseclaw doctor
     """
 
     if cisco_api_key_env is not None:
@@ -12460,7 +12521,6 @@ def _setup_guardrail_connector_alias(
     human_approval: bool | None,
     hilt_min_severity: str | None,
     restart: bool,
-    verify: bool,
     replace: bool = False,
 ) -> None:
     """Run the full guardrail setup backend for a specific connector."""
@@ -12570,7 +12630,6 @@ def _setup_guardrail_connector_alias(
         human_approval=human_approval,
         hilt_min_severity=hilt_min_severity,
         restart=restart,
-        verify=verify,
         non_interactive=True,
         _prior_snapshot=prior_snapshot,
     )
@@ -12867,7 +12926,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         help="Minimum severity that asks for human approval.",
     )
     @click.option("--restart/--no-restart", default=True, show_default=True, help="Restart gateway after setup.")
-    @click.option("--verify/--no-verify", default=True, show_default=True, help="Run connectivity checks after setup.")
     @click.option(
         "--replace",
         is_flag=True,
@@ -12896,7 +12954,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         human_approval: bool | None,
         hilt_min_severity: str | None,
         restart: bool,
-        verify: bool,
         replace: bool,
     ) -> None:
         if cisco_api_key_env is not None:
@@ -12926,7 +12983,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
             restart=restart,
-            verify=verify,
             replace=replace,
         )
 

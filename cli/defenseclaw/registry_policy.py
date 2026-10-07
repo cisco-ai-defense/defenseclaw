@@ -324,4 +324,8 @@ def set_registry_required(
     except Exception as exc:
         raise RegistryRequiredUpdateError(result, exc) from exc
     cfg.asset_policy = working.asset_policy
+    # The saved copy holds the new save baseline; publish it too, or the next save in this
+    # process diffs against the baseline from load and skips a change back to a default (GAP-0060).
+    cfg._loaded_v8_modeled_snapshot = working._loaded_v8_modeled_snapshot
+    cfg._source_config_version = working._source_config_version
     return result

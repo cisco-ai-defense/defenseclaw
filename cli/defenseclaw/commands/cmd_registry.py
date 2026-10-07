@@ -210,6 +210,16 @@ def _find_source(cfg: Config, sid: str) -> RegistrySource:
     raise SystemExit(1)
 
 
+def _require_writable_cfg(app: AppContext, command: str) -> Config:
+    """``_require_cfg`` for a command that changes config.yaml: a managed device
+    refuses it first, with exit 3 (GAP-0052)."""
+    from defenseclaw.enforce.asset_lists import refuse_config_writer_on_managed_device
+
+    cfg = _require_cfg(app)
+    refuse_config_writer_on_managed_device(cfg, f"registry {command}", "registry")
+    return cfg
+
+
 def _require_cfg(app: AppContext) -> Config:
     """Return ``app.cfg`` after asserting it is loaded.
 
@@ -361,7 +371,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     \b
       defenseclaw registry add clawhub --kind clawhub --content skill --non-interactive
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "add")
 
     if not non_interactive:
         if not source_id:
@@ -491,7 +501,7 @@ def edit_cmd(  # noqa: PLR0913
     holds. Use the bare form (no flags) when you want to re-confirm
     every field.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "edit")
     source = _find_source(cfg, source_id)
     before = {field: getattr(source, field) for field in _EDIT_AUDIT_FIELDS}
 
@@ -752,7 +762,7 @@ def remove_cmd(
     are removed from config too — the registry source is the source
     of truth for those entries.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "remove")
     source = _find_source(cfg, source_id)
     sid = source.id
 
@@ -1716,7 +1726,7 @@ def _do_manual_verdict(
     implementation would silently swallow a fetch failure here and
     leave the operator believing the rule had landed.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, action_label)
     source = _find_source(cfg, source_id)
     entry_name, entry_type = _split_typed_name(cfg, source, entry_name, entry_type)
     entry_type = _resolve_entry_type(cfg, source, entry_name, entry_type)
@@ -1854,7 +1864,7 @@ def require_cmd(
     (``asset_policy.enabled=true`` and ``mode=action``). --enforce turns
     both on in the same save; --no-enforce sets ``mode=observe`` again.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "require")
     asset = asset_type.lower()
     connector = (connector or "").strip()
     if enforce and not enabled:

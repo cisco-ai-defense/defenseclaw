@@ -1179,9 +1179,17 @@ func TestPolicyEdit(t *testing.T) {
 				ta.Cfg.DeploymentMode = "managed_enterprise"
 			}
 			before, _ := os.ReadFile(ta.ConfigPath)
-			wantErr(t, ta.PolicyEdit(bg, "allow", []string{c.host}), c.want)
+			err := ta.PolicyEdit(bg, "allow", []string{c.host})
+			wantErr(t, err, c.want)
 			if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 				t.Fatal("a refused entry was written")
+			}
+			if c.name == "a managed install" {
+				// GAP-0052: the refusal exits 3, like every other local writer on a managed device.
+				var exit *ExitError
+				if !errors.As(err, &exit) || exit.Code != 3 {
+					t.Fatalf("managed refusal = %#v, want an exit-3 error", err)
+				}
 			}
 		})
 	}

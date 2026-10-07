@@ -90,6 +90,24 @@ def test_main_turns_an_unreachable_gateway_audit_into_one_line(capsys):
     assert "defenseclaw-gateway start" in err
 
 
+def test_main_turns_a_refused_config_change_into_one_line_and_exit_1(capsys):
+    # GAP-0055: a value the schema rejects at write time used to end in a Python traceback.
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    rejected = V8ConfigError("config.yaml", "$.scanners.mcp_scanner.analyzers", "oneOf", "use exactly one supported source shape")
+    with (
+        patch.object(main_mod.ux, "configure_console_output"),
+        patch.object(main_mod, "_force_utf8_io"),
+        patch.object(main_mod, "_try_launch_tui", side_effect=rejected),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main_mod.main()
+    assert exited.value.code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and err.count("\n") == 1
+    assert err.startswith("Error: config.yaml was not changed: scanners.mcp_scanner.analyzers")
+
+
 def test_main_turns_a_managed_config_refusal_into_one_line_and_exit_3(capsys):
     from defenseclaw.config_writer import MANAGED_REFUSAL, ManagedConfigWriteError
 

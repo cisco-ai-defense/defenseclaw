@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/google/uuid"
 )
 
 // inspectMode returns the operator-selected guardrail mode (action or
@@ -450,6 +451,12 @@ func (a *APIServer) alertSensitiveHookToolResult(ctx context.Context, connectorN
 // no operator saw (GAP-0187). The details only count the findings.
 func (a *APIServer) raiseToolResultAlert(ctx context.Context, event audit.Event, findingSeverity string) {
 	event.Severity = toolResultAlertSeverity(findingSeverity)
+	// The logger stamps the row id on its own copy of the event, so give the
+	// event its id first: the webhook payload then carries the id of the audit
+	// row, and the delivery can be matched to the alert (GAP-0218).
+	if event.ID == "" {
+		event.ID = uuid.New().String()
+	}
 	_ = a.logger.LogEventCtx(ctx, event)
 	if a.webhookSource == nil {
 		return
