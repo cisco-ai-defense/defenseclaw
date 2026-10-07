@@ -45,11 +45,6 @@ export interface OpaData {
     source_path_contains: string[];
   }>;
   severity_ranking: Record<string, number>;
-  audit: {
-    retention_days: number;
-    log_all_actions: boolean;
-    log_scan_results: boolean;
-  };
   guardrail: {
     severity_rank: Record<string, number>;
     block_threshold: number;
@@ -58,12 +53,6 @@ export interface OpaData {
     hilt: { enabled: boolean; min_severity: string };
     patterns: Record<string, string[]>;
     severity_mappings: Record<string, string>;
-  };
-  firewall: {
-    default_action: string;
-    blocked_destinations: string[];
-    allowed_domains: string[];
-    allowed_ports: number[];
   };
   /** Session correlator (Layer 5). Mirrors the YAML schema in
    *  internal/guardrail/defaults/correlation-patterns.yaml so custom
@@ -160,11 +149,6 @@ export function projectPolicyToData(policy: Policy): OpaData {
     scanner_overrides: scannerOverrides,
     first_party_allow_list: policy.first_party_allow_list,
     severity_ranking: { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1 },
-    audit: {
-      retention_days: policy.audit.retention_days,
-      log_all_actions: policy.audit.log_all_actions,
-      log_scan_results: policy.audit.log_scan_results,
-    },
     guardrail: {
       severity_rank: { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 },
       block_threshold: policy.guardrail.block_threshold,
@@ -173,12 +157,6 @@ export function projectPolicyToData(policy: Policy): OpaData {
       hilt: { ...policy.guardrail.hilt },
       patterns: { ...policy.guardrail.patterns },
       severity_mappings: { ...policy.guardrail.severity_mappings },
-    },
-    firewall: {
-      default_action: policy.firewall.default_action,
-      blocked_destinations: [...policy.firewall.blocked_destinations],
-      allowed_domains: [...policy.firewall.allowed_domains],
-      allowed_ports: [...policy.firewall.allowed_ports],
     },
     correlator: projectCorrelator(policy.correlator ?? []),
     cisco_ai_defense: {
