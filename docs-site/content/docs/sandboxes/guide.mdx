@@ -1182,7 +1182,9 @@ the port. A port the pack or your organization's policy refuses, and
 DefenseClaw's own ports and the OpenShell gateway's, are never opened; the
 run warns about them and leaves them off the `Host` line. A connection to
 your machine is a door into it, so the sandbox's first connection to the
-port arrives as an ask for you to approve.
+port arrives as an ask for you to approve. Once approved, the session's
+first connection shows in `defenseclaw sandbox activity` as
+`✓ host.openshell.internal:5432 (port 5432 on this machine)`.
 
 ### Other run flags
 

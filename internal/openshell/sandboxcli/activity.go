@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -161,6 +162,10 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	switch ev.Kind {
 	case sandboxapi.ActivityEgressAllowed:
 		b.WriteString(a.style("✓", ansiGreen) + " " + hostPort(ev))
+		if ev.Host == packs.OpenShellHostAlias && ev.Port > 0 {
+			// A --host-port service or a local model endpoint (GAP-0154).
+			b.WriteString(a.dim(" (port " + strconv.Itoa(ev.Port) + " on this machine)"))
+		}
 	case sandboxapi.ActivityEgressBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
 		switch why := firstNonEmpty(ev.Category, ev.Reason); {
