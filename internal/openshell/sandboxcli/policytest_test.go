@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package sandboxcli
 
 import (
@@ -77,6 +79,7 @@ func TestPolicyTestAPack(t *testing.T) {
 		{Sandbox: "x", Pack: "strict", Host: "a.example"},
 		{Pack: "strict"},
 		{Fixture: fixture, Host: "a.example"},
+		{Pack: "strict", Host: "a.example:99999"},
 	} {
 		if err := ta.PolicyTest(bg, o); err == nil {
 			t.Fatalf("%+v was accepted", o)

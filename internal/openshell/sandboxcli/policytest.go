@@ -141,10 +141,15 @@ func (a *App) policyTestCases(o PolicyTestOptions) ([]packs.EgressCase, error) {
 		return nil, fmt.Errorf("--port %d must be between 1 and 65535", o.Port)
 	}
 	host, port := o.Host, o.Port
-	// host:port reads as --host host --port port.
-	if h, p, err := net.SplitHostPort(host); err == nil && port == 0 {
-		if n, err := strconv.Atoi(p); err == nil {
-			host, port = h, n
+	// host:port (or [v6]:port) reads as --host host --port port; --port wins.
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("--host %s: the port must be a number between 1 and 65535", o.Host)
+		}
+		host = h
+		if port == 0 {
+			port = n
 		}
 	}
 	return []packs.EgressCase{{Host: host, Port: port, Binary: o.Binary}}, nil
