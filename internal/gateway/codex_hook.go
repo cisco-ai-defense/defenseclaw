@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -236,7 +237,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	case "UserPromptSubmit":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:         "message",
-			Content:      req.Prompt,
+			Content:      codexPromptForInspection(req.Prompt),
 			Direction:    "prompt",
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
@@ -378,6 +379,31 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
+}
+
+// codexTitleHelperPreamble is the fixed instruction Codex puts in front of its
+// task-title helper request, which reaches the UserPromptSubmit hook like a
+// prompt. It tells the model to name the task and "Do not answer the request",
+// so the injection judge read it, next to the user prompt after it, as an
+// instruction override and blocked a benign prompt (GAP-0230).
+var codexTitleHelperPreamble = regexp.MustCompile(`^\s*` +
+	regexp.QuoteMeta("Generate a concise, single-line task title of at most ") + `\d+` +
+	regexp.QuoteMeta(" characters and under five words where possible. Start with an imperative verb."+
+		" Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise."+
+		" Preserve ticket references exactly. Write in the user's language."+
+		" Do not use quotes, markdown, or trailing punctuation. Do not answer the request.") +
+	`(?:\s*` + regexp.QuoteMeta("Prioritize the current task and latest substantive user request.") + `)?` +
+	`(?:\s*` + regexp.QuoteMeta("Recent conversation messages:") + `)?`)
+
+// codexPromptForInspection drops Codex's own title-helper instruction from the
+// front of a prompt. Only that exact text goes: the conversation and the user
+// prompt after it are inspected as usual, and a prompt that merely resembles
+// the instruction is inspected whole.
+func codexPromptForInspection(prompt string) string {
+	if loc := codexTitleHelperPreamble.FindStringIndex(prompt); loc != nil {
+		return strings.TrimSpace(prompt[loc[1]:])
+	}
+	return prompt
 }
 
 // dispatchCodexHookNotification mirrors the Claude Code path —
