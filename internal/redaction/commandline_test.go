@@ -122,3 +122,18 @@ func TestCommandLineWithholdsTheNotifyPayload(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandLineRedactsAllWordsOfQuotedSecret(t *testing.T) {
+	for _, line := range []string{
+		`bash -c "--token=dccert-first dccert-second dccert-third"`,
+		`curl --password "dccert-first dccert-second"`,
+		`curl --user="alice:dccert-first dccert-second"`,
+	} {
+		got := CommandLine(strings.Fields(line), 1024)
+		for _, leak := range []string{"dccert-first", "dccert-second", "dccert-third"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("%q keeps %q in %q", line, leak, got)
+			}
+		}
+	}
+}

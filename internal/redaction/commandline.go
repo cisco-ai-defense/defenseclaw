@@ -103,19 +103,32 @@ func CommandArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	mysql := len(args) > 0 && mysqlClient(args[0])
 	hideNext, userNext := false, false
+	var hideQuote byte
 	for _, word := range args {
 		opening, a, closing := splitEdgeQuotes(word)
+		if hideQuote != 0 {
+			// A text source split one quoted secret value on spaces.
+			out = append(out, opening+ForSinkEntity(a)+closing)
+			if quoteCloses(word, hideQuote) {
+				hideQuote = 0
+			}
+			continue
+		}
 		user := userNext
 		userNext = false
+		sensitive := false
 		switch {
 		case hideNext:
 			a, hideNext = ForSinkEntity(a), false
+			sensitive = true
 		case user && !strings.HasPrefix(a, "-") && strings.Contains(a, ":"):
 			name, password, _ := strings.Cut(a, ":")
 			a = name + ":" + ForSinkEntity(password)
+			sensitive = true
 		case cmdlineSecretArg.MatchString(a):
 			m := cmdlineSecretArg.FindStringSubmatch(a)
 			a = m[1] + ForSinkEntity(m[2])
+			sensitive = true
 		case cmdlineSecretFlag.MatchString(a):
 			hideNext = true
 		case cmdlineUserFlag.MatchString(a):
@@ -123,10 +136,15 @@ func CommandArgs(args []string) []string {
 		case cmdlineUserArg.MatchString(a):
 			m := cmdlineUserArg.FindStringSubmatch(a)
 			a = m[1] + m[2] + ForSinkEntity(m[3])
+			sensitive = true
 		case mysql && len(a) > 2 && strings.HasPrefix(a, "-p"):
 			a = "-p" + ForSinkEntity(a[2:])
+			sensitive = true
 		case cmdlineLongToken.MatchString(a) && strings.ContainsAny(a, "0123456789") && strings.IndexFunc(a, isASCIILetter) >= 0 && !strings.Contains(a, "/"):
 			a = ForSinkEntity(a)
+		}
+		if sensitive {
+			hideQuote = unclosedQuote(word)
 		}
 		a = cmdlineURLPassword.ReplaceAllStringFunc(a, func(m string) string {
 			sub := cmdlineURLPassword.FindStringSubmatch(m)
@@ -135,6 +153,41 @@ func CommandArgs(args []string) []string {
 		out = append(out, opening+a+closing)
 	}
 	return out
+}
+
+// unclosedQuote finds a quote opened in a word from a text command line.
+// A real argv element can contain spaces; balanced quotes need no continuation.
+func unclosedQuote(word string) byte {
+	var quote byte
+	escaped := false
+	for i := 0; i < len(word); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case word[i] == '\\' && quote != '\'':
+			escaped = true
+		case quote == 0 && (word[i] == '\'' || word[i] == '"'):
+			quote = word[i]
+		case word[i] == quote:
+			quote = 0
+		}
+	}
+	return quote
+}
+
+func quoteCloses(word string, quote byte) bool {
+	escaped := false
+	for i := 0; i < len(word); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case word[i] == '\\' && quote != '\'':
+			escaped = true
+		case word[i] == quote:
+			return true
+		}
+	}
+	return false
 }
 
 // splitEdgeQuotes splits the quote characters a word starts and ends with
