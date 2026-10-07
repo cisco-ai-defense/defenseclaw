@@ -1,0 +1,70 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+#
+# Machine config for the standalone enterprise profile on Linux, with guardrail
+# profiles chosen by Okta group. Copy it, change the group names, the profiles and
+# the connectors, then apply it as root:
+#
+#   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure \
+#       --config /root/defenseclaw-config.yaml --json
+#
+# The file must be root-owned and not writable by anyone else. ensure validates it
+# first and keeps the installed config when it is invalid.
+#
+# Group names are the names `id -Gn <user>` prints on the host. SSSD serves only
+# Okta groups that have a gidNumber, so every group named here needs one in Okta
+# (okta-ldap-setup.py assign-posix --group NAME).
+#
+# Guardrail profiles are not supported with the Secure Client integration; this
+# file is for the standalone enterprise profile and would be rejected there.
+
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw
+policy_dir: /etc/defenseclaw/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+
+# Send the Okta login as the user principal name in records. It needs
+# install-sssd-okta.sh --map-upn. Leave it off unless your observability
+# destinations may hold user names.
+# ai_discovery:
+#   include_user_principal: true
+
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    # Give every connector at least one key. An empty entry such as
+    # `claudecode: {}` is dropped when the config loads, and then the
+    # enumerator enrolls nobody for that connector.
+    claudecode: {enabled: true}
+    codex: {enabled: true}
+  profiles:
+    okta-strict:
+      description: Contractors - block at MEDIUM and above
+      mode: action
+      block_at: MEDIUM
+    okta-standard:
+      description: Everyone else - block at HIGH and above
+      mode: action
+      block_at: HIGH
+    okta-observe:
+      description: Research - record only, block nothing
+      mode: observe
+  # Ordered: the first assignment that matches wins. A user who is in both groups
+  # gets okta-strict.
+  profile_assignments:
+    - profile: okta-strict
+      match:
+        groups: ["contractors"]
+    - profile: okta-observe
+      match:
+        groups: ["ml-research"]
+  # Anyone else, and anyone DefenseClaw cannot look up (for example while Okta and
+  # the SSSD cache are both unavailable), gets this profile. Make it the strict
+  # one you can live with, never a lenient one.
+  default_profile: okta-standard
