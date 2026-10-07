@@ -241,7 +241,12 @@ func (m *Manager) refreshModelCredential(ctx context.Context, gw *Gateway, rec r
 			"the OpenShell provider %s is not the one DefenseClaw created for sandbox %s; delete the sandbox and run a new one", pname, rec.Name)
 	}
 	profile, err := gw.Client.GetProfile(ctx, p.Type)
-	if err != nil {
+	switch {
+	case openshell.IsNotFound(err):
+		// Nothing says which variables the provider delivers: it keeps its key.
+		m.logf("sandbox %s: provider profile %s is gone; the model credential is not renewed", rec.Name, p.Type)
+		return rec.LLMDigest, nil
+	case err != nil:
 		return "", upstream("get provider profile "+p.Type, err)
 	}
 	delivered := map[string]bool{}
