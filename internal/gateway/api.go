@@ -2950,6 +2950,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		cfg.ResolveLLM("scanners.mcp"),
 		cfg.CiscoAIDefense,
 	)
+	ms.RulePack = scanner.MCPRulePackFor(cfg, "")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()

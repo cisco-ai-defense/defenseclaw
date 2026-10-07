@@ -85,20 +85,30 @@ print(json.dumps(scan_plugin(t,o).to_dict()))`
 	// The runtime reads no config of its own: --settings carries the
 	// scanners.mcp_scanner block with config.yaml's keys, read by the config
 	// loader's own parser, so yara, analyzers and every other key reach the
-	// scan as they do on the Python CLI path. The judge and AI Defense
-	// settings come from the environment that internal/scanner runtimeEnv
-	// derives from config.
+	// scan as they do on the Python CLI path. --rule-pack carries the
+	// guardrail rule pack the CLI lays over the server definition
+	// (rulepack.maybe_wrap), applied with the same overlay (GAP-0296). The
+	// judge and AI Defense settings come from the environment that
+	// internal/scanner runtimeEnv derives from config.
 	mcpScanScript = `import json,os,sys
+from types import SimpleNamespace
 from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, _merge_mcp_scanner
 from defenseclaw.scanner.mcp import MCPScannerWrapper
 a=sys.argv[1:]
-if len(a)!=3 or a[0]!="--settings" or a[2].startswith("--"):
-    sys.exit("usage: mcp-scan --settings <scanners.mcp_scanner as JSON> <server URL>")
-c=_merge_mcp_scanner(json.loads(a[1])); t=a[2]
+if len(a) not in (3,5) or a[0]!="--settings" or (len(a)==5 and a[2]!="--rule-pack") or a[-1].startswith("--"):
+    sys.exit("usage: mcp-scan --settings <scanners.mcp_scanner as JSON> [--rule-pack <pack as JSON>] <server URL>")
+c=_merge_mcp_scanner(json.loads(a[1])); t=a[-1]
 e=os.environ.get
 llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""))
 aid=CiscoAIDefenseConfig(api_key=e("DEFENSECLAW_SCANNER_AID_API_KEY",""), endpoint=e("DEFENSECLAW_SCANNER_AID_ENDPOINT","") or CiscoAIDefenseConfig().endpoint)
-print(MCPScannerWrapper(c, None, aid, llm=llm).scan(t).to_json())`
+s=MCPScannerWrapper(c, None, aid, llm=llm)
+if len(a)==5:
+    from defenseclaw.scanner.rulepack import RulePackOverlayScanner, _layer_of, load_rule_pack
+    rp=json.loads(a[3]); layers=tuple(x for x in (_layer_of(SimpleNamespace(**r)) for r in rp.get("rules") or []) if x)
+    p=load_rule_pack(rp["dir"], layers)
+    if not p.is_empty():
+        s=RulePackOverlayScanner(s, p, None)
+print(s.scan(t).to_json())`
 )
 
 func main() {

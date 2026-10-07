@@ -516,3 +516,33 @@ class TestTextFromMcpServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWindowsRuntimeMCPScan(unittest.TestCase):
+    def test_runtime_mcp_scan_applies_the_rule_pack(self):
+        # GAP-0296: the Windows scanner runtime's mcp-scan (the gateway's MCP
+        # scan on standalone Windows) skipped the rule-pack overlay that the
+        # CLI's mcp scan lays over the server definition.
+        import contextlib
+        import io
+        import json
+        import re
+        import shutil
+
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(root, "cmd", "defenseclaw-scanners", "main.go"), encoding="utf-8") as stream:
+            script = re.search(r"mcpScanScript = `(.*?)`", stream.read(), re.S).group(1)
+        tmp = tempfile.mkdtemp(prefix="rp-runtime-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        url = "https://mcp.example.test/mcp?key=sk-ant-abcdefghij0123456789KLM"
+        clean = ScanResult(scanner="mcp-scanner", target=url, timestamp=datetime.now(timezone.utc), findings=[])
+        pack = json.dumps({"dir": _write_pack(tmp), "rules": [{"disable": ["SEC-TOOL-ONLY"]}]})
+        out = io.StringIO()
+        with (
+            patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan", return_value=clean),
+            patch.object(sys, "argv", ["mcp-scan", "--settings", "{}", "--rule-pack", pack, url]),
+            contextlib.redirect_stdout(out),
+        ):
+            exec(compile(script, "mcpScanScript", "exec"), {"__name__": "__main__"})
+        findings = json.loads(out.getvalue())["findings"]
+        self.assertIn("SEC-ANTHROPIC", [finding["id"] for finding in findings])

@@ -4098,6 +4098,7 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 			cfg.ResolveLLM("scanners.mcp"),
 			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "codex")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		// Agent, rule, and memory targets participate in inventory/discovery,

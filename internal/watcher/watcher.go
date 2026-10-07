@@ -1250,11 +1250,14 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 			w.cfg.CiscoAIDefense,
 		), evt)
 	case InstallMCP:
-		return scanner.NewMCPScannerFromLLM(
+		ms := scanner.NewMCPScannerFromLLM(
 			w.cfg.Scanners.MCPScanner,
 			w.cfg.ResolveLLM("scanners.mcp"),
 			w.cfg.CiscoAIDefense,
 		)
+		// The Windows scanner runtime applies the rule pack as the CLI does (GAP-0296).
+		ms.RulePack = scanner.MCPRulePackFor(w.cfg, w.eventConnector(evt))
+		return ms
 
 	case InstallPlugin:
 		return scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner)

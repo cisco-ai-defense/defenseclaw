@@ -1198,6 +1198,7 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 			cfg.ResolveLLM("scanners.mcp"),
 			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "claudecode")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		rulesDir := ""
