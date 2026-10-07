@@ -1169,6 +1169,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	newEffectiveGateway := effectiveGatewayConfigForDiff(newCfg.Gateway)
 	add("gateway", oldEffectiveGateway, newEffectiveGateway)
 	add("openshell", oldCfg.OpenShell, newCfg.OpenShell)
+	// The v8 action keys of a Secure Client source, which main compared here;
+	// no Secure Client hot set lists them, so an edit is restart-required.
+	for _, key := range []string{"skill_actions", "mcp_actions", "plugin_actions"} {
+		add(key, oldCfg.SecureClientV8Actions[key], newCfg.SecureClientV8Actions[key])
+	}
 	add("admission", oldCfg.Admission, newCfg.Admission)
 	add("asset_policy", oldCfg.AssetPolicy, newCfg.AssetPolicy)
 	add("registries", oldCfg.Registries, newCfg.Registries)
@@ -1193,7 +1198,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	// configuration generation (issue #1092): the hot set below, a restart
 	// for any gateway edit but the reload mode, and every per-connector
 	// guardrail setting. Its v8 action keys (skill_actions, mcp_actions,
-	// plugin_actions) are read as admission, which the restart set covers.
+	// plugin_actions, compared above) are restart-required.
 	secureClient := oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration()
 	standalone := oldCfg.StandaloneEnterprise() || newCfg.StandaloneEnterprise()
 	if !secureClient {

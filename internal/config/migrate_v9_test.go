@@ -861,6 +861,25 @@ func TestV8SourceWithTheActionKeysIsAccepted(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "admission.skill.actions") {
 		t.Errorf("v9 source with skill_actions: got %v, want a pointer to admission.skill.actions", err)
 	}
+	// A Secure Client source (Windows and macOS) keeps the keys, read and
+	// validated as on main (GAP-0279, issue #1092).
+	if runtime.GOOS == "linux" {
+		return
+	}
+	secureClient := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n" + body
+	cfg, err := LoadRuntimeV8InspectionCandidateFromBytes(configPath, []byte(secureClient))
+	if err != nil {
+		t.Fatalf("Secure Client v8 load: %v", err)
+	}
+	if cfg.SecureClientV8Actions["skill_actions"][1].Install != InstallBlock ||
+		cfg.SecureClientV8Actions["plugin_actions"][0].File != FileActionQuarantine {
+		t.Fatalf("Secure Client v8 actions = %v", cfg.SecureClientV8Actions)
+	}
+	invalid := strings.Replace(secureClient, "install: block}\nmcp_actions", "install: blok}\nmcp_actions", 1)
+	if _, err := LoadRuntimeV8InspectionCandidateFromBytes(configPath, []byte(invalid)); err == nil ||
+		!strings.Contains(err.Error(), `skill_actions.high.install: invalid value "blok"`) {
+		t.Fatalf("Secure Client invalid skill_actions: got %v", err)
+	}
 }
 
 // The migration opens audit.db by a file: URI built from the path, so a '#'

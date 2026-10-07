@@ -936,6 +936,23 @@ func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 	}
 }
 
+// TestDiffConfigsSecureClientV8ActionsRequireRestart: under Secure Client an
+// edit of a v8 action key is restart-required, as on main (GAP-0279).
+func TestDiffConfigsSecureClientV8ActionsRequireRestart(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	oldCfg.Enterprise.Profile = managed.ProfileSecureClient
+	oldCfg.SecureClientV8Actions = map[string][5]config.SeverityAction{"skill_actions": {}}
+	newCfg := cloneConfig(oldCfg)
+	newCfg.SecureClientV8Actions["skill_actions"] = [5]config.SeverityAction{1: {Install: config.InstallNone}}
+	if diff := diffConfigs(oldCfg, newCfg); !slices.Equal(diff.RestartRequired, []string{"skill_actions"}) {
+		t.Fatalf("diff = %+v", diff)
+	}
+	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); len(diff.Changed) != 0 {
+		t.Fatalf("unchanged diff = %+v", diff)
+	}
+}
+
 // TestDiffConfigsDirectoryKeys: a policy_dir or quarantine_dir edit applies
 // hot (the generation rebuilds, the watcher restarts) and a plugin_dir edit is
 // restart-required and held, instead of all three passing as no change
