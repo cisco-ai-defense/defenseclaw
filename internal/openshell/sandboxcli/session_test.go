@@ -21,6 +21,7 @@ package sandboxcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1742,7 +1743,8 @@ func TestCopySessionAfterAnApply(t *testing.T) {
 
 // `sandbox pull` and a session's end ask the same question before bringing
 // back changes that can run code on this machine (cert
-// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret").
+// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret"). A no says what
+// it leaves and exits 1.
 func TestPullAsksLikeTheSessionEnd(t *testing.T) {
 	ta := newTestApp(t, "n\n")
 	sb := copySandbox("copybox")
@@ -1752,8 +1754,14 @@ func TestPullAsksLikeTheSessionEnd(t *testing.T) {
 		Changes: []workspace.TreeChange{{Path: "Makefile", Status: "M"}},
 		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: "Makefile", Label: "Makefile", Kind: workspace.RiskExecutable,
 			Severity: workspace.SeverityHigh, Detail: "build file"}}}}
-	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
-	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?")
+	// GAP-0086: the no ended the command without a word, and with 0.
+	err := ta.Pull(bg, PullOptions{Name: "copybox", Apply: true})
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("declined pull = %v, want exit status 1", err)
+	}
+	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?",
+		"not brought back; the changes stay in copybox: review them with `defenseclaw sandbox review copybox`, then pull with --accept-sensitive")
 	lacks(t, ta.output(), "or hold a secret")
 }
 
