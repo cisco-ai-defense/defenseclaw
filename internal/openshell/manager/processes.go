@@ -305,25 +305,28 @@ func (m *Manager) endProcessTree(b *box) {
 // recordProcesses records the processes that started and exited, within the
 // tree's record rate; the log says once a minute how many it held back.
 func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxIdentity, t *procTree, started, exited []*procNode) {
-	emit := func(node *procNode, event string, at time.Time) {
+	emit := func(node *procNode, event string) {
+		// The record copies the process while it holds the tree: a sample
+		// or an OpenShell record may update the process meanwhile.
 		t.mu.Lock()
-		lineage := t.lineageNamesLocked(node.PPID)
-		t.mu.Unlock()
-		if !t.gate.take(processGateKey, at) {
-			return
-		}
 		ev := audit.SandboxProcessEvent{
 			Sandbox: id, Event: event, Source: node.Source, PID: node.PID, ParentPID: node.PPID,
 			Executable: node.Exe, Name: node.Comm, CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
-			ExitCode: node.ExitCode, Lineage: lineage, Timestamp: at,
+			Lineage: t.lineageNamesLocked(node.PPID), Timestamp: node.FirstSeen,
 		}
-		m.tel.RecordSandboxProcess(ctx, ev)
+		if event == audit.SandboxProcessExit {
+			ev.ExitCode, ev.Timestamp = node.ExitCode, node.ExitedAt
+		}
+		t.mu.Unlock()
+		if t.gate.take(processGateKey, ev.Timestamp) {
+			m.tel.RecordSandboxProcess(ctx, ev)
+		}
 	}
 	for _, node := range started {
-		emit(node, audit.SandboxProcessStart, node.FirstSeen)
+		emit(node, audit.SandboxProcessStart)
 	}
 	for _, node := range exited {
-		emit(node, audit.SandboxProcessExit, node.ExitedAt)
+		emit(node, audit.SandboxProcessExit)
 	}
 	now := m.now()
 	t.mu.Lock()
