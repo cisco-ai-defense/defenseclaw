@@ -557,9 +557,6 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 	}
 	for _, module := range m.rego {
-		if m.leftOutsideRollbackCopy(module.path) {
-			continue
-		}
 		if err := m.refreshRegoModule(module); err != nil {
 			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
 			continue
@@ -589,7 +586,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	return written, nil
 }
 
-// leftOutsideRollbackCopy reports whether commit must leave path as it is. The
+// leftOutsideRollbackCopy reports whether the migration must leave path as it is. The
 // installer saves a rollback copy of the data home only (the directory holding
 // config.yaml, and DEFENSECLAW_HOME), so a failed upgrade or `defenseclaw
 // rollback` puts config.yaml back but not a data.json, Rego module,
@@ -709,9 +706,9 @@ func (m *v9Migrator) planRegoRefresh() error {
 		if err != nil || !v9LegacyRegoData.Match(raw) {
 			continue
 		}
-		if m.in.Managed {
+		if m.in.Managed || m.leftOutsideRollbackCopy(path) {
 			m.note("%s is a pre-9 module that reads data.json; the gateway refuses it and uses the config-driven "+
-				"admission and thresholds until the admin replaces it with the shipped module", path)
+				"admission and thresholds until it is replaced with the shipped module", path)
 			continue
 		}
 		m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
@@ -741,7 +738,8 @@ var v9RetiredPolicyFiles = []struct{ name, sha256 string }{
 // planRetiredPolicyFiles removes the unmodified 0.8 copies of the retired
 // policy files. An edited copy belongs to the operator: it stays, and the
 // report says so. On a managed host the admin owns policy_dir, so the files
-// are only reported.
+// are only reported. A copy outside the data home stays as well: the 0.8
+// gateway a rollback restores still loads it (leftOutsideRollbackCopy).
 func (m *v9Migrator) planRetiredPolicyFiles() {
 	dir := filepath.Join(m.policyDir(), "rego")
 	for _, file := range v9RetiredPolicyFiles {
@@ -761,6 +759,8 @@ func (m *v9Migrator) planRetiredPolicyFiles() {
 				"Rego policies are retired)", path)
 		case m.in.Managed:
 			m.note("%s is the unmodified 0.8 copy of a retired policy; nothing reads it, remove it", path)
+		case m.leftOutsideRollbackCopy(path):
+			// Kept, and noted there.
 		default:
 			m.retired = append(m.retired, path)
 			m.note("%s, the unmodified 0.8 copy of a retired policy, is removed", path)

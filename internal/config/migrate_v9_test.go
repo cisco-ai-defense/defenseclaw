@@ -70,13 +70,29 @@ func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 		}
 	}
 	_ = db.Close()
+	// The 0.8 gateway a rollback restores still loads its Rego modules,
+	// including the retired firewall module and a pre-9 one.
+	firewall := filepath.Join(elsewhere, "policies", "rego", "firewall.rego")
+	module := filepath.Join(elsewhere, "policies", "rego", "guardrail.rego")
+	raw, err := os.ReadFile(filepath.Join("testdata", "rego_0_8_10", "firewall.rego"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firewall, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(module, []byte("package defenseclaw.guardrail\nblock := data.guardrail.block_threshold\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, AuditDBPath: auditDB})
 	if err != nil {
 		t.Fatalf("MigrateV9: %v", err)
 	}
-	if _, err := os.Stat(dataJSON); err != nil {
-		t.Errorf("data.json outside the data home was renamed: %v", err)
+	for _, path := range []string{dataJSON, firewall, module} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s outside the data home was moved: %v", path, err)
+		}
 	}
 	db, _ = sql.Open("sqlite", auditDB)
 	defer db.Close()
@@ -90,6 +106,9 @@ func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 	var noted bool
 	for _, note := range result.Record.Notes {
 		noted = noted || strings.Contains(note, "outside the data home")
+		if strings.Contains(note, "is removed") || strings.Contains(note, DataJSONMigratedSuffix) {
+			t.Errorf("a note claims a file left in place was changed: %s", note)
+		}
 	}
 	if !noted {
 		t.Errorf("no note says what was left in place: %v", result.Record.Notes)
