@@ -3594,12 +3594,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-			// Only the gateway's account can read the ACP token that signed the
-			// request, so it is the verified subject; identity headers the
-			// caller sent stay claims.
-			authenticated = authenticated.WithContext(
-				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(authenticated.Context())),
-			)
+			// Only the account the ACP token belongs to can read it, so that
+			// account is the verified subject; identity headers the caller
+			// sent stay claims.
+			authenticated = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
 			return
 		}
