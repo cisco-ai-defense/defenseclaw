@@ -480,12 +480,14 @@ func (m *Manager) Run(ctx context.Context) error {
 	destinations := time.NewTicker(destinationFlushEvery)
 	defer destinations.Stop()
 	defer m.flushDestinations("")
+	defer m.keepHookCounts()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-destinations.C:
 			m.flushDestinations("")
+			m.keepHookCounts()
 		case <-silence.C:
 			m.checkHookSilence(ctx)
 			m.pruneToolCalls()

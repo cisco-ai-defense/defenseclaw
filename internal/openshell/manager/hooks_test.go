@@ -540,6 +540,28 @@ func TestHookTamperAfterRestart(t *testing.T) {
 	}
 }
 
+// A daemon restart keeps a sandbox's hook counts, as it keeps its
+// destinations: sandbox status and the Sandboxes list go on from them
+// instead of dropping to what came after the restart (GAP-0156).
+func TestHookCountsSurviveARestart(t *testing.T) {
+	e := liveEnv(t, "countrestart", nil)
+	d := e.decider("countrestart", "Bash")
+	e.m.ObserveIngress(e.binding("countrestart"), sandboxauth.RouteHook)
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_1", "allow"))
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_2", "block"))
+	before := e.get("countrestart").Hooks
+	e.restartDaemon()
+	after := e.get("countrestart").Hooks
+	if after.HookRequests != 1 || after.ToolCalls != 2 || after.ToolBlocked != 1 || after.LastBlocked != before.LastBlocked ||
+		after.Events["PreToolUse"] != 2 {
+		t.Fatalf("hook counts after a restart = %+v, want those of %+v", after, before)
+	}
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_3", "allow"))
+	if n := e.get("countrestart").Hooks.ToolCalls; n != 3 {
+		t.Fatalf("tool calls after the restart = %d, want 3", n)
+	}
+}
+
 // Hook text is cut and stripped of control characters, and a redacted reason
 // never reaches the feed.
 func TestHookLabelAndDisplayReason(t *testing.T) {
@@ -639,8 +661,8 @@ func TestLowAlertsAreNoSessionFinding(t *testing.T) {
 
 // Every verdict counts under its hook event, the harness's name for it, tool
 // events or not (#956). The counts live as long as the sandbox's other hook
-// counters: a stop and start keep them, a new sandbox of the name and a
-// daemon restart start over.
+// counters: a stop and start keep them, as a daemon restart does
+// (TestHookCountsSurviveARestart), and a new sandbox of the name starts over.
 func TestHookEventCounts(t *testing.T) {
 	e := newEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "eventbox"})
@@ -660,10 +682,6 @@ func TestHookEventCounts(t *testing.T) {
 	want["SessionStart"]++
 	if h := e.get("eventbox").Hooks; !maps.Equal(h.Events, want) {
 		t.Fatalf("after a restart of the sandbox: events %v, want %v", h.Events, want)
-	}
-	e.restartDaemon()
-	if h := e.get("eventbox").Hooks; h.Events != nil || h.HookRequests != 0 {
-		t.Fatalf("after a daemon restart: hooks %+v, want no counts", h)
 	}
 	e.m.ObserveHookDecision(e.decider("eventbox", "Bash")("Stop", "", "allow"))
 	e.deleteBox("eventbox", sandboxapi.DeleteRequest{})

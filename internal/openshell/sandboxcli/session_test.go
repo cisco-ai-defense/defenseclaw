@@ -611,16 +611,16 @@ func TestSessionSummary(t *testing.T) {
 				})
 			}
 		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted since then"}, not: []string{"hooks are not reaching"}},
-		// PR 1022 live retest N1: the daemon restarted twice during the
-		// session, which left its counters at zero rather than below the
-		// session's start, and the summary read "0 tool calls · 0 new sites
-		// contacted" after 7 tool calls. Its start time says it restarted.
+		// The daemon keeps its hook counts across a restart (GAP-0156): one
+		// that left no counter lower kept them, so the session counts what
+		// it moved them by and names no restart (PR 1022 live retest N1,
+		// before any daemon kept them, read "0 tool calls" after 7).
 		{name: "a daemon restart that left no counter lower", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
 			ta.daemon.mu.Lock()
 			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
 			ta.daemon.mu.Unlock()
-		}, want: []string{"Session ended · 0 tool calls since the daemon restarted at " + time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04") +
-			" · 0 new sites contacted"}, not: []string{"since then"}},
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.HookRequests += 9; sb.Hooks.ToolCalls += 7 })
+		}, want: []string{"Session ended · 7 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
 		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
 			ta.daemon.mu.Lock()
 			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
@@ -879,7 +879,7 @@ func TestSessionHookWarnings(t *testing.T) {
 			quiet(time.Hour)(ta)
 			ta.env["OPENAI_API_KEY"] = "sk-mock"
 		}, during: restartedAt(5 * time.Minute),
-			want: []string{"Session ended · 0 tool calls since the daemon restarted at " + restartClock, restartNote, "continue this conversation"},
+			want: []string{"Session ended · 0 tool calls · ", restartNote, "continue this conversation"},
 			not:  []string{"no hook of this session reached", "not reaching"}},
 		{name: "a claude session across a daemon restart", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
 			quiet(10 * time.Millisecond)(ta)
@@ -907,7 +907,7 @@ func restartedAt(after time.Duration) func(*testing.T, *testApp) {
 
 var (
 	restartClock = time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04")
-	restartNote  = "the DefenseClaw daemon restarted during the session (at " + restartClock + ") and keeps no hook counts across a restart, " +
+	restartNote  = "the DefenseClaw daemon restarted during the session (at " + restartClock + ") and has counted no hook of it since, " +
 		"so DefenseClaw cannot tell whether this session's hooks reached it"
 )
 
