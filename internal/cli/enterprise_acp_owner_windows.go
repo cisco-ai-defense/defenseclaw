@@ -6,11 +6,16 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 )
+
+// configureEnterpriseACPTargetLookup does nothing on Windows: accounts
+// resolve through the local security authority.
+func configureEnterpriseACPTargetLookup(context.Context) {}
 
 // withEnterpriseACPServiceOwner runs fn as is: on Windows the elevated
 // caller hardens the records with ACLs for the gateway service afterwards

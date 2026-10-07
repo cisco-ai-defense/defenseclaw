@@ -46,17 +46,34 @@ agent, and central policy profile. The service record remains in protected
 machine state; only the bearer copy is published into the target user's private
 ACP runtime. The administrator commands never write an editor profile; the
 enrolled user runs "setup" to write their own editor entry.`,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// The administrator commands read the managed deployment (GAP-0249).
-		// The user-side setup reads no central config and runs as the user
-		// (GAP-0254).
-		if cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true" {
-			if err := pinEnterpriseACPAdministratorEnv(cmd); err != nil {
-				return err
-			}
+	PersistentPreRunE: enterpriseACPPersistentPreRun,
+}
+
+// enterpriseACPRootPreRun loads the config; a variable so tests can supply
+// one without a managed deployment.
+var enterpriseACPRootPreRun = rootPersistentPreRunNoAuditE
+
+func enterpriseACPPersistentPreRun(cmd *cobra.Command, args []string) error {
+	// The administrator commands read the managed deployment (GAP-0249).
+	// The user-side setup reads no central config and runs as the user
+	// (GAP-0254).
+	admin := cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true"
+	if admin {
+		if err := pinEnterpriseACPAdministratorEnv(cmd); err != nil {
+			return err
 		}
-		return rootPersistentPreRunNoAuditE(cmd, args)
-	},
+	}
+	if err := enterpriseACPRootPreRun(cmd, args); err != nil {
+		return err
+	}
+	if admin {
+		// A directory account (AD, SSSD) resolves only through the
+		// directory on the static gateway, as in the enterprise hooks
+		// commands; without it enroll, verify and revoke refused every
+		// such user (GAP-0269).
+		configureEnterpriseACPTargetLookup(cmd.Context())
+	}
+	return nil
 }
 
 // pinEnterpriseACPAdministratorEnv points an administrator on a standalone
