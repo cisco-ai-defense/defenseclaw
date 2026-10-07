@@ -160,3 +160,42 @@ func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
 		t.Fatalf("restore failure = %q, want %q", got, want)
 	}
 }
+
+// GAP-0543: after the account home moved (usermod -l -d -m), the record names
+// the old home. Setup must rebind it to the same file under the new home
+// instead of stopping at "managed backup target mismatch", and teardown must
+// then restore the file under the new home.
+func TestManagedBackupFollowsAMovedHome(t *testing.T) {
+	root := t.TempDir()
+	oldHome := filepath.Join(root, "old-home")
+	newHome := filepath.Join(root, "new-home")
+	for _, dir := range []string{filepath.Join(oldHome, ".claude"), filepath.Join(oldHome, ".defenseclaw")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", oldHome)
+	t.Setenv("USERPROFILE", oldHome)
+	oldTarget := filepath.Join(oldHome, ".claude", "settings.json")
+	if err := os.WriteFile(oldTarget, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(filepath.Join(oldHome, ".defenseclaw"), "claudecode", "settings.json", oldTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(oldHome, newHome); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", newHome)
+	t.Setenv("USERPROFILE", newHome)
+	dataDir := filepath.Join(newHome, ".defenseclaw")
+	newTarget := filepath.Join(newHome, ".claude", "settings.json")
+
+	if err := captureManagedFileBackup(dataDir, "claudecode", "settings.json", newTarget); err != nil {
+		t.Fatalf("setup after a home move: %v", err)
+	}
+	restored, err := restoreManagedFileBackupIfUnchanged(dataDir, "claudecode", "settings.json", newTarget)
+	if err != nil || !restored {
+		t.Fatalf("teardown after a home move: restored=%v err=%v", restored, err)
+	}
+}
