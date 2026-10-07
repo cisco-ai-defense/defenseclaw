@@ -403,7 +403,7 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 	}
 	cfg.Guardrail.DefaultProfile = "watch"
 	api := &APIServer{scannerCfg: cfg}
-	api.initGuardrailProfiles(cfg)
+	api.initGuardrailProfiles(cfg, nil)
 
 	type seen struct {
 		subject  VerifiedSubject

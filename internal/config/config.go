@@ -2703,35 +2703,18 @@ func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManag
 	return candidate, nil
 }
 
-// ResolveObservabilityV8ManagedAIDOptionsForInspection decodes only the
-// release-owned managed-destination inputs from one exact schema-v8 source.
-// It applies the same defaults and environment bindings as runtime decoding,
-// but never publishes provenance and returns no activatable Config. Managed
-// path trust is intentionally an activation concern: read-only plan/status
-// inspection compiles a private exact-byte snapshot whose temporary path is
-// not the authoritative service config path.
-func ResolveObservabilityV8ManagedAIDOptionsForInspection(
-	configFile string,
-	raw []byte,
-) (ObservabilityV8ManagedAIDOptions, error) {
-	candidate, err := loadConfigSource(
-		configFile,
-		false,
-		append([]byte(nil), raw...),
-		true,
-		false,
-		true,
-		false,
-	)
-	if err != nil {
-		return ObservabilityV8ManagedAIDOptions{}, err
-	}
+// ObservabilityV8ManagedAIDOptionsFromConfig returns the release-owned
+// managed-destination inputs of a runtime candidate decoded from raw (the
+// result of LoadRuntimeV8InspectionCandidateFromBytes or the strict loaders).
+// Reading them from that candidate keeps the source from being decoded a
+// second time for the same four values (GAP-0264).
+func ObservabilityV8ManagedAIDOptionsFromConfig(candidate *Config, raw []byte) ObservabilityV8ManagedAIDOptions {
 	return ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    candidate.DeploymentMode,
 		Profile:           candidate.EnterpriseProfile(),
 		Endpoint:          candidate.CiscoAIDefense.Endpoint,
 		SourceContentHash: ObservabilityV8SourceContentHash(raw),
-	}, nil
+	}
 }
 
 // ApplyRuntimeV8DataDirDefaultsFromBytes re-bases omitted path fields and an
@@ -2982,7 +2965,7 @@ func loadConfigSourceChecked(
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
 	if runtimeV8 {
-		if err := restoreRuntimeV8GuardrailConnectors(&cfg, sourceBytes); err != nil {
+		if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
 			return nil, err
 		}
 	} else if !resolvesToSecureClient(&cfg, pinnedDeploymentMode) {
@@ -3268,17 +3251,21 @@ func loadConfigSourceChecked(
 // entries whose policy value is an empty mapping (for example, codex: {}).
 // Those entries are semantically meaningful roster members, but Viper omits
 // them while unmarshalling. Decode this one dynamic map from the same immutable
-// target-runtime bytes before migration/defaulting and validation continue.
-func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
-	var source struct {
-		Guardrail struct {
-			Connectors map[string]PerConnectorGuardrailConfig `yaml:"connectors"`
-		} `yaml:"guardrail"`
+// target-runtime bytes before migration/defaulting and validation continue. The
+// strict parse of those bytes is shared (ParseV8YAML), so this does not parse a
+// large source again (GAP-0264).
+func restoreRuntimeV8GuardrailConnectors(cfg *Config, configFile string, raw []byte) error {
+	document, err := ParseV8YAML(configFile, raw)
+	if err != nil {
+		return err
 	}
-	if err := yaml.Unmarshal(raw, &source); err != nil {
-		return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+	var connectors map[string]PerConnectorGuardrailConfig
+	if node := v8YAMLMapValue(v8YAMLMapValue(v8DocumentRoot(document.Document), "guardrail"), "connectors"); node != nil {
+		if err := node.Decode(&connectors); err != nil {
+			return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+		}
 	}
-	cfg.Guardrail.Connectors = source.Guardrail.Connectors
+	cfg.Guardrail.Connectors = connectors
 	return nil
 }
 
