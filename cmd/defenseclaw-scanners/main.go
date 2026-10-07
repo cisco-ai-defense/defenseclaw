@@ -22,6 +22,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -143,7 +144,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var scriptArgs []string
 	switch args[0] {
 	case "prepare":
-		dir, err := ensureRuntime(manifest)
+		dir, err := prepareRuntime(manifest)
 		if err != nil {
 			fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
 			return 1
@@ -309,6 +310,91 @@ func ensureRuntime(manifest runtimeManifest) (string, error) {
 		return "", fmt.Errorf("publish scanner runtime: %w", err)
 	}
 	return dir, nil
+}
+
+// prepareRuntime is ensureRuntime plus a check that the unpacked tree is the
+// embedded archive. The completion marker names a public SHA-256, so a folder
+// somebody else created could carry it: prepare, which runs elevated and
+// executes the folder's python.exe, never trusts the marker alone. A tree that
+// differs is removed and unpacked again.
+func prepareRuntime(manifest runtimeManifest) (string, error) {
+	dir, err := ensureRuntime(manifest)
+	if err != nil {
+		return "", err
+	}
+	archive, err := payload.ReadFile(runtimeArchiveName)
+	if err != nil {
+		return "", errors.New("this build carries no scanner runtime archive")
+	}
+	if verifyRuntime(dir, archive) == nil {
+		return dir, nil
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return "", fmt.Errorf("remove the scanner runtime that does not match this build: %w", err)
+	}
+	if dir, err = ensureRuntime(manifest); err != nil {
+		return "", err
+	}
+	if err := verifyRuntime(dir, archive); err != nil {
+		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
+	}
+	return dir, nil
+}
+
+// verifyRuntime checks that every file of archive exists under dir as a
+// regular file with the archived size and SHA-256. Files prepare adds (the
+// byte-compiled caches) are not in the archive and are not checked.
+func verifyRuntime(dir string, archive []byte) error {
+	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		return err
+	}
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, filepath.FromSlash(file.Name))
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || uint64(info.Size()) != file.UncompressedSize64 {
+			return fmt.Errorf("%s is missing or changed", file.Name)
+		}
+		want, err := entrySHA256(file)
+		if err != nil {
+			return err
+		}
+		if got, err := fileSHA256(path); err != nil || got != want {
+			return fmt.Errorf("%s is missing or changed", file.Name)
+		}
+	}
+	return nil
+}
+
+func entrySHA256(file *zip.File) ([sha256.Size]byte, error) {
+	in, err := file.Open()
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	defer in.Close()
+	return readerSHA256(in)
+}
+
+func fileSHA256(path string) ([sha256.Size]byte, error) {
+	in, err := os.Open(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	defer in.Close()
+	return readerSHA256(in)
+}
+
+func readerSHA256(r io.Reader) ([sha256.Size]byte, error) {
+	var sum [sha256.Size]byte
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return sum, err
+	}
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
 }
 
 func runtimeComplete(dir, sha string) bool {

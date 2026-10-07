@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"gopkg.in/yaml.v3"
@@ -26,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // The standalone payload's scanner runtime (cmd/defenseclaw-scanners) lives
@@ -46,7 +48,76 @@ var (
 // Administrators hold full control and the gateway service reads and runs
 // it, all inherited. No other account has access.
 func windowsScannerRuntimeSDDL(gateway *windows.SID) string {
-	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + gateway.String() + ")"
+	return "O:BAG:SY" + windowsScannerRuntimeDACL(gateway)
+}
+
+func windowsScannerRuntimeDACL(gateway *windows.SID) string {
+	return "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + gateway.String() + ")"
+}
+
+// ensureWindowsScannerRuntimeRoot makes root a folder this lifecycle created.
+// "prepare" runs a python.exe from under it as an administrator and the
+// gateway service runs the same one, so a folder a standard user made first
+// (ProgramData lets users create folders) is not adopted: its owner keeps
+// WRITE_DAC over everything in it. A root that is not owned by Administrators
+// or LocalSystem is removed and created again, with the protected ACL set at
+// creation so no user can add a file before the lockdown.
+func ensureWindowsScannerRuntimeRoot(root string, gateway *windows.SID) error {
+	info, err := os.Lstat(root)
+	if err == nil {
+		if !info.IsDir() || winpath.RejectReparseChain(root) != nil {
+			return fmt.Errorf("%s is not a real folder", root)
+		}
+		trusted, ownerErr := windowsPathOwnedByAdministrators(root)
+		if ownerErr != nil {
+			return fmt.Errorf("read the owner of %s: %w", root, ownerErr)
+		}
+		if !trusted {
+			if err := removeWindowsScannerRuntime(); err != nil {
+				return fmt.Errorf("replace %s, which an unprivileged account created: %w", root, err)
+			}
+			err = os.ErrNotExist
+		}
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		descriptor, err := windows.SecurityDescriptorFromString(windowsScannerRuntimeDACL(gateway))
+		if err != nil {
+			return err
+		}
+		attributes := &windows.SecurityAttributes{
+			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+			SecurityDescriptor: descriptor,
+		}
+		pointer, err := winpath.UTF16Ptr(root)
+		if err != nil {
+			return err
+		}
+		if err := windows.CreateDirectory(pointer, attributes); err != nil {
+			return fmt.Errorf("create %s: %w", root, err)
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := applyWindowsSDDL(root, windowsScannerRuntimeSDDL(gateway)); err != nil {
+		return fmt.Errorf("protect %s: %w", root, err)
+	}
+	return nil
+}
+
+func windowsPathOwnedByAdministrators(path string) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return false, err
+	}
+	return owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || owner.IsWellKnown(windows.WinLocalSystemSid), nil
 }
 
 func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
@@ -97,17 +168,8 @@ func installWindowsScannerRuntime(source string) error {
 	if err != nil || gateway == nil {
 		return fmt.Errorf("resolve the gateway service SID: %v", err)
 	}
-	if info, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(root, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("create %s: %w", root, err)
-		}
-	} else if err != nil {
+	if err := ensureWindowsScannerRuntimeRoot(root, gateway); err != nil {
 		return err
-	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is not a real folder", root)
-	}
-	if err := applyWindowsSDDL(root, windowsScannerRuntimeSDDL(gateway)); err != nil {
-		return fmt.Errorf("protect %s: %w", root, err)
 	}
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	want, err := windowsEnterpriseFileSHA256(source)
