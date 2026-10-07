@@ -1031,10 +1031,10 @@ class TestSetupCodexAliasInteractiveDecline(unittest.TestCase):
 class TestApplyConnectorObservabilityHelper(unittest.TestCase):
     """Direct unit test for the shared helper.
 
-    Both Click commands defer to ``_apply_connector_observability_only``
-    which is the single decision point. Pinning its contract here
-    means a regression in the helper fails this test loudly even if a
-    future Click refactor renames either alias.
+    Both Click commands defer to ``_apply_hook_connector_setup``, the
+    single decision point. Pinning its contract here means a regression
+    in the helper fails this test loudly even if a future Click refactor
+    renames either alias.
     """
 
     def setUp(self):
@@ -1055,11 +1055,9 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
         They have full enforcement integrations and don't have an
         observability-only equivalent yet — see docs/OBSERVABILITY.md.
         """
-        from defenseclaw.commands.cmd_setup import (
-            _apply_connector_observability_only,
-        )
+        from defenseclaw.commands.cmd_setup import _apply_hook_connector_setup
 
-        ok = _apply_connector_observability_only(
+        ok = _apply_hook_connector_setup(
             self.app,
             connector="openclaw",
             restart=False,
@@ -1068,9 +1066,7 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
 
     def test_idempotent(self):
         """Running the helper twice yields the same on-disk state."""
-        from defenseclaw.commands.cmd_setup import (
-            _apply_connector_observability_only,
-        )
+        from defenseclaw.commands.cmd_setup import _apply_hook_connector_setup
 
         with (
             patch(
@@ -1082,10 +1078,11 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
                 return_value=True,
             ),
         ):
-            ok1 = _apply_connector_observability_only(
+            ok1 = _apply_hook_connector_setup(
                 self.app,
                 connector="codex",
                 restart=False,
+                allow_offline_audit=True,
             )
             self.assertTrue(ok1)
             snapshot_first = (
@@ -1094,10 +1091,11 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
                 self.app.cfg.guardrail.mode,
             )
 
-            ok2 = _apply_connector_observability_only(
+            ok2 = _apply_hook_connector_setup(
                 self.app,
                 connector="codex",
                 restart=False,
+                allow_offline_audit=True,
             )
             self.assertTrue(ok2)
             snapshot_second = (
