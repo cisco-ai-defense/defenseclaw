@@ -210,6 +210,7 @@ const (
 	WarnReconcileFailed     = "kernel_reconcile_failed"
 	WarnRootsOverLimit      = "kernel_roots_over_limit"
 	WarnPIDMonitorOnly      = "kernel_pid_anchor_monitor_only"
+	WarnBinaryScopeLimited  = "kernel_binary_anchor_scope_limited"
 	WarnGuardrailObserve    = "kernel_enforce_guardrail_observe"
 	WarnPolicyLoadError     = "kernel_policy_load_error"
 	WarnLSMUnavailable      = "kernel_lsm_unavailable"
@@ -223,6 +224,16 @@ const (
 	ReasonNotEnrolled       = "not_enrolled"
 	ReasonGuardrailObserve  = "guardrail_observe"
 )
+
+// The two limits of enforcement, each a warning and the reason of a user
+// that finished burn-in but stays in monitor mode:
+//
+//   - WarnPIDMonitorOnly: an agent session matched only by its process id (a
+//     script-hosted agent, such as an npm install run by node) is monitored,
+//     never denied, because a pid can be reused between two passes.
+//   - WarnBinaryScopeLimited: a controls policy's binary selector carries one
+//     uid, so when several users have native installs only the first (lowest
+//     uid) is denied and the others stay in monitor.
 
 // WarnCustomerEventsCapped:<policy> is one of the host's own Tetragon
 // policies whose events went over the helper's volume budget in the last

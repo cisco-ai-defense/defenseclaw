@@ -639,6 +639,22 @@ func hasMonitorAnchor(uid int, compiled Compiled) bool {
 	return false
 }
 
+// hasNativeAgent reports a native command-line agent binary of uid: an
+// install, or a verified live root.
+func (c *Controller) hasNativeAgent(uid int) bool {
+	for _, install := range c.installs {
+		if install.UID == uid && IsCLIConnector(install.Connector) && len(install.Native) > 0 {
+			return true
+		}
+	}
+	for _, root := range c.roots.Roots {
+		if root.UID == uid && root.Native {
+			return true
+		}
+	}
+	return false
+}
+
 // fillUIDs publishes each enrolled user's place in the rollout and emits a
 // change when it moved.
 func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
@@ -657,12 +673,18 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 		}
 		status.AnchoredRoots = c.alive[uid]
 		if status.State == UIDEnforcing && !c.hasAnchor(uid, plan, compiled) {
-			// A verified live root can still be measured in monitor mode;
-			// numeric PID reuse keeps it out of an enforcing policy.
-			if hasMonitorAnchor(uid, compiled) {
-				status.State, status.Reason = UIDMonitor, WarnPIDMonitorOnly
-			} else {
+			// Ready, but the enforcing policy cannot deny for this user: it
+			// stays measured in monitor mode, and the reason names which
+			// limit applies. A native install means another user holds the
+			// controls policy's one binary uid; otherwise the agent is matched
+			// only by a pid, which may be reused and so never denies.
+			switch {
+			case !hasMonitorAnchor(uid, compiled):
 				status.State, status.Reason = UIDInactive, ReasonNoAnchors
+			case c.hasNativeAgent(uid):
+				status.State, status.Reason = UIDMonitor, WarnBinaryScopeLimited
+			default:
+				status.State, status.Reason = UIDMonitor, WarnPIDMonitorOnly
 			}
 		}
 		status.CoveredSeconds = int64(c.burn.Covered(uid) / time.Second)

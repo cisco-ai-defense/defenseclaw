@@ -501,12 +501,15 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	}
 	var pids []int
 	over := 0
+	pidOnly := false
 	for _, root := range in.Roots {
 		if !uidSet[root.UID] || !scope.allows(root.Connector) {
 			continue
 		}
 		if root.Native {
 			addBin(root.UID, root.Exe)
+		} else {
+			pidOnly = true
 		}
 		if scope.Mode == PolicyEnforce {
 			continue
@@ -526,13 +529,15 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		}
 	}
 	if len(binsByUID) > 1 {
-		notes = append(notes, "binary_anchor_scope_limited")
+		notes = append(notes, WarnBinaryScopeLimited)
 	}
 	binList := sortedKeys(binsByUID[binaryUID])
 	if over > 0 {
 		notes = append(notes, fmt.Sprintf("%s:%d", WarnRootsOverLimit, over))
 	}
-	if scope.Mode == PolicyEnforce && len(in.Roots) > 0 {
+	// Only a session the binaries cannot cover is left to monitor; a native
+	// root of the binary uid is denied through its binary.
+	if scope.Mode == PolicyEnforce && pidOnly {
 		notes = append(notes, WarnPIDMonitorOnly)
 	}
 	var homeDirs []string

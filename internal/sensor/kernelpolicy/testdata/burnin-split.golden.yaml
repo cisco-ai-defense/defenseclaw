@@ -480,4 +480,3 @@ spec:
             - action: Override
               argError: -1
             - action: Post
-# note: kernel_pid_anchor_monitor_only
