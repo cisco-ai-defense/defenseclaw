@@ -113,6 +113,9 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 				break
 			}
 			facts.Directory, facts.Source = known.directory, known.source
+			if domain, _, qualified := strings.Cut(account.Name, `\`); qualified {
+				facts.AccountDomain = domain
+			}
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
 			if domain != "" && known.directory == useridentity.DirectoryEntraID {
 				// The aad module, and Himmelblau with cn_name_mapping =

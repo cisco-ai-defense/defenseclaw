@@ -822,3 +822,21 @@ func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
 		t.Fatalf("explain = %s", rec.Body.String())
 	}
 }
+
+// A DOMAIN\\user assignment uses the account domain reported by the verified
+// account name, not the first label of an unrelated DNS realm.
+func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "1201", UserName: `CONTOSO\\alice`,
+		Directory: useridentity.DirectoryFacts{
+			Domain: "corp.contoso.com", Principal: "alice@CORP.CONTOSO.COM",
+			ResolvedAt: time.Now(),
+		},
+	}, true)
+	if !userEntryMatches(&subject, `CONTOSO\\alice`) {
+		t.Fatal("the verified NetBIOS account domain did not match")
+	}
+	if userEntryMatches(&subject, `CORP\\alice`) {
+		t.Fatal("a DNS first label selected another account domain")
+	}
+}

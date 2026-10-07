@@ -58,8 +58,9 @@ type profileSubject struct {
 	UPN       string
 	// Directory and Domain say where the account lives (explain's short-name
 	// note); an empty Domain is an account the host knows by a bare name.
-	Directory useridentity.Directory
-	Domain    string
+	Directory     useridentity.Directory
+	Domain        string
+	AccountDomain string
 	// Groups are verified directory group names and SIDs.
 	Groups []string
 	// LookupFailed is set when the directory lookup for this subject failed
@@ -573,6 +574,12 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // build their subject through this function, so a users entry cannot match
 // one and not the other (GAP-0182).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
+	accountDomain := s.Directory.AccountDomain
+	if accountDomain == "" {
+		if domain, _, qualified := strings.Cut(s.UserName, `\`); qualified {
+			accountDomain = domain
+		}
+	}
 	return profileSubject{
 		UserID:          s.UserID,
 		IDKind:          s.IDKind,
@@ -581,6 +588,7 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		UPN:             s.Directory.UPN,
 		Directory:       s.Directory.Directory,
 		Domain:          s.Directory.Domain,
+		AccountDomain:   accountDomain,
 		Groups:          s.Directory.Groups,
 		LookupFailed:    lookupAttempted && s.Directory.ResolvedAt.IsZero(),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
@@ -804,25 +812,12 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 	return qualified && account != "" && useridentity.EqualFold(account, subject.UserName) && subjectInDomain(subject, domain)
 }
 
-// subjectInDomain reports whether domain, the DOMAIN of a DOMAIN\user entry,
-// names the subject's domain: by the name the directory reported (winbind
-// reports the NetBIOS name) or the first label of a DNS name, of that domain
-// or of the realm of the subject's principal (Windows reports the DNS name of
-// the computer's own domain).
+// subjectInDomain compares only verified account namespaces. Guessing a
+// NetBIOS name from a DNS first label can select a different trusted domain.
 func subjectInDomain(subject *profileSubject, domain string) bool {
-	if domain = strings.TrimSpace(domain); domain == "" {
-		return false
-	}
-	for _, have := range []string{subject.Domain, useridentity.RealmOf(subject.Principal)} {
-		if have == "" {
-			continue
-		}
-		label, _, _ := strings.Cut(have, ".")
-		if useridentity.EqualFold(have, domain) || useridentity.EqualFold(label, domain) {
-			return true
-		}
-	}
-	return false
+	domain = strings.TrimSpace(domain)
+	return domain != "" && (useridentity.EqualFold(domain, subject.AccountDomain) ||
+		useridentity.EqualFold(domain, subject.Domain))
 }
 
 // subjectGroups answers whether one of a subject's groups is the group an
