@@ -72,6 +72,11 @@ var (
 )
 
 func main() {
+	// The sandbox kernel feed (Linux, sandboxfeed_linux.go) is a mode of its
+	// own that shares none of the broker's flags.
+	if code, ok := sandboxFeedMode(os.Args[1:]); ok {
+		os.Exit(code)
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "defenseclaw-sensor-helper:", err)
 		os.Exit(exitCode(err))

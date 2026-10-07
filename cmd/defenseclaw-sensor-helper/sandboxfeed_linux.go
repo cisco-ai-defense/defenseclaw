@@ -46,13 +46,13 @@ import (
 // It shares none of the broker's flags: the managed helper's socket, peer
 // uids, homes and Tetragon intent mean nothing to it, and it takes no
 // argument that could widen what it reads. So it is picked off the command
-// line before the broker's flag set is parsed, and only as the first
-// argument.
-func init() {
-	if len(os.Args) < 2 || (os.Args[1] != "--sandbox-feed" && os.Args[1] != "-sandbox-feed") {
-		return
+// line before the broker's flag set is parsed (main calls sandboxFeedMode
+// first), and only as the first argument.
+func sandboxFeedMode(args []string) (code int, ok bool) {
+	if len(args) == 0 || (args[0] != "--sandbox-feed" && args[0] != "-sandbox-feed") {
+		return 0, false
 	}
-	os.Exit(runSandboxFeed(os.Args[2:], os.Stdout, os.Stderr))
+	return runSandboxFeed(args[1:], os.Stdout, os.Stderr), true
 }
 
 // runSandboxFeed is the mode's whole command; it returns the exit status.

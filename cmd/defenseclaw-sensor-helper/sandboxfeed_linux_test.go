@@ -36,6 +36,20 @@ func TestSandboxFeedModeTakesNoOtherArguments(t *testing.T) {
 	}
 }
 
+// The helper binary picks the feed mode off its first argument before the
+// broker's flags are parsed, and only there.
+func TestSandboxFeedModeIsTheFirstArgumentOfTheBinary(t *testing.T) {
+	if _, stderr, code := runHelperBinary(t, "--sandbox-feed", "--socket", "/tmp/x"); code != 2 || !strings.Contains(stderr, "usage: defenseclaw-sensor-helper --sandbox-feed") {
+		t.Fatalf("--sandbox-feed with a broker flag exited %d: %q", code, stderr)
+	}
+	if _, stderr, code := runHelperBinary(t, "--check", "--sandbox-feed"); code == 0 || strings.Contains(stderr, "usage: defenseclaw-sensor-helper --sandbox-feed") {
+		t.Fatalf("--sandbox-feed after another flag reached the feed mode (exit %d): %q", code, stderr)
+	}
+	if _, ok := sandboxFeedMode([]string{"--version"}); ok {
+		t.Fatal("--version was taken for the feed mode")
+	}
+}
+
 func TestSandboxFeedModeRunsAsRootOnly(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root")
