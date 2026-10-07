@@ -182,6 +182,21 @@ var reasonTexts = map[string]string{
 	"not_allowlisted":                "not on the allowlist",
 	"rate_limited":                   "rate limited",
 	"ip_literal":                     "IP address instead of a name",
+	// Triage's verdicts on the rule OpenShell drafts for a denied
+	// connection (triage.Reason).
+	"unsupported_rule":         "no OpenShell rule allows it, and DefenseClaw does not approve the rule drafted for it",
+	"no_endpoints":             "the rule drafted for it names no destination",
+	"wildcard_destination":     "wildcard destination",
+	"policy_refused":           "the sandbox policy refuses it",
+	"admin_violation":          "blocked by your organization",
+	"blocklisted":              "on the block list",
+	"agent_proposals_disabled": "no OpenShell rule allows it, and this sandbox takes no new rules",
+	"resolves_to_host":         "the name leads to this machine",
+	"unresolved":               "the name does not resolve",
+	"multiple_hosts":           "the rule drafted for it names several hosts",
+	"harness_background_fetch": "a background fetch of the harness, which it does without",
+	"rule_limit":               "the sandbox added its limit of rules this session",
+	"too_many_pending":         "too many approvals are waiting",
 }
 
 // reasonText is the short explanation of a feed reason token; an unknown
