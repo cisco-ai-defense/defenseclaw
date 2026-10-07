@@ -218,7 +218,8 @@ func TestPromotionReplacesPIDMonitorPolicyBeforeDeletingIt(t *testing.T) {
 	h.burnedIn(1002, 24*time.Hour)
 	h.pass()
 	calls := h.tg.take()
-	add, del := indexOf(calls, "add:defenseclaw-controls-"), indexOf(calls, "delete:"+first.Name)
+	enforcingPolicy, _ := h.tg.find(FamilyControls)
+	add, del := indexOf(calls, "add:"+enforcingPolicy.Name), indexOf(calls, "delete:"+first.Name)
 	if add < 0 || del < 0 || add > del || !strings.HasSuffix(calls[add], ":enforce") {
 		t.Fatalf("calls = %v, want enforcing add before monitor delete", calls)
 	}
@@ -226,12 +227,13 @@ func TestPromotionReplacesPIDMonitorPolicyBeforeDeletingIt(t *testing.T) {
 		t.Fatalf("a PID monitor policy was promoted: %v", calls)
 	}
 
-	// A new script-hosted PID does not change the enforcing native-binary
-	// policy or trigger a temporary overlap of different deny scopes.
+	// A new script-hosted PID can refresh the monitor family but must not
+	// replace or reconfigure the enforcing native-binary policy.
 	h.procs = append(h.procs, codexProc(4100, 1, 200, 1001))
 	h.pass()
 	for _, call := range h.tg.take() {
-		if strings.HasPrefix(call, "add:") || strings.HasPrefix(call, "delete:") || strings.HasPrefix(call, "configure:") {
+		if strings.Contains(call, enforcingPolicy.Name) &&
+			(strings.HasPrefix(call, "add:") || strings.HasPrefix(call, "delete:") || strings.HasPrefix(call, "configure:")) {
 			t.Fatalf("a numeric pid changed an enforcing policy: %s", call)
 		}
 	}
@@ -242,8 +244,8 @@ func TestTetragonRestartIsReAddedAndIsNotAnOverride(t *testing.T) {
 	h.tg.restart()
 	h.pass()
 	calls := h.tg.take()
-	if countCalls(calls, "add:") != 3 {
-		t.Fatalf("calls = %v, want observe, connect and controls re-added", calls)
+	if countCalls(calls, "add:") != 4 {
+		t.Fatalf("calls = %v, want observe, connect, controls and monitor re-added", calls)
 	}
 	controls, ok := h.tg.find(FamilyControls)
 	if !ok || !controls.Mode.Enforcing() {

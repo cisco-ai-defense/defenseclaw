@@ -22,8 +22,11 @@ func TestEnforcingPolicyCannotDenyReusedPID(t *testing.T) {
 	if hasFamily(compiled, FamilyControls) {
 		t.Fatal("a script-only live root cannot be safely enforced by its numeric pid")
 	}
-	if compiled.Anchored[1002] != 0 {
-		t.Fatalf("reported enforcing anchors for script-only root: %v", compiled.Anchored)
+	if compiled.Anchored[1002] != 1 {
+		t.Fatalf("the script root must stay measured in monitor mode: %v", compiled.Anchored)
+	}
+	if burnin := policyOf(t, compiled, FamilyBurnin); burnin.Mode != PolicyMonitor || len(burnin.PIDs) != 1 {
+		t.Fatalf("unsafe script root did not stay in monitor mode: %+v", burnin)
 	}
 
 	monitor := w.compile(Input{Controls: &Scope{Mode: PolicyMonitor, UIDs: []int{1002}}, Roots: roots.Roots})
@@ -33,7 +36,7 @@ func TestEnforcingPolicyCannotDenyReusedPID(t *testing.T) {
 	}
 }
 
-func TestScriptOnlyUserIsReportedInactiveAfterBurnIn(t *testing.T) {
+func TestScriptOnlyUserStaysMonitorAfterBurnIn(t *testing.T) {
 	h := newHarness(t, enforceIntent(Digest(), "codex"), baseTargets)
 	h.procs = []Proc{codexProc(5001, 1, 120, 1002)}
 	h.burnedIn(1002, 24*time.Hour)
@@ -42,8 +45,34 @@ func TestScriptOnlyUserIsReportedInactiveAfterBurnIn(t *testing.T) {
 		t.Fatal("script-only root loaded an enforcing controls policy")
 	}
 	for _, user := range h.status().UIDs {
-		if user.UID == 1002 && (user.State != UIDInactive || user.Reason != ReasonNoAnchors) {
+		if user.UID == 1002 && (user.State != UIDMonitor || user.Reason != WarnPIDMonitorOnly) {
 			t.Fatalf("script-only user has inaccurate enforcement status: %+v", user)
 		}
+	}
+}
+
+func TestReadyScriptUserKeepsMonitorCoverage(t *testing.T) {
+	h := newHarness(t, enforceIntent(Digest()), baseTargets)
+	h.procs = twoUserProcs()
+	h.pass()
+	h.burnedIn(1001, 24*time.Hour)
+	h.burnedIn(1002, 24*time.Hour)
+	h.pass()
+	controls, enforcing := h.tg.find(FamilyControls)
+	burnin, monitoring := h.tg.find(FamilyBurnin)
+	if !enforcing || !controls.Mode.Enforcing() || !monitoring || burnin.Mode != LoadedMonitor {
+		t.Fatalf("missing safe enforcement and script monitoring: controls %+v burnin %+v", controls, burnin)
+	}
+	var found bool
+	for _, user := range h.status().UIDs {
+		if user.UID == 1002 {
+			found = true
+			if user.State != UIDMonitor || user.Reason != WarnPIDMonitorOnly {
+				t.Fatalf("script user is not reported as monitor-only: %+v", user)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("script user missing from status")
 	}
 }

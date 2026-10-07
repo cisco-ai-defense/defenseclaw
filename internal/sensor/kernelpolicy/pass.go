@@ -623,6 +623,20 @@ func (c *Controller) hasAnchor(uid int, plan Plan, compiled Compiled) bool {
 	return false
 }
 
+// hasMonitorAnchor reports a ready user's still-active monitor coverage when
+// no safe native binary anchor exists for enforcement.
+func hasMonitorAnchor(uid int, compiled Compiled) bool {
+	if compiled.Anchored[uid] > 0 {
+		return true
+	}
+	for _, policy := range compiled.Policies {
+		if policy.Family == FamilyBurnin && policy.BinaryUID == uid && len(policy.Binaries) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // fillUIDs publishes each enrolled user's place in the rollout and emits a
 // change when it moved.
 func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
@@ -641,9 +655,13 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 		}
 		status.AnchoredRoots = c.alive[uid]
 		if status.State == UIDEnforcing && !c.hasAnchor(uid, plan, compiled) {
-			// Ready, but no install and no live session: nothing is
-			// enforced for this user until one appears.
-			status.State, status.Reason = UIDInactive, ReasonNoAnchors
+			// A verified live root can still be measured in monitor mode;
+			// numeric PID reuse keeps it out of an enforcing policy.
+			if hasMonitorAnchor(uid, compiled) {
+				status.State, status.Reason = UIDMonitor, WarnPIDMonitorOnly
+			} else {
+				status.State, status.Reason = UIDInactive, ReasonNoAnchors
+			}
 		}
 		status.CoveredSeconds = int64(c.burn.Covered(uid) / time.Second)
 		status.NeededSeconds = int64(c.cfg.Intent.BurnIn / time.Second)
