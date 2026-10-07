@@ -226,9 +226,16 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 			v.RulePacks[label] = filepath.Clean(dir)
 		}
 	}
+	// The singular guardrail.connector (the shape the per-user CLI writes)
+	// enrols its connector too unless guardrail.connectors disables it, as
+	// in the enumerator (GAP-0263).
+	names := []string{cfg.Guardrail.Connector}
 	for name := range cfg.Guardrail.Connectors {
+		names = append(names, name)
+	}
+	for _, name := range names {
 		connector := strings.ToLower(strings.TrimSpace(name))
-		if connector == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+		if connector == "" || contains(v.Connectors, connector) || !cfg.Guardrail.EffectiveEnabled(name) {
 			continue
 		}
 		v.Connectors = append(v.Connectors, connector)

@@ -286,6 +286,17 @@ func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
 			if r := h.run(Options{Action: ActionStatus}); hasWarning(r, "no_connectors_enabled") {
 				t.Fatalf("the warning stays with a connector enabled: %+v", r.Warnings)
 			}
+			// The singular guardrail.connector (the shape the per-user CLI
+			// writes) enrols the connector too, so verify passes (GAP-0263).
+			single := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(single, append(DefaultConfig(h.env.Layout), "  connector: claudecode\n"...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: single}))
+			requireOK(t, h.run(Options{Action: ActionVerify}))
+			if goos == "linux" && !strings.Contains(h.read("/etc/systemd/system/"+unitGuardian+".d/"+dropinPaths), "ReadWritePaths=-/etc/claude-code") {
+				t.Fatal("the guardian sandbox does not allow the Claude Code machine-policy folder for guardrail.connector")
+			}
 		})
 	}
 }
