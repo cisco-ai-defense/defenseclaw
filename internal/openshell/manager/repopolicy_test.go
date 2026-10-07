@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -75,6 +76,19 @@ func TestCreateKeepsTheRepoPolicy(t *testing.T) {
 	must(t, os.Symlink(file, filepath.Join(linked, packs.RepoPolicyPath)))
 	_, err = e.tryCreate(sandboxapi.CreateRequest{Name: "linked", Project: linked})
 	wantCode(t, err, sandboxapi.CodePackInvalid)
+}
+
+// Explain names the packs a custom pack extends, parent first.
+func TestExplainNamesThePackChain(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "team", "pack.yaml"), "version: 1\nname: team\nextends: balanced\negress: {allow: [example.org]}\n")
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = dir })
+	ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Pack: "team", Project: e.project})
+	must(t, err)
+	if ex.Pack != "team" || len(ex.PackChain) != 1 || ex.PackChain[0].Name != "balanced" || !ex.PackChain[0].Builtin ||
+		!strings.HasPrefix(ex.PackChain[0].Digest, "sha256:") {
+		t.Fatalf("explain pack %s, chain %+v", ex.Pack, ex.PackChain)
+	}
 }
 
 // A policy test asks the sandbox's own decider, so its unblocks count, and

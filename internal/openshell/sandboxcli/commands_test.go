@@ -1402,6 +1402,27 @@ func TestPackCommands(t *testing.T) {
 	lacks(t, ta.output(), "…")
 }
 
+// A pack that extends another says so: pack list, show and validate, and
+// policy show and explain name the chain.
+func TestPackChainIsShown(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.PackDir = filepath.Join(ta.Cfg.DataDir, "policies", "sandbox")
+	file := filepath.Join(ta.Cfg.OpenShell.PackDir, "team", "pack.yaml")
+	writeFile(t, file, "version: 1\nname: team\nextends: balanced\negress: {allow: [example.org]}\n")
+	ta.ok(t, ta.PackList(PackOptions{}))
+	has(t, ta.output(), "custom, extends balanced")
+	ta.ok(t, ta.fresh().PackShow("team", PackOptions{}))
+	has(t, ta.output(), "# extends balanced (", "the settings below are the merged result", "example.org", "registry.npmjs.org")
+	ta.ok(t, ta.fresh().PackValidate(file))
+	has(t, ta.output(), "valid pack team (profile balanced)", "extends balanced")
+	ta.daemon.explain.Pack = "team"
+	ta.daemon.explain.PackChain = []sandboxapi.PackLink{{Name: "balanced", Builtin: true, Source: "builtin:balanced", Digest: "sha256:" + strings.Repeat("b", 64)}}
+	ta.ok(t, ta.fresh().PolicyShow(bg, PolicyOptions{}))
+	has(t, ta.output(), "extends balanced")
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{}))
+	has(t, ta.output(), "  extends balanced sha256:bbbb")
+}
+
 func TestEnableDisableWrappers(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")
