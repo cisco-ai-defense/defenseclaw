@@ -321,7 +321,7 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 		t.mu.Lock()
 		ev := audit.SandboxProcessEvent{
 			Sandbox: id, Event: event, Source: node.Source, PID: node.PID, ParentPID: node.PPID,
-			Executable: node.Exe, Name: node.Comm, CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
+			Executable: node.Exe, Name: node.name(), CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
 			Lineage: t.lineageNamesLocked(node.PPID), Timestamp: node.FirstSeen,
 		}
 		if event == audit.SandboxProcessExit {

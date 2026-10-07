@@ -396,24 +396,30 @@ func TestSampleProcessesRecordsTheTree(t *testing.T) {
 }
 
 // TestLineageNamesTheProgramInFull (GAP-0172): the kernel keeps 15 bytes of a
-// process's name, so a lineage said openshell-sandb for openshell-sandbox;
-// its first argument gives the name in full. A shorter comm stays as it is.
+// process's name, so a lineage, a process record's name and the dashboard's
+// top programs said openshell-sandb for openshell-sandbox; its first
+// argument gives the name in full. A shorter comm stays as it is.
 func TestLineageNamesTheProgramInFull(t *testing.T) {
-	c, err := parseCollection(answerOf("T 100 1700000000",
-		"P 1 0 1000 10", "Pc 1 openshell-sandb", "Pa 1 /.openshell/runtime/openshell-sandbox",
-		"P 42 1 1000 20", "Pc 42 bash", "Pa 42 -bash", "P 43 42 1000 30", "Pc 43 curl", "Pa 43 curl", collectEnd),
-		false, newCollectScope(), 1)
-	if err != nil {
-		t.Fatal(err)
+	var sample atomic.Pointer[string]
+	sample.Store(psAnswer("P 1 0 1000 10", "Pc 1 openshell-sandb", "Pa 1 /.openshell/runtime/openshell-sandbox",
+		"P 42 1 1000 20", "Pc 42 bash", "Pa 42 -bash", "P 43 42 1000 30", "Pc 43 curl", "Pa 43 curl"))
+	e := treeEnv(t, "namebox", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("namebox")); !ok {
+		t.Fatal("no sample")
 	}
-	tree := newProcTree()
-	now := time.Now()
-	tree.merge(c, now, now)
-	tree.mu.Lock()
-	names := tree.lineageNamesLocked(43)
-	tree.mu.Unlock()
-	if strings.Join(names, ",") != "curl,bash,openshell-sandbox" {
-		t.Fatalf("lineage = %v", names)
+	if l := e.m.Lineage("namebox", 43); len(l) != 3 || l[1].Comm != "bash" || l[2].Comm != "openshell-sandbox" {
+		t.Fatalf("lineage = %+v", l)
+	}
+	names := map[int]string{}
+	var lineage []string
+	for _, ev := range where(&e.tel.mu, &e.tel.processes, func(ev audit.SandboxProcessEvent) bool { return ev.Sandbox.Name == "namebox" }) {
+		names[ev.PID] = ev.Name
+		if ev.PID == 43 {
+			lineage = ev.Lineage
+		}
+	}
+	if names[1] != "openshell-sandbox" || names[42] != "bash" || strings.Join(lineage, ",") != "bash,openshell-sandbox" {
+		t.Fatalf("records: names %v, lineage of 43 %v", names, lineage)
 	}
 }
 
