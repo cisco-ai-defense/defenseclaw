@@ -1497,7 +1497,7 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 	if rp == nil {
 		return nil, fmt.Errorf("%s rule pack %q: loader returned no rule pack", scope, dir)
 	}
-	if err := rp.Validate(); err != nil {
+	if err := cache.Validate(rp); err != nil {
 		return nil, fmt.Errorf("%s rule pack %q: %w", scope, dir, err)
 	}
 	return rp, nil
