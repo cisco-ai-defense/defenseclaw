@@ -257,7 +257,9 @@ dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`,
 `/status`, `/verify` and `/uninstall`. Prefer `/ensure`: `/install` also
 requires `MANIFEST=`, a target manifest that `/ensure` generates for you.
-`/quiet` and `/norestart` are accepted and have no effect.
+`/quiet` and `/norestart` are accepted and have no effect. `/?` lists the
+actions and properties; an unknown property is refused with `1639` and names
+the property.
 
 ### 4. Add the AI Defense key
 
