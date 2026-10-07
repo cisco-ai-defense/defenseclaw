@@ -314,9 +314,10 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 		dirs, files := map[string]struct{}{}, map[string]struct{}{}
 		if m.assetDirs != nil {
 			for _, assetDir := range m.assetDirs() {
-				if assetDir = filepath.Clean(assetDir); assetDir != dir {
+				assetDir = filepath.Clean(assetDir)
+				dirs[assetDir] = struct{}{}
+				if assetDir != dir {
 					want[assetDir] = struct{}{}
-					dirs[assetDir] = struct{}{}
 				}
 			}
 		}
