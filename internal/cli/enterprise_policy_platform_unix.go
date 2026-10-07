@@ -29,7 +29,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
-	"github.com/spf13/cobra"
 )
 
 // standaloneEnterprisePolicyLayout returns the standalone layout and, on
@@ -93,20 +92,6 @@ func pinStandaloneManagedEnv() error {
 			return err
 		}
 	}
-	return nil
-}
-
-// pinEnterpriseACPEnv points an administrator's `enterprise acp` command at
-// the standalone deployment when the host runs one and the caller chose no
-// config, and tells a standard user that an administrator runs it. Without
-// it the command read the caller's own config, failed with the managed
-// answer for a per-user command and told the administrator to run the
-// command just run (GAP-0253).
-func pinEnterpriseACPEnv(cmd *cobra.Command) error {
-	if err := refuseEnterpriseHooksForStandardUserOnManagedHost(cmd); err != nil {
-		return err
-	}
-	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 	return nil
 }
 

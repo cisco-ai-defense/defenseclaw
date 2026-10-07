@@ -333,34 +333,6 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 	}
 }
 
-// `enterprise acp enroll|verify|revoke` read the standalone deployment for an
-// administrator, as `enterprise hooks` does, and tell a standard user that an
-// administrator runs them; they used to load the caller's own config and
-// answer with the managed per-user message that sent the administrator back
-// to the command just run (GAP-0253).
-func TestEnterpriseACPCommandsReadTheManagedDeployment(t *testing.T) {
-	layout := withManagedStandaloneDeployment(t, 991)
-	clearManagedStandaloneAdminEnv(t)
-	withManagedHostCallerUID(t, 0)
-	if err := pinEnterpriseACPEnv(enterpriseACPEnrollCmd); err != nil {
-		t.Fatalf("root was refused: %v", err)
-	}
-	if os.Getenv(managed.ConfigPathEnv) != layout.ConfigPath || os.Getenv("DEFENSECLAW_HOME") != layout.DataDir {
-		t.Fatalf("root was not pointed at the managed deployment: config=%q home=%q",
-			os.Getenv(managed.ConfigPathEnv), os.Getenv("DEFENSECLAW_HOME"))
-	}
-
-	clearManagedStandaloneAdminEnv(t)
-	withManagedHostCallerUID(t, 1000)
-	err := pinEnterpriseACPEnv(enterpriseACPEnrollCmd)
-	if err == nil || !strings.Contains(err.Error(), "an administrator runs it: `sudo "+managedHostGatewayCommand()+" enterprise acp enroll`") {
-		t.Fatalf("a standard user was not told to ask an administrator: %v", err)
-	}
-	if os.Getenv(managed.ConfigPathEnv) != "" {
-		t.Fatal("a standard user was pointed at the administrator-owned deployment")
-	}
-}
-
 // The guardian manifest and authorization directory come from this OS's
 // layout for a standalone config; `enterprise hooks status` on macOS used
 // to default to the Linux manifest and a data-dir-derived authorization
