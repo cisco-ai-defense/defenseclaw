@@ -87,7 +87,6 @@ type BridgeConfig struct {
 
 	// VerdictQoS is the QoS for verdict request subscriptions (default 1).
 	VerdictQoS byte
-
 }
 
 // NewBridge creates a new MQTT bridge.

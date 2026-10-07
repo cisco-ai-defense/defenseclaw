@@ -479,8 +479,7 @@ def load(app: AppContext, path: str) -> None:
 
     For standard policies this is equivalent to ``policy activate`` on
     the named policy.  When the YAML has ``kind: FleetPolicy`` the file
-    is pushed to the fleet API instead
-    (POST /api/v1/fleet/policy/push).
+    is pushed to the fleet API instead.
 
     Examples:\n
       defenseclaw policy load my-policy.yaml\n

@@ -54,9 +54,9 @@ func fleetKey(tenantID, fleetID uint64) string {
 
 // MemoryPolicyStore is an in-memory PolicyStore for development and testing.
 type MemoryPolicyStore struct {
-	mu            sync.RWMutex
-	policies      map[string][]PolicyRecord // keyed by "tenantID:fleetID"
-	emergencySeq  uint32
+	mu           sync.RWMutex
+	policies     map[string][]PolicyRecord // keyed by "tenantID:fleetID"
+	emergencySeq uint32
 }
 
 // NewMemoryPolicyStore creates an empty in-memory store.

@@ -31,7 +31,7 @@ func TestGeneratedProducerGroupsAreExactPublicClassificationAuthority(t *testing
 	if got, want := len(gatewayEventClassifications), 16; got != want {
 		t.Fatalf("gateway classifications = %d, want %d", got, want)
 	}
-	if got, want := len(auditActionClassifications), 213; got != want {
+	if got, want := len(auditActionClassifications), 222; got != want {
 		t.Fatalf("audit classifications = %d, want %d", got, want)
 	}
 

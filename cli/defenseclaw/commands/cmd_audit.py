@@ -35,8 +35,8 @@ def audit() -> None:
         defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]
 
     \b
-    Fleet device events are available via the Fleet API at
-    /api/v1/fleet/fleet/health (use 'defenseclaw status' to see a summary).
+    Fleet device events are available via the Fleet API.
+    Use 'defenseclaw status' or 'defenseclaw edge-connector health' to see a summary.
     """
 
 
