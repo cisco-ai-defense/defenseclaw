@@ -249,7 +249,12 @@ The two controls, and nothing else, are:
 The controls apply only to processes that descend from an enrolled user's
 agent CLI and run as that user. A developer's normal shell, other users, IDE
 terminals and programs that only look like an agent by name are observed, not
-denied. Everything in `enforce` mode is a cap, never a rejection: when a
+denied. In this release they deny only through a native agent binary, and for
+one user per computer: a script-hosted agent (such as an npm install) and,
+when several users have a native agent install, every user but the lowest uid
+stay in monitor mode
+([limits](/docs/enterprise/tetragon#the-kernel-controls)). Everything in
+`enforce` mode is a cap, never a rejection: when a
 condition is not met, the controls stay in monitor mode and status names the
 reason.
 

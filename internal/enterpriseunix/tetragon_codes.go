@@ -353,6 +353,16 @@ var tetragonCodes = map[string]tetragonCodeText{
 		return defaultStr(f.Detail, "some") + fmt.Sprintf(" live agent processes are over the %d-pid anchor limit", kernelpolicy.MaxPIDs) +
 			" (they are observed, not enforced); nothing to do, the count is reported"
 	}},
+	kernelpolicy.WarnPIDMonitorOnly: {Message: func(tetragonFacts) string {
+		return "agent sessions matched only by their process id, such as a script-hosted agent run by node, are monitored in enforce mode" +
+			" (a process id can be reused between two passes, so it never denies; only a native agent binary is a deny anchor);" +
+			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
+	}},
+	kernelpolicy.WarnBinaryScopeLimited: {Message: func(tetragonFacts) string {
+		return "more than one enrolled user has a native agent install" +
+			" (the controls policy denies for one user, the lowest uid; the others stay in monitor mode);" +
+			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
+	}},
 	kernelpolicy.WarnReconcileFailed: {Message: func(tetragonFacts) string {
 		return "the sensor helper's last pass failed (policies stay in or move to monitor mode); see the ERROR column of " + gwStatus +
 			" and " + helperJournal
@@ -436,4 +446,6 @@ var monitorReasonWords = map[string]string{
 	kernelpolicy.WarnPersistentSensors:  "Tetragon keeps sensors on exit",
 	kernelpolicy.WarnEnforcePaused:      "paused",
 	kernelpolicy.ReasonGuardrailObserve: "connector in observe mode",
+	kernelpolicy.WarnPIDMonitorOnly:     "no native agent binary (a process id never denies)",
+	kernelpolicy.WarnBinaryScopeLimited: "another user's native agent holds the one deny anchor",
 }

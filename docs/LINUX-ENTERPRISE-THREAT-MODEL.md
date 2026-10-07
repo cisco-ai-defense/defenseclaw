@@ -384,10 +384,16 @@ access. Status shows presence, modification time and a digest prefix only.
 15. Kernel enforcement fails open. While Tetragon is stopped nothing is denied;
     after a restart the policies are loaded again within one reconcile pass
     (about a minute); while the helper is stopped loaded policies keep the
-    scope they had. A pid freed and reused by another process of the same user
-    inside the host namespace can briefly fall under a pid anchor until the
-    next pass (the uid and namespace conditions bound this to that user's own
-    processes).
+    scope they had. Enforcing policies anchor only native agent binaries,
+    never a process ID: a pid freed and reused by another process of the same
+    user inside the host namespace can briefly fall under a monitor-mode pid
+    anchor until the next pass, where it can only count as a would-block hit
+    (and reset that user's burn-in), never deny. Two coverage limits follow: a
+    script-hosted agent (such as an npm install run by `node`) is monitored,
+    never denied (`kernel_pid_anchor_monitor_only`), and one controls policy
+    denies for one user per computer, the lowest uid with a native agent
+    install, while the other users stay in monitor
+    (`kernel_binary_anchor_scope_limited`).
 16. The arguments of Codex's notify program carry the turn's content
     (GAP-0045). The helper withholds them from its stream, but any other
     process accounting on the computer (Tetragon's own export file, which is

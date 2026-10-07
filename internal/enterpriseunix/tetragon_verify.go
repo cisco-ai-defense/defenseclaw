@@ -136,6 +136,7 @@ type TetragonUserReadiness struct {
 	UID          int     `json:"uid"`
 	User         string  `json:"user,omitempty"`
 	State        string  `json:"state"`
+	Reason       string  `json:"reason,omitempty"`
 	CoveredHours float64 `json:"covered_hours"`
 	NeededHours  float64 `json:"needed_hours"`
 	Percent      int     `json:"percent"`
@@ -669,9 +670,10 @@ func readinessUsers(in tetragonInputs, now time.Time) []TetragonUserReadiness {
 		record := state.BurnIn.UIDs[strconv.Itoa(user.UID)]
 		p := progressFor(user, record, in, now)
 		view := TetragonUserReadiness{
-			UID: user.UID, User: user.User, State: user.State, CoveredHours: roundHours(p.Covered), NeededHours: roundHours(p.Needed),
-			Percent: p.Percent, Ready: (p.Ready || user.State == kernelpolicy.UIDEnforcing) && !p.MonitorOnly, Reset: p.Reset,
-			Measuring: p.Measuring, MonitorOnly: p.MonitorOnly, Hits: hitDetails(record, user.UID),
+			UID: user.UID, User: user.User, State: user.State, Reason: user.Reason, CoveredHours: roundHours(p.Covered),
+			NeededHours: roundHours(p.Needed), Percent: p.Percent,
+			Ready: (p.Ready || user.State == kernelpolicy.UIDEnforcing) && !p.MonitorOnly && !noDenyAnchor(user.State, user.Reason),
+			Reset: p.Reset, Measuring: p.Measuring, MonitorOnly: p.MonitorOnly, Hits: hitDetails(record, user.UID),
 		}
 		if p.HasETA {
 			hours := roundHours(p.ETA)
@@ -775,31 +777,62 @@ func readinessNext(rep *TetragonReadiness, failed []string) []string {
 // would), how many wait for their burn-in and how many stay monitor-only:
 // "1 of 3 users would be enforced now; 1 stays in monitor until its burn-in
 // completes; 1 stays monitor-only (connector in observe mode)."
+//
+// Two limits of the controls cap who is denied (SPEC-TETRAGON-UX, security
+// review): a user whose agent is matched only by a process id, and every
+// user but the lowest uid when several have a native agent install, stay in
+// monitor. Running enforce, the helper names them (noDenyAnchor); in observe
+// the count says that enforce denies for one of several ready users.
 func enforceCounts(users []TetragonUserReadiness, would bool) string {
-	ready, monitorOnly := 0, 0
+	ready, monitorOnly, unanchored := 0, 0, 0
+	limitSet := map[string]bool{}
 	for _, user := range users {
 		switch {
 		case user.Ready:
 			ready++
 		case user.MonitorOnly:
 			monitorOnly++
+		case noDenyAnchor(user.State, user.Reason):
+			unanchored++
+			limitSet[user.Reason] = true
 		}
 	}
 	verb := plural(ready, "is enforced", "are enforced")
 	if would {
 		verb = "would be enforced now"
 	}
-	if len(users) > 0 && ready == len(users) {
+	var text string
+	switch {
+	case would && ready > 1:
+		text = fmt.Sprintf("%d of %d %s finished burn-in, and enforce denies for one of them (the lowest uid with a native agent"+
+			" install; the others stay in monitor, %s)", ready, len(users), plural(len(users), "user", "users"), kernelpolicy.WarnBinaryScopeLimited)
+	case len(users) > 0 && ready == len(users):
 		return fmt.Sprintf("every enrolled user (%d) %s.", len(users), strings.Replace(verb, "are", "is", 1))
+	default:
+		text = fmt.Sprintf("%d of %d %s %s", ready, len(users), plural(len(users), "user", "users"), verb)
 	}
-	text := fmt.Sprintf("%d of %d %s %s", ready, len(users), plural(len(users), "user", "users"), verb)
-	if waiting := len(users) - ready - monitorOnly; waiting > 0 {
+	if waiting := len(users) - ready - monitorOnly - unanchored; waiting > 0 {
 		text += fmt.Sprintf("; %d %s in monitor until %s burn-in completes", waiting, plural(waiting, "stays", "stay"), plural(waiting, "its", "their"))
+	}
+	if unanchored > 0 {
+		limits := make([]string, 0, len(limitSet))
+		for limit := range limitSet {
+			limits = append(limits, limit)
+		}
+		sort.Strings(limits)
+		text += fmt.Sprintf("; %d %s in monitor without a deny anchor (%s)", unanchored, plural(unanchored, "stays", "stay"), strings.Join(limits, ", "))
 	}
 	if monitorOnly > 0 {
 		text += fmt.Sprintf("; %d %s monitor-only (connector in observe mode)", monitorOnly, plural(monitorOnly, "stays", "stay"))
 	}
 	return text + "."
+}
+
+// noDenyAnchor reports a user that finished burn-in but that the enforcing
+// controls cannot deny for: the helper keeps it in monitor and names the
+// limit as its reason.
+func noDenyAnchor(state, reason string) bool {
+	return state == kernelpolicy.UIDMonitor && (reason == kernelpolicy.WarnPIDMonitorOnly || reason == kernelpolicy.WarnBinaryScopeLimited)
 }
 
 func without(list []string, value string) []string {

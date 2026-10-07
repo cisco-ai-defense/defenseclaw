@@ -47,7 +47,7 @@ Each step adds to the one before it, and you can stop at any step.
 | 1 | `consume` | Plane C reads Tetragon's process events: short-lived processes keep their names and arguments, native Claude Code is identified by its executable, and container processes are never mistaken for host agents | Nothing in Tetragon. Needs Plane C turned on |
 | 2 | `consume`, `customer_events: agent` | The events of your own kprobe and LSM policies, when they hit an AI agent, tagged with the policy name and tied to the agent, the user and the hook decision | Nothing in Tetragon. Your policies are read, never changed |
 | 3 | `observe` | DefenseClaw's own read-only policies, and two kernel controls in monitor mode that count what they would have denied | Loads three `defenseclaw-*` policies |
-| 4 | `enforce` | The two controls return `Operation not permitted`, per user, after a measured burn-in and your approval | The same policies; the controls move to enforce mode |
+| 4 | `enforce` | The two controls return `Operation not permitted` after a measured burn-in and your approval, for one user per computer whose agent is a native binary (see [the limits](#the-kernel-controls)) | The same policies; the controls move to enforce mode |
 
 How this fits with hooks, sandboxes and the egress proxy is on
 [Agent segmentation, visibility and enforcement](/docs/segmentation).
@@ -659,9 +659,14 @@ Read these rules before you roll it out:
    "Kernel controls digest: sha256:..., changed or unchanged since the previous
    release".
 2. **Enforce per user, per computer.** The approval is fleet-wide, but the
-   burn-in is not. On a computer, the users who finished their burn-in are
-   enforced and the rest stay in monitor mode until theirs completes. The
-   estimate in `verify` says when.
+   burn-in is not. On a computer, a user who finished the burn-in is enforced
+   and the rest stay in monitor mode until theirs completes. The estimate in
+   `verify` says when. In this release that is at most one user per computer,
+   and only through a native agent binary: when several ready users have a
+   native agent install, the lowest uid is enforced and the others stay in
+   monitor (`kernel_binary_anchor_scope_limited`), and a script-hosted agent,
+   such as an npm install, is never denied (`kernel_pid_anchor_monitor_only`).
+   See [The kernel controls](#the-kernel-controls).
 3. **Go through the rings.** Roll out with `serial` as in the play, and gate
    each ring on `tetragon verify --ready-for enforce` (exit `0`).
 4. **Controls are caps, never rejections.** A stale approval, a connector in
@@ -1177,6 +1182,23 @@ Who a control applies to is deliberately narrow. Each control covers only:
 While the controls run in monitor mode, every such connector is counted. To
 deny, a connector must also be in `action` mode; a connector in observe mode
 stays monitor-only (`kernel_enforce_guardrail_observe:<connector>`).
+
+In `enforce`, a control denies only through an agent's native binary. Two
+limits of this release follow:
+
+- **A process ID never denies.** An agent session the helper matches only by
+  its process ID (a script-hosted agent, such as an npm install that `node`
+  runs) is monitored, not denied, because a process ID can be reused between
+  two passes. Its would-block hits still count. Status warns
+  `kernel_pid_anchor_monitor_only`, and a user whose agents are all of this
+  kind stays in monitor with that reason after its burn-in.
+- **One user per computer is denied.** The controls policy carries the native
+  binaries of one user. When several enrolled users have a native agent
+  install, enforcement covers the first of them (the lowest uid); the other
+  users stay in monitor mode, and their would-block hits still count. Status
+  warns `kernel_binary_anchor_scope_limited`, which is also each such user's
+  reason, and `verify --ready-for enforce` says so when more than one user is
+  ready.
 
 The same user's normal shell, other users, IDE terminals, containers, and
 programs that only look like an agent by name are observed, never denied.

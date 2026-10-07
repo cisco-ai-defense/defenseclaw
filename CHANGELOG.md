@@ -43,7 +43,12 @@ says otherwise. Per-user installs never connect to Tetragon.
     `action` mode. `enforce_ack` takes one digest or a list of up to four, so
     a ring upgrade that changes a control does not drop users to monitor mode. Controls apply only below enrolled command-line agents of
     the user; IDE terminals, look-alike processes, other users and containers
-    are observed, never denied. An eligible account counts as enrolled for
+    are observed, never denied. In this release enforcement denies only
+    through a native agent binary, never by process ID, and for one user per
+    computer (the lowest uid with a native agent install): script-hosted
+    agents and the other users stay in monitor mode, and status says so
+    (`kernel_pid_anchor_monitor_only`, `kernel_binary_anchor_scope_limited`).
+    An eligible account counts as enrolled for
     the connectors that reach it through vendor machine policy (Claude Code,
     Codex, Cursor, Copilot CLI and OpenCode) without a `targets.yaml` row, so
     the default `enterprise.enrollment.unenrolled_users` needs no change.
