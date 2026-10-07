@@ -233,7 +233,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     its default, with a note on stderr. With --effective, guardrail levels
     (guardrail.block_at, guardrail.connectors.<c>.alert_at) and admission[.<type>]
     print what the gateway resolves them to; admission keys config.yaml leaves
-    out always print that resolved value. Exits 1 when the key has no value
+    out always print that resolved value, as do guardrail.cisco_trust_level and
+    the guardrail levels when unset. Exits 1 when the key has no value
     and no default, and 2 for an unknown section.
     """
     from defenseclaw.config_writer import parse_path
@@ -249,7 +250,7 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
             "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
         )
-    if effective or (parts[0] in ("admission", "update") and not _written_in_source(app, parts)):
+    if effective or (_resolves_when_unset(parts) and not _written_in_source(app, parts)):
         resolved = _effective_value(app, parts)
         if resolved is not None:
             value, source = resolved
@@ -336,6 +337,15 @@ def _echo_value(value: object, fmt: str) -> None:
 
 _LEVEL_KEYS = ("block_at", "alert_at")
 _ADMISSION_TYPES = ("skill", "mcp", "plugin")
+_TRUST_KEY = ["guardrail", "cisco_trust_level"]
+
+
+def _resolves_when_unset(parts: list) -> bool:
+    """Keys whose default is resolved (a rule pack level, the Cisco trust
+    level, the admission and update sections) rather than blank."""
+    return parts[0] in ("admission", "update") or parts == _TRUST_KEY or (
+        parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS
+    )
 
 
 def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | None:
@@ -364,6 +374,11 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    if parts == _TRUST_KEY:
+        written = str(getattr(cfg.guardrail, "cisco_trust_level", "") or "").strip().lower()
+        if written in ("full", "advisory", "none"):
+            return written, "config:guardrail.cisco_trust_level"
+        return "full", "builtin"
     if parts[0] == "update" and len(parts) <= 2:
         data, sources = _update_view(cfg)
         if len(parts) == 1:
