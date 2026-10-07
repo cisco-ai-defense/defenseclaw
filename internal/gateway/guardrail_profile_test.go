@@ -391,6 +391,56 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	}
 }
 
+// TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails pins GAP-0212:
+// explain resolves the account afresh, but the gateway's requests for it get
+// default_lookup_failed while its own lookups fail, and explain says so; groups
+// kept as numbers are named as a sign of an unreachable directory.
+func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
+	prevFacts, prevFailure := cachedDirectoryFacts, cachedDirectoryFailure
+	t.Cleanup(func() { cachedDirectoryFacts, cachedDirectoryFailure = prevFacts, prevFailure })
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
+		return useridentity.DirectoryFacts{}, time.Time{}, false
+	}
+	since := time.Now().Add(-time.Minute)
+	cachedDirectoryFailure = func(string) (time.Time, string, bool) { return since, "groups of dcad-manygroups: timeout", true }
+	explained := profileSubject{UserID: "94401116", UserName: "dcad-manygroups", Groups: []string{"94400513"}}
+	set := &guardrailProfileSet{}
+	decision := set.match(&explained, profileSubjectLookup, "", "")
+	view, warning := explainCacheView(set, &explained, decision, "", "", time.Now())
+	if view == nil || view["match"] != profileMatchDefaultLookupFailed || !strings.Contains(warning, "default_lookup_failed") ||
+		!strings.Contains(warning, "timeout") {
+		t.Fatalf("view %v, warning %q; want the lookup failure named", view, warning)
+	}
+	if note := unnamedGroupsNote(&explained); !strings.Contains(note, "1 of this account's 1 group(s) are shown by number") {
+		t.Fatalf("unnamed groups note = %q", note)
+	}
+}
+
+// TestExplainNamesWindowsGroupsWithoutAnIdentityRecord pins GAP-0121 and
+// GAP-0136: an account without a guardian identity record has unknown groups,
+// not none, and groups the guardian could not name stay bare SIDs; both are
+// said, and facts awaiting the record are refreshed early.
+func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
+	previous := currentIdentitySpoolDir()
+	t.Cleanup(func() { setIdentitySpoolDir(previous) })
+	setIdentitySpoolDir(t.TempDir())
+	if note := spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()); !strings.Contains(note, "no identity record for this account yet") {
+		t.Fatalf("spool note = %q", note)
+	}
+	if !awaitingSpool(useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}) ||
+		awaitingSpool(useridentity.DirectoryFacts{Groups: []string{"S-1-1-0", "Everyone"}}) {
+		t.Fatal("facts without groups must await the record, facts with groups must not")
+	}
+	setIdentitySpoolDir("")
+	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
+		t.Fatal("a gateway without a spool has no record to wait for")
+	}
+	named := &profileSubject{Groups: []string{"S-1-1-0", "Everyone", "S-1-5-21-1-2-3-9001", "S-1-5-21-1-2-3-9002"}}
+	if note := unnamedGroupsNote(named); !strings.Contains(note, "2 of this account's 3 group(s) have no name, only a SID") {
+		t.Fatalf("unnamed SID note = %q", note)
+	}
+}
+
 // TestExplainNamesEntraIDAccountsThroughTheLSA pins GAP-0222: explain names
 // an Entra ID account by its SID, bare name or UPN through the LSA, as the
 // hook path names it, where os/user failed for every Entra ID account; a

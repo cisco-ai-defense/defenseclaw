@@ -20,8 +20,8 @@ existing sandbox, so the gauge is republished.
 
 Every sandbox record carries these attributes when they are known. Empty
 values are omitted, never inferred. They are never metric labels. The model
-(`log.model.*`) and agent lifecycle (`log.compat.*`) records of a sandboxed
-session carry `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name` from the
+(`log.model.*`), tool (`log.tool.invocation.*`) and agent lifecycle
+(`log.compat.*`) records of a sandboxed session carry `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name` from the
 binding that authenticated the request, with `defenseclaw.agent.identity.id`,
 so they join that session's hook decisions.
 

@@ -625,6 +625,27 @@ func TestDecisionGolden(t *testing.T) {
 	}
 }
 
+// GAP-0205: a 429 from a busy gateway is retried, so a burst the gateway
+// clears in seconds does not fail the tool call.
+func TestRunRetriesAfterTheGatewayAnswers429(t *testing.T) {
+	rt := &stubRT{onRequest: func(s *stubRT, _ *http.Request) (*http.Response, error) {
+		status, body := http.StatusTooManyRequests, `{"error":"rate_limited","reason":"enterprise_managed_overloaded"}`
+		if s.requests > 2 {
+			status, body = http.StatusOK, `{"action":"allow"}`
+		}
+		header := make(http.Header)
+		header.Set("Retry-After", "1")
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
+	}}
+	result := run(t, "claudecode", rt, func(opts *Options) { opts.FailMode = "closed" })
+	if result.code != 0 || rt.requests != 3 {
+		t.Fatalf("code %d after %d requests, want an allow on the third; stderr=%q", result.code, rt.requests, result.stderr)
+	}
+	if got := retryAfterDelay("90"); got != 3*time.Second {
+		t.Fatalf("a long Retry-After was kept at %s", got)
+	}
+}
+
 func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
 	for _, connector := range []string{
 		"amp",

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -96,12 +97,17 @@ func emitHookToolLogV8WithEmitter(
 			return observability.Record{}, buildErr
 		}
 		envelope := hookToolLogEnvelope(ctx, snapshot, meta, connector, eventName)
+		// A sandboxed session's tool records carry the sandbox binding that
+		// authenticated the hook, like its hook decisions, model and lifecycle
+		// records, so they join them (GAP-0202).
+		sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 		if outcome == observability.OutcomeAttempted {
-			return builder.BuildLogToolInvocationRequested(
-				buildHookToolRequestedLogInput(envelope, meta, tool, input),
-			)
+			requested := buildHookToolRequestedLogInput(envelope, meta, tool, input)
+			requested.DefenseClawSandboxID, requested.DefenseClawSandboxName = sandboxID, sandboxName
+			return builder.BuildLogToolInvocationRequested(requested)
 		}
 		completed := buildHookToolCompletedLogInput(envelope, meta, tool, input, output, exitCode, outcome)
+		completed.DefenseClawSandboxID, completed.DefenseClawSandboxName = sandboxID, sandboxName
 		if outcome == observability.OutcomeBlocked {
 			return builder.BuildLogToolInvocationBlocked(observability.LogToolInvocationBlockedInput(completed))
 		}
