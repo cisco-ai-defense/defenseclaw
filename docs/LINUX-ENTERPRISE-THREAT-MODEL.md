@@ -91,7 +91,10 @@ is given in the second column so reviewers can compare the two platforms.
     policies it recorded itself are ever changed or deleted. Kernel
     enforcement starts only when the administrator approves the exact control
     set, is limited to enrolled command-line agents' own process trees, and
-    is removed by every uninstall, rollback and downgrade path.
+    is removed by every uninstall, rollback and downgrade path. The events of
+    the customer's own Tetragon policies are read, never managed: no call names
+    a policy the helper did not record loading, and only typed, bounded fields
+    of events below an AI agent cross the broker.
 
 ## Zones on Linux
 
@@ -246,6 +249,7 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-45 | — | An administrator's stop is undone by a helper or Tetragon restart, or a human's change is overwritten | `enterprise linux tetragon pause` writes a root-owned record that survives restarts of the helper and of Tetragon (`--until-reboot` is kept in `/run`), is checked before every policy change, and moves the controls to monitor within seconds. A policy moved to monitor or deleted with `tetra` is recorded as an operator override and never re-promoted until the intent (`enforce_ack` or the mode) changes. A control set that changes with a release makes the old ack stale | `internal/sensor/kernelpolicy` reconciler tests; live rows TG-29 to TG-31 |
 | L-46 | — | DefenseClaw's policies stay loaded in Tetragon after uninstall, purge, rollback, downgrade or a stopped helper, enforcing with nobody reconciling | Every exit path deletes the names the helper recorded, using the helper that loaded them, before binaries or state are removed: `uninstall`, `purge`, a transaction rollback, and the package's pre-removal script. `verify` fails with `kernel_policy_orphaned` for a recorded name that is still loaded while the mode is `off` or `consume` or the helper is not running. Enforcement is refused when Tetragon runs with `keep-sensors-on-exit`, because its programs would outlive it | `internal/enterpriseunix` lifecycle and `packaging/linux` tests; live rows TG-33 to TG-37 |
 | L-47 | — | Command lines read from Tetragon carry secrets or a turn's content to the gateway or an exporter | The helper applies the shared command-line redaction before a line leaves it, withholds the arguments of Codex's notify program, asks Tetragon for no environment variables, capabilities, namespaces or pod data, and never forwards raw Tetragon events. The hook's own short-lived helper processes are summarized; any other child, and any process that does not match the exact rendered hook command, is forwarded in full | `internal/redaction` tests; `internal/sensor` self-filter tests; live row TG-08 |
+| L-48 | — | The helper changes or deletes a policy of the customer's while it reads that policy's events, or those events carry content to the gateway or an exporter that the customer did not expect | Ownership is by record: a policy is DefenseClaw's only if this helper recorded loading it, whatever its name, and a customer policy named like a DefenseClaw one is treated as the customer's and warned about (`tetragon_foreign_defenseclaw_name`). The reading adds no request and no RPC: the per-mode call allowlist of L-42 is unchanged, and a fake Tetragon serving customer policies (one named `defenseclaw-controls-deadbeef`, one from `tetragon.tp.d`) sees no add, delete or configure call naming them through every mode, a mode change, the cleanup, uninstall and rollback. Only typed fields of kprobe and LSM events cross the broker (policy name, hook type, function, action, policy mode, outcome, one file or binary path or socket peer, tags, message and the process facts every event carries, with the command line redacted). String and byte arguments, integers, credentials, stack traces, return values, ancestors and the raw event are never forwarded; a test feeds a string argument carrying a marker and asserts it never crosses. Volume is bounded in the helper (repeats folded within 60 seconds, 20 events a second per policy, 200 a second per host, the overflow counted and warned as `tetragon_customer_events_capped`). The gateway exports a record only for an event below an AI agent's process lineage; the rest are counted per policy. The target is a content-class field, so each destination's redaction profile decides whether it leaves the computer, and `enterprise.tetragon.customer_events: off` forwards nothing. The events are not scored | `internal/sensor/tetragon` mapper fixtures and the never-mutate pin; `internal/sensor` host-plane lineage-gate tests; manual onboarding rows OB-05 to OB-07 |
 
 ## Invariants
 
@@ -388,3 +392,10 @@ access. Status shows presence, modification time and a digest prefix only.
     (GAP-0045). The helper withholds them from its stream, but any other
     process accounting on the computer (Tetragon's own export file, which is
     root `0600` and the customer's, or `auditd`) records them.
+17. The events of the customer's own Tetragon policies carry a target (a file
+    or binary path, or a socket peer) and a policy message for events below an
+    AI agent. The helper forwards no other argument type, but a path can
+    itself be sensitive. The target is a content-class field: each destination's
+    redaction profile decides whether it leaves the computer, and
+    `enterprise.tetragon.customer_events: off` stops the forwarding while
+    keeping the counts (L-48).
