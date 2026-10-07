@@ -189,8 +189,10 @@ def test_pause_names_who_and_when_and_prints_a_command_that_runs() -> None:
     assert other_day.detail_lines()[-2] == "paused until 2026-10-08 01:30Z; root can resume it with"
     reboot = _plane_c({**_ENFORCE, "kernel_floor": {**_FLOOR, "paused_until": "reboot", "paused_by": "bob"}})
     assert reboot.detail_lines()[-2].startswith("paused until the next reboot by bob;")
-    ended = _plane_c({**_ENFORCE, "kernel_floor": {**_FLOOR, "paused_until": "resumed"}})
-    assert ended.kernel_paused_until == "" and ended.strip_label == "agent actions: up (Tetragon, enforce)"
+    # An untrusted pause file holds enforcement off until resume removes it.
+    untrusted = _plane_c({**_ENFORCE, "kernel_floor": {**_FLOOR, "paused_until": "resumed"}})
+    assert untrusted.strip_label == "agent actions: up (Tetragon, paused)"
+    assert untrusted.detail_lines()[-2] == "paused until resumed; root can resume it with"
     # The binaries are not on PATH and sudo resets it: no bare command is ever printed.
     for text in lines:
         if "defenseclaw-gateway" in text:
@@ -221,12 +223,15 @@ def test_finding_detail_says_what_the_kernel_did_and_what_your_policy_saw() -> N
             {"tactic": "discovery", "kernel_outcome": "observed"},
         ],
     }
+    # The gateway's customer_kernel_events shape: the tool's child under the
+    # agent root (the finding's pid) by root_pid or session_root_pid.
     events = [
-        {"policy_name": "file-sensitive", "function": "security_file_open", "outcome": "observed",
-         "process": "cat", "pid": 20, "target": "dccert-target-marker"},
-        {"policy_name": "file-sensitive", "function": "security_file_open", "outcome": "observed",
-         "process": "cat", "pid": 20, "count": 2},
-        {"policy_name": "elsewhere", "function": "tcp_connect", "outcome": "blocked", "process": "curl", "pid": 99},
+        {"policy": "file-sensitive", "function": "security_file_open", "outcome": "observed",
+         "process": "cat", "pid": 21, "root_pid": 20, "target": "dccert-target-marker"},
+        {"policy": "file-sensitive", "function": "security_file_open", "outcome": "observed",
+         "process": "cat", "pid": 22, "session_root_pid": 20, "tool_pid": 22, "count": 2},
+        {"policy": "elsewhere", "function": "tcp_connect", "outcome": "blocked", "process": "curl", "pid": 99,
+         "root_pid": 98},
     ]
     model = RuntimePanelModel(platform="linux")
     model.set_snapshot({**_snapshot(_ENFORCE), "findings": [finding], "customer_kernel_events": events})
@@ -243,7 +248,7 @@ def test_finding_detail_says_what_the_kernel_did_and_what_your_policy_saw() -> N
 
 def test_finding_detail_is_unchanged_without_kernel_data_and_ignores_junk() -> None:
     model = RuntimePanelModel(platform="linux")
-    model.set_snapshot({**_snapshot(), "customer_kernel_events": ["x", {"policy_name": ""}, 7]})
+    model.set_snapshot({**_snapshot(), "customer_kernel_events": ["x", {"policy": ""}, 7]})
     assert "kernel:" not in model.detail_text() and "your policy" not in model.detail_text()
     model.set_snapshot({**_snapshot(), "customer_kernel_events": "nope", "findings": [{**_FINDING, "activities": "x"}]})
     assert model.detail_text().startswith("CRITICAL  score 95")

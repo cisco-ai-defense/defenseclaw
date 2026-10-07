@@ -406,7 +406,7 @@ def _decode_customer_events(raw: Any) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        policy = str(item.get("policy_name") or item.get("policy") or "").strip()
+        policy = str(item.get("policy") or "").strip()
         if not policy:
             continue
         events.append({
@@ -415,21 +415,19 @@ def _decode_customer_events(raw: Any) -> list[dict[str, Any]]:
             "outcome": str(item.get("outcome") or "observed").strip().lower(),
             "process": str(item.get("process") or "").strip(),
             "count": max(1, _int(item.get("count"))),
-            "pids": {_int(item.get("pid")), _int(item.get("root_pid"))} - {0},
-            "finding_id": str(item.get("finding_id") or ""),
+            # The event's process and the agent lineage the gateway joined it
+            # to: a finding is the agent's root, the event usually a tool's child.
+            "pids": {_int(item.get(key)) for key in ("pid", "root_pid", "session_root_pid", "tool_pid")} - {0},
         })
     return events
 
 
-def _policy_notes(events: list[dict[str, Any]], finding_id: str, pid: int) -> list[str]:
+def _policy_notes(events: list[dict[str, Any]], pid: int) -> list[str]:
     """``your policy file-sensitive: observed security_file_open by cat``, worst outcome first."""
 
     folded: dict[tuple[str, str, str, str], int] = {}
     for event in events:
-        if event["finding_id"]:
-            if event["finding_id"] != finding_id:
-                continue
-        elif pid not in event["pids"]:
+        if pid not in event["pids"]:
             continue
         key = (event["policy"], event["function"], event["outcome"], event["process"])
         folded[key] = folded.get(key, 0) + event["count"]
@@ -478,8 +476,9 @@ def _decode_backend(raw: Any, scanned_at: str = "") -> dict[str, Any]:
     floor = raw.get("kernel_floor")
     if isinstance(floor, dict) and floor:
         paused = str(floor.get("paused_until") or "").strip()
-        # "resumed" is the gateway's word for a pause record that has ended.
-        if paused and paused != "resumed":
+        # "resumed" is the gateway's word for a pause file the helper cannot
+        # trust. It is a pause: enforcement stays off until resume removes it.
+        if paused:
             fields["kernel_paused_until"] = paused
             fields["kernel_paused_label"] = _paused_label(paused, str(floor.get("paused_by") or ""), scanned_at)
     return fields
@@ -542,7 +541,7 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
             kernel_notes=tuple(
                 (
                     _kernel_activity_notes(raw.get("activities"))
-                    + _policy_notes(customer_events, str(raw.get("finding_id") or ""), _int(raw.get("pid")))
+                    + _policy_notes(customer_events, _int(raw.get("pid")))
                 )[:_MAX_KERNEL_NOTES]
             ),
         ))
