@@ -5,12 +5,15 @@ package watcher
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -169,6 +172,51 @@ func TestWatcherAdmissionTraceUsesGeneratedFamilyAndJoinsScanEvaluation(t *testi
 	if corr.EvaluationID != watcherAdmissionEvaluationID(started) || corr.TraceID != traceID.String() ||
 		corr.SpanID != spanID.String() {
 		t.Fatalf("watcher scan correlation=%+v", corr)
+	}
+}
+
+type admissionSwapScanner struct {
+	countingScanner
+	swap func()
+}
+
+func (s *admissionSwapScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	s.swap()
+	return s.countingScanner.Scan(ctx, target)
+}
+
+func TestWatcherAdmissionUsesPostScanPolicySnapshot(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	path := filepath.Join(skillDir, "changed-policy")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	next := *cfg
+	next.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "changed-policy", Reason: "new policy"}}
+	oldSnapshot := AdmissionPolicySnapshot{
+		Config: cfg, Digest: observability.Present("sha256:old"), Generation: observability.Present(int64(7)),
+	}
+	newSnapshot := AdmissionPolicySnapshot{
+		Config: &next, Digest: observability.Present("sha256:new"), Generation: observability.Present(int64(8)),
+	}
+	current := oldSnapshot
+	reads := 0
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.SetAdmissionPolicySource(func() AdmissionPolicySnapshot { reads++; return current })
+	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		t.Fatal("separate stamp callback must not be read")
+		return observability.Absent[string](), observability.Absent[int64]()
+	})
+	capture := &watcherAdmissionTraceCapture{}
+	w.BindObservabilityV8(capture)
+	fake := &admissionSwapScanner{countingScanner: countingScanner{name: "skill-scanner"}, swap: func() { current = newSnapshot }}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+	result := w.runAdmission(t.Context(), InstallEvent{Type: InstallSkill, Name: "changed-policy", Path: path})
+	if result.Verdict != VerdictBlocked || reads != 2 || fake.calls != 1 {
+		t.Fatalf("verdict=%s snapshot reads=%d scans=%d, want blocked, 2, 1", result.Verdict, reads, fake.calls)
+	}
+	if got, ok := capture.input.DefenseClawPolicyGeneration.Get(); !ok || got != 7 {
+		t.Fatalf("attempted trace generation=%d present=%t, want 7", got, ok)
 	}
 }
 

@@ -23,6 +23,14 @@ import "github.com/defenseclaw/defenseclaw/internal/observability"
 // before the first generation and under the Secure Client integration,
 // whose records stay unchanged.
 
+func livePolicyStampV8() (observability.Optional[string], observability.Optional[int64]) {
+	g := livePolicyGeneration()
+	if g == nil {
+		return observability.Absent[string](), observability.Absent[int64]()
+	}
+	return observability.Present(g.Digest), observability.Present(int64(g.N))
+}
+
 func livePolicyDigestV8() observability.Optional[string] {
 	if g := livePolicyGeneration(); g != nil && g.Digest != "" {
 		return observability.Present(g.Digest)
