@@ -14,13 +14,15 @@ from __future__ import annotations
 
 import importlib.util
 import io
-from email.message import Message
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import time
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
 import pytest
@@ -144,3 +146,21 @@ def test_okta_pagination_reads_separate_link_headers() -> None:
     client = okta.Okta("https://example.okta.com", "token")
     client._opener.open = lambda *_args, **_kwargs: next(responses)
     assert [user["id"] for user in client.get_all("/api/v1/users?limit=1")] == ["one", "two"]
+
+
+def test_okta_rate_limit_honors_lowercase_reset_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    waited = []
+    monkeypatch.setattr(okta.time, "sleep", waited.append)
+    reset = int(time.time()) + 20
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            raise urllib.error.HTTPError("https://example.okta.com/api/v1/users", 429,
+                                         "rate limit", {"x-rate-limit-reset": str(reset)}, io.BytesIO(b"{}"))
+
+    client = okta.Okta("https://example.okta.com", "token")
+    client._opener = Opener()
+    status, _, _ = client.call("GET", "/api/v1/users")
+    assert status == 429
+    assert waited and min(waited) > 5

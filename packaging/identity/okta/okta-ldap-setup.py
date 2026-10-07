@@ -107,7 +107,8 @@ class Okta:
                 raw = err.read()
                 headers = dict(err.headers)
                 if err.code == 429 and attempt < 4:
-                    reset = int(headers.get("X-Rate-Limit-Reset", "0") or 0)
+                    lowered = {key.lower(): value for key, value in headers.items()}
+                    reset = int(lowered.get("x-rate-limit-reset", "0") or 0)
                     time.sleep(min(max(reset - time.time(), 1), 60))
                     continue
                 try:
