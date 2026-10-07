@@ -752,7 +752,7 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 // TestMigrateV9DropsTheKeysTheRuntimeNoLongerHas: a 0.8.10-shaped v8 file with
 // every key only an upgrade still understands (the three *_actions maps,
 // update_check and the privacy: section) migrates to its v9 equivalent or is
-// reported as dropped, and the same keys in a v9 file are plain unknown keys.
+// reported as dropped, and the same keys in a v9 file are refused.
 // The 0.x environment inputs (DEFENSECLAW_PERSIST_JUDGE,
 // DEFENSECLAW_DISABLE_REDACTION) are read by the 0.x conversion in
 // cli/defenseclaw/observability/v8_migration.py, which has its own tests.
@@ -820,10 +820,10 @@ observability: {}
 		}
 		wantConflicts = append(wantConflicts, row.conflicts...)
 
-		// In a v9 file the key has no special handling: it is an unknown key.
+		// In a v9 file the key is refused.
 		v9 := "config_version: 9\n" + row.key + ": {}\nobservability: {}\n"
 		if err := ValidateCandidate(configPath, []byte(v9)); err == nil || !strings.Contains(err.Error(), row.key) {
-			t.Errorf("%s in a v9 file: got %v, want an unknown-key error naming it", row.key, err)
+			t.Errorf("%s in a v9 file: got %v, want an error naming it", row.key, err)
 		}
 	}
 	if update, _ := doc["update"].(map[string]any); update["check"] != false {
@@ -835,6 +835,31 @@ observability: {}
 	}
 	if !slices.Equal(gotConflicts, wantConflicts) {
 		t.Errorf("conflicts = %v, want %v", gotConflicts, wantConflicts)
+	}
+}
+
+// A config_version 8 file that still carries the *_actions keys (1.0.0 wrote
+// skill_actions from `policy activate`) must pass the strict parse and the
+// runtime load the upgrade check and `enterprise ensure` run on the v8 bytes
+// before the migration moves the keys; in a v9 file the keys name their
+// replacement.
+func TestV8SourceWithTheActionKeysIsAccepted(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	body := "data_dir: " + dir + "\nskill_actions:\n  high: {file: none, runtime: enable, install: block}\n" +
+		"mcp_actions:\n  medium: {file: none, runtime: enable, install: block}\n" +
+		"plugin_actions:\n  critical: {file: quarantine, runtime: disable, install: block}\nprivacy: {}\nobservability: {}\n"
+	v8 := []byte("config_version: 8\n" + body)
+	if _, err := ParseCompileObservabilityV8(configPath, v8, ObservabilityV8CompileOptions{DefaultDataDir: dir}); err != nil {
+		t.Errorf("v8 source with the action keys: %v", err)
+	}
+	if _, err := LoadRuntimeV8InspectionCandidateFromBytes(configPath, v8); err != nil {
+		t.Errorf("runtime load of the v8 source: %v", err)
+	}
+	_, err := ParseCompileObservabilityV8(configPath, []byte("config_version: 9\n"+body), ObservabilityV8CompileOptions{DefaultDataDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "admission.skill.actions") {
+		t.Errorf("v9 source with skill_actions: got %v, want a pointer to admission.skill.actions", err)
 	}
 }
 
