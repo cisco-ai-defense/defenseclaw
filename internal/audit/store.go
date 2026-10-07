@@ -825,6 +825,8 @@ var migrations = []migration{
 			for _, idx := range []string{
 				`CREATE INDEX IF NOT EXISTS idx_audit_session_id ON audit_events(session_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_audit_agent_instance_id ON audit_events(agent_instance_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`,
 			} {
 				if _, err := ex.Exec(idx); err != nil {
 					return fmt.Errorf("create correlation index: %w", err)
@@ -870,6 +872,8 @@ var migrations = []migration{
 			}
 			for _, idx := range []string{
 				`CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`,
 			} {
 				if _, err := ex.Exec(idx); err != nil {
 					return fmt.Errorf("create v7 index: %w", err)
@@ -1578,6 +1582,7 @@ var migrations = []migration{
 				`CREATE INDEX IF NOT EXISTS idx_audit_turn_id ON audit_events(turn_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_audit_evaluation_id ON audit_events(evaluation_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_audit_scan_id ON audit_events(scan_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_audit_enforcement_action_id ON audit_events(enforcement_action_id)`,
 			} {
 				if _, err := ex.Exec(stmt); err != nil {
@@ -1829,26 +1834,6 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 	return count > 0, nil
 }
 
-// unreadAuditIndexes are audit_events indexes no query reads. Every hook
-// writes about ten audit rows, and each index is another B-tree page per row
-// in the write-ahead log (GAP-0246), so they are dropped from stores that
-// earlier migrations created them in. The migrations no longer create them;
-// this runs on every open and does not move the schema version, so an older
-// binary opened on the same store after a rollback runs without them too.
-var unreadAuditIndexes = []string{
-	"idx_audit_policy_id", "idx_audit_tool_name", "idx_audit_generation",
-	"idx_audit_sidecar_instance_id", "idx_audit_finding_id",
-}
-
-func dropUnreadAuditIndexes(ex dbExecer) error {
-	for _, name := range unreadAuditIndexes {
-		if _, err := ex.Exec("DROP INDEX IF EXISTS " + name); err != nil {
-			return fmt.Errorf("audit: drop unread index %s: %w", name, err)
-		}
-	}
-	return nil
-}
-
 func (s *Store) Init() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("audit: store is not initialized")
@@ -1901,9 +1886,6 @@ func (s *Store) Init() error {
 	}
 	if err := ensureJudgeBodyTimestampUnixNano(s.db, legacyJudgeTimestampUnixNanoIndex); err != nil {
 		return fmt.Errorf("audit: verify judge timestamp retention index: %w", err)
-	}
-	if err := dropUnreadAuditIndexes(s.db); err != nil {
-		return err
 	}
 	// The previous supported binary may have written another legacy ACK row
 	// after an operator rolled back. Re-scan idempotently on every current

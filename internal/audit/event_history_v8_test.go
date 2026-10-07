@@ -472,38 +472,14 @@ func TestV8EventHistoryMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err := historyMigration.apply(store.db); err != nil {
 		t.Fatalf("second direct migration replay: %v", err)
 	}
-	// A store an earlier build migrated still has an index no query reads.
-	if _, err := store.db.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.Init(); err != nil {
 		t.Fatalf("Init after migration replay: %v", err)
-	}
-	// GAP-0246: the next open drops the indexes no query reads.
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err := NewStore(store.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Init(); err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	for _, index := range unreadAuditIndexes {
-		var count int
-		if err := store.db.QueryRow(
-			`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, index,
-		).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("unread index %s count=%d err=%v", index, count, err)
-		}
 	}
 
 	for _, index := range []string{
 		"idx_audit_bucket_timestamp", "idx_audit_event_name_timestamp", "idx_audit_source_timestamp",
 		"idx_audit_turn_id", "idx_audit_evaluation_id", "idx_audit_scan_id",
-		"idx_audit_enforcement_action_id",
+		"idx_audit_finding_id", "idx_audit_enforcement_action_id",
 	} {
 		var count int
 		if err := store.db.QueryRow(
