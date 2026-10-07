@@ -37,6 +37,7 @@ from defenseclaw.commands.cmd_doctor import (
 )
 from defenseclaw.doctor_hooks import (
     _CLAUDE_REQUIRED_HOOKS,
+    WindowsHookCheck,
     _codex_command_hook_hash,
     _codex_hook_state_key_source,
     _codex_policy_executable,
@@ -1424,6 +1425,44 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.state, "policy-blocked")
         self.assertIn("native Windows .exe", raised.exception.detail)
+
+    def test_codex_executable_changed_after_setup_names_the_setup_rerun(self) -> None:
+        """GAP-0129: after a Codex update the evidence mismatch says to re-run
+        setup, and the Codex hooks row (like Hook contract, from the same
+        check) carries it as its Next step."""
+        executable = self.install / "codex.exe"
+        executable.write_bytes(b"MZnative-codex")
+        lock = {
+            "version": 2,
+            "connectors": {
+                "codex": {
+                    "contract_id": "codex-hooks-v3-generic",
+                    "compatibility_status": "known",
+                    "raw_agent_version": "codex-cli 0.144.3",
+                    "normalized_agent_version": "0.144.3",
+                    "agent_executable": str(executable),
+                    "agent_executable_source": "setup-selected",
+                    "agent_executable_sha256": "0" * 64,
+                }
+            },
+        }
+        (self.data / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        with (
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+            patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
+            patch("defenseclaw.agent_selection.stable_executable_sha256", return_value="1" * 64),
+            self.assertRaises(_InspectionError) as raised,
+        ):
+            _inspect_codex_effective_hook_policy(str(self.data), str(self.data / "config.toml"))
+        self.assertIn("no longer matches protected Setup evidence", raised.exception.detail)
+        self.assertIn("defenseclaw setup codex --yes", raised.exception.repair)
+
+        check = WindowsHookCheck("policy-blocked", raised.exception.detail, repair=raised.exception.repair)
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_windows_native_hook_check", return_value=check):
+            _check_codex_hooks(self.cfg, result, platform_name="nt", config_path=str(self.data / "config.toml"))
+        self.assertEqual(result.checks[-1]["status"], "fail")
+        self.assertIn("defenseclaw setup codex --yes", result.checks[-1]["remediation"])
 
     def test_codex_policy_executable_never_uses_automatic_discovery_cache(self) -> None:
         (self.data / "agent_discovery.json").write_text(

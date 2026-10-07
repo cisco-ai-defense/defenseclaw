@@ -310,6 +310,7 @@ class WindowsHookCheck:
     command: str = ""
     target: str = ""
     raw_target: str = ""
+    repair: str = ""
 
     @property
     def healthy(self) -> bool:
@@ -339,10 +340,12 @@ class WindowsHookCheck:
 
 
 class _InspectionError(Exception):
-    def __init__(self, state: str, detail: str) -> None:
+    def __init__(self, state: str, detail: str, *, repair: str = "") -> None:
         super().__init__(detail)
         self.state = state
         self.detail = detail
+        # The command that fixes it, when DefenseClaw has one (doctor's Next step).
+        self.repair = repair
 
 
 class _WindowsGUID(ctypes.Structure):
@@ -1027,6 +1030,11 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
     return document
 
 
+_CODEX_RESELECT_STEP = (
+    "after a Codex update or reinstall, select the Codex executable again: defenseclaw setup codex --yes"
+)
+
+
 def _codex_policy_executable(data_dir: str) -> str:
     """Resolve Setup's exact protected Codex executable evidence.
 
@@ -1117,7 +1125,13 @@ def _codex_policy_executable(data_dir: str) -> str:
 def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tuple[bool, str]:
     """Read Codex's merged system/cloud/MDM hook policy through app-server."""
 
-    executable = _codex_policy_executable(data_dir)
+    try:
+        executable = _codex_policy_executable(data_dir)
+    except _InspectionError as exc:
+        # Setup records the Codex executable it trusts; a Codex update or
+        # reinstall changes it, and only a Setup re-run selects it again
+        # (GAP-0129).
+        raise _InspectionError(exc.state, exc.detail, repair=_CODEX_RESELECT_STEP) from exc
     env = dict(os.environ)
     env["CODEX_HOME"] = os.path.dirname(os.path.abspath(config_path))
     creationflags = 0
@@ -3687,4 +3701,5 @@ def validate_windows_hook_registration(
             command,
             target,
             raw_target,
+            repair=exc.repair,
         )
