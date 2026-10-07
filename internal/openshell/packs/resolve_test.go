@@ -1573,7 +1573,7 @@ func TestResolveReviewFloor(t *testing.T) {
 		eff, _ := mustResolve(t, cfg, Flags{})
 		for _, glob := range []string{"**/.claude/**", ".mcp.json", "**/.codex/**", "AGENTS.md", "CLAUDE.md", "**/.cursor/**",
 			"**/.devin/**", "**/.openhands/**", "**/.omnigent/**", ".github/hooks/**", ".github/copilot/**",
-			"package-lock.json", "yarn.lock", "go.sum", "Cargo.lock", "uv.lock", PackFileName} {
+			"package-lock.json", "yarn.lock", "go.sum", "Cargo.lock", "uv.lock", PackFileName, RepoPolicyPath} {
 			if !containsString(eff.Workspace.Review, glob) {
 				t.Fatalf("pack %s review %v lacks %q", eff.Pack.Name, eff.Workspace.Review, glob)
 			}

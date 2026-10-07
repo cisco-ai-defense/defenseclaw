@@ -819,6 +819,9 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 	}
 	if eff.Pack != nil {
 		out.Pack, out.PackSource, out.PackDigest = eff.Pack.Name, eff.Pack.Source, eff.Pack.Digest
+		for _, link := range eff.Pack.Chain {
+			out.PackChain = append(out.PackChain, sandboxapi.PackLink{Name: link.Name, Builtin: link.Builtin, Source: link.Source, Digest: link.Digest})
+		}
 	}
 	for _, s := range eff.Explain() {
 		out.Settings = append(out.Settings, sandboxapi.Setting{

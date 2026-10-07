@@ -847,9 +847,14 @@ type ExplainRun struct {
 
 // Explain is the resolved sandbox posture with provenance.
 type Explain struct {
-	Pack        string      `json:"pack"`
-	PackSource  string      `json:"pack_source"`
-	PackDigest  string      `json:"pack_digest"`
+	Pack       string `json:"pack"`
+	PackSource string `json:"pack_source"`
+	PackDigest string `json:"pack_digest"`
+	// PackChain are the packs the pack extends, parent first.
+	PackChain []PackLink `json:"pack_chain,omitempty"`
+	// RepoPolicy is the project's repository policy
+	// (.defenseclaw/sandbox.yaml) the posture includes, if any.
+	RepoPolicy  *RepoPolicy `json:"repo_policy,omitempty"`
 	Profile     string      `json:"profile"`
 	NetworkMode string      `json:"network_mode"`
 	Approvals   string      `json:"approvals"`
@@ -861,6 +866,27 @@ type Explain struct {
 	// image prepares its MicroVM disk, which takes about a minute. Always
 	// false on the docker driver.
 	VMFirstBoot bool `json:"vm_first_boot,omitempty"`
+}
+
+// PackLink is one pack of an extends chain.
+type PackLink struct {
+	Name    string `json:"name"`
+	Builtin bool   `json:"builtin"`
+	Source  string `json:"source"`
+	Digest  string `json:"digest"`
+}
+
+// RepoPolicy is a project's repository sandbox policy as a run read it: it
+// may only tighten the posture. Content is the file as read (at most
+// packs.MaxRepoPolicyBytes), so a client resolves exactly what the daemon
+// resolved.
+type RepoPolicy struct {
+	// Path is the file read (<project>/.defenseclaw/sandbox.yaml).
+	Path   string `json:"path"`
+	Digest string `json:"digest"`
+	// Tightened are the settings it made stricter for this run.
+	Tightened []string `json:"tightened,omitempty"`
+	Content   []byte   `json:"content,omitempty"`
 }
 
 // Setting is one resolved key and where its value came from.

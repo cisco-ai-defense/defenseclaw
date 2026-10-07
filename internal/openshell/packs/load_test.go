@@ -144,10 +144,10 @@ func TestLoadRefusals(t *testing.T) {
 		})
 	}
 
-	if _, err := Validate(filepath.Join(teamDir, PackFileName)); err != nil {
+	if _, err := Validate(filepath.Join(teamDir, PackFileName), ""); err != nil {
 		t.Fatalf("Validate(valid pack): %v", err)
 	}
-	_, err := Validate(filepath.Join(root, "reserved"))
+	_, err := Validate(filepath.Join(root, "reserved"), "")
 	wantPackError(t, err, "reserved_name", "name")
 }
 
