@@ -188,15 +188,20 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	credential, err := acp.EnsureEnterpriseCredential(
-		cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
-	)
+	var credential acp.EnterpriseCredential
+	err = withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		var ensureErr error
+		credential, ensureErr = acp.EnsureEnterpriseCredential(
+			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+		)
+		if ensureErr != nil {
+			return ensureErr
+		}
+		return alignEnterpriseACPCredentialOwner(
+			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile, credential.Token,
+		)
+	})
 	if err != nil {
-		return enterpriseACPResult(cmd, nil, err)
-	}
-	if err := alignEnterpriseACPCredentialOwner(
-		cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile, credential.Token,
-	); err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
 	var tokenPath string
@@ -293,9 +298,11 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
-	if err := acp.RemoveEnterpriseCredential(
-		cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
-	); err != nil {
+	if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		return acp.RemoveEnterpriseCredential(
+			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+		)
+	}); err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(enrollment.dataDir, enrollment.client, enrollment.agent)
