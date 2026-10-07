@@ -243,7 +243,8 @@ func TestSetupIsNotDoneWhileSandboxesStayOff(t *testing.T) {
 	useGateway(ta)
 	ta.daemon.status.Available = false
 	ta.daemon.status.Reason = "the OpenShell gateway is not available"
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	// Not ready is status 1, as doctor's failures (GAP-0165).
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "the daemon has not turned sandboxes on yet: the OpenShell gateway is not available",
 		"not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `defenseclaw sandbox doctor --fix`")
 	lacks(t, ta.output(), "Done →")
@@ -258,7 +259,7 @@ func TestSetupIsNotDoneWithoutTheDaemon(t *testing.T) {
 	ta.IO.TTY = false
 	useGateway(ta)
 	ta.daemon.errors["GET "+sandboxapi.PathStatus] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "the DefenseClaw daemon is not reachable"}
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, "+
 		"then `defenseclaw sandbox run claude`")
 	lacks(t, ta.output(), "Done →")
@@ -818,7 +819,7 @@ func TestSetupSaysTheDaemonNeedsARestartForDocker(t *testing.T) {
 	ta.IO.TTY = false
 	useGateway(ta)
 	ta.daemon.status.DockerGroupMissing = true
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "started before you joined the docker group", "`defenseclaw-gateway restart`")
 	lacks(t, ta.output(), "Done →")
 }
@@ -946,7 +947,7 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}))
+	wantExit(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}), 1)
 	if len(ta.gateway.planned) != 0 {
 		t.Fatalf("gateway changed without need: %+v", ta.gateway.planned)
 	}
@@ -1176,7 +1177,7 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 	runningOn(t, ta, 1)
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	if ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("applied %d, restarts %d", ta.gateway.applied, ta.gateway.restarts)
 	}
@@ -1375,7 +1376,13 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 			}
 		}
 		_ = fake
-		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+		// Left on the docker driver without Landlock, setup ends not ready
+		// (status 1, GAP-0165).
+		if err := ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}); tc.landlock.Status == openshell.StatusPass {
+			ta.ok(t, err)
+		} else {
+			wantExit(t, err, 1)
+		}
 		out := ta.output()
 		has(t, out, tc.want, "the 2 sandboxes on it (dc-a, theirs) were made on the docker driver, stop if running, and cannot start again "+
 			"unless the gateway is switched back", "Restart the OpenShell gateway now? [y/N]",

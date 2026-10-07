@@ -627,27 +627,27 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.warn("not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the docker driver. Rerun `" +
 			CommandName + " setup` and let it write the change, then restart the OpenShell gateway yourself, the way you started it; then `" +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case stuck && unmanaged:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the MicroVM driver; then `" +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case stuck:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case down:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, then `" +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case noDockerGroup:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon started before you joined the docker group, so it cannot reach Docker. " +
 			"Restart it so it picks up the group: `defenseclaw-gateway restart`; then `" + CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case !ready:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `" + CommandName +
 			" doctor --fix`, then `" + CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case restartYourself:
 		// No flush comes first, as with a restart of DefenseClaw's
 		// (consentGatewayRestart): the sandboxes are the user's to stop.
@@ -658,10 +658,18 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.warn("not ready for sandboxes yet: no " + strings.Join(mountedSettingsHarnesses(harness.Names()), " or ") +
 			" sandbox can start without bind mounts; enable them with `" + CommandName + " doctor --fix`, then `cd <project> && " +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
+}
+
+// errSetupNotReady ends a setup whose last line says it is not ready for
+// sandboxes yet (and what to do) with status 1, as `sandbox doctor` ends
+// one whose checks failed: it exited 0, so a script or the TUI's Setup form
+// that ran it saw success (GAP-0165).
+func errSetupNotReady() error {
+	return &ExitError{Code: 1, Err: &Silent{Err: errors.New("sandbox setup is not ready for sandboxes yet")}}
 }
 
 // gatewayStops are the checks setup stops on, in this order, once
