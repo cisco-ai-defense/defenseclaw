@@ -880,8 +880,12 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		// GAP-0377: Claude Code hides stderr after exit 0, so the user reads
+		// the per-user outage notice from systemMessage, as on Unix.
+		var notice map[string]string
+		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
+			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") {
+			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start", r.stdout)
 		}
 	})
 
