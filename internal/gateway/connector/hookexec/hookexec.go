@@ -1333,8 +1333,9 @@ const managedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
 
 // unenrolledAccountExplanation is why an unenrolled account's call is blocked.
 const unenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer; the administrator's " +
-	"policy has not enrolled it yet (enrollment runs while the account is signed in) or excludes it; ask your " +
-	"administrator if this continues"
+	"policy has not enrolled it yet or excludes it. Windows enrolls an account while it is signed in to the desktop " +
+	"(at the console or over Remote Desktop); an SSH, scheduled-task or runas session does not enroll it, so sign " +
+	"in to the desktop once, or ask your administrator if this continues"
 
 // failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
 // an account the administrator has not enrolled (yet) or excludes, and says

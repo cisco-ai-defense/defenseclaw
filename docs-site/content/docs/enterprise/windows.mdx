@@ -32,6 +32,7 @@ the same Setup and the same config.
 | Privileges | An elevated administrator token, or SYSTEM (for example an MDM agent). |
 | Disk space | Free space on the ProgramData volume for about three copies of the Setup payload plus 256 MB to install, upgrade, repair or ensure (one copy plus 256 MB for the other actions). Setup refuses at once, before it stages anything, and names the volume, its free space and the space it needs. |
 | Other profiles | No Secure Client DefenseClaw deployment. The two profiles share service names, so the lifecycle refuses with `profile_conflict`. |
+| User sessions | Users enroll while they are signed in to the desktop, at the console or over Remote Desktop. An account that only uses SSH, scheduled tasks or `runas` is never enrolled, and under `unenrolled_users: deny` its agents stay blocked. See [Enrollment on Windows](/docs/enterprise/enrollment#windows). |
 
 ## Layout
 

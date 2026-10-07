@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -68,8 +69,18 @@ func spoolRecordNote(id string, now time.Time) string {
 	}
 	return "the guardian has no identity record for this account yet: its group membership is unknown until the enumerator " +
 		"writes one (at the account's first sign-in or its next cycle), so a group assignment cannot match it now and the " +
-		"profile above is not final"
+		"profile above is not final" + spoolRecordSignInHint
 }
+
+// spoolRecordSignInHint names the sign-in that writes the record on Windows:
+// only a desktop session (console or Remote Desktop) does (GAP-0388).
+var spoolRecordSignInHint = func() string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	return "; on Windows only a desktop sign-in (console or Remote Desktop) writes it, not an SSH, scheduled-task or " +
+		"runas session"
+}()
 
 // readIdentitySpoolFacts returns the guardian's record for key (a uid or
 // SID), when one exists, is trusted and is current.

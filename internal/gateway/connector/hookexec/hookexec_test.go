@@ -1984,6 +1984,10 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if !strings.Contains(errb.String(), "this account is not enrolled") || strings.Contains(errb.String(), "gateway unreachable") {
 		t.Fatalf("stderr = %q, want the enrollment explanation", errb.String())
 	}
+	// GAP-0388: an SSH-only account waited for an enrollment that cannot happen.
+	if !strings.Contains(errb.String(), "Remote Desktop") || !strings.Contains(errb.String(), "SSH") {
+		t.Fatalf("stderr = %q, want the desktop sign-in requirement", errb.String())
+	}
 	// Codex shows its structured denial, not stderr, so the denial names
 	// the reason too instead of the generic failed-closed text.
 	out.Reset()
