@@ -31,7 +31,8 @@ func TestHookAndShimGatewayCallsBypassProxy(t *testing.T) {
 				t.Fatal(err)
 			}
 			for n, line := range strings.Split(string(body), "\n") {
-				if strings.HasPrefix(strings.TrimSpace(line), "#") || !strings.Contains(line, "http://${API_ADDR}") {
+				if strings.HasPrefix(strings.TrimSpace(line), "#") ||
+					(!strings.Contains(line, "http://${API_ADDR}") && !strings.Contains(line, "http://${_DC_SHIM_ADDR}")) {
 					continue
 				}
 				calls++

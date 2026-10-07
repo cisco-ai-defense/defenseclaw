@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -471,6 +472,143 @@ func TestPathShimsKeepTokenOffEveryCommandLine(t *testing.T) {
 	}
 }
 
+// writeShimRealTools puts a stand-in for every shimmed tool in a new
+// directory. Each one records its arguments and its environment in the
+// returned log directory; the curl stand-in then runs the real curl, which
+// also sends the curl shim's own inspection request.
+func writeShimRealTools(t *testing.T) (binDir, logDir string) {
+	t.Helper()
+	envBin, curlBin := hookArgvLookPath("env"), hookArgvLookPath("curl")
+	if envBin == "" || curlBin == "" {
+		t.Skip("env and curl are required")
+	}
+	binDir, logDir = t.TempDir(), t.TempDir()
+	for _, tool := range shimBinaries {
+		next := "exit 0\n"
+		if tool == "curl" {
+			next = "exec " + shellSingleQuoteForTest(curlBin) + " \"$@\"\n"
+		}
+		script := "#!/bin/sh\n" +
+			"f=" + shellSingleQuoteForTest(logDir) + "/$$\n" +
+			"printf '%s\\n' \"$*\" > \"$f.args\"\n" +
+			shellSingleQuoteForTest(envBin) + " > \"$f.env\"\n" + next
+		if err := os.WriteFile(filepath.Join(binDir, tool), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return binDir, logDir
+}
+
+// shimRealToolRun is one recorded start of a stand-in tool.
+type shimRealToolRun struct {
+	args string
+	env  []string
+}
+
+func readShimRealToolRuns(t *testing.T, logDir string) []shimRealToolRun {
+	t.Helper()
+	envFiles, err := filepath.Glob(filepath.Join(logDir, "*.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runs []shimRealToolRun
+	for _, envFile := range envFiles {
+		env, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args, err := os.ReadFile(strings.TrimSuffix(envFile, ".env") + ".args")
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, shimRealToolRun{args: strings.TrimSpace(string(args)), env: strings.Split(strings.TrimSpace(string(env)), "\n")})
+	}
+	return runs
+}
+
+// runShimForTest runs one PATH shim with the stand-in tools behind it and
+// returns its exit code and output.
+func runShimForTest(t *testing.T, shimDir, name, binDir string, env ...string) (int, string) {
+	t.Helper()
+	jq := hookArgvLookPath("jq")
+	if jq == "" {
+		t.Skip("jq is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, systemBashForTest(t), filepath.Join(shimDir, name), "--version", hookArgvPayloadMarker)
+	cmd.Env = append(append(hookArgvBaseEnv(), env...), "HOME="+t.TempDir(),
+		"PATH="+strings.Join([]string{shimDir, binDir, filepath.Dir(jq), "/usr/bin", "/bin"}, ":"))
+	out, err := cmd.CombinedOutput()
+	code := 0
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run shim %s: %v", name, err)
+	}
+	return code, string(out)
+}
+
+// TestPathShimsLeaveTheRealToolsEnvironmentAlone: the real tool inherits the
+// shim's environment, and an assignment keeps the export bit of an inherited
+// variable. Run from an agent environment that exports the names the shims
+// used for their own values (a user's API_TOKEN, ACTION, ...) and an empty
+// DEFENSECLAW_GATEWAY_TOKEN, so that the bearer comes from the .token file,
+// every shim must start the real tool, on the allow path and with the gateway
+// down, with the user's values unchanged and no copy of the bearer.
+func TestPathShimsLeaveTheRealToolsEnvironmentAlone(t *testing.T) {
+	const token = "dccert-fake-token-shim-env"
+	gateway, liveAddr := newHookArgvGateway(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downAddr := listener.Addr().String()
+	_ = listener.Close()
+	userEnv := []string{"DEFENSECLAW_GATEWAY_TOKEN="}
+	for _, name := range []string{"API_TOKEN", "API_ADDR", "AUTH_CONFIG", "INSPECT_BODY", "RESPONSE", "RESULT",
+		"HTTP_CODE", "ACTION", "REASON", "SHIM_DIR", "REAL_BINARY", "CURL_BIN"} {
+		userEnv = append(userEnv, name+"=dccert-user-value")
+	}
+	for _, state := range []struct{ name, addr string }{{"allow", liveAddr}, {"gateway-down", downAddr}} {
+		shimDir := t.TempDir()
+		if err := WriteShimScriptsWithToken(shimDir, state.addr, token); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range shimBinaries {
+			t.Run(state.name+"/"+name, func(t *testing.T) {
+				binDir, logDir := writeShimRealTools(t)
+				gateway.take()
+				code, out := runShimForTest(t, shimDir, name, binDir, userEnv...)
+				requests := gateway.take()
+				if state.name == "allow" && (len(requests) != 1 || requests[0].authorization != "Bearer "+token) {
+					t.Fatalf("gateway requests %+v, want one inspection with the bearer from .token\n%s", requests, out)
+				}
+				ran := false
+				for _, run := range readShimRealToolRuns(t, logDir) {
+					got := map[string]bool{}
+					for _, line := range run.env {
+						if strings.Contains(line, token) {
+							t.Fatalf("%q started with the gateway bearer in its environment: %s", run.args, line)
+						}
+						got[line] = true
+					}
+					for _, want := range userEnv {
+						if !got[want] {
+							t.Errorf("%q started without the inherited %s", run.args, want)
+						}
+					}
+					ran = ran || strings.Contains(run.args, hookArgvPayloadMarker)
+				}
+				if code != 0 || !ran {
+					t.Fatalf("shim exit %d, real tool started %v, want the real tool run\n%s", code, ran, out)
+				}
+			})
+		}
+	}
+}
+
 // curlArgvViolations reports what a curl command line in script would
 // disclose: a credential, the hook payload, or a body or config given inline
 // rather than from a descriptor. Process substitutions on the command
@@ -513,7 +651,7 @@ func curlArgvViolations(script string) []string {
 
 var (
 	templateDirective   = regexp.MustCompile(`\{\{[^}]*\}\}`)
-	curlCommand         = regexp.MustCompile(`(?:^|[\s;|&(])(?:curl|"\$REAL_BINARY"|"\$CURL_BIN")\s`)
+	curlCommand         = regexp.MustCompile(`(?:^|[\s;|&(])(?:curl|"\$_DC_SHIM_CURL")\s`)
 	processSubstitution = regexp.MustCompile(`\d+<\s*<\(printf '[^']*'(?:\s+"[^"]*")*\)|\d+<\s*<\([^)]*\)`)
 	authArgsUse         = regexp.MustCompile(`"\$\{AUTH_HEADER_ARGS\[@\]`)
 	authArgsCaller      = regexp.MustCompile(`^\s*(?:RESPONSE="?\$\()?(?:defenseclaw_gateway_post|defenseclaw_sandbox_post)\s`)
@@ -554,7 +692,7 @@ func TestCurlArgvCheckCatchesTheOldHookTransport(t *testing.T) {
 		`curl -s -X POST "http://${API_ADDR}/x" -H "Authorization: Bearer ${API_TOKEN}" --max-time 10 2>/dev/null`,
 		"curl -s -X POST \"http://${API_ADDR}/x\" \\\n  \"${AUTH_HEADER_ARGS[@]+\"${AUTH_HEADER_ARGS[@]}\"}\" \\\n  --data-binary @- 2>/dev/null",
 		`curl -s -X POST "http://${API_ADDR}/x" -d "$PAYLOAD" 2>/dev/null`,
-		`"$REAL_BINARY" -s -X POST "http://${API_ADDR}/x" --data-binary "{\"a\":1}"`,
+		`"$_DC_SHIM_CURL" -s -X POST "http://${_DC_SHIM_ADDR}/x" --data-binary "{\"a\":1}"`,
 		`curl -s --config "$HOME/.curlrc-token" --data-binary @/dev/fd/9 http://x 9< <(printf '%s' "$PAYLOAD")`,
 		`curl -s --data-binary @/dev/fd/9 http://x 9< <(/usr/bin/printf '%s' "$PAYLOAD")`,
 		`defenseclaw_hook_post() { other_helper "http://x" "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}"; }`,
