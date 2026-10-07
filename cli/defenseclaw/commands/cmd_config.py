@@ -524,25 +524,24 @@ def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]
 MANAGED_EXIT_CODE = 3
 
 
-_CONNECTOR_ENABLED_PATH = re.compile(r"guardrail\.connectors\.[^.\[\]]+\.enabled")
+def _unloaded_signature_pack_notes(cfg: object) -> list[str]:
+    """Configured signature packs the gateway leaves out (a missing file, a
+    pin that does not match). The change still applies; discovery is blind to
+    the agents those packs describe until they are fixed (GAP-0232)."""
+    discovery = getattr(cfg, "ai_discovery", None)
+    if not getattr(discovery, "enabled", False) or not getattr(discovery, "signature_packs", None):
+        return []
+    try:
+        from defenseclaw.inventory import ai_signatures
 
-
-def _restart_still_pending(cfg: object, paths: list[str], local_digest: str) -> list[str]:
-    """The restart-required paths the running gateway does not already enforce.
-
-    A connector enabled flag is part of the effective policy digest, and the
-    gateway keeps its running value until it restarts. When it already reports
-    the digest config.yaml now computes to, the key is back at the running
-    value and nothing is pending (GAP-0221). Other keys keep their hint: some
-    are not part of the digest at all."""
-    flips = [path for path in paths if _CONNECTOR_ENABLED_PATH.fullmatch(path)]
-    if not flips or not local_digest:
-        return paths
-    from defenseclaw.gateway import running_policy_digest
-
-    if running_policy_digest(cfg) != local_digest:
-        return paths
-    return [path for path in paths if path not in flips]
+        _total, refused = ai_signatures.refused_packs(cfg)
+    except Exception:  # noqa: BLE001 - the change is committed; the note is best effort
+        return []
+    return [
+        f"Warning: signature pack {pack.path} is not loaded ({pack.reason}); "
+        "every other setting applies. See: defenseclaw doctor"
+        for pack in refused
+    ]
 
 
 def _shadowed_mode_notes(changes: list) -> list[str]:
@@ -611,10 +610,11 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     digest = local_policy_digest(cfg, timeout=20)
     if digest:
         click.echo(f"Effective policy digest: {digest['effective_digest']}")
-    local_digest = digest["effective_digest"] if digest else ""
     for note in _shadowed_mode_notes(changes):
         click.echo(note)
-    pending = _restart_still_pending(cfg, result.restart_required, local_digest)
+    for note in _unloaded_signature_pack_notes(cfg):
+        click.echo(note)
+    pending = result.restart_required
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
     logger = getattr(app, "logger", None)

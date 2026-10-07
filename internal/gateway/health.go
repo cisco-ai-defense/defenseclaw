@@ -1386,6 +1386,28 @@ func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspec
 	}
 }
 
+// RetainConnectors drops the connectors set up from config ("manual") that
+// are not in names, so a connector set that changed in-process leaves the
+// roster a fresh start would show. Connectors activated by application
+// protection keep their entries.
+func (h *SidecarHealth) RetainConnectors(names ...string) {
+	keep := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		keep[connName(name)] = struct{}{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for key, s := range h.connStats {
+		if _, ok := keep[key]; ok || s.source != "manual" {
+			continue
+		}
+		delete(h.connStats, key)
+		if h.primaryConn == key {
+			h.primaryConn = ""
+		}
+	}
+}
+
 func (h *SidecarHealth) HasConnector(name string) bool {
 	key := connName(name)
 	if key == "" {

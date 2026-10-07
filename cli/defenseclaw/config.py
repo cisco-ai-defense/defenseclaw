@@ -2069,16 +2069,6 @@ class RegistrySource:
                                 the literal token. Empty disables auth.
     * ``enabled``             — when False the source is preserved in
                                 config but skipped by ``sync --all``.
-    * ``auto_sync``           — RESERVED. Scheduled sync is not yet
-                                implemented; setting this to True today
-                                does NOT cause periodic ingest.
-                                Persisted so a v1 -> v2 operator config
-                                doesn't lose the bit. Run
-                                ``defenseclaw registry sync --all`` (or
-                                schedule it via cron) until the v2
-                                scheduler ships.
-    * ``sync_interval_hours`` — RESERVED. Paired with ``auto_sync``;
-                                ignored at runtime today.
     * ``last_sync``           — ISO-8601 UTC timestamp; populated by
                                 the sync command on success.
     * ``last_status``         — ``ok`` or ``error: <reason>``.
@@ -2090,8 +2080,6 @@ class RegistrySource:
     content: str = "skill"
     auth_env: str = ""
     enabled: bool = True
-    auto_sync: bool = False
-    sync_interval_hours: int = 24
     last_sync: str = ""
     last_status: str = ""
 
@@ -5154,11 +5142,6 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
                 ", ".join(REGISTRY_CONTENT_TYPES),
             )
             content = "skill"
-        sync_interval = entry.get("sync_interval_hours", 24)
-        try:
-            sync_interval_int = max(0, int(sync_interval))
-        except (TypeError, ValueError):
-            sync_interval_int = 24
         sources.append(
             RegistrySource(
                 id=sid,
@@ -5167,8 +5150,6 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
                 content=content,
                 auth_env=str(entry.get("auth_env", "") or ""),
                 enabled=bool(entry.get("enabled", True)),
-                auto_sync=bool(entry.get("auto_sync", False)),
-                sync_interval_hours=sync_interval_int,
                 last_sync=str(entry.get("last_sync", "") or ""),
                 last_status=str(entry.get("last_status", "") or ""),
             )

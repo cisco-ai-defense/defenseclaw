@@ -1120,20 +1120,85 @@ func TestGuardrailRestartPredicateIncludesSingularConnector(t *testing.T) {
 	}
 }
 
-// A connector's enabled: true is the unset default, so it is no restart-
-// required change; disabling it is (GAP-0032).
-func TestGuardrailRestartPredicateTreatsEnabledTrueAsTheDefault(t *testing.T) {
+// The connector set applies in-process off Secure Client: disabling a
+// connector re-runs the connector setup (and the install watcher) without a
+// gateway restart, enabled: true is the unset default, and Secure Client
+// keeps the restart (GAP-0072, GAP-0032).
+func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	yes, no := true, false
-	withCodex := func(enabled *bool) *config.Config {
+	withCodex := func(enabled *bool, profile string) *config.Config {
 		cfg := config.DefaultConfig()
-		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}}
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}, "claudecode": {}}
+		if profile != "" {
+			cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+			cfg.Enterprise.Profile = profile
+		}
 		return cfg
 	}
-	if guardrailNeedsRestart(withCodex(nil), withCodex(&yes)) {
-		t.Fatal("enabled: true (the default) asked for a restart")
+	if connectorSetChanged(withCodex(nil, ""), withCodex(&yes, "")) {
+		t.Fatal("enabled: true (the default) changed the connector set")
 	}
-	if !guardrailNeedsRestart(withCodex(&yes), withCodex(&no)) {
-		t.Fatal("disabling a connector did not ask for a restart")
+	oldCfg, newCfg := withCodex(&yes, ""), withCodex(&no, "")
+	if diff := diffConfigs(oldCfg, newCfg); len(diff.RestartRequired) != 0 || !connectorSetChanged(oldCfg, newCfg) {
+		t.Fatalf("disable codex: diff = %+v, connector set changed = %v; want a hot connector-set change", diff, connectorSetChanged(oldCfg, newCfg))
+	}
+	sc := managed.ProfileSecureClient
+	if diff := diffConfigs(withCodex(&yes, sc), withCodex(&no, sc)); !slices.Contains(diff.RestartRequired, "guardrail.connectors") {
+		t.Fatalf("Secure Client disable codex: restart_required = %v, want guardrail.connectors", diff.RestartRequired)
+	}
+}
+
+// The CLI no longer restarts the gateway for a hook fail mode change
+// (GAP-0184): with hook self-heal off, no hook guard rewrites the hooks, so the
+// reload re-runs the connector setup; with it on the guards do.
+func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.Guardrail.Enabled = true
+	oldCfg.Guardrail.Connector = "codex"
+	oldCfg.Guardrail.Mode = "action"
+	oldCfg.Guardrail.HookSelfHeal = false
+	oldCfg.Guardrail.HookFailMode = "open"
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.HookFailMode = "closed"
+	if !hookFailModeNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("hook fail mode change with self-heal off did not re-run the connector setup")
+	}
+	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
+	if hookFailModeNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+	}
+}
+
+// A custom rule-pack folder that is deleted and created again is watched
+// again (and reported as added, so the 30 s tick reloads the generation from
+// it) instead of staying in the watched set with a dead watch (GAP-0266).
+func TestAssetWatchesReaddARecreatedFolder(t *testing.T) {
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsw.Close()
+	pack := filepath.Join(t.TempDir(), "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	watches := &assetWatches{fsw: fsw, watched: map[string]struct{}{}}
+	want := map[string]struct{}{pack: {}}
+	if !watches.sync(want) {
+		t.Fatal("first sync did not watch the pack folder")
+	}
+	if err := os.RemoveAll(pack); err != nil {
+		t.Fatal(err)
+	}
+	watches.removed(pack)
+	if watches.sync(want) {
+		t.Fatal("sync watched a folder that is gone")
+	}
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !watches.sync(want) {
+		t.Fatal("the recreated pack folder was not watched again")
 	}
 }
 

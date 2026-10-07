@@ -1088,9 +1088,8 @@ is saved, but the running gateway keeps the old value until you run
   `gateway.config_reload.mode`
 - `guardrail.host`, `guardrail.port`, `guardrail.enabled`,
   `guardrail.connector`, `guardrail.scanner_mode`,
-  `guardrail.retain_judge_bodies`, `guardrail.hook_self_heal`,
-  `guardrail.hook_self_heal_debounce_ms`, and
-  `guardrail.connectors.<c>.enabled`
+  `guardrail.retain_judge_bodies`, `guardrail.hook_self_heal` and
+  `guardrail.hook_self_heal_debounce_ms`
 - `claw`, `agent`, `routing` and `plugin_dir`
 - `observability.local.path` and `observability.local.judge_bodies_path`
 
@@ -1100,7 +1099,8 @@ so it refuses that reload, and every later one, until you restart it. `/health`
 shows the error as `last_reload_error`, and an `/enforce` write answers
 `applied: false`.
 
-Thresholds, rule packs and rules, suppressions, `guardrail.hook_fail_mode`, `admission`, `asset_policy`,
+Thresholds, rule packs and rules, suppressions, `guardrail.hook_fail_mode`,
+the connector set (`guardrail.connectors.<c>.enabled`), `admission`, `asset_policy`,
 `scanners`, `llm_providers`, `update` and the observability destinations and
 redaction profiles all apply without a restart. The TUI follows the same list;
 see [Terminal UI](/docs/tui#the-config-editor).

@@ -159,6 +159,13 @@ installed. Every path keeps your configuration and data.
   once you no longer need the old history. `make all` from a source checkout
   over a 0.x install keeps a copy in
   `~/.defenseclaw/backups/audit-history-<time>.db` and says so.
+- On a host that several accounts share, `defenseclaw-gateway start` and
+  `restart` in 0.8.4 and older stop every `defenseclaw-gateway` process the
+  account may signal, not only its own (0.8.5 and later stop only the gateway
+  of their own data directory). Do not run those 0.8.4 commands with `sudo` on
+  a shared host. The upgrade itself starts the gateway with the new binary, so
+  upgrading one account leaves the other accounts' gateways running; a
+  rollback to 0.8.4 runs the 0.8.4 start again.
 - To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
   rollback command, so to return to 1.x from there, run the command the
   rollback prints:

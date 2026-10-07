@@ -300,14 +300,15 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 		m.afterWatchAdded()
 	}
 	// watchedAssets is the asset directory set currently registered with
-	// fsw; syncAssetWatches reconciles it after every reload.
-	watchedAssets := map[string]struct{}{}
+	// fsw; syncAssetWatches reconciles it after every reload and on the
+	// 30 s tick.
+	watchedAssets := &assetWatches{fsw: fsw, watched: map[string]struct{}{}}
 	// assetDirSet holds the directories whose policy files are assets and
 	// assetFileSet the single asset files, whose directories are watched too.
 	assetDirSet, assetFileSet := map[string]struct{}{}, map[string]struct{}{}
-	syncAssetWatches := func() {
+	syncAssetWatches := func() bool {
 		if m.assetDirs == nil && m.assetFiles == nil {
-			return
+			return false
 		}
 		want := map[string]struct{}{}
 		dirs, files := map[string]struct{}{}, map[string]struct{}{}
@@ -329,20 +330,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			}
 		}
 		assetDirSet, assetFileSet = dirs, files
-		for assetDir := range watchedAssets {
-			if _, keep := want[assetDir]; !keep {
-				_ = fsw.Remove(assetDir)
-				delete(watchedAssets, assetDir)
-			}
-		}
-		for assetDir := range want {
-			if _, done := watchedAssets[assetDir]; done {
-				continue
-			}
-			if err := fsw.Add(assetDir); err == nil {
-				watchedAssets[assetDir] = struct{}{}
-			}
-		}
+		return watchedAssets.sync(want)
 	}
 	isAsset := func(path string) bool {
 		cleaned := filepath.Clean(path)
@@ -468,6 +456,9 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			}
 			return ctx.Err()
 		case event := <-fsw.Events:
+			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				watchedAssets.removed(event.Name)
+			}
 			which := m.classify(event.Name)
 			if which == "" && isAsset(event.Name) {
 				which = configDiffAssets
@@ -533,7 +524,61 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			ensureEnvConfigWatched()
 		case <-envWatchRetryTicker.C:
 			ensureEnvConfigWatched()
+			// An asset folder that was deleted and created again (or
+			// created after the generation named it) is watched again
+			// here; rebuild the generation from it.
+			if syncAssetWatches() {
+				if !pending {
+					pendingTrigger = configDiffAssets
+				}
+				pendingKinds[configDiffAssets] = true
+				pending = true
+				resetTimer(timer, configReloadDebounce)
+			}
 		}
+	}
+}
+
+// assetWatches is the set of asset directories registered with the config
+// watcher.
+type assetWatches struct {
+	fsw     *fsnotify.Watcher
+	watched map[string]struct{}
+}
+
+// sync watches exactly want. A watched folder that is gone lost its watch
+// with it, so it is dropped and watched again once it is back (GAP-0266). It
+// reports whether it started watching a folder.
+func (a *assetWatches) sync(want map[string]struct{}) (added bool) {
+	for assetDir := range a.watched {
+		_, keep := want[assetDir]
+		if keep {
+			if _, err := os.Stat(assetDir); err == nil {
+				continue
+			}
+		}
+		_ = a.fsw.Remove(assetDir)
+		delete(a.watched, assetDir)
+	}
+	for assetDir := range want {
+		if _, done := a.watched[assetDir]; done {
+			continue
+		}
+		if err := a.fsw.Add(assetDir); err == nil {
+			a.watched[assetDir] = struct{}{}
+			added = true
+		}
+	}
+	return added
+}
+
+// removed forgets a watched folder a Remove or Rename event names: its watch
+// died with it, so the next sync adds it again when it is back.
+func (a *assetWatches) removed(path string) {
+	path = filepath.Clean(path)
+	if _, ok := a.watched[path]; ok {
+		_ = a.fsw.Remove(path)
+		delete(a.watched, path)
 	}
 }
 
@@ -1391,10 +1436,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	if oldCfg.Guardrail.ScannerMode != newCfg.Guardrail.ScannerMode {
 		restart = append(restart, "guardrail.scanner_mode")
 	}
-	connectorsChanged := !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
-	if secureClient {
-		connectorsChanged = !reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
-	}
+	// The connector set (guardrail.connectors membership and enabled) applies
+	// in-process: the reload re-runs the connector setup and restarts the
+	// install watcher. Secure Client keeps its restart for every connector
+	// setting (issue #1092).
+	connectorsChanged := secureClient && !reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
 	if oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector || connectorsChanged {
 		restart = append(restart, "guardrail.connectors")
 	}
@@ -1452,21 +1498,6 @@ func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.Guar
 	g.Host, g.Port, g.Enabled, g.Connector = running.Host, running.Port, running.Enabled, running.Connector
 	g.ScannerMode, g.RetainJudgeBodies = running.ScannerMode, running.RetainJudgeBodies
 	g.HookSelfHeal, g.HookSelfHealDebounceMs = running.HookSelfHeal, running.HookSelfHealDebounceMs
-	// The connector set (the keys of guardrail.connectors) is the set of
-	// connectors whose hooks are installed, so it stays as it runs too.
-	var connectors map[string]config.PerConnectorGuardrailConfig
-	if running.Connectors != nil {
-		connectors = make(map[string]config.PerConnectorGuardrailConfig, len(running.Connectors))
-	}
-	for name, was := range running.Connectors {
-		pc, ok := g.Connectors[name]
-		if !ok {
-			pc = was
-		}
-		pc.Enabled = was.Enabled
-		connectors[name] = pc
-	}
-	g.Connectors = connectors
 }
 
 // effectiveGatewayConfigForDiff compares operator-controlled gateway state.

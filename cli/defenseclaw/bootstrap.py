@@ -801,9 +801,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         )
 
 
-    # GAP-1551: hooks bake their fail mode in when the gateway writes them,
-    # so a rerun that only changes it must restart a running gateway.
-    hook_fail_modes_before = _hook_fail_modes(cfg)
     try:
         if protected_selection is not None:
             from defenseclaw.commands.cmd_setup import _revalidate_setup_agent_selections
@@ -939,10 +936,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
 
         if options.start_gateway:
-            gateway_step = _start_gateway_structured(
-                cfg,
-                hook_fail_mode_changed=_hook_fail_modes(cfg) != hook_fail_modes_before,
-            )
+            gateway_step = _start_gateway_structured(cfg)
             setup.append(gateway_step)
             if gateway_step.status == "fail":
                 rollback_first_run_transaction = True
@@ -1779,7 +1773,7 @@ def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) ->
     return useful[0] if useful else default
 
 
-def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
+def _start_gateway_structured(cfg: Config) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
 
@@ -1873,8 +1867,6 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
                 f"{gateway_failure_detail(result, 'restart failed')}",
                 "defenseclaw-gateway restart",
             )
-        if hook_fail_mode_changed:
-            return _restart_for_hook_fail_mode(gw)
         return StepResult("Sidecar", "pass", "already running")
     try:
         result = subprocess.run([gw, "start"], capture_output=True, text=True, timeout=_GATEWAY_START_TIMEOUT)
@@ -1901,37 +1893,6 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
     # A port held by another account names its own fix; lead with it.
     port_fix = re.search(r"with: (defenseclaw setup gateway --api-port \d+)", first)
     return StepResult("Sidecar", "warn", first, port_fix.group(1) if port_fix else "defenseclaw-gateway status")
-
-
-def _hook_fail_modes(cfg: Config) -> dict[str, str]:
-    """Effective hook fail mode per configured hook connector."""
-    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
-
-    gc = cfg.guardrail
-    try:
-        names = cfg.active_connectors() if cfg.has_connector_configured() else []
-    except Exception:
-        return {}
-    return {
-        name: str(gc.effective_hook_fail_mode(name) or "").lower()
-        for name in names
-        if _normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
-    }
-
-
-def _restart_for_hook_fail_mode(gw: str) -> StepResult:
-    """Restart a running gateway so it rewrites the hooks with the new fail mode."""
-    stale = "the hooks keep the old fail mode until the gateway restarts"
-    try:
-        result = subprocess.run([gw, "restart"], capture_output=True, text=True, timeout=_GATEWAY_START_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return StepResult("Sidecar", "warn", f"restart timed out; {stale}", "defenseclaw-gateway restart")
-    except OSError as exc:
-        return StepResult("Sidecar", "warn", f"restart failed ({exc}); {stale}", "defenseclaw-gateway restart")
-    if result.returncode == 0:
-        return StepResult("Sidecar", "pass", "restarted to apply the new hook fail mode")
-    first = gateway_failure_detail(result, "restart failed")
-    return StepResult("Sidecar", "warn", f"restart failed: {first}; {stale}", "defenseclaw-gateway restart")
 
 
 def _pid_file_running(pid_file: str) -> bool:

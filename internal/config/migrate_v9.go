@@ -25,10 +25,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -379,6 +381,9 @@ type v9Migrator struct {
 	// retired are the unmodified 0.8 copies of retired policy files that
 	// commit removes.
 	retired []string
+	// seedPacks maps a missing rule-pack folder to the shipped pack commit
+	// writes there (planShippedPacks).
+	seedPacks map[string]string
 	// globalPackPosture is the posture the gateway gives the global v8
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
@@ -442,6 +447,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	}
 	m.migrateTelemetryAliases(root)
 	m.migratePrivacy(root)
+	m.migrateRegistrySources(root)
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
@@ -452,6 +458,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	// A Secure Client policy folder is the deployment's, not the user's.
 	if !v9SecureClientDocument(root) {
 		m.planRetiredPolicyFiles()
+		m.planShippedPacks()
 	}
 	versionNode.Value = fmt.Sprint(ConfigVersionV9)
 	versionNode.Tag = "!!int"
@@ -568,6 +575,14 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
 		m.retireProvidersOverlay(&written)
+	}
+	for _, dir := range slices.Sorted(maps.Keys(m.seedPacks)) {
+		if err := seedShippedRulePack(dir, m.seedPacks[dir]); err != nil {
+			m.note("could not write the shipped %s rule pack to %s: %v; the gateway refuses to start until it is there "+
+				"(run defenseclaw init)", m.seedPacks[dir], dir, err)
+			continue
+		}
+		written = append(written, dir)
 	}
 	for _, path := range m.retired {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -766,6 +781,74 @@ func (m *v9Migrator) planRetiredPolicyFiles() {
 			m.note("%s, the unmodified 0.8 copy of a retired policy, is removed", path)
 		}
 	}
+}
+
+// planShippedPacks finds the rule-pack folders config_version 9 reads that are
+// missing. An empty 0.8 rule_pack_dir selected the packs embedded in the
+// gateway; after the migration the implicit default pack is
+// <data_dir>/policies/guardrail/default and a built-in rule_pack name is
+// <policy_dir>/guardrail/<name>. init seeds those folders, but a home without
+// them (removed, or a policy_dir init never filled) would stop the gateway
+// at start, so commit writes the shipped pack there (GAP-0150). A managed host
+// installs the vendor packs with its lifecycle.
+func (m *v9Migrator) planShippedPacks() {
+	if m.in.Managed {
+		return
+	}
+	want := map[string]string{filepath.Join(expandPath(m.dataDir()), "policies", "guardrail", "default"): "default"}
+	for _, name := range BuiltinRulePacks {
+		want[filepath.Join(expandPath(m.policyDir()), "guardrail", name)] = name
+	}
+	for dir, name := range want {
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if m.seedPacks == nil {
+			m.seedPacks = map[string]string{}
+		}
+		m.seedPacks[filepath.Clean(dir)] = name
+		m.note("%s was missing; the shipped %s rule pack is written there (config_version 9 reads the rule pack from that folder)", dir, name)
+	}
+}
+
+// seedShippedRulePack writes the embedded pack name to dir, which must not
+// exist: the files go to a sibling folder that is renamed into place.
+func seedShippedRulePack(dir, name string) error {
+	files, err := policyassets.Files()
+	if err != nil {
+		return err
+	}
+	prefix := "guardrail/" + name + "/"
+	staging := dir + ".seeding"
+	_ = os.RemoveAll(staging)
+	wrote := false
+	for _, f := range files {
+		rel, ok := strings.CutPrefix(f.Path, prefix)
+		if !ok {
+			continue
+		}
+		target := filepath.Join(staging, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		if err := cfgtxn.WriteFileDurable(target, f.Data, 0o600); err != nil {
+			_ = os.RemoveAll(staging)
+			return err
+		}
+		wrote = true
+	}
+	if !wrote {
+		return fmt.Errorf("this build ships no %s rule pack", name)
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		_ = os.RemoveAll(staging)
+		return err
+	}
+	if err := os.Rename(staging, dir); err != nil {
+		_ = os.RemoveAll(staging)
+		return err
+	}
+	return nil
 }
 
 func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {
@@ -1140,6 +1223,21 @@ func (m *v9Migrator) migratePrivacy(root *yaml.Node) {
 		if key == "disable_redaction" && section.Content[index+1].Decode(&disabled) == nil && disabled {
 			m.note("privacy.disable_redaction: true was dropped: no config_version 8 or 9 runtime applies it; " +
 				"redaction follows observability.redaction_profiles (set a destination's redaction_profile to none to send unredacted data)")
+		}
+	}
+}
+
+// migrateRegistrySources drops registries.sources[].auto_sync and
+// sync_interval_hours, reserved for a scheduled sync that never shipped:
+// nothing read them, and `defenseclaw registry sync` is the only ingest path.
+// Keep this until the config_version 8 migration is dropped (1.1.0).
+func (m *v9Migrator) migrateRegistrySources(root *yaml.Node) {
+	sources := v8YAMLMapValue(v8YAMLMapValue(root, "registries"), "sources")
+	for index, source := range v9SeqItems(sources) {
+		for _, key := range []string{"auto_sync", "sync_interval_hours"} {
+			if v9Pop(source, key) != nil {
+				m.record.Removed = append(m.record.Removed, fmt.Sprintf("registries.sources[%d].%s", index, key))
+			}
 		}
 	}
 }

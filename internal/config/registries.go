@@ -33,15 +33,9 @@ type RegistrySource struct {
 	Content string `mapstructure:"content"  yaml:"content"`
 	AuthEnv string `mapstructure:"auth_env" yaml:"auth_env,omitempty"`
 	Enabled bool   `mapstructure:"enabled"  yaml:"enabled"`
-	// AutoSync and SyncIntervalHours are RESERVED for a future
-	// scheduled-sync implementation. Persisted today so an operator
-	// config rewrite is not needed when v2 lands, but no runtime
-	// component reads them — `defenseclaw registry sync --all`
-	// (cron-driven if needed) is the only ingest path right now.
-	AutoSync          bool   `mapstructure:"auto_sync"           yaml:"auto_sync,omitempty"`
-	SyncIntervalHours int    `mapstructure:"sync_interval_hours" yaml:"sync_interval_hours,omitempty"`
-	LastSync          string `mapstructure:"last_sync"           yaml:"last_sync,omitempty"`
-	LastStatus        string `mapstructure:"last_status"         yaml:"last_status,omitempty"`
+	// LastSync and LastStatus are written by `defenseclaw registry sync`.
+	LastSync   string `mapstructure:"last_sync"   yaml:"last_sync,omitempty"`
+	LastStatus string `mapstructure:"last_status" yaml:"last_status,omitempty"`
 }
 
 // RegistriesConfig groups every registered registry source. Stored at

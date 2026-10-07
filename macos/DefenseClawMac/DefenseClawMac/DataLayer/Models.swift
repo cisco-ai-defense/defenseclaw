@@ -1959,8 +1959,6 @@ struct RegistrySource: Identifiable, Sendable, Hashable {
     var url: String
     var authEnv: String
     var enabled: Bool
-    var autoSync: Bool
-    var syncIntervalHours: Int
     var lastSync: String
     var lastStatus: String
     var fetchedAt: String = ""

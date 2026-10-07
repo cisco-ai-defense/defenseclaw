@@ -94,8 +94,7 @@ the old value until you restart it:
   `guardrail.connector`, `guardrail.scanner_mode` and
   `guardrail.retain_judge_bodies`
 - the hook self-heal settings (`guardrail.hook_self_heal` and
-  `guardrail.hook_self_heal_debounce_ms`) and
-  `guardrail.connectors.<c>.enabled`
+  `guardrail.hook_self_heal_debounce_ms`)
 - `claw`, `agent`, `routing` and `plugin_dir`
 - `deployment_mode`, `enterprise.profile` and `enterprise.network`
 - the resource-identity keys (`environment`, `tenant_id`, `workspace_id`,
@@ -104,6 +103,11 @@ the old value until you restart it:
 The storage paths and `deployment_mode` can not be kept that way: after a
 change to one, the gateway refuses that reload, and every later one, until you
 restart it, and `/health` shows the error as `last_reload_error`.
+
+Adding, removing, enabling or disabling a connector
+(`guardrail.connectors.<c>.enabled`) applies in place: the gateway sets up or
+removes that connector's hooks and restarts its install watcher, without a
+process restart. On Secure Client, connector changes still need a restart.
 
 [Restart-required keys](/docs/reference/cli#restart-required-keys) is the
 reference list. When your change touches one, `config set` says so:

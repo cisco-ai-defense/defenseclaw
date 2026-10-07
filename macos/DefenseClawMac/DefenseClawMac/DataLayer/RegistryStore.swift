@@ -57,8 +57,6 @@ enum RegistryStore {
                 url: sourceConfig.url,
                 authEnv: sourceConfig.authEnv,
                 enabled: sourceConfig.enabled,
-                autoSync: sourceConfig.autoSync,
-                syncIntervalHours: sourceConfig.syncIntervalHours,
                 lastSync: sourceConfig.lastSync,
                 lastStatus: sourceConfig.lastStatus
             )
