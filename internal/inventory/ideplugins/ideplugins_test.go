@@ -42,6 +42,23 @@ func writeStateDB(t *testing.T, path, disabled string) {
 	}
 }
 
+func TestStateDBRejectsView(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.vscdb")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE VIEW ItemTable AS SELECT 'extensionsIdentifiers/disabled' AS key, '[]' AS value`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readStateDBValue(path, "extensionsIdentifiers/disabled", DefaultStateDBTimeout); ok {
+		t.Fatal("a state database view must not be evaluated")
+	}
+}
+
 func writeJar(t *testing.T, path, pluginXML string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
