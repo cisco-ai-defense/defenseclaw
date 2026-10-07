@@ -5,9 +5,12 @@
 package scanner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // scannerRuntimeName is the standalone Windows enterprise payload's scanner
@@ -19,6 +22,29 @@ const scannerRuntimeName = "defenseclaw-scanners"
 func usesScannerRuntime(binary string) bool {
 	base := strings.ToLower(filepath.Base(strings.TrimSpace(binary)))
 	return base == scannerRuntimeName || base == scannerRuntimeName+".exe"
+}
+
+// runtimeSettings is scanners.mcp_scanner as JSON with config.yaml's keys,
+// which the runtime's mcp-scan reads with the config loader's own parser.
+// It is the whole block, so a key like yara.extra_rules reaches the scan as
+// it does on the Python CLI path (GAP-0274). binary is the runtime itself, and
+// the judge (llm, judge_source) comes resolved through runtimeEnv.
+func (s *MCPScanner) runtimeSettings() (string, error) {
+	block := s.Config
+	block.Analyzers = block.EffectiveAnalyzers()
+	encoded, err := yaml.Marshal(block)
+	if err != nil {
+		return "", err
+	}
+	var settings map[string]any
+	if err := yaml.Unmarshal(encoded, &settings); err != nil {
+		return "", err
+	}
+	for _, key := range []string{"binary", "llm", "judge_source"} {
+		delete(settings, key)
+	}
+	out, err := json.Marshal(settings)
+	return string(out), err
 }
 
 // runtimeEnv is the MCP scan's environment under the embedded runtime: the

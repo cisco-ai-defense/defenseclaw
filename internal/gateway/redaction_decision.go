@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -47,8 +48,9 @@ func setManagedEnterpriseRedactionPosture(v bool) {
 	redaction.SetAgentReasonRedactionDisabled(v)
 	SetManagedEnterpriseActive(v)
 	// The Secure Client records keep the passwd names as the system reports
-	// them (issue #1092).
+	// them, and its scan errors the scanner stderr (issue #1092).
 	useridentity.KeepQualifiedNames(v)
+	scanner.KeepFullFailureText(v)
 }
 
 // ManagedEnterpriseActive reports the flag set by

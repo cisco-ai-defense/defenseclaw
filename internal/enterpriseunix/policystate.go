@@ -115,10 +115,13 @@ func gatewayPolicyDigest(body []byte) string {
 
 // describePolicy fills Result.Policy. The digest is computed from the
 // installed config (computePolicy); when that is not possible the last
-// applied record stands in. A change action records policy-state.json once the gateway reports
-// the computed digest, and warns when it reports another one. A reload the
-// gateway rejected (reloadError) is never "applied", and every action warns
-// about it: the gateway keeps enforcing the previous policy.
+// applied record stands in. With neither there is no digest to report and
+// Result.Policy stays nil, as on Windows: the lifecycle-result schema
+// requires effective_digest to be a sha256 digest. A change action records
+// policy-state.json once the gateway reports the computed digest, and warns
+// when it reports another one. A reload the gateway rejected (reloadError)
+// is never "applied", and every action warns about it, with or without a
+// digest: the gateway keeps enforcing the previous policy.
 func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError string) {
 	env, r := l.env, l.result
 	state := &enterprisestatus.PolicyState{GatewayReportedDigest: reported, LastReloadError: reloadError}
@@ -131,15 +134,15 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 			state.EffectiveDigest, state.ConfigGeneration = record.EffectiveDigest, record.ConfigGeneration
 		}
 	}
-	if state.EffectiveDigest == "" && reported == "" {
-		return
-	}
-	state.Applied = state.EffectiveDigest != "" && state.EffectiveDigest == reported && reloadError == ""
-	r.Policy = state
 	if reloadError != "" {
 		r.AddWarning(codePolicyReloadRejected, "the gateway reports a policy error and keeps enforcing the policy it last built: "+reloadError+
 			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds")
 	}
+	if state.EffectiveDigest == "" {
+		return
+	}
+	state.Applied = state.EffectiveDigest == reported && reloadError == ""
+	r.Policy = state
 	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify || !computed || !r.Readiness.Gateway {
 		return
 	}

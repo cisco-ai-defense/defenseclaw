@@ -5,9 +5,11 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
 func TestGuardrailFallbackActionPreservesProfile(t *testing.T) {
@@ -42,12 +44,33 @@ func TestGuardrailInspectorFallbackUsesResolvedThresholds(t *testing.T) {
 	t.Cleanup(func() { liveGeneration.Store(previous) })
 
 	inspector := NewGuardrailInspector("local", nil, nil)
-	got := inspector.finalize(context.Background(), "prompt", "", "action", "", &ScanVerdict{
-		Action: "alert", Severity: "MEDIUM", Scanner: "local-pattern",
-	}, nil)
+	medium := &ScanVerdict{Action: "alert", Severity: "MEDIUM", Scanner: "local-pattern"}
+	got := inspector.finalize(context.Background(), "prompt", "", "action", "", medium, medium, nil)
 	if got.Action != "block" || got.Severity != "MEDIUM" {
 		t.Fatalf("fallback with guardrail.block_at=MEDIUM = %+v, want MEDIUM block", got)
 	}
+
+	// GAP-0281: AI Defense counts by guardrail.cisco_trust_level alone, with
+	// and without the Rego module: a HIGH AI Defense block over no local
+	// finding blocks at full, alerts at advisory and is allowed at none.
+	cfg.Guardrail.BlockAt = "HIGH"
+	prepared, err := policy.Prepare(context.Background(), filepath.Join("..", "..", "policies", "rego"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aid := &ScanVerdict{Action: "block", Severity: "HIGH", Scanner: "ai-defense"}
+	none := allowVerdict("local-pattern")
+	merged := mergeVerdicts(none, aid)
+	for _, opa := range []*policy.Prepared{nil, prepared} {
+		for trust, want := range map[string]string{"full": "block", "advisory": "alert", "none": "allow"} {
+			cfg.Guardrail.CiscoTrustLevel = trust
+			liveGeneration.Store(&Generation{Config: cfg, Thresholds: buildThresholdTable(cfg, nil), OPA: opa})
+			if got := inspector.finalize(context.Background(), "prompt", "", "action", "", none, merged, aid); got.Action != want {
+				t.Fatalf("cisco_trust_level=%s opa=%v: %+v, want %s", trust, opa != nil, got, want)
+			}
+		}
+	}
+	cfg.Guardrail.CiscoTrustLevel = ""
 
 	// GAP-0190: a prompt is blocked at the level the operator set, not only at CRITICAL.
 	cfg.Guardrail.BlockAt = "HIGH"

@@ -29,6 +29,7 @@ import yaml
 
 from defenseclaw import policy_catalog, ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
 SEVERITIES = ["critical", "high", "medium", "low", "info"]
@@ -944,15 +945,11 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
 
     The Rego modules read only their input: admission and block/allow
     policy come from config.yaml, which ``defenseclaw config`` validates.
-    Rego compiles with 'opa' if installed, else defenseclaw-gateway.
+    Rego compiles with defenseclaw-gateway, the loader the gateway runs, or
+    with 'opa' when the gateway is not installed.
     """
     rd = rego_dir or _default_rego_dir(app)
-    errors: list[str] = []
-
-    # 2. Try to compile Rego
-    rego_compiled = _try_rego_compile(rd)
-
-    if errors or not rego_compiled:
+    if not _try_rego_compile(rd, app.cfg):
         raise SystemExit(1)
 
     ux.ok("All validations passed.")
@@ -984,7 +981,7 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
         # Installed policy directories ship no *_test.rego files, so this is
         # the normal answer there, not a failure (GAP-1091). The modules
         # must still compile, as 'opa test' requires (GAP-1392).
-        if not _try_rego_compile(rd):
+        if not _try_rego_compile(rd, app.cfg):
             raise SystemExit(1)
         click.echo(
             f"No Rego unit tests (*_test.rego) in {rd}; nothing to run. "
@@ -1485,28 +1482,37 @@ def _has_rego_tests(rego_dir: str) -> bool:
     return False
 
 
-def _rego_tool_cmd(opa_args: list[str], gateway_args: list[str]) -> list[str] | None:
+def _rego_tool_cmd(opa_args: list[str], gateway_args: list[str], *, gateway_first: bool = False) -> list[str] | None:
     """Return the argv for a Rego check: 'opa' when installed, else the gateway.
 
     defenseclaw-gateway embeds OPA (``policy validate`` / ``policy test``), so
     a standard install can validate and test Rego without a separate 'opa'
-    binary (GAP-1091). Returns None when neither is available.
+    binary (GAP-1091). ``gateway_first`` picks the gateway whenever it is
+    installed: its ``policy validate`` is the loader the gateway runs, which
+    also refuses a module that reads data config_version 9 no longer
+    provides (data.config, data.actions), where 'opa check' accepts any data
+    reference. Returns None when neither is available.
     """
     import shutil
 
-    opa = shutil.which("opa")
-    if opa:
-        return [opa, *opa_args]
     from defenseclaw.gateway import resolve_gateway_binary
 
-    gateway = resolve_gateway_binary()
+    opa = shutil.which("opa")
+    gateway = resolve_gateway_binary() if gateway_first or not opa else None
     if gateway:
         return [gateway, *gateway_args]
+    if opa:
+        return [opa, *opa_args]
     return None
 
 
-def _try_rego_compile(rego_dir: str) -> bool:
-    """Try to compile Rego modules. Returns True on success."""
+def _try_rego_compile(rego_dir: str, cfg=None) -> bool:
+    """Try to compile Rego modules. Returns True on success.
+
+    The gateway gives the verdict when it is installed, so a module the
+    gateway refuses never passes here; a Secure Client host keeps the 'opa'
+    first order of main (issue #1092).
+    """
     rego_files = [
         os.path.join(rego_dir, f) for f in os.listdir(rego_dir)
         if f.endswith(".rego") and not f.endswith("_test.rego")
@@ -1515,7 +1521,11 @@ def _try_rego_compile(rego_dir: str) -> bool:
         ux.err("FAIL: no .rego files found")
         return False
 
-    cmd = _rego_tool_cmd(["check", "--strict", *rego_files], ["policy", "validate", "--rego-dir", rego_dir])
+    cmd = _rego_tool_cmd(
+        ["check", "--strict", *rego_files],
+        ["policy", "validate", "--rego-dir", rego_dir],
+        gateway_first=not asset_lists.is_secure_client(cfg),
+    )
     if cmd is None:
         # A missing checker must not turn into a clean "Rego compilation: OK"
         # verdict, so the default fails closed. Operators can opt out with

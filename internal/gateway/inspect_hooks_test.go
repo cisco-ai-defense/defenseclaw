@@ -61,6 +61,18 @@ func TestInspectRequest_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// TestInspectRequestBlocksAtBlockAt: the pre-request hook route blocks a HIGH
+// prompt at guardrail.block_at: HIGH, as the proxy and the agent hooks do,
+// instead of demoting it to an alert (GAP-0282).
+func TestInspectRequestBlocksAtBlockAt(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.Guardrail.BlockAt = "HIGH"
+	_, verdict := postInspectRequest(t, api, `{"content":"my ssn is 078-05-1120"}`)
+	if verdict.Action != "block" || verdict.Severity != "HIGH" {
+		t.Fatalf("verdict = %s %s %q, want a HIGH block", verdict.Action, verdict.Severity, verdict.Reason)
+	}
+}
+
 // TestInspectRequestAuditRowNamesTheVerifiedCaller (#921): a direct
 // /api/v1/inspect/request call writes a registered, attributed audit row.
 func TestInspectRequestAuditRowNamesTheVerifiedCaller(t *testing.T) {

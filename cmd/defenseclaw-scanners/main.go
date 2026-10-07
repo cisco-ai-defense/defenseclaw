@@ -13,7 +13,7 @@
 // SHA-256 and compiles it; the gateway service then runs it read-only.
 //
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
-//	defenseclaw-scanners mcp-scan --json [--analyzers a,b] [--scan-prompts] [--scan-resources] [--scan-instructions] <url>
+//	defenseclaw-scanners mcp-scan --settings <scanners.mcp_scanner as JSON> <url>
 //	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--include-self]
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
@@ -81,28 +81,20 @@ if t is None:
     sys.exit("plugin-scan: a plugin directory is required")
 print(json.dumps(scan_plugin(t,o).to_dict()))`
 
-	// mcpScanScript is the gateway's "mcp scan --json" for a remote server:
-	// the scanner settings come as arguments, and the judge and AI Defense
+	// mcpScanScript is the gateway's "mcp scan --json" for a remote server.
+	// The runtime reads no config of its own: --settings carries the
+	// scanners.mcp_scanner block with config.yaml's keys, read by the config
+	// loader's own parser, so yara, analyzers and every other key reach the
+	// scan as they do on the Python CLI path. The judge and AI Defense
 	// settings come from the environment that internal/scanner runtimeEnv
 	// derives from config.
-	mcpScanScript = `import os,sys
-from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, MCPScannerConfig
+	mcpScanScript = `import json,os,sys
+from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, _merge_mcp_scanner
 from defenseclaw.scanner.mcp import MCPScannerWrapper
-a=sys.argv[1:]; c=MCPScannerConfig(); t=None; i=0
-while i<len(a):
-    x=a[i]
-    if x=="--json":
-        i+=1
-    elif x=="--analyzers" and i+1<len(a):
-        c.analyzers=a[i+1]; i+=2
-    elif x in ("--scan-prompts","--scan-resources","--scan-instructions"):
-        setattr(c,x[2:].replace("-","_"),True); i+=1
-    elif t is None and not x.startswith("--"):
-        t=x; i+=1
-    else:
-        sys.exit("mcp-scan: unexpected argument "+x)
-if t is None:
-    sys.exit("mcp-scan: a server URL is required")
+a=sys.argv[1:]
+if len(a)!=3 or a[0]!="--settings" or a[2].startswith("--"):
+    sys.exit("usage: mcp-scan --settings <scanners.mcp_scanner as JSON> <server URL>")
+c=_merge_mcp_scanner(json.loads(a[1])); t=a[2]
 e=os.environ.get
 llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""))
 aid=CiscoAIDefenseConfig(api_key=e("DEFENSECLAW_SCANNER_AID_API_KEY",""), endpoint=e("DEFENSECLAW_SCANNER_AID_ENDPOINT","") or CiscoAIDefenseConfig().endpoint)

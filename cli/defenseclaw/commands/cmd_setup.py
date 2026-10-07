@@ -1604,7 +1604,7 @@ def _configure_llm(
     previous_provider = (llm.provider or "").strip().lower()
 
     default_provider = llm.provider if llm.provider in _WIZARD_LLM_PROVIDERS else "anthropic"
-    instances = list_custom_instances(data_dir)
+    instances = list_custom_instances(data_dir, cfg)
     llm.provider = pick_provider(
         current=default_provider,
         instances=instances,
@@ -1629,7 +1629,7 @@ def _configure_llm(
         llm.api_key = ""
         llm.api_key_env = ""
     else:
-        instance_obj = custom_instance(data_dir, llm.instance_name) if llm.instance_name else None
+        instance_obj = custom_instance(data_dir, llm.instance_name, cfg) if llm.instance_name else None
         llm.model = pick_model(
             current=current_model,
             provider=llm.provider,

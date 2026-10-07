@@ -379,7 +379,7 @@ unreachable. `~/.defenseclaw/custom-providers.json` is **derived** from
 `llm_providers` on every config write and is never read back as input: do not
 edit it. If it drifts, `defenseclaw doctor` fails the **Custom-provider
 overlay** row and `defenseclaw doctor --fix` rewrites it. A hand-written
-`custom-providers.json` from DefenseClaw 1.0.x is imported into `llm_providers`
+`custom-providers.json` from DefenseClaw 0.8.x is imported into `llm_providers`
 by the next `setup provider add` or `remove`.
 
 ```bash

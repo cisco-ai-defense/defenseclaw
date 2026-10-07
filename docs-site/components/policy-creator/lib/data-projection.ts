@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 //
-// Project a wizard-state Policy into the 1.0 `data.json` shape (uppercase
+// Project a wizard-state Policy into the version 8 `data.json` shape (uppercase
 // severity keys, "enable → allow / disable → block"), and into the
 // evaluation input the config_version 9 Rego modules read instead
 // (input.admission, input.thresholds; see withPolicyInput).

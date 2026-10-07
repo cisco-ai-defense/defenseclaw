@@ -36,7 +36,8 @@ import (
 // thousands of files. This lifecycle step owns it: after a successful
 // install, upgrade, repair or ensure it installs the staged executable and
 // unpacks the runtime; uninstall removes the root; status and verify report
-// it. A payload without the runtime (an older Setup) changes nothing.
+// it, and verify fails while it is not ready, since every scan then fails
+// closed.
 
 var (
 	windowsScannerRuntimeDir     = managed.StandaloneWindowsScannerRuntimeDir
@@ -137,9 +138,10 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			}
 		}
 		if source == "" {
-			// No staged copy to install from (a repair run from the installed CLI, an older
-			// Setup): a runtime that is installed but not unpacked is prepared again, so a
-			// prepare that failed half way is not left for a hand clean-up (GAP-0263).
+			// No staged copy to install from (a repair or ensure run from the installed
+			// CLI): a runtime that is installed but not unpacked is prepared again, so a
+			// prepare that failed half way is not left for a hand clean-up (GAP-0263),
+			// and a missing one is reported with the Setup command that installs it.
 			reprepareInstalledWindowsScannerRuntime(result)
 			return
 		}
@@ -156,9 +158,22 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			result.AddWarning("scanner_runtime_left", "the scanner runtime folder could not be removed: "+err.Error())
 		}
 	case "status", "verify":
-		if result.Installed {
+		// A request refused before its health checks ran reports only the
+		// recorded deployment; a standard account cannot read the runtime
+		// folder anyway.
+		if result.Installed && !windowsEnterpriseResultHasWarning(result, windowsEnterpriseHealthNotChecked) {
 			result.Scanners = readWindowsScannerRuntime()
-			if result.Scanners != nil && result.Scanners.State != "missing" && result.Scanners.JudgeModel == "" {
+			// Every scan fails closed without a ready runtime, so verify
+			// fails and an MDM detection remediates (GAP-0294).
+			if result.Scanners.State != "ready" {
+				message := windowsScannerRuntimeUnavailable(result.Scanners.State)
+				if result.Action == "verify" {
+					result.AddError("scanner_runtime_unavailable", message)
+				} else {
+					result.AddWarning("scanner_runtime_unavailable", message)
+				}
+			}
+			if result.Scanners.State != "missing" && result.Scanners.JudgeModel == "" {
 				result.AddWarning("scanner_judge_missing",
 					"the scanners run without an LLM judge (recommended: the quiet policy with the LLM judge); "+
 						"set llm.model in the admin config and store its key with `enterprise secret set`, named by enterprise.inspection.llm.credential")
@@ -204,12 +219,39 @@ func installWindowsScannerRuntime(source string) error {
 	return nil
 }
 
+func windowsEnterpriseResultHasWarning(result *enterprisestatus.Result, code string) bool {
+	for _, warning := range result.Warnings {
+		if warning.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsScannerRuntimeUnavailable says what a scanner runtime that is not
+// ready blocks and what restores it.
+func windowsScannerRuntimeUnavailable(state string) string {
+	const blocked = "so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed)"
+	if state == "not_prepared" {
+		return "the skill, MCP and plugin scanner runtime is installed but not prepared, " + blocked +
+			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to prepare it"
+	}
+	return "the skill, MCP and plugin scanner runtime is missing, " + blocked +
+		"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair (or /ensure) to install it"
+}
+
 // reprepareInstalledWindowsScannerRuntime unpacks the runtime of an installed
-// scanners executable whose state is not_prepared. A ready or missing runtime is
-// left alone.
+// scanners executable whose state is not_prepared. A ready runtime is left
+// alone. A missing one can only come from a Setup payload, which this run
+// does not have, so it is reported.
 func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 	current := readWindowsScannerRuntime()
-	if current == nil || current.State != "not_prepared" {
+	if current.State == "ready" {
+		return
+	}
+	if current.State == "missing" {
+		result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(current.State))
+		result.Scanners = current
 		return
 	}
 	root, err := windowsScannerRuntimeDir()

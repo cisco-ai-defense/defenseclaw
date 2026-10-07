@@ -206,7 +206,7 @@ def test_hook_state_matches_what_the_hook_reads() -> None:
         assert field in body.group(1)
     for field in ("install_root = $root", "command_dir = $root", "data_root = "):
         assert field in body.group(1)
-    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text()
+    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text(encoding="utf-8")
     assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
     assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
 

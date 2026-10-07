@@ -211,11 +211,11 @@ func TestFallbackVerdict_SecureClientKeepsThresholdOnlyAnswer(t *testing.T) {
 	inspector := NewGuardrailInspector("local", nil, nil)
 	inspector.SetHILTConfig(true, "HIGH")
 	thresholds := policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium, CiscoTrustLevel: "none"}
-	if got := inspector.fallbackVerdict(context.Background(), none, critical, thresholds, "action"); got.Action != "allow" {
+	if got := inspector.fallbackVerdict(context.Background(), none, none, critical, thresholds, "action"); got.Action != "allow" {
 		t.Errorf("Cisco-only critical = %q, want the 1.0 answer allow", got.Action)
 	}
 	high := &ScanVerdict{Action: "alert", Severity: "HIGH"}
-	if got := inspector.fallbackVerdict(context.Background(), high, nil, thresholds, "action"); got.Action != "alert" {
+	if got := inspector.fallbackVerdict(context.Background(), high, high, nil, thresholds, "action"); got.Action != "alert" {
 		t.Errorf("HIGH with HILT on = %q, want the 1.0 answer alert", got.Action)
 	}
 }

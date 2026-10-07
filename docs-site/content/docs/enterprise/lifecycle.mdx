@@ -157,10 +157,10 @@ fleet.
 Every lifecycle refuses an older release unless you ask for the rollback
 (`downgrade_refused`).
 
-**Going back to a release that reads `config_version: 8` (1.0.x).** An
+**Going back to a release that reads `config_version: 8`.** An
 upgrade rewrites a `config_version: 8` administrator config as
-`config_version: 9` in place, and an older release refuses that file
-("config_version 9 is newer than this binary supports"). Give the older
+`config_version: 9` in place, and an older release refuses that file as
+written by a newer DefenseClaw. Give the older
 release a version 8 config explicitly: your own version 8 administrator
 config, or the copy the upgrade kept next to the installed file
 (`config.yaml.v8.bak`, root- or SYSTEM-only). The commands below pass it as
@@ -318,9 +318,9 @@ apply a config the same way. In order, on Linux and macOS:
 
 If any step fails, including the checks after the services start, the
 transaction rolls back, and the generation file and the migration files go
-back with it. On Windows the Setup transaction migrates a version 8 config,
-keeps the same two files and records the generation with the actor
-`lifecycle`, but its result reports no `policy` object in this release.
+back with it. On Windows the Setup transaction does the same: it migrates a
+version 8 config, keeps the same two files, records the generation with the
+actor `lifecycle` and reports `policy`.
 
 The result's `changes` list says what was written, for example
 `migrated /etc/defenseclaw/config.yaml to config_version 9 (N values moved, 0 conflicts; the v8 file is kept as /etc/defenseclaw/config.yaml.v8.bak, the --config a rollback to a config_version 8 release needs)`.

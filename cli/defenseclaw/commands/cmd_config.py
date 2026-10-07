@@ -726,7 +726,12 @@ def _v8_schema() -> dict:
 
 
 def _v8_sections() -> set[str]:
-    return set((_v8_schema().get("properties") or {}).keys())
+    """The top-level sections a config_version 9 config.yaml may have. The
+    schema also declares the sections version 9 removed (skill_actions,
+    privacy, ...), so a version 8 source still reads; they are not offered."""
+    schema = _v8_schema()
+    removed = ((schema.get("$defs") or {}).get("v9SourceConstraints") or {}).get("properties") or {}
+    return {key for key in schema.get("properties") or {} if removed.get(key) is not False}
 
 
 def _v8_defaults(app: AppContext) -> dict:

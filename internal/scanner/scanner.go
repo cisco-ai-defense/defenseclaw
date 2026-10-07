@@ -19,6 +19,7 @@ package scanner
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 )
 
 // Scanner defines the interface that all scanner implementations must satisfy.
@@ -31,11 +32,22 @@ type Scanner interface {
 	Scan(ctx context.Context, target string) (*ScanResult, error)
 }
 
+// keepFullFailureText is set by KeepFullFailureText.
+var keepFullFailureText atomic.Bool
+
+// KeepFullFailureText makes scanner errors carry the scanner's stderr
+// unchanged, as main did. The Secure Client profile keeps its scan errors
+// that way (issue #1092).
+func KeepFullFailureText(keep bool) { keepFullFailureText.Store(keep) }
+
 // scannerFailureText is a scanner subprocess's stderr as it is reported to the
 // caller: a Python traceback is cut to its exception line, so interpreter and
 // package paths and scanner source lines do not reach CLI or API output
 // (GAP-0229). ScanResult.ScanError keeps the full text for diagnostics.
 func scannerFailureText(stderr string) string {
+	if keepFullFailureText.Load() {
+		return stderr
+	}
 	text := strings.TrimSpace(stderr)
 	head, _, found := strings.Cut(text, "Traceback (most recent call last)")
 	if !found {
