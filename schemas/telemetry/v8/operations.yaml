@@ -4436,6 +4436,174 @@ attributes:
     overrides: {max_utf8_bytes: 16384, max_item_utf8_bytes: 1024, max_items: 64}
     notes: Relative to the project root and bounded to 64 entries; file names can disclose project content, so each destination's redaction profile governs them
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.binding.id
+  type: string
+  brief: DefenseClaw ingress binding the sandbox's hooks and egress proxy credential authenticate with
+  examples: [sb_3f9a7c21d04e5b6a8c9d0e1f2a3b4c5d]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Opaque DefenseClaw-assigned binding identifier (never the binding token); it joins a sandbox's hook verdicts, egress and findings. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.event
+  type: string
+  brief: Process event a sandbox process record reports
+  examples: [start]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [start, exit]}
+    notes: start is a process launch, exit its termination
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.source
+  type: string
+  brief: What observed a sandbox process
+  examples: [openshell]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [openshell, sampled]}
+    notes: openshell is the supervisor's OCSF PROC record; sampled is DefenseClaw's opt-in sampling of the sandbox's process table
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.pid
+  type: int64
+  brief: Process ID inside the sandbox of the process a record is about, or of the actor of a connection
+  examples: [42]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 4194304}
+    notes: The sandbox's own PID namespace; reported by the workload's supervisor. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.executable
+  type: string
+  brief: Executable path inside the sandbox of the process a record is about, or of the actor of a connection
+  examples: [/usr/bin/curl]
+  stability: stable
+  owner: defenseclaw
+  field_class: path
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: path-v1
+    overrides: {max_utf8_bytes: 1024}
+    notes: Untrusted display text the sandboxed process chooses (OpenShell reports what the process claims); never an attribution decision on its own and never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.command_line
+  type: string
+  brief: Command line of a process the sandbox launched
+  examples: [python3 /work/app/main.py]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 4096}
+    notes: Agent-controlled argument vector, so content class on purpose; each destination's redaction profile governs whether it leaves the host
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.exit_code
+  type: int64
+  brief: Exit code of a process the sandbox ran
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: -2147483648, max: 2147483647}
+    notes: Present on exit records only, when the supervisor reported it
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.ssh.activity
+  type: string
+  brief: OpenShell SSH activity of a sandbox SSH record
+  examples: [OPEN]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The OCSF SSH activity OpenShell reports (LISTEN, OPEN, CLOSE and the like), kept as reported
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.ssh.auth
+  type: string
+  brief: Authentication scheme of a sandbox SSH connection
+  examples: [NSSH1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The scheme name OpenShell reports; never a credential
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.inference.latency_ms
+  type: int64
+  brief: Latency of a model call OpenShell's inference route reported
+  examples: [812]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 86400000}
+    notes: Milliseconds, as OpenShell measured them
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.inference.status
+  type: string
+  brief: Status OpenShell reported for a model call of the sandbox
+  examples: [Success]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Kept as reported; Success maps to the completed outcome and anything else to failed
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.inference.operation
+  type: string
+  brief: API operation of a model call OpenShell's inference route reported
+  examples: ['messages:create']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: The provider API operation as OpenShell names it, not a gen_ai.operation.name value
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.ide.product
   type: string
   brief: IDE or editor product an extension or plugin is installed in
@@ -10304,6 +10472,8 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.sandbox.workdir.mode
     requirement_level: recommended
+  - ref: defenseclaw.sandbox.binding.id
+    requirement_level: recommended
   body_fields: []
 - id: body.policy.updated
   type: body_group
@@ -10433,6 +10603,157 @@ groups:
     mandatory_floor:
     - enforced_outcome
     - enforcement_state_change
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.process
+  type: body_group
+  brief: Sandbox process body for a process the sandbox started or that exited, as OpenShell's supervisor (or DefenseClaw's opt-in sampling) observed it.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.event
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.source
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.executable
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.command_line
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.exit_code
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+- id: body.sandbox.ssh
+  type: body_group
+  brief: Sandbox SSH body for OpenShell's record of an SSH listener or connection into the sandbox (a connect, exec or file transfer).
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.ssh.activity
+    requirement_level: required
+  - ref: defenseclaw.sandbox.ssh.auth
+    requirement_level: recommended
+  - ref: client.address
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+- id: body.sandbox.inference
+  type: body_group
+  brief: Sandbox inference body for a model call OpenShell's inference route reported, without any model content.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: gen_ai.request.model
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.inference.status
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.inference.latency_ms
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.inference.operation
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
+- id: log.sandbox.process
+  type: log
+  brief: Canonical sandbox.process log identity; one record per process start or exit observed in a sandbox, bounded per sandbox.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.process
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.process
+  x-defenseclaw:
+    bucket: tool.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.sandbox.ssh
+  type: log
+  brief: Canonical sandbox.ssh log identity; one record per OpenShell SSH listener or connection event of a sandbox.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.ssh
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.ssh
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - allowed
+    - blocked
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.sandbox.inference
+  type: log
+  brief: Canonical sandbox.inference log identity; one record per model call OpenShell's inference route reported for a sandbox.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.inference
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.inference
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor: []
     compatibility_profiles:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.transitions
@@ -12610,6 +12931,23 @@ producer_identity_sets:
   - event_name: egress.blocked
     bucket: network.egress
     family: log.egress.blocked
+  - event_name: egress.completed
+    bucket: network.egress
+    family: log.egress.completed
+  - event_name: egress.failed
+    bucket: network.egress
+    family: log.egress.failed
+- id: identity_set.sandbox_activity
+  identities:
+  - event_name: sandbox.process
+    bucket: tool.activity
+    family: log.sandbox.process
+  - event_name: sandbox.ssh
+    bucket: compliance.activity
+    family: log.sandbox.ssh
+  - event_name: sandbox.inference
+    bucket: model.io
+    family: log.sandbox.inference
 - id: identity_set.sandbox_approval
   identities:
   - event_name: approval.requested
@@ -15668,6 +16006,17 @@ producer_mappings:
     event_name: legacy.audit.restore
     bucket: enforcement.action
     compatibility_only: true
+- producer: audit_action
+  key: sandbox-activity
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_activity
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
 - producer: audit_action
   key: sandbox-approval
   source: internal/audit/actions.go

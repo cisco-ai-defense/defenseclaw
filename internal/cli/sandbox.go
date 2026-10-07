@@ -511,6 +511,23 @@ func newSandboxLogsCmd() *cobra.Command {
 	return cmd
 }
 
+func newSandboxDestinationsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "destinations <name>",
+		Short: "List the hosts a sandbox reached or tried to reach, its model APIs and any shadow AI",
+		Args:  nameArg("sandbox"),
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
+			out, err := parseOutput(cmd.Flag("output").Value.String())
+			if err != nil {
+				return err
+			}
+			return app.Destinations(ctx, args[0], out)
+		}),
+	}
+	outputFlag(cmd)
+	return cmd
+}
+
 func newSandboxActivityCmd() *cobra.Command {
 	var o sandboxcli.ActivityOptions
 	cmd := &cobra.Command{
@@ -909,7 +926,7 @@ func init() {
 	sandboxCmd.AddCommand(
 		newSandboxSetupCmd(), newSandboxDoctorCmd(), newSandboxRunCmd(), newSandboxListCmd(), newSandboxStatusCmd(),
 		newSandboxConnectCmd(), newSandboxExecCmd(), newSandboxStopCmd(), newSandboxStartCmd(), newSandboxDeleteCmd(),
-		newSandboxLogsCmd(), newSandboxActivityCmd(), newSandboxUndoCmd(), newSandboxReviewCmd(),
+		newSandboxLogsCmd(), newSandboxActivityCmd(), newSandboxDestinationsCmd(), newSandboxUndoCmd(), newSandboxReviewCmd(),
 		newSandboxApprovalsCmd(), newSandboxDecideCmd(true), newSandboxDecideCmd(false), newSandboxUnblockCmd(),
 		newSandboxPullCmd(), newSandboxPolicyCmd(), newSandboxPackCmd(), newSandboxImageCmd(),
 		newSandboxWrapperCmd(true), newSandboxWrapperCmd(false), newSandboxTeardownCmd(),

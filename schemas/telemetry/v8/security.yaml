@@ -1801,6 +1801,51 @@ attributes:
     id: identity-v1
     notes: Source Blocked Boolean or exact decision=block derivation; false is meaningful
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.network.bytes_up
+  type: int64
+  brief: Payload bytes an ended outbound connection or request sent to its destination
+  examples:
+  - 18432
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Counted by the proxy that relayed it; present on completed records only
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.network.bytes_down
+  type: int64
+  brief: Payload bytes an ended outbound connection or request received from its destination
+  examples:
+  - 524288
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Counted by the proxy that relayed it; present on completed records only
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.network.duration_ms
+  type: int64
+  brief: How long an ended or failed outbound connection or request took
+  examples:
+  - 2150
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Milliseconds from the proxy accepting the request to the connection closing (completed) or the failure (failed)
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.guardrail.profile.name
   type: string
   brief: Identity-based guardrail profile that supplied the decision configuration
@@ -2439,6 +2484,16 @@ groups:
   body_fields:
   - ref: defenseclaw.network.target_ref
     requirement_level: required
+  - ref: defenseclaw.network.bytes_up
+    requirement_level: recommended
+  - ref: defenseclaw.network.bytes_down
+    requirement_level: recommended
+  - ref: defenseclaw.network.duration_ms
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.executable
+    requirement_level: recommended
 - id: event.tool.flagged
   type: span_event
   brief: Bounded tool.flagged milestone; full durable record remains authoritative.
@@ -3935,6 +3990,8 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.metric.source
     requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
   body_fields: []
   metric:
     instrument_name: defenseclaw.egress.events
@@ -3952,6 +4009,8 @@ groups:
         label: decision
       - ref: defenseclaw.metric.source
         label: source
+      - ref: defenseclaw.connector.source
+        label: connector
   x-defenseclaw:
     bucket: network.egress
     family_schema_version: 1

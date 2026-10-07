@@ -393,6 +393,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("destinations",),
+        "List the hosts a sandbox reached or tried to reach, its model APIs and any shadow AI",
+        args=(_Arg("name"),),
+        flags=(_OUTPUT, _JSON),
+    ),
+    _Cmd(
         ("undo",),
         "Restore the project folder to its pre-session snapshot",
         args=(_Arg("name"),),

@@ -830,7 +830,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, `started_at` (when the sandbox runtime started: nothing keeps the sandboxes' hook and egress counters across a restart, so they count from then), and `daemon_uid` (the uid the daemon runs as; absent on Windows). |
+| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, `started_at` (when the sandbox runtime started: nothing keeps the sandboxes' hook and egress counters across a restart, so they count from then), `daemon_uid` (the uid the daemon runs as; absent on Windows), and `telemetry_failures` and `telemetry_error` (the sandbox telemetry records the recorder refused since then, and the last refusal). |
 | `GET` | `/api/v1/sandbox/sandboxes` | — | `{"sandboxes": [Sandbox]}` |
 | `POST` | `/api/v1/sandbox/sandboxes` | `CreateRequest` | `Sandbox` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}` | — | `Sandbox` |
@@ -841,6 +841,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, the `unmasked_secrets` (project files that look like secrets and that the sandbox does not mask, so its next start refuses), and the `diff` when asked |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/accept` | Optional `{"snapshot_created_at": time, "session": int}`; `409 conflict` when the sandbox is running, its undo point was undone, it is another one than `snapshot_created_at` names, or the sandbox was started again since the `session` named; `400 invalid_request` for a copy-mode sandbox; `404 not_found` without an undo point | `Sandbox`, whose `snapshot` carries `accepted_at` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}/logs` | Query `lines` (optional, 0 or absent for all of it); `404 not_found` when no log was kept | `RunLog`: `name`, `state` (`exited` or `interrupted`), `exit`, `started_at`, `kept_at`, `log` |
+| `GET` | `/api/v1/sandbox/sandboxes/{name}/destinations` | — | `Destinations`: `name`, `harness`, `destinations` (one row per host: `host`, `ports`, `kind` (`model_provider`, `harness_vendor`, `other_ai_api` and `unknown_ai` for shadow AI, else the egress category it was allowed under, `blocked` or `other`), `provider`, `vendor`, `category`, `rule`, `sources`, the `connections`, `tunnels`, `refused`, `blocked` and `model_turns` counts, `bytes_up`, `bytes_down`, the `binaries` and `pid` OpenShell named, the process `lineage` when the process tree is on, `first_seen`, `last_seen`), `models` (the `provider`, `model`, `calls` and `failed` calls OpenShell's inference route reported) and `dropped` (rows dropped over 512) |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
 | `GET` | `/api/v1/sandbox/approvals` | Query `sandbox` (optional) | `{"approvals": [Approval]}` |
 | `POST` | `/api/v1/sandbox/approvals/{id}` | `ApprovalDecision` | `ApprovalResult`: the `approval`, whether it was `persisted`, a `message` |
@@ -882,7 +883,8 @@ plain reason, tamper counts, the verdicts per hook event under the
 harness's own event names in `events`, at most 48 names with the rest in
 `other_events`, and whether hooks are `silent` or `unreachable`),
 `endpoints` (the last result of each credentialed endpoint),
-`egress` totals, `pending_approvals`, the
+`egress` totals (with `model_apis` and `shadow_ai`, the AI destinations of
+its destinations view), `pending_approvals`, the
 `workspace` and `mcp` banner views, `snapshot`, `session` (a count that goes
 up each time the daemon sees the sandbox become ready), `violations` (settings the
 policy clamped), `warnings`, `orphaned`, and `nested_repos` (repositories the
@@ -1008,7 +1010,7 @@ Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
 | `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |
 | `hook.blocked` | DefenseClaw blocked a hook event other than a tool call, such as a submitted prompt (`event` names it). The sandbox's `hooks.prompt_blocked` counts blocked prompts. |
 | `sandbox.lifecycle` | A sandbox changed phase. |
-| `finding` | A finding. Its `reason` is, for example, `hook_tamper` (a tool ran without a DefenseClaw verdict), `hook_silence`, `hooks_unreachable` (hooks do not reach DefenseClaw, so every tool call is blocked), `hooks_restored`, or `nested_repo`. |
+| `finding` | A finding. Its `reason` is, for example, `hook_tamper` (a tool ran without a DefenseClaw verdict), `hook_silence`, `hooks_unreachable` (hooks do not reach DefenseClaw, so every tool call is blocked), `hooks_restored`, `nested_repo`, or `shadow_ai` (an AI API that is neither the sandbox's model provider nor its harness's vendor; `host` names it). |
 | `workspace` | An undo, or a copy-mode upload or pull. |
 | `dropped` | A slow subscriber missed events. |
 

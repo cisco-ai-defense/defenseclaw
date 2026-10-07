@@ -178,6 +178,10 @@ type Provider struct {
 	// MatchedDomain is the catalog domain that matched, which is what makes
 	// the classification auditable.
 	MatchedDomain string
+	// SupportedConnector is the DefenseClaw connector the signature is of
+	// (its supported_connector), "" for every other provider: a host of the
+	// harness's own vendor is no shadow AI in that harness's sandbox.
+	SupportedConnector string
 }
 
 // Weight prices reaching this provider.
@@ -229,11 +233,12 @@ func FromSignatures(signatures []inventory.AISignature) *Catalog {
 				continue
 			}
 			provider := Provider{
-				ID:            signature.ID,
-				DisplayName:   signature.Name,
-				Vendor:        signature.Vendor,
-				Category:      classify(signature.Vendor, domain),
-				MatchedDomain: domain,
+				ID:                 signature.ID,
+				DisplayName:        signature.Name,
+				Vendor:             signature.Vendor,
+				Category:           classify(signature.Vendor, domain),
+				MatchedDomain:      domain,
+				SupportedConnector: signature.SupportedConnector,
 			}
 			// First writer wins so a later signature cannot silently reclassify
 			// a domain an earlier one already owns.
@@ -310,8 +315,23 @@ func InferenceShaped(hostname string) bool {
 		if strings.HasPrefix(domain, prefix) {
 			// A bare "api." prefix is weak on its own; require the label to
 			// also suggest a model service rather than any REST API.
-			if strings.Contains(domain, "ai") || strings.Contains(domain, "model") ||
+			if aiWord(domain) || strings.Contains(domain, "model") ||
 				strings.Contains(domain, "chat") || strings.Contains(domain, "llm") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// aiWord reports a domain that has "ai" as a word: a label or a part of one
+// between hyphens that is "ai" or ends in it (x.ai, someai, my-ai-gateway),
+// not the letters inside another word (api.mailgun.net, api.airtable.com,
+// api.domain.com), which every other REST API would match.
+func aiWord(domain string) bool {
+	for _, label := range strings.Split(domain, ".") {
+		for _, part := range strings.Split(label, "-") {
+			if strings.HasSuffix(part, "ai") {
 				return true
 			}
 		}

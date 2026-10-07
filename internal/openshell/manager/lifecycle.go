@@ -123,6 +123,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	}
 	st.LastReconcile = m.lastReconcile
 	st.StartedAt = m.startedAt.UTC()
+	st.TelemetryFailures, st.TelemetryError = m.tel.failureStatus()
 	return st, nil
 }
 
@@ -839,6 +840,8 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	}
 	warn(m.removeRunConfig(rec.Name))
 	warn(m.removeRunLog(rec.Name))
+	// A sandbox kept for its snapshot reaches nothing any more.
+	warn(m.dropDestinations(rec.Name, rec.BindingID))
 	if !retained {
 		warn(m.removeRecord(b))
 		m.removeSandboxDir(rec.Name)
@@ -953,10 +956,18 @@ func (m *Manager) retire(b *box) {
 func (m *Manager) forget(b *box) {
 	m.mu.Lock()
 	b.deleted = true
-	if m.boxes[b.rec.Name] == b {
-		delete(m.boxes, b.rec.Name)
+	name, gone := b.rec.Name, m.boxes[b.rec.Name] == b
+	if gone {
+		delete(m.boxes, name)
 	}
 	m.mu.Unlock()
+	if gone {
+		m.tel.forgetSandbox(name)
+		// A sandbox created under the name later starts with no destinations.
+		m.destMu.Lock()
+		delete(m.dests, name)
+		m.destMu.Unlock()
+	}
 	m.refreshEgress()
 }
 

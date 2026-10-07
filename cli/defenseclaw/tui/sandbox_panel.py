@@ -715,9 +715,21 @@ class SandboxPanelMixin:
             return ("a", "x"), "Keys: a approve once · x reject · Esc close"
         return keys, keys_hint
 
+    async def _fetch_sandbox_destinations(self, name: str) -> Any:
+        """The sandbox's destinations for its detail, or why they are unavailable.
+
+        One call as the detail opens, never on the 2 s render path.
+        """
+        try:
+            return await self._sandbox_call("sandbox_destinations", name)
+        except SandboxAPIError as exc:
+            return f"unavailable: {exc.plain()}"
+
     async def _open_sandbox_detail(self) -> None:
         model = self.sandbox_model
-        title, pairs = model.detail_pairs()
+        selected = model.selected_sandbox() if model.view == "sandboxes" else None
+        destinations = await self._fetch_sandbox_destinations(selected.name) if selected is not None else None
+        title, pairs = model.detail_pairs(destinations)
         keys, keys_hint = self._sandbox_detail_keys()
         key: str | None = None
         try:

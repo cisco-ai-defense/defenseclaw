@@ -110,6 +110,12 @@ func (f *fakeSandboxController) RunLog(_ context.Context, name string, lines int
 		func() { f.lines = lines })
 }
 
+func (f *fakeSandboxController) Destinations(_ context.Context, name string) (*sandboxapi.Destinations, error) {
+	return answer(f, "destinations "+name, &sandboxapi.Destinations{Name: name, Destinations: []sandboxapi.DestinationRow{
+		{Host: "api.example.com", Kind: sandboxapi.DestinationOtherAI, Sources: []string{sandboxapi.SourceProxy}},
+	}})
+}
+
 func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, r sandboxapi.WorkspaceReport) error {
 	_, err := answer(f, "workspace "+name+" "+r.Operation, struct{}{})
 	return err
@@ -417,6 +423,9 @@ func TestSandboxAPIClientRoundTrip(t *testing.T) {
 	}
 	if log, err := c.RunLog(ctx, "box", 0); err != nil || log.State != sandboxapi.RunInterrupted || log.Log != "partial\n" || ctl.lines != 0 {
 		t.Fatalf("run log = %+v, %v (lines %d)", log, err, ctl.lines)
+	}
+	if d, err := c.Destinations(ctx, "box"); err != nil || d.Name != "box" || len(d.Destinations) != 1 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI {
+		t.Fatalf("destinations = %+v, %v", d, err)
 	}
 	if list, err := c.Approvals(ctx, ""); err != nil || list == nil {
 		t.Fatalf("approvals = %v, %v", list, err)

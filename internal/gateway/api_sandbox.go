@@ -49,6 +49,9 @@ type SandboxController interface {
 	// RunLog returns the log of the latest detached run the daemon kept
 	// when it stopped the sandbox (its last lines lines; 0: all of it).
 	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
+	// Destinations returns what the sandbox reached or tried to reach, by
+	// host and kind (model provider, shadow AI, ...).
+	Destinations(ctx context.Context, name string) (*sandboxapi.Destinations, error)
 	// ReportWorkspace records a copy-mode workspace step the CLI ran.
 	ReportWorkspace(ctx context.Context, name string, report sandboxapi.WorkspaceReport) error
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
@@ -120,6 +123,9 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 			return nil, err
 		}
 		return c.RunLog(ctx, r.PathValue("name"), lines)
+	}))
+	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/destinations", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		return c.Destinations(ctx, r.PathValue("name"))
 	}))
 	mux.HandleFunc("DELETE "+sandboxapi.PathSandboxes+"/{name}", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		var req sandboxapi.DeleteRequest

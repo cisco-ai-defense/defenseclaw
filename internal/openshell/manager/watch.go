@@ -185,7 +185,7 @@ func (m *Manager) handleEvent(ctx context.Context, b *box, ev stream.Event) {
 		m.mu.Lock()
 		id := b.identity()
 		m.mu.Unlock()
-		_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+		m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), ErrorSummary: "sandbox events were lost: " + ev.Gap.Reason, Timestamp: m.now()})
 	case stream.KindWarning:
 		m.streamWarning(ctx, b, ev.Warning)
@@ -212,7 +212,7 @@ func (m *Manager) streamWarning(ctx context.Context, b *box, w *stream.Warning) 
 		return
 	}
 	m.logf("%s: sandbox %s: OpenShell warned on its event stream: %s", gatewaylog.ErrCodeOpenShellWatchFailed, id.Name, msg)
-	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 		ErrorCode:    errorToken(gatewaylog.ErrCodeOpenShellWatchFailed),
 		ErrorSummary: truncate("OpenShell warned on the sandbox's event stream (its events may be incomplete): "+msg, 512), Timestamp: m.now()})
 }
@@ -312,7 +312,11 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
 			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),
-			Timestamp: at, UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
+			Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+		}
+		if !quiet {
+			m.observeDestination(ctx, b, destinationSighting{host: host, port: r.Port, at: at, denied: r.Denied(), rule: r.Policy,
+				binary: r.Binary, pid: ocsfPID(r), turn: r.Allowed() && r.Class == ocsf.ClassHTTP && modelRequestOf(r) == modelTurn})
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
@@ -333,7 +337,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if r.Class == ocsf.ClassHTTP {
 			ev.Scheme = schemeOf(r.URL)
 		}
-		_ = m.tel.RecordSandboxEgress(ctx, ev)
+		m.tel.RecordSandboxEgress(ctx, ev)
 		if r.Denied() && !quiet {
 			m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
 				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
@@ -343,6 +347,11 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if harnessActivity(harnessName, r.Binary) {
 			m.markActive(b, at)
 		}
+		m.processEvent(ctx, id, r, at)
+	case ocsf.ClassSSH:
+		m.sshEvent(ctx, id, r, at)
+	case ocsf.ClassAPI:
+		m.inferenceEvent(ctx, b, id, r, at)
 	case ocsf.ClassFinding:
 		severity := ocsfSeverity(r.Severity)
 		ev := audit.SandboxFindingEvent{
@@ -353,7 +362,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if c, err := parseConfidence(r.Confidence); err == nil {
 			ev.Confidence = c
 		}
-		_ = m.tel.RecordSandboxFinding(ctx, ev)
+		m.tel.RecordSandboxFinding(ctx, ev)
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
 			Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
 	}
@@ -541,8 +550,11 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 			req = m.harnessRequest(b, r, openshellHostAlias, ofHarness)
 		}
 		m.markWork(b, at, ofHarness, req)
-		if r.Denied() {
+		switch {
+		case r.Denied():
 			m.hostPortDenied(ctx, b, r, at)
+		case r.Allowed():
+			m.hostPortAllowed(ctx, b, r, at)
 		}
 	}
 }

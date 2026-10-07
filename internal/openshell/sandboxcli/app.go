@@ -67,6 +67,7 @@ type API interface {
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
 	Accept(ctx context.Context, name string, req sandboxapi.AcceptRequest) (*sandboxapi.Sandbox, error)
 	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
+	Destinations(ctx context.Context, name string) (*sandboxapi.Destinations, error)
 	ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	Decide(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)

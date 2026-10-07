@@ -311,7 +311,7 @@ func (s recordStore) has(name string) bool {
 
 // OrphanedSandboxData lists the sandboxes that have data under
 // <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
-// files, a kept run log) or a pre-session snapshot under
+// files, a kept run log, kept destinations) or a pre-session snapshot under
 // <data_dir>/snapshots/<name> (with its refs in the project) but no daemon
 // record: an interrupted create or delete, or an older build, left it.
 // RemoveOrphanedSandboxData removes it.
@@ -374,10 +374,19 @@ func RemoveOrphanedSandboxData(dataDir, name string) error {
 	dir := filepath.Join(dataDir, "sandboxes", name)
 	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
 	keep(os.RemoveAll(filepath.Join(dir, runLogDirName)))
+	keep(removeIfExists(filepath.Join(dir, destinationsFile)))
 	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("%s holds files DefenseClaw did not write there; it is left in place", dir))
 	}
 	return errors.Join(errs...)
+}
+
+// removeIfExists removes a file, which may be gone already.
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // RecordedSandbox is a sandbox the daemon keeps a record of under a data
@@ -453,6 +462,7 @@ func RemoveSandboxState(ctx context.Context, dataDir, name string) error {
 	dir := filepath.Join(dataDir, "sandboxes", name)
 	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
 	keep(os.RemoveAll(filepath.Join(dir, runLogDirName)))
+	keep(removeIfExists(filepath.Join(dir, destinationsFile)))
 	if rec.BindingID != "" {
 		keep(revokeStoredBinding(dataDir, rec.BindingID))
 	}

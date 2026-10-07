@@ -342,6 +342,7 @@ type memTelemetry struct {
 	health    []audit.SandboxHealthEvent
 	findings  []audit.SandboxFindingEvent
 	workspace []audit.SandboxWorkspaceEvent
+	activity  []audit.SandboxActivityEvent
 }
 
 func newMemTelemetry() *memTelemetry {
@@ -389,6 +390,10 @@ func (t *memTelemetry) RecordSandboxFinding(ctx context.Context, e audit.Sandbox
 
 func (t *memTelemetry) RecordSandboxWorkspace(ctx context.Context, e audit.SandboxWorkspaceEvent) error {
 	return keep(t, "workspace", &t.workspace, e, func() error { return t.check.RecordSandboxWorkspace(ctx, e) })
+}
+
+func (t *memTelemetry) RecordSandboxActivity(ctx context.Context, e audit.SandboxActivityEvent) error {
+	return keep(t, "activity", &t.activity, e, func() error { return t.check.RecordSandboxActivity(ctx, e) })
 }
 
 func (t *memTelemetry) phases(name string) []audit.SandboxPhase {

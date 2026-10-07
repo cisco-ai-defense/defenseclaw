@@ -121,6 +121,8 @@ func TestInferenceShapedRecognisesUncatalogedEndpoints(t *testing.T) {
 	for _, hostname := range []string{
 		"llm-gateway.internal.corp",
 		"api.someai.example",
+		"api.my-ai-gateway.example",
+		"api.example.ai",
 		"inference.acme.test",
 		"my-openai-proxy.example.net",
 		"models.chat.example",
@@ -131,6 +133,8 @@ func TestInferenceShapedRecognisesUncatalogedEndpoints(t *testing.T) {
 	}
 	for _, hostname := range []string{
 		"api.github.com", "www.example.com", "cdn.jsdelivr.net", "", "   ",
+		// "ai" inside another word is no sign of a model service.
+		"api.mailgun.net", "api.airtable.com", "api.domain.com", "api.braintreegateway.com",
 	} {
 		if InferenceShaped(hostname) {
 			t.Errorf("InferenceShaped(%q) = true, want false", hostname)
@@ -163,5 +167,21 @@ func TestFirstWriterWinsForADomain(t *testing.T) {
 	provider, _ := catalog.Lookup("shared.example")
 	if provider.ID != "first" || provider.Category != CategoryFrontier {
 		t.Fatalf("Lookup = %+v, want the first writer's frontier classification", provider)
+	}
+}
+
+// TestProviderNamesItsConnector pins that a connector's own signature says
+// which connector it is, which tells a sandbox harness's vendor from shadow
+// AI, and that the bundled catalog maps the harnesses' model APIs so.
+func TestProviderNamesItsConnector(t *testing.T) {
+	t.Parallel()
+	shared, err := Shared()
+	if err != nil {
+		t.Fatalf("Shared(): %v", err)
+	}
+	for host, connector := range map[string]string{"api.anthropic.com": "claudecode", "api.openai.com": "codex", "openrouter.ai": ""} {
+		if provider, ok := shared.Lookup(host); !ok || provider.SupportedConnector != connector {
+			t.Errorf("Lookup(%q) = %+v, %v; want supported connector %q", host, provider, ok, connector)
+		}
 	}
 }

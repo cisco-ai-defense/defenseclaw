@@ -35,6 +35,13 @@ func (m *Manager) loadRecords() error {
 	for _, err := range errs {
 		m.logf("%v", err)
 	}
+	m.destMu.Lock()
+	for _, r := range recs {
+		if t := m.loadDestinations(r.Name); t != nil && !r.Retained {
+			m.dests[r.Name] = t
+		}
+	}
+	m.destMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, r := range recs {

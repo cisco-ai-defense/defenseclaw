@@ -70,6 +70,7 @@
             "sandbox-policy",
             "sandbox-health",
             "sandbox-finding",
+            "sandbox-activity",
             "sidecar-start",
             "sidecar-stop",
             "sidecar-connected",

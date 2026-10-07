@@ -1184,6 +1184,11 @@ class OrchestratorClient:
         result = self._sandbox_call("GET", self._sandbox_path(name, "logs"), params=params)
         return self._sandbox_object(result, "run log")
 
+    def sandbox_destinations(self, name: str) -> dict[str, Any]:
+        """The hosts the sandbox reached or tried to reach, by kind (model provider, shadow AI, ...)."""
+        result = self._sandbox_call("GET", self._sandbox_path(name, "destinations"))
+        return self._sandbox_object(result, "destinations")
+
     def sandbox_approvals(self, sandbox: str = "") -> list[dict[str, Any]]:
         """Pending asks, optionally for one sandbox."""
         params = {"sandbox": sandbox} if sandbox else None

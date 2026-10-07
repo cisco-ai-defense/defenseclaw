@@ -176,12 +176,10 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	}
 	m.logf("%s: sandbox %s: its policy cannot be resolved; its egress is blocked until it can: %s",
 		gatewaylog.ErrCodeOpenShellPackInvalid, name, detail)
-	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid),
 		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+detail, 512), Timestamp: m.now(),
-	}); err != nil {
-		m.logf("health telemetry for %s: %v", name, err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceProxy,
 		Reason: policyUnresolvedReason, Message: truncate("✗ all web egress: the sandbox policy cannot be resolved ("+detail+
 			"); fix the pack or the configuration, or delete the sandbox", 512)})
@@ -203,11 +201,9 @@ func (m *Manager) policyRestored(b *box, eff *packs.Effective) {
 	}
 	m.syncCredential(b, eff)
 	m.logf("sandbox %s: its policy resolves again; its egress follows it", name)
-	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthRestored, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("health telemetry for %s: %v", name, err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "policy_restored",
 		Message: "the sandbox policy resolves again; its egress follows it"})
 }

@@ -86,11 +86,10 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 	explained := b.closedPorts[port]
 	m.mu.Unlock()
 	replayed := at.Before(m.startedAt)
-	_ = m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
 		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: port,
 		Blocked: true, DecisionCode: "SANDBOX_EGRESS_OPENSHELL_DENIED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
-		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at,
-		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
+		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
 	})
 	refusal := errors.New("the sandbox policy is not resolved")
 	if eff != nil {
@@ -117,6 +116,24 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name,
 		Host: openshellHostAlias, Port: port, Source: sandboxapi.SourceOpenShell, Reason: sandboxapi.ReasonHostPortClosed,
 		Message: hostPortClosedMessage(port, declared, refusal), Replayed: replayed})
+}
+
+// hostPortAllowed records OpenShell's allowed connection to a host port
+// other than DefenseClaw's own listeners: a --host-port service the user
+// approved, or a local model endpoint the sandbox policy opens. It is an
+// allowed egress record (server.address host.openshell.internal) and a row
+// of the sandbox's destinations.
+func (m *Manager) hostPortAllowed(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
+	m.mu.Lock()
+	id := b.identity()
+	m.mu.Unlock()
+	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: r.Port,
+		DecisionCode: "SANDBOX_EGRESS_ALLOWED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
+		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+	})
+	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: r.Port, at: at, rule: r.Policy,
+		binary: r.Binary, pid: ocsfPID(r)})
 }
 
 // hostPortClosedMessage is the feed line of a denied connection to host
@@ -285,9 +302,7 @@ func (m *Manager) hostPortApplied(ctx context.Context, a *approval, res *openshe
 	if res != nil {
 		ev.PolicyHash = res.PolicyHash
 	}
-	if perr := m.tel.RecordSandboxPolicy(ctx, ev); perr != nil {
-		m.logf("policy telemetry for approval %s: %v", a.id, perr)
-	}
+	m.tel.RecordSandboxPolicy(ctx, ev)
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 		Host: openshellHostAlias, Port: port, Reason: a.actor,
 		Message: fmt.Sprintf("approved port %d on your machine (%s:%d)", port, openshellHostAlias, port)})
