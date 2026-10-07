@@ -425,9 +425,9 @@ def cmd_check(graph: Graph, args: argparse.Namespace) -> int:
 
 
 def cmd_devices(graph: Graph, args: argparse.Namespace) -> int:
-    select = (
-        "id,azureADDeviceId,deviceName,operatingSystem,osVersion,complianceState,managementState,lastSyncDateTime,userPrincipalName"
-    )
+    select = "id,azureADDeviceId,deviceName,operatingSystem,osVersion,complianceState,managementState,lastSyncDateTime"
+    if args.show_users:
+        select += ",userPrincipalName"
     devices = graph.get_all(f"{BETA}/deviceManagement/managedDevices?$select={select}")
     if args.group:
         group = group_by_name(graph, args.group)
@@ -454,7 +454,10 @@ def cmd_devices(graph: Graph, args: argparse.Namespace) -> int:
         for d in devices
     ]
     if args.json:
-        print(json.dumps(devices, indent=2))
+        output = devices if args.show_users else [
+            {key: value for key, value in device.items() if key != "userPrincipalName"} for device in devices
+        ]
+        print(json.dumps(output, indent=2))
     else:
         headers = [
             "device",

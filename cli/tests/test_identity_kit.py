@@ -140,6 +140,22 @@ def test_intune_check_counts_every_managed_device_page() -> None:
     assert count == "windows/compliant: 2"
 
 
+def test_intune_devices_json_hides_users_by_default(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    paths = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            paths.append(path)
+            return [{"id": "device-1", "deviceName": "workstation", "userPrincipalName": "user@example.test"}]
+
+    args = intune.build_parser().parse_args(["devices", "--json"])
+    assert intune.cmd_devices(Graph(), args) == 0
+    import json
+    assert "userPrincipalName" not in paths[0]
+    assert "userPrincipalName" not in json.loads(capsys.readouterr().out)[0]
+
+
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
     entra = _load(ENTRA)
     # Data1 = 1; Data2 and Data3 share one little-endian word; Data4 is two more.
