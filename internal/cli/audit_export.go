@@ -98,10 +98,10 @@ func openManagedAuditStoreReadOnly(path string) (*audit.Store, error) {
 	return store, nil
 }
 
-var auditExportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Export audit_events as JSONL (v7 schema)",
-	Long: `Write one JSON object per line. Each audit row is validated against
+// auditExportLongIntro is the help text main and this build share; --db
+// and its paragraph are new, so a Secure Client computer drops the flag and
+// keeps the help of main (issue #1092, GAP-0270).
+const auditExportLongIntro = `Write one JSON object per line. Each audit row is validated against
 schemas/audit-event.json before it is written. Configuration changes and
 operator actions are audit rows too (action config-update and others).
 --include-activity appends the rows of the activity_events table, which
@@ -120,15 +120,23 @@ On a Windows host with a standalone managed deployment, run it from an
 elevated Administrator prompt (or as LocalSystem): it then reads the managed
 deployment's configuration and audit log.
 
---db reads another audit database instead of the configured one, with no
+`
+
+const auditExportExamples = `Examples:
+  defenseclaw-gateway audit export --since 30m
+  defenseclaw-gateway audit export --connector claudecode --limit 50 --newest`
+
+var auditExportCmd = &cobra.Command{
+	Use:   "export",
+	Short: "Export audit_events as JSONL (v7 schema)",
+	Long: auditExportLongIntro + `--db reads another audit database instead of the configured one, with no
 configuration needed. After defenseclaw rollback, the install you left keeps
 its audit log in ~/.defenseclaw/previous/data/audit.db (previous\data\audit.db
 on Windows), and this reads it; each install shows only its own window.
 
-Examples:
-  defenseclaw-gateway audit export --since 30m
-  defenseclaw-gateway audit export --connector claudecode --limit 50 --newest
+` + auditExportExamples + `
   defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`,
+	Annotations: map[string]string{secureClientLongAnnotation: auditExportLongIntro + auditExportExamples},
 	// Export only reads audit.db. It loads the configuration without opening
 	// the audit store: the store opens read-write and, on a managed host,
 	// only as the gateway service, so an administrator could never export.
@@ -193,6 +201,7 @@ func init() {
 	auditExportCmd.Flags().BoolVar(&auditExportForce, "force", false, "Overwrite the --output file if it already exists")
 	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
 	auditExportCmd.Flags().StringVar(&auditExportDB, "db", "", "Read this audit database instead of the configured one, for example the install a rollback left in ~/.defenseclaw/previous/data/audit.db")
+	_ = auditExportCmd.Flags().SetAnnotation("db", secureClientAbsentAnnotation, []string{"true"})
 
 	auditCmd.AddCommand(auditExportCmd)
 	rootCmd.AddCommand(auditCmd)

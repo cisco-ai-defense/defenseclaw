@@ -34,10 +34,13 @@ import (
 
 // config is the operator-facing config group of the gateway binary. Like
 // config-v8 it runs without the root pre-run, which would load the very
-// file being migrated.
+// file being migrated. Main has no config group, so a Secure Client
+// computer leaves it out of its help; it stays runnable there and answers
+// that the config stays on config_version 8 (issue #1092, GAP-0270).
 var configCmd = &cobra.Command{
-	Use:   "config",
-	Short: "Migrate config.yaml",
+	Use:         "config",
+	Short:       "Migrate config.yaml",
+	Annotations: map[string]string{secureClientHiddenAnnotation: "true"},
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},

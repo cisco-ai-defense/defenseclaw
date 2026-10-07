@@ -74,13 +74,17 @@ var enterpriseIdentityViews = []enterpriseIdentityView{
 // enterpriseIdentityViewAnnotation marks the identity view commands.
 const enterpriseIdentityViewAnnotation = "defenseclaw.identity-view"
 
-// secureClientAbsentAnnotation marks a command main does not have, which a
-// Secure Client computer drops; secureClientShortAnnotation holds the help
-// line and secureClientLongAnnotation the help text of main for a command
-// whose help changed, and the flag annotation secureClientUsageAnnotation
-// the usage line of main for a flag (issue #1092).
+// secureClientAbsentAnnotation marks a command or flag main does not have,
+// which a Secure Client computer drops; secureClientHiddenAnnotation a
+// command main does not have that a Secure Client computer keeps runnable
+// but leaves out of its help (config migrate answers that its config stays
+// on config_version 8); secureClientShortAnnotation holds the help line and
+// secureClientLongAnnotation the help text of main for a command whose help
+// changed, and the flag annotation secureClientUsageAnnotation the usage
+// line of main for a flag (issue #1092).
 const (
 	secureClientAbsentAnnotation = "defenseclaw.secure-client-absent"
+	secureClientHiddenAnnotation = "defenseclaw.secure-client-hidden"
 	secureClientShortAnnotation  = "defenseclaw.secure-client-short"
 	secureClientLongAnnotation   = "defenseclaw.secure-client-long"
 	secureClientUsageAnnotation  = "defenseclaw.secure-client-usage"
@@ -89,11 +93,13 @@ const (
 // keepCommandTreeOfMainOnSecureClient gives a Secure Client computer the
 // command tree of main (issue #1092): it removes the identity views of the
 // `enterprise <platform>` groups, whose routes its gateway does not serve,
-// and every command marked secureClientAbsentAnnotation (policy digest, scan
-// skill|mcp|plugin, enterprise acp setup), and puts back the help of main
-// where a command carries secureClientShortAnnotation (policy show, policy
-// validate) or secureClientLongAnnotation (enterprise acp), or a flag
-// carries secureClientUsageAnnotation (enterprise windows discovery --user).
+// and every command or flag marked secureClientAbsentAnnotation (policy
+// digest, scan skill|mcp|plugin, enterprise acp setup, audit export --db),
+// hides the commands marked secureClientHiddenAnnotation (config), and puts
+// back the help of main where a command carries secureClientShortAnnotation
+// (policy show, policy validate) or secureClientLongAnnotation (enterprise
+// acp, audit export, rulepack), or a flag carries secureClientUsageAnnotation
+// (enterprise windows discovery --user, sandbox setup --no-mounts).
 func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 	if !secureClientHost() {
 		return
@@ -111,6 +117,10 @@ func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 			if long := cmd.Annotations[secureClientLongAnnotation]; long != "" {
 				cmd.Long = long
 			}
+			if cmd.Annotations[secureClientHiddenAnnotation] != "" {
+				cmd.Hidden = true
+			}
+			dropSecureClientAbsentFlags(cmd)
 			cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 				if usage := flag.Annotations[secureClientUsageAnnotation]; len(usage) == 1 {
 					flag.Usage = usage[0]
@@ -120,6 +130,35 @@ func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 		}
 	}
 	keep(root)
+}
+
+// dropSecureClientAbsentFlags removes the flags of cmd that main does not
+// have, so a Secure Client computer refuses them as unknown flags, as main
+// does. pflag cannot delete a flag, so the command gets new flag sets with
+// every other flag (and its value binding) kept.
+func dropSecureClientAbsentFlags(cmd *cobra.Command) {
+	absent := func(flag *pflag.Flag) bool { return len(flag.Annotations[secureClientAbsentAnnotation]) > 0 }
+	found := false
+	for _, set := range []*pflag.FlagSet{cmd.Flags(), cmd.PersistentFlags()} {
+		set.VisitAll(func(flag *pflag.Flag) { found = found || absent(flag) })
+	}
+	if !found {
+		return
+	}
+	var local, persistent []*pflag.Flag
+	cmd.LocalNonPersistentFlags().VisitAll(func(flag *pflag.Flag) { local = append(local, flag) })
+	cmd.PersistentFlags().VisitAll(func(flag *pflag.Flag) { persistent = append(persistent, flag) })
+	cmd.ResetFlags()
+	for _, flag := range local {
+		if !absent(flag) {
+			cmd.Flags().AddFlag(flag)
+		}
+	}
+	for _, flag := range persistent {
+		if !absent(flag) {
+			cmd.PersistentFlags().AddFlag(flag)
+		}
+	}
 }
 
 // newEnterpriseIdentityViewCommands returns the identity views of

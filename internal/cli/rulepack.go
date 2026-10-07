@@ -32,6 +32,9 @@ import (
 
 const rulePackWireVersion = 1
 
+const rulePackLongIntro = `Inspect a guardrail rule pack without starting the gateway or reading its
+config. Administrators validate a custom pack with this command before`
+
 var safeRulePackWireCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 type rulePackWireDiagnostic struct {
@@ -51,10 +54,13 @@ type rulePackWireResponse struct {
 var rulePackCmd = &cobra.Command{
 	Use:   "rulepack",
 	Short: "Inspect a guardrail rule pack without starting the gateway",
-	Long: `Inspect a guardrail rule pack without starting the gateway or reading its
-config. Administrators validate a custom pack with this command before
+	Long: rulePackLongIntro + `
 registering it as guardrail.custom_packs.<name> (its path and the digest this
 command prints) and selecting it with guardrail.rule_pack.`,
+	// A Secure Client config stays on config_version 8, where rule_pack_dir
+	// names the pack, so it keeps the help of main (issue #1092, GAP-0270).
+	Annotations: map[string]string{secureClientLongAnnotation: rulePackLongIntro + `
+pointing guardrail.rule_pack_dir at it.`},
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},
