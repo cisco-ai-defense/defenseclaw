@@ -326,7 +326,13 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             "add --endpoint <https://<cluster>/otel/traces>"
         )
     if not dry_run:
-        click.echo(f"  Test it with: defenseclaw setup observability test {destination_name}")
+        if preset.id in {"splunk-hec", "splunk-enterprise"}:
+            click.echo(
+                f"  Test event acceptance with: defenseclaw observability destination test "
+                f"{destination_name} --write-probe"
+            )
+        else:
+            click.echo(f"  Test it with: defenseclaw setup observability test {destination_name}")
 
     if not dry_run:
         # The destination is already saved, and the gateway loads it when it
