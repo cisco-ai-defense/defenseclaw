@@ -291,6 +291,7 @@ class _GatewayRuntimeGeneration:
     replacement_not_before: float
 
 
+_SETUP_CHILD_ARGS_KEY = "defenseclaw.setup.child_args"
 _SETUP_OFFLINE_NOTED_KEY = "defenseclaw.setup.offline_noted"
 _SETUP_OFFLINE_AUDIT_NOTE_KEY = "defenseclaw.setup.offline_audit_note"
 #: Set once the run has told the user to start a stopped gateway, so the audit note
@@ -381,6 +382,9 @@ class _SetupGroup(click.Group):
 
     def resolve_command(self, ctx: click.Context, args: list[str]):
         name, command, rest = super().resolve_command(ctx, args)
+        # click clears ctx.args before this group's callback runs; keep the child's own
+        # arguments (its subcommand verb) for the callback's pre-checks (GAP-0219).
+        ctx.meta[_SETUP_CHILD_ARGS_KEY] = list(rest)
         return (command.name if command is not None else name), command, rest
 
 
@@ -601,6 +605,24 @@ def setup(
     )
 
 
+_WEBHOOK_URL_ISSUE = re.compile(r"^(?:line \d+: )?webhooks\[\d+\]\.url: ")
+
+
+def _webhook_url_cleanup(ctx: click.Context, result: Any) -> bool:
+    """Whether ``setup webhook list|disable|remove`` may run on a config whose only
+    errors are webhook URLs (a loopback or private address, for example)."""
+    child_args = ctx.meta.get(_SETUP_CHILD_ARGS_KEY) or []
+    verb = child_args[0] if child_args else ""
+    return (
+        ctx.invoked_subcommand == "webhook"
+        and verb in ("list", "disable", "remove")
+        and not getattr(result, "parse_error", "")
+        and not getattr(result, "timed_out", False)
+        and bool(result.errors)
+        and all(_WEBHOOK_URL_ISSUE.match(str(issue)) for issue in result.errors)
+    )
+
+
 def _exit_not_initialized(ctx: click.Context) -> None:
     """Stop with the missing-config message: run init, or on a managed
     device that it is managed (exit 3)."""
@@ -626,7 +648,12 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     from defenseclaw.commands.cmd_config import validate_config
 
     result = validate_config()
-    if not result.ok:
+    if not result.ok and _webhook_url_cleanup(ctx, result):
+        # The message says "fix the url, or remove the webhook": list, disable and remove
+        # have to run for that to be possible (GAP-0219).
+        for issue in result.errors:
+            ux.echo(f"  ⚠ {issue}", err=True)
+    elif not result.ok:
         timed_out = getattr(result, "timed_out", False)
         ux.echo("Config check did not finish:" if timed_out else "Config validation failed:", err=True)
         if result.parse_error:
