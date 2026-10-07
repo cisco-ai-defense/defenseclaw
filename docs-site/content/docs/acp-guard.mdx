@@ -257,6 +257,9 @@ profile folder, which can be SYSTEM:
   --user CONTOSO\alice --client zed --agent kiro --profile kiro-only --json
 ```
 
+A refused enrollment leaves no credential behind, and a failed re-enrollment
+keeps the working credential.
+
 The JSON result contains a `token_file` and a `next` command, never the token
 value. The user runs the reported `defenseclaw-gateway enterprise acp setup ...`
 command, as themselves: a managed computer has no other DefenseClaw command.
