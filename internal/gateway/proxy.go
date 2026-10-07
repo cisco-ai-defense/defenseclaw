@@ -3897,7 +3897,7 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 //
 // Dispatch order:
 //
-//  1. Bedrock is provider-specific (binary eventstream framing, AWS Sigv4
+//  1. Bedrock's native /model/ API is provider-specific (eventstream framing, SigV4
 //     auth) and predates the FormatAdapter registry — it keeps its own
 //     branch so #124's proxy_bedrock_block.go handler stays the single
 //     source of truth for Bedrock wire formats.
@@ -3911,7 +3911,7 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 //     formats should go through the registry, not through more branches
 //     here.
 func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, provider, model string, stream bool, msg string) {
-	if provider == "bedrock" {
+	if provider == "bedrock" && !bedrockOpenAICompatibleReply(path) {
 		// Bedrock decides streaming vs non-streaming from the URL path
 		// (/converse-stream vs /converse, /invoke-with-response-stream
 		// vs /invoke) rather than a `stream: true` body field, so the
