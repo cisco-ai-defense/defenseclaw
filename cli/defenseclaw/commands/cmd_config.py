@@ -31,6 +31,7 @@ Five subcommands:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -50,7 +51,7 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_validate_v8
+from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_masked_v8, load_validate_v8
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -234,7 +235,22 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
     parts = [part for part in key.strip().split(".") if part]
     if not parts:
         raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
-    view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    cfg_path = str(config_module.config_path())
+    v8 = _looks_like_v8_config(cfg_path)
+    written: dict | None = None
+    if v8 and parts[0] != "observability":
+        # One parse of the source serves the value and the "not set" note; the
+        # observability plan and the full validation are not needed for a
+        # key outside observability (GAP-0276).
+        try:
+            written = load_masked_v8(Path(cfg_path).read_bytes(), source_name=cfg_path)
+        except OSError as exc:
+            raise click.ClickException(f"cannot read configuration source: {exc}") from exc
+        except (V8ConfigError, RuntimeError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        view = _merge_defaults(written, _v8_defaults(app))
+    else:
+        view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
     found, value = _lookup(view, parts)
     if not found:
         sections = _v8_sections() or set(view)
@@ -249,10 +265,8 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
             f"{key} is not set and has no default. "
             f"Run 'defenseclaw config show --section {parts[0]}' to see the keys it has."
         )
-    if parts[0] != "observability" and _looks_like_v8_config(str(config_module.config_path())):
-        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
-        if not _lookup(written, parts)[0]:
-            click.echo(f"(default: config.yaml does not set {key})", err=True)
+    if written is not None and not _lookup(written, parts)[0]:
+        click.echo(f"(default: config.yaml does not set {key})", err=True)
     if isinstance(value, (dict, list)) or fmt.lower() == "json":
         _emit(value, fmt)
     elif isinstance(value, bool):
@@ -775,6 +789,16 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
 
 
 def _looks_like_v8_config(path: str) -> bool:
+    """Detect a root v8 declaration, once per file version in a process."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return False
+    return _looks_like_v8_config_at(path, stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=8)
+def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
     """Detect a root v8 declaration without constructing source values.
 
     ``yaml.compose`` understands valid YAML presentation variants (including
