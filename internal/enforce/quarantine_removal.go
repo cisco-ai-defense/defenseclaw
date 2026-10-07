@@ -58,19 +58,31 @@ type QuarantineRemovalResult struct {
 // QuarantineRemovalChannel is where the gateway writes requests (a folder only
 // it and administrators can write) and where the guardian answers (a folder
 // only the guardian can write and the gateway can read).
+//
+// DeferredDir, also guardian-only, keeps the requests the guardian finishes
+// later.
 type QuarantineRemovalChannel struct {
-	RequestDir string
-	ResultDir  string
+	RequestDir  string
+	ResultDir   string
+	DeferredDir string
 }
 
 // QuarantineRemovalChannelFor is the channel of a gateway data directory and
 // its hook guardian authorization directory.
 func QuarantineRemovalChannelFor(dataDir, guardianAuthDir string) QuarantineRemovalChannel {
 	return QuarantineRemovalChannel{
-		RequestDir: filepath.Join(dataDir, "guardian-requests", "quarantine"),
-		ResultDir:  filepath.Join(guardianAuthDir, "quarantine-results"),
+		RequestDir:  filepath.Join(dataDir, "guardian-requests", "quarantine"),
+		ResultDir:   filepath.Join(guardianAuthDir, "quarantine-results"),
+		DeferredDir: filepath.Join(guardianAuthDir, "quarantine-deferred"),
 	}
 }
+
+// ErrQuarantineRemovalDeferred marks a removal the guardian cannot do yet:
+// the user who owns the folder is signed out and the account has no S4U
+// logon (a Microsoft Entra ID account). The source stayed in the profile
+// with only an error in the log (GAP-0414); the guardian now keeps the
+// request and removes the folder when that user next signs in.
+var ErrQuarantineRemovalDeferred = errors.New("removal deferred until the user signs in")
 
 var quarantineSourceRemover atomic.Pointer[func(AssetQuarantinePlan, string) error]
 
@@ -178,6 +190,9 @@ func (c QuarantineRemovalChannel) ServeOnce(handle func(QuarantineRemovalRequest
 		result := QuarantineRemovalResult{Version: quarantineRemovalVersion, ID: id, Nonce: request.Nonce, OK: true}
 		if err := handle(request); err != nil {
 			result.OK, result.Error = false, err.Error()
+			if errors.Is(err, ErrQuarantineRemovalDeferred) {
+				c.deferRequest(request)
+			}
 		}
 		if payload, err := json.Marshal(result); err == nil {
 			if os.MkdirAll(c.ResultDir, 0o750) == nil && os.WriteFile(resultPath+".tmp", payload, 0o640) == nil {
@@ -192,6 +207,50 @@ func (c QuarantineRemovalChannel) ServeOnce(handle func(QuarantineRemovalRequest
 	for _, entry := range results {
 		if id, ok := strings.CutSuffix(entry.Name(), ".json"); ok && !pending[id] {
 			_ = os.Remove(filepath.Join(c.ResultDir, entry.Name()))
+		}
+	}
+}
+
+// deferRequest keeps request for ServeDeferred.
+func (c QuarantineRemovalChannel) deferRequest(request QuarantineRemovalRequest) {
+	if c.DeferredDir == "" || !safePathSegment(request.ID) {
+		return
+	}
+	payload, err := json.Marshal(request)
+	if err != nil || os.MkdirAll(c.DeferredDir, 0o700) != nil {
+		return
+	}
+	path := filepath.Join(c.DeferredDir, request.ID+".json")
+	if os.WriteFile(path+".tmp", payload, 0o600) == nil {
+		_ = os.Rename(path+".tmp", path)
+	}
+}
+
+// ServeDeferred retries every deferred request with handle. A request is
+// dropped once handle removes the source or refuses it for another reason
+// (the source changed or is gone); it stays while the removal is still
+// deferred.
+func (c QuarantineRemovalChannel) ServeDeferred(handle func(QuarantineRemovalRequest) error) {
+	if c.DeferredDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(c.DeferredDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !entry.Type().IsRegular() || !safePathSegment(id) {
+			continue
+		}
+		path := filepath.Join(c.DeferredDir, entry.Name())
+		var request QuarantineRemovalRequest
+		if readQuarantineRemovalFile(path, &request) != nil || request.ID != id {
+			_ = os.Remove(path)
+			continue
+		}
+		if err := handle(request); err == nil || !errors.Is(err, ErrQuarantineRemovalDeferred) {
+			_ = os.Remove(path)
 		}
 	}
 }
