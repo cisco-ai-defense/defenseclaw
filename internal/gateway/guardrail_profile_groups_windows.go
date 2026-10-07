@@ -27,5 +27,9 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 	}
 }
 
+// profileGroupQualifiedName has nothing to offer on Windows, where an
+// assignment names a group as DOMAIN\\name or by its SID.
+var profileGroupQualifiedName = func(context.Context, string) string { return "" }
+
 // accountGroupIDs lists an OS account's group SIDs.
 var accountGroupIDs = func(account *osuser.User) ([]string, error) { return account.GroupIds() }

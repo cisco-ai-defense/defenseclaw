@@ -89,8 +89,8 @@ the standalone enterprise profile with its root guardian or SYSTEM enumerator.
 | Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | uid, name and groups from Open Directory, reported as `local` (verified), also per-user |
 | LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name, the groups from `initgroups` and, for an SSSD account, the directory type of the realmd realm that serves its domain (verified), also per-user. Enterprise adds the UPN from SSSD InfoPipe (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified, enterprise) |
 | Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
-| Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` with the UPN as principal (verified), also per-user. The `aad` module gives no Entra groups | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified), also per-user. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists (verified, enterprise only; see [Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified, enterprise). The user's Platform SSO login is not read |
-| Okta | Through the Okta LDAP Interface and SSSD: the uid, name and Okta groups (verified), also per-user; standalone enterprise adds directory `ldap`, and the UPN when SSSD maps the Okta login to it. Tested live on RHEL 9. Or the AD account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: the device's SSO provider (verified, enterprise; not tested live). As AD or LDAP when synced |
+| Entra ID | With the `aad` NSS module or Himmelblau, reported as `entra_id` (verified), also per-user, with the UPN as principal (Himmelblau: with `cn_name_mapping = false`). The `aad` module gives no Entra groups; Himmelblau gives the user's Entra groups by name. Joined to Microsoft Entra Domain Services, the account is an AD account with the synced Entra groups (see the row above). Tested live: [Entra on Linux](/docs/enterprise/identity-entra-id#3-linux) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified), also per-user. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists (verified, enterprise only; see [Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)) | Platform SSO with Company Portal: an account registered with Platform SSO is `entra_id` with its login UPN from `AltSecurityIdentities` (verified, enterprise). No Entra groups reach the Mac (tested live: [Entra on macOS](/docs/enterprise/identity-entra-id#4-macos-platform-sso)) |
+| Okta | Through the Okta LDAP Interface and SSSD: the uid, name and Okta groups (verified), also per-user; standalone enterprise adds directory `ldap`, and the UPN when SSSD maps the Okta login to it. Tested live on RHEL 9. Or the AD account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: a registered account's SSO provider and login UPN (verified, enterprise; not tested live). As AD or LDAP when synced |
 
 What differs between platforms and installs, as exercised on real hosts:
 
@@ -131,8 +131,12 @@ What differs between platforms and installs, as exercised on real hosts:
   tenant ID; a `users` assignment by UPN selected the profile on both. See
   [Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields-as-seen-live).
   Windows puts an Entra group into the sign-in token only when a built-in
-  local group lists it. The Okta Device Access and Platform SSO readers
-  were tested against recorded OS output, not a live tenant. See the limits in
+  local group lists it. On Linux, Entra groups reach the host only through
+  Himmelblau or Microsoft Entra Domain Services with SSSD, both tested live;
+  the `aad` module gives none. On macOS, Platform SSO gives no Entra groups
+  (tested live); a local group has to carry the membership. The Okta Device
+  Access and Okta Platform SSO readers were tested against recorded OS output,
+  not a live tenant. See the limits in
   [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources#limits-stated-plainly).
 
 ## Agent identity

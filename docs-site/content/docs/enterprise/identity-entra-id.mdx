@@ -1,12 +1,15 @@
 ---
 title: Deploy with Microsoft Entra ID
-description: Use Microsoft Entra ID users with DefenseClaw on Entra-joined Windows and on Azure Linux VMs with Entra SSH sign-in. Prepare the tenant, read group SIDs, set up sign-in, map users and groups to guardrail profiles, and check what DefenseClaw records. Starter scripts and configs included.
+description: Use Microsoft Entra ID users and groups with DefenseClaw on Entra-joined Windows, on Linux (Azure Entra SSH sign-in, Himmelblau, or Microsoft Entra Domain Services with SSSD) and on macOS with Platform SSO. Get Entra groups to the operating system, map users and groups to guardrail profiles, and check what DefenseClaw records. Starter scripts and configs included.
 keywords:
   - DefenseClaw Entra ID
   - Microsoft Entra ID
   - Entra joined Windows
   - Entra SSH login Linux
   - AADSSHLoginForLinux
+  - Himmelblau
+  - Microsoft Entra Domain Services
+  - Platform SSO
   - Entra group SID
   - guardrail profiles Entra
 ---
@@ -14,8 +17,10 @@ keywords:
 DefenseClaw never calls Microsoft Entra ID or Microsoft Graph. A user signs in
 to the computer with Entra ID, the computer gives that user an operating system
 account, and DefenseClaw reads the account the way it reads any other: the SID
-and sign-in token on Windows, NSS on Linux. So deploying DefenseClaw for Entra
-users is first an Entra and operating system task. This guide gives the steps in
+and sign-in token on Windows, NSS on Linux, Open Directory on macOS. So
+deploying DefenseClaw for Entra users is first an Entra and operating system
+task, and a `groups` assignment can name an Entra group only where the
+operating system knows the membership. This guide gives the steps in
 order, the starter scripts that do them, and what DefenseClaw records at the
 end. The background on what is read from where is in
 [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
@@ -25,20 +30,27 @@ profile. The Secure Client profile rejects them and keeps its behavior as it
 was, so nothing here applies to a Secure Client computer.
 
 <Callout title="What was run live">
-On a live Entra tenant with Claude Code:
+On live Entra tenants with Claude Code (Haiku 4.5 on Amazon Bedrock), each as
+the real user in an interactive session:
 
-- a per-user DefenseClaw install on an Entra-joined Windows 11 computer,
-  signed in over remote desktop as an Entra user;
-- a per-user install on an Ubuntu 22.04 Azure VM with Entra SSH sign-in
-  (`AADSSHLoginForLinux`);
-- the standalone enterprise profile on the same Windows 11 computer, installed
-  with Setup as LocalSystem, with a `groups` assignment by Entra group SID: the
-  prompts of a group member got the assigned profile, those of another Entra
-  user got `default_profile`.
+- Entra-joined Windows 11: a per-user install signed in over remote desktop as
+  an Entra user, and the standalone enterprise profile with a `groups`
+  assignment by Entra group SID.
+- Ubuntu 22.04 on Azure with Entra SSH sign-in (`AADSSHLoginForLinux`), per user.
+- Ubuntu 24.04 with Himmelblau 5.0.0 (nightly), per user and with the
+  standalone enterprise package (deb): a group member got the group profile.
+- RHEL 9.8 joined to a Microsoft Entra Domain Services managed domain with
+  realmd and SSSD, per user and with the standalone enterprise package (rpm):
+  a group member got the group profile, with qualified and with short names.
+- macOS 15.8 enrolled in Intune with Company Portal and Platform SSO, per user
+  and with the standalone enterprise package (pkg): no Entra group reached the
+  Mac; a local group that carried the membership selected the profile.
 
-Not tested: a `users` assignment on the standalone profile, delivering the local group membership through Intune, hybrid-joined Windows, Entra Kerberos, the himmelblau module,
-macOS with Platform SSO, the standalone package on an Entra Linux VM, and an
-Entra outage. Each is marked where it comes up.
+Not tested: a `users` assignment on the standalone profile on Windows,
+delivering the local group membership through Intune (Windows) or the bridge
+script through Intune (macOS), hybrid-joined Windows, Entra Kerberos,
+Himmelblau 4.x stable, Himmelblau's offline break-glass, and an Entra outage on
+Windows or macOS. Each is marked where it comes up.
 </Callout>
 
 ## Pick your setup
@@ -46,9 +58,20 @@ Entra outage. Each is marked where it comes up.
 | Setup | Users sign in with | DefenseClaw sees | A `groups` assignment can name |
 | --- | --- | --- | --- |
 | Entra-joined Windows 10 or 11 | Entra ID at the Windows sign-in screen | Directory `entra_id`, the user SID, the UPN and the tenant ID | Standalone enterprise profile: an Entra group by SID, once a built-in local group lists it ([step 2](#2-windows-entra-joined-computers)). Per-user install: no groups, use `users` |
-| Azure Linux VM with Entra SSH sign-in | `az ssh vm`, with the `aad` module | Directory `entra_id`, source `nss_aad`, the UPN | No Entra group: the module gives the account only a private group. Use `users` |
+| Azure Linux VM with Entra SSH sign-in | `az ssh vm`, with the `aad` module | Directory `entra_id`, source `nss_aad`, the UPN | No Entra group: the module gives the account only a private group. Use `users`, or one of the two routes below |
+| Linux with Himmelblau | `ssh` with the Entra password, an MFA code and a Hello PIN | Directory `entra_id`, source `himmelblau`; the UPN when accounts are named by it | The user's Entra groups, by name ([Himmelblau](#himmelblau)) |
+| Linux joined to Microsoft Entra Domain Services | `ssh` with the Entra password, through SSSD | Directory `active_directory`, source `sssd` (`sssd_infopipe` on standalone enterprise), the UPN, the domain | The synced Entra groups, as `name@domain` unless SSSD uses short names ([Entra Domain Services](#microsoft-entra-domain-services-with-sssd)) |
+| Mac with Platform SSO (Company Portal) | Entra ID at the macOS login window | Standalone enterprise: directory `entra_id`, source `macos_platform_sso`, the UPN. Per-user: directory `local` | No Entra group: Platform SSO gives none. A local group that carries the membership ([step 4](#4-macos-platform-sso)) |
 | Linux desktop enrolled in Intune | A local account; Intune enrolls the device and does not sign users in | Directory `local`, expected. Not observed with DefenseClaw installed | Local groups |
-| Hybrid-joined Windows, Entra Kerberos, himmelblau, macOS Platform SSO | | The readers exist ([identity sources](/docs/enterprise/identity-sources)) | Not run on a live tenant |
+| Hybrid-joined Windows, Entra Kerberos | | The readers exist ([identity sources](/docs/enterprise/identity-sources)) | Not run on a live tenant |
+
+<Callout title="Why a group assignment matches no one">
+The usual cause is that the operating system does not know the Entra group, so
+DefenseClaw does not either. Check with the OS's own tools as the user: `whoami
+/groups` on Windows, `id` on Linux and macOS. If the Entra group is not listed
+there, no DefenseClaw setting can match it: use the route for your platform
+below, or a `users` assignment.
+</Callout>
 
 ## Starter kit
 
@@ -56,7 +79,7 @@ The scripts and example configs are in
 [`packaging/identity/entra`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/packaging/identity/entra).
 Every script has `--help` (or `Get-Help`), reads credentials from the
 environment and never from arguments, and changes nothing until you say so:
-the Python and Azure scripts print a plan unless you pass `--apply`, and the
+the Python and shell scripts print a plan unless you pass `--apply`, and the
 PowerShell script supports `-WhatIf`.
 
 | File | Use |
@@ -65,6 +88,10 @@ PowerShell script supports `-WhatIf`.
 | `setup-entra-ssh-linux.sh` | Azure CLI wrapper: enable Entra SSH sign-in on an Azure Linux VM and grant the sign-in role |
 | `Add-EntraGroupToLocalGroup.ps1` | Put an Entra group's SID into a built-in local group, the step that makes the group appear in sign-in tokens |
 | `Get-DefenseClawEntraIdentity.ps1` | Read-only: show the join state, the Entra accounts, the token's groups and what DefenseClaw answers |
+| `setup-himmelblau.sh` | Install Himmelblau on Ubuntu 24.04, write `himmelblau.conf` (UPN account names, the groups allowed to sign in) and restart it safely; `check` is read-only |
+| `join-entra-domain-services.sh` | Join a Linux host to an Entra Domain Services managed domain with realmd and SSSD, switch between qualified and short names, clear the SSSD cache; `check` is read-only |
+| `macos-entra-group-bridge.sh` | Add the signed-in Mac user to, or remove them from, the local group that stands for an Entra group (an Intune shell script, or by hand) |
+| `macos-platform-sso.settings-catalog.example.json` | The Intune settings catalog body for Platform SSO with Company Portal that the live test used |
 | `admin-config.windows.example.yaml`, `per-user-profiles.example.yaml`, `tenant.example.json` | Starting points for the standalone config, a per-user config and the tenant setup file |
 
 ## 1. Prepare the tenant
@@ -187,7 +214,18 @@ A per-user install has no group list on Windows, so only `users`, `connectors`
 and `agents` assignments can match there. The standalone enterprise profile
 reads each user's token groups through the SYSTEM enumerator.
 
-## 3. Linux: Azure VMs with Entra SSH sign-in
+## 3. Linux
+
+Linux has three ways to sign Entra users in, and only two of them give the host
+the user's Entra groups:
+
+| Route | Entra groups on the host | Tested with DefenseClaw |
+| --- | --- | --- |
+| Azure Entra SSH sign-in (`aad` module) | None: each account has only its private group | Ubuntu 22.04, per user |
+| [Himmelblau](#himmelblau) | The user's Entra groups, named in `id` and initgroups | Ubuntu 24.04, Himmelblau 5.0.0 nightly, per user and standalone enterprise |
+| [Entra Domain Services with SSSD](#microsoft-entra-domain-services-with-sssd) | The synced Entra groups, as Active Directory groups | RHEL 9.8, per user and standalone enterprise |
+
+### Azure VMs with Entra SSH sign-in
 
 Enable the sign-in on the VM. The script enables the VM's system-assigned
 identity, installs the `AADSSHLoginForLinux` extension and grants the
@@ -229,7 +267,209 @@ Enrolling a Linux desktop in Intune is a different path: the device gets an
 Entra identity for compliance, but the accounts on it stay local. See
 [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant#identity-through-intune).
 
-## 4. Map users and groups to profiles
+### Himmelblau
+
+[Himmelblau](https://github.com/himmelblau-idm/himmelblau) is an open-source
+(GPL-3.0) NSS, PAM and SSH module that signs Entra users in to Linux and reads
+their Entra groups. It needs no app registration. The live test used the 5.0.0
+nightly build (`5.0.0-ubuntu24.04~20261007`) on Ubuntu 24.04, the only free
+channel at the time; the 4.0.5 stable packages need a paid entitlement token
+(or a build from source) and were not tested.
+
+**Before users sign in.** Entra refuses remote sign-in through Himmelblau for a
+user who has no MFA method registered (`AADSTS50072`, "Remote session with
+unenrolled MFA user denied"), even with security defaults off and no
+Conditional Access policy. Have each user register an authenticator app at
+**Security info**. The first sign-in then asks for the Entra password, the
+code and a new Windows Hello PIN of at least six characters (an empty PIN is
+refused), and joins the computer to Entra: it creates a device object, so your
+users need permission to join devices.
+
+**Install and configure** (as root; the script prints its plan first):
+
+```bash
+sudo ./setup-himmelblau.sh install --domain contoso.onmicrosoft.com --allow-group <group object id>
+sudo ./setup-himmelblau.sh install --domain contoso.onmicrosoft.com --allow-group <group object id> --apply
+./setup-himmelblau.sh check --user alice@contoso.onmicrosoft.com
+```
+
+The script's `configure`, `restart` and `check` ran live on the test VM;
+its `install` step does what the live test did by hand (repository, key and
+packages) and was run in plan mode only. The packages (`himmelblau nss-himmelblau pam-himmelblau
+himmelblau-sshd-config`, from the signed repository at
+`packages.himmelblau-idm.org`) add `himmelblau` to the `passwd`, `group` and
+`shadow` lines of `nsswitch.conf` and to PAM, but write no
+`/etc/himmelblau/himmelblau.conf`, and the daemon does not start without its
+`domain`. The script writes these keys:
+
+| Key | Why |
+| --- | --- |
+| `domain = contoso.onmicrosoft.com` | The tenant |
+| `cn_name_mapping = false` | Names accounts by their UPN. With Himmelblau's default (`true`) accounts are named `alice`, carry no UPN or domain, and a DefenseClaw `users` entry written as a UPN never matches; `explain` says so. Groups match either way |
+| `pam_allow_groups = <object id>,...` | Only members of these Entra groups may sign in. Without it every user of the tenant can, and the daemon warns. It takes object IDs, not names |
+| `home_attr`, `home_alias = CN`, `use_etc_skel = true` | Home directories named by the account |
+
+**What the host shows.** `id` names the Entra groups
+(`groups=1608906209(ml-team)` style ids and names), but `getent group ml-team`
+answers nothing: Himmelblau finds a group only by gid or object ID, by design.
+DefenseClaw matches the names `id` reports, so a `groups: [ml-team]`
+assignment works, and DefenseClaw does not warn that the group is unknown on a
+host whose group line lists Himmelblau. The records carry directory
+`entra_id`, source `himmelblau`, assurance `verified`, a `posix_uid`, the
+private group plus the Entra groups in `group_count`, and the SSH session.
+
+**Group changes.** Himmelblau caches an account for 300 seconds
+(`cache_timeout`) and refreshes it at the next lookup after that. In the live
+test a removal showed in `id` after 1 minute 46 seconds and an addition after
+4 minutes 58 seconds; a new sign-in, or `sudo aad-tool cache-clear`, shows it
+at once. DefenseClaw then picks it up within its 15-minute cache, so a removal
+can take about 21 minutes to reach hook decisions.
+
+**When Entra is unreachable.** Cached accounts and groups keep answering, past
+the cache time and across a daemon restart. A new SSH sign-in of an MFA user
+is refused (`PAM_ABORT: Network outage detected`) unless Himmelblau's
+`offline_breakglass` is set up, which is off by default and was not tested.
+Sign-in works again as soon as Entra answers.
+
+**When the daemon is down or restarting**, `id` shows the Entra groups as bare
+numbers. DefenseClaw keeps such an answer for 2 minutes instead of 15, and the
+next request after that waits for a fresh lookup, so a group member gets the
+group profile again within about 2 minutes of the daemon's return.
+
+**Restart the daemon with the script.** On the 5.0.0 nightly, a second
+`systemctl restart himmelblaud himmelblaud-tasks` left the units stuck
+(`inactive (dead-resources-pinned)`), and the host answered no Entra account
+until `systemctl clean --what=fdstore himmelblaud.service`. `setup-himmelblau.sh
+restart --apply` stops the sockets and daemons, clears the stored descriptors and
+starts them again; `configure` restarts the same way.
+
+Other notes from the live test: a VM without a TPM uses a software HSM;
+`debug = true` is very verbose; the test VM (`Standard_B2als_v2`) cost about
+US$0.04 an hour while running.
+
+### Microsoft Entra Domain Services with SSSD
+
+[Microsoft Entra Domain Services](https://learn.microsoft.com/entra/identity/domain-services/overview)
+runs a managed Active Directory domain that syncs the tenant's users and
+groups. A Linux host joins it with `realm join` like any AD domain, SSSD reads
+the Entra groups as AD groups, and DefenseClaw reports the account as
+`active_directory`.
+
+**Cost.** The managed domain bills while it exists: about US$0.15 an hour
+(roughly US$110 a month) for the Standard SKU in the live test, plus the VMs.
+
+**Create the managed domain** (once per tenant, in the Azure portal or with
+ARM; the live test used the ARM API, `Microsoft.AAD/domainServices` version
+2022-12-01):
+
+1. Register the `Microsoft.AAD` resource provider. Create the **Domain
+   Controller Services** service principal, the **AAD DC Administrators** group
+   and an admin user in it. The live test's automation identity needed the
+   Entra roles Application Administrator and Groups Administrator for this.
+2. Create a VNet with a subnet for the domain and one for the VMs.
+3. Create the managed domain with TLS 1.0 disabled
+   (`domainSecuritySettings.tlsV1: Disabled`): with the default the create
+   failed after 19 seconds. It took about 67 minutes to finish; a second domain
+   controller appeared later.
+4. Point the VNet's DNS servers at both domain controllers.
+5. Reset or change each user's password once the domain exists, so it gets the
+   NTLM and Kerberos hashes. A self-service change worked within 5 minutes; an
+   administrator reset took about 11 minutes. Repeated failed `kinit` attempts
+   lock the account for 30 minutes.
+
+**Join a host** (as root; RHEL 9.8 in the live test):
+
+```bash
+sudo ./join-entra-domain-services.sh join --domain contoso.onmicrosoft.com --admin dsadmin@contoso.onmicrosoft.com --short-names
+sudo ./join-entra-domain-services.sh join --domain contoso.onmicrosoft.com --admin dsadmin@contoso.onmicrosoft.com --short-names --apply
+./join-entra-domain-services.sh check --user alice --group ml-team
+```
+
+It installs realmd, SSSD and adcli, and runs
+`realm join --membership-software=adcli -U dsadmin@CONTOSO.ONMICROSOFT.COM contoso.onmicrosoft.com`,
+which asks for the password. The computer account lands in
+`OU=AADDC Computers`, and SSSD gets `id_provider = ad`. The live test joined
+with that `realm join` command typed by hand; the script's `check` and
+`names` ran live, and its `join` was run in plan mode only.
+
+**Qualified or short names.** `realm join` sets `use_fully_qualified_names =
+True`, so the host knows the group only as `ml-team@contoso.onmicrosoft.com`
+and the user as `alice@contoso.onmicrosoft.com`. A `groups: [ml-team]`
+assignment then selects nobody; `explain` names the qualified group the host
+knows. Either write the qualified name in the assignment, or switch to short
+names (`--short-names`, or `join-entra-domain-services.sh names short
+--apply`). Both were tested live and selected the group profile.
+
+**What DefenseClaw records.** Directory `active_directory`, source `sssd`, the
+domain, the bare account name and the uid SSSD's ID mapping assigns. On
+standalone enterprise the root guardian reads the UPN from SSSD InfoPipe after
+the reconcile that enrolls the account, and the source becomes
+`sssd_infopipe`. Until then the principal is `alice@CONTOSO.ONMICROSOFT.COM`;
+DefenseClaw refreshes such an account every 2 minutes, so the UPN replaces it
+within about 2 minutes of the guardian's record. A per-user install has no
+InfoPipe access and keeps `alice@CONTOSO.ONMICROSOFT.COM`.
+
+**Group changes** go through three caches. Entra to the managed domain took
+about 20 seconds for an addition and 37 seconds for a removal. SSSD keeps an
+entry for `entry_cache_timeout`, 5,400 seconds by default: with the defaults
+the change had not shown after 10 minutes. After `sudo sss_cache -E`
+(`join-entra-domain-services.sh flush --apply`), `id` showed it 172 seconds
+after the Entra change. DefenseClaw then picks it up within its 15-minute cache.
+End to end: about 15 minutes with a flush, and up to about 105 minutes with
+SSSD's defaults. A shorter `entry_cache_timeout` shortens the SSSD part; that
+was not measured.
+
+## 4. macOS: Platform SSO
+
+Platform SSO with the Microsoft Enterprise SSO plug-in (Company Portal) signs
+Entra users in at the login window and links each local account to its Entra
+user. It does not put the user's Entra groups into the macOS group database.
+
+The live test used macOS 15.8, Company Portal 5.2608.0 and user-driven
+enrollment in Intune, with the settings catalog policy in
+`macos-platform-sso.settings-catalog.example.json` (password method, shared
+device keys, a local account created at the login window, the account name
+from the UPN's short name), assigned to a device group. An existing local
+account was linked by registration, and a new one was created at the login
+window. In both cases:
+
+- `id -Gn` listed only local groups, and `dsmemberutil checkmembership` did
+  not find the Entra group.
+- With the Platform SSO settings `UserAuthorizationMode` and
+  `NewUserAuthorizationMode` set to Groups and `AdditionalGroups` naming the
+  Entra groups (by name and by object ID), or with `AdministratorGroups`,
+  Platform SSO created empty local groups (`RealName` "Platform SSO: ml-team",
+  gid 5000 and up) and never added the user. No Entra group claim reached the
+  Mac, and the user did not become an administrator.
+
+So a `groups` assignment can match only a local group that carries the
+membership. `macos-entra-group-bridge.sh` adds the signed-in user to such a
+group, or removes them; it uses the group Platform SSO created when one of
+that name exists:
+
+```bash
+sudo ./macos-entra-group-bridge.sh add --group ml-team --user alice
+sudo ./macos-entra-group-bridge.sh add --group ml-team --user alice --apply
+./macos-entra-group-bridge.sh check --group ml-team --user alice
+```
+
+For a fleet, let Intune decide who is in the group: fill in the script's
+settings block (`ACTION=add`, `GROUP_NAME=ml-team`, `APPLY=yes`) and assign it
+as a macOS shell script to the Entra group, and assign a copy with
+`ACTION=remove` to the users who are not in it. That delivery was not tested;
+the membership itself was: the member got the group profile on a per-user
+install and on standalone enterprise, the other user got `default_profile`,
+and removing the membership moved her back to the default.
+
+**What DefenseClaw records.** Platform SSO stores each registered account's
+Entra UPN in its record (`AltSecurityIdentities`, `PlatformSSO:<upn>`), which
+root can read. The standalone enterprise enumerator reads it: the account is
+directory `entra_id`, source `macos_platform_sso`, with the UPN as its
+principal and domain, so a `users` assignment by UPN works there. Local
+accounts on the same Mac that never registered stay `local`. A per-user
+install cannot read the record and reports `local`.
+
+## 5. Map users and groups to profiles
 
 Write the assignments with the UPN for users and the SID for groups. Starter
 files: `per-user-profiles.example.yaml` for a user's own config and
@@ -266,11 +506,15 @@ standalone enterprise profile, which reads the machine config.
 | Windows, per-user | Matched in the live test | No: a per-user install has no group list |
 | Windows, standalone enterprise | Not tested live | By SID, after the local group step. Matched in the live test |
 | Linux `aad`, per-user | Matched in the live test | No: the module gives no Entra groups |
+| Linux Himmelblau, per-user and standalone | With `cn_name_mapping = false` | By name, as `id` shows it. Matched in the live test |
+| Linux Entra Domain Services, per-user and standalone | By the UPN on standalone enterprise | `ml-team@domain`, or `ml-team` with short names. Matched in the live test |
+| macOS Platform SSO, standalone | By the UPN | Only a local group that carries the membership. Matched in the live test |
+| macOS Platform SSO, per-user | No: the account reports `local` without a UPN | Only a local group, as above |
 
 Set a strict `default_profile`: a failed lookup lands on it
 ([why](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile)).
 
-## 5. Check
+## 6. Check
 
 Ask the gateway which profile a user gets. On Windows, name an Entra user by
 SID, as `AzureAD\Name`, by the bare name or by the UPN.
@@ -282,6 +526,9 @@ defenseclaw guardrail profile explain --connector claudecode    # the account th
 
 ```bash
 defenseclaw guardrail profile explain --connector claudecode
+# standalone enterprise, as root:
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector claudecode
+sudo defenseclaw-gateway enterprise macos profile-explain --user alice --connector claudecode
 ```
 
 In the per-user live tests, `profile` named the profile from the `users`
@@ -302,7 +549,7 @@ These are the fields the records carried for an Entra user (the complete table i
 | `defenseclaw.user.tenant_id` | The tenant ID | Not reported |
 | `defenseclaw.user.group_count` | `0` on a per-user install | `1`, the private group |
 
-## 6. What to expect in operation
+## 7. What to expect in operation
 
 - **A group change on Windows** reaches DefenseClaw when the user signs in
   again: the token is fixed at sign-in. The enumerator decides a signed-out
@@ -312,6 +559,10 @@ These are the fields the records carried for an Entra user (the complete table i
   Microsoft documents that a
   new token can take up to 4 hours to carry a change; that was not measured
   here.
+- **A group change on Linux** takes the Himmelblau or SSSD cache time plus
+  DefenseClaw's 15 minutes; the measured times are under
+  [Himmelblau](#himmelblau) and [Entra Domain Services](#microsoft-entra-domain-services-with-sssd).
+  On macOS a change reaches DefenseClaw when the bridge script runs again.
 - **A user who has not signed in yet.** An Entra user who has never signed in to
   a Windows computer has no account there yet, so there is no SID to match. On
   the Azure Linux VM, the module resolved such a user by name but not by uid,
@@ -330,7 +581,14 @@ These are the fields the records carried for an Entra user (the complete table i
 | A `groups` assignment with an Entra group never matches on Windows | The group is not in the token. Name it by SID (the computer cannot resolve names), have a built-in local group list it, and have the user sign out and in. Check with `Get-DefenseClawEntraIdentity.ps1 -GroupSid` |
 | `profile explain --user <name>` on Windows says "Windows has no account by this name" | The user has not signed in to this computer yet, or the name is misspelled. Pass the SID, `AzureAD\Name` or the UPN |
 | `group_count` is `0` and `groups` never match on a per-user Windows install | Expected: use `users`, or the standalone enterprise profile |
-| `getent group` finds no Entra group on the Linux VM | Expected: the `aad` module gives no Entra groups. Use `users` |
+| `getent group` finds no Entra group on the Linux VM | Expected: the `aad` module gives no Entra groups. Use `users`, Himmelblau or Entra Domain Services |
+| `getent group ml-team` finds nothing on a Himmelblau host, but `id` lists the group | Expected: Himmelblau finds groups only by gid or object ID. DefenseClaw matches the name `id` shows |
+| SSH sign-in through Himmelblau asks for the password again; the log says "Remote session with unenrolled MFA user denied" | The user has no MFA method. Register one at Security info, then sign in: password, code, then a new PIN of six or more characters |
+| `himmelblaud` is `inactive (dead-resources-pinned)` after a restart, and no Entra account resolves | The 5.0.0 nightly restart issue. Run `setup-himmelblau.sh restart --apply` |
+| A `users` entry by UPN never matches on a Himmelblau host; `explain` says the account has no UPN | `cn_name_mapping` is `true` (the default). Set it to `false` (`setup-himmelblau.sh configure ... --apply`), or name the account by its short name |
+| `explain` says a group is not known to this host by that name and names `ml-team@domain` | SSSD uses qualified names. Write the qualified name, or switch to short names |
+| `id` on a Mac shows no Entra group after Platform SSO registration | Expected: Platform SSO gives no groups. Use the bridge script, or `users` on standalone enterprise |
+| The records of a Platform SSO user say `local` | A per-user install cannot read the Platform SSO link; standalone enterprise reports `entra_id`. An account that never registered stays `local` |
 | `profile explain` says `unixidentity: not found` for an Entra user on Linux | The OS names the account but cannot map its uid back to it, as seen for users who had not signed in. Have the user sign in, then ask again |
 | Records have no principal | `ai_discovery.include_user_principal` is off, the default |
 | `az ssh vm` is refused | Microsoft requires the `AADSSHLoginForLinux` extension on the VM and a VM login role for the user. `setup-entra-ssh-linux.sh` without `--apply` lists what is missing |

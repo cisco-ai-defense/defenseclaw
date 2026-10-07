@@ -229,4 +229,18 @@ func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
 	if note := shortNameUserNote(set, profileDecision{Assignment: 1}, &local); note != "" {
 		t.Errorf("a local account got the short-name note %q", note)
 	}
+
+	// GAP-0328: Himmelblau names Entra accounts by the short name by default,
+	// so the account has no UPN and a users entry written as one cannot match.
+	byUPN := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"carol@contoso.example"}}},
+	}}
+	shortEntra := profileSubject{UserID: "1608906301", UserName: "carol", Directory: useridentity.DirectoryEntraID}
+	if note := entraShortNameNote(byUPN, &shortEntra); !strings.Contains(note, "cn_name_mapping = false") {
+		t.Errorf("Entra short-name note = %q, want the cn_name_mapping hint", note)
+	}
+	shortEntra.UserName, shortEntra.UPN = "carol@contoso.example", "carol@contoso.example"
+	if note := entraShortNameNote(byUPN, &shortEntra); note != "" {
+		t.Errorf("an account named by its UPN got the note %q", note)
+	}
 }

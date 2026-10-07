@@ -12,8 +12,10 @@ import (
 // meets on a Mac, taken from dscl, dsconfigad and app-sso output captured on a
 // Mac bound to a lab Active Directory (names replaced), so a change in those
 // tools' output shows up here and not as a silently empty identity. The
-// Platform SSO cases use the extensionIdentifier line of a configured device;
-// the lab has no Entra or Okta tenant to capture one from.
+// Platform SSO cases follow an Intune-enrolled macOS 15.8 Mac with Company
+// Portal (names replaced): app-sso prints JSON, and a registered account's
+// record carries PlatformSSO:<UPN> in AltSecurityIdentities (GAP-0330,
+// GAP-0324).
 func TestParseMacOSDirectoryFacts(t *testing.T) {
 	const (
 		mobileAccount = "AuthenticationAuthority:\n" +
@@ -38,8 +40,10 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 		noPlatformSSO = "Time: 2026-10-06 19:08:09 +0000\n\nDevice Configuration:\n (null)\n\nLogin Configuration:\n (null)\n"
 	)
 	platformSSO := func(bundle string) string {
-		return "Device Configuration:\n {\n    extensionIdentifier = \"" + bundle + "\";\n    type = Credential;\n }\n"
+		return "Device Configuration:\n{\n  \"extensionIdentifier\" : \"" + bundle + "\",\n  \"loginType\" : \"POLoginTypePassword (1)\",\n}\n"
 	}
+	plistPlatformSSO := "Device Configuration:\n {\n    extensionIdentifier = \"com.microsoft.CompanyPortalMac.ssoextension\";\n    type = Credential;\n }\n"
+	registered := localAccount + "AltSecurityIdentities: PlatformSSO:Erin@Contoso.Example\n"
 	now := time.Unix(1_800_000_000, 0)
 	tests := []struct {
 		name      string
@@ -65,12 +69,16 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "dave@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 		{"local account with an LKDC authority", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: noPlatformSSO},
 			DirectoryLocal, SourceMacOSOpenDirectory, "", "", ""},
-		{"Entra ID Platform SSO", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: platformSSO("com.microsoft.CompanyPortalMac.ssoextension")},
-			DirectoryEntraID, SourceMacOSPlatformSSO, "", "", ""},
-		{"Okta Platform SSO", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: platformSSO("com.okta.mobile.auth-service-extension")},
-			DirectoryOkta, SourceMacOSPlatformSSO, "", "", ""},
-		{"other Platform SSO", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: platformSSO("com.example.psso")},
-			DirectoryOther, SourceMacOSPlatformSSO, "", "", ""},
+		{"Entra ID Platform SSO", MacOSDirectoryInputs{DSCL: registered, AppSSO: platformSSO("com.microsoft.CompanyPortalMac.ssoextension")},
+			DirectoryEntraID, SourceMacOSPlatformSSO, "erin@contoso.example", "", "contoso.example"},
+		{"Entra ID Platform SSO, property-list app-sso", MacOSDirectoryInputs{DSCL: registered, AppSSO: plistPlatformSSO},
+			DirectoryEntraID, SourceMacOSPlatformSSO, "erin@contoso.example", "", "contoso.example"},
+		{"unregistered local account on a Platform SSO Mac", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: platformSSO("com.microsoft.CompanyPortalMac.ssoextension")},
+			DirectoryLocal, SourceMacOSOpenDirectory, "", "", ""},
+		{"Okta Platform SSO", MacOSDirectoryInputs{DSCL: registered, AppSSO: platformSSO("com.okta.mobile.auth-service-extension")},
+			DirectoryOkta, SourceMacOSPlatformSSO, "erin@contoso.example", "", "contoso.example"},
+		{"other Platform SSO", MacOSDirectoryInputs{DSCL: registered, AppSSO: platformSSO("com.example.psso")},
+			DirectoryOther, SourceMacOSPlatformSSO, "erin@contoso.example", "", "contoso.example"},
 		{"a bound directory wins over Platform SSO", MacOSDirectoryInputs{DSCL: mobileAccount, DSConfigAD: dsconfigadBound, AppSSO: platformSSO("com.microsoft.CompanyPortalMac.ssoextension")},
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 	}

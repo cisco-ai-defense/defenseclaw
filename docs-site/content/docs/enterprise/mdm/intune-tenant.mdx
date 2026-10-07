@@ -183,10 +183,12 @@ and keeps its behavior as it was.
 | --- | --- | --- | --- |
 | Windows, Entra-joined | Entra accounts | The same as any Entra-joined computer: directory `entra_id`, the SID, the UPN and the tenant ([the Entra guide](/docs/enterprise/identity-entra-id)) | An Entra group only after a built-in local group lists it |
 | Linux, enrolled with the Intune app | Local accounts. The Entra user is only the device's primary user | Directory `local`, expected | Local groups and accounts; no Entra groups |
-| macOS, enrolled with Company Portal | Local accounts, unless Platform SSO is set up | Directory `local`, or the Platform SSO provider | macOS groups |
+| macOS, enrolled with Company Portal | Local accounts; with Platform SSO, local accounts linked to Entra users | Directory `local`; with Platform SSO and standalone enterprise, `entra_id` and the UPN for a registered account (observed live) | macOS groups only: Platform SSO gives no Entra groups (observed live; [Entra on macOS](/docs/enterprise/identity-entra-id#4-macos-platform-sso)) |
 
-The rows for the Intune test devices are what the OS setup implies: DefenseClaw
-was not installed on them, so none of it was observed there. The Entra-joined
+The Windows and Linux rows for the Intune test devices are what the OS setup
+implies: DefenseClaw was not installed on them, so none of it was observed
+there. The macOS row was observed on a Mac enrolled with Company Portal and
+Platform SSO. The Entra-joined
 Windows facts come from a separate test tenant, where they were run live.
 
 Put the profiles in the `config.yaml` you give the package builder (Windows), or in the

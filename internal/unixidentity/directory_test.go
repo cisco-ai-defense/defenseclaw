@@ -185,3 +185,24 @@ func TestEntraNSSAccountReportsItsUPN(t *testing.T) {
 		t.Fatalf("facts = %+v", facts)
 	}
 }
+
+// TestGroupNameLookupDefinitive pins GAP-0292: Himmelblau answers an Entra
+// group only by gid or object id, so a host whose group line names it gives
+// no definitive "no such group" by name; other hosts do.
+func TestGroupNameLookupDefinitive(t *testing.T) {
+	nss := filepath.Join(t.TempDir(), "nsswitch.conf")
+	orig := nsswitchPath
+	nsswitchPath = nss
+	t.Cleanup(func() { nsswitchPath = orig })
+	for content, want := range map[string]bool{
+		"passwd: files himmelblau\ngroup: files himmelblau systemd\n": false,
+		"passwd: files sss\ngroup: files sss\n":                       true,
+	} {
+		if err := os.WriteFile(nss, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := GroupNameLookupDefinitive(); got != want {
+			t.Errorf("GroupNameLookupDefinitive(%q) = %t, want %t", content, got, want)
+		}
+	}
+}

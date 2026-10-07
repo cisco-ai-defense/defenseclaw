@@ -424,6 +424,56 @@ rules:
 	}
 }
 
+// TestProfileRulePackLoadedAfterStart pins GAP-0333: a profile whose rule
+// pack directory did not exist when the gateway started scans with the base
+// rule set only until a retry loads the pack, and explain says so meanwhile.
+func TestProfileRulePackLoadedAfterStart(t *testing.T) {
+	stubProfileSources(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	priorManaged := ManagedEnterpriseActive()
+	setManagedEnterpriseRedactionPosture(false)
+	t.Cleanup(func() { setManagedEnterpriseRedactionPosture(priorManaged) })
+	packDir := filepath.Join(t.TempDir(), "late-pack")
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action", RulePackDir: packDir}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	set := api.guardrailProfileSet()
+	scan := func() []string {
+		ctx := context.WithValue(context.Background(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+		return findingIDs(scanAllRulesForConnectorFor(api.withGuardrailProfileDecision(ctx, "codex"), "codex", "profile_marker_token", "exec"))
+	}
+	if set == nil || containsRuleID(scan(), "PROFILE-MARKER") {
+		t.Fatal("a profile whose pack is missing must scan with the base rule set")
+	}
+	if note := set.pendingRulePackNote("strict", set.profiles["strict"].Config, "codex"); !strings.Contains(note, "did not load") {
+		t.Fatalf("explain note = %q, want the missing pack", note)
+	}
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: PROFILE-MARKER
+    pattern: "profile_marker_token"
+    title: late pack fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	for _, retry := range set.missing {
+		retry.mu.Lock()
+		retry.nextTry = time.Time{}
+		retry.mu.Unlock()
+	}
+	if ids := scan(); !containsRuleID(ids, "PROFILE-MARKER") {
+		t.Fatalf("the pack created after start was not used: %v", ids)
+	}
+	if note := set.pendingRulePackNote("strict", set.profiles["strict"].Config, "codex"); note != "" {
+		t.Fatalf("explain note = %q after the pack loaded", note)
+	}
+}
+
 // GAP-0094: a local account's groups count once each. macOS listed every
 // gid and then its name, so explain and identity.observed doubled the count.
 func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
@@ -500,6 +550,12 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	if !awaitingSpool(useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}) ||
 		awaitingSpool(useridentity.DirectoryFacts{Groups: []string{"S-1-1-0", "Everyone"}}) {
 		t.Fatal("facts without groups must await the record, facts with groups must not")
+	}
+	// GAP-0334: an SSSD account without the guardian's UPN is refreshed
+	// early on a gateway that reads the spool; with the UPN it is not.
+	if !awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Principal: "bob@CORP.EXAMPLE"}) ||
+		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceSSSDInfoPipe, UPN: "bob@corp.example"}) {
+		t.Fatal("SSSD facts without a UPN must await the guardian record, facts with it must not")
 	}
 	setIdentitySpoolDir("")
 	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
@@ -610,10 +666,24 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		}
 		return false, nil
 	}
-	got := unknownAssignmentGroups(context.Background(), assignments, exists)
+	got := unknownAssignmentGroups(context.Background(), assignments, exists, nil)
 	if len(got) != 2 || !strings.HasPrefix(got[0], `assignment 1: group "dc-rename-me@dclab.test" is not known`) ||
 		!strings.HasPrefix(got[1], `assignment 2: group "DC-RENAME-ME@dclab.test" is not known`) {
 		t.Fatalf("warnings = %q, want the renamed group in assignments 1 and 2 only", got)
+	}
+
+	// GAP-0332: SSSD names realm groups name@domain, so a short name is
+	// absent while the qualified one exists; the warning names it.
+	qualify := func(_ context.Context, name string) string {
+		if name == "dc-ml-short" {
+			return "dc-ml-short@dclab.test"
+		}
+		return ""
+	}
+	short := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-ml-short"}}}}
+	if got := unknownAssignmentGroups(context.Background(), short, exists, qualify); len(got) != 1 ||
+		!strings.Contains(got[0], `the host knows it as "dc-ml-short@dclab.test"`) {
+		t.Fatalf("short-name warnings = %q, want the qualified name", got)
 	}
 
 	// A command does not wait for a slow directory: the pass runs in the

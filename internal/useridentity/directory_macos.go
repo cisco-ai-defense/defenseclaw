@@ -17,10 +17,17 @@ import (
 //   - dsconfigad -show: the AD domain the Mac is bound to;
 //   - app-sso platform -s: the Platform SSO extension, which names the
 //     identity provider (Microsoft Company Portal for Entra ID, Okta Verify
-//     for Okta).
+//     for Okta);
+//   - dscl ... AltSecurityIdentities: an account registered with Platform SSO
+//     (linked at registration, or created at the login window) carries
+//     PlatformSSO:<login UPN>, which root can read (GAP-0324).
 //
-// The Platform SSO login UPN is per user and is not reported here: until a
-// root-readable source for it is confirmed it stays a claimed fact.
+// An account is a Platform SSO account only when its own record carries that
+// link: a Mac with Platform SSO also has local accounts that never registered
+// (the administrator, service accounts), and those stay local. macOS 15
+// prints app-sso as JSON ("extensionIdentifier" : "..."); older releases
+// printed a property list (extensionIdentifier = "..."). Both are read: the
+// JSON form went unread, so every account reported local (GAP-0330).
 
 // MacOSDirectoryInputs are the raw outputs of the three commands.
 type MacOSDirectoryInputs struct {
@@ -67,9 +74,14 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 	if facts.Directory == DirectoryActiveDirectory && facts.Domain == "" {
 		facts.Domain = adDomain
 	}
-	if provider := platformSSOProvider(in.AppSSO); provider != "" && facts.Directory == "" {
-		facts.Directory = provider
+	if upn := platformSSOLoginUPN(attrs["AltSecurityIdentities"]); upn != "" && facts.Directory == "" {
+		facts.Directory = platformSSOProvider(in.AppSSO)
+		if facts.Directory == "" {
+			facts.Directory = DirectoryOther
+		}
 		facts.Source = SourceMacOSPlatformSSO
+		facts.UPN, facts.Principal = upn, upn
+		facts.Domain = upn[strings.LastIndexByte(upn, '@')+1:]
 	}
 	if facts.Directory == "" {
 		facts.Directory = DirectoryLocal
@@ -118,15 +130,31 @@ func parseDSConfigADDomain(output string) string {
 	return ""
 }
 
+// platformSSOLoginUPN returns the login UPN of a PlatformSSO:<upn> entry of
+// AltSecurityIdentities, or "".
+func platformSSOLoginUPN(values []string) string {
+	for _, value := range values {
+		if rest, ok := strings.CutPrefix(value, "PlatformSSO:"); ok {
+			if upn := NormalizeUPN(rest); upn != "" {
+				return upn
+			}
+		}
+	}
+	return ""
+}
+
 // platformSSOProvider maps the device's Platform SSO extension to the
 // directory behind it.
 func platformSSOProvider(output string) Directory {
 	for _, line := range strings.Split(output, "\n") {
 		key, value, found := strings.Cut(line, "=")
-		if !found || strings.TrimSpace(key) != "extensionIdentifier" {
+		if !found {
+			key, value, found = strings.Cut(line, ":")
+		}
+		if !found || strings.Trim(strings.TrimSpace(key), `"`) != "extensionIdentifier" {
 			continue
 		}
-		bundle := strings.ToLower(strings.Trim(strings.TrimSpace(value), `";`))
+		bundle := strings.ToLower(strings.Trim(strings.TrimSpace(value), `";, `))
 		switch {
 		case strings.HasPrefix(bundle, "com.microsoft."):
 			return DirectoryEntraID

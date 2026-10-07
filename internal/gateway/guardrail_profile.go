@@ -148,6 +148,9 @@ type guardrailProfileSet struct {
 	rules map[string]*compiledRulePackCategories
 	// packs are the composed packs behind rules, by the same key.
 	packs map[string]*guardrail.RulePack
+	// missing holds the rule packs that did not load when the set was built
+	// at start, keyed like rules; requests retry them (GAP-0333).
+	missing map[string]*profileRulePackRetry
 	// matches memoises match for repeated subjects.
 	matches *profileMatchCache
 }
@@ -199,8 +202,14 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 				if strictRules {
 					return nil, loadErr
 				}
-				fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set\n", name, loadErr)
+				fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set until the pack loads (retried every %s)\n",
+					name, loadErr, profileRulePackRetryInterval)
 				set.rules[key] = nil
+				if set.missing == nil {
+					set.missing = make(map[string]*profileRulePackRetry)
+				}
+				set.missing[key] = &profileRulePackRetry{profile: name, cfg: derived[name].Config, scope: scope,
+					lastErr: loadErr.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
 				continue
 			}
 			set.rules[key] = compiled
@@ -208,6 +217,76 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 		}
 	}
 	return set, nil
+}
+
+// A profile rule pack that did not load at start.
+//
+// The gateway starts before an administrator, or the MDM that delivers the
+// files, has created a profile's rule-pack directory: on a fresh managed
+// install the package starts the services, and the pack is copied a moment
+// later. Such a profile scanned with the base rule set until the next
+// restart, while ensure and status reported a complete deployment (GAP-0333).
+// The request path now retries the pack at most every
+// profileRulePackRetryInterval and uses it from the first retry that loads
+// it; explain says when a profile still waits for its pack. A reload keeps
+// refusing a pack that does not load (strictRules).
+
+const profileRulePackRetryInterval = 30 * time.Second
+
+type profileRulePackRetry struct {
+	profile string
+	cfg     *config.Config
+	scope   rulePackScope
+	loaded  atomic.Pointer[compiledRulePackCategories]
+
+	mu      sync.Mutex
+	lastErr string
+	nextTry time.Time
+}
+
+// rules returns the pack once it has loaded, retrying the load when the
+// interval has passed. A request never waits for another request's retry.
+func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories {
+	if loaded := r.loaded.Load(); loaded != nil {
+		return loaded
+	}
+	if !r.mu.TryLock() {
+		return nil
+	}
+	defer r.mu.Unlock()
+	if loaded := r.loaded.Load(); loaded != nil || now.Before(r.nextTry) {
+		return loaded
+	}
+	r.nextTry = now.Add(profileRulePackRetryInterval)
+	rp, err := loadScopedRulePack(guardrail.NewRulePackCache(), r.cfg, r.scope, "guardrail profile "+r.profile)
+	var compiled *compiledRulePackCategories
+	if err == nil {
+		compiled, err = compileRulePackCategories(rp)
+	}
+	if err != nil {
+		r.lastErr = err.Error()
+		return nil
+	}
+	r.loaded.Store(compiled)
+	fmt.Fprintf(os.Stderr, "[guardrail] profile %s: rule pack %s loaded; it did not load when the gateway started\n", r.profile, r.scope.key())
+	return compiled
+}
+
+// pendingRulePackNote is the explain warning for a profile whose rule pack
+// for connectorName has not loaded yet, or "".
+func (set *guardrailProfileSet) pendingRulePackNote(profile string, cfg *config.Config, connectorName string) string {
+	if set == nil || cfg == nil || len(set.missing) == 0 {
+		return ""
+	}
+	retry := set.missing[effectiveRulePackKey(cfg, connectorName)]
+	if retry == nil || retry.rules(time.Now()) != nil {
+		return ""
+	}
+	retry.mu.Lock()
+	reason := retry.lastErr
+	retry.mu.Unlock()
+	return fmt.Sprintf("profile %s: its rule pack did not load (%s), so its requests scan with the base rule set; "+
+		"the gateway retries the pack every %s and uses it once it loads", firstNonEmpty(profile, "default"), reason, profileRulePackRetryInterval)
 }
 
 // profileRulePackScopes lists every rule-pack scope a derived configuration
@@ -924,7 +1003,13 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	if key == "" || key == effectiveRulePackKey(r.set.base, connectorName) {
 		return nil
 	}
-	return r.set.rules[key]
+	if rules := r.set.rules[key]; rules != nil {
+		return rules
+	}
+	if retry := r.set.missing[key]; retry != nil {
+		return retry.rules(time.Now())
+	}
+	return nil
 }
 
 // proxyProfileFor returns the profile resolution the guardrail proxy applies
@@ -1184,12 +1269,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {
 		out["directory"] = view
 	}
-	if len(warnings) > 0 {
-		out["warnings"] = warnings
-	}
 	effective := set.base
 	if derived, ok := set.profiles[decision.Name]; ok {
 		effective = derived.Config
+	}
+	if note := set.pendingRulePackNote(decision.Name, effective, connectorName); note != "" {
+		warnings = append(warnings, note)
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
 	}
 	out["effective"] = profileEffectiveView(effective, connectorName)
 	digests := guardrailProfileDigests(set)
