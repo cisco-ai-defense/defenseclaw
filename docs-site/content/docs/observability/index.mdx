@@ -228,9 +228,9 @@ Each optional destination signal route (logs, traces, or metrics) has an
 independent in-memory delivery circuit. By default, three consecutive terminal
 transient or permanent-payload batches open that route for 30 seconds. A single
 payload rejection therefore does not suppress later valid telemetry.
-Authentication and unsafe-endpoint failures open the affected route
-immediately for 24 hours because retrying unchanged configuration would only
-repeat expensive or unsafe work.
+Authentication failures open the affected route immediately for five minutes;
+a half-open probe then retries it. Unsafe-endpoint failures open for 24 hours
+because retrying an unchanged unsafe endpoint would repeat unsafe work.
 
 While a circuit is open, new and already queued work for that route is rejected
 before adapter delivery and size-estimation work. Sibling signals,
