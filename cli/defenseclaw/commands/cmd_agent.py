@@ -3521,6 +3521,8 @@ def _trigger_post_enable_scan(
     discovery_off = False
     for delay in delays:
         time.sleep(delay)
+        # Only the latest attempt can establish why the scan did not run.
+        discovery_off = False
         try:
             client = _usage_client(
                 app,
