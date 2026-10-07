@@ -82,6 +82,7 @@ func (profile Profile) IsRedacting() bool { return profile.name != ProfileNone }
 // like the join keys, but nothing joins on them, so the least-data profile
 // (strict, and any custom profile that extends it) removes them while user.id,
 // the account name and the agent and session ids still correlate records.
+// An engine from Engine.WithPersonalIdentifiersKept (Secure Client) keeps them.
 func (profile Profile) RemovesPersonalIdentifiers() bool { return profile.base == ProfileStrict }
 
 // personalIdentifierKeys are the registry attributes that sensitivity marks as
