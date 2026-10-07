@@ -314,7 +314,10 @@ func (c *OmnigentConnector) renderPolicyModule(opts SetupOpts) ([]byte, error) {
 	// the gateway's peer-authorized hook socket, like every other per-user
 	// hook there; everywhere else the socket is empty and TCP is kept.
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
-	return []byte(renderOmnigentPolicyWithTransport(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID)), nil
+	// A standalone managed install reads the Kerberos principal through its
+	// administrator-owned hook binary; a per-user one has its own gateway.
+	return []byte(renderOmnigentPolicyFull(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID,
+		managedSessionFactsBinary(opts))), nil
 }
 
 func prepareOmnigentManagedBackup(dataDir, connectorName, logicalName, targetPath string) error {
@@ -968,6 +971,13 @@ func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string 
 // and the gateway service uid trusted beside root as its owner; an empty
 // socket keeps the bridge on the TCP transport with its scoped credential.
 func renderOmnigentPolicyWithTransport(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int) string {
+	return renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket, serviceUID, "")
+}
+
+// renderOmnigentPolicyFull also names the administrator-owned hook binary
+// that reads the user's Kerberos credential cache for a standalone managed
+// install; empty uses the per-user gateway binary.
+func renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int, factsBinary string) string {
 	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
 	uid := ""
 	if hookSocket != "" && serviceUID > 0 {
@@ -979,6 +989,7 @@ func renderOmnigentPolicyWithTransport(template, apiAddr, tokenFile, failMode, h
 		"{{FAIL_MODE_B64}}", encode(normalizeHookFailMode(failMode)),
 		"{{HOOK_SOCKET_B64}}", encode(hookSocket),
 		"{{SERVICE_UID_B64}}", encode(uid),
+		"{{SESSION_FACTS_BIN_B64}}", encode(factsBinary),
 	)
 	return replacer.Replace(template)
 }

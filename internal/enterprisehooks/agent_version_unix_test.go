@@ -85,6 +85,31 @@ func TestDiscoverUnixAgentVersionReadsUVToolMetadata(t *testing.T) {
 	}
 }
 
+// A current Hermes refuses --version outside a committed dependency
+// environment, which left the managed enumerator without a Hermes version
+// and no hook written; the install stamp names the release without running
+// anything (GAP-0193).
+func TestDiscoverUnixAgentVersionReadsHermesInstallStamp(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".hermes", "hermes-agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp := filepath.Join(dir, "install-stamp.json")
+	if err := os.WriteFile(stamp, []byte(`{"baseVersion":"0.21.5","displayVersion":"0.21.5+8332.g3d304a1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, reason := DiscoverUnixAgentVersion(context.Background(), home, "hermes", false); got != "0.21.5+8332.g3d304a1" {
+		t.Fatalf("version = %q (%s)", got, reason)
+	}
+	if err := os.WriteFile(stamp, []byte(`{"baseVersion":"0.21.5","displayVersion":"unknown"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, reason := DiscoverUnixAgentVersion(context.Background(), home, "hermes", false); got != "0.21.5" {
+		t.Fatalf("base version = %q (%s)", got, reason)
+	}
+}
+
 // A prerelease that ends in "v" must survive extraction; the root parent
 // compared the extracted token with the worker's answer and dropped
 // "1.2.0-dev" as "1.2.0-de".

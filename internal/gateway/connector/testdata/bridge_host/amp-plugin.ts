@@ -16,11 +16,11 @@
 // does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
-import { userInfo } from 'node:os'
-import { dirname } from 'node:path'
+import { homedir, userInfo } from 'node:os'
+import { dirname, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
@@ -97,10 +97,44 @@ function identityHeaders(): Record<string, string> {
 	return headers
 }
 
+// The Kerberos principal of this login sits in a credential cache the plugin
+// cannot read (a KCM cache is a socket protocol), so a DefenseClaw binary reads
+// it: `hook session-facts` prints the whole X-DefenseClaw-Session-Facts value,
+// the principal included, and keeps its own five-minute cache in
+// ~/.defenseclaw. A managed install runs its administrator-owned hook binary
+// (DC_FOREIGN_GUARD); a per-user install runs the gateway binary the installer
+// puts in ~/.local/bin. No answer is a supported outcome: the SSH and logind
+// variables alone follow.
+const DC_SESSION_FACTS_TTL_MS = 300000
+const DC_SESSION_FACTS_RETRY_MS = 30000
+let sessionFactsCache = { key: "", value: "", until: 0 }
+
+function fullSessionFacts(): string {
+	const env = process.env
+	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|")
+	const now = Date.now()
+	if (sessionFactsCache.key === key && now < sessionFactsCache.until) return sessionFactsCache.value
+	let value = ""
+	try {
+		const binary = DC_FOREIGN_GUARD ||
+			join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+		const out = String(execFileSync(binary, ["hook", "session-facts"], {
+			timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+		})).trim()
+		if (out.startsWith("v1;") && out.length <= 1024 && /^[A-Za-z0-9._@\/:;=-]+$/.test(out)) value = out
+	} catch (_) {
+		// No binary or no answer: the caller falls back to the SSH variables.
+	}
+	sessionFactsCache = { key, value, until: now + (value ? DC_SESSION_FACTS_TTL_MS : DC_SESSION_FACTS_RETRY_MS) }
+	return value
+}
+
 // sessionFactsHeader renders the claimed SSH and logind session facts as the
 // X-DefenseClaw-Session-Facts value the hook runner also sends. Each value is
 // dropped unless it matches the header's allowlisted charset.
 function sessionFactsHeader(): string {
+	const full = fullSessionFacts()
+	if (full !== "") return full
 	const env = process.env
 	const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || ""
 	const tty = String(env.SSH_TTY || "").replace(/^\/dev\//, "")
