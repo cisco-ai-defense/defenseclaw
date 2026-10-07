@@ -10061,25 +10061,6 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
         _echo_saved_without_restart(plural=True)
 
 
-# Backwards-compat alias for any out-of-tree callers; new code must
-# use ``_apply_hook_connector_setup`` directly. Forces observe mode
-# so the legacy contract is preserved bit-for-bit.
-def _apply_connector_observability_only(
-    app: AppContext,
-    *,
-    connector: str,
-    restart: bool,
-) -> bool:
-    return _apply_hook_connector_setup(
-        app,
-        connector=connector,
-        mode="observe",
-        restart=restart,
-        allow_offline_audit=not restart,
-        workspace_dir=None,
-    )
-
-
 def _print_connector_observability_banner(connector: str, *, mode: str = "observe") -> None:
     setup_slug = "claude-code" if connector == "claudecode" else connector
     label = _CONNECTOR_META[connector]["label"]
@@ -12404,11 +12385,6 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "kiro",
     }
 )
-
-# Legacy alias retained as a backstop for any out-of-tree code that
-# imported the old name. New call sites must use one of the two named
-# sets above. Slated for deletion once internal docs catch up.
-_OBSERVABILITY_ONLY_CONNECTORS = _HOOK_ENFORCED_CONNECTORS
 
 # Kept as separate name for legibility at call sites that mean
 # "supports the proxy enforcement surface".
