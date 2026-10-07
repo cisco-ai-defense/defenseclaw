@@ -413,7 +413,7 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
 	for _, where := range []string{"host.openshell.internal:5432", "host.openshell.internal:6379", "db.example.net:6379", "host.openshell.internal:443",
-		"paste.example.net (blocklisted)"} {
+		"paste.example.net (on the block list)"} {
 		if !strings.Contains(live, "✗ DefenseClaw blocked "+where) {
 			t.Errorf("no notice names %s:\n%q", where, live)
 		}
