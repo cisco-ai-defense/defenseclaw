@@ -107,7 +107,7 @@ func errUnrecorded(name string) error {
 
 // checkPolicySources refuses a policy the sandbox could rewrite. In mount
 // mode the agent writes the project as the host user, and a custom pack is
-// trusted because that user owns it (packs.LoadFile), so a pack file or
+// trusted because that user owns it (packs.Validate), so a pack file or
 // pack directory inside the project (or holding it) would let the agent
 // change its own policy on the next resolution: add allow entries that
 // lift the blocklist feed or open private networks, drop block entries,

@@ -237,17 +237,12 @@ func (l *loader) loadNamed(name string) (*Pack, error) {
 	return pack, nil
 }
 
-// LoadFile loads a custom pack from an absolute path to a pack.yaml or to the
+// loadFile loads a custom pack from an absolute path to a pack.yaml or to the
 // directory holding one ("~/" expands to the home directory). The pack
 // directory and the file must not be symbolic links, the file must be a
 // regular file of at most MaxPackBytes, no other local user may have written
 // it or be able to replace it (checkPackOwnership), and the pack may not
-// claim a built-in name. A pack loaded this way can extend only a built-in
-// pack (Load and Validate also find custom parents).
-func LoadFile(p string) (*Pack, error) {
-	return (&loader{}).loadFile(p)
-}
-
+// claim a built-in name.
 func (l *loader) loadFile(p string) (*Pack, error) {
 	raw := strings.TrimSpace(p)
 	expanded, err := expandHome(raw)

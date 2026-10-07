@@ -143,9 +143,9 @@ func TestExtendsRefusals(t *testing.T) {
 	// a built-in parent needs none.
 	_, err := Parse([]byte(extends("x", "open")), "test")
 	wantPackError(t, err, "extends_unsupported", "extends")
-	_, err = LoadFile(filepath.Join(root, "orphan"))
+	_, err = Validate(filepath.Join(root, "orphan"), "")
 	wantPackError(t, err, "not_found", "extends")
-	if _, err := LoadFile(filepath.Join(root, "d5")); err != nil {
+	if _, err := Validate(filepath.Join(root, "d5"), ""); err != nil {
 		t.Fatalf("a built-in parent: %v", err)
 	}
 	// The merged pack is validated as a whole: a deny parent's empty port

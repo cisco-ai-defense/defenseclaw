@@ -304,7 +304,7 @@ func packErr(source, field, code, format string, args ...any) *Error {
 
 // Parse strictly decodes and validates pack bytes. source names the pack in
 // errors and becomes Pack.Source. A pack that extends another needs the
-// loader to find its parent (Load, LoadFile), so Parse refuses one.
+// loader to find its parent (Load, Validate), so Parse refuses one.
 func Parse(data []byte, source string) (*Pack, error) {
 	return parse(data, source, nil)
 }
