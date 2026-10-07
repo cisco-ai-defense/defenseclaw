@@ -791,6 +791,17 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 			if adoptErr != nil {
 				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: restore the managed DACL on the folder a purge kept: %w", adoptErr)
 			}
+			if !adopted {
+				// A folder the account created itself before enrollment (the
+				// refused hook of an unenrolled account writes one) holds no
+				// per-user product. The guardian takes it over at sign-in; a
+				// fresh install takes it over here instead of failing for
+				// every account on the machine (GAP-0416).
+				adopted, adoptErr = adoptWindowsManagedRuntimeAccountCreatedRoot(parent, final, target)
+				if adoptErr != nil {
+					return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: take over the folder the account created: %w", adoptErr)
+				}
+			}
 			if adopted {
 				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
 			}
@@ -866,6 +877,45 @@ func adoptWindowsManagedRuntimePurgeKeptRoot(parent, final windows.Handle, targe
 	}
 	if _, err := windowsRecoverSetupRelaxedHookDirectory(target.data, target.sid); err != nil && !windowsManagedRuntimeRootMissing(err) {
 		return true, err
+	}
+	return true, nil
+}
+
+// adoptWindowsManagedRuntimeAccountCreatedRoot gives the canonical DACL to a
+// data directory the account created itself before it was enrolled
+// (windowsAccountCreatedDataDir: owned by the account, an inherited DACL, no
+// hooks folder, a small plain tree the account owns). It is the install-plan
+// counterpart of the guardian adoption (adoptWindowsAccountCreatedDataDir). A
+// folder a per-user install left has a hooks folder and is still refused.
+func adoptWindowsManagedRuntimeAccountCreatedRoot(parent, final windows.Handle, target windowsManagedRuntimeTarget) (bool, error) {
+	if !windowsManagedRuntimeAccountCreatedBaseline(final, target) {
+		return false, nil
+	}
+	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+	if err != nil {
+		return false, err
+	}
+	writer, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess()|windows.WRITE_DAC, false)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(writer)
+	if got, err := windowsManagedRuntimeHandleIdentity(writer, true); err != nil || got != identity {
+		return false, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	descriptor, err := windows.GetSecurityInfo(writer, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	if ok, err := windowsAccountCreatedDataDirDescriptor(descriptor, target.sid); err != nil || !ok {
+		return false, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	acl, err := windowsUserPathProtectionACL(target.sid, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(writer, acl, true); err != nil {
+		return false, err
 	}
 	return true, nil
 }

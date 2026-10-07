@@ -715,7 +715,9 @@ each user remove their per-user install with
 `defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does
 not adopt a `%USERPROFILE%\.defenseclaw` folder that a per-user install left,
 and refuses that profile until the folder is gone (move it aside to keep its
-data). A per-user gateway that still runs holds the gateway API port, and
+data). A folder the account created itself without any per-user product (the
+refused hook of an account that was not enrolled writes one) is not such a
+folder: Setup takes it over. A per-user gateway that still runs holds the gateway API port, and
 Setup names it in its `api_port_held` error. See
 [Uninstall and preserved state](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
 
