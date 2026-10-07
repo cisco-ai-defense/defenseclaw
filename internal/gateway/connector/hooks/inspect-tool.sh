@@ -85,9 +85,11 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
     # shellcheck source=/dev/null
     . "$TOKEN_FILE"
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# Only the private copy is used from here on: no child process inherits the
+# bearer in its environment.
+unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_INPUT="$(defenseclaw_read_stdin_capped)" || {
@@ -128,18 +130,28 @@ fail_unauthorized() {
 
 AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+{{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to. Like
+  # a 401, a malformed bearer fails closed whatever the fail mode: otherwise a
+  # CR in an inherited DEFENSECLAW_GATEWAY_TOKEN would turn it into an allow.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_unauthorized "invalid gateway token" ;;
+  esac
+{{end}}  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 CONNECTOR_HEADER_ARGS=()
 if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-{{if .Sandbox}}INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | jq -Rs --arg tool "$TOOL_NAME" \
+# The tool input reaches jq on stdin and the gateway on a curl descriptor:
+# on a command line it would be readable by every local account, and an
+# input over the argument size limit would make jq fail to start.
+INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | jq -Rs --arg tool "$TOOL_NAME" \
   '{tool: $tool, args: .}')" || {
   fail_unreachable "failed to build inspect body"
 }
-RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
+{{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
   "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
@@ -149,16 +161,11 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg args "$TOOL_INPUT" \
-  '{tool: $tool, args: $args}' | \
-  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool" \
+RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool" 5 "$INSPECT_BODY" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 5 \
-  --data-binary @- 2>/dev/null) || {
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
   fail_unreachable "gateway unreachable"
 }{{end}}
 

@@ -139,10 +139,6 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
   defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
-# Drop inherited export attributes before these names receive private values.
-# A plain Bash assignment preserves the exported bit of an inherited variable,
-# which would otherwise copy the hook payload or bearer into curl's environment.
-unset PAYLOAD API_TOKEN CURL_CONFIG_TOKEN
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
@@ -174,7 +170,6 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
     IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
@@ -284,80 +279,48 @@ if [ "$BOUND_EVENT" = "SessionEnd" ]; then
   HOOK_MAX_TIME=2
 fi
 
-# Keep authentication and the hook event off the curl command line. Process
-# inspection is available to other same-user processes on supported hosts, so
-# passing either value as a literal argv entry discloses the gateway credential
-# and the potentially sensitive tool payload. curl reads both through inherited
-# descriptors instead; argv contains only the descriptor paths. The
-# descriptor-backed --config form works on curl releases older than 7.55.0,
-# unlike --header @file.
 {{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
-# unset first so a name the agent exported cannot carry either value into
-# curl's environment; plain shell variables are never inherited.
-unset _DC_CURL_CONFIG_TOKEN _DC_HOOK_PAYLOAD
-_DC_CURL_CONFIG_TOKEN=
 if [ -n "${API_TOKEN}" ]; then
-  # A bearer token is an HTTP field value, so CR/LF is never valid. Reject it
-  # before formatting curl configuration, then escape the two metacharacters
-  # recognized inside a quoted curl config value.
+  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to.
   case "${API_TOKEN}" in
     *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
   esac
-  _DC_CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"
-  _DC_CURL_CONFIG_TOKEN="${_DC_CURL_CONFIG_TOKEN//\"/\\\"}"
-  AUTH_HEADER_ARGS=(--config "/dev/fd/8")
+  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
-_DC_HOOK_PAYLOAD="${PAYLOAD}"
-
-# curl does not need the original values: the request reads them from the
-# private descriptors opened below. Clear them before spawning curl so no
-# credential or payload is inherited as process environment.
-API_TOKEN=
-PAYLOAD=
-unset API_TOKEN PAYLOAD
 
 if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
 
-# Each attempt opens fresh descriptors, because curl consumes them.
+# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the hook
+# event on descriptors, never on its command line.
 codex_gateway_post() {
-  local status=0
-  if [ -n "${_DC_CURL_CONFIG_TOKEN}" ]; then
-    exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${_DC_CURL_CONFIG_TOKEN}\"")
-  fi
-  exec 9< <(printf '%s' "${_DC_HOOK_PAYLOAD}")
-  RESPONSE=$(curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" "$HOOK_MAX_TIME" "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: codex-hook/1.0" \
     -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
     -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
     "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-    --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
-    --max-time "$HOOK_MAX_TIME" \
-    --data-binary "@/dev/fd/9" 2>/dev/null) || status=$?
-  exec 9<&-
-  if [ -n "${_DC_CURL_CONFIG_TOKEN}" ]; then
-    exec 8<&-
-  fi
-  return "$status"
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if .HookSocketTransportSH}} \
+    --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 
 CURL_STATUS=0
-codex_gateway_post || CURL_STATUS=$?
+RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
 # A refused connection means this account's gateway is not running (after a
 # reboot, for example): start it once and retry. SessionEnd has no time for a
 # start. See defenseclaw_gateway_cold_start in _hardening.sh.
 if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ] &&
   defenseclaw_gateway_cold_start "$CURL_STATUS"; then
   CURL_STATUS=0
-  codex_gateway_post || CURL_STATUS=$?
+  RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
 fi
-_DC_CURL_CONFIG_TOKEN=
-_DC_HOOK_PAYLOAD=
-unset _DC_CURL_CONFIG_TOKEN _DC_HOOK_PAYLOAD
+API_TOKEN=
+PAYLOAD=
+AUTH_HEADER_ARGS=()
+unset API_TOKEN PAYLOAD
 if [ "$CURL_STATUS" -ne 0 ]; then
   fail_unreachable "gateway unreachable"
 fi{{end}}

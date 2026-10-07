@@ -32,6 +32,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -7166,9 +7167,12 @@ func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
-	if !containsAuthBearer(out, "tok-abcdef123") {
-		t.Errorf("claude-code-hook.sh curl invocation missing `Authorization: Bearer tok-abcdef123`; got curl args:\n%s", out)
+	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	if !containsAuthBearer(capture.headers, "tok-abcdef123") {
+		t.Errorf("claude-code-hook.sh request missing `Authorization: Bearer tok-abcdef123`; got curl headers:\n%s", capture.headers)
+	}
+	if strings.Contains(capture.argv, "tok-abcdef123") {
+		t.Errorf("claude-code-hook.sh put the bearer on curl's command line:\n%s", capture.argv)
 	}
 }
 
@@ -7183,9 +7187,9 @@ func TestWriteHookScriptsWithToken_EmptyTokenOmitsHeader(t *testing.T) {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
-	if containsAuthBearer(out, "") {
-		t.Errorf("claude-code-hook.sh should not emit an Authorization header when token is empty; got curl args:\n%s", out)
+	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	if containsAuthBearer(capture.headers, "") {
+		t.Errorf("claude-code-hook.sh should not emit an Authorization header when token is empty; got curl headers:\n%s", capture.headers)
 	}
 }
 
@@ -7199,10 +7203,13 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "claude-code-hook.sh"),
+	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "claude-code-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "from-env"})
-	if !containsAuthBearer(out, "from-env") {
-		t.Errorf("env var should win over baked token; got curl args:\n%s", out)
+	if !containsAuthBearer(capture.headers, "from-env") {
+		t.Errorf("env var should win over baked token; got curl headers:\n%s", capture.headers)
+	}
+	if strings.Contains(capture.argv, "from-env") {
+		t.Errorf("claude-code-hook.sh put the bearer on curl's command line:\n%s", capture.argv)
 	}
 }
 
@@ -7245,24 +7252,19 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 				t.Fatalf("mutate scoped token: %v", err)
 			}
 
-			out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
+			capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "codex-hook.sh"),
 				map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
-			if containsAuthBearer(out, "") {
-				t.Errorf("hook retained an inherited generic token after scoped read failure; got curl args:\n%s", out)
+			if containsAuthBearer(capture.headers, "") || strings.Contains(capture.argv, "generic-env") {
+				t.Errorf("hook retained an inherited generic token after scoped read failure; got curl headers:\n%s", capture.headers)
 			}
 		})
 	}
 }
 
-// runHookAndReturnCurlArgs executes the given hook script with `curl`
-// replaced by a stub that persists its argv out-of-band. The companion
-// transport helper also dereferences header and config descriptors so tests
-// can verify private header transport without putting credentials in argv.
-func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[string]string) string {
-	t.Helper()
-	return runHookAndCaptureCurlTransport(t, scriptPath, extraEnv).argv
-}
-
+// hookCurlTransportCapture is what runHookAndCaptureCurlTransport's curl stub
+// saw: its argv, and the -H values and --config files (read from their
+// descriptors) it was given, so tests can check that the bearer reached the
+// request without reaching the command line.
 type hookCurlTransportCapture struct {
 	argv    string
 	headers string
@@ -7357,12 +7359,19 @@ func shellSingleQuoteForTest(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// containsAuthBearer returns true if the stubbed curl argv lines contain
-// an `Authorization: Bearer <token>` header. When token is empty, returns
-// true whenever ANY Authorization: Bearer header is present.
-func containsAuthBearer(curlArgs, token string) bool {
-	for _, line := range strings.Split(curlArgs, "\n") {
+// containsAuthBearer returns true if the captured curl headers (-H values or
+// `header = "..."` lines of a --config file) contain an
+// `Authorization: Bearer <token>` header. When token is empty, returns true
+// whenever ANY Authorization: Bearer header is present.
+func containsAuthBearer(curlHeaders, token string) bool {
+	for _, line := range strings.Split(curlHeaders, "\n") {
 		line = strings.TrimSpace(line)
+		if quoted, ok := strings.CutPrefix(line, "header = "); ok {
+			// curl unescapes \" and \\ in a quoted config value, as Go does.
+			if header, err := strconv.Unquote(quoted); err == nil {
+				line = header
+			}
+		}
 		if !strings.HasPrefix(line, "Authorization: Bearer") {
 			continue
 		}
@@ -7500,8 +7509,8 @@ func TestHookScripts_MissingTokenNamesTheFile(t *testing.T) {
 	}
 }
 
-// runHookAndReturnCurlArgsWithHome is the sentinel-aware variant of
-// runHookAndReturnCurlArgs. It takes an explicit DEFENSECLAW_HOME so
+// runHookAndReturnCurlArgsWithHome runs a hook against a curl stub that
+// records its arguments. It takes an explicit DEFENSECLAW_HOME so
 // tests can drive the .disabled / missing-home branches deterministically
 // without touching the real $HOME of the developer running the tests.
 // curl args end up in a file the stub appends to; the function returns
@@ -7878,8 +7887,9 @@ func TestRenderedShimsPostExecutableAndExactArgv(t *testing.T) {
 set -euo pipefail
 payload=""
 while (( $# > 0 )); do
-  if [[ "$1" == "-d" && $# -ge 2 ]]; then
-    payload="$2"
+  # The shim sends its request body from a descriptor (@/dev/fd/9).
+  if [[ "$1" == "--data-binary" && $# -ge 2 && "$2" == @* ]]; then
+    payload="$(cat "${2#@}")"
     shift 2
     continue
   fi

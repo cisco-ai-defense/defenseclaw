@@ -431,11 +431,13 @@ func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 	return nil
 }
 
-// WriteHookScriptsWithToken generates every hook script into hookDir,
-// baking the gateway bearer token into the curl Authorization header so
-// the API server's auth middleware accepts the hook's POST. When token
-// is empty the scripts omit the header entirely so the middleware's
-// loopback-allow branch still applies.
+// WriteHookScriptsWithToken generates every hook script into hookDir and
+// writes the gateway bearer token to the .token file the scripts read at run
+// time, so the API server's auth middleware accepts the hook's POST. The
+// scripts hand the token to curl on a descriptor (defenseclaw_gateway_post in
+// _hardening.sh), never on its command line. When token is empty the scripts
+// omit the header entirely so the middleware's loopback-allow branch still
+// applies.
 //
 // Hook scripts generated:
 //   - inspect-tool.sh          (pre-tool)

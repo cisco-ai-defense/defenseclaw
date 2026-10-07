@@ -2149,6 +2149,43 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
         self.assertTrue(any("bakes hook fail mode open" in reason for reason in reasons), reasons)
 
+    def test_hooks_rendered_before_the_descriptor_transport_are_stale(self):
+        # GAP-0027: such a hook still has the older sentinels but gives curl
+        # the bearer and the payload as command-line arguments.
+        from defenseclaw.commands import cmd_doctor
+
+        old_hook = (
+            "#!/bin/bash\n# defenseclaw-managed-hook v7\n"
+            'fail_response() { reason="$(defenseclaw_response_failure_reason "$1")"; }\n'
+            'curl -s -X POST "http://${API_ADDR}/hook" -H "Authorization: Bearer ${API_TOKEN}" -d "$PAYLOAD"\n'
+        )
+        old_helper = (
+            "#!/bin/bash\n# defenseclaw-managed-hook v7\n"
+            "defenseclaw_response_failure_reason() { printf '%s (possible token drift)' \"$1\"; }\n"
+        )
+        for connector, script in (("claudecode", "claude-code-hook.sh"), ("codex", "codex-hook.sh")):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = self._make_cfg(tmp)
+                self._write_hook(tmp, script, old_hook)
+                self._write_hook(tmp, "_hardening.sh", old_helper)
+                reasons = cmd_doctor._stale_generated_hook_reasons(cfg, connector)
+            self.assertTrue(any(f"{script} missing defenseclaw_gateway_post" in r for r in reasons), reasons)
+            self.assertTrue(any("_hardening.sh missing defenseclaw_gateway_post" in r for r in reasons), reasons)
+
+    def test_current_hook_templates_carry_every_freshness_sentinel(self):
+        # A sentinel the templates lack would report every fresh install stale.
+        from defenseclaw.commands import cmd_doctor
+
+        hooks = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "internal", "gateway", "connector", "hooks"
+        )
+        for connector, files in cmd_doctor._GENERATED_HOOK_SENTINELS.items():
+            for filename, needles in files.items():
+                with open(os.path.join(hooks, filename), encoding="utf-8") as fh:
+                    text = fh.read()
+                for needle in needles:
+                    self.assertIn(needle, text, f"{connector}: {filename} lacks {needle!r}")
+
     def test_codex_hook_check_warns_when_generated_script_is_stale(self):
         from defenseclaw.commands import cmd_doctor
 
