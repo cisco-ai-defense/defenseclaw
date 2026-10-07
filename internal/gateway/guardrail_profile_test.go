@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	osuser "os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -69,6 +70,51 @@ func TestGuardrailProfileTelemetryBoundsTheMatchedGroup(t *testing.T) {
 	}
 	if name, _ := long.Name.Get(); name != "strict" {
 		t.Fatalf("profile name = %q, want strict", name)
+	}
+}
+
+// The guardrail proxy scans the requests a profile selects with the
+// profile's rule pack, under the posture that pack implies, and applies its
+// HILT, as explain says it does (GAP-0313).
+func TestGuardrailProxyAppliesTheProfileRulePackAndHILT(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	packDir := filepath.Join(t.TempDir(), "strict")
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: PROXY-PROFILE-MARKER
+    pattern: "proxy_profile_marker_token"
+    title: proxy profile fixture
+    severity: MEDIUM
+    confidence: 0.99
+    tags: [test]
+`)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"contractors": {RulePackDir: packDir, HILT: &config.HILTConfig{Enabled: true, MinSeverity: "medium"}},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
+	}
+	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	inspector := NewGuardrailInspector("local", nil, nil, "")
+	inspector.SetHILTConfig(false, "HIGH")
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}}
+	ctx := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)).Context()
+	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "contractors" {
+		t.Skip("the gateway's own account is not a verified subject on this host")
+	}
+	// A completion: the prompt surface reports and never blocks.
+	verdict := inspector.Inspect(ctx, "completion", "please keep proxy_profile_marker_token safe", nil, "test-model", "action")
+	if verdict == nil || verdict.Action != "block" || !strings.Contains(strings.Join(verdict.Findings, ","), "PROXY-PROFILE-MARKER") {
+		t.Fatalf("proxy verdict = %+v, want a block by the profile's strict rule pack", verdict)
+	}
+	if hilt := inspector.hiltInputFor(ctx); hilt == nil || !hilt.Enabled || hilt.MinSeverity != "MEDIUM" {
+		t.Fatalf("proxy HILT input = %+v, want the profile's (enabled, MEDIUM)", hilt)
 	}
 }
 

@@ -329,7 +329,10 @@ hooks, its `/api/v1/inspect` calls and, for OpenClaw and ZeptoClaw, its LLM
 traffic through the guardrail proxy. The proxy attributes each request to the
 connector it serves and to that connector's install for the user the gateway
 runs as, so an OpenClaw or ZeptoClaw install appears in
-`defenseclaw agent identities` after its first proxied request.
+`defenseclaw agent identities` after its first proxied request. On proxied
+traffic the profile sets the mode, the block message, the rule pack (with the
+posture it implies) and `hilt`; `block_at` and `alert_at` apply to hook and
+inspect decisions only, as they do without profiles.
 
 A pin names one install, so keep three things in mind:
 

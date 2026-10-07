@@ -914,25 +914,49 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	return r.set.rules[dir]
 }
 
-// profileProxyOverride returns the mode and block message the guardrail
-// proxy applies for ctx, whose profile withProxyAgent resolved for the
-// proxy's connector and agent. It applies only to a request with a verified
-// user-scoped identity; without one the proxy keeps its own settings.
-func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
+// proxyProfileFor returns the profile resolution the guardrail proxy applies
+// to ctx, whose profile withProxyAgent resolved for the proxy's connector and
+// agent. It applies only to a request with a verified user-scoped identity;
+// without one (nil) the proxy keeps its own settings.
+func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
 	set := liveGuardrailProfiles.Load()
 	if set == nil {
-		return "", "", false
+		return nil
 	}
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || resolved.set != set {
 		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
 	if resolved == nil || resolved.derived == nil || resolved.decision.SubjectSource == "" {
+		return nil
+	}
+	return resolved
+}
+
+// profileProxyOverride returns the mode and block message the guardrail
+// proxy applies for ctx (proxyProfileFor).
+func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
+	resolved := proxyProfileFor(ctx)
+	if resolved == nil {
 		return "", "", false
 	}
 	connectorName = config.NormalizeConnectorName(connectorName)
 	return resolved.derived.Guardrail.EffectiveMode(connectorName),
 		resolved.derived.Guardrail.EffectiveBlockMessage(connectorName), true
+}
+
+// proxyRuleGeneration is the rule pack the guardrail proxy scans ctx's
+// content with: the one its profile selects (proxyProfileFor) when that is
+// another pack than the base configuration's, else the process-global one.
+// The proxy scanned every request with the global pack, so a profile's
+// rule_pack_dir never reached OpenClaw or ZeptoClaw traffic (GAP-0313).
+func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
+	if resolved := proxyProfileFor(ctx); resolved != nil {
+		if generation := resolved.ruleGeneration(""); generation != nil {
+			return generation
+		}
+	}
+	return snapshotRulePackGeneration("")
 }
 
 // guardrailProfileTelemetry carries the correlation.guardrail.profile
