@@ -214,7 +214,7 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
                 cfg = default_config()
                 cfg.data_dir = tmpdir
-                with self.assertRaisesRegex(ConfigVersionError, "schema v8"):
+                with self.assertRaisesRegex(ConfigVersionError, "older DefenseClaw"):
                     cfg.save()
 
     def test_fresh_v8_save_emits_only_canonical_observability(self):

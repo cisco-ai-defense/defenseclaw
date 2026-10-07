@@ -451,7 +451,7 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 // Client one) still enables VirusTotal and AI Defense through its v8 keys; the
 // model carries them only as analyzers (GAP-0157).
 func TestRuntimeV8FoldsTheRetiredScannerKeysIntoAnalyzers(t *testing.T) {
-	const keyEnv = "DEFENSECLAW_TEST_GAP0157_VT"
+	const keyEnv = "GAP0157_TEST_VT_KEY"
 	t.Setenv(keyEnv, "")
 	raw := []byte("config_version: 8\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    use_aidefense: true\n" +
 		"    virustotal_api_key_env: " + keyEnv + "\n    virustotal_api_key: inline-test-value\nobservability: {}\n")

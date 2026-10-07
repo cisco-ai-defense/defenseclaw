@@ -549,6 +549,7 @@ func TestWindowsEnterpriseStderrCodeKeepsInstallerRefusals(t *testing.T) {
 }
 
 func TestWindowsEnterpriseStandalonePreflightFailureIsSchemaTwo(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, nil)
 	originalObserver := windowsEnterpriseStandaloneObserver
 	t.Cleanup(func() { windowsEnterpriseStandaloneObserver = originalObserver })
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
@@ -575,6 +576,30 @@ func TestWindowsEnterpriseStandalonePreflightFailureIsSchemaTwo(t *testing.T) {
 		if result.SchemaVersion != 2 || result.OK || len(result.Errors) != 1 || result.Errors[0].Code != tc.code || result.ExitCode != tc.exit {
 			t.Fatalf("%v: result %+v", tc.cause, result)
 		}
+	}
+}
+
+// GAP-0181: an ensure or install refused for a config the gateway cannot load
+// changed nothing, so its result describes the installed host as it is, not
+// installed=false with every readiness flag false.
+func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	cause := fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, errors.New("the gateway cannot load the config"))
+	err := writeWindowsEnterpriseStandaloneConfigRefusal(context.Background(), command, "ensure", ensureTestOptions(), `C:\stage\install-enterprise.ps1`, cause)
+	if commandExitCode(err) != 1639 || len(stub.calls) != 1 || !strings.EqualFold(stub.calls[0][1], "status") {
+		t.Fatalf("exit %d, installer runs %q", commandExitCode(err), stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		!result.Installed || result.InstalledVersion != "1.4.0" || !result.Readiness.Gateway || !result.Readiness.Guardian {
+		t.Fatalf("result = %+v", result)
 	}
 }
 
