@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
 )
+
+// sha256Sum returns the SHA-256 hash of data.
+func sha256Sum(data []byte) [32]byte {
+	return sha256.Sum256(data)
+}
 
 // EmergencyCommand identifies an emergency action to push to a fleet.
 type EmergencyCommand uint8
@@ -170,10 +176,32 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("read compiled policy: %w", err)
 	}
 
-	// The raw compiler output IS the policy binary (header + payload).
-	// Do NOT strip any bytes — the Python compiler's output is the
-	// complete policy blob. Sign() appends the real HMAC-SHA256
-	// signature when the caller is ready to distribute.
+	// P1-3 fix: The Python compiler outputs [header(8) + payload(N) + dev_stub(33)].
+	// The 33-byte dev stub is: 32 bytes of padding with a 0xED marker at byte -33,
+	// and the last byte is the first byte of SHA-256 of the payload. The C-side OTA
+	// receiver expects [header(8) + payload(N) + signature(64)], so we must strip
+	// the dev stub before Sign() appends the real 64-byte signature.
+	//
+	// Detection: last 33 bytes exist, blob[-33] == 0xED, and blob[-1] matches
+	// the first byte of SHA-256(payload).
+	if len(blob) > HeaderSize+33 {
+		stubStart := len(blob) - 33
+		if blob[stubStart] == 0xED {
+			// Verify: last byte should be first byte of SHA-256(payload)
+			hdr, hdrErr := ParseHeader(blob)
+			if hdrErr == nil {
+				payloadEnd := HeaderSize + int(hdr.PayloadLen)
+				if payloadEnd <= stubStart {
+					payload := blob[HeaderSize:payloadEnd]
+					h := sha256Sum(payload)
+					if h[0] == blob[len(blob)-1] {
+						s.logger.Printf("[policy] stripping 33-byte dev stub from compiler output (marker=0xED, checksum=0x%02x)", h[0])
+						blob = blob[:stubStart]
+					}
+				}
+			}
+		}
+	}
 
 	// Validate the header
 	if _, err := ParseHeader(blob); err != nil {

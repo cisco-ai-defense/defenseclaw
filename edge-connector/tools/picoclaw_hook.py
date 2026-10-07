@@ -183,7 +183,8 @@ class DclawEngine:
         self._initialized = True
 
     def evaluate(self, tool_name: str, cap_flags: int,
-                 destination: str = "", session_id: int = 0) -> dict:
+                 destination: str = "", session_id: int = 0,
+                 content: str = "") -> dict:
         if not self._initialized:
             self.init()
 
@@ -197,8 +198,16 @@ class DclawEngine:
         req.session_id = session_id
         req.direction = 0       # DCLAW_DIRECTION_REQUEST
         req.content_scope = 0   # DCLAW_CONTENT_SCOPE_UNKNOWN
-        req.content = None
-        req.content_len = 0
+
+        # P1-8 fix: Pass tool arguments as content so the C engine's content
+        # scanner can inspect them for secrets, PII, injection, etc.
+        if content:
+            content_bytes = content.encode("utf-8", errors="replace")[:511]
+            req.content = content_bytes
+            req.content_len = len(content_bytes)
+        else:
+            req.content = None
+            req.content_len = 0
 
         verdict = self.lib.dclaw_evaluate(ctypes.byref(req))
 
@@ -303,12 +312,22 @@ def handle_before_tool(params: dict[str, Any]) -> dict[str, Any]:
     destination = extract_destination(tool, arguments)
     session_id = get_session_id(params)
 
+    # P1-8 fix: Serialize tool arguments as JSON and pass as content
+    # so the C engine's content scanner can inspect them.
+    content = ""
+    if arguments:
+        try:
+            content = json.dumps(arguments, ensure_ascii=True, default=str)
+        except (TypeError, ValueError):
+            content = ""
+
     engine = get_engine()
     verdict = engine.evaluate(
         tool_name=tool,
         cap_flags=cap_flags,
         destination=destination,
         session_id=session_id,
+        content=content,
     )
 
     action = verdict["action"]

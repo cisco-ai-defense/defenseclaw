@@ -18,6 +18,7 @@ extern void dclaw_cache_invalidate(const uint8_t *tool_hash);
 extern const char *dclaw_mqtt_get_session_id(void);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint16_t target_hash, uint16_t session_id);
+extern dclaw_retroactive_block_fn dclaw_get_retroactive_callback(void);
 extern int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
                                               uint16_t *request_id, uint8_t *action,
                                               uint8_t *severity, uint16_t *ttl,
@@ -127,15 +128,26 @@ static bool ct_compare(const uint8_t *a, const uint8_t *b, size_t len) {
 static uint8_t s_device_key[32];
 static size_t  s_device_key_len = 0;
 static bool    s_device_key_loaded = false;
+static bool    s_device_key_provisioned = false;
 
 static const uint8_t *get_device_key(size_t *out_key_len) {
     if (!s_device_key_loaded) {
         s_device_key_len = 0;
+        s_device_key_provisioned = false;
         if (hal_load_device_key(s_device_key, &s_device_key_len, sizeof(s_device_key)) != 0) {
             /* Fallback: 32-byte zero key (Comment 32 fix).
              * Must match the Go side (bridge.go) which uses make([]byte, 32). */
             memset(s_device_key, 0, sizeof(s_device_key));
             s_device_key_len = 32;
+        } else {
+            /* Check that the loaded key is not all zeros */
+            bool all_zero = true;
+            for (size_t i = 0; i < s_device_key_len; i++) {
+                if (s_device_key[i] != 0) { all_zero = false; break; }
+            }
+            if (!all_zero) {
+                s_device_key_provisioned = true;
+            }
         }
         s_device_key_loaded = true;
     }
@@ -143,12 +155,36 @@ static const uint8_t *get_device_key(size_t *out_key_len) {
     return s_device_key;
 }
 
-/* Register a pending verdict request */
+/* Set device key for testing. Allows tests to provision a non-zero key
+ * so that verdict HMAC verification succeeds. */
+void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len) {
+    if (key_len > sizeof(s_device_key)) key_len = sizeof(s_device_key);
+    memcpy(s_device_key, key, key_len);
+    s_device_key_len = key_len;
+    s_device_key_loaded = true;
+    /* Check if key is non-zero */
+    bool all_zero = true;
+    for (size_t i = 0; i < key_len; i++) {
+        if (key[i] != 0) { all_zero = false; break; }
+    }
+    s_device_key_provisioned = !all_zero;
+}
+
+/* Register a pending verdict request.
+ *
+ * P1-7 fix: A slot is "available" when EITHER:
+ *   (a) it has never been used (request_id == 0 && !resolved), OR
+ *   (b) it was resolved and reclaimed (resolved == true).
+ * The previous logic only checked condition (a), so resolved slots were
+ * never reused — once all DCLAW_PENDING_SLOTS were resolved the system
+ * could not send any new verdict requests. */
 int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash) {
     dclaw_state_t *s = dclaw_get_state();
 
     for (int i = 0; i < DCLAW_PENDING_SLOTS; i++) {
-        if (!s->pending[i].resolved && s->pending[i].request_id == 0) {
+        bool available = (s->pending[i].request_id == 0 && !s->pending[i].resolved)
+                      || s->pending[i].resolved;
+        if (available) {
             s->pending[i].request_id = request_id;
             s->pending[i].resolved = false;
             s->pending[i].resolved_at = 0;
@@ -200,6 +236,16 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
     const uint8_t *device_key = get_device_key(&key_len);
     const char *session_id = dclaw_mqtt_get_session_id();
 
+    /* P0-1 fix: Reject verdict responses when no real device key is provisioned.
+     * Without a provisioned key, HMAC verification is meaningless because anyone
+     * can compute the HMAC with the known zero-key fallback and forge ALLOW verdicts. */
+    if (!s_device_key_provisioned) {
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
+                          (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8)),
+                          0);
+        return -1; /* device key not provisioned */
+    }
+
     compute_verdict_hmac(device_key, key_len, session_id,
                          request_id, action, pending_tool_hash, expected_hmac);
 
@@ -231,6 +277,17 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
     /* Cache the verdict */
     dclaw_cache_store(pending_tool_hash, (dclaw_action_t)action,
                       (dclaw_severity_t)severity);
+
+    /* Invoke retroactive callback when cloud returns BLOCK for a
+     * previously speculatively-allowed request (Comment 41 fix).
+     * Computes target_hash from tool_hash for the callback signature. */
+    if ((dclaw_action_t)action == DCLAW_ACTION_BLOCK) {
+        dclaw_retroactive_block_fn cb = dclaw_get_retroactive_callback();
+        if (cb) {
+            uint16_t target_hash = (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8));
+            cb(target_hash, NULL);
+        }
+    }
 
     /* Audit the decision */
     dclaw_audit_write((dclaw_action_t)action, (dclaw_reason_t)reason,

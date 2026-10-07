@@ -1701,17 +1701,30 @@ def _status_payload(app) -> dict:
 
 def _fetch_fleet_health(client) -> dict | None:
     """GET /api/v1/fleet/fleet/health from the gateway; None when unavailable."""
+    import os
+
     try:
+        # Use the fleet bearer token (DCLAW_FLEET_API_TOKEN), not the gateway token.
+        fleet_token = os.environ.get("DCLAW_FLEET_API_TOKEN", "").strip()
+        headers = {}
+        if fleet_token:
+            headers["Authorization"] = f"Bearer {fleet_token}"
+
         resp = client._session.get(
             f"{client.base_url}/api/v1/fleet/fleet/health",
             timeout=client.timeout,
             allow_redirects=False,
+            headers=headers,
         )
         if resp.status_code in (404, 503):
             return None
         resp.raise_for_status()
         data = resp.json()
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        # The fleet health endpoint returns {"fleet": {...}, "cache_hits": ..., ...}.
+        # Extract the nested "fleet" object which contains online/offline/total_devices.
+        return data.get("fleet") if "fleet" in data else data
     except Exception:  # noqa: BLE001 - status is observational; fleet is optional
         return None
 
@@ -1724,7 +1737,7 @@ def _print_fleet_health(client) -> None:
         return
     online = int(data.get("online", 0))
     offline = int(data.get("offline", 0))
-    total = online + offline
+    total = int(data.get("total_devices", online + offline))
     if total == 0:
         _status_row("Fleet", ux.dim("no devices registered"))
         return
@@ -1740,9 +1753,11 @@ def _fleet_health_payload(client) -> dict:
         return {"available": False}
     return {
         "available": True,
+        "total_devices": int(data.get("total_devices", 0)),
         "online": int(data.get("online", 0)),
         "offline": int(data.get("offline", 0)),
-        "devices": data.get("devices", []),
+        "degraded": int(data.get("degraded", 0)),
+        "lockdown": int(data.get("lockdown", 0)),
     }
 
 

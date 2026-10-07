@@ -526,16 +526,19 @@ def _load_fleet_policy(app: AppContext, path: str, data: dict) -> None:
         )
         raise SystemExit(1)
 
-    resolver = getattr(gateway, "resolved_token", None)
-    try:
-        token = resolver() if callable(resolver) else str(getattr(gateway, "token", "") or "")
-    except Exception:  # noqa: BLE001
-        token = ""
+    # Use the fleet API token (DCLAW_FLEET_API_TOKEN), not the gateway token.
+    fleet_token = os.environ.get("DCLAW_FLEET_API_TOKEN", "").strip()
+    if not fleet_token:
+        click.echo(
+            "error: DCLAW_FLEET_API_TOKEN not set. The fleet API requires a bearer token.",
+            err=True,
+        )
+        raise SystemExit(1)
 
     client = OrchestratorClient(
         host=gateway_api_client_host(cfg),
         port=port,
-        token=(token or "").strip(),
+        token=fleet_token,
         timeout=10,
     )
 
@@ -543,10 +546,16 @@ def _load_fleet_policy(app: AppContext, path: str, data: dict) -> None:
     tenant_id = int(metadata.get("tenant_id", 1))
     fleet_id = int(metadata.get("fleet_id", 1))
 
+    # Read the raw YAML string — the fleet API expects the unparsed YAML text
+    # in ``policy_yaml``, not a parsed object in ``policy``.
+    with open(path) as fh:
+        raw_yaml = fh.read()
+
     payload = {
         "tenant_id": tenant_id,
         "fleet_id": fleet_id,
-        "policy": data,
+        "policy_yaml": raw_yaml,
+        "profile": str(metadata.get("profile", "standard")),
     }
 
     try:

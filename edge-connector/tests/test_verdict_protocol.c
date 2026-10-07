@@ -13,6 +13,7 @@ extern int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_le
 extern void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t action,
                                                 const uint8_t *tool_hash,
                                                 uint8_t *out_hmac_4bytes);
+extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
 
 static void build_valid_response(uint16_t request_id, uint8_t action,
                                  const uint8_t *tool_hash, uint8_t *buf) {
@@ -111,6 +112,13 @@ int main(void) {
     dclaw_init(&info);
     dclaw_mqtt_init();
     dclaw_mqtt_connect();
+
+    /* P0-1 fix: Provision a non-zero device key so that HMAC verification
+     * is active. Without this, the zero-key fallback causes all verdict
+     * responses to be rejected (device key not provisioned). */
+    uint8_t test_key[32];
+    memset(test_key, 0x42, 32);
+    dclaw_verdict_set_device_key(test_key, 32);
 
     printf("test_verdict_protocol:\n");
     test_valid_verdict_accepted();

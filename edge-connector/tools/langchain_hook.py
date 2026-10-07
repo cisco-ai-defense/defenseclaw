@@ -77,15 +77,79 @@ def set_connector(connector: EdgeConnector) -> None:
 
 
 # ---------------------------------------------------------------------------
-# EdgeConnectorToolWrapper — wraps any LangChain BaseTool
+# EdgeConnectorToolWrapper — proper BaseTool subclass wrapping any LangChain tool
 # ---------------------------------------------------------------------------
+def _make_wrapper_class(tool: Any, connector: Optional["EdgeConnector"] = None) -> Any:
+    """Build a ``BaseTool`` subclass that delegates to *tool* via the Edge Connector.
+
+    We dynamically construct the class so that ``args_schema`` is declared as a
+    Pydantic **class variable** (``ClassVar``-style) rather than a ``@property``,
+    which would collide with Pydantic's descriptor protocol and raise TypeError.
+    """
+    _import_langchain()
+
+    wrapped_tool = tool
+    wrapped_connector = connector
+
+    schema = getattr(wrapped_tool, "args_schema", None)
+
+    # Build the class dict.  ``args_schema`` must be a plain class attribute
+    # (a Type[BaseModel] or None) — NOT a property — so that Pydantic
+    # model_fields / schema generation works correctly.
+    ns: Dict[str, Any] = {
+        "name": wrapped_tool.name,
+        "description": wrapped_tool.description,
+    }
+    if schema is not None:
+        ns["args_schema"] = schema
+
+    def _run(self: Any, *args: Any, **kwargs: Any) -> str:  # noqa: N805
+        ec = wrapped_connector or get_connector(fail_open=False)
+        arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
+        verdict_result = ec.evaluate(
+            tool_name=wrapped_tool.name,
+            arguments=arguments,
+        )
+        if verdict_result.blocked:
+            msg = (
+                f"[EdgeConnector] Tool '{wrapped_tool.name}' blocked: "
+                f"{verdict_result.reason}"
+            )
+            logger.warning(msg)
+            return msg
+        return wrapped_tool.run(*args, **kwargs)
+
+    async def _arun(self: Any, *args: Any, **kwargs: Any) -> str:  # noqa: N805
+        ec = wrapped_connector or get_connector(fail_open=False)
+        arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
+        verdict_result = ec.evaluate(
+            tool_name=wrapped_tool.name,
+            arguments=arguments,
+        )
+        if verdict_result.blocked:
+            msg = (
+                f"[EdgeConnector] Tool '{wrapped_tool.name}' blocked: "
+                f"{verdict_result.reason}"
+            )
+            logger.warning(msg)
+            return msg
+        return wrapped_tool.run(*args, **kwargs)
+
+    ns["_run"] = _run
+    ns["_arun"] = _arun
+
+    cls = type(f"EdgeConnectorWrapped_{wrapped_tool.name}", (_BaseTool,), ns)
+    return cls
+
+
 class EdgeConnectorToolWrapper:
     """Wraps a LangChain ``BaseTool`` with Edge Connector enforcement.
 
-    The wrapper is itself a ``BaseTool`` subclass so it can be used anywhere
-    a regular tool is expected.  When the agent invokes the tool, the wrapper
-    evaluates the call through the Edge Connector first.  If the verdict is
-    BLOCK the tool returns an error message instead of executing.
+    Call ``as_tool()`` (or just invoke the wrapper) to get a proper
+    ``BaseTool`` instance that can be used anywhere a regular tool is
+    expected.  When the agent invokes the tool, the wrapper evaluates
+    the call through the Edge Connector first.  If the verdict is BLOCK
+    the tool returns an error message instead of executing.
     """
 
     def __init__(
@@ -99,44 +163,10 @@ class EdgeConnectorToolWrapper:
         self._tool = tool
         self._connector = connector
 
-    # Dynamically create a BaseTool subclass that delegates to our logic
     def as_tool(self) -> Any:
         """Return a LangChain ``BaseTool`` wrapping the original tool."""
-        _import_langchain()
-        wrapper = self
-
-        class _Wrapped(_BaseTool):
-            name: str = wrapper._tool.name
-            description: str = wrapper._tool.description
-
-            @property
-            def args_schema(self) -> Optional[Type]:
-                return getattr(wrapper._tool, "args_schema", None)
-
-            def _run(self_, *args: Any, **kwargs: Any) -> str:
-                return wrapper._invoke(*args, **kwargs)
-
-            async def _arun(self_, *args: Any, **kwargs: Any) -> str:
-                # Evaluate synchronously, then delegate async execution
-                return wrapper._invoke(*args, **kwargs)
-
-        return _Wrapped()
-
-    def _invoke(self, *args: Any, **kwargs: Any) -> str:
-        ec = self._connector or get_connector(fail_open=False)
-        arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
-        verdict = ec.evaluate(
-            tool_name=self._tool.name,
-            arguments=arguments,
-        )
-        if verdict.blocked:
-            msg = (
-                f"[EdgeConnector] Tool '{self._tool.name}' blocked: "
-                f"{verdict.reason}"
-            )
-            logger.warning(msg)
-            return msg
-        return self._tool.run(*args, **kwargs)
+        cls = _make_wrapper_class(self._tool, self._connector)
+        return cls()
 
     # Convenience: let callers use wrap() as a shortcut
     __call__ = as_tool

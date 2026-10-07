@@ -27,7 +27,7 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 void dclaw_policy_rollback(void);
 void dclaw_canary_tick(void);
 void dclaw_canary_record_block(void);
-void dclaw_policy_reload_from_flash(void);
+int dclaw_policy_reload_from_flash(void);
 
 /* Policy blob header format (first 8 bytes of blob) */
 typedef struct {
@@ -236,6 +236,20 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
     hdr.payload_len = ((uint16_t)blob[2] << 8) | blob[3];
     hdr.canary_baseline = ((uint16_t)blob[4] << 8) | blob[5];
 
+    /* P1-4 fix: Validate that the declared payload length matches the actual
+     * blob size. The signed blob format is: header(8) + payload(N) + signature(64).
+     * Without this check, a short blob with a header claiming a large payload
+     * would pass signature verification (which only covers blob_len bytes)
+     * and then cause out-of-bounds reads in downstream consumers. */
+    {
+        uint32_t expected_total = (uint32_t)sizeof(dclaw_policy_header_t)
+                                + (uint32_t)hdr.payload_len;
+        if (expected_total != blob_len) {
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, 0, 0);
+            return -1; /* payload length mismatch */
+        }
+    }
+
     /* REQ-36: Anti-rollback — reject version ≤ current */
     if (hdr.version <= s->device.policy_version) {
         return -2;
@@ -392,13 +406,17 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     /* Apply command */
     switch (command) {
     case 0x01: /* BLOCK_ALL */
-        /* Flush cache, set all verdicts to BLOCK */
+        /* P1-6 fix: Set global emergency block flag so dclaw_evaluate()
+         * returns BLOCK for ALL requests until cleared or daemon restart. */
         dclaw_cache_flush_all();
+        s->emergency.block_all_active = true;
         break;
 
-    case 0x02: /* REVOKE_HASH */
+    case 0x02: /* REVOKE_HASH / REVOKE_SESSIONS */
         /* payload[0:32] contains the hash to revoke */
         dclaw_cache_flush_all(); /* simplified: flush everything */
+        /* P1-6 fix: Clear session table to revoke all active sessions */
+        memset(s->sessions, 0, sizeof(s->sessions));
         break;
 
     case 0x03: /* FORCE_SYNC */
@@ -406,7 +424,11 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         break;
 
     case 0x04: /* ENTER_LOCKDOWN */
-        /* Would trigger full lockdown — Phase 2+ */
+        /* P1-6 fix: Full lockdown — set global emergency block flag.
+         * Same effect as BLOCK_ALL: dclaw_evaluate() returns BLOCK for
+         * all requests. The flag persists until cleared or daemon restart. */
+        dclaw_cache_flush_all();
+        s->emergency.block_all_active = true;
         break;
 
     default:
@@ -441,11 +463,17 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
  * TODO(Phase 2): Implement dynamic policy table loading from flash binary
  *   blob format, parsing the same structures the compiler generates.
  */
-void dclaw_policy_reload_from_flash(void) {
+/*
+ * P1-5 fix: Return an explicit error code so callers know enforcement
+ * is deferred. Return 0 would suggest tables were reloaded; return 1
+ * signals "policy stored but requires restart to enforce".
+ */
+int dclaw_policy_reload_from_flash(void) {
     fprintf(stderr, "[DCLAW] WARNING: New policy written to flash but policy tables "
-            "are compiled-in. A process restart is required for deny-list, allowlist, "
+            "are compiled-in. A daemon restart is required for deny-list, allowlist, "
             "and rule changes to take effect. Version, cache, and canary protections "
             "are active immediately.\n");
+    return 1; /* 1 = stored but not enforced; restart required */
 }
 
 /* REQ-32: Check for emergency sequence gap on reconnect */

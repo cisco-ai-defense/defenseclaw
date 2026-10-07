@@ -62,6 +62,36 @@ static const dclaw_tool_cap_entry_t tool_cap_map[] = {
     { "read_sensor",    DCLAW_CAP_SENSOR_READ },
     { "read-sensor",    DCLAW_CAP_SENSOR_READ },
     { "sensor",         DCLAW_CAP_SENSOR_READ },
+
+    /* P1-9 fix: Common adapter tool names (HA, PicoClaw, IoT connectors).
+     * Without these entries, adapter tools default to EXEC_SHELL and get
+     * blocked by the fail-closed policy. */
+
+    /* Sensor-class adapter tools → SENSOR_READ */
+    { "get_state",        DCLAW_CAP_SENSOR_READ },
+    { "battery_status",   DCLAW_CAP_SENSOR_READ },
+    { "read_sensor",      DCLAW_CAP_SENSOR_READ },
+    { "get_temperature",  DCLAW_CAP_SENSOR_READ },
+    { "check_status",     DCLAW_CAP_SENSOR_READ },
+    { "list_devices",     DCLAW_CAP_SENSOR_READ },
+    { "get_history",      DCLAW_CAP_SENSOR_READ },
+    { "get_sensors",      DCLAW_CAP_SENSOR_READ },
+    { "scan_surroundings", DCLAW_CAP_SENSOR_READ },
+    { "check_room_state", DCLAW_CAP_SENSOR_READ },
+
+    /* Actuation-class adapter tools → ACTUATE */
+    { "turn_on",          DCLAW_CAP_ACTUATE },
+    { "turn_off",         DCLAW_CAP_ACTUATE },
+    { "set_temperature",  DCLAW_CAP_ACTUATE },
+    { "start_motor",      DCLAW_CAP_ACTUATE },
+    { "drive",            DCLAW_CAP_ACTUATE },
+    { "move",             DCLAW_CAP_ACTUATE },
+    { "explore",          DCLAW_CAP_ACTUATE },
+    { "go_to_room",       DCLAW_CAP_ACTUATE },
+    { "follow_nearest",   DCLAW_CAP_ACTUATE },
+    { "follow_start",     DCLAW_CAP_ACTUATE },
+    { "follow_stop",      DCLAW_CAP_ACTUATE },
+    { "stop",             DCLAW_CAP_ACTUATE },
 };
 static const size_t tool_cap_map_count = sizeof(tool_cap_map) / sizeof(tool_cap_map[0]);
 

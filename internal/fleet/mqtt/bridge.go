@@ -47,6 +47,13 @@ type BridgeConfig struct {
 
 	// VerdictQoS is the QoS for verdict request subscriptions (default 1).
 	VerdictQoS byte
+
+	// RequireRegistrationToken, when non-empty, requires registration payloads
+	// to include a pre-shared token. The token is NOT currently carried in the
+	// heartbeat wire format; this field is reserved for Phase 2 extended
+	// registration payloads. For now, setting it logs a warning on every
+	// registration attempt since the 32-byte heartbeat format has no token field.
+	RequireRegistrationToken string
 }
 
 // NewBridge creates a new MQTT bridge.
@@ -196,6 +203,16 @@ func (b *Bridge) handleRegistration(msg Message) {
 	hw, err := DecodeHeartbeat(msg.Payload)
 	if err != nil {
 		b.logger.Printf("[mqtt-bridge] decode registration from device %d: %v", parts.DeviceID, err)
+		b.incErrors()
+		return
+	}
+
+	// P0-2 fix: Validate that the device_id in the payload matches the topic's
+	// device_id. A mismatch indicates a forged registration — an attacker
+	// publishing to another device's topic to impersonate it.
+	if hw.DeviceID != parts.DeviceID {
+		b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — topic device_id=%d does not match payload device_id=%d (possible spoofing attempt)",
+			parts.DeviceID, hw.DeviceID)
 		b.incErrors()
 		return
 	}

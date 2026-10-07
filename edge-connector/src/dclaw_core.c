@@ -67,6 +67,10 @@ void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb) {
     g_retroactive_cb = cb;
 }
 
+dclaw_retroactive_block_fn dclaw_get_retroactive_callback(void) {
+    return g_retroactive_cb;
+}
+
 void dclaw_shutdown(void) {
     dclaw_flush_audit();
     g_state.initialized = false;
@@ -122,6 +126,19 @@ static dclaw_verdict_t make_verdict(dclaw_action_t action, dclaw_reason_t reason
 
 dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     if (!req) return (dclaw_verdict_t){.action = DCLAW_ACTION_BLOCK, .reason = DCLAW_REASON_INVALID_INPUT};
+
+    /* P1-6 fix: Check global emergency BLOCK_ALL / LOCKDOWN flag at the TOP
+     * of evaluation. When active, ALL requests are immediately blocked
+     * regardless of policy, cache, or cloud verdicts. The flag is set by
+     * BLOCK_ALL (0x01) and ENTER_LOCKDOWN (0x04) emergency commands and
+     * persists until explicitly cleared or daemon restart. */
+    if (g_state.emergency.block_all_active) {
+        uint16_t th = compute_target_hash(req->tool_hash);
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_BLOCK,
+                          th, req->session_id);
+        g_state.eval_denied_count++;
+        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_BLOCK, DCLAW_VERDICT_SYNC);
+    }
 
     uint16_t target_hash = compute_target_hash(req->tool_hash);
 
@@ -192,6 +209,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
+            dclaw_canary_record_block();
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                                 DCLAW_VERDICT_SYNC);
         }
@@ -200,6 +218,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
+            dclaw_canary_record_block();
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY, DCLAW_VERDICT_SYNC);
         }
     }
@@ -210,6 +229,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
+        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }
 
@@ -219,7 +239,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(cached.action, cached.reason, target_hash, req->session_id);
         switch (cached.action) {
             case DCLAW_ACTION_ALLOW:    g_state.eval_allowed_count++;   break;
-            case DCLAW_ACTION_BLOCK:    g_state.eval_denied_count++;    break;
+            case DCLAW_ACTION_BLOCK:    g_state.eval_denied_count++;  dclaw_canary_record_block(); break;
             case DCLAW_ACTION_WARN:     g_state.eval_warned_count++;    break;
             case DCLAW_ACTION_ESCALATE: g_state.eval_escalated_count++; break;
         }

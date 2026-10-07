@@ -245,6 +245,7 @@ typedef struct {
     uint32_t gap_start;
     bool     replay_requested;
     bool     initialized;
+    bool     block_all_active;  /* P1-6: global BLOCK_ALL / LOCKDOWN flag */
 } dclaw_emergency_state_t;
 
 /* === Global Agent State === */

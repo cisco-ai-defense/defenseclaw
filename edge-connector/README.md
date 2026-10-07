@@ -18,7 +18,7 @@ prompt injection, and dangerous commands before they leave the device.
 security enforcement to any agent.
 
 **Architecture:** See `docs-site/content/docs/edge-connector/architecture.mdx`  
-**Spec:** See `docs/specs/001-defenseclaw-lite-phase1/`
+**Documentation:** See `docs-site/content/docs/edge-connector/`
 
 ## Features
 

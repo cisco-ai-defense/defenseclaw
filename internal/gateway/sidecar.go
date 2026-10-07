@@ -6886,9 +6886,13 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// Wire the policy service so policy endpoints (push, emergency, versions)
 	// are functional instead of returning 501.
 	policySigner, _ := fleetpolicy.NewHMACSignerFromEnv()
-	policyStore := fleetpolicy.NewMemoryPolicyStore()
-	// TODO: replace with a SQLite-backed PolicyStore once one is implemented
-	// to persist policy versions across restarts.
+	var policyStore fleetpolicy.PolicyStore
+	if sqlPS, err := fleetpolicy.NewSQLitePolicyStore(filepath.Join(fleetDataDir, "policies.db")); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] policy SQLite store: %v (using in-memory)\n", err)
+		policyStore = fleetpolicy.NewMemoryPolicyStore()
+	} else {
+		policyStore = sqlPS
+	}
 	var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
 
 	// Start the MQTT bridge if a broker URL is configured. The bridge
