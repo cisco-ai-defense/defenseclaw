@@ -67,6 +67,13 @@ var (
 		})
 		return err
 	}
+	// The upgrade transaction admits --config only from a source that only
+	// SYSTEM, Administrators and TrustedInstaller can write
+	// (Assert-DefenseClawTrustedSource), as Setup CONFIG= does
+	// (ValidateTrustedFilePath). The hot path checks the same, so whether a
+	// standard user's edit is installed does not depend on which keys it
+	// changed (GAP-0312).
+	windowsEnterpriseHotConfigSourceCheck = managed.ValidateTrustedConfigPath
 )
 
 // windowsEnterpriseServicePins are the environment pins the gateway service
@@ -136,6 +143,11 @@ func windowsEnterpriseHotConfigApply(
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
+		return false
+	}
+	// An untrusted source goes to the transaction, which refuses it and
+	// says why.
+	if windowsEnterpriseHotConfigSourceCheck(opts.configPath) != nil {
 		return false
 	}
 	next, err := readWindowsEnterpriseBoundedFile(opts.configPath, windowsEnterpriseHotConfigMaxBytes)

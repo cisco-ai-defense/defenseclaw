@@ -204,4 +204,13 @@ func TestSidecarBannerManagedShowsNoWatcherOrFleet(t *testing.T) {
 	if got != want {
 		t.Fatalf("Secure Client banner:\n%s\nwant:\n%s", got, want)
 	}
+	// The Auth row too: main masks the token, standalone says only "set".
+	cfg.Gateway.Token = "abcd1234567890wxyz"
+	if got := tokenStatus(cfg); got != "abcd...wxyz" {
+		t.Fatalf("Secure Client Auth row = %q, want the masked token of main", got)
+	}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	if got := tokenStatus(cfg); got != "set" {
+		t.Fatalf("standalone Auth row = %q, want set", got)
+	}
 }

@@ -1003,9 +1003,11 @@ $Payload = 'C:\ProgramData\DefenseClaw-Staging\payload'
 For unsigned files, add `--trust-mode hash_pinned --payload-manifest <file>`.
 The manifest is JSON in the form
 `{"schema_version":1,"files":{"<file name>":"<sha256>"}}`. It must pin
-`install-enterprise.ps1`, `DefenseClawEnterprise.psm1` and every other
-unsigned file. The `...payload-manifest.json` release asset uses a different
-format and cannot be passed here. Later `repair`, `verify` and `uninstall`
+`install-enterprise.ps1`, `DefenseClawEnterprise.psm1`,
+`defenseclaw-scanners.exe` and every other unsigned file; the CLI checks the
+scanner runtime against it before it installs and runs it. The
+`...payload-manifest.json` release asset uses a different format and cannot
+be passed here. Later `repair`, `verify` and `uninstall`
 runs re-trust the installed files from the digests the deployment recorded,
 so they need no manifest.
 

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,12 +61,16 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	layoutSeam, lockSeam := windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll
+	sourceSeam := windowsEnterpriseHotConfigSourceCheck
 	t.Cleanup(func() {
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
+		windowsEnterpriseHotConfigSourceCheck = sourceSeam
 	})
+	// The supplied file stands for an administrator-only staged config.
+	windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
 	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
 	}
@@ -126,6 +131,17 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	}
 	if !result.OK || result.Policy == nil || !result.Policy.Applied || !strings.Contains(strings.Join(result.Changes, "\n"), "it was not restarted") {
 		t.Fatalf("result = %+v", result)
+	}
+
+	// GAP-0312: a supplied config a standard user can write is not
+	// installed by the hot path; the transaction gets it and refuses it.
+	host, opts = newHotConfigHost(t, previous, next)
+	host.adopted = true
+	windowsEnterpriseHotConfigSourceCheck = func(string) error { return errors.New("writable by BUILTIN\\Users") }
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	if len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" || len(host.writes) != 0 {
+		t.Fatalf("untrusted source: installer runs %q, writes %q", stub.calls, host.writes)
 	}
 
 	// A key the gateway reads once at start goes through the upgrade.

@@ -100,6 +100,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	payloadManifest string
 	allowedSigners  []string
 	productVersion  string
+	// payloadPins are the payload manifest's SHA-256 pins, read when a
+	// hash_pinned run verifies its installer. The scanner runtime the
+	// lifecycle installs itself is admitted by them too.
+	payloadPins map[string]string
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.
@@ -412,9 +416,11 @@ func runWindowsEnterpriseLifecycle(
 		script = staged
 	}
 	if windowsEnterpriseStandalone(opts) && opts.trustMode == windowsEnterpriseTrustHashPinned {
-		if err := verifyWindowsEnterpriseHashPinnedInstaller(script, opts.payloadManifest); err != nil {
+		pins, err := verifyWindowsEnterpriseHashPinnedInstaller(script, opts.payloadManifest)
+		if err != nil {
 			return failPreflight(err)
 		}
+		opts.payloadPins = pins
 	}
 	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure") {
 		if err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath); err != nil {
