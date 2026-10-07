@@ -124,7 +124,24 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if _, err := os.Stat(tokenPath); err != nil {
 		t.Fatal(err)
 	}
-	run(runEnterpriseACPVerify)
+	// verify tells a published token from a completed setup, and list
+	// names who is enrolled and how far they got (GAP-0400).
+	if verified := run(runEnterpriseACPVerify); verified["setup_done"] != false {
+		t.Fatalf("verify did not report that setup has not run: %v", verified)
+	}
+	restoreDescribe := enterpriseACPDescribePrincipal
+	t.Cleanup(func() { enterpriseACPDescribePrincipal = restoreDescribe })
+	enterpriseACPDescribePrincipal = func(string) (enterpriseACPAccount, error) {
+		return enterpriseACPAccount{exists: true, name: "alice", home: userHome, uid: -1, gid: -1}, nil
+	}
+	listed, _ := run(runEnterpriseACPList)["enrollments"].([]any)
+	if len(listed) != 1 {
+		t.Fatalf("list = %v, want the one enrollment", listed)
+	}
+	if row, _ := listed[0].(map[string]any); row["user"] != "alice" || row["client"] != "zed" || row["agent"] != "kiro" ||
+		row["token_copy"] != "present" || row["setup"] != "not run" {
+		t.Fatalf("list row = %v, want alice zed/kiro with the token copy present and setup not run", row)
+	}
 
 	enrollment, err := resolveEnterpriseACPEnrollment(true)
 	if err != nil {

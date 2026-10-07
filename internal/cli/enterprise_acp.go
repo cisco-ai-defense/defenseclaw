@@ -388,7 +388,11 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	setupDone := false
 	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
+		if info, statErr := os.Lstat(acpContractLockPath(enrollment.dataDir, enrollment.client, enrollment.agent)); statErr == nil && info.Mode().IsRegular() {
+			setupDone = true
+		}
 		if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
 			return err
 		}
@@ -406,10 +410,20 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, enterpriseACPRefusal(err))
 	}
-	return enterpriseACPResult(cmd, map[string]any{
+	payload := map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
-	}, nil)
+	}
+	if !cfg.SecureClientIntegration() {
+		// A published token is not a working editor entry: verify was green
+		// for users who never ran setup (GAP-0400).
+		payload["setup_done"] = setupDone
+		payload["setup_note"] = "the user has run setup (the contract lock is present)"
+		if !setupDone {
+			payload["setup_note"] = "the user has not run setup yet; as that user, run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
+		}
+	}
+	return enterpriseACPResult(cmd, payload, nil)
 }
 
 func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
@@ -511,5 +525,8 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential verified\n", Style("✓", "fg=green", "bold"))
+	if note, _ := payload["setup_note"].(string); note != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", note)
+	}
 	return nil
 }

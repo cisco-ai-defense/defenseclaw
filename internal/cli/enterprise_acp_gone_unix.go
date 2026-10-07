@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
@@ -30,6 +31,24 @@ var enterpriseACPHomeForUID = func(uid int) (home string, found bool, err error)
 		return "", false, err
 	}
 	return account.Home, true, nil
+}
+
+// enterpriseACPDescribePrincipal names the account of a uid:N principal;
+// replaceable in tests.
+var enterpriseACPDescribePrincipal = func(principal string) (enterpriseACPAccount, error) {
+	kind, value, _ := strings.Cut(principal, ":")
+	uid, err := strconv.Atoi(value)
+	if kind != "uid" || err != nil {
+		return enterpriseACPAccount{}, fmt.Errorf("%s names no account", principal)
+	}
+	account, err := enterprisehooks.StandaloneResolver().LookupUID(uid)
+	if unixidentity.IsNotFound(err) {
+		return enterpriseACPAccount{uid: uid, gid: -1}, nil
+	}
+	if err != nil {
+		return enterpriseACPAccount{}, err
+	}
+	return enterpriseACPAccount{exists: true, name: account.Name, home: account.Home, uid: account.UID, gid: account.GID}, nil
 }
 
 // revokeGoneEnterpriseACPEnrollments revokes the managed ACP enrollments of

@@ -290,6 +290,21 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp revoke \
   --user alice --client zed --agent kiro --profile kiro-only
 ```
 
+`verify` also says whether the user has run setup: a published token alone
+is not a working editor entry. To see every enrollment, with its user,
+editor and agent, profile, enrollment time, token copy and setup state, run:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp list
+```
+
+```text
+  2 managed ACP enrollment(s)
+  USER                        CLIENT/AGENT  PROFILE    ENROLLED           TOKEN COPY  SETUP
+  alice (uid:1001)            zed/kiro      kiro-only  2026-10-07 17:20Z  present     done
+  uid:1051 (account deleted)  zed/kiro      kiro-only  2026-10-07 18:10Z  -           -
+```
+
 Revocation deletes the service-side credential first, so a copied or cached
 token stops working even if the user-side cleanup is interrupted. The user's
 private copy is written as that user. Enrolling again after a revocation
