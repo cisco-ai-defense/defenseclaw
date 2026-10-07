@@ -28,8 +28,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 )
 
 // ServerConfig is the helper's own configuration.
@@ -48,6 +51,48 @@ type ServerConfig struct {
 	AllowedUIDs []int
 	// Logger receives refusals and acquisition errors.
 	Logger *slog.Logger
+	// Tetragon is the managed Linux helper's Tetragon intent. nil
+	// everywhere else: the per-user gateway's Local acquirer never builds a
+	// Tetragon source, even when it runs as root.
+	Tetragon *TetragonConfig
+}
+
+// TetragonConfig is the helper's Tetragon intent: the values the enterprise
+// lifecycle renders into the helper's root-owned service drop-in (from
+// enterprise.tetragon), never anything a client sent.
+type TetragonConfig struct {
+	// Mode is the effective mode (the Plane C cap applied): off, consume,
+	// observe or enforce.
+	Mode string
+	// BurnIn is the covered agent time a uid needs before it is enforced
+	// (0 skips it, with a warning).
+	BurnIn time.Duration
+	// EnforceAck is the approved kernel_policy digest ("" when none).
+	EnforceAck string
+	// EnforceConnectors are the enrolled connectors whose effective
+	// guardrail mode is action: only they can be anchored for enforcement.
+	EnforceConnectors []string
+	// Dial opens a Tetragon event session (tetragon.NewDialer). With Mode
+	// off, or without Dial, the event stream is the native one.
+	Dial plane.KernelDialer
+	// OwnObservePolicy reports DefenseClaw's recorded observe policy; it
+	// gates the fanotify hand-off (nil: fanotify always runs).
+	OwnObservePolicy func(name string) bool
+	// KernelStatus answers OpKernelStatus from the reconciler's state. nil:
+	// the helper reports no kernel-policy reconciler.
+	KernelStatus func(ctx context.Context) (KernelStatus, error)
+	// Tap and Stream let the reconciler count controls hits, loss signals
+	// and connected time from the event stream (plane.TetragonOptions).
+	Tap    func(plane.KernelBatch)
+	Stream func(connected bool)
+}
+
+// tetragonMode is the effective Tetragon mode ("" when the helper has none).
+func (s *Server) tetragonMode() string {
+	if s.config.Tetragon == nil {
+		return ""
+	}
+	return s.config.Tetragon.Mode
 }
 
 // Server answers the fixed question set over a local socket.
@@ -165,6 +210,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		s.serveEvents(ctx, conn, request)
 	case OpDNS:
 		s.serveDNS(ctx, conn, request)
+	case OpKernelStatus:
+		s.serveKernelStatus(ctx, conn, request)
 	default:
 		// An unknown op is a protocol error, not something to guess at.
 		_ = writeFrame(conn, Response{
@@ -227,7 +274,7 @@ type eventStreamFrame struct {
 // the property that keeps a privileged event source from becoming a general
 // purpose file reader for whoever holds the socket.
 func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request) {
-	source := s.acquirer.PlaneSource(s.config.HomeDirs)
+	source := s.planeSource()
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -260,11 +307,57 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 		cancel()
 	}()
 
+	// Coverage-update frames: a source whose coverage changes mid-stream
+	// (the Tetragon backend falling back to cn_proc and back) says so with
+	// a coverage-only frame, at most one per coverageUpdateInterval and
+	// only when the coverage differs from the last one sent. A gateway that
+	// predates them skips a frame without an event. Content-free: coverage
+	// only.
+	var changes <-chan struct{}
+	if watcher, ok := source.(plane.CoverageWatcher); ok {
+		changes = watcher.CoverageChanges()
+	}
+	lastSent, lastCoverage := time.Now(), coverage
+	var pending <-chan time.Time
+	sendCoverage := func() bool {
+		current := encodeCoverage(source.Coverage())
+		lastSent = time.Now()
+		if reflect.DeepEqual(current, lastCoverage) {
+			return true
+		}
+		lastCoverage = current
+		body, err := json.Marshal(eventStreamFrame{Coverage: &current})
+		if err != nil {
+			return true
+		}
+		return writeFrame(conn, Response{Version: protocolVersion, Op: request.Op, Body: body}, responseDeadline) == nil
+	}
+
 	events := source.Events()
 	for {
 		select {
 		case <-streamCtx.Done():
 			return
+		case _, ok := <-changes:
+			if !ok {
+				changes = nil
+				continue
+			}
+			if pending != nil {
+				continue
+			}
+			if wait := coverageUpdateInterval - time.Since(lastSent); wait > 0 {
+				pending = time.After(wait)
+				continue
+			}
+			if !sendCoverage() {
+				return
+			}
+		case <-pending:
+			pending = nil
+			if !sendCoverage() {
+				return
+			}
 		case event, ok := <-events:
 			if !ok {
 				return
@@ -281,4 +374,70 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 			}
 		}
 	}
+}
+
+// coverageUpdateInterval bounds coverage-update frames to one per interval.
+var coverageUpdateInterval = 10 * time.Second
+
+// planeSource is the event stream's source. The managed Linux helper with a
+// Tetragon mode other than off reads Tetragon (falling back to the native
+// halves inside the stream); in off it serves the native source and says
+// so in the coverage; everything else serves the acquirer's source.
+func (s *Server) planeSource() plane.Source {
+	tetragon := s.config.Tetragon
+	if tetragon == nil {
+		return s.acquirer.PlaneSource(s.config.HomeDirs)
+	}
+	if tetragon.Mode != "" && tetragon.Mode != "off" && tetragon.Dial != nil {
+		return plane.NewTetragonSource(s.config.HomeDirs, plane.TetragonOptions{
+			Mode: tetragon.Mode, Dial: tetragon.Dial, OwnObservePolicy: tetragon.OwnObservePolicy,
+			Tap: tetragon.Tap, Stream: tetragon.Stream,
+		})
+	}
+	return nativeBackend{Source: s.acquirer.PlaneSource(s.config.HomeDirs), mode: firstNonEmpty(tetragon.Mode, "off")}
+}
+
+// nativeBackend is the native source of a Tetragon-aware helper that does
+// not use Tetragon, labelled so the coverage tells "off by intent" from a
+// helper that predates Tetragon.
+type nativeBackend struct {
+	plane.Source
+	mode string
+}
+
+func (n nativeBackend) Coverage() plane.Coverage {
+	coverage := n.Source.Coverage()
+	coverage.Backend = &plane.Backend{Kind: plane.BackendNative, Mode: n.mode}
+	return coverage
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// serveKernelStatus answers OpKernelStatus from the reconciler's state.
+func (s *Server) serveKernelStatus(ctx context.Context, conn net.Conn, request Request) {
+	response := Response{Version: protocolVersion, Op: request.Op}
+	status := KernelStatus{Mode: s.tetragonMode(), Reason: "this helper runs no kernel-policy reconciler"}
+	if tetragon := s.config.Tetragon; tetragon != nil && tetragon.KernelStatus != nil {
+		reported, err := tetragon.KernelStatus(ctx)
+		if err != nil {
+			response.Error = err.Error()
+		} else {
+			status = reported
+		}
+	}
+	if response.Error == "" {
+		if body, err := json.Marshal(status); err == nil {
+			response.Body = body
+		} else {
+			response.Error = err.Error()
+		}
+	}
+	_ = writeFrame(conn, response, responseDeadline)
 }
