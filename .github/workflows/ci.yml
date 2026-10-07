@@ -156,7 +156,10 @@ jobs:
             --package-dir internal/gateway \
             --shard-count "$GO_TEST_SHARDS" \
             --shard-index "$GO_TEST_SHARD")"
-          go test -race -count=1 -timeout 45m \
+          # -race also turns on checkptr in every package. In the transpiled
+          # SQLite (modernc.org) that every audit store runs, checkptr alone
+          # doubles the cost of a race shard; race detection stays on everywhere.
+          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
             -coverprofile="coverage-go-gateway-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
             ./internal/gateway
@@ -199,7 +202,8 @@ jobs:
             --package-dir internal/audit \
             --shard-count "$GO_TEST_SHARDS" \
             --shard-index "$GO_TEST_SHARD")"
-          go test -race -count=1 -timeout 45m \
+          # checkptr is off only in modernc.org: see Go Gateway Test.
+          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
             -coverprofile="coverage-go-audit-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
             ./internal/audit
@@ -251,7 +255,8 @@ jobs:
             fi
           done
           test "${#packages[@]}" -gt 0
-          go test -race -count=1 -timeout 45m \
+          # checkptr is off only in modernc.org: see Go Gateway Test.
+          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
             -coverprofile="coverage-go-other-$GO_PACKAGE_SHARD.out" \
             "${packages[@]}"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
