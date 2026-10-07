@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
@@ -883,6 +884,12 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 
 // NewAPIServer creates the REST API server bound to the given address.
 func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
+	return newAPIServer(nil, addr, health, client, store, logger, cfg...)
+}
+
+// newAPIServer is NewAPIServer with the rule packs the sidecar already loaded
+// and validated for its guardrail profile set; nil loads them again.
+func newAPIServer(rulePacks *guardrail.RulePackCache, addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
 	s := &APIServer{
 		addr:   addr,
 		health: health,
@@ -892,7 +899,7 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	}
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
-		s.initGuardrailProfiles(s.scannerCfg)
+		s.initGuardrailProfiles(s.scannerCfg, rulePacks)
 	}
 	return s
 }
