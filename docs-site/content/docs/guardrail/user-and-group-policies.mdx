@@ -199,8 +199,11 @@ enforce (see
 [sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents)).
 **Identity headers, hook payloads and claimed
 facts never reach the matcher.** A user who forges a header, sets
-`KRB5CCNAME`, edits a local file or overrides a config directory cannot move
-to a weaker profile.
+`KRB5CCNAME` or alters a hook payload cannot change verified identity. On a
+standalone enterprise install, the user cannot edit the machine-owned profile
+or move to a weaker one. On a per-user install, the user owns the configuration
+file and can change their own profile; enforce profiles with machine-owned
+configuration when users must not weaken them.
 
 What follows when the identity is missing:
 
