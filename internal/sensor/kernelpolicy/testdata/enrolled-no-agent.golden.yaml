@@ -1,0 +1,171 @@
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:08b71155b713
+# Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defenseclaw-observe-fa6ed5cf
+spec:
+  lsmhooks:
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+      selectors:
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/carol/.aws/config
+                - /home/carol/.aws/credentials
+                - /home/carol/.config/gcloud/application_default_credentials.json
+                - /home/carol/.config/gcloud/credentials.db
+                - /home/carol/.docker/config.json
+                - /home/carol/.git-credentials
+                - /home/carol/.gnupg/secring.gpg
+                - /home/carol/.kube/config
+                - /home/carol/.netrc
+                - /home/carol/.npmrc
+                - /home/carol/.pypirc
+                - /home/carol/.ssh/id_dsa
+                - /home/carol/.ssh/id_ecdsa
+                - /home/carol/.ssh/id_ed25519
+                - /home/carol/.ssh/id_rsa
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/carol/.claude/settings.json
+                - /home/carol/.claude/settings.local.json
+                - /home/carol/.codex/config.toml
+                - /home/carol/.cursor/mcp.json
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /etc/shadow
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/carol/.bash_profile
+                - /home/carol/.bashrc
+                - /home/carol/.profile
+                - /home/carol/.zshrc
+            - index: 1
+              operator: Mask
+              values:
+                - "2"
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+      selectors:
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /home/carol/.gnupg/private-keys-v1.d/
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /home/carol/.claude/hooks/
+                - /home/carol/.claude/skills/
+                - /home/carol/.codex/skills/
+                - /home/carol/.cursor/rules/
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /etc/sudoers.d/
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /home/carol/.config/autostart/
+                - /home/carol/.config/systemd/user/
+            - index: 1
+              operator: Mask
+              values:
+                - "2"
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+# note: kernel_enforce_inactive: no anchors

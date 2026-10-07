@@ -1,0 +1,56 @@
+# DefenseClaw observe policy for Tetragon (managed Linux only): post-only file
+# opens of credential, agent-config and system paths, and write opens of the
+# persistence paths of kernel.persistence_write. Rendered per enrolled home
+# into the defenseclaw-observe TracingPolicy, rate limited per process and
+# path. Nothing here ever denies.
+version: 1
+rate_limit: 1m
+groups:
+  - name: credentials
+    scope: home
+    access: open
+    files:
+      - .aws/credentials
+      - .aws/config
+      - .ssh/id_rsa
+      - .ssh/id_ed25519
+      - .ssh/id_ecdsa
+      - .ssh/id_dsa
+      - .config/gcloud/credentials.db
+      - .config/gcloud/application_default_credentials.json
+      - .kube/config
+      - .docker/config.json
+      - .netrc
+      - .npmrc
+      - .pypirc
+      - .git-credentials
+      - .gnupg/secring.gpg
+    dirs:
+      - .gnupg/private-keys-v1.d/
+  - name: agent_config
+    scope: home
+    access: open
+    files:
+      - .claude/settings.json
+      - .claude/settings.local.json
+      - .codex/config.toml
+      - .cursor/mcp.json
+    dirs:
+      - .claude/hooks/
+      - .claude/skills/
+      - .codex/skills/
+      - .cursor/rules/
+  - name: system
+    scope: system
+    access: open
+    files:
+      - /etc/shadow
+    dirs:
+      - /etc/sudoers.d/
+  # The persistence paths are the ones kernel.persistence_write names; only
+  # write opens are recorded, because agents read the shell rc files all the
+  # time.
+  - name: persistence
+    scope: home
+    access: write
+    from_control: kernel.persistence_write
