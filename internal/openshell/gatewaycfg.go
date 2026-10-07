@@ -118,6 +118,12 @@ var (
 	// on a change (Write). Rollback returns it once it has restored the
 	// files.
 	ErrNoGatewayService = errors.New("openshell: no gateway service runs the gateway")
+	// ErrGatewayServiceStopped means the gateway service is installed but
+	// not running. Rollback returns it once it has restored the files,
+	// without the restart, which would start the service: it loads them when
+	// it starts. With another account's gateway on the port, a restart left
+	// the service restarting forever (GAP-0149).
+	ErrGatewayServiceStopped = errors.New("openshell: the gateway service is not running")
 )
 
 // What the MicroVM (vm) driver gives every sandbox when
@@ -1315,7 +1321,8 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 // Rollback restores the files an Apply (or a Write) wrote and restarts the
 // gateway. With no gateway service to restart it through, it restores the
 // files and returns ErrNoGatewayService: the gateway, run another way,
-// loads them once its operator restarts it.
+// loads them once its operator restarts it. With a service that is not
+// running, it restores them and returns ErrGatewayServiceStopped.
 func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyResult) error {
 	if err := g.defaults(); err != nil {
 		return err
@@ -1328,6 +1335,17 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 			return err
 		}
 		return ErrNoGatewayService
+	}
+	// A stopped systemd service starts on the restored files (Homebrew's
+	// state is not asked: `brew services info` is slow).
+	if g.GOOS != "darwin" {
+		if svc, err := g.ServiceState(ctx); err == nil && svc.Installed && !svc.Active {
+			if err := g.restore(res); err != nil {
+				return err
+			}
+			g.clearRestartPending()
+			return ErrGatewayServiceStopped
+		}
 	}
 	// Before anything changes: a sandbox that cannot be flushed refuses
 	// the restart.
