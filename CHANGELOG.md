@@ -101,6 +101,19 @@ stopped`. Nothing is changed; use the install command above.
   (`openshell_telemetry_failed`).
 - Removed the `binary_drift` and `tamper_attempt` sandbox finding kinds,
   which nothing produced.
+- New Grafana dashboard **Sandboxes** (`defenseclaw-sandboxes`), linked from
+  Overview: active sandboxes by connector, phase changes, egress by source
+  (OpenShell or the DefenseClaw egress proxy) and decision, top blocked and
+  allowed hosts, bytes up and down per destination, a destinations table,
+  shadow-AI and other sandbox findings, integration health and the opt-in
+  process starts, with a Sandbox variable. The local Collector now adds the
+  record's sandbox name as the `defenseclaw.sandbox.name` log attribute (Loki
+  structured metadata) so the variable and the filters never parse log bodies;
+  the body is unchanged and sandbox names stay out of metric labels. The
+  Splunk Observability bundle splits the Egress blocks tile by source, adds a
+  Sandboxes dashboard and a sandbox egress-blocks detector (and the local
+  Prometheus rule `DefenseClawSandboxEgressBlocksSustained`), and drops the
+  unused "Egress blocks / min" tile.
 
 ## [Unreleased] — Enterprise hardening
 

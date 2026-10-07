@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions a focused catalog of 17 Grafana dashboards. Each board
+DefenseClaw provisions a focused catalog of 18 Grafana dashboards. Each board
 has one job: start broad, select a connector, agent, rule, or execution, and
 then move to the detail surface that owns that question. The catalog avoids
 duplicating the same analysis across several boards.
@@ -23,6 +23,7 @@ start the stack first with `defenseclaw setup local-observability up`.
   <Card title="Live agent activity" href="http://localhost:3000/d/defenseclaw-activity" description="Cross-agent prompts, model usage, tools, destinations, and session correlation." />
   <Card title="Agent360" href="http://localhost:3000/d/defenseclaw-agent-360" description="One agent or tree: initial and follow-up prompts, grouped per-agent model/tool work, directed lineage, outcomes, decisions, and traces." />
   <Card title="Blocked Events & Analysis" href="http://localhost:3000/d/defenseclaw-blocked-events" description="Enforced and would-block decisions, exact rule IDs, post-redaction evidence, recurring signatures, and investigation pivots." />
+  <Card title="Sandboxes" href="http://localhost:3000/d/defenseclaw-sandboxes" description="OpenShell sandboxes: active count, phase changes, egress by source and outcome, top hosts, bytes, shadow-AI findings, and health." />
   <Card title="Runtime & reliability" href="http://localhost:3000/d/defenseclaw-runtime" description="Process, SQLite, exporter, destination delivery, and canonical error health in one operations board." />
 </Cards>
 
@@ -46,6 +47,7 @@ start the stack first with `defenseclaw setup local-observability up`.
 | **Findings** (`defenseclaw-findings`) | Which rule fired, against what target, and how often? | Detection engineer, SOC | Prometheus, Loki | Rule-level ranking, first/last seen, target attribution, and finding-to-verdict correlation. |
 | **Scanners (Ops)** (`defenseclaw-scanners`) | Are scanner executions healthy and producing expected findings? | Detection engineer, SRE | Prometheus | Sparse-safe rolling scan counts, duration, errors, quarantine actions, and operational finding trends. Queue depth is omitted because scanners currently execute synchronously and do not emit a durable queue series. |
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | What is happening on proxy/router deployments? | Proxy operator, SRE | Prometheus, Loki, Tempo | HTTP, tool, guardrail, GenAI, and trace telemetry that only exists when proxy/router mode is active. |
+| **Sandboxes** (`defenseclaw-sandboxes`) | What are the OpenShell sandboxes doing, what did they reach, and what was refused? | Operator, SOC, platform owner | Prometheus, Loki | Fleet gauge and phase changes, egress decisions by source (OpenShell or the DefenseClaw egress proxy) and outcome, top blocked and allowed hosts, bytes up and down per destination, a destinations table, shadow-AI and other sandbox findings, integration health, and opt-in process starts. See [Sandboxes board](#sandboxes-board). |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Is the local process, database, exporter, or destination delivery unhealthy? | SRE, operator | Prometheus, Loki | One truthful operations board for runtime, SQLite, exporter freshness/errors, destination delivery, and gateway errors. |
 
 ## Filter by user
@@ -91,6 +93,41 @@ Things to know when you read it:
   effective policy changed. Compare it with the digest `defenseclaw guardrail
   profile explain` reports.
 - **Records without a verified user drop out** when you narrow `$user`.
+
+## Sandboxes board
+
+The **Sandboxes** board (`defenseclaw-sandboxes`) shows what the
+[OpenShell sandboxes](/docs/sandboxes/guide) are doing. It has a **Connector**
+box (`$connector`, the sandbox's harness connector, for the metric panels) and a
+**Sandbox** box (`$sandbox`, the sandbox name, for the log panels). Sandbox
+names are never metric labels, so the metric panels are fleet-wide and only the
+log panels follow `$sandbox`.
+
+The Sandbox list and every log filter read `defenseclaw.sandbox.name` as Loki
+structured metadata. The local Collector copies the name from each record's body
+onto the record (`transform/sandbox-identity`), so no panel parses every log line
+to find a sandbox. A record that names no sandbox has no such metadata.
+
+| Row | Panels | What they show |
+| --- | --- | --- |
+| Sandbox fleet | Active sandboxes, Sandboxes seen, Egress allowed, Egress blocked, Shadow-AI findings, Health degraded | Sandboxes provisioning, starting, ready or stopping (latest gauge value per connector); then counts for the range. Egress counts are one per decision; the end of a tunnel is not counted again. |
+| Lifecycle | Active sandboxes by connector, Phase transitions, Recent lifecycle changes | The gauge over time, the phase each change entered (creating, provisioning, starting, ready, stopping, stopped, error, deleting, deleted), and the newest changes with trigger and OpenShell condition. |
+| Egress decisions | Egress by source and decision (logs and metric), Top blocked hosts, Top allowed hosts | Who decided (`openshell` is OpenShell's own network boundary, `dc-egress-proxy` is the DefenseClaw egress proxy) and the outcome. The metric panel counts the `defenseclaw.egress.events` counter, which misses a series' first increment, so the log panel is the exact count. |
+| Traffic volume | Bytes up by destination, Bytes down by destination, Bytes up / down over time | Sums of `bytes_up` and `bytes_down` on `egress.completed` records, which only the DefenseClaw egress proxy writes. OpenShell's own connections report no byte counts. |
+| Destinations | Destinations, Recent blocked egress | Each host with allowed and blocked counts and bytes moved (top 50 per column), and the newest refusals with the decision code and the process the workload claims made the request. |
+| Findings and shadow AI | Findings by kind, Shadow-AI destinations, Recent sandbox findings | `sandbox.<kind>` findings. A shadow-AI finding names an AI API that is neither the sandbox's model provider nor its harness vendor: MEDIUM when reached, LOW when refused. |
+| Integration health | Health degraded / restored, Recent health transitions | OpenShell health records with their stable error code. Records about the whole integration name no sandbox and show under every `$sandbox` selection. |
+| Process starts | Process starts, Top started programs | Empty unless the sandbox's process tree is on (`observe.process_tree`, or `sandbox run --process-tree`); it is off in every built-in pack. Sampling misses a process that starts and ends between two samples. |
+
+Things to know when you read it:
+
+- **A host that did not canonicalize shows as its target reference**
+  (`invalid-host`, or `host:` plus the name for a name that starts with `_`).
+- **Process names, paths and command lines are what the workload claims.** They
+  are display text the sandboxed agent chooses, and each destination's redaction
+  profile governs whether they leave the host.
+- **Bytes stay empty for OpenShell-only traffic.** Only `egress.completed`
+  records from the egress proxy carry byte counts.
 
 ## How the drill-down works
 

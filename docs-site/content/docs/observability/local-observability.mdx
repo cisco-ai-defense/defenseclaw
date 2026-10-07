@@ -210,7 +210,7 @@ this gateway sends.
 
 ## Bundled Grafana dashboards
 
-The bundle ships 16 dashboards in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
+The bundle ships 18 dashboards in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
 
 <Files>
   <Folder name="grafana/dashboards" defaultOpen>
@@ -230,6 +230,8 @@ The bundle ships 16 dashboards in `bundles/local_observability_stack/grafana/das
     <File name="defenseclaw-blocked-events.json" />
     <File name="defenseclaw-ai-discovery.json" />
     <File name="defenseclaw-ai-runtime.json" />
+    <File name="defenseclaw-identity.json" />
+    <File name="defenseclaw-sandboxes.json" />
   </Folder>
 </Files>
 
@@ -250,6 +252,7 @@ The bundle ships 16 dashboards in `bundles/local_observability_stack/grafana/das
 | **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, initial and grouped follow-up prompts, descendants, per-agent model/tool-family summaries, updates, approvals, outcomes, inputs/outputs, reported tokens/cost, security decisions, and Tempo waterfall. |
 | **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | Enforced and observe-mode would-block decisions, rule IDs, recurring signatures, and pivots into Agent360. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
+| **Sandboxes** (`defenseclaw-sandboxes`) | OpenShell sandboxes: active count, phase changes, egress by source and outcome, top blocked and allowed hosts, bytes per destination, shadow-AI findings, integration health. `$sandbox` reads Loki structured metadata added by the Collector. |
 | **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What AI runtimes actually ran next to the discovery inventory: runtime-plane coverage and health, processes and connections, runtime findings, and host-level agent activity. |
 
 See the [complete Grafana dashboard catalog](/docs/observability/grafana-dashboards)
