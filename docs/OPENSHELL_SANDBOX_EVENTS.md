@@ -144,12 +144,16 @@ Both are what the process claims, display text the workload chooses.
 
 The end of every tunnel or forwarded request the proxy allowed is a second
 record: `log.egress.completed` with `defenseclaw.network.bytes_up`,
-`.bytes_down` and `.duration_ms` (decision code `SANDBOX_EGRESS_ALLOWED`; a
-connection a recheck ended names why in `.reason`), or `log.egress.failed`
-when DNS, the connect, TLS or the upstream failed and the sandbox got a 502
-(outcome `failed`) or 504 (`timed_out`), with `.duration_ms` and the bounded
-error (decision code `SANDBOX_EGRESS_UPSTREAM_FAILED`). Neither counts
-toward `defenseclaw.egress.events`: the decision did.
+`.bytes_down` and `.duration_ms` (decision code `SANDBOX_EGRESS_ALLOWED`),
+or `log.egress.failed`. A failed end is either one the proxy cut short (the
+large-upload block, the idle timeout, a refused TLS server name or content,
+or a recheck): outcome `cancelled`, with the byte counts, `.duration_ms`
+and decision code `SANDBOX_EGRESS_TERMINATED` (`.reason` says why a recheck
+ended it); or one where DNS, the connect, TLS or the upstream failed and
+the sandbox got a 502 (outcome `failed`) or 504 (`timed_out`), with
+`.duration_ms` and the bounded error (decision code
+`SANDBOX_EGRESS_UPSTREAM_FAILED`). None counts toward
+`defenseclaw.egress.events`: the decision did.
 
 ### Activity
 

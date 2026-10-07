@@ -770,20 +770,27 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 }
 
 // egressEnded records the end of an allowed tunnel or forwarded request:
-// what it sent and received and how long it took (completed), or the
-// upstream failure the sandbox got a 502 or 504 for (failed; timed out on
-// a 504). The decision was recorded when it opened.
+// what it sent and received and how long it took (completed, or cancelled
+// when the proxy cut it short), or the upstream failure the sandbox got a
+// 502 or 504 for (failed; timed out on a 504). The decision was recorded
+// when it opened.
 func (m *Manager) egressEnded(ctx context.Context, ident audit.SandboxIdentity, e egress.Event) {
 	ev := audit.SandboxEgressEvent{
 		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port, Scheme: egressScheme(e),
 		ResolvedIP: remoteIP(e.RemoteAddr), DecisionCode: "SANDBOX_EGRESS_ALLOWED", PolicyOutcome: policyOutcome(e),
 		Duration: e.Duration, Timestamp: e.Time,
 	}
-	if e.Kind == egress.EventClosed {
+	switch {
+	case e.Kind == egress.EventClosed && e.Terminated:
+		// The large-upload block (its finding says so), the idle timeout, a
+		// refused TLS server name or content, or a recheck, whose reason
+		// says why (its credential was revoked).
+		ev.End, ev.Terminated, ev.BytesUp, ev.BytesDown = audit.SandboxEgressFailed, true, e.BytesUp, e.BytesDown
+		ev.DecisionCode = "SANDBOX_EGRESS_TERMINATED"
+		ev.Reason = truncate(firstNonEmpty(e.Reason, "the egress proxy cut it short"), 512)
+	case e.Kind == egress.EventClosed:
 		ev.End, ev.BytesUp, ev.BytesDown = audit.SandboxEgressCompleted, e.BytesUp, e.BytesDown
-		// Set when a recheck ended it (its credential was revoked).
-		ev.Reason = truncate(e.Reason, 512)
-	} else {
+	default:
 		ev.End, ev.TimedOut = audit.SandboxEgressFailed, e.Status == http.StatusGatewayTimeout
 		ev.DecisionCode = "SANDBOX_EGRESS_UPSTREAM_FAILED"
 		ev.Reason = truncate(firstNonEmpty(e.Error, e.Reason), 512)

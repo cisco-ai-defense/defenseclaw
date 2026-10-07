@@ -1094,6 +1094,19 @@ func TestSandboxEgressEndsAndActivity(t *testing.T) {
 			},
 		},
 		{
+			name: "egress cut short",
+			event: SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "drop.example", End: SandboxEgressFailed, Terminated: true,
+				BytesUp: 1 << 20, BytesDown: 120, Duration: 4250 * time.Millisecond, DecisionCode: "SANDBOX_EGRESS_TERMINATED",
+			},
+			eventName: observability.TelemetryEventEgressFailed, bucket: observability.BucketNetworkEgress,
+			outcome: observability.OutcomeCancelled,
+			body: map[string]any{
+				"defenseclaw.network.bytes_up": int64(1 << 20), "defenseclaw.network.bytes_down": int64(120),
+				"defenseclaw.network.duration_ms": int64(4250), "defenseclaw.network.decision_code": "SANDBOX_EGRESS_TERMINATED",
+			},
+		},
+		{
 			name: "process start",
 			event: SandboxActivityEvent{
 				Sandbox: sb, Kind: SandboxActivityProcess, ProcessEvent: SandboxProcessStart, PID: 42,
@@ -1186,6 +1199,8 @@ func TestSandboxEgressEndsAndActivity(t *testing.T) {
 	for name, event := range map[string]any{
 		"blocked with an end":         SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", Blocked: true, End: SandboxEgressCompleted},
 		"completed timed out":         SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: SandboxEgressCompleted, TimedOut: true},
+		"completed cut short":         SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: SandboxEgressCompleted, Terminated: true},
+		"decision cut short":          SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", Terminated: true},
 		"unknown end":                 SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: "closed"},
 		"negative bytes":              SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "a.example", End: SandboxEgressCompleted, BytesUp: -1},
 		"unknown activity":            SandboxActivityEvent{Sandbox: sb, Kind: "file"},

@@ -225,8 +225,14 @@ type SandboxEgressEvent struct {
 	// TimedOut marks a failure the proxy timed out on (End failed only):
 	// its outcome is timed_out rather than failed.
 	TimedOut bool
+	// Terminated marks a connection the proxy cut short (End failed only):
+	// the large-upload block, the idle timeout, a refused TLS server name or
+	// content, or a recheck. Its outcome is cancelled, and it keeps its
+	// byte counts.
+	Terminated bool
 	// BytesUp and BytesDown are the payload bytes an ended connection sent
-	// and received; Duration how long it took (completed and failed).
+	// and received (completed, and cut short); Duration how long it took
+	// (completed and failed).
 	BytesUp   int64
 	BytesDown int64
 	Duration  time.Duration
@@ -787,12 +793,18 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 		if input.TimedOut {
 			return fmt.Errorf("audit: only a failed sandbox egress record times out")
 		}
+		if input.Terminated {
+			return fmt.Errorf("audit: only a failed sandbox egress record is cut short")
+		}
 	case SandboxEgressCompleted, SandboxEgressFailed:
 		if input.Blocked {
 			return fmt.Errorf("audit: a blocked sandbox egress decision has no end")
 		}
 		if input.TimedOut && input.End != SandboxEgressFailed {
 			return fmt.Errorf("audit: only a failed sandbox egress record times out")
+		}
+		if input.Terminated && (input.End != SandboxEgressFailed || input.TimedOut) {
+			return fmt.Errorf("audit: only a failed sandbox egress record that did not time out is cut short")
 		}
 	default:
 		return fmt.Errorf("audit: sandbox egress end %q is not registered", input.End)
@@ -831,6 +843,8 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 		eventName, outcome = observability.TelemetryEventEgressCompleted, observability.OutcomeCompleted
 	case input.End == SandboxEgressFailed && input.TimedOut:
 		eventName, outcome = observability.TelemetryEventEgressFailed, observability.OutcomeTimedOut
+	case input.End == SandboxEgressFailed && input.Terminated:
+		eventName, outcome = observability.TelemetryEventEgressFailed, observability.OutcomeCancelled
 	case input.End == SandboxEgressFailed:
 		eventName, outcome = observability.TelemetryEventEgressFailed, observability.OutcomeFailed
 	}
@@ -842,7 +856,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	decisionCode := optionalNetworkIdentifier(input.DecisionCode)
 	conversationID, agentID := sandboxAgentCorrelation(event, input.ConversationID)
 	bytesUp, bytesDown, duration := observability.Absent[int64](), observability.Absent[int64](), observability.Absent[int64]()
-	if input.End == SandboxEgressCompleted {
+	if input.End == SandboxEgressCompleted || input.Terminated {
 		bytesUp, bytesDown = observability.Present(input.BytesUp), observability.Present(input.BytesDown)
 	}
 	if input.End != "" {

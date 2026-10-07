@@ -79,8 +79,9 @@ stopped`. Nothing is changed; use the install command above.
   (MEDIUM) or tries to reach (LOW) that is neither its model provider nor its
   harness's vendor, also on the activity feed.
 - New v8 records: `log.egress.completed` (bytes and duration) and
-  `log.egress.failed` (upstream failures and timeouts) for every allowed
-  proxy connection; `log.sandbox.process`, `log.sandbox.ssh` and
+  `log.egress.failed` (upstream failures and timeouts, and `cancelled` with
+  the bytes for a connection the proxy cut short) for every allowed proxy
+  connection; `log.sandbox.process`, `log.sandbox.ssh` and
   `log.sandbox.inference` from OpenShell's PROC, SSH and API:INFERENCE
   records (process records are paced per sandbox; command lines are content
   class); allowed connections to host ports. Sandbox records now carry the

@@ -131,9 +131,16 @@ func TestEgressEndsAndCredentialRefusals(t *testing.T) {
 		Host: "registry.npmjs.org", Port: 443, BytesUp: 1200, BytesDown: 98000, Duration: 2 * time.Second, RemoteAddr: "104.16.0.1:443"}, 0)
 	e.m.egressEvent(ctx, egress.Event{Kind: egress.EventFailed, Time: now, BindingID: id, SandboxName: "endbox", Method: "CONNECT",
 		Host: "slow.example", Port: 443, Status: http.StatusGatewayTimeout, Error: "upstream timed out", Duration: 30 * time.Second}, 0)
+	// A tunnel the proxy cut (here the large-upload block) did not complete.
+	e.m.egressEvent(ctx, egress.Event{Kind: egress.EventClosed, Time: now, BindingID: id, SandboxName: "endbox", Method: "CONNECT",
+		Host: "drop.example.org", Port: 443, BytesUp: 1 << 20, Duration: time.Second, Terminated: true}, 0)
 	recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.End != "" })
-	if len(recs) != 2 {
+	if len(recs) != 3 {
 		t.Fatalf("ended = %+v", recs)
+	}
+	if c := recs[2]; c.End != audit.SandboxEgressFailed || !c.Terminated || c.BytesUp != 1<<20 || c.DecisionCode != "SANDBOX_EGRESS_TERMINATED" ||
+		c.Reason != "the egress proxy cut it short" {
+		t.Fatalf("cut short = %+v", c)
 	}
 	if c := recs[0]; c.End != audit.SandboxEgressCompleted || c.BytesUp != 1200 || c.BytesDown != 98000 || c.Duration != 2*time.Second ||
 		c.ResolvedIP != "104.16.0.1" || c.Blocked {
