@@ -11,12 +11,14 @@
 package gateway
 
 import (
+	"database/sql"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,5 +204,50 @@ func TestAcquireAPIListenerFailsClosedOnInheritedMismatch(t *testing.T) {
 	listener, err := api.acquireAPIListener(t.Context())
 	if err != nil || listener.Addr().String() != inheritedSocket.Addr().String() {
 		t.Fatalf("matching inherited listener: %v %v", listener, err)
+	}
+}
+
+// GAP-0188: a standard user holds no gateway token, so its refused policy write
+// reaches the managed audit store through the hook socket, attributed to the
+// kernel-verified peer. Only the registered refusal actions are accepted.
+func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	handler := api.managedHookPeerAuth(newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, nil), api.managedHookSocketMux())
+	send := func(body string) int {
+		request := httptest.NewRequest(http.MethodPost, managedRefusalAuditPath, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-DefenseClaw-Client", "python-cli")
+		request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{UID: 508, Name: "dcm-p0e2"}))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	if code := send(`{"action":"skill-block","target":"p0-test-skill","details":"type=skill"}`); code != http.StatusNoContent {
+		t.Fatalf("refusal report: status %d", code)
+	}
+	for _, body := range []string{
+		`{"action":"scan","target":"x"}`,
+		`{"action":"skill-block","target":""}`,
+		`{"action":"skill-block","target":"x","actor":"root"}`,
+	} {
+		if code := send(body); code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", body, code)
+		}
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	var details string
+	if err := database.QueryRow(`SELECT COUNT(*), COALESCE(MAX(details), "") FROM audit_events WHERE action = "skill-block" AND target = "p0-test-skill"`).Scan(&count, &details); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || !strings.Contains(details, "outcome=refused reason=managed_device actor=uid:508 user=dcm-p0e2") {
+		t.Fatalf("refusal rows=%d details=%q", count, details)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = "scan"`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("a rejected action must not be recorded: rows=%d err=%v", count, err)
 	}
 }

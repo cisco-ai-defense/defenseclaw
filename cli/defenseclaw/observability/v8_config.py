@@ -914,7 +914,7 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
             source_name,
             _json_path(parts),
             "legacy-key-forbidden",
-            f"a v8 configuration key is not accepted in config_version 9; use {target}",
+            f"a retired configuration key is not accepted in config_version 9; use {target}",
         )
 
     for parts, target in _V9_REMOVED_KEYS:
@@ -948,7 +948,7 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     )
     if not errors:
         return
-    error = errors[0]
+    error = _narrow_one_of(errors[0], source_name)
     keyword = str(error.validator or "schema")
     parts = tuple(error.absolute_path)
     if keyword == "additionalProperties":
@@ -968,6 +968,50 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     elif keyword == "additionalProperties" and v9:
         action = _unknown_field_action(error, parts)
     raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
+
+
+def _narrow_one_of(error: Any, source_name: str) -> Any:
+    """Narrow a ``oneOf`` over ``kind``-pinned shapes to the shape the source chose.
+
+    Without this the reader gets every shape's key list in one line. A ``kind``
+    no shape declares is named with the kinds that exist; a declared ``kind``
+    reports the first problem inside its own shape.
+    """
+
+    while error.validator == "oneOf" and isinstance(error.instance, Mapping):
+        kinds: dict[str, int] = {}
+        for index, branch in enumerate(error.validator_value if isinstance(error.validator_value, list) else []):
+            const = ((_resolve_branch(branch).get("properties") or {}).get("kind") or {}).get("const")
+            if not isinstance(const, str):
+                return error
+            kinds[const] = index
+        if not kinds:
+            return error
+        kind = error.instance.get("kind")
+        chosen = kinds.get(kind) if isinstance(kind, str) else None
+        if chosen is None:
+            raise V8ConfigError(
+                source_name,
+                _json_path((*error.absolute_path, "kind")),
+                "enum",
+                "use one of " + ", ".join(kinds),
+            )
+        inner = sorted(
+            (item for item in error.context or () if item.relative_schema_path[0] == chosen),
+            key=lambda item: tuple(str(part) for part in item.absolute_path),
+        )
+        if not inner:
+            return error
+        error = inner[0]
+    return error
+
+
+def _resolve_branch(branch: Any) -> Mapping[str, Any]:
+    """A oneOf branch with a local $ref followed; {} when it is not a mapping."""
+
+    if isinstance(branch, Mapping) and str(branch.get("$ref", "")).startswith("#/$defs/"):
+        branch = _schema_validator().schema.get("$defs", {}).get(str(branch["$ref"])[len("#/$defs/"):], {})
+    return branch if isinstance(branch, Mapping) else {}
 
 
 _PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -1095,13 +1139,8 @@ def _one_of_action(branches: Any) -> str:
 
     if not isinstance(branches, list) or not branches:
         return ""
-    definitions = _schema_validator().schema.get("$defs", {})
     parts: list[str] = []
-    for branch in branches:
-        if isinstance(branch, Mapping) and str(branch.get("$ref", "")).startswith("#/$defs/"):
-            branch = definitions.get(str(branch["$ref"])[len("#/$defs/"):], {})
-        if not isinstance(branch, Mapping):
-            return ""
+    for branch in map(_resolve_branch, branches):
         values = branch.get("enum")
         if isinstance(values, list) and values and all(isinstance(value, str) for value in values):
             parts.append("one of " + ", ".join(values))

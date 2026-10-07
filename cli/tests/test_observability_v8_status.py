@@ -758,7 +758,7 @@ def test_doctor_invalid_v8_never_falls_back_to_legacy_destination_reader(tmp_pat
     assert not hasattr(observability, "list_destinations")
     _check_observability(SimpleNamespace(data_dir=str(tmp_path)), result)
     assert result.failed == 1
-    assert result.checks[0]["label"] == "Observability v8 effective plan"
+    assert result.checks[0]["label"] == "Observability plan"
 
 
 def test_doctor_v8_renders_bounded_live_health_and_never_raw_error_text() -> None:
