@@ -423,6 +423,7 @@ func retiredStandaloneV8(dir string) string {
 	return "config_version: 8\ndata_dir: " + dir + "\n" + `claw:
   home_dir: /home/sandbox/.openclaw
   config_file: /home/sandbox/.openclaw/openclaw.json
+  openclaw_home_original: /home/alice/.openclaw
 gateway:
   host: 10.200.0.2
   port: 18789
@@ -506,11 +507,17 @@ func TestMigrateV9ResetsTheRetiredStandaloneSandbox(t *testing.T) {
 			t.Errorf("openshell.%s survived the migration", key)
 		}
 	}
+	if _, ok := doc.Claw["openclaw_home_original"]; ok {
+		t.Error("claw.openclaw_home_original survived the migration")
+	}
+	if !slices.ContainsFunc(result.Record.Notes, func(n string) bool { return strings.Contains(n, "/home/alice/.openclaw") }) {
+		t.Errorf("migration notes = %v, want the pinned OpenClaw home named", result.Record.Notes)
+	}
 	if doc.Gateway["port"] != 18789 || doc.Guardrail["port"] != 4000 || doc.OpenShell["version"] != "0.6.2" ||
 		doc.Claw["home_dir"] != "/home/sandbox/.openclaw" {
 		t.Fatalf("the migration changed more than the standalone keys:\n%s", migrated)
 	}
-	for _, key := range []string{"openshell.mode", "openshell.sandbox_home", "guardrail.host", "gateway.host"} {
+	for _, key := range []string{"openshell.mode", "openshell.sandbox_home", "claw.openclaw_home_original", "guardrail.host", "gateway.host"} {
 		if !slices.Contains(result.Record.Removed, key) {
 			t.Errorf("migration record removed = %v, want %s", result.Record.Removed, key)
 		}
@@ -538,7 +545,8 @@ func TestMigrateV9ResetsTheRetiredStandaloneSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateV8InMemory: %v", err)
 	}
-	if !strings.Contains(string(out), "host: 10.200.0.1") || !strings.Contains(string(out), "host: 10.200.0.2") || strings.Contains(string(out), "sandbox_home") {
+	if !strings.Contains(string(out), "host: 10.200.0.1") || !strings.Contains(string(out), "host: 10.200.0.2") || strings.Contains(string(out), "sandbox_home") ||
+		strings.Contains(string(out), "openclaw_home_original") {
 		t.Fatalf("a config without the standalone mode:\n%s", out)
 	}
 }

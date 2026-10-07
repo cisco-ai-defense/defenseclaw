@@ -1647,8 +1647,9 @@ You need this only on a Linux host that ran the retired `openshell-sandbox`
 0.0.x standalone integration (`defenseclaw init --sandbox` before 1.0), which
 ran OpenClaw as a `sandbox` user in a network namespace joined to the host by
 a veth pair (`10.200.0.1` host, `10.200.0.2` sandbox). The upgrade to 1.0
-resets DefenseClaw's own config: it drops `openshell.mode` and
-`openshell.sandbox_home`, and resets `guardrail.host` and `gateway.host` to
+resets DefenseClaw's own config: it drops `openshell.mode`,
+`openshell.sandbox_home` and `claw.openclaw_home_original`, and resets
+`guardrail.host` and `gateway.host` to
 their defaults, so the gateway API listens on loopback like on every other
 host (the migration record, `migration-v9.json`, lists them). It leaves what
 that integration set up as root, which you remove by hand before you set up
@@ -1667,8 +1668,9 @@ sudo userdel -r sandbox                  # also removes /home/sandbox and its .o
 
 Then give the OpenClaw home back to your user
 (`sudo chown -R "$USER": ~/.openclaw`, and `sudo setfacl -R -b ~/.openclaw` if
-`getfacl` still lists ACL entries), point `claw.home_dir` and
-`claw.config_file` back at it if they name `/home/sandbox`
+`getfacl` still lists ACL entries; when 0.8.x had pinned the OpenClaw home
+somewhere else, the notes in `migration-v9.json` name it), point
+`claw.home_dir` and `claw.config_file` back at it if they name `/home/sandbox`
 (`defenseclaw config set claw.home_dir ~/.openclaw` and
 `defenseclaw config set claw.config_file ~/.openclaw/openclaw.json`),
 and in `openclaw.json` set `gateway.bind` back to `loopback` and the

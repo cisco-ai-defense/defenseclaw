@@ -668,7 +668,6 @@ class ClawConfig:
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
     workspace_dir: str = ""
-    openclaw_home_original: str = ""
 
 
 @dataclass
@@ -6543,7 +6542,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
             workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
-            openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         acp=_merge_acp(raw.get("acp")),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),

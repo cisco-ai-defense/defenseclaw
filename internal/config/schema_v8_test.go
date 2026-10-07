@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
-	"gopkg.in/yaml.v3"
 )
 
 func TestConfigV8SchemaClassifiesEveryTopLevelGoConfigField(t *testing.T) {
@@ -69,7 +68,12 @@ managed:
 	}
 }
 
-func TestConfigV8SchemaAcceptsClawRollbackCustodyField(t *testing.T) {
+// A 0.8.x config still carries claw.openclaw_home_original (0.8.x wrote it,
+// empty unless the retired standalone sandbox pinned a home): the v8 schema
+// keeps accepting it until the v9 migration has dropped it
+// (migrateRetiredStandaloneSandbox), as long as the v8 schema validates
+// 0.8.x files.
+func TestConfigV8SchemaAcceptsTheRetiredOpenClawHomePin(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw
 claw:
@@ -85,14 +89,7 @@ claw:
 		ObservabilityV8CompileOptions{DefaultDataDir: "/tmp/defenseclaw"},
 	)
 	if err != nil {
-		t.Fatalf("v8 compiler rejected current claw rollback custody field: %v", err)
-	}
-	var parsed Config
-	if err := yaml.Unmarshal(raw, &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if parsed.Claw.OpenClawHomeOriginal != "/tmp/original-openclaw" {
-		t.Fatalf("claw.openclaw_home_original = %q", parsed.Claw.OpenClawHomeOriginal)
+		t.Fatalf("v8 compiler rejected the retired claw.openclaw_home_original: %v", err)
 	}
 }
 

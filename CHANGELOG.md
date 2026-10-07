@@ -1260,8 +1260,10 @@ deleted.
 - **Breaking:** no cleanup command and no bind shim: the upgrade resets the
   config instead. The `config_version` 9 migration (run by the upgrade, by
   `defenseclaw migrate`, and in memory when the gateway loads a v8 file)
-  drops `openshell.mode` and `openshell.sandbox_home` from every config and,
-  on one that said `openshell.mode: standalone`, the non-loopback
+  drops `openshell.mode`, `openshell.sandbox_home` and
+  `claw.openclaw_home_original` (the OpenClaw home pin, named in a migration
+  note when set) from every config and, on one that said
+  `openshell.mode: standalone`, the non-loopback
   `guardrail.host` and `gateway.host` (the veth addresses), which take their
   defaults. An upgraded standalone host's gateway API so binds on loopback,
   where the upgrade, watchdog and status probes and the CLI dial it, instead

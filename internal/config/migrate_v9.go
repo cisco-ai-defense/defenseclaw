@@ -1607,20 +1607,29 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
 // (openshell.sandbox_home), and pointed guardrail.host (where the gateway
 // API and the guardrail proxy listened) and gateway.host (the sandboxed
 // OpenClaw gateway) at its veth link, 10.200.0.1 and 10.200.0.2 by default.
-// 1.0 drives no such sandbox and keeps no shim for those addresses, so both
-// keys go, on every config, and on a standalone one so do the two hosts
-// (unless already loopback), which then take their defaults: the upgraded
-// host binds and probes the API on loopback like every other one, instead
-// of dialing a link nothing serves and rolling the upgrade back. Running it
-// again changes nothing. The root units, network namespace, NAT rules and
-// sandbox user the integration set up are removed by hand (the sandbox
-// guide's "Remove a retired standalone sandbox").
+// It also pinned the OpenClaw home it moved (claw.openclaw_home_original,
+// which 0.8.x wrote empty everywhere else). 1.0 drives no such sandbox,
+// keeps no shim for those addresses and reads no pin, so the three keys go,
+// on every config (a pin is named in a note, for the manual clean-up), and
+// on a standalone one so do the two hosts (unless already loopback), which
+// then take their defaults: the upgraded host binds and probes the API on
+// loopback like every other one, instead of dialing a link nothing serves
+// and rolling the upgrade back. Running it again changes nothing. The root
+// units, network namespace, NAT rules and sandbox user the integration set
+// up are removed by hand (the sandbox guide's "Remove a retired standalone
+// sandbox").
 func (m *v9Migrator) migrateRetiredStandaloneSandbox(root *yaml.Node) {
 	openshell := v8YAMLMapValue(root, "openshell")
 	standalone := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(openshell, "mode"))) == "standalone"
 	for _, key := range []string{"mode", "sandbox_home"} {
 		if v9Pop(openshell, key) != nil {
 			m.record.Removed = append(m.record.Removed, "openshell."+key)
+		}
+	}
+	if pin := v9Pop(v8YAMLMapValue(root, "claw"), "openclaw_home_original"); pin != nil {
+		m.record.Removed = append(m.record.Removed, "claw.openclaw_home_original")
+		if home := strings.TrimSpace(yamlScalarValue(pin)); home != "" {
+			m.note("claw.openclaw_home_original %s was the OpenClaw home the retired standalone sandbox moved; point claw.home_dir and claw.config_file back at it if they name the sandbox user's home", home)
 		}
 	}
 	if !standalone {

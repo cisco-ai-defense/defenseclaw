@@ -3022,8 +3022,10 @@ subprocess policy on every platform.
 The upgrade to 1.0 resets what it left in DefenseClaw's config: the
 `config_version` 9 migration (`migrateRetiredStandaloneSandbox` in
 `internal/config/migrate_v9.go`, which the gateway's in-memory load of a v8
-file runs too) drops `openshell.mode` and `openshell.sandbox_home` from every
-config and, on one that said `openshell.mode: standalone`, the non-loopback
+file runs too) drops `openshell.mode`, `openshell.sandbox_home` and the
+OpenClaw home pin `claw.openclaw_home_original` (named in a migration note
+when set) from every config and, on one that said
+`openshell.mode: standalone`, the non-loopback
 `guardrail.host` and `gateway.host` (the veth addresses), which take their
 defaults. So the gateway binds its API on loopback and every probe (upgrade,
 watchdog, status, the Python CLI's `api_bind_host`) dials it there; the
