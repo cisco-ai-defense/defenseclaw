@@ -1858,9 +1858,12 @@ verdict. The file and egress boundaries are enforced outside the sandbox and
 do not depend on the hooks. The manager watches for the two ways a
 compromised hook shows:
 
-- **Hook silence** (`hook_silence`): the harness is active (OCSF process or
-  network events of the harness's own binaries under its install root,
-  their connections to the egress proxy included, native OTLP) for the
+- **Hook silence** (`hook_silence`): the harness is active (OCSF network
+  events of the harness's own binaries under its install root, their
+  connections to the egress proxy included, native OTLP; OCSF process
+  events of those binaries count too, but OpenShell 0.1 reports only the
+  processes its supervisor starts, never the ones a harness runs, so work
+  without network traffic goes unseen) for the
   pack's `hooks.silence_after` (10 minutes in the built-in packs, 1 minute
   to 24 hours) without a single hook request: one run of activity since the
   last hook (or the session's start) that no idle stretch of `silence_after`

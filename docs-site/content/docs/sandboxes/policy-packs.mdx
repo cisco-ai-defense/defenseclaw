@@ -219,10 +219,11 @@ These are the settings each pack controls. The
   call a hook belongs to, so for those DefenseClaw relies on noticing hooks
   that go silent.
 - **Silent hooks response** (`hooks.on_silence`, `hooks.silence_after`):
-  what DefenseClaw does when the harness works (model calls, its own
-  processes and connections) for `silence_after` without one hook request
-  reaching DefenseClaw, as a hook registration the agent switched off
-  looks. It applies to user-tier harnesses, whose hook settings the agent
+  what DefenseClaw does when the harness works (its model calls and other
+  connections: OpenShell doesn't report the processes a harness starts, so
+  commands without network traffic don't count) for `silence_after`
+  without one hook request reaching DefenseClaw, as a hook registration
+  the agent switched off looks. It applies to user-tier harnesses, whose hook settings the agent
   can edit (OpenCode, Kiro CLI, Amp, Devin CLI, Antigravity, Hermes,
   OpenHands; the run's banner says so on its `Hooks` line): `stop` stops the
   sandbox, as a hook tamper does; `alert` reports a high-severity

@@ -652,8 +652,8 @@ What happens next is the pack's `hooks.on_tamper` setting:
 | `open` | `alert` | The sandbox keeps running; review the activity and stop it if you didn't expect this. |
 | `balanced`, `strict` | `stop` | DefenseClaw stops the sandbox. |
 
-A harness that works (model calls, its own processes and connections) for
-the pack's `hooks.silence_after`, 10 minutes in every built-in pack, without
+A harness that works (its model calls and other connections) for the
+pack's `hooks.silence_after`, 10 minutes in every built-in pack, without
 one hook request reaching DefenseClaw raises a HIGH `hook_silence` finding,
 and `defenseclaw sandbox list` shows `silent!` in its HOOKS column. A
 switched-off hook registration looks like that, and a user-tier harness's
@@ -665,7 +665,10 @@ a background request). That reset is also a limit: a harness whose hooks
 were switched off and that works in bursts shorter than `silence_after`,
 each after an idle stretch at least that long (a tool call that sleeps, for
 example), is never flagged, at the cost of sitting idle for more than half
-of the time. Silence detection is a backstop; the file and network
+of the time. Only network traffic shows that a harness works: OpenShell
+doesn't report the processes a harness starts, so a harness that runs
+commands without reaching its model or any site is not flagged either.
+Silence detection is a backstop; the file and network
 boundaries are enforced outside the sandbox and hold either way.
 
 ```text
