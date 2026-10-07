@@ -53,12 +53,18 @@ func init() { hostRealms = func(context.Context) []Realm { return nil } }
 // A per-user gateway resolves the directory type of an SSSD account from the
 // realm realmd reports, as the root guardian does: by the account's DNS
 // domain or a parent of it, or the only realm for a bare name. An SSSD
-// domain no joined realm covers gets no directory type.
+// domain no joined realm covers gets no directory type. A local account
+// SSSD's files provider answers for (the implicit files domain of RHEL 8)
+// stays local: it was reported as the AD account lee@CORP.EXAMPLE.COM.
 func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
-	origNSS, origRealms := nsswitchPath, hostRealms
-	t.Cleanup(func() { nsswitchPath, hostRealms = origNSS, origRealms })
+	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
+	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
 	nsswitchPath = filepath.Join(t.TempDir(), "nsswitch.conf")
-	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss systemd\n"), 0o644); err != nil {
+	localPasswdPath = filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files systemd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, []byte("lee:x:1000:70000::/home/lee:/bin/bash\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	hostRealms = func(context.Context) []Realm {
@@ -69,6 +75,7 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		70002: "bob@emea.corp.example.com",
 		70003: "carol",
 		70004: "dave@ldap.example.org",
+		1000:  "lee",
 	}
 	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
@@ -78,15 +85,16 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		f.results["initgroups "+name] = commandResult{stdout: []byte(name + " 70000\n")}
 	}
 	type view struct {
-		directory                useridentity.Directory
-		domain, realm, principal string
+		directory                        useridentity.Directory
+		source, domain, realm, principal string
 	}
-	ad := useridentity.DirectoryActiveDirectory
+	ad, sssd := useridentity.DirectoryActiveDirectory, useridentity.SourceSSSD
 	want := map[int]view{
-		70001: {ad, "corp.example.com", "CORP.EXAMPLE.COM", "alice@CORP.EXAMPLE.COM"},
-		70002: {ad, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@EMEA.CORP.EXAMPLE.COM"},
-		70003: {ad, "corp.example.com", "CORP.EXAMPLE.COM", "carol@CORP.EXAMPLE.COM"},
-		70004: {"", "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@LDAP.EXAMPLE.ORG"},
+		70001: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "alice@CORP.EXAMPLE.COM"},
+		70002: {ad, sssd, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@EMEA.CORP.EXAMPLE.COM"},
+		70003: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "carol@CORP.EXAMPLE.COM"},
+		70004: {"", sssd, "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@LDAP.EXAMPLE.ORG"},
+		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
 	}
 	r := newFakeNSS(f)
 	for uid, expected := range want {
@@ -94,9 +102,9 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("uid %d: %v", uid, err)
 		}
-		got := view{facts.Directory, facts.Domain, facts.Realm, facts.Principal}
-		if got != expected || facts.Source != useridentity.SourceSSSD || facts.Assurance != useridentity.AssuranceVerified {
-			t.Errorf("uid %d (%s) = %+v source %q, want %+v from sssd, verified", uid, accounts[uid], facts, facts.Source, expected)
+		got := view{facts.Directory, facts.Source, facts.Domain, facts.Realm, facts.Principal}
+		if got != expected || facts.Assurance != useridentity.AssuranceVerified {
+			t.Errorf("uid %d (%s) = %+v, want %+v, verified", uid, accounts[uid], facts, expected)
 		}
 	}
 }

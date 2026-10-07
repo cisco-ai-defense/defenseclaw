@@ -13,8 +13,10 @@
 package unixidentity
 
 import (
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +29,7 @@ import (
 // The backend that owns an account is found by asking each directory
 // service named on the passwd line of nsswitch.conf for the uid with
 // `getent -s <service>`; the first that answers owns it, and an account no
-// directory service knows is local. The domain comes from the
+// directory service knows, or one /etc/passwd holds, is local. The domain comes from the
 // fully-qualified name SSSD (alice@corp.example.com) or winbind
 // (CORP\alice) reports, and groups from initgroups plus group lookups for
 // all of their ids. The realm and directory type of an SSSD or winbind
@@ -95,6 +97,18 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 				// A directory that did not answer is not one that does not
 				// own the account.
 				return useridentity.DirectoryFacts{}, lookupErr
+			}
+			// SSSD's files provider (the implicit files domain of RHEL 8, an
+			// id_provider=files or proxy domain) answers for the accounts of
+			// /etc/passwd as well, and the only realm would then name a local
+			// account as an AD one. An account the files database holds
+			// under its name and uid is local, whichever service answers.
+			local, localErr := LocalAccounts(r.context())
+			if localErr != nil && !errors.Is(localErr, os.ErrNotExist) {
+				return useridentity.DirectoryFacts{}, localErr
+			}
+			if id, ok := local[account.Name]; ok && id == uid {
+				break
 			}
 			facts.Directory, facts.Source = known.directory, known.source
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
