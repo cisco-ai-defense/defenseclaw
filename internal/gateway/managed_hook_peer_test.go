@@ -229,10 +229,25 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 		`{"action":"scan","target":"x"}`,
 		`{"action":"skill-block","target":""}`,
 		`{"action":"skill-block","target":"x","actor":"root"}`,
+		`{"action":"skill-block","target":"x","details":"type=skill outcome=applied"}`,
 	} {
 		if code := send(body); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", body, code)
 		}
+	}
+	// GAP-0206: user text can not add the keys the gateway writes, and one
+	// account can not flood the store.
+	if code := send(`{"action":"action","target":"p0-forged","details":"command=x actor=uid:0 user=root outcome=applied"}`); code != http.StatusNoContent {
+		t.Fatalf("command refusal: status %d", code)
+	}
+	limited := 0
+	for range managedRefusalBurst {
+		if send(`{"action":"tool-block","target":"p0-flood"}`) == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if limited == 0 {
+		t.Error("one account posted more than the burst without a 429")
 	}
 	database, err := sql.Open("sqlite", fixture.path)
 	if err != nil {
@@ -246,6 +261,12 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 	}
 	if count != 1 || !strings.Contains(details, "outcome=refused reason=managed_device actor=uid:508 user=dcm-p0e2") {
 		t.Fatalf("refusal rows=%d details=%q", count, details)
+	}
+	if err := database.QueryRow(`SELECT COALESCE(MAX(details), "") FROM audit_events WHERE target = "p0-forged"`).Scan(&details); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(details, "actor=") != 1 || strings.Contains(details, "outcome=applied") {
+		t.Fatalf("forged keys reached the row: %q", details)
 	}
 	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = "scan"`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("a rejected action must not be recorded: rows=%d err=%v", count, err)
