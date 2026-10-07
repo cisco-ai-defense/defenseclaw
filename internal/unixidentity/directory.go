@@ -17,7 +17,6 @@ import (
 	"maps"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -57,12 +56,12 @@ var directoryServices = map[string]directoryService{
 // (about 30 ms), so one getent call for a few hundred ids outlasts the
 // seconds a single command gets, and its failure used to leave the ids as
 // numbers that no assignment matches (GAP-0138). The ids are named
-// groupQueryBatch at a time, groupQueryParallel batches at once, and a batch
-// that fails fails the lookup.
-const (
-	groupQueryBatch    = 64
-	groupQueryParallel = 4
-)
+// groupQueryBatch at a time, and a batch that fails fails the lookup. The
+// batches run one after the other: SSSD fills its cache one request at a
+// time, so four getent calls at once each finished only after the calls
+// before it, and the last ones ran past the five seconds one command gets
+// while the first finished within two (GAP-0230).
+const groupQueryBatch = 64
 
 // DirectoryFactsForUID resolves the verified directory facts of uid. The
 // caller has verified the uid (peer credentials or a per-user credential);
@@ -130,7 +129,8 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 }
 
 // groupNames names the account's groups with getent group calls of
-// groupQueryBatch ids each. An id no group answers for is kept as its number.
+// groupQueryBatch ids each, one after the other. An id no group answers for
+// is kept as its number.
 func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	ids, err := r.GroupIDs(account)
 	if err != nil {
@@ -139,31 +139,13 @@ func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	if len(ids) > maxDirectoryGroups {
 		return nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
 	}
-	var (
-		mu    sync.Mutex
-		wg    sync.WaitGroup
-		names = make(map[int]string, len(ids))
-		first error
-		slots = make(chan struct{}, groupQueryParallel)
-	)
+	names := make(map[int]string, len(ids))
 	for start := 0; start < len(ids); start += groupQueryBatch {
-		batch := ids[start:min(start+groupQueryBatch, len(ids))]
-		slots <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			found, queryErr := r.groupBatchNames(batch)
-			mu.Lock()
-			defer mu.Unlock()
-			if queryErr != nil && first == nil {
-				first = queryErr
-			}
-			maps.Copy(names, found)
-		}()
-	}
-	wg.Wait()
-	if first != nil {
-		return nil, first
+		found, queryErr := r.groupBatchNames(ids[start:min(start+groupQueryBatch, len(ids))])
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		maps.Copy(names, found)
 	}
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {

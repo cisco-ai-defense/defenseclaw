@@ -165,6 +165,13 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	const token = "dc-test-discovery-token"
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/slow" {
+			select { // a gateway still resolving a user
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
 		if r.URL.Path != "/api/v1/ai-usage/runtime" || r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -202,6 +209,23 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	}
 	if view.Gateway != "127.0.0.1:"+port || !view.Enabled || len(view.Planes) != 1 || view.Planes[0].Mechanism != "ps(1)" {
 		t.Fatalf("runtime view = %+v", view)
+	}
+
+	// GAP-0215: a gateway that took the connection and is still resolving a
+	// user is running, so a timeout blames the directory lookup; only a
+	// connection that fails sends the administrator to the deployment status.
+	previousWait := enterpriseGatewayWait
+	enterpriseGatewayWait = 100 * time.Millisecond
+	t.Cleanup(func() { enterpriseGatewayWait = previousWait })
+	var answer json.RawMessage
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil ||
+		!strings.Contains(err.Error(), "took the connection but did not answer within 0.1 s") ||
+		strings.Contains(err.Error(), "check the deployment") {
+		t.Fatalf("slow gateway error = %v, want the directory lookup blamed", err)
+	}
+	gateway.Close()
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "check the deployment") {
+		t.Fatalf("stopped gateway error = %v, want the deployment status hint", err)
 	}
 }
 

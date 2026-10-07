@@ -46,7 +46,13 @@ func verifiedAuditCaller(ctx context.Context) (auditCaller, bool) {
 		return auditCaller{}, false
 	}
 	if peer, found := managedHookPeerFromContext(ctx); found {
-		return auditCaller{ID: strconv.Itoa(peer.UID), IDKind: useridentity.KindPOSIXUID, Name: peer.Name}, true
+		caller := auditCaller{ID: strconv.Itoa(peer.UID), IDKind: useridentity.KindPOSIXUID, Name: peer.Name}
+		if agent := AgentIdentityFromContext(ctx); caller.Name == "" && agent.UserID == caller.ID {
+			// The account lookup failed; the name the guardian recorded for
+			// the uid attributes the row (attachVerifiedSubject).
+			caller.Name = agent.UserName
+		}
+		return caller, true
 	}
 	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
 		caller := auditCaller{ID: identity, IDKind: useridentity.KindForID(identity)}

@@ -549,7 +549,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 				}
 				if body, err := l.gatewayHealth(ctx, unit, serviceUID); err == nil {
 					r.Readiness.Gateway = true
-					l.readInspection(body)
+					l.readGatewayPosture(body)
 				}
 			}
 		case "guardian":
@@ -601,18 +601,41 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 // failing (for example a rejected key).
 const codeAIDefenseUnavailable = "ai_defense_unavailable"
 
-// readInspection copies the gateway's inspection posture from /health when
-// the gateway publishes it.
-func (l *lifecycle) readInspection(body []byte) {
+// codeDirectoryLookups warns that the gateway cannot resolve some accounts in
+// the directory (a domain controller or SSSD that does not answer).
+const codeDirectoryLookups = "directory_lookups_failing"
+
+// readGatewayPosture copies the gateway's inspection posture from /health
+// when the gateway publishes it, and warns when it reports directory lookups
+// that fail: the accounts without cached facts then run under the default
+// guardrail profile, and nothing else in status or verify showed it (GAP-0216).
+func (l *lifecycle) readGatewayPosture(body []byte) {
 	var health struct {
 		Inspection *struct {
 			Local     string `json:"local"`
 			AIDefense string `json:"ai_defense"`
 		} `json:"inspection"`
+		Directory *struct {
+			Failing int    `json:"failing"`
+			Since   string `json:"since"`
+			Stale   int    `json:"stale"`
+		} `json:"directory"`
 	}
-	if json.Unmarshal(body, &health) == nil && health.Inspection != nil {
+	if json.Unmarshal(body, &health) != nil {
+		return
+	}
+	if health.Inspection != nil {
 		l.result.Inspection.Local = health.Inspection.Local
 		l.result.Inspection.AIDefense = health.Inspection.AIDefense
+	}
+	if d := health.Directory; d != nil && d.Failing > 0 {
+		message := fmt.Sprintf("directory lookups are failing for %d account(s) since %s; accounts without cached facts get the "+
+			"default guardrail profile (default_lookup_failed)", d.Failing, d.Since)
+		if d.Stale > 0 {
+			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
+		}
+		l.result.AddWarning(codeDirectoryLookups, message+". Check SSSD or the domain controller; `"+
+			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
 	}
 }
 
