@@ -685,8 +685,8 @@ struct SetupDefinitionsParityTests {
         expect(wizard != nil, "the Sandbox wizard is listed")
         expect(wizard?.fields.contains { $0.key == "install-openshell" } == false,
                "the app never runs the sudo installer (it needs a terminal)")
-        expect(wizard?.fields.contains { $0.key.contains("telemetry") || $0.label.contains("telemetry") } == false,
-               "no telemetry question: the Homebrew gateway does not read gateway.env")
+        expect(wizard?.fields.contains { $0.key == "telemetry-off" && $0.defaultValue == "yes" } == true,
+               "the telemetry question: the Homebrew service reads gateway.env")
         expect(wizard?.fields.contains { $0.key.contains("mount") || $0.label.lowercased().contains("mount") } == false,
                "no mounts question: setup runs macOS sandboxes in MicroVMs, which mount no host folders")
         let blurb = wizard?.blurb ?? ""
@@ -701,9 +701,10 @@ struct SetupDefinitionsParityTests {
             "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--harness", "codex", "--no-wrappers",
         ]], "defaults match the TUI wizard")
         expect(TUIWizards.sandboxCommands([
-            "harness-codex": "no", "mounts": "no", "wrappers": "yes", "build-images": "no",
+            "harness-codex": "no", "mounts": "no", "telemetry-off": "no", "wrappers": "yes", "build-images": "no",
         ], false) == [[
-            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--wrappers", "--skip-images",
+            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--upstream-telemetry", "--wrappers",
+            "--skip-images",
         ]], "every consent flag, and never --no-mounts")
         expect(TUIWizards.sandboxCommands(["action": "doctor"], false) == [["sandbox", "doctor"]], "doctor action")
         expect(TUIWizards.sandboxValidation(["harness-claudecode": "no", "harness-codex": "no"]) != nil,
@@ -713,8 +714,8 @@ struct SetupDefinitionsParityTests {
                "configured harnesses seed the toggles")
 
         // Every flag the TUI builder can emit is one the app emits too, except
-        // the sudo installer, and the telemetry opt-in and the mounts question
-        // the TUI offers only off macOS.
+        // the sudo installer and the mounts question the TUI offers only off
+        // macOS.
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let python = (try? String(
             contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/panels/setup.py"),
@@ -733,9 +734,9 @@ struct SetupDefinitionsParityTests {
             Range(match.range(at: 1), in: body).map { String(body[$0]) }
         })
         let swiftFlags: Set<String> = [
-            "--non-interactive", "--harness", "--wrappers", "--no-wrappers", "--skip-images",
+            "--non-interactive", "--harness", "--upstream-telemetry", "--wrappers", "--no-wrappers", "--skip-images",
         ]
-        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--upstream-telemetry", "--no-mounts"]),
+        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--no-mounts"]),
                "TUI sandbox flags \(tuiFlags.sorted()) differ from the app's")
     }
 

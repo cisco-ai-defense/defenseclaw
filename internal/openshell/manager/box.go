@@ -105,13 +105,18 @@ type box struct {
 	// process tree is on.
 	procs *procTree
 
-	hooks       hookStats
+	hooks hookStats
+	// activeAt is the harness's latest activity and activeSince the start
+	// of its current run of activity (noteActiveLocked), which the hook
+	// silence check measures.
 	activeAt    time.Time
+	activeSince time.Time
 	silentSince time.Time
 	// reach is whether the current session's hooks reach the ingress
 	// (reach.go); it starts over whenever the sandbox becomes ready.
 	reach hookReach
-	// tamperStop is set once a hook tamper scheduled this session's stop.
+	// tamperStop is set once a hook alarm (a tamper, or silent hooks under
+	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
 	// seenChunks are the pending draft chunks triage decided; it is pruned
@@ -295,6 +300,10 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
 		b.reach = hookReach{}
+		// The silence check starts over with the session: one that stopped
+		// a session for silent hooks stops the next one too while they stay
+		// silent.
+		b.silentSince, b.silenceSent = time.Time{}, false
 		b.closedPorts = nil
 		// The new session's hooks name its session.
 		m.tel.forgetSandbox(b.rec.Name)
@@ -664,6 +673,11 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 	}
 	v.Egress.BlockedRequests = b.blockedRequests
+	// What silent hooks lead to, as checkHookSilence decides it: under a
+	// policy that is not resolved, the fail-closed response.
+	var after time.Duration
+	v.Hooks.OnSilence, after = silenceResponse(r.TamperTier, b.eff)
+	v.Hooks.SilenceAfter = packs.ShortDuration(after)
 	running := b.phase == audit.SandboxPhaseReady && !b.started.IsZero()
 	if running {
 		v.SessionYolo = launchYolo(b)

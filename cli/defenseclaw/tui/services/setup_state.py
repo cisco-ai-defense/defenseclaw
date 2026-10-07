@@ -1216,7 +1216,7 @@ _OPENSHELL_STRING_LIST_KEYS = frozenset(
     }
 )
 # Keys only the daemon and the sandbox commands write.
-_OPENSHELL_READ_ONLY_KEYS = frozenset({"openshell.wrappers", "openshell.admin", "openshell.mode"})
+_OPENSHELL_READ_ONLY_KEYS = frozenset({"openshell.wrappers", "openshell.admin"})
 _OPENSHELL_CPU = re.compile(r"^(\d+(\.\d+)?|\d+m)$")
 _OPENSHELL_MEMORY = re.compile(r"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|K|M|G|T|k)?$")
 # config.openShellNamePattern.

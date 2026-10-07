@@ -165,3 +165,8 @@ mcp:
 hooks:
   fail_mode: closed
   on_tamper: stop
+  # A user-tier harness (its hook registration is the agent's to edit) that
+  # works for silence_after without one hook reaching DefenseClaw: stop the
+  # sandbox.
+  on_silence: stop
+  silence_after: 10m

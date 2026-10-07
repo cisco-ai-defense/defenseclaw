@@ -11,7 +11,7 @@ The operator guide for the sandbox commands is the
 [published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
 (`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
-servers, the shell wrapper, troubleshooting, and the legacy 0.0.x cleanup.
+servers, the shell wrapper, troubleshooting, and removing what a retired 0.0.x standalone install left.
 Telemetry details are in
 [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
 
@@ -193,10 +193,12 @@ not the driver's name or `runtime.GOOS`.
   an admin `max_resources` it also counts the processors and reads the
   memory the MicroVM got, since the running gateway can take other values
   than its files say (launchd's environment, a change since its restart). A
-  mismatch rolls the create back or stops the started sandbox. It runs on
-  the vm driver, where the workload's identity is the gateway's
-  configuration. On docker it is off (`SkipWorkloadCheck` in the driver
-  table) until a Linux live run has passed it.
+  mismatch rolls the create back or stops the started sandbox, and the
+  refusal says which (`policy_rejected`, "... DefenseClaw deleted it" or
+  "... DefenseClaw stopped it again"). It runs on every driver: on vm the
+  workload's identity is the gateway's configuration, on docker it is the
+  policy's `process.run_as_user`, and the run files docker bind-mounts must
+  be on a read-only mount.
 - **Resources.** vm has no per-sandbox limits: every MicroVM gets the
   gateway-wide `vcpus`, `mem_mib` and `overlay_disk_mib`. `--cpu` and
   `--memory` are warned about and dropped, the record keeps the gateway-wide
@@ -343,7 +345,10 @@ never reaches the main listener.
    |                    raw relay to 127.0.0.1:18972, the proxy decides
    |
    |-- LLM API -----> provider host, for example api.anthropic.com:443
-   |                    (NO_PROXY) provider rule swaps the key placeholder
+   |                    (NO_PROXY) provider rule swaps the key placeholder;
+   |                    open to the harness's network binaries only (for an
+   |                    npm or Python harness its node/python interpreter,
+   |                    which runs any script), around the egress proxy
    |
    '-- anything else: denied by OpenShell, which files a draft proposal
 ```
@@ -1161,15 +1166,13 @@ providers (`<sandbox>-ingress`, `<sandbox>-llm`, `<sandbox>-cred-<n>`) carry
 the data dir's owner label, and a create never replaces a provider of that
 name that another data dir (or a user) owns. Policy rules, `defenseclaw_egress`
 among them, belong to one sandbox's policy, and the overlay image tags hash
-the owner and the ingress port. Earlier releases imported one gateway-wide
-`defenseclaw-ingress` profile, holding one daemon's port, and single-region
-`defenseclaw-claude-bedrock-mantle` and `defenseclaw-codex-bedrock-mantle`
-profiles. Sandboxes created then keep using them, and nothing updates them
-any more.
+the owner and the ingress port. The ingress and Bedrock Mantle templates are
+only ever imported under ids naming their inputs (`defenseclaw-ingress-<port>`,
+`<template>-<region>`), never under the bare template ID.
 
 `defenseclaw sandbox teardown` deletes this data dir's own ingress profiles
-(the configured listener's and any its providers used), the legacy
-`defenseclaw-ingress`, and the shared LLM and credential profiles, each only
+(the configured listener's and any its providers used) and the shared LLM
+and credential profiles, each only
 when no other provider uses it. It never deletes another daemon's ingress
 profile, and OpenShell refuses to delete a profile a provider still uses.
 
@@ -1346,9 +1349,7 @@ only while that count is unchanged: the next start takes a fresh snapshot,
 and any session after the acceptance ends it (a `--no-snapshot` start's,
 or one that ran although its start failed on DefenseClaw's side), while a
 start that never ran the sandbox leaves it in place. `sandbox start --new-snapshot` accepts the changes and takes a
-fresh one; `--no-snapshot` always keeps the previous one. An acceptance an
-earlier CLI recorded in `cli/accepted.json` is honoured once, as
-`--new-snapshot`.
+fresh one; `--no-snapshot` always keeps the previous one.
 
 `Undo` needs the sandbox stopped first (the manager must stop it), and has a
 preview mode. A stop of a ready sandbox first sends SIGTERM to the harness's
@@ -1377,10 +1378,8 @@ stop's interrupted mark goes through a descriptor checked to be a regular
 file, after it has said how the run stands, so a FIFO swapped in for
 `latest.exit` gets no write. The CLI
 only asks first, on a terminal, before `sandbox stop` ends a run still
-going. `sandbox logs` names the run a kept log is of (its start), and still
-shows a log an earlier CLI kept in `cli/run.log`, said to be that CLI's,
-until the daemon sees the sandbox start again (its `session` count): every
-stop after that is the daemon's. In a git project undo:
+going. `sandbox logs` names the run a kept log is of (its start). In a git
+project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;
@@ -1645,8 +1644,8 @@ phase `deleted`, `undo` and `review` still work on it, and `delete` drops the
 snapshot. Until then its name cannot be reused.
 
 Sandbox names follow the OpenShell rule (a DNS label: lowercase letters,
-digits and `-`, starting and ending with a letter or digit), and `git` is
-reserved. OpenShell 0.1.1 creates sandboxes of at most 19 characters, so a
+digits and `-`, starting and ending with a letter or digit). OpenShell 0.1.1
+creates sandboxes of at most 19 characters, so a
 new name is held to that; the default is `<folder>-<rand4>`, the folder name
 cut to fit, with the harness and DefenseClaw ownership carried as labels.
 
@@ -1847,11 +1846,23 @@ compromised hook shows:
 
 - **Hook silence** (`hook_silence`): the harness is active (OCSF process or
   network events of the harness's own binaries under its install root,
-  their connections to the egress proxy included, native OTLP) for
-  `HookSilence` without a single hook request. Commands the harness did not
+  their connections to the egress proxy included, native OTLP) for the
+  pack's `hooks.silence_after` (10 minutes in the built-in packs, 1 minute
+  to 24 hours) without a single hook request: one run of activity since the
+  last hook (or the session's start) that no idle stretch of `silence_after`
+  breaks (`noteActiveLocked`), so a harness that wakes up after a long idle
+  stretch, before its first hook, is no alarm. Commands the harness did not
   start, such as the CLI's probe, a copy-mode upload or pull, or your own
   `sandbox exec`, do not count, and neither do the egress proxy's own
-  events, which cannot tell the harness's requests from theirs.
+  events, which cannot tell the harness's requests from theirs. For a
+  user-tier harness (its hook registration is in the image HOME, the
+  agent's to edit) the pack's `hooks.on_silence` picks the response: `stop`
+  (balanced, strict) stops the sandbox once per session through the tamper
+  stop path (`stopForAlarm`; the stop keeps no run log), `alert` (open)
+  reports and leaves it running. A managed-tier harness only alerts. The
+  finding's evidence names the response, the threshold and the tier, and
+  `hooks.on_silence` / `hooks.silence_after` in the sandbox's `hooks` view
+  feed the banner's `Hooks` line.
 - **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
   a tool that ran without a verdict. Per binding, the manager records each
   pre-tool decision and pairs it with the call's post-tool event. A
@@ -2987,11 +2998,11 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | `sandbox` commands (setup, run, lifecycle, pull, policy, images, teardown) | [`../internal/openshell/sandboxcli/`](../internal/openshell/sandboxcli/), [`../internal/cli/sandbox.go`](../internal/cli/sandbox.go) |
 | Shell wrappers (`sandbox enable`/`disable`) | [`../internal/openshell/wrapper/`](../internal/openshell/wrapper/) |
 | Nested-repository guard | [`../internal/openshell/nestguard/`](../internal/openshell/nestguard/), [`../internal/openshell/manager/guard.go`](../internal/openshell/manager/guard.go) |
-| Python `sandbox` stubs and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| Python `sandbox` stubs | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py) |
 | Python sandbox API client (REST and the activity stream) | [`../cli/defenseclaw/gateway.py`](../cli/defenseclaw/gateway.py) |
 | TUI Sandboxes panel, launch dialog and setup wizard | [`../cli/defenseclaw/tui/sandbox_panel.py`](../cli/defenseclaw/tui/sandbox_panel.py), [`../cli/defenseclaw/tui/services/sandbox_state.py`](../cli/defenseclaw/tui/services/sandbox_state.py), [`../cli/defenseclaw/tui/panels/setup.py`](../cli/defenseclaw/tui/panels/setup.py) |
 | macOS app sandboxes (menu bar, Overview, panel) | [`../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift`](../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift), [`../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift`](../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift) |
-| Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`../internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`../cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |
+| Reset of a retired standalone install (config_version 9 migration) | [`../internal/config/migrate_v9.go`](../internal/config/migrate_v9.go) (`migrateRetiredStandaloneSandbox`) |
 
 ## Testing
 
@@ -3028,24 +3039,22 @@ them.
 
 The legacy standalone integration targeted the `openshell-sandbox` 0.0.x
 binary on Linux, for OpenClaw only, and its generated sandbox policy was never
-enforced. It was removed. OpenClaw and ZeptoClaw use the `shims` subprocess
-policy on every platform. Review the cleanup plan, then run it:
+enforced. It was removed, with its cleanup command and the bind shim that
+kept the gateway API on the veth host. OpenClaw and ZeptoClaw use the `shims`
+subprocess policy on every platform.
 
-```bash
-defenseclaw sandbox legacy-cleanup --dry-run
-defenseclaw sandbox legacy-cleanup
-```
-
-Cleanup stops the systemd units itself but changes nothing else while any part
-of the legacy sandbox still runs. Stop the non-systemd launcher first with
-`sudo <data_dir>/scripts/run-sandbox.sh stop`. The
-[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
-lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
-and the follow-up commands.
-
-Until cleanup runs, a config that still says `openshell.mode: standalone` with
-a non-localhost `guardrail.host` keeps the gateway API bound to that host (an
-explicit `gateway.api_bind` still wins). While `openshell.mode: standalone`
-remains, `/health` reports the `sandbox` subsystem as `degraded`, and
-`defenseclaw doctor` and `defenseclaw status` point at
-`defenseclaw sandbox legacy-cleanup`.
+The upgrade to 1.0 resets what it left in DefenseClaw's config: the
+`config_version` 9 migration (`migrateRetiredStandaloneSandbox` in
+`internal/config/migrate_v9.go`, which the gateway's in-memory load of a v8
+file runs too) drops `openshell.mode`, `openshell.sandbox_home` and the
+OpenClaw home pin `claw.openclaw_home_original` (named in a migration note
+when set) from every config and, on one that said
+`openshell.mode: standalone`, the non-loopback
+`guardrail.host` and `gateway.host` (the veth addresses), which take their
+defaults. So the gateway binds its API on loopback and every probe (upgrade,
+watchdog, status, the Python CLI's `api_bind_host`) dials it there; the
+migration record lists the removed keys. Running it again changes nothing.
+The root systemd units, launchers, network namespace, NAT rules and `sandbox`
+user are removed by hand, as the
+[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox)
+lists.

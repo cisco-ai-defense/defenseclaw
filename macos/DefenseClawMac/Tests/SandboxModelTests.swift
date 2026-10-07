@@ -162,19 +162,20 @@ struct SandboxModelTests {
 
     private static func aFeedThatStartedOverIsReadFromItsStart() {
         var snapshot = SandboxSnapshot()
-        let last: [String: Any] = ["seq": 40, "kind": "egress.allowed", "host": "a.example", "time": "2026-09-27T12:00:00Z"]
+        let last: [String: Any] = ["seq": 40, "epoch": "a1", "kind": "egress.allowed", "host": "a.example"]
         _ = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [last]]), notify: false)
         func lost(_ events: [[String: Any]]) -> Bool {
             snapshot.resumePointLost(SandboxDecoding.activity(from: ["events": events]))
         }
         var newer = blocked
         newer["seq"] = 45
+        newer["epoch"] = "a1"
         expect(!lost([last, newer]), "the daemon still holds the resume point")
         expect(!lost([newer]), "only newer events pushed it out")
         expect(lost([]), "a restarted daemon with fewer events")
         var other = last
-        other["time"] = "2026-09-27T13:00:00Z"
-        expect(lost([other]), "another event under that number")
+        other["epoch"] = "b2"
+        expect(lost([other]), "a feed of another epoch")
         snapshot.restartFeed()
         expect(snapshot.lastSeq == 0 && snapshot.activity.isEmpty && !lost([]), "read from the start again")
     }

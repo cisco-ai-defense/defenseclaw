@@ -591,20 +591,17 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 //
 // OpenClaw auth checks the shared gateway.auth.token first; the per-device
 // token in device-auth.json is a Node.js client-side cache irrelevant here.
-//
-// Only activates in standalone sandbox mode (cfg.SandboxHome != "").
 // ---------------------------------------------------------------------------
 
 // tryAuthRepair attempts to repair device pairing and refresh the shared
-// gateway token when a connect attempt fails with an auth-related error.
-// Uses SandboxHome in sandbox mode, otherwise falls back to ClawHome
-// (the user's real home directory) so auth repair works everywhere.
+// gateway token when a connect attempt fails with an auth-related error,
+// in the OpenClaw home under ClawHome (the user's real home directory).
 func (c *Client) tryAuthRepair(connectErr error) {
 	if !c.shouldAutoRepair(connectErr) {
 		return
 	}
 
-	home := c.authRepairHome()
+	home := c.cfg.ClawHome
 	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — repairing device pairing and token (home=%s) ...\n", home)
 
 	if err := c.device.RepairPairing(home); err != nil {
@@ -728,17 +725,7 @@ func updateEnvFileToken(path, newToken string) error {
 
 // shouldAutoRepair returns true when auth auto-repair should be attempted.
 func (c *Client) shouldAutoRepair(err error) bool {
-	return c.authRepairHome() != "" && isAuthError(err)
-}
-
-// authRepairHome returns the home directory used for pairing repair.
-// Prefers SandboxHome (standalone sandbox mode), falls back to ClawHome
-// (regular installs).
-func (c *Client) authRepairHome() string {
-	if c.cfg.SandboxHome != "" {
-		return c.cfg.SandboxHome
-	}
-	return c.cfg.ClawHome
+	return c.cfg.ClawHome != "" && isAuthError(err)
 }
 
 // isAuthError returns true if the error message indicates the OpenClaw

@@ -28,7 +28,6 @@ import yaml
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.config import (
-    DEFAULT_SANDBOX_HOME,
     OPENSHELL_LOCKABLE_KEYS,
     OPENSHELL_PROFILES,
     Config,
@@ -133,7 +132,6 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.token_delivery, "provider")
         self.assertEqual(oc.llm, "auto")
         self.assertFalse(oc.keep_headless)
-        self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
         # Pack-governed keys stay unset so the selected pack supplies them.
         self.assertEqual(oc.pack, "")
         self.assertEqual(oc.profile, "")
@@ -417,13 +415,13 @@ class TestOpenShellSave(unittest.TestCase):
             # Ignored legacy keys survive untouched; unset pack keys are not written.
             self.assertEqual(section["version"], "0.6.2")
             self.assertIs(section["auto_pair"], False)
+            self.assertEqual(section["mode"], "standalone")
             self.assertNotIn("workdir", section)
             self.assertNotIn("import_", section.get("mcp", {}))
 
             reloaded = self._load(tmpdir)
             self.assertIs(reloaded.openshell.mcp.import_, False)
             self.assertEqual(reloaded.openshell.admin.locked, ["profile"])
-            self.assertEqual(reloaded.openshell.mode, "standalone")
 
             # Clearing a tri-state back to "inherit" writes null, which the
             # schema accepts and the loader reads as None.

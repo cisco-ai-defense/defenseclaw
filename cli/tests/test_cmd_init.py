@@ -1127,11 +1127,11 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(len(sandbox_steps), 1, summary["setup"])
         self.assertEqual(sandbox_steps[0]["status"], "warn")
         self.assertIn("deprecated and ignored", sandbox_steps[0]["detail"])
-        self.assertIn("defenseclaw sandbox legacy-cleanup", sandbox_steps[0]["detail"])
+        self.assertIn("Remove a retired standalone sandbox", sandbox_steps[0]["detail"])
         # OpenShell 0.1 sandboxes ship: the notice points at their setup.
         self.assertIn("run 'defenseclaw sandbox setup'", sandbox_steps[0]["detail"])
         self.assertNotIn("being rebuilt", sandbox_steps[0]["detail"])
-        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox legacy-cleanup --dry-run")
+        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox setup")
 
     def test_sandbox_flag_is_hidden_from_help(self):
         result = self._invoke(["--help"])

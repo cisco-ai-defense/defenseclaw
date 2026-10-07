@@ -1066,32 +1066,6 @@ def _gateway_peer_bound_request(
 # ---------------------------------------------------------------------------
 
 
-def _check_legacy_sandbox(cfg, r: _DoctorResult) -> None:
-    """Point a host that still carries the removed openshell-sandbox mode at cleanup.
-
-    Silent when nothing is found. The legacy mode keeps the gateway API on
-    the sandbox veth host until ``defenseclaw sandbox legacy-cleanup`` resets
-    the config, and its root units, ACLs, and ownership changes stay behind.
-    """
-    from defenseclaw import sandbox_legacy
-
-    try:
-        evidence = sandbox_legacy.quick_evidence(cfg)
-    except Exception:  # noqa: BLE001 - a diagnostic must never abort doctor
-        return
-    if not evidence:
-        return
-    _emit(
-        "warn",
-        "Legacy sandbox",
-        "legacy openshell-sandbox standalone install detected (" + ", ".join(evidence) + ")",
-        r=r,
-        check_id="doctor.sandbox.legacy-install",
-        reason_code="legacy-standalone-sandbox",
-        remediation="run 'defenseclaw sandbox legacy-cleanup --dry-run', then 'defenseclaw sandbox legacy-cleanup'",
-    )
-
-
 # ``defenseclaw-gateway sandbox doctor --json`` probes Docker, the OpenShell
 # service and CLI, and the daemon; each probe has its own short deadline.
 SANDBOX_DOCTOR_TIMEOUT_SECONDS = 90
@@ -2735,16 +2709,12 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
     if sub == "sandbox":
         # The gateway runs the sandbox subsystem when OpenShell sandboxes are
         # on (openshell.enabled: running, or degraded while a listener or the
-        # manager fails) and reports it degraded for a legacy standalone
-        # install until legacy-cleanup runs. Where sandboxes are unsupported
-        # (a platform other than Linux or macOS, managed_enterprise) it
-        # reports them disabled on purpose, which is no stale sidecar.
+        # manager fails). Where sandboxes are unsupported (a platform other
+        # than Linux or macOS, managed_enterprise) it reports them disabled
+        # on purpose, which is no stale sidecar.
         oc = getattr(cfg, "openshell", None)
         if oc is None:
             return None
-        is_standalone = getattr(oc, "is_standalone", None)
-        if callable(is_standalone) and is_standalone():
-            return True
         if not bool(getattr(oc, "enabled", False)):
             return False
         if not sys.platform.startswith(("linux", "darwin")):
@@ -3091,8 +3061,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 elif normalized_state == "degraded":
                     # Up but needs operator action (the sandbox subsystem
-                    # with a failed listener or manager, or the legacy
-                    # standalone sandbox shim), so warn rather than fail.
+                    # with a failed listener, manager or OpenShell
+                    # gateway), so warn rather than fail.
                     last_error = info.get("last_error")
                     reason = last_error.strip() if isinstance(last_error, str) else ""
                     if sub == "sandbox" and reason.startswith("openshell:"):
@@ -10754,7 +10724,6 @@ def doctor(
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
-    _check_legacy_sandbox(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a

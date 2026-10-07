@@ -691,7 +691,7 @@ func TestDiffConfigsMarksStorageIdentityRestartRequired(t *testing.T) {
 func TestDiffConfigsMarksOpenShellChanged(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{}
-	newCfg.OpenShell.Mode = "standalone"
+	newCfg.OpenShell.Profile = "strict"
 
 	diff := diffConfigs(oldCfg, newCfg)
 	if !slices.Contains(diff.Changed, "openshell") {

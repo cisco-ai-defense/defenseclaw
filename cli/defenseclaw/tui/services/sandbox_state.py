@@ -635,6 +635,9 @@ class ActivityRow:
     time: datetime | None
     kind: str
     sandbox: str = ""
+    # The feed that numbered seq: a restarted daemon numbers from one again
+    # under another epoch.
+    epoch: str = ""
     host: str = ""
     port: int = 0
     category: str = ""
@@ -653,7 +656,7 @@ class ActivityRow:
     @property
     def key(self) -> tuple[Any, ...]:
         """What tells this event apart from every other, across daemon restarts too."""
-        return (self.seq, self.time, self.kind, self.sandbox, self.host, self.port)
+        return (self.epoch, self.seq, self.time, self.kind, self.sandbox, self.host, self.port)
 
     @property
     def blocked_destination(self) -> bool:
@@ -756,6 +759,7 @@ def decode_activity(raw: Any) -> ActivityRow | None:
         time=_time(item.get("time")),
         kind=kind,
         sandbox=_text(item.get("sandbox")),
+        epoch=_text(item.get("epoch")),
         host=_text(item.get("host")),
         port=_int(item.get("port")),
         category=_text(item.get("category")),
@@ -1035,9 +1039,9 @@ class SandboxesPanelModel:
     error: str = ""
     fetched_at: datetime | None = None
     last_seq: int = 0
-    # The event last_seq names, which tells a daemon that started its feed
-    # over from one that stayed quiet (resume_point_lost).
-    _resume_event: ActivityRow | None = None
+    # The epoch of the feed last_seq is from, which tells a daemon that
+    # started its feed over from one that stayed quiet (resume_point_lost).
+    _epoch: str = ""
     stream_state: str = "idle"
     admin: AdminPolicy = field(default_factory=AdminPolicy)
     wrappers: tuple[str, ...] = ()
@@ -1130,7 +1134,7 @@ class SandboxesPanelModel:
                 else:
                     self.last_seq = max(self.last_seq, row.seq)
                 if row.seq and row.seq == self.last_seq:
-                    self._resume_event = row
+                    self._epoch = row.epoch
             if row.kind == "egress.unblocked" and row.host:
                 # Scope "always" lifts the host in every sandbox.
                 self.mark_unblocked(row.sandbox, row.host, always=row.reason == "always")
@@ -1151,27 +1155,23 @@ class SandboxesPanelModel:
     def resume_point_lost(self, events: Any) -> bool:
         """Whether the daemon's feed started over, from a read of the events after ``last_seq - 1``.
 
-        The feed keeps the event ``last_seq`` names until newer events push it
-        out, so a feed that still counts on answers with it (or with newer
-        ones). An empty answer, or another event under that number, is a new
-        feed: the daemon restarted and numbers its events from one again, so
-        resuming after ``last_seq`` would skip its first events.
+        Every event names the feed (its epoch), and a daemon that restarted
+        numbers its events from one again in a new feed, so resuming after
+        ``last_seq`` would skip its first events. An answer from another
+        feed is a new one, and so is an empty answer: the feed keeps the
+        event ``last_seq`` names until newer events push it out.
         """
         if self.last_seq <= 0:
             return False
         rows = [row for row in (decode_activity(raw) for raw in _list(events)) if row and row.kind != "dropped"]
         if not rows:
             return True
-        same = next((row for row in rows if row.seq == self.last_seq), None)
-        if same is None:
-            # Only newer events: they pushed the resume point out of the feed.
-            return False
-        return self._resume_event is not None and same.key != self._resume_event.key
+        return rows[0].epoch != self._epoch
 
     def reset_resume_point(self) -> None:
         """Read the daemon's feed from its start again (after resume_point_lost)."""
         self.last_seq = 0
-        self._resume_event = None
+        self._epoch = ""
 
     def mark_unblocked(self, sandbox: str, host: str, *, always: bool = False, lifted_by: str = "unblocked") -> None:
         """Mark the feed's earlier blocks of ``host`` as lifted.

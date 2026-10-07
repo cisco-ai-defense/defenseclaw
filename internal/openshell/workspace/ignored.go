@@ -401,8 +401,7 @@ func writeIgnored(lay layout, name string, m *ignoredManifest) error {
 	return nil
 }
 
-// loadIgnored reads a snapshot's manifest; nil when the snapshot has none
-// (taken by an older build).
+// loadIgnored reads a snapshot's manifest, which every snapshot writes.
 func loadIgnored(dataDir, name string) (*ignoredManifest, error) {
 	lay, err := newLayout(dataDir)
 	if err != nil {
@@ -410,9 +409,6 @@ func loadIgnored(dataDir, name string) (*ignoredManifest, error) {
 	}
 	var m ignoredManifest
 	if err := readJSON(lay.ignoredManifest(name), &m); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
 		return nil, err
 	}
 	if m.Files == nil {

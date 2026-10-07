@@ -48,7 +48,7 @@
     },
     {
       "title": "CLI and Gateway Commands",
-      "purpose": "Operator guide for defenseclaw CLI commands and defenseclaw-gateway commands: init, doctor, setup, skill, mcp, plugin, codeguard, policy, audit, alerts, tui, sandbox legacy-cleanup, status, start/stop/restart, scan, watchdog, and provenance. Reference docs/CLI.md, internal/cli/, cli/defenseclaw/commands/, and cmd/defenseclaw/main.go.",
+      "purpose": "Operator guide for defenseclaw CLI commands and defenseclaw-gateway commands: init, doctor, setup, skill, mcp, plugin, codeguard, policy, audit, alerts, tui, sandbox, status, start/stop/restart, scan, watchdog, and provenance. Reference docs/CLI.md, internal/cli/, cli/defenseclaw/commands/, and cmd/defenseclaw/main.go.",
       "parent": "Home"
     },
     {
@@ -73,7 +73,7 @@
     },
     {
       "title": "Firewall and Legacy Sandbox Cleanup",
-      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, the removal of the legacy openshell-sandbox 0.0.x standalone integration, defenseclaw sandbox legacy-cleanup, and the legacy bind shim and degraded sandbox health state that remain until cleanup runs. NVIDIA OpenShell 0.1 support is coming in a future release; do not describe it. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/config/legacy_openshell.go, internal/firewall/, internal/gateway/connector/subprocess.go, policies/rego/firewall.rego, and policies/rego/data-sandbox.json.",
+      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, the removal of the legacy openshell-sandbox 0.0.x standalone integration, and the config_version 9 migration that resets what it left in the config. NVIDIA OpenShell 0.1 support is coming in a future release; do not describe it. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/config/migrate_v9.go, internal/firewall/, internal/gateway/connector/subprocess.go, policies/rego/firewall.rego, and policies/rego/data-sandbox.json.",
       "parent": "Home"
     },
     {

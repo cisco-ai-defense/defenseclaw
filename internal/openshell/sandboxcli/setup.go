@@ -51,10 +51,10 @@ func (a *App) defaultInstaller(consent func(*openshell.InstallPlan) (bool, error
 		ConfirmBreakingUpgrade: func(*openshell.InstallPlan) (bool, error) {
 			// Only a person can say the old runtime is backed up: --yes
 			// does not answer this.
-			ok, err := a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up (`defenseclaw sandbox legacy-cleanup`)?", false, false)
+			ok, err := a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up?", false, false)
 			if errors.Is(err, ErrNoTerminal) {
 				return false, errors.New("an OpenShell 0.0.x runtime is installed and 0.1 cannot use its state; back it up, clean it up " +
-					"(`defenseclaw sandbox legacy-cleanup`) and run setup again on a terminal")
+					"and run setup again on a terminal")
 			}
 			return ok, err
 		},
@@ -305,19 +305,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// keep it, which setup does not ask again.
 	keepTelemetry := o.UpstreamTelemetry || a.Cfg.OpenShell.UpstreamTelemetry
 	telemetryOff := !keepTelemetry
-	if a.GOOS == "darwin" {
-		// Setup changes the telemetry only through the systemd unit, whose
-		// environment files it can check (the doctor skips the telemetry
-		// check here). The Homebrew service's wrapper sources gateway.env
-		// too, so say how to turn it off by hand.
-		switch {
-		case telemetryOff && unmanaged:
-			a.note("OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, start the gateway with " +
+	if a.GOOS == "darwin" && unmanaged {
+		// No Homebrew service: whoever starts the gateway gives it its
+		// environment, which DefenseClaw cannot change.
+		if telemetryOff {
+			a.note("OpenShell's anonymous usage telemetry stays on: no Homebrew service runs this gateway. To turn it off, start the gateway with " +
 				openshell.EnvTelemetryEnabled + "=false in its environment")
-		case telemetryOff:
-			a.note("OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, set " +
-				openshell.EnvTelemetryEnabled + "=false in " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
-				", which the Homebrew service reads, and restart the gateway (`brew services restart " + openshell.GatewayFormula + "`)")
 		}
 	} else {
 		switch {
@@ -325,16 +318,19 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.note("OpenShell's anonymous usage telemetry stays on (openshell.upstream_telemetry is true in " + a.tildePath(a.ConfigPath) + ")")
 		case !keepTelemetry && state.TelemetryEnabled():
 			// Say what a yes costs before it is given: an edit of
-			// gateway.env and a restart of the shared gateway.
+			// gateway.env (which the Homebrew service's wrapper sources on
+			// a Mac) and a restart of the shared gateway.
+			envFile := a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env"))
+			if a.GOOS == "darwin" {
+				envFile += ", which the Homebrew service reads,"
+			}
 			question := "Disable OpenShell's anonymous usage telemetry?"
 			switch {
 			case assume:
 			case unmanaged:
-				question += " (edits " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
-					"; you restart the gateway yourself, with its variables in the gateway's environment, to apply it)"
+				question += " (edits " + envFile + "; you restart the gateway yourself, with its variables in the gateway's environment, to apply it)"
 			default:
-				question += " (edits " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
-					" and restarts the OpenShell gateway" + a.restartImpact(ctx) + ")"
+				question += " (edits " + envFile + " and restarts the OpenShell gateway" + a.restartImpact(ctx) + ")"
 			}
 			yes, err := a.ask(question, true, assume)
 			if err != nil {

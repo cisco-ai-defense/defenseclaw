@@ -411,8 +411,9 @@ class SandboxPanelMixin:
                 resume = self.sandbox_model.last_seq
                 if resume:
                     # Read from one event early: a daemon that restarted
-                    # numbers its events from one again, and resuming after
-                    # the old number would skip its first events.
+                    # numbers its events from one again in a feed of another
+                    # epoch, and resuming after the old number would skip
+                    # its first events.
                     probe = client.sandbox_activity(since=resume - 1)
                     if not self._deliver_from_thread(self._on_sandbox_resume, probe):
                         return

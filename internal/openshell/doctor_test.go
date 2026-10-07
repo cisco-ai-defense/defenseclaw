@@ -542,7 +542,24 @@ func TestDoctorChecks(t *testing.T) {
 			want: []checkWant{{"landlock", pass, "ABI 6 in the Linux VM Docker runs in"}, {"linger", skip, ""},
 				{"gateway-service", pass, "nvidia/openshell/openshell"},
 				// The Homebrew service's wrapper sources gateway.env too (M8).
-				{"telemetry", skip, "DefenseClaw changes it on Linux only; the Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from /"}}},
+				{"telemetry", pass, "OpenShell usage telemetry is on in /"}}},
+		// A mismatch on a Mac names that file; the fix writes it and
+		// restarts the Homebrew service.
+		{name: "macOS telemetry differs from config", setup: func(f *doctorFixture) {
+			f.onBrew()
+			off := false
+			f.doctor.WantTelemetry = &off
+		}, want: []checkWant{{"telemetry", warn, "gateway.env, which the Homebrew service reads but openshell.upstream_telemetry is false"}},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r, openshell.CheckIDTelemetry)
+				st, err := f.doctor.Gateway.Read()
+				if err != nil || st.TelemetryEnabled() || !f.runner.Called("brew services restart nvidia/openshell/openshell") {
+					t.Fatalf("after the fix: telemetry on %v (%v), calls %v", st != nil && st.TelemetryEnabled(), err, f.runner.Calls())
+				}
+				if data, err := os.ReadFile(st.EnvPath); err != nil || !strings.Contains(string(data), "OPENSHELL_TELEMETRY_ENABLED=false") {
+					t.Fatalf("%s = %q, %v", st.EnvPath, data, err)
+				}
+			}},
 		// No formula and no gateway answering (one that answers is
 		// TestDoctorOnReleaseBinaries').
 		{name: "macOS without OpenShell", setup: func(f *doctorFixture) {

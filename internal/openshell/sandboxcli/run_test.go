@@ -73,6 +73,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Hidden    .env",
 		"Protected .git/hooks .git/config (read-only)",
 		"Model     sonnet · ANTHROPIC_API_KEY → api.anthropic.com only",
+		"          "+modelChannelNote,
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
@@ -330,7 +331,6 @@ func TestRunRefusals(t *testing.T) {
 			want: []string{"use at most 19 lowercase letters, digits and '-'"}},
 		{name: "a trailing dash", opts: RunOptions{Harness: "claude", Copy: true, Name: "trailing-"}, offline: true,
 			want: []string{"starting and ending with a letter or digit"}},
-		{name: "a reserved name", opts: RunOptions{Harness: "claude", Copy: true, Name: "git"}, offline: true, want: []string{`--name "git" is reserved`}},
 		{name: "an existing name, headless copy", opts: RunOptions{Harness: "codex", Copy: true, Name: "m2-a", Detach: true, Prompt: "x"},
 			setup: existing("m2-a", "stopped", false), want: []string{"a sandbox named m2-a already exists",
 				"resume it with `defenseclaw sandbox connect m2-a --prompt TEXT`", "delete it with `defenseclaw sandbox delete m2-a`"}},
@@ -997,6 +997,16 @@ func TestBanner(t *testing.T) {
 		}, nil,
 			[]string{"Hooks     user tier: the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start (hook silence is detected)"},
 			nil},
+		// The line says what silent hooks lead to, as the daemon resolved
+		// the pack's hooks.on_silence and hooks.silence_after.
+		{"silent hooks stop", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+			sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = "stop", "10m"
+		}, nil, []string{"(DefenseClaw stops the sandbox when the harness works for 10m without its hooks)"}, []string{"hook silence is detected"}},
+		{"silent hooks alert", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+			sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = "alert", "5m"
+		}, nil, []string{"(DefenseClaw alerts when the harness works for 5m without its hooks)"}, nil},
 		{"a managed tier", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.TamperTier = "managed" }, nil, nil, []string{"Hooks "}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

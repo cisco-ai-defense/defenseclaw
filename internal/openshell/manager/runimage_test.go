@@ -591,14 +591,9 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 }
 
 // On docker a start that rewrites the run files records their new digests,
-// so the session's workload check compares with what was just written
-// (here with the check turned on, as it will be for docker).
+// so the session's workload check compares with what was just written.
 func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
 	e := newEnv(t, nil)
-	checked, _ := openshell.LookupDriver("docker")
-	checked.SkipWorkloadCheck = false
-	e.gw.Driver = checked
-	e.fake.HandleExec(e.workloadChecks(nil, nil))
 	e.create(sandboxapi.CreateRequest{Name: "dk-yolo", Yolo: true})
 	before := readRecord(t, e, "dk-yolo")
 	e.stopBox("dk-yolo")

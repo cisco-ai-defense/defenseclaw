@@ -979,11 +979,10 @@ func deleteRefsUnder(ctx context.Context, g gitCmd, prefix string) {
 }
 
 // ownShadow reports whether dir is a shadow git dir DefenseClaw created:
-// directly under the shadows root (or the snapshots/git root older builds
-// used) and carrying its project marker. Anything else is never deleted.
+// directly under the shadows root and carrying its project marker.
+// Anything else is never deleted.
 func ownShadow(lay layout, dir string) bool {
-	parent := filepath.Dir(filepath.Clean(dir))
-	if parent != lay.shadowsRoot() && parent != filepath.Join(lay.snapshotsRoot(), "git") {
+	if filepath.Dir(filepath.Clean(dir)) != lay.shadowsRoot() {
 		return false
 	}
 	if !strings.HasSuffix(dir, ".git") {

@@ -316,7 +316,7 @@ func (s recordStore) has(name string) bool {
 // <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
 // files, a kept run log, kept destinations) or a pre-session snapshot under
 // <data_dir>/snapshots/<name> (with its refs in the project) but no daemon
-// record: an interrupted create or delete, or an older build, left it.
+// record: an interrupted create or delete left it.
 // RemoveOrphanedSandboxData removes it.
 func OrphanedSandboxData(dataDir string) []string {
 	records := newRecordStore(dataDir)

@@ -15,8 +15,8 @@ main() {
 DefenseClaw: the legacy openshell-sandbox (0.0.x) installer has been removed.
   Nothing was installed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run:
     defenseclaw sandbox setup
-  To remove an old standalone sandbox install first, run:
-    defenseclaw sandbox legacy-cleanup --dry-run
+  To remove an old standalone sandbox install first, follow:
+    https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox
 EOF
     return 0
 }

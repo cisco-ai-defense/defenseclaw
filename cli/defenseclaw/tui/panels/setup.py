@@ -5313,11 +5313,12 @@ def sandbox_wizard_fields(
     Every consent the interactive command asks for is a field here, so the
     wizard runs the command with ``--non-interactive`` and explicit flags:
     the answers are the consent. ``machine`` is the doctor's check of this
-    machine; until it answers, Install OpenShell stays off. On macOS there is
-    no telemetry question: the Homebrew gateway does not read gateway.env,
-    so setup cannot turn OpenShell's telemetry off there. Nor is there a
-    mounts question: setup runs macOS sandboxes in OpenShell MicroVMs, which
-    mount no host folders, so every run there works on a copy.
+    machine; until it answers, Install OpenShell stays off. On macOS the
+    telemetry question names ~/.config/openshell/gateway.env, which the
+    Homebrew service reads; a gateway no Homebrew service runs gets none
+    (setup cannot change its environment). There is no mounts question on
+    macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no
+    host folders, so every run there works on a copy.
     """
 
     configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
@@ -5467,16 +5468,23 @@ def sandbox_wizard_fields(
                 "Turning bind mounts on " + restart_note,
                 visible_when=is_setup,
             ),
+        ]
+    # On macOS the Homebrew service reads gateway.env too. A Mac gateway no
+    # Homebrew service runs takes the setting from the environment it was
+    # started with, which setup does not change, so it is not asked there.
+    if not (macos and unmanaged):
+        env_file = "~/.config/openshell/gateway.env, which the Homebrew service reads" if macos else "gateway.env"
+        fields.append(
             WizardFormField(
-                "Disable OpenShell Telemetry",
+                "OpenShell Telemetry Off",
                 "bool",
                 no_flag="--upstream-telemetry",
                 value="yes",
                 default="yes",
-                hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + restart_note,
+                hint=f"Turn OpenShell's anonymous usage telemetry off ({env_file}). Changing it " + restart_note,
                 visible_when=is_setup,
-            ),
-        ]
+            )
+        )
     fields += [
         WizardFormField(
             "Shell Wrappers",
@@ -5520,7 +5528,7 @@ def _build_sandbox_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
         args.append("--install-openshell")
     if wizard_bool_value(fields, "Mount Project Folder", "yes") == "no":
         args.append("--no-mounts")
-    if wizard_bool_value(fields, "Disable OpenShell Telemetry", "yes") == "no":
+    if wizard_bool_value(fields, "OpenShell Telemetry Off", "yes") == "no":
         args.append("--upstream-telemetry")
     args.append("--wrappers" if wizard_bool_value(fields, "Shell Wrappers", "no") == "yes" else "--no-wrappers")
     if wizard_bool_value(fields, "Build Images Now", "yes") == "no":
@@ -8585,11 +8593,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             + ("  — administrator-owned (managed_enterprise)" if managed else "  — edit config.yaml directly"),
         ),
     ]
-    legacy_mode = _value(cfg, "openshell.mode")
-    if legacy_mode:
-        fields.append(
-            _header("Legacy Mode", "openshell.mode", f"{legacy_mode}  — run: defenseclaw sandbox legacy-cleanup --dry-run")
-        )
     summary = "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."
     if managed:
         summary += " Administrator-owned (managed_enterprise): read-only."

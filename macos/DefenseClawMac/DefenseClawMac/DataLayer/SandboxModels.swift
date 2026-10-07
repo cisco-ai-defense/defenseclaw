@@ -214,6 +214,9 @@ struct SandboxAsk: Identifiable, Sendable, Hashable {
 
 struct SandboxActivity: Identifiable, Sendable, Hashable {
     var seq = 0
+    /// The feed that numbered seq: a daemon that restarted numbers its
+    /// events from one again under another epoch.
+    var epoch = ""
     var time: Date?
     var kind = ""
     var sandbox = ""
@@ -228,15 +231,8 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
     /// An egress.unblocked event lifted this block since it happened.
     var unblocked = false
 
-    var id: String { "\(seq)|\(kind)|\(host)" }
+    var id: String { "\(epoch)|\(seq)|\(kind)|\(host)" }
     var isBlockedDestination: Bool { kind == "egress.blocked" && !host.isEmpty }
-
-    /// The same feed event (unblock marks aside): a daemon that restarted
-    /// numbers its events from one again, so a sequence number alone is not.
-    func isSameEvent(as other: SandboxActivity) -> Bool {
-        seq == other.seq && time == other.time && kind == other.kind && sandbox == other.sandbox
-            && host == other.host && port == other.port
-    }
 
     var glyph: String {
         switch kind {
@@ -314,9 +310,9 @@ struct SandboxSnapshot: Sendable {
     var asks: [SandboxAsk] = []
     var activity: [SandboxActivity] = []
     var lastSeq = 0
-    /// The event lastSeq names, which tells a daemon that started its feed
-    /// over from one that stayed quiet (resumePointLost).
-    var resumeEvent: SandboxActivity?
+    /// The epoch of the feed lastSeq is from, which tells a daemon that
+    /// started its feed over from one that stayed quiet (resumePointLost).
+    var epoch = ""
     var fetchedAt: Date?
     var error = ""
     /// (sandbox|host) → when it was last notified, so a flapping destination
@@ -404,26 +400,22 @@ struct SandboxSnapshot: Sendable {
     }
 
     /// Whether the daemon's feed started over, from a read of the events
-    /// after lastSeq - 1. The feed keeps the event lastSeq names until newer
-    /// events push it out, so a feed that still counts on answers with it
-    /// (or newer ones). An empty answer, or another event under that number,
-    /// is a new feed: the daemon restarted and numbers from one again. The
-    /// daemon's uptime cannot tell: it stops while the Mac sleeps.
+    /// after lastSeq - 1. Every event names its feed (its epoch), and a
+    /// daemon that restarted numbers from one again in a new feed: an answer
+    /// from another epoch is a new feed, and so is an empty answer, since the
+    /// feed keeps the event lastSeq names until newer events push it out.
+    /// The daemon's uptime cannot tell: it stops while the Mac sleeps.
     func resumePointLost(_ events: [SandboxActivity]) -> Bool {
         guard lastSeq > 0 else { return false }
-        let feed = events.filter { $0.kind != "dropped" }
-        if feed.isEmpty { return true }
-        // Only newer events: they pushed the resume point out of the feed.
-        guard let same = feed.first(where: { $0.seq == lastSeq }) else { return false }
-        guard let resumeEvent else { return false }
-        return !same.isSameEvent(as: resumeEvent)
+        guard let first = events.first(where: { $0.kind != "dropped" }) else { return true }
+        return first.epoch != epoch
     }
 
     /// Read the daemon's feed from its start again (after resumePointLost):
     /// the old events' numbers mean nothing to the new feed.
     mutating func restartFeed() {
         lastSeq = 0
-        resumeEvent = nil
+        epoch = ""
         activity = []
     }
 
@@ -435,7 +427,7 @@ struct SandboxSnapshot: Sendable {
                 // A "dropped" marker shares its sequence with the next event.
                 if event.seq > 0 && event.seq <= lastSeq { continue }
                 lastSeq = max(lastSeq, event.seq)
-                if event.seq > 0, event.seq == lastSeq { resumeEvent = event }
+                if event.seq > 0, event.seq == lastSeq { epoch = event.epoch }
             }
             if event.kind == "egress.unblocked", !event.host.isEmpty {
                 // Reason is the scope: "always" lifts the host everywhere.
@@ -693,6 +685,7 @@ enum SandboxDecoding {
         }
         return SandboxActivity(
             seq: int(d["seq"]),
+            epoch: str(d["epoch"]),
             time: DCDates.parse(d["time"]),
             kind: kind,
             sandbox: str(d["sandbox"]),

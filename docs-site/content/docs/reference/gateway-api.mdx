@@ -37,16 +37,13 @@ described under [Sandbox listeners](#sandbox-listeners).
 | Knob | Config default | Effective value |
 | --- | --- | --- |
 | `gateway.api_port` | `18970` | Sidecar API port |
-| `gateway.api_bind` | empty | `127.0.0.1` when empty, except on an uncleaned legacy sandbox host (below) |
+| `gateway.api_bind` | empty | `127.0.0.1` when empty |
 
-The API binds to loopback by default. The one exception is a host that still
-carries the removed legacy standalone sandbox: while the config still says
-`openshell.mode: standalone`, an empty `gateway.api_bind` inherits
-`guardrail.host` when that value is non-empty and is not the literal
-`localhost` (for example `10.200.0.1`), so `upgrade` health checks keep
-reaching the gateway. Running [`defenseclaw sandbox legacy-cleanup`](/docs/sandboxes/guide)
-resets that config and returns the API to loopback. An explicit
-`gateway.api_bind` always takes precedence. A non-loopback value expands access
+The API binds to loopback unless `gateway.api_bind` names another address.
+(A 0.8.x host that ran the retired standalone sandbox kept it on
+`guardrail.host`, `10.200.0.1`; the upgrade to 1.0 resets that, see
+[Remove a retired standalone sandbox](/docs/sandboxes/guide#remove-a-retired-standalone-sandbox).)
+A non-loopback value expands access
 to the authenticated management surface; protect that listener with host
 firewalling and a deployment-specific network design.
 `gateway.host` and `gateway.port` describe the upstream agent gateway, while
@@ -195,12 +192,8 @@ for the OpenShell sandbox runtime:
   hooks fail closed;
 - `stopped` while the API listener restarts.
 
-On a host that still carries the removed legacy standalone sandbox (see
-[Bind address](#bind-address)), `/health` includes a `sandbox` subsystem with
-state `degraded` and a `last_error` of "legacy standalone install detected",
-directing the operator to run `defenseclaw sandbox legacy-cleanup`. On a host
-with neither, where `openshell.enabled` is `false` and no legacy install is
-left, the `sandbox` subsystem is absent from `/health`.
+Where `openshell.enabled` is `false`, the `sandbox` subsystem is absent from
+`/health`.
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
 
@@ -883,7 +876,9 @@ when OpenShell no longer has it), and its policy: `pack`, `pack_digest`,
 `tamper_tier`, `hooks` (hook traffic, blocked tool calls, the last block's
 plain reason, tamper counts, the verdicts per hook event under the
 harness's own event names in `events`, at most 48 names with the rest in
-`other_events`, and whether hooks are `silent` or `unreachable`),
+`other_events`, whether hooks are `silent` or `unreachable`, and
+`on_silence` with `silence_after`: `stop` or `alert`, what silent hooks
+lead to once the harness has worked that long without them),
 `endpoints` (the last result of each credentialed endpoint),
 `egress` totals (with `model_apis` and `shadow_ai`, the AI destinations of
 its destinations view), `pending_approvals`, the
@@ -992,17 +987,24 @@ events after `since`, or after the `Last-Event-ID` header, which wins over
 ```text
 id: 42
 event: activity
-data: {"seq":42,"time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
+data: {"seq":42,"epoch":"3f9c2a1d7b6e4058","time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
 ```
 
 A `: keepalive` comment follows the replay and repeats every 15 seconds.
 `sandbox` limits the feed to one sandbox. Too many open streams get 429.
 
-Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
-`sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
+Each `ActivityEvent` has a `seq` (one higher per event), `epoch`, `time`,
+`kind`, and `sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
 (`dc-egress-proxy` or `openshell`), `category`, `rule`, `unblockable`,
 `bytes_up`, `bytes_down`, `threshold`, `approval_id`, `tool`, `event`,
 `phase`, `severity`, `reason`, and `message`.
+
+The feed lives in the daemon's memory. A daemon that restarts starts a new
+feed, numbered from one again under a new `epoch` (16 hex digits), so a
+client that resumes with `since` compares the epoch of what it reads with
+the one it last saw: another epoch, or nothing at all after `since - 1`,
+means the daemon restarted, and the client reads the new feed from its start
+(`since=0`). The TUI and the macOS app do this.
 
 | `kind` | Meaning |
 | --- | --- |
@@ -1034,7 +1036,7 @@ starts with "blocked by your organization's DefenseClaw policy".
 | 409 | `conflict` | The sandbox exists already or is in the wrong phase, another sandbox already mounts the folder (or one inside or around it) live, or an undo would revert a folder another running sandbox mounts. |
 | 409 | `needs_copy` | The project cannot be mounted live (a linked worktree, `.git` as a symbolic link, a git directory outside the folder, or a gateway whose compute driver mounts no host folders, when the request staged no copy); `detail` says why. `sandbox run` then creates the sandbox in copy mode. |
 | 409 | `image_unavailable` | No hook-checked harness image, and building one was refused or failed. |
-| 422 | `policy_rejected` | OpenShell rejected the sandbox configuration, or the sandbox it made does not run as DefenseClaw prepared it (the check after ready on the MicroVM driver: the identity the workload runs as, its capabilities, and DefenseClaw's hook and settings files). The sandbox is deleted, or stopped again after a start. |
+| 422 | `policy_rejected` | OpenShell rejected the sandbox configuration, or the sandbox it made does not run as DefenseClaw prepared it (the check after ready, on every compute driver: the identity the workload runs as, its capabilities, and DefenseClaw's hook and settings files). The sandbox is deleted, or stopped again after a start, and the message says which. |
 | 429 | `unavailable` | Too many activity streams are open. |
 | 502 | `upstream_error` | An OpenShell call failed. |
 | 503 | `disabled`, `unavailable` | Sandboxes are off, or the runtime or the OpenShell gateway is not available, or (MicroVM driver) the volume of its image cache lacks the room to prepare the disk of an image the sandbox is the first to boot: the message names what is free and what is needed. |

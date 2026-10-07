@@ -627,8 +627,6 @@ func checkNewName(name string) error {
 	case !openshell.ValidNewSandboxName(name):
 		return fmt.Errorf("--name %q: use at most %d lowercase letters, digits and '-', starting and ending with a letter or digit",
 			name, openshell.MaxSandboxNameLen)
-	case workspace.ValidateName(name) != nil:
-		return fmt.Errorf("--name %q is reserved; choose another", name)
 	}
 	return nil
 }
@@ -1488,6 +1486,15 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(kept, sep)
 }
 
+// modelChannelNote is the banner line under a model credential: OpenShell's
+// provider rule for it opens the model hosts to the harness's network
+// binaries (harness.ProbeSpec.NetworkBinaries) directly, not through
+// DefenseClaw's egress proxy, and a harness that runs on an interpreter (an
+// npm build's node, a Python harness's python) has that interpreter as its
+// network binary, which runs any script.
+const modelChannelNote = "opened to the harness's own program directly, around DefenseClaw's egress proxy; " +
+	"for an npm or Python harness that is its node or python, so a script it runs reaches them too"
+
 // banner prints the plan's launch banner.
 func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	name := firstNonEmpty(sb.HarnessName, sb.Harness)
@@ -1515,6 +1522,7 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	switch {
 	case b.llm.Credential != nil:
 		row("Model", joinNonEmpty(" · ", model, b.llm.Source+" → "+strings.Join(b.llm.Hosts, ", ")+" only (the sandbox sees a placeholder)"))
+		row("", modelChannelNote)
 	case b.llm.Note != "":
 		row("Model", joinNonEmpty(" · ", model, b.llm.Note))
 	case model != "":
@@ -1578,7 +1586,19 @@ func hooksTierText(sb *sandboxapi.Sandbox) string {
 	if spec, ok := harness.Get(sb.Harness); ok && spec.TamperNote != "" {
 		note = spec.TamperNote
 	}
-	return sb.TamperTier + " tier: " + note + " (hook silence is detected)"
+	return sb.TamperTier + " tier: " + note + " (" + silenceText(sb.Hooks) + ")"
+}
+
+// silenceText says what silent hooks of the sandbox lead to (the pack's
+// hooks.on_silence and hooks.silence_after, as the daemon resolved them).
+func silenceText(h sandboxapi.HookCoverage) string {
+	switch {
+	case h.OnSilence == "stop" && h.SilenceAfter != "":
+		return "DefenseClaw stops the sandbox when the harness works for " + h.SilenceAfter + " without its hooks"
+	case h.OnSilence == "alert" && h.SilenceAfter != "":
+		return "DefenseClaw alerts when the harness works for " + h.SilenceAfter + " without its hooks"
+	}
+	return "hook silence is detected"
 }
 
 // bannerHostPorts are the host ports the sandbox may ask to reach, as the

@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
@@ -305,15 +306,20 @@ type Effective struct {
 	ProcessTree bool `json:"process_tree"`
 	// AllowedHarnesses is the pack ∩ admin allowlist when AnyHarness is
 	// false; empty then means no harness may run. It is never nil.
-	AllowedHarnesses []string    `json:"allowed_harnesses"`
-	Workspace        Workspace   `json:"workspace"`
-	Egress           Egress      `json:"egress"`
-	MCP              MCP         `json:"mcp"`
-	Resources        Resources   `json:"resources"`
-	Learn            bool        `json:"learn"`
-	HookFailMode     string      `json:"hook_fail_mode"`
-	HookOnTamper     string      `json:"hook_on_tamper"`
-	Admin            AdminStatus `json:"admin"`
+	AllowedHarnesses []string  `json:"allowed_harnesses"`
+	Workspace        Workspace `json:"workspace"`
+	Egress           Egress    `json:"egress"`
+	MCP              MCP       `json:"mcp"`
+	Resources        Resources `json:"resources"`
+	Learn            bool      `json:"learn"`
+	HookFailMode     string    `json:"hook_fail_mode"`
+	HookOnTamper     string    `json:"hook_on_tamper"`
+	// HookOnSilence and HookSilenceAfter are the pack's hooks.on_silence
+	// and hooks.silence_after (Explain shows the latter as the pack writes
+	// it).
+	HookOnSilence    string        `json:"hook_on_silence"`
+	HookSilenceAfter time.Duration `json:"-"`
+	Admin            AdminStatus   `json:"admin"`
 
 	admin config.OpenShellAdminConfig
 	// requiredPack: Pack is openshell.admin.required_pack, whose posture is
@@ -347,6 +353,7 @@ var explainOrder = []string{
 	"egress.ports", "egress.large_upload_mb", "egress.block_large_uploads",
 	"mcp.import", "mcp.host_port_access", "mcp.host_ports", "mcp.blocked_tools", "mcp.project_servers",
 	"resources.cpu", "resources.memory", "learn", "hooks.fail_mode", "hooks.on_tamper",
+	"hooks.on_silence", "hooks.silence_after",
 }
 
 // Explain returns every resolved setting with its provenance, in a stable
@@ -469,6 +476,9 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	r.set("hooks.fail_mode", pack.Hooks.FailMode, r.packLayer)
 	r.eff.HookOnTamper = pack.Hooks.OnTamper
 	r.set("hooks.on_tamper", pack.Hooks.OnTamper, r.packLayer)
+	r.eff.HookOnSilence, r.eff.HookSilenceAfter = pack.Hooks.OnSilence, pack.Hooks.SilenceAfterDuration()
+	r.set("hooks.on_silence", pack.Hooks.OnSilence, r.packLayer)
+	r.set("hooks.silence_after", pack.Hooks.SilenceAfter, r.packLayer)
 	r.eff.policySources = r.policySources(o)
 	return r.eff, r.violations, nil
 }

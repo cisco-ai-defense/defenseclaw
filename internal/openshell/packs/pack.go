@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"gopkg.in/yaml.v3"
@@ -103,6 +104,25 @@ const OnTamperStop = "stop"
 // OnTamperAlert emits a high-severity finding and notifies when hook tamper
 // is detected (default in open).
 const OnTamperAlert = "alert"
+
+// OnSilenceStop stops a sandbox whose harness works without its hooks
+// reaching DefenseClaw for hooks.silence_after (default in balanced and
+// strict). It applies to user-tier harnesses, whose hook registration the
+// agent can edit; a managed-tier harness's silence only alerts.
+const OnSilenceStop = "stop"
+
+// OnSilenceAlert emits a high-severity hook_silence finding and notifies
+// (default in open).
+const OnSilenceAlert = "alert"
+
+// DefaultSilenceAfter is hooks.silence_after when a pack sets none, and
+// MinSilenceAfter and MaxSilenceAfter bound it: under a minute a long model
+// turn without a tool call would read as silence.
+const (
+	DefaultSilenceAfter = 10 * time.Minute
+	MinSilenceAfter     = time.Minute
+	MaxSilenceAfter     = 24 * time.Hour
+)
 
 var (
 	packNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -216,6 +236,24 @@ type HooksPolicy struct {
 	// a hook was killed or bypassed: "stop" stops the sandbox (default in
 	// balanced/strict), "alert" emits a finding and notifies (default in open).
 	OnTamper string `yaml:"on_tamper" json:"on_tamper"`
+	// OnSilence is the response when the harness of a user-tier sandbox
+	// works (model calls, its own processes) for SilenceAfter without one
+	// hook request reaching DefenseClaw, as a disabled hook registration
+	// looks: "stop" stops the sandbox (default in balanced/strict), "alert"
+	// emits a finding and notifies (default in open).
+	OnSilence string `yaml:"on_silence" json:"on_silence"`
+	// SilenceAfter is that time, a Go duration ("10m"), between
+	// MinSilenceAfter and MaxSilenceAfter (DefaultSilenceAfter when unset).
+	SilenceAfter string `yaml:"silence_after" json:"silence_after"`
+}
+
+// SilenceAfterDuration is SilenceAfter as a duration (normalize validated
+// it); DefaultSilenceAfter when it is unset.
+func (h HooksPolicy) SilenceAfterDuration() time.Duration {
+	if d, err := time.ParseDuration(h.SilenceAfter); err == nil && d > 0 {
+		return d
+	}
+	return DefaultSilenceAfter
 }
 
 // Profile returns the OpenShell policy profile the pack's network mode maps
@@ -356,8 +394,10 @@ type mcpFile struct {
 }
 
 type hooksFile struct {
-	FailMode *string `yaml:"fail_mode"`
-	OnTamper *string `yaml:"on_tamper"`
+	FailMode     *string `yaml:"fail_mode"`
+	OnTamper     *string `yaml:"on_tamper"`
+	OnSilence    *string `yaml:"on_silence"`
+	SilenceAfter *string `yaml:"silence_after"`
 }
 
 // Defaults for optional pack keys.
@@ -482,6 +522,15 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 	} else {
 		p.Hooks.OnTamper = v.enum("hooks.on_tamper", hooks.OnTamper, OnTamperStop, OnTamperAlert)
 	}
+	// OnSilence defaults like OnTamper: stop in balanced/strict, alert in open.
+	p.Hooks.OnSilence = OnSilenceStop
+	if p.Network.Mode == NetworkOpen {
+		p.Hooks.OnSilence = OnSilenceAlert
+	}
+	if hooks.OnSilence != nil {
+		p.Hooks.OnSilence = v.enum("hooks.on_silence", hooks.OnSilence, OnSilenceStop, OnSilenceAlert)
+	}
+	p.Hooks.SilenceAfter = v.silenceAfter("hooks.silence_after", hooks.SilenceAfter)
 
 	if p.Network.Mode != NetworkDeny && p.Egress.Ports != nil && len(p.Egress.Ports) == 0 {
 		v.fail("egress.ports", "invalid_value", "must list at least one port unless network.mode is deny")
@@ -518,6 +567,37 @@ func (v *validator) enum(field string, value *string, allowed ...string) string 
 	}
 	v.fail(field, "invalid_value", "%q must be one of %s", *value, strings.Join(allowed, ", "))
 	return ""
+}
+
+// silenceAfter validates hooks.silence_after: a Go duration between
+// MinSilenceAfter and MaxSilenceAfter, DefaultSilenceAfter when unset. It
+// returns the duration as ShortDuration writes it.
+func (v *validator) silenceAfter(field string, value *string) string {
+	if value == nil {
+		return ShortDuration(DefaultSilenceAfter)
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(*value))
+	if err != nil {
+		v.fail(field, "invalid_value", "%q is not a duration such as 10m", *value)
+		return ""
+	}
+	if d < MinSilenceAfter || d > MaxSilenceAfter {
+		v.fail(field, "invalid_value", "%q must be between %s and %s", *value, ShortDuration(MinSilenceAfter), ShortDuration(MaxSilenceAfter))
+		return ""
+	}
+	return ShortDuration(d)
+}
+
+// ShortDuration is d as a pack writes it: "10m" and "1h30m", not "10m0s".
+func ShortDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 func (v *validator) requiredBool(field string, value *bool) bool {

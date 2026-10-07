@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -212,21 +211,6 @@ def test_supported_connectors_preserves_order_and_available_windows_scope() -> N
 
 def test_host_os_returns_known_token() -> None:
     assert host_os() in {"windows", "darwin", "linux"} or isinstance(host_os(), str)
-
-
-def test_windows_sandbox_legacy_cleanup_rejects_before_any_inspection() -> None:
-    with (
-        patch("defenseclaw.platform_support.host_os", return_value="windows"),
-        patch(
-            "defenseclaw.sandbox_legacy.detect",
-            side_effect=AssertionError("host inspection reached"),
-        ) as detect,
-    ):
-        result = CliRunner().invoke(sandbox_group, ["legacy-cleanup", "--dry-run"], obj=AppContext())
-
-    assert result.exit_code != 0
-    assert "unsupported on native Windows" in result.output
-    detect.assert_not_called()
 
 
 def test_legacy_sandbox_setup_and_init_commands_are_gone() -> None:

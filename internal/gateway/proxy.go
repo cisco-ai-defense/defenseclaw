@@ -59,9 +59,9 @@ import (
 )
 
 // guardrailListenAddr returns the TCP listen address for the guardrail HTTP server.
-// Loopback-style hosts bind 127.0.0.1 only. Any other host (e.g. a veth / bridge
-// IP for openshell standalone sandbox) binds that address so peers outside the
-// host loopback namespace can connect.
+// Loopback-style hosts bind 127.0.0.1 only. Any other host (e.g. a container
+// bridge IP) binds that address so peers outside the host loopback namespace
+// can connect.
 func guardrailListenAddr(port int, effectiveHost string) string {
 	h := strings.TrimSpace(effectiveHost)
 	if h == "" {

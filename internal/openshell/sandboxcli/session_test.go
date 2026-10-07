@@ -1076,41 +1076,18 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 	}
 }
 
-// A stopped sandbox without a kept log says how to read its log; a log an
-// earlier CLI kept on this machine (before the daemon kept them) is still
-// shown, said to be that CLI's, for its own sandbox only, and the daemon's
-// wins over it. Once the daemon has seen the sandbox start since (its
-// session count), every stop since was the daemon's: the earlier CLI's log
-// is older than the latest stop and is not shown as its log. Without the
-// kept marker, a run whose process is gone reads "did not finish", not
-// "still going".
+// A stopped sandbox without a kept log says how to read its log, and shows
+// the log the daemon kept when it stopped. Without the kept marker, a run
+// whose process is gone reads "did not finish", not "still going".
 func TestLogsOfAStoppedSandbox(t *testing.T) {
 	ta := newTestApp(t, "")
 	sb := sampleSandbox("box")
 	sb.Phase = "stopped"
 	ta.daemon.add(sb)
 	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept", "defenseclaw sandbox start box")
-	dir, _ := ta.cliStateDir("box")
-	writeFile(t, filepath.Join(dir, "run.json"), `{"state":"exited","exit":"0","sandbox_id":"sb-box","name":"box","saved_at":"2026-09-29T10:00:00Z"}`)
-	writeFile(t, filepath.Join(dir, "run.log"), "earlier\ndone\n")
-	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
-	has(t, ta.output(), "done", "the log an earlier DefenseClaw CLI kept when it stopped", "the run exited with status 0")
-	lacks(t, ta.output(), "earlier\n")
-	ta.out.Reset()
-	started := sb
-	started.Session = 1
-	ta.daemon.add(started)
-	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept")
-	ta.daemon.add(sb)
-	ta.out.Reset()
 	ta.daemon.runLogs["box"] = &sandboxapi.RunLog{Name: "box", State: sandboxapi.RunInterrupted, KeptAt: time.Now(), Log: "newer\n"}
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box"}))
 	has(t, ta.output(), "newer", "the run did not finish")
-	lacks(t, ta.output(), "done")
-	delete(ta.daemon.runLogs, "box")
-	sb.ID = "sb-another-box"
-	ta.daemon.add(sb)
-	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept")
 
 	ta = newTestApp(t, "")
 	ta.IO.TTY = false
@@ -1236,38 +1213,6 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 		}
 		has(t, ta.output(), c.want...)
 		lacks(t, ta.output(), c.not)
-	}
-}
-
-// An acceptance an earlier CLI recorded on this machine (cli/accepted.json),
-// before the daemon kept them, still makes the next start take a new undo
-// point, once; one for another snapshot is not honoured.
-func TestStartHonoursAnEarlierCLIsAcceptance(t *testing.T) {
-	ta := newTestApp(t, "")
-	ta.IO.TTY = false
-	sb := sampleSandbox("box")
-	sb.Phase = "stopped"
-	taken := time.Date(2026, 9, 27, 9, 30, 0, 0, time.UTC)
-	sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: taken}
-	ta.daemon.add(sb)
-	ta.daemon.pendingChanges = true
-	dir, _ := ta.cliStateDir("box")
-	accepted := filepath.Join(dir, "accepted.json")
-	writeFile(t, accepted, `{"sandbox_id":"sb-box","snapshot_created_at":"2026-09-27T09:30:00Z"}`)
-	ta.ok(t, ta.Start(bg, "box", StartOptions{}))
-	if starts := ta.bodies("POST", "box/start"); len(starts) != 1 || !strings.Contains(starts[0], `"new_snapshot":true`) {
-		t.Fatalf("start = %q", starts)
-	}
-	if _, err := os.Stat(accepted); !os.IsNotExist(err) {
-		t.Fatalf("the used acceptance is still there: %v", err)
-	}
-	ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
-		sb.Phase, sb.Snapshot = "stopped", &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: taken.Add(time.Hour)}
-	})
-	writeFile(t, accepted, `{"sandbox_id":"sb-box","snapshot_created_at":"2026-09-27T09:30:00Z"}`)
-	ta.ok(t, ta.Start(bg, "box", StartOptions{}))
-	if starts := ta.bodies("POST", "box/start"); len(starts) != 2 || strings.Contains(starts[1], "snapshot") {
-		t.Fatalf("start with another snapshot's acceptance = %q", starts)
 	}
 }
 

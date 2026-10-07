@@ -1264,13 +1264,11 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
     assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
-    # The OpenShell 0.1 section edits the openshell: keys; a legacy
-    # standalone marker stays visible read-only with its cleanup command.
+    # The OpenShell 0.1 section edits the openshell: keys; the retired
+    # standalone marker is not one of them.
     openshell = next(section for section in sections if section.name.startswith("OpenShell"))
     assert openshell.name == "OpenShell Sandboxes"
-    legacy = next(field for field in openshell.fields if field.key == "openshell.mode")
-    assert legacy.interactive is False
-    assert "standalone" in legacy.value and "legacy-cleanup" in legacy.value
+    assert not any(field.key == "openshell.mode" for field in openshell.fields)
     assert _field_by_key(sections, "openshell.enabled").kind == "bool"
     assert _field_by_key(sections, "openshell.profile").options == ("inherit", "open", "balanced", "strict")
     llm = _field_by_key(sections, "openshell.llm")

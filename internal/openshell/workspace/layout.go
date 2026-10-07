@@ -122,8 +122,7 @@ var snapshotDirEntries = map[string]bool{"snapshot.json": true, "tree": true, ig
 
 // checkSnapshotDir refuses a snapshot directory that holds anything
 // Snapshot does not write there, so a per-name write or delete never mixes
-// with other data. (Older builds kept every project's shadow under
-// snapshots/git, which a sandbox named "git" would have taken with it.)
+// with other data.
 func checkSnapshotDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {

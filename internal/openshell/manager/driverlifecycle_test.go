@@ -473,7 +473,7 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 	// Docker's stop keeps its exec as it was: no flush.
 	d := liveEnv(t, "dockerstop", nil)
 	d.stopBox("dockerstop")
-	dc := d.fake.ExecCalls()
+	dc := d.execCalls()
 	if len(dc) != 1 || dc[0].Command[2] != endHarnessScript || dc[0].Timeout != harnessExitWait+3*time.Second {
 		t.Fatalf("docker exec = %+v", dc)
 	}

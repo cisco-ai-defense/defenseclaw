@@ -568,18 +568,14 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	// Before the sandbox is saved and watched: one that does not run as
 	// prepared is rolled back like one OpenShell rejected.
-	var hostname string
-	if !gw.Driver.SkipWorkloadCheck {
-		facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify)
-		if err != nil {
-			return nil, err
-		}
-		hostname = facts.Hostname
+	facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify, "DefenseClaw deleted it")
+	if err != nil {
+		return nil, err
 	}
 
 	m.mu.Lock()
 	b.rec.ID = sb.ID
-	b.rec.Hostname = hostname
+	b.rec.Hostname = facts.Hostname
 	b.sb = sb
 	b.creating = false
 	m.mu.Unlock()

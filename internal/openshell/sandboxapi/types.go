@@ -333,6 +333,14 @@ type HookCoverage struct {
 	// Silent is set while the harness is active without hook traffic.
 	Silent      bool      `json:"silent,omitempty"`
 	SilentSince time.Time `json:"silent_since,omitzero"`
+	// OnSilence is what DefenseClaw does once the harness has worked for
+	// SilenceAfter ("10m") without hook traffic: "stop" stops the sandbox
+	// (a user-tier harness under the pack's hooks.on_silence: stop), "alert"
+	// raises a finding and leaves it running. While the sandbox's policy is
+	// not resolved, a user-tier harness gets the fail-closed "stop" after
+	// "10m".
+	OnSilence    string `json:"on_silence,omitempty"`
+	SilenceAfter string `json:"silence_after,omitempty"`
 	// HookFailed counts the authenticated hook posts DefenseClaw answered
 	// with an error status (a refused route, the rate limit, a malformed
 	// request). The hooks fail closed, so the harness did not do what each
@@ -1002,7 +1010,13 @@ const (
 // ActivityEvent is one item of the live activity feed.
 type ActivityEvent struct {
 	// Seq increases by one per event; resume with ?since=<seq>.
-	Seq     uint64    `json:"seq"`
+	Seq uint64 `json:"seq"`
+	// Epoch names the feed that numbered Seq. The feed lives in the
+	// daemon's memory, so a daemon that restarted numbers its events from
+	// one again under another epoch: a client that sees the epoch change
+	// reads the new feed from its start instead of resuming after its old
+	// Seq.
+	Epoch   string    `json:"epoch,omitempty"`
 	Time    time.Time `json:"time"`
 	Kind    string    `json:"kind"`
 	Sandbox string    `json:"sandbox,omitempty"`

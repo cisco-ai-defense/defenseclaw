@@ -119,11 +119,6 @@ which ones are interactive and which ones are designed for scripts.
     href="/docs/scanning/mcp-scanner"
     description="Choose the cisco-ai-mcp-scanner analyzers and whether scans also cover MCP prompts, resources and instructions."
   />
-  <Card
-    title="defenseclaw sandbox legacy-cleanup"
-    href="/docs/sandboxes/guide"
-    description="Linux-only removal of the retired standalone OpenShell sandbox (openshell-sandbox 0.0.x). Restores host OpenClaw networking, ownership, and config."
-  />
 </Cards>
 
 ### OpenShell sandbox
@@ -135,10 +130,9 @@ On a Mac, sandboxes are OpenShell MicroVMs and every run works on a copy (see
 [macOS](/docs/sandboxes/guide#macos)).
 The same setup is the **Sandboxes (OpenShell)** wizard in the TUI's Setup
 and the Sandbox wizard in the macOS app; the TUI Sandboxes panel (key 7) shows live activity. Run
-`defenseclaw sandbox --help` for every command.
-`defenseclaw sandbox legacy-cleanup` removes the retired `openshell-sandbox`
-0.0.x install from Linux hosts. The [sandbox guide](/docs/sandboxes/guide)
-covers setup, runs and legacy cleanup.
+`defenseclaw sandbox --help` for every command. The
+[sandbox guide](/docs/sandboxes/guide) covers setup and runs, and how to remove
+what a retired `openshell-sandbox` 0.0.x install left on a Linux host.
 
 ## Change one setting without a wizard
 
@@ -215,7 +209,6 @@ the interactive and scripted form of each.
 | `skill` / `mcp` / `plugin` / `tool` `block`, `allow`, `unblock` | no | always | Write `asset_policy` in `config.yaml`; no gateway call is needed. |
 | `migrate` / `config migrate` | no | always | `--check` or `--dry-run` previews; `config migrate --ack` marks the migration record as read. |
 | `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux, or on a Mac with Apple silicon. See the [sandbox guide](/docs/sandboxes/guide). |
-| `sandbox legacy-cleanup` | yes (prints the plan, then asks once) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. |
 | `doctor` | only with `--fix` | `--fix --yes` | A plain run is read-only and never prompts. |
 | `alerts` | no | `--limit`, `--connector`, `--show <n>`, `--json`; `acknowledge` / `dismiss` subcommands | A snapshot of recent alerts, not a live tail. |
 | `tui` | full-screen dashboard | none | Interactive only. |

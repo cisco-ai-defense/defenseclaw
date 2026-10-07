@@ -668,7 +668,6 @@ class ClawConfig:
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
     workspace_dir: str = ""
-    openclaw_home_original: str = ""
 
 
 @dataclass
@@ -1302,8 +1301,6 @@ class ScannersConfig:
     codeguard: str = ""
 
 
-DEFAULT_SANDBOX_HOME = "/home/sandbox"
-
 # Sandbox profiles, loosest to strictest (mirrors OpenShellProfile* in
 # internal/config/openshell.go).
 OPENSHELL_PROFILES = ("open", "balanced", "strict")
@@ -1444,11 +1441,10 @@ class OpenShellConfig:
     sandbox policy pack governs (``profile``, ``yolo``, ``workdir.mode``, upload
     caps, egress lists, ``mcp.import``) stay empty unless the operator sets
     them, so they inherit the pack. The legacy openshell-sandbox (0.0.x)
-    sub-keys ``policy_dir``, ``version``, ``auto_pair`` and ``host_networking``
-    are accepted and ignored (the v8 save only writes modeled fields that
-    changed, so they stay on disk untouched). ``mode`` and ``sandbox_home`` are
-    read only by :func:`legacy_standalone_api_host` and ``defenseclaw sandbox
-    legacy-cleanup``.
+    sub-keys ``policy_dir``, ``version``, ``auto_pair``, ``host_networking``,
+    ``mode`` and ``sandbox_home`` are accepted and ignored (the v8 save only
+    writes modeled fields that changed, so they stay on disk untouched; the
+    config_version 9 migration drops ``mode`` and ``sandbox_home``).
     """
 
     enabled: bool = False
@@ -1478,15 +1474,6 @@ class OpenShellConfig:
     token_delivery: str = "provider"
     middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
-    # LEGACY(openshell-0.0.x): delete one release after cleanup.
-    mode: str = ""
-    sandbox_home: str = DEFAULT_SANDBOX_HOME
-
-    def is_standalone(self) -> bool:
-        return self.mode == "standalone"
-
-    def effective_sandbox_home(self) -> str:
-        return self.sandbox_home or DEFAULT_SANDBOX_HOME
 
     def effective_ingress_port(self, api_port: int) -> int:
         """Sandbox hook ingress port; 0 means ``api_port + 1``."""
@@ -1501,56 +1488,19 @@ class OpenShellConfig:
         return (api_port if api_port > 0 else 18970) + 2
 
 
-def legacy_standalone_configured(cfg: Any) -> bool:
-    """Whether *cfg* still records the removed openshell-sandbox standalone mode.
-
-    Mirrors ``IsLegacyStandalone`` in internal/config/legacy_openshell.go.
-
-    LEGACY(openshell-0.0.x): delete one release after cleanup.
-    """
-    openshell = getattr(cfg, "openshell", None)
-    is_standalone = getattr(openshell, "is_standalone", None)
-    if callable(is_standalone):
-        return bool(is_standalone())
-    return getattr(openshell, "mode", "") == "standalone"
-
-
-def legacy_standalone_api_host(cfg: Any) -> str | None:
-    """Return the API bind host of a legacy standalone install, or ``None``.
-
-    A host that still runs the removed openshell-sandbox mode keeps
-    ``openshell.mode: standalone`` and points ``guardrail.host`` at the host
-    end of the sandbox veth link. Until ``defenseclaw sandbox legacy-cleanup``
-    resets that, the gateway keeps its API on that host, so every CLI client
-    and health probe must dial it too. An explicit ``gateway.api_bind`` still
-    wins at each call site. Mirrors ``LegacyStandaloneAPIHost`` in
-    internal/config/legacy_openshell.go.
-
-    LEGACY(openshell-0.0.x): delete one release after cleanup.
-    """
-    if not legacy_standalone_configured(cfg):
-        return None
-    host = str(getattr(getattr(cfg, "guardrail", None), "host", "") or "").strip()
-    if not host or host == "localhost":
-        return None
-    return host
-
-
 def api_bind_host(cfg: Any) -> str:
     """Return the address the gateway REST API listens on.
 
-    An explicit ``gateway.api_bind`` wins, then the legacy standalone host,
-    then loopback. Mirrors ``APIBindHost`` in internal/config/config.go, so
-    every CLI caller agrees with the listener. Clients dial
+    An explicit ``gateway.api_bind``, else loopback. Mirrors ``APIBindHost``
+    in internal/config/config.go, so every CLI caller (the upgrade, watchdog
+    and status probes among them) agrees with the listener. Clients dial
     :func:`defenseclaw.gateway.gateway_api_client_host`, which maps an
     unspecified bind to a loopback address.
     """
     if cfg is None:
         return "127.0.0.1"
     bind = str(getattr(getattr(cfg, "gateway", None), "api_bind", "") or "").strip()
-    if bind:
-        return bind
-    return legacy_standalone_api_host(cfg) or "127.0.0.1"
+    return bind or "127.0.0.1"
 
 
 @dataclass
@@ -6254,8 +6204,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
             max_resources=_merge_openshell_resources(admin.get("max_resources")),
             locked=_openshell_str_list(admin.get("locked")),
         ),
-        mode=_openshell_str(raw.get("mode")),
-        sandbox_home=_openshell_str(raw.get("sandbox_home")) or DEFAULT_SANDBOX_HOME,
     )
 
 
@@ -6594,7 +6542,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
             workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
-            openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         acp=_merge_acp(raw.get("acp")),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),

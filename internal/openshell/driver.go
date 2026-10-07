@@ -82,12 +82,6 @@ type Driver struct {
 	// 0.1.1), so without it DefenseClaw runs sync in the sandbox before
 	// every stop, and a copy's unpulled work survives the stop.
 	StopFlushes bool
-	// SkipWorkloadCheck leaves out the check after ready (the identity the
-	// workload runs as, its capabilities, DefenseClaw's files in the
-	// sandbox). It is new on docker and waits for a live run there before
-	// it is turned on; the vm driver needs it from the start, because the
-	// workload's identity there is the gateway's configuration.
-	SkipWorkloadCheck bool
 	// ImageCache is where the driver keeps what it prepares from each image
 	// it boots, relative to the home of the user the gateway runs as; empty
 	// when it prepares nothing. The vm driver turns an image into a MicroVM
@@ -112,7 +106,7 @@ type Driver struct {
 // drivers is the table: what each compute driver DefenseClaw drives can
 // and cannot do.
 var drivers = map[ComputeDriver]Driver{
-	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, StopFlushes: true, SkipWorkloadCheck: true, HostsFile: true},
+	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, StopFlushes: true, HostsFile: true},
 	DriverVM: {
 		Name: DriverVM, RunFilesInImage: true, GatewayIdentity: true,
 		ImageRepository: "defenseclaw.invalid/sandbox",

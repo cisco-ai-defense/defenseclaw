@@ -273,24 +273,33 @@ func (r *captureRunner) Output(_ context.Context, cmd openshell.Command) ([]byte
 
 func (r *captureRunner) Run(context.Context, openshell.Command) error { return nil }
 
-// Two daemons (data dirs with their own ports) share a gateway that still
-// holds an earlier release's legacy ingress profile: their concurrent creates
-// all succeed, each token binds to its own daemon's listener, and neither
-// touches the other's objects.
+// Two daemons (data dirs with their own ports) share a gateway that also
+// holds a third daemon's ingress profile and provider: their concurrent
+// creates all succeed, each token binds to its own daemon's listener, and
+// neither touches the other's objects or the third's.
 func TestTwoDaemonsShareAGateway(t *testing.T) {
 	fake := openshelltest.New()
 	a := newDaemonEnv(t, daemonOptions{fake: fake, owner: "aaaaaaaaaaaaaaaa", ingressPort: 18971, egressPort: 18972, apiPort: 18970}, nil)
 	b := newDaemonEnv(t, daemonOptions{fake: fake, owner: "bbbbbbbbbbbbbbbb", ingressPort: 28971, egressPort: 28972, apiPort: 28970}, nil)
+	// Each daemon answers the workload checks of its own sandboxes.
+	fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		owner := a
+		b.m.mu.Lock()
+		if b.m.boxes[call.Sandbox] != nil {
+			owner = b
+		}
+		b.m.mu.Unlock()
+		return owner.workloadChecks(nil, nil)(ctx, call)
+	})
 	// b's image is another harness build: the shared LLM profile must end up with both images' binaries.
 	const otherClaude = "/opt/defenseclaw-harness/claudecode-2/bin/claude"
 	b.images.rec.NetworkBinaries = []image.Binary{{Name: "claude", Realpath: otherClaude}}
 	ctx := t.Context()
-	legacy, err := profiles.Render(profiles.IngressID, profiles.Input{IngressPort: 38971})
+	third, err := profiles.Render(profiles.IngressID, profiles.Input{IngressPort: 38971})
 	must(t, err)
-	legacy.Spec.ID = profiles.LegacyIngressID
-	_, err = a.client.ImportProfiles(ctx, []openshell.ProfileImportItem{{Profile: legacy.Spec, Source: "earlier release"}})
+	_, err = a.client.ImportProfiles(ctx, []openshell.ProfileImportItem{{Profile: third.Spec, Source: "a third daemon"}})
 	must(t, err)
-	_, err = a.client.CreateProvider(ctx, &openshell.Provider{Name: "old-box-ingress", Type: profiles.LegacyIngressID,
+	_, err = a.client.CreateProvider(ctx, &openshell.Provider{Name: "old-box-ingress", Type: profiles.IngressProfileID(38971),
 		Labels: map[string]string{LabelManaged: "true", LabelOwner: "cccccccccccccccc", LabelSandbox: "old-box"},
 		Spec:   openshell.ProviderSpec{Credentials: map[string]string{openshell.EnvSandboxToken: "old-token"}}})
 	must(t, err)
@@ -358,7 +367,7 @@ func TestTwoDaemonsShareAGateway(t *testing.T) {
 		check(a, b, fmt.Sprintf("pn-a-%d", i))
 		check(b, a, fmt.Sprintf("pn-b-%d", i))
 	}
-	// No ingress profile was ever updated, the legacy one included; the shared LLM profile holds both images' binaries.
+	// No ingress profile was ever updated, the third daemon's included; the shared LLM profile holds both images' binaries.
 	for _, e := range daemons {
 		for _, id := range e.importer.updated {
 			if id != profiles.AnthropicID {
@@ -366,13 +375,13 @@ func TestTwoDaemonsShareAGateway(t *testing.T) {
 			}
 		}
 	}
-	if old, err := a.client.GetProfile(ctx, profiles.LegacyIngressID); err != nil || old.ResourceVersion != 1 || old.Endpoints[0].Port != 38971 {
-		t.Fatalf("the legacy ingress profile changed: %+v, %v", old, err)
+	if old, err := a.client.GetProfile(ctx, profiles.IngressProfileID(38971)); err != nil || old.ResourceVersion != 1 || old.Endpoints[0].Port != 38971 {
+		t.Fatalf("the third daemon's ingress profile changed: %+v, %v", old, err)
 	}
 	if shared, _ := a.client.GetProfile(ctx, profiles.AnthropicID); !slices.Equal(profileBinaries(*shared), []string{otherClaude, testClaudeBin}) {
 		t.Fatalf("shared LLM profile binaries = %v", profileBinaries(*shared))
 	}
-	// Reconciling either daemon leaves the other's sandboxes and providers (and the earlier release's) alone.
+	// Reconciling either daemon leaves the other's sandboxes and providers (and the third's) alone.
 	for _, e := range daemons {
 		must(t, e.m.Reconcile(ctx))
 	}

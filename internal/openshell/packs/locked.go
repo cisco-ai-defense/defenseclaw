@@ -310,6 +310,10 @@ func looserPackKey(candidate, baseline *Pack, mode string) string {
 		{"hooks.fail_mode", c.Hooks.FailMode != b.Hooks.FailMode},
 		// on_tamper: alert is looser than stop.
 		{"hooks.on_tamper", c.Hooks.OnTamper == OnTamperAlert && b.Hooks.OnTamper == OnTamperStop},
+		// on_silence: alert is looser than stop, and a longer wait looser
+		// than a shorter one.
+		{"hooks.on_silence", c.Hooks.OnSilence == OnSilenceAlert && b.Hooks.OnSilence == OnSilenceStop},
+		{"hooks.silence_after", c.Hooks.SilenceAfterDuration() > b.Hooks.SilenceAfterDuration()},
 	}
 	if mode != NetworkDeny {
 		allowed := append(append([]string{}, b.Egress.Allow...), curatedAllowlist()...)

@@ -104,11 +104,6 @@ const (
 	// holds custom sandbox policy packs (<name>/pack.yaml), mirroring the
 	// repository's policies/sandbox layout.
 	DefaultOpenShellPackDirName = "sandbox"
-
-	// DefaultSandboxHome is the legacy openshell-sandbox user's home.
-	//
-	// LEGACY(openshell-0.0.x): delete one release after cleanup.
-	DefaultSandboxHome = "/home/sandbox"
 )
 
 // DefaultOpenShellUndoIgnoredDirs are the directories
@@ -137,10 +132,11 @@ var OpenShellLockableKeys = []string{
 // Admin clamps the result (see internal/openshell/packs). Pack-governed keys
 // therefore stay unset (empty, zero, or nil) unless the operator sets them.
 //
-// The legacy openshell-sandbox (0.0.x) sub-keys policy_dir, version, auto_pair
-// and host_networking are still accepted by the v8 schema and ignored. Mode and
-// SandboxHome are read only by the legacy shim (legacy_openshell.go) until
-// `defenseclaw sandbox legacy-cleanup` resets them. No migration rewrites them.
+// The legacy openshell-sandbox (0.0.x) sub-keys policy_dir, mode, version,
+// sandbox_home, auto_pair and host_networking are still accepted by the v8
+// schema and ignored. The config_version 9 migration drops mode and
+// sandbox_home and resets the addresses a standalone install pointed at its
+// sandbox's veth link (migrateRetiredStandaloneSandbox).
 type OpenShellConfig struct {
 	// Enabled turns on the sandbox ingress and egress listeners and the
 	// sandbox API. Off by default.
@@ -194,15 +190,6 @@ type OpenShellConfig struct {
 	// config file is administrator-owned and Admin is authoritative;
 	// elsewhere it is still enforced, but the user owns the file.
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
-
-	// Mode is the legacy openshell-sandbox standalone marker.
-	//
-	// LEGACY(openshell-0.0.x): delete one release after cleanup.
-	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
-	// SandboxHome is the legacy sandbox user's home directory.
-	//
-	// LEGACY(openshell-0.0.x): delete one release after cleanup.
-	SandboxHome string `mapstructure:"sandbox_home" yaml:"sandbox_home,omitempty"`
 }
 
 // OpenShellGatewayConfig selects the local OpenShell gateway registration and
@@ -424,20 +411,6 @@ func (a OpenShellAdminConfig) IsLocked(key string) bool {
 		}
 	}
 	return false
-}
-
-// IsStandalone reports whether the config still records the legacy
-// openshell-sandbox standalone mode.
-func (o *OpenShellConfig) IsStandalone() bool {
-	return o.Mode == "standalone"
-}
-
-// EffectiveSandboxHome returns the recorded legacy sandbox home or the default.
-func (o *OpenShellConfig) EffectiveSandboxHome() string {
-	if o.SandboxHome != "" {
-		return o.SandboxHome
-	}
-	return DefaultSandboxHome
 }
 
 // EffectiveBinary returns the openshell CLI to run.

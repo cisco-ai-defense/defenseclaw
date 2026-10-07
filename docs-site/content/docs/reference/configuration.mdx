@@ -528,12 +528,7 @@ webhooks:
     min_severity: HIGH
 ```
 
-When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. The only
-exception is a host that still carries the removed legacy standalone sandbox
-(`openshell.mode: standalone` with a `guardrail.host` that is non-empty and not
-the literal `localhost`): the management API inherits `guardrail.host` until
-`defenseclaw sandbox legacy-cleanup` resets the config. An explicit
-`gateway.api_bind` always wins. See
+When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. See
 [Gateway API: bind address](/docs/reference/gateway-api#bind-address).
 
 The `openshell:` block for the NVIDIA OpenShell sandbox is described in
@@ -872,8 +867,10 @@ loader default, so an unset key follows the pack: `profile`, `yolo`,
 block, and allow lists add to the pack's lists. Some settings exist only in a
 pack, so a custom pack is the way to change them: the approvals mode, the
 review list, `mcp.blocked_tools`, `mcp.project_servers` (whether the MCP
-servers a repository defines may start), and `hooks.on_tamper` (whether a
-sandbox whose hooks were bypassed is stopped or only reported).
+servers a repository defines may start), `hooks.on_tamper` (whether a
+sandbox whose hooks were bypassed is stopped or only reported), and
+`hooks.on_silence` with `hooks.silence_after` (the same for a user-tier
+harness that works that long without its hooks).
 
 ```yaml
 openshell:
@@ -972,7 +969,7 @@ openshell:
 | `wrappers` | `[]` | The harnesses whose command runs in a sandbox through the shell wrapper. `sandbox enable` and `disable` record it; the wrapper itself lives in your shell rc file. At most 64, unique. |
 | `mcp.import` | `null` | Whether the harness's MCP servers come along. `null` follows the pack. |
 | `mcp.host_ports` | `[]` | Host ports you agreed to open for MCP servers running on your machine, 1–65535, unique, at most 64. Each port is still checked against the pack and `openshell.admin`, and DefenseClaw's own listeners are never opened. |
-| `upstream_telemetry` | `false` | Whether OpenShell's own anonymous usage telemetry stays on. `sandbox setup` turns it off in the OpenShell gateway's environment (`OPENSHELL_TELEMETRY_ENABLED=false`) unless you keep it (`--upstream-telemetry`), and records your choice here. On Linux, `sandbox doctor` reports a mismatch, and `--fix` repairs it. |
+| `upstream_telemetry` | `false` | Whether OpenShell's own anonymous usage telemetry stays on. `sandbox setup` turns it off in the OpenShell gateway's environment (`OPENSHELL_TELEMETRY_ENABLED=false`) unless you keep it (`--upstream-telemetry`), and records your choice here, on Linux and on a Mac whose gateway the Homebrew service runs. `sandbox doctor` reports a mismatch, and `--fix` repairs it. |
 | `token_delivery` | `provider` | How a sandbox receives its hook ingress credential. `provider`: as an OpenShell provider credential, so the agent only sees a placeholder, rotated on every start. `env`: as a plain `DEFENSECLAW_SANDBOX_TOKEN` variable the agent can read, kept for the sandbox's life. Both are revoked when the sandbox is deleted. See [Hook ingress](/docs/reference/gateway-api#hook-ingress). |
 | `middleware.enabled` | `false` | Reserved for an experimental supervisor-middleware switch. Nothing reads it yet. |
 
@@ -1150,16 +1147,16 @@ of every running sandbox, so changes to the egress keys, the large-upload
 threshold included, reach them within seconds.
 Turning `enabled` on or off, or moving `ingress_port` or
 `egress_port` while `enabled` is `true`, restarts the API listener inside the
-running gateway. The one exception is entering or leaving the legacy
-standalone mode (`openshell.mode`), which needs a gateway restart.
+running gateway.
 
 ### Legacy keys
 
-`mode` and `sandbox_home` remain for the removed legacy standalone sandbox.
-They are read only by the legacy bind rule above and by
-[`defenseclaw sandbox legacy-cleanup`](/docs/reference/sandbox-cli#sandbox-legacy-cleanup).
-`policy_dir`, `version`, `auto_pair`, and `host_networking` are accepted and
-ignored. No migration rewrites the block.
+`policy_dir`, `mode`, `version`, `sandbox_home`, `auto_pair`, and
+`host_networking` belong to the retired `openshell-sandbox` 0.0.x standalone
+sandbox. They are accepted and ignored. The upgrade to 1.0 (the
+`config_version` 9 migration) removes `mode` and `sandbox_home`, and on a
+host that ran that sandbox resets `guardrail.host` and `gateway.host`; see
+[Remove a retired standalone sandbox](/docs/sandboxes/guide#remove-a-retired-standalone-sandbox).
 
 
 ## `guardrail.connectors` (several connectors)

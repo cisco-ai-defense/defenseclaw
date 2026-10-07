@@ -217,6 +217,20 @@ These are the settings each pack controls. The
   Hermes, OpenHands, Antigravity and OmniGent it is not measured yet which
   call a hook belongs to, so for those DefenseClaw relies on noticing hooks
   that go silent.
+- **Silent hooks response** (`hooks.on_silence`, `hooks.silence_after`):
+  what DefenseClaw does when the harness works (model calls, its own
+  processes and connections) for `silence_after` without one hook request
+  reaching DefenseClaw, as a hook registration the agent switched off
+  looks. It applies to user-tier harnesses, whose hook settings the agent
+  can edit (OpenCode, Kiro CLI, Amp, Devin CLI, Antigravity, Hermes,
+  OpenHands; the run's banner says so on its `Hooks` line): `stop` stops the
+  sandbox, as a hook tamper does; `alert` reports a high-severity
+  `hook_silence` finding and keeps it running. A managed-tier harness, whose
+  hooks are root-owned, only alerts. `open` alerts; `balanced` and `strict`
+  stop. `silence_after` is 10 minutes in every built-in pack, long enough
+  for a slow model turn without a tool call. An idle stretch as long as
+  `silence_after` starts the count over, so a harness that wakes up after
+  one is not flagged for it.
 
 Hooks are DefenseClaw's judgment inside the sandbox boundary, and the
 workload runs as the same user as the hooks, so it could stop a hook
@@ -340,6 +354,8 @@ mcp:
 hooks:
   fail_mode: closed
   on_tamper: stop
+  on_silence: stop
+  silence_after: 10m
 ```
 
 <Callout type="warn" title="A custom pack starts from nothing">
@@ -382,6 +398,8 @@ added. Copy the registry and source hosts you need from
 | `mcp.project_servers` | No | `block` | `block` or `allow`. `allow` is looser: with `pack` [locked](#locked), a run can't switch to a pack that allows them where the configured pack blocks them. |
 | `hooks.fail_mode` | Yes | | Must be `closed`. |
 | `hooks.on_tamper` | No | `alert` when `network.mode` is `open`, otherwise `stop` | `stop` or `alert`. `alert` is looser: with `pack` locked, a run can't switch to a pack that alerts where the configured pack stops. |
+| `hooks.on_silence` | No | `alert` when `network.mode` is `open`, otherwise `stop` | `stop` or `alert`, for user-tier harnesses (a managed-tier harness only alerts). `alert` is looser, as for `on_tamper`. |
+| `hooks.silence_after` | No | `10m` | A duration such as `10m` or `1h`, from `1m` to `24h`. A longer wait is looser: with `pack` locked, a run can't switch to a pack that waits longer than the configured pack. |
 
 **Host patterns** use the egress proxy's grammar: an exact host name
 (`example.com`), `*.example.com` (every subdomain, not `example.com` itself),
@@ -514,7 +532,7 @@ unset follows the pack. Some settings merge instead of replacing:
 | Proxy ports | The pack's ports, or `openshell.egress.ports`, which replaces them. |
 | MCP import | The pack's `mcp.import`, then `openshell.mcp.import`, then leaving MCP servers behind for a run. |
 | Repository MCP servers | The pack's `mcp.project_servers` only. |
-| Hook fail mode and tamper response | The pack's `hooks.fail_mode` and `hooks.on_tamper` only. |
+| Hook fail mode, tamper and silence responses | The pack's `hooks.fail_mode`, `hooks.on_tamper`, `hooks.on_silence` and `hooks.silence_after` only. |
 | Host ports | `openshell.mcp.host_ports` plus the run's ports. Each port is checked. |
 | Resources | `openshell.resources`, then the run's CPU and memory request, capped by `openshell.admin.max_resources`. |
 

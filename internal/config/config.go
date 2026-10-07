@@ -80,11 +80,10 @@ const (
 )
 
 type ClawConfig struct {
-	Mode                 ClawMode `mapstructure:"mode"                       yaml:"mode"`
-	HomeDir              string   `mapstructure:"home_dir"                   yaml:"home_dir"`
-	ConfigFile           string   `mapstructure:"config_file"                yaml:"config_file"`
-	WorkspaceDir         string   `mapstructure:"workspace_dir"              yaml:"workspace_dir,omitempty"`
-	OpenClawHomeOriginal string   `mapstructure:"openclaw_home_original"     yaml:"openclaw_home_original,omitempty"`
+	Mode         ClawMode `mapstructure:"mode"                       yaml:"mode"`
+	HomeDir      string   `mapstructure:"home_dir"                   yaml:"home_dir"`
+	ConfigFile   string   `mapstructure:"config_file"                yaml:"config_file"`
+	WorkspaceDir string   `mapstructure:"workspace_dir"              yaml:"workspace_dir,omitempty"`
 }
 
 // AgentConfig [v7] pins the logical agent identity for this
@@ -2475,7 +2474,6 @@ type GatewayConfig struct {
 	ConfigReload GatewayConfigReloadConfig `mapstructure:"config_reload"     yaml:"config_reload,omitempty"`
 	Watcher      GatewayWatcherConfig      `mapstructure:"watcher"           yaml:"watcher"`
 	Watchdog     WatchdogConfig            `mapstructure:"watchdog"          yaml:"watchdog"`
-	SandboxHome  string                    `mapstructure:"-"                 yaml:"-"`
 	ClawHome     string                    `mapstructure:"-"                 yaml:"-"`
 }
 
@@ -2578,20 +2576,14 @@ func (g *GatewayConfig) RequiresTLS() bool {
 }
 
 // APIBindHost returns the address the gateway REST API listens on: an explicit
-// gateway.api_bind, else the legacy standalone shim's host, else loopback.
-// Every listener, hook/plugin address, and health probe derives the API host
-// from here so they cannot disagree.
+// gateway.api_bind, else loopback. Every listener, hook/plugin address, and
+// health probe (upgrade, watchdog, status, the Python CLI's api_bind_host)
+// derives the API host from here so they cannot disagree.
 func APIBindHost(cfg *Config) string {
-	if cfg == nil {
+	if cfg == nil || cfg.Gateway.APIBind == "" {
 		return "127.0.0.1"
 	}
-	if cfg.Gateway.APIBind != "" {
-		return cfg.Gateway.APIBind
-	}
-	if host, ok := LegacyStandaloneAPIHost(cfg); ok {
-		return host
-	}
-	return "127.0.0.1"
+	return cfg.Gateway.APIBind
 }
 
 type RuntimeAction string
@@ -3215,8 +3207,6 @@ func loadConfigSourceChecked(
 			)
 		}
 	}
-
-	cfg.Gateway.SandboxHome = LegacySandboxHome(&cfg)
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home

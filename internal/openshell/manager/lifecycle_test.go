@@ -830,7 +830,7 @@ func TestStopEndsTheHarnessFirst(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
-	e.fake.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
 		note("exec")
 		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
 	})
@@ -847,12 +847,12 @@ func TestStopEndsTheHarnessFirst(t *testing.T) {
 	if len(got) < 2 || got[0] != "exec" || !slices.Contains(got, "stop") {
 		t.Fatalf("calls = %v, want the harness asked to exit before the stop", got)
 	}
-	if calls := e.fake.ExecCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) ||
+	if calls := e.execCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) ||
 		!slices.Contains(calls[0].Command, harness.RunDir) || calls[0].Timeout <= harnessExitWait {
 		t.Fatalf("exec calls = %+v", calls)
 	}
 	e.startBox("stopbox", sandboxapi.StartRequest{})
-	e.fake.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
 		return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
 	})
 	e.stopBox("stopbox")

@@ -782,9 +782,9 @@ enum TUIWizards {
     /// `_build_sandbox_args` on macOS byte for byte. The OpenShell install
     /// runs in a terminal (on a Mac it installs NVIDIA's Homebrew formula,
     /// and e2fsprogs under the same consent); the app never passes
-    /// --install-openshell. Like the TUI on macOS it has no telemetry
-    /// question (the Homebrew gateway does not read gateway.env, so setup
-    /// cannot turn OpenShell's telemetry off) and no mounts question: setup
+    /// --install-openshell. Like the TUI on macOS it asks about OpenShell's
+    /// telemetry, which setup turns off in ~/.config/openshell/gateway.env
+    /// (the Homebrew service reads it), and has no mounts question: setup
     /// runs macOS sandboxes in OpenShell MicroVMs, which mount no host folders.
     private static let sandbox = WizardDefinition(
         id: "sandbox", title: "Sandbox", icon: "cube.transparent",
@@ -811,6 +811,12 @@ enum TUIWizards {
             WizardField(key: "harness-codex", label: "Codex", kind: .bool, defaultValue: "yes",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         help: "Run `codex` in a sandbox (--harness codex)."),
+            WizardField(key: "telemetry-off", label: "OpenShell telemetry off", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Turn OpenShell's anonymous usage telemetry off in ~/.config/openshell/gateway.env, "
+                            + "which the Homebrew service reads; changing it restarts the OpenShell gateway. "
+                            + "Off keeps it on (--upstream-telemetry). A gateway you started yourself keeps "
+                            + "the environment you started it with."),
             WizardField(key: "wrappers", label: "Shell wrappers", kind: .bool, defaultValue: "no",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         help: "Make `claude` and `codex` run sandboxed when you type them "
@@ -828,6 +834,7 @@ enum TUIWizards {
         for harness in ["claudecode", "codex"] where on("harness-\(harness)", "yes") {
             args += ["--harness", harness]
         }
+        if !on("telemetry-off", "yes") { args.append("--upstream-telemetry") }
         args.append(on("wrappers", "no") ? "--wrappers" : "--no-wrappers")
         if !on("build-images", "yes") { args.append("--skip-images") }
         return [args]

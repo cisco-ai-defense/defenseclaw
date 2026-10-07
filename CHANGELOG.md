@@ -729,7 +729,7 @@ deleted.
   from.
 - Commands: `sandbox setup|doctor|run|connect|list|status|exec|logs|activity|
   stop|start|delete|undo|review|pull|approvals|approve|reject|unblock|policy|
-  pack|image|enable|disable|teardown|legacy-cleanup`; the daemon serves them
+  pack|image|enable|disable|teardown`; the daemon serves them
   under `/api/v1/sandbox/*` (master token and CSRF). The TUI gains a
   Sandboxes panel (key `7`) and a Sandbox setup wizard; the macOS app gains
   sandbox views.
@@ -1246,6 +1246,52 @@ deleted.
   administrator's switch; the TUI and app feeds name the threshold. Both
   drivers.
 
+### OpenShell sandbox hardening
+
+- **The check after ready runs on the docker driver too.** After every
+  create and start, one exec checks that the workload runs as the uid its
+  image was built for with no capabilities, that DefenseClaw's hooks,
+  launcher and managed settings are the root-owned files it delivered, and,
+  on docker, that the per-run settings files are on read-only mounts. A
+  sandbox that fails it is refused with `policy_rejected` and is deleted
+  (create) or stopped again (start), and the message now says which
+  (`…; DefenseClaw deleted it`, `…; DefenseClaw stopped it again (its work is
+  kept)`). It ran only on the MicroVM driver before.
+- **Silent hooks stop a user-tier sandbox in balanced and strict.** New pack
+  keys `hooks.on_silence` (`stop` or `alert`) and `hooks.silence_after` (a
+  duration from `1m` to `24h`, `10m` in every built-in pack). When the
+  harness of a user-tier sandbox (OpenCode, Kiro CLI, Amp, Devin CLI,
+  Antigravity, Hermes, OpenHands), whose hook registration the agent can
+  edit, works that long (an idle stretch that long starts the count over)
+  without one hook request reaching DefenseClaw,
+  `stop` (the default in `balanced` and `strict`) stops the sandbox the way
+  a hook tamper does, and `alert` (the default in `open`) keeps it running.
+  Both raise the HIGH `hook_silence` finding, whose evidence names the
+  response, and a feed line that says what follows. A managed-tier harness
+  only alerts. The banner's `Hooks` line, `sandbox policy explain` and the
+  sandbox's `hooks.on_silence` / `hooks.silence_after` show the setting;
+  with `pack` locked, a run cannot switch to a pack that alerts or waits
+  longer. The threshold was a fixed 10 minutes and silence only alerted.
+- **The activity feed names its epoch.** Every activity event carries
+  `epoch`, which names the daemon's in-memory feed; a restarted daemon
+  numbers its events from one again under a new epoch. The TUI's Sandboxes
+  panel and the macOS app compare it when they resume (instead of guessing
+  from the event under the old number) and read a new feed from its start.
+- **macOS setup offers to turn OpenShell's usage telemetry off.** As on
+  Linux, `defenseclaw sandbox setup` asks before it sets
+  `OPENSHELL_TELEMETRY_ENABLED=false` in `~/.config/openshell/gateway.env`,
+  which the Homebrew service reads, in the same change and restart as the
+  MicroVM settings, and records the answer in
+  `openshell.upstream_telemetry`. The doctor's telemetry check runs on a Mac
+  too (it was skipped), and `--fix` repairs a mismatch. The TUI's and the
+  macOS app's Sandbox wizards ask it on a Mac too (**OpenShell Telemetry
+  Off**). A Mac gateway that no Homebrew service runs is still left alone.
+- **The banner says how the model hosts are reached.** A new line under
+  `Model` states that OpenShell opens them to the harness's own program
+  directly, around the egress proxy, and that for an npm or Python harness
+  that program is its `node` or `python`, so a script it runs reaches them
+  too. The sandbox guide and the network page say the same.
+
 ### Legacy OpenShell standalone sandbox removed
 
 - **Breaking:** removes the legacy standalone sandbox integration for the
@@ -1280,53 +1326,31 @@ deleted.
   every platform. Earlier docs claimed Linux installed an enforced
   Landlock/seccomp OpenShell policy with shims as a supplement; that policy was
   never enforced.
-- Adds
-  `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]`.
-  Linux only; privileged steps run through `sudo` with binaries resolved only
-  from root-owned `/usr/sbin`, `/usr/bin`, `/sbin`, and `/bin`. It detects a
-  legacy install, prints every step with its exact commands, and asks for
-  confirmation unless `--yes`; `--dry-run` changes nothing. Each artifact is
-  handled idempotently and recorded in `<data_dir>/legacy-sandbox-cleanup.json`.
-  Steps: disable and remove the generated systemd units and root-owned,
-  DefenseClaw-generated launchers; stop unless nothing of the legacy sandbox
-  still runs (no active unit, no live PID from `sandbox.pids` or
-  `openshell.pid`, no process of the sandbox uid; the non-systemd
-  `run-sandbox.sh` launcher must be stopped by the operator first); delete the
-  recorded namespace and the veths whose peer is in it, remove the exact NAT
-  rules (checked with `iptables -C` first), and restore
-  `net.ipv4.conf.all.route_localnet`; remove the `sandbox` user's ACLs, then
-  restore the OpenClaw home's original ownership from the validated backup and
-  clear only the `o+x` legacy setup added to the home's ancestors, and remove
-  the `/home/sandbox/.openclaw` symlink (a host whose old `--disable` erased the
-  pin and backup still has its sandbox ACLs removed from `claw.home_dir` or
-  `~/.openclaw`); then, as the operator and refusing symlinks, restore the
-  `openclaw.json` gateway and provider settings to loopback; remove the
-  invoking user from the `sandbox` group; optionally `userdel -r sandbox`
-  (`--remove-user`, refused while that user has processes, until its
-  ownership and ACLs are gone from the OpenClaw home, or when the account's
-  home is not the configured sandbox home) and remove a non-package-owned
-  0.0.x `/usr/local/bin/openshell-sandbox` (`--remove-binary`); once the
-  ownership and `openclaw.json` restores are done, reset `openshell.mode`,
-  `gateway.host`, `gateway.port`, `guardrail.host`, `claw.home_dir`,
-  `claw.config_file`, and `claw.openclaw_home_original`; back up legacy
-  data-dir artifacts to `<data_dir>/backups/legacy-sandbox-<timestamp>/`
-  before removing them; and print next steps (scan the skills, plugins, and
-  MCP servers the sandboxed agent could have changed, then
-  `defenseclaw setup guardrail`, which restarts the gateway and OpenClaw).
-  The group and user steps only run on a host with legacy evidence.
-- Legacy bind shim: until cleanup runs on a host whose config still says
-  `openshell.mode: standalone` with a non-localhost `guardrail.host`, the
-  gateway API keeps binding to that host (an explicit `gateway.api_bind`
-  still wins) so `upgrade` health checks keep working. While
-  `openshell.mode: standalone` remains, `/health` reports the `sandbox`
-  subsystem as `degraded` with a `last_error` pointing at
-  `defenseclaw sandbox legacy-cleanup`; on every other host the subsystem is
-  absent. `defenseclaw doctor` and `defenseclaw status` point a detected
-  legacy install at the same command.
-- Config: the `openshell:` key stays in the v8 schema with no migration.
-  `mode` and `sandbox_home` are read only by the legacy shim and
-  `legacy-cleanup`; `binary`, `policy_dir`, `version`, `auto_pair`, and
-  `host_networking` are accepted and ignored.
+- **Breaking:** no cleanup command and no bind shim: the upgrade resets the
+  config instead. The `config_version` 9 migration (run by the upgrade, by
+  `defenseclaw migrate`, and in memory when the gateway loads a v8 file)
+  drops `openshell.mode`, `openshell.sandbox_home` and
+  `claw.openclaw_home_original` (the OpenClaw home pin, named in a migration
+  note when set) from every config and, on one that said
+  `openshell.mode: standalone`, the non-loopback
+  `guardrail.host` and `gateway.host` (the veth addresses), which take their
+  defaults. An upgraded standalone host's gateway API so binds on loopback,
+  where the upgrade, watchdog and status probes and the CLI dial it, instead
+  of on `10.200.0.1`; `migration-v9.json` lists the removed keys, and running
+  the migration again changes nothing. `/health` reports no `sandbox`
+  subsystem for such a host, and `doctor`, `status` and `status --json`
+  (whose `sandbox` object loses `legacy_standalone`) say nothing of it. The
+  root units, launchers, network namespace, NAT rules and `sandbox` user are
+  removed by hand: see
+  [remove a retired standalone sandbox](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox).
+  `defenseclaw init --sandbox`, `install.sh --sandbox` and the
+  `install-openshell-sandbox.sh` stub point there. A
+  `defenseclaw sandbox legacy-cleanup` command was in unreleased 1.0 builds
+  only and is gone.
+- Config: the `openshell:` legacy sub-keys `policy_dir`, `version`,
+  `auto_pair`, and `host_networking` stay accepted by the v8 schema and are
+  ignored; `mode` and `sandbox_home` are removed by the `config_version` 9
+  migration.
 - **Breaking:** telemetry and audit: removes the `metric.defenseclaw.openshell.exit`
   metric family (instrument `defenseclaw.openshell.exit`) and its
   `defenseclaw.metric.command` attribute, and retires the `init-sandbox` audit
