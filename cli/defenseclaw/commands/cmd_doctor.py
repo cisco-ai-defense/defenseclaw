@@ -64,7 +64,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
 from defenseclaw import credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_contracts import (
-    openclaw_needs_interception_advisory,
     resolve_connector_contract,
     stable_agent_version,
 )
@@ -8224,6 +8223,8 @@ _INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
 # The plugin reports every 60 s and a restarted sidecar starts with no
 # report, so a fresh sidecar gets two cadences before a missing one fails.
 _INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
+# A model call completes after its proxy hop; a longer gap means it took no hop.
+_INTERCEPTION_MODEL_CALL_GRACE = timedelta(minutes=10)
 
 
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -8293,6 +8294,19 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         )
         return
     if info.get("verified") is True and _interception_self_test_is_fresh(info):
+        missed = _model_call_missed_the_proxy(info)
+        if missed:
+            _emit(
+                "warn",
+                label,
+                f"the plugin self-test passed, but {missed} - possible bypass",
+                remediation=(
+                    "restart the OpenClaw gateway so the DefenseClaw plugin reloads, then rerun doctor; if "
+                    "this returns, look for '[defenseclaw] intercept via=' lines in the OpenClaw gateway log"
+                ),
+                r=r,
+            )
+            return
         detail = "plugin self-test rewrote an LLM URL onto the local guardrail proxy"
         last_traffic = info.get("last_agent_traffic_at")
         if isinstance(last_traffic, str) and last_traffic.strip():
@@ -8324,47 +8338,40 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     )
 
 
-def _interception_self_test_is_fresh(info: dict) -> bool:
-    raw = info.get("last_verified_at")
+def _interception_time(info: dict, key: str) -> datetime | None:
+    raw = info.get(key)
     if not isinstance(raw, str) or not raw.strip():
-        return False
+        return None
     try:
-        verified_at = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
     except ValueError:
-        return False
-    if verified_at.tzinfo is None:
-        verified_at = verified_at.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - verified_at <= _INTERCEPTION_SELF_TEST_FRESHNESS
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
-def _check_openclaw_transport_advisory(cfg, r: _DoctorResult) -> None:
-    """Warn when the installed OpenClaw is in the changed-transport range."""
-    connectors = [
-        c
-        for c in _doctor_active_connectors(cfg)
-        if c == "openclaw" and _connector_enabled(cfg, c)
-    ]
-    if not connectors:
-        return
-    try:
-        from defenseclaw.inventory import agent_discovery
+def _interception_self_test_is_fresh(info: dict) -> bool:
+    verified_at = _interception_time(info, "last_verified_at")
+    return verified_at is not None and datetime.now(timezone.utc) - verified_at <= _INTERCEPTION_SELF_TEST_FRESHNESS
 
-        disc = agent_discovery.discover_agents(use_cache=True, data_dir=getattr(cfg, "data_dir", None))
-        signal = disc.agents.get("openclaw")
-    except Exception:
-        return
-    version = ""
-    if signal is not None:
-        version = signal.version or ""
-    if not openclaw_needs_interception_advisory(version):
-        return
-    _emit(
-        "warn",
-        "OpenClaw transport",
-        f"OpenClaw {version or 'unknown'} is ≥2026.6.8; confirm the OpenClaw interception "
-        "check rather than the :4000 port alone",
-        remediation="run doctor after the DefenseClaw plugin has loaded and look for 'OpenClaw interception'",
-        r=r,
+
+def _model_call_missed_the_proxy(info: dict) -> str:
+    """Say when the agent completed a model call that never reached the proxy.
+
+    The plugin self-test proves the patched transports work, not that the
+    application sends its model calls through them (GAP-0190). A call finishes
+    after its proxy hop, so a completed call with no hop in the grace window
+    before it took another path.
+    """
+    called_at = _interception_time(info, "last_agent_model_activity_at")
+    if called_at is None:
+        return ""
+    proxied_at = _interception_time(info, "last_agent_traffic_at")
+    if proxied_at is not None and called_at - proxied_at <= _INTERCEPTION_MODEL_CALL_GRACE:
+        return ""
+    proxied = f"at {proxied_at:%H:%M:%S}Z" if proxied_at is not None else "never"
+    return (
+        f"OpenClaw completed a model call at {called_at:%H:%M:%S}Z that did not go through the guardrail "
+        f"proxy (last proxied call: {proxied})"
     )
 
 
@@ -10974,7 +10981,6 @@ def doctor(
     _emit_hilt_observe_summary(_hilt_observe_only, r, tagged=_multi_hooks)
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
-    _check_openclaw_transport_advisory(cfg, r)
     if not json_out:
         _doctor_subsection("Credentials")
     r.set_section("credentials")

@@ -48,4 +48,12 @@ func TestGuardrailInspectorFallbackUsesResolvedThresholds(t *testing.T) {
 	if got.Action != "block" || got.Severity != "MEDIUM" {
 		t.Fatalf("fallback with guardrail.block_at=MEDIUM = %+v, want MEDIUM block", got)
 	}
+
+	// GAP-0190: a prompt is blocked at the level the operator set, not only at CRITICAL.
+	cfg.Guardrail.BlockAt = "HIGH"
+	liveGeneration.Store(&Generation{Config: cfg, Thresholds: buildThresholdTable(cfg, nil)})
+	got = inspector.Inspect(context.Background(), "prompt", "please find their ssn", nil, "", "action")
+	if got.Action != "block" || got.Severity != "HIGH" {
+		t.Fatalf("prompt with guardrail.block_at=HIGH = %+v, want HIGH block", got)
+	}
 }
