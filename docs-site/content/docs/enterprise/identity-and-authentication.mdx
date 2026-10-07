@@ -64,9 +64,11 @@ DefenseClaw reads identity only from the operating system the agent runs on.
 
 Each fact has an assurance level, sent as
 `defenseclaw.user.principal.assurance`: `verified` when the gateway or the
-root guardian resolved it for a uid or SID the kernel or a per-user
-credential proved, `claimed` when the hook reported it from the user's own
-session and the user could change it. The reference for what is read on each
+root guardian resolved it for a uid or SID the gateway took from how it
+authenticated the caller (the kernel's peer credentials, a per-user
+credential, or on a per-user install the account the gateway runs as),
+`claimed` when the hook reported it from the user's own session and the user
+could change it. The reference for what is read on each
 OS is [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
 
 <Callout type="warn" title="Do not grant access from these fields">
@@ -135,7 +137,7 @@ and upgrades.
 
 <Flow
   direction="TB"
-  caption="One person can run many agents, each agent many sessions, and each session sub-agents. Every level keeps a pointer to the level above it. The agent ID is a hash of four facts the gateway already holds."
+  caption="One person can run many agents, each agent many sessions, and each session sub-agents. A sub-agent shares its parent's agent ID and links to its parent and root. The agent ID is a hash of four facts the gateway already holds."
 >
   <Node id="h" kind="operator">{`Person\nuser.id, principal`}</Node>
   <Node id="in" kind="generic">{`Machine ID, connector\nconfig root`}</Node>
@@ -153,7 +155,7 @@ and upgrades.
 | Person | `user.id`, `defenseclaw.user.principal` | From the OS, as above |
 | Agent | `defenseclaw.agent.identity.id` | `agt-` and 16 hex digits of a SHA-256 over the machine ID, the verified user, the connector and the connector's config root in that user's home |
 | Session | `defenseclaw.agent.instance_id` | `ais-` and 16 hex digits of a SHA-256 over the agent ID and the session ID |
-| Sub-agent | `defenseclaw.agent.instance_id`, parent and root | `ais-` over the parent instance and the sub-agent ID |
+| Sub-agent | `defenseclaw.agent.instance_id`, with the parent and root links below | `ais-` over the parent instance and the sub-agent ID. A sub-agent that runs in a session of its own gets the `ais-` of that session. It shares its parent's `agt-` |
 
 The machine ID comes from `/etc/machine-id`, the Windows `MachineGuid` or the
 macOS `IOPlatformUUID`. A config root the agent claims, such as a
@@ -171,6 +173,16 @@ runs a spawned agent as a session of its own and sends no `SubagentStart`; the
 gateway links that session to the agent that created it, so it is a sub-agent
 at depth one with the parent session named, under the `ais-` of its own session.
 
+A sub-agent has no `agt-` of its own: it runs in its parent's install, so it
+shares the parent's `agt-` and has its own `ais-`. The lineage attributes link
+it to its parent and hold the IDs the connector reports, not DefenseClaw's.
+`defenseclaw.agent.parent.id` and `defenseclaw.agent.root.id` name the
+connector agent ID of the parent and the root (`gen_ai.agent.id` on their own
+records), and `defenseclaw.session.parent.id` and
+`defenseclaw.session.root.id` name their connector session ID
+(`gen_ai.conversation.id`). No attribute holds the parent's `ais-`, so join a
+sub-agent to its parent on those connector IDs and the shared `agt-`.
+
 List the identities the gateway has seen:
 
 ```bash
@@ -182,6 +194,37 @@ defenseclaw agent identities --user alice --connector codex --json
 User                    Connector  Agent identity        Sessions  Last seen  Config root
 alice@corp.example.com  codex      agt-3f9c0a1b2c3d4e5f  4         2m ago     /home/alice@corp.example.com/.codex
 ```
+
+The command lists every identity, most recently seen first. `--limit N` lists
+only the `N` most recent. When the list is cut short, the command says so on
+stderr and names the total; narrow a long list with `--user` or
+`--connector`. The gateway API returns 1000 identities a page (`limit` and
+`cursor`), and the TUI **Agents** tab shows the 1000 most recently seen as
+`Agents (1000+)`. Use the command to see them all.
+
+### Sandboxed agents
+
+An agent that runs in an OpenShell sandbox is attributed like a host agent,
+with four differences.
+
+- **The user is the host user on the sandbox binding**, the account that
+  started the sandbox. On a per-user install the gateway verifies it as its
+  own account, so a sandboxed agent gets the same directory facts, groups and
+  guardrail profile as that user's host agents. Identity headers the sandbox
+  sends are ignored.
+- **Each sandbox has its own `agt-`.** The agent's install is the sandbox, not
+  a config directory in the home, so a project run in two sandboxes is two
+  agents, and the `agt-` of the host install does not name a sandboxed run.
+  `defenseclaw agent identities` lists one per sandbox, and they stay listed
+  after the sandbox is gone.
+- **Its hooks always enforce.** A sandbox's hooks run in `action` mode
+  whatever `guardrail.mode` or the profile's `mode` says, because DefenseClaw
+  launched the harness and its hooks are the only gate on the tool calls. The
+  profile's thresholds and rule pack still apply.
+- **Its web egress follows the sandbox's network profile.** The egress proxy
+  decides each site by the sandbox's OpenShell profile (`open`, `balanced` or
+  `strict`) and its policy pack, not by a guardrail profile. See
+  [Network and egress](/docs/sandboxes/network).
 
 ## Guides
 
@@ -552,7 +595,7 @@ none of these facts.
 | No `defenseclaw.user.directory` for an SSSD account | The directory type comes from realmd: run `realm list` as that user. It is expected to be missing when the account's domain is not a joined realm or a child domain of one (a plain LDAP domain, for example), or when the host has several realms and the account name carries no DNS domain. The gateway refreshes directory facts every 15 minutes. The domain and groups are still verified. |
 | First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
 | `doctor` or `guardrail status` warns "directory lookups are failing" | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Users without cached facts get the default profile (`default_lookup_failed`); users with cached facts keep them for at most an hour, then fall back the same way. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |
-| No Kerberos principal, or an old one | The principal is read from the credential cache as a claim: it is the cache's default principal, and its tickets are not checked, so an expired TGT still reports it (`klist` shows the end time). With KCM the caches belong to the uid, not to one login: `kdestroy` removes the session's own cache, and another cache of the same uid (another login) becomes the default, so the record keeps naming a principal; `kdestroy -A` empties the uid's collection. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. |
+| No Kerberos principal, or an old one | The principal is read from the credential cache as a claim: it is the cache's default principal, and its tickets are not checked, so an expired TGT still reports it (`klist` shows the end time). With KCM the caches belong to the uid, not to one login: `kdestroy` removes the session's own cache, and another cache of the same uid (another login) becomes the default, so the record keeps naming a principal; `kdestroy -A` empties the uid's collection. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. The OpenCode plugin, the Amp plugin and the Omnigent bridge never send it: they do not read the ticket cache. |
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |
 | `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
