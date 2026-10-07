@@ -470,3 +470,41 @@ func TestCollectScriptReadsATreeWithoutHanging(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A sample leaves out the collector and the timeout(1) wrapper Exec runs it
+// under: each sample would otherwise see them start, and the next one exit.
+func TestCollectScriptLeavesItselfOut(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the collector runs in Linux sandboxes; it needs /proc")
+	}
+	timeout, err := exec.LookPath("timeout")
+	if err != nil {
+		t.Skip("timeout(1) is missing")
+	}
+	for _, tool := range []string{"/bin/bash", "/usr/bin/find", "/usr/bin/tr"} {
+		if _, err := os.Stat(tool); err != nil {
+			t.Skipf("%s is missing", tool)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	argv := append([]string{timeout, "30"}, collectArgv("ps", 1, []string{"O", "argv"})...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("collector: %v", err)
+	}
+	c, err := parseCollection(out, false, newCollectScope(), 1)
+	if err != nil || !c.Ended {
+		t.Fatalf("parse: %v, %v", c, err)
+	}
+	wrapper := cmd.Process.Pid
+	for _, p := range c.Processes {
+		if p.PID == wrapper || p.PPID == wrapper {
+			t.Fatalf("the sample reports the collector's own process %+v", p)
+		}
+	}
+	if len(c.Processes) == 0 {
+		t.Fatal("no processes")
+	}
+}

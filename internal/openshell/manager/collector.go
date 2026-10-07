@@ -117,7 +117,10 @@ var sandboxExecutableDirs = []string{
 // exe|cwd target", "V name", "X size mtime path", "E type size mtime path"
 // (type f, d, l or another find %y letter), "F path" followed by the file's
 // base64 on the next line, "Q what" (a bound was reached) and "end". Paths
-// and text come last on their line. find prints NUL-terminated records that
+// and text come last on their line. The collector leaves itself out of the
+// processes it reports, and the timeout(1) wrapper Exec runs it under (its
+// parent, when that is timeout): they are not the workload's, and every
+// sample would see them start anew. find prints NUL-terminated records that
 // tr turns into lines, with a newline inside one turned into \001, which the
 // host refuses; the shell's own text has its control characters replaced.
 // A path with a control character is skipped. Files are read only when
@@ -155,9 +158,13 @@ content() {
 printf '%s\n' 'dccollect 1'
 while read -r k v _; do [ "$k" = btime ] && printf 'T 100 %s\n' "$v"; done < /proc/stat
 uid=$EUID n=0
+wrap=
+{ read -r -d '' wrap < "/proc/$PPID/comm"; } 2>/dev/null
+[ "${wrap%$'\n'}" = timeout ] && wrap=$PPID || wrap=
 declare -A envs=()
 for d in /proc/[0-9]*; do
   pid=${d#/proc/}
+  case $pid in "$$"|"$wrap") continue ;; esac
   line=
   { read -r -d '' line < "$d/stat"; } 2>/dev/null
   [ -n "$line" ] || continue
