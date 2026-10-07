@@ -130,9 +130,9 @@ stopped`. Nothing is changed; use the install command above.
   (OpenShell or the DefenseClaw egress proxy) and decision, top blocked and
   allowed hosts, bytes up and down per destination, a destinations table,
   shadow-AI and other sandbox findings, integration health and the opt-in
-  process starts, with a Sandbox variable. The local Collector now adds the
-  record's sandbox name as the `defenseclaw.sandbox.name` log attribute (Loki
-  structured metadata) so the variable and the filters never parse log bodies;
+  process starts, with Environment, Host and Sandbox variables. The local
+  Collector now adds the record's sandbox name as the `defenseclaw.sandbox.name`
+  log attribute (Loki structured metadata) so the variable and the filters never parse log bodies;
   the body is unchanged and sandbox names stay out of metric labels. The
   Splunk Observability bundle adds an Egress blocks by source chart to
   Security and Policy, a Sandboxes dashboard and a sandbox egress-blocks

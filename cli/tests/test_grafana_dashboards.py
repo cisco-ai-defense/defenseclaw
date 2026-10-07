@@ -1066,6 +1066,26 @@ def test_sandboxes_blocked_egress_leaves_out_audit_only_refusals() -> None:
         assert 'body_defenseclaw_network_decision_code!~"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)"' in expr, expr
 
 
+def test_sandboxes_board_scopes_to_one_computer() -> None:
+    # GAP-0195: every panel follows Environment and Host; a metric panel,
+    # which cannot follow the Sandbox box, says so in its title; the active
+    # count adds hosts up instead of taking one maximum per connector; and
+    # Health degraded no longer counts gateway-wide records as the sandbox's.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    assert [variable["name"] for variable in board["templating"]["list"]][:2] == ["environment", "host"]
+    for panel in board["panels"]:
+        for target in panel.get("targets", []):
+            expr = target["expr"]
+            assert 'deployment_environment=~"$environment"' in expr and 'host_name=~"$host"' in expr, panel["title"]
+            if target["datasource"]["type"] == "prometheus":
+                assert "all names)" in panel["title"], panel["title"]
+    active = _panel(board, "Active (all names)")["targets"][0]["expr"]
+    assert active.startswith("sum(max by (deployment_environment, host_name, connector) (")
+    health = [target["expr"] for target in _panel(board, "Health degraded")["targets"]]
+    assert ['body_defenseclaw_sandbox_name=~"$sandbox"' in e for e in health] == [True, False]
+    assert ['body_defenseclaw_sandbox_name=""' in e for e in health] == [False, True]
+
+
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
     audit = _load_audit_module()
 

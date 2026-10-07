@@ -97,11 +97,19 @@ Things to know when you read it:
 ## Sandboxes board
 
 The **Sandboxes** board (`defenseclaw-sandboxes`) shows what the
-[OpenShell sandboxes](/docs/sandboxes/guide) are doing. It has a **Connector**
-box (`$connector`, the sandbox's harness connector, for the metric panels) and a
-**Sandbox** box (`$sandbox`, the sandbox name, for the log panels). Sandbox
-names are never metric labels, so the metric panels are fleet-wide and only the
-log panels follow `$sandbox`.
+[OpenShell sandboxes](/docs/sandboxes/guide) are doing. It has four boxes:
+
+- **Environment** (`$environment`, the gateway's `deployment.environment.name`,
+  which `defenseclaw setup observability add --environment` sets) and **Host**
+  (`$host`, the computer's `host.name`). Every panel follows both, so you can
+  scope the board to one computer and show, for example, that a Windows
+  computer has no sandboxes.
+- **Connector** (`$connector`, the sandbox's harness connector) for the metric
+  panels.
+- **Sandbox** (`$sandbox`, the sandbox name) for the log panels. Sandbox names
+  are never metric labels, so the three metric panels ignore it and say so in
+  their titles: **Active (all names)**, **Active sandboxes by connector (all
+  names)** and **Egress by source and decision (metric, all names)**.
 
 The Sandbox list and every log filter read `defenseclaw.sandbox.name` as Loki
 structured metadata. The local Collector copies the name from each record's body
@@ -110,8 +118,8 @@ to find a sandbox. A record that names no sandbox has no such metadata.
 
 | Row | Panels | What they show |
 | --- | --- | --- |
-| Sandbox fleet | Active sandboxes, Sandboxes seen, Egress allowed, Egress blocked, Shadow-AI findings, Health degraded | Sandboxes provisioning, starting, ready or stopping (latest gauge value per connector); then counts for the range. Egress counts are one per decision; the end of a tunnel is not counted again. |
-| Lifecycle | Active sandboxes by connector, Phase transitions, Recent lifecycle changes | The gauge over time, the phase each change entered (creating, provisioning, starting, ready, stopping, stopped, error, deleting, deleted), and the newest changes with trigger and OpenShell condition. |
+| Sandbox fleet | Active (all names), Sandboxes seen, Egress allowed, Egress blocked, Shadow-AI findings, Health degraded | Sandboxes provisioning, starting, ready or stopping now, from the gauge of every running gateway (the largest value per host, so a restarted gateway is not counted twice); then counts for the range. Egress counts are one per decision; the end of a tunnel is not counted again. Health degraded shows two numbers: **sandboxes** for the sandboxes in the Sandbox box and **gateway-wide** for records about the whole integration. |
+| Lifecycle | Active sandboxes by connector (all names), Phase transitions, Recent lifecycle changes | The gauge over time, the phase each change entered (creating, provisioning, starting, ready, stopping, stopped, error, deleting, deleted), and the newest changes with trigger and OpenShell condition. |
 | Egress decisions | Egress by source and decision (logs and metric), Top blocked hosts, Top allowed hosts | Who decided (`openshell` is OpenShell's own network boundary, `dc-egress-proxy` is the DefenseClaw egress proxy) and the outcome. The metric panel counts the `defenseclaw.egress.events` counter, which misses a series' first increment, so the log panel is the exact count. |
 | Traffic volume | Bytes up by destination, Bytes down by destination, Bytes up / down over time | Sums of `bytes_up` and `bytes_down` on `egress.completed` records, which only the DefenseClaw egress proxy writes. OpenShell's own connections report no byte counts. |
 | Destinations | Destinations, Recent blocked egress | Each host with allowed and blocked counts and bytes moved (top 50 per column), and the newest refusals with the decision code and the process the workload claims made the request. |
