@@ -34,14 +34,11 @@ var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsCl
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
 
 // enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
-// a guardian row of a local account that was deleted and whose profile
-// folder was removed too: no one can sign in as it, and the enumerator drops
-// its rows at its next pass. Tests replace it.
+// a guardian row of a local account that was deleted: no one can sign in as
+// it, and the enumerator drops its rows at its next pass, also when its
+// profile folder could not be removed (GAP-0430). Tests replace it.
 var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
 	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(row.UserHome) == "" {
-		return false
-	}
-	if _, err := os.Lstat(row.UserHome); !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
 	return windowsEnterpriseAccountDeleted(row.SID)
