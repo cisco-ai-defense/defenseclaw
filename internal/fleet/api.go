@@ -662,8 +662,8 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.emitAudit("fleet.threat_intel.push",
-		fmt.Sprintf("revoked=%d", len(req.RevokeAllowHash)),
-		fmt.Sprintf("emergency=%v hashes=%d", req.Emergency, len(req.RevokeAllowHash)))
+		fmt.Sprintf("threat-intel-push.%d", len(req.RevokeAllowHash)),
+		fmt.Sprintf("revoked_count:%d emergency:%v", len(req.RevokeAllowHash), req.Emergency))
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"revoked": len(req.RevokeAllowHash),
@@ -707,8 +707,8 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.emitAudit("fleet.device.decommission",
-		fmt.Sprintf("batch=%s", batchID),
-		fmt.Sprintf("requested=%d decommissioned=%d not_found=%d", len(req.Devices), decommissioned, len(notFound)))
+		batchID,
+		fmt.Sprintf("requested:%d decommissioned:%d not_found:%d", len(req.Devices), decommissioned, len(notFound)))
 
 	resp := map[string]any{
 		"batch_id":       batchID,

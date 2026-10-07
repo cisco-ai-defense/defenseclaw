@@ -162,12 +162,34 @@ func makeSignedHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount u
 }
 
 // fixedKeyProvider is a test DeviceKeyProvider that returns a fixed key for all devices.
+// It does NOT implement DeviceKeyChecker, simulating a pre-HMAC deployment where
+// no per-device key tracking is available.
 type fixedKeyProvider struct {
 	key []byte
 }
 
 func (f *fixedKeyProvider) KeyForDevice(_ uint64) []byte {
 	return f.key
+}
+
+// perDeviceKeyProvider is a test DeviceKeyProvider that also implements
+// DeviceKeyChecker. It stores per-device keys and reports whether a key
+// has been provisioned for a given device.
+type perDeviceKeyProvider struct {
+	keys        map[uint64][]byte
+	fallbackKey []byte
+}
+
+func (p *perDeviceKeyProvider) KeyForDevice(deviceID uint64) []byte {
+	if key, ok := p.keys[deviceID]; ok {
+		return key
+	}
+	return p.fallbackKey
+}
+
+func (p *perDeviceKeyProvider) HasDeviceKey(deviceID uint64) bool {
+	_, ok := p.keys[deviceID]
+	return ok
 }
 
 func makeVerdictRequestPayload(requestID uint16, toolName string) []byte {
@@ -687,7 +709,11 @@ func TestBridgeSignedHeartbeatBadHMAC(t *testing.T) {
 	<-errCh
 }
 
-func TestBridgeUnsignedHeartbeatStillAccepted(t *testing.T) {
+func TestBridgeUnsignedHeartbeatNoKeyChecker(t *testing.T) {
+	// When the key provider does NOT implement DeviceKeyChecker (e.g. pre-HMAC
+	// deployment using fixedKeyProvider), unsigned heartbeats are accepted with
+	// a warning. This preserves backward compatibility for fleets that have not
+	// migrated to per-device key tracking.
 	mc := newMockClient()
 	fm := manager.New(nil)
 	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
@@ -707,7 +733,6 @@ func TestBridgeUnsignedHeartbeatStillAccepted(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Send a legacy unsigned 32-byte heartbeat — should be accepted with warning
 	payload := makeHeartbeatPayload(42, 7, 15, 0)
 	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
 
@@ -715,7 +740,100 @@ func TestBridgeUnsignedHeartbeatStillAccepted(t *testing.T) {
 
 	hb, _, errs := bridge.Stats()
 	if hb != 1 {
-		t.Errorf("heartbeats processed = %d, want 1 (legacy unsigned should still be accepted)", hb)
+		t.Errorf("heartbeats processed = %d, want 1 (no DeviceKeyChecker — should accept unsigned)", hb)
+	}
+	if errs != 0 {
+		t.Errorf("errors = %d, want 0", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeUnsignedHeartbeatRejectedWhenKeyed(t *testing.T) {
+	// P1-06: When the device has a per-device key provisioned, unsigned
+	// heartbeats MUST be rejected. An attacker could otherwise bypass the
+	// HMAC check by sending a shorter (32-byte, unsigned) payload.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	fullDeviceID := manager.ComposeID(1, 2, 42)
+	deviceKey := []byte("per-device-key-32-bytes-long!!!!") // 32 bytes
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.SetKeyProvider(&perDeviceKeyProvider{
+		keys:        map[uint64][]byte{fullDeviceID: deviceKey},
+		fallbackKey: make([]byte, 32),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send an unsigned 32-byte heartbeat — must be REJECTED because device is keyed
+	payload := makeHeartbeatPayload(42, 7, 15, 0)
+	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 0 {
+		t.Errorf("heartbeats processed = %d, want 0 (unsigned from keyed device must be rejected)", hb)
+	}
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeUnsignedHeartbeatAcceptedWhenNoDeviceKey(t *testing.T) {
+	// When the key provider implements DeviceKeyChecker but reports that this
+	// specific device does NOT have a per-device key, unsigned heartbeats are
+	// accepted with a warning. This covers truly legacy devices that have not
+	// been provisioned with a key yet.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	bridge := NewBridge(mc, fm, cache)
+	// perDeviceKeyProvider with NO key for device 42 — empty keys map
+	bridge.SetKeyProvider(&perDeviceKeyProvider{
+		keys:        map[uint64][]byte{},
+		fallbackKey: make([]byte, 32),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send an unsigned heartbeat — should be accepted because no per-device key exists
+	payload := makeHeartbeatPayload(42, 7, 15, 0)
+	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 1 {
+		t.Errorf("heartbeats processed = %d, want 1 (no per-device key — should accept unsigned)", hb)
 	}
 	if errs != 0 {
 		t.Errorf("errors = %d, want 0", errs)

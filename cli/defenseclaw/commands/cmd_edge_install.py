@@ -515,6 +515,27 @@ def edge_install(
         # or receive signed verdict responses.
         device_key = _register_device_via_api(tenant_id, fleet_id, device_id)
 
+        # P1-15 fix: If registration returned no key, the device is
+        # unprovisioned and cannot authenticate. Do NOT continue to the
+        # success path — report the error and exit 1 so operators don't
+        # mistakenly believe the install succeeded.
+        if not device_key:
+            ux.echo()
+            ux.section("Install failed")
+            ux.err(
+                "Device registration did not return a device key. "
+                "The device is unprovisioned and cannot authenticate "
+                "heartbeats or receive signed verdicts.\n"
+                "  Possible causes:\n"
+                "    - Device was previously registered (key only shown once)\n"
+                "    - Fleet API key store is not configured\n"
+                "    - Fleet API is unreachable\n"
+                "  To fix:\n"
+                "    - Re-register with a new device ID, or\n"
+                "    - Provision the key manually via DCLAW_DEVICE_KEY"
+            )
+            raise SystemExit(1)
+
         _configure_remote_env(target, user, tenant_id, fleet_id, device_id, broker_url,
                               device_key=device_key)
         daemon_ok = _start_remote_daemon(target, user)

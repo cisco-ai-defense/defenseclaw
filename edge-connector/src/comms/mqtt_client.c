@@ -13,6 +13,13 @@
 #include <netdb.h>
 #include <poll.h>
 
+/* P1-24 fix: The mbedTLS HMAC path in dclaw_mqtt_send_heartbeat() uses
+ * mbedtls_md_context_t, mbedtls_md_info_t, and MBEDTLS_MD_SHA256.
+ * Include the header when mbedTLS is available. */
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
+#include <mbedtls/md.h>
+#endif
+
 /*
  * Minimal MQTT 3.1.1 client for Edge Connector.
  *

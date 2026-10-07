@@ -134,6 +134,34 @@ def _setup_docker(port: int) -> dict | bool:
     # Step 1: Create config directory
     conf_dir = Path.home() / ".defenseclaw" / "mqtt"
     os.makedirs(conf_dir, exist_ok=True)
+
+    # P1-10 fix: Ensure the config directory is traversable by the Mosquitto
+    # UID (1883) inside the container.  The host's umask may create the dir
+    # as 0700, which prevents the non-root broker process from traversing it.
+    # chmod 0755 makes it world-executable (traverse) and readable.
+    # chown to 1883:1883 via a throwaway container (host user typically can't
+    # chown to an arbitrary UID directly).
+    try:
+        conf_dir.chmod(0o755)
+    except OSError:
+        ux.warn("Could not chmod config directory to 0755.")
+
+    chown_dir_result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "--user", "0",
+            "-v", f"{conf_dir}:/mosquitto/config",
+            _MOSQUITTO_IMAGE,
+            "chown", "1883:1883", "/mosquitto/config",
+        ],
+        capture_output=True, text=True,
+    )
+    if chown_dir_result.returncode != 0:
+        ux.warn(
+            f"Could not chown config dir to mosquitto (1883): {chown_dir_result.stderr.strip()}\n"
+            "  The broker may fail to traverse the config directory."
+        )
+
     ux.ok(f"Config directory: {conf_dir}")
 
     # Step 2: Write mosquitto.conf with persistence enabled.

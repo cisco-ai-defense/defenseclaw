@@ -66,6 +66,48 @@ static void load_active_partition_from_flash(void) {
      * version check (hdr.version <= s->device.policy_version) uses the real
      * last-applied version instead of 0. */
     persisted_policy_version = ((uint16_t)buf[4] << 8) | buf[5];
+
+    /* P1-07 migration fix: Handle upgrade from old 4-byte flash format to the
+     * new 6-byte format. The old format was [magic0, magic1, partition, reserved]
+     * and did not include version bytes. When upgrading, bytes [4..5] read as
+     * 0x0000 (or 0xFFFF on erased flash), which resets the version to 0 and
+     * allows policy downgrade — defeating REQ-36 anti-rollback.
+     *
+     * Recovery: if the version field is zero (or 0xFFFF) but we have a valid
+     * active partition, read the OTA policy header directly from that flash
+     * partition. The header format is: version(u16 BE), payload_len(u16 BE),
+     * canary_baseline(u16 BE), reserved(u16 BE) = 8 bytes total. If we find
+     * a valid version > 0 there, adopt it and re-persist in the new 6-byte
+     * format so subsequent boots use the fast path. */
+    if (persisted_policy_version == 0 || persisted_policy_version == 0xFFFF) {
+        uint32_t part_offset = (active_policy_partition == 0)
+                                ? HAL_FLASH_POLICY_A_OFFSET
+                                : HAL_FLASH_POLICY_B_OFFSET;
+        uint8_t hdr_buf[8];
+        if (hal_flash_read(part_offset, hdr_buf, 8) == 0) {
+            uint16_t recovered_ver = ((uint16_t)hdr_buf[0] << 8) | hdr_buf[1];
+            uint16_t payload_len   = ((uint16_t)hdr_buf[2] << 8) | hdr_buf[3];
+            /* Sanity: version must be non-zero and payload_len must be plausible
+             * (non-zero, fits in partition). This rejects blank/erased partitions
+             * where all bytes are 0x00 or 0xFF. */
+            if (recovered_ver > 0 && recovered_ver != 0xFFFF &&
+                payload_len > 0 && payload_len <= HAL_FLASH_POLICY_A_SIZE - 8) {
+                persisted_policy_version = recovered_ver;
+                fprintf(stderr, "[DCLAW] Migration: recovered policy version %u "
+                        "from active partition %c OTA header.\n",
+                        recovered_ver,
+                        active_policy_partition == 0 ? 'A' : 'B');
+                /* Re-persist in new 6-byte format so future boots are clean */
+                persist_active_partition();
+            } else {
+                /* Partition is blank or erased — no version to recover.
+                 * Leave persisted_policy_version at 0; this is a fresh device
+                 * or the partition was never written via OTA. */
+                persisted_policy_version = 0;
+            }
+        }
+    }
+
     if (persisted_policy_version > 0) {
         dclaw_state_t *s = dclaw_get_state();
         s->device.policy_version = persisted_policy_version;

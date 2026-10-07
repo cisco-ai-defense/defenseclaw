@@ -54,6 +54,20 @@ static const uint8_t *get_audit_key(void) {
             s_audit_key[i] = (uint8_t)((hi << 4) | lo);
         }
         if (valid) {
+            /* P1-18 fix: Reject an all-zero key as weak/invalid.
+             * 64 hex zero digits decode to 32 zero bytes, which is a
+             * trivially guessable key that defeats HMAC integrity. */
+            bool all_zero = true;
+            for (int j = 0; j < AUDIT_KEY_LEN; j++) {
+                if (s_audit_key[j] != 0) { all_zero = false; break; }
+            }
+            if (all_zero) {
+                fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY is all zeros — "
+                        "rejected as weak/invalid.\n");
+                valid = false;
+            }
+        }
+        if (valid) {
             s_audit_key_provisioned = true;
             return s_audit_key;
         }

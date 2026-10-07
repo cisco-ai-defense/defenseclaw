@@ -29,6 +29,7 @@ static void test_non_ascii_tool_name_rejected(void) {
     dclaw_tool_request_t req = make_valid_request();
     req.tool_name[2] = (char)0x80;
     assert(dclaw_ipc_validate_request(&req) == -1);
+    (void)req;
     printf("  PASS: non-ASCII tool_name rejected\n");
 }
 
@@ -36,6 +37,7 @@ static void test_control_char_tool_name_rejected(void) {
     dclaw_tool_request_t req = make_valid_request();
     req.tool_name[0] = 0x01; /* SOH control char */
     assert(dclaw_ipc_validate_request(&req) == -1);
+    (void)req;
     printf("  PASS: control char in tool_name rejected\n");
 }
 
@@ -43,6 +45,7 @@ static void test_all_zero_hash_rejected(void) {
     dclaw_tool_request_t req = make_valid_request();
     memset(req.tool_hash, 0, 32);
     assert(dclaw_ipc_validate_request(&req) == -1);
+    (void)req;
     printf("  PASS: all-zero hash rejected\n");
 }
 
@@ -50,6 +53,7 @@ static void test_invalid_cap_flags_rejected(void) {
     dclaw_tool_request_t req = make_valid_request();
     req.cap_flags = 0x80;
     assert(dclaw_ipc_validate_request(&req) == -1);
+    (void)req;
     printf("  PASS: invalid cap_flags (0x80) rejected\n");
 }
 
@@ -57,6 +61,7 @@ static void test_valid_cap_flags_accepted(void) {
     dclaw_tool_request_t req = make_valid_request();
     req.cap_flags = 0x7F; /* all valid bits set */
     assert(dclaw_ipc_validate_request(&req) == 0);
+    (void)req;
     printf("  PASS: all valid cap_flags (0x7F) accepted\n");
 }
 
@@ -65,6 +70,7 @@ static void test_non_ascii_destination_rejected(void) {
     strncpy(req.destination, "evil.com", DCLAW_DESTINATION_MAX - 1);
     req.destination[4] = (char)0xFF;
     assert(dclaw_ipc_validate_request(&req) == -1);
+    (void)req;
     printf("  PASS: non-ASCII destination rejected\n");
 }
 
@@ -72,6 +78,7 @@ static void test_empty_destination_accepted(void) {
     dclaw_tool_request_t req = make_valid_request();
     req.destination[0] = '\0';
     assert(dclaw_ipc_validate_request(&req) == 0);
+    (void)req;
     printf("  PASS: empty destination accepted\n");
 }
 
@@ -130,7 +137,7 @@ static void test_json_parse_oversized_rejected(void) {
     big[sizeof(big) - 1] = '\0';
     dclaw_tool_request_t out;
     assert(dclaw_ipc_parse_request(big, sizeof(big) - 1, &out) == -1);
-    (void)out;
+    (void)big; (void)out;
     printf("  PASS: oversized payload (>512B) rejected\n");
 }
 

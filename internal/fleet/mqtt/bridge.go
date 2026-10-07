@@ -30,6 +30,13 @@ type DeviceKeyLookup interface {
 	LoadDeviceKey(deviceID uint64) ([]byte, error)
 }
 
+// DeviceKeyChecker is an optional interface that a DeviceKeyProvider can
+// implement to report whether a per-device key has been provisioned. The
+// bridge uses this to reject unsigned heartbeats from keyed devices (P1-06).
+type DeviceKeyChecker interface {
+	HasDeviceKey(deviceID uint64) bool
+}
+
 // storeBackedKeyProvider resolves per-device keys from the DeviceKeyStore.
 // Falls back to the fleet-wide DCLAW_DEVICE_KEY env var or zero key
 // when no per-device key is found (for backward compatibility during rollout).
@@ -63,6 +70,17 @@ func (p *storeBackedKeyProvider) KeyForDevice(deviceID uint64) []byte {
 		}
 	}
 	return p.fallbackKey
+}
+
+// HasDeviceKey reports whether a per-device key has been provisioned for
+// this device. Returns true only when the backing store has a specific key;
+// returns false when the device would fall back to the fleet-wide key.
+func (p *storeBackedKeyProvider) HasDeviceKey(deviceID uint64) bool {
+	if p.store == nil {
+		return false
+	}
+	key, err := p.store.LoadDeviceKey(deviceID)
+	return err == nil && key != nil
 }
 
 // envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment.
@@ -286,9 +304,17 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 				return
 			}
 		} else {
-			// Unsigned (legacy) heartbeat: log a warning but accept for backward
-			// compatibility. Operators should upgrade edge devices to send signed
-			// heartbeats.
+			// Unsigned (legacy) heartbeat: check whether this device has a
+			// per-device key provisioned. If it does, reject — an attacker
+			// could bypass HMAC by sending a shorter (unsigned) payload.
+			// P1-06 fix: only accept unsigned heartbeats from truly legacy
+			// devices that have no per-device key.
+			if checker, ok := b.keyProvider.(DeviceKeyChecker); ok && checker.HasDeviceKey(fullDeviceID) {
+				b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — unsigned heartbeat from keyed device %d (possible HMAC bypass attempt)",
+					parts.DeviceID)
+				b.incErrors()
+				return
+			}
 			b.logger.Printf("[mqtt-bridge] WARNING: device %d sent unsigned heartbeat (no HMAC) — upgrade edge-connector for signed heartbeats",
 				parts.DeviceID)
 		}
