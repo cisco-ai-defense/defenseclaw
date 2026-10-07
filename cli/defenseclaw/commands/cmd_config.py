@@ -898,7 +898,7 @@ def validate_config() -> ValidationResult:
             res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res
         if inspected.valid is not True:
-            res.errors.append("canonical v8 validator returned no validity decision")
+            res.errors.append("the configuration validator returned no validity decision")
         return res
 
     if config_module.config_is_empty(cfg_path):

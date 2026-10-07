@@ -127,14 +127,14 @@ def mutate_v8_config(
 def _validate_candidate(path: str, data_dir: str | None) -> None:
     result = inspect_v8_config("validate", config_path=path, data_dir=data_dir)
     if result.valid is not True:
-        raise RuntimeError("canonical v8 configuration validator rejected the candidate")
+        raise RuntimeError("the configuration validator rejected the candidate")
 
 
 def _assert_safe_target(path: str) -> None:
     try:
         metadata = os.lstat(path)
     except FileNotFoundError as exc:
-        raise FileNotFoundError("config.yaml does not exist; initialize DefenseClaw before editing v8 policy") from exc
+        raise FileNotFoundError("config.yaml does not exist; initialize DefenseClaw before editing its policy") from exc
     if stat.S_ISLNK(metadata.st_mode):
         raise OSError("refusing to edit config.yaml through a symbolic link")
     if not stat.S_ISREG(metadata.st_mode):

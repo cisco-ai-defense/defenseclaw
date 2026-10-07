@@ -1090,7 +1090,7 @@ def test_v8_enable_mutates_exact_source_index() -> None:
             return_value=result,
         ) as mutate,
     ):
-        _set_v8_destination_enabled("/tmp/dc", "collector", True, "")
+        _set_v8_destination_enabled("/tmp/dc", "collector", True)
     args, kwargs = mutate.call_args
     assert Path(args[0]) == Path("/tmp/dc/config.yaml")
     assert args[1][0].path == ("observability", "destinations", 3, "enabled")
@@ -1098,7 +1098,7 @@ def test_v8_enable_mutates_exact_source_index() -> None:
     assert kwargs == {"data_dir": "/tmp/dc"}
 
 
-def test_v8_remove_mutates_exact_source_index_and_rejects_connector_scope() -> None:
+def test_v8_remove_mutates_exact_source_index() -> None:
     result = V8PolicyWriteResult(True, "a" * 64, "b" * 64)
     with (
         patch(
@@ -1110,11 +1110,9 @@ def test_v8_remove_mutates_exact_source_index_and_rejects_connector_scope() -> N
             return_value=result,
         ) as mutate,
     ):
-        _remove_v8_destination("/tmp/dc", "archive", "")
+        _remove_v8_destination("/tmp/dc", "archive")
     mutation = mutate.call_args.args[1][0]
     assert mutation.path == ("observability", "destinations", 1)
-    with pytest.raises(click.ClickException, match="process-wide"):
-        _remove_v8_destination("/tmp/dc", "archive", "codex")
 
 
 @pytest.mark.parametrize("emit_json", [False, True])

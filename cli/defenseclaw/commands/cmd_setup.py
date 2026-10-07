@@ -18111,7 +18111,7 @@ def _disable_splunk(
                 if destination.kind != "otlp" or not _splunk_o11y_realm(destination.endpoint):
                     continue
                 try:
-                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False, "")
+                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False)
                 except click.ClickException:
                     pass
             click.echo("    Splunk O11y (OTLP): disabled")
@@ -18135,7 +18135,7 @@ def _disable_splunk(
                     if enterprise_only and is_local:
                         continue
                 try:
-                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False, "")
+                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False)
                     if is_local:
                         disabled_local = True
                     else:

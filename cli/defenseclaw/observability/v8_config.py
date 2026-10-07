@@ -914,7 +914,7 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
             source_name,
             _json_path(parts),
             "legacy-key-forbidden",
-            f"a v8 configuration key is not accepted in config_version 9; use {target}",
+            f"a retired configuration key is not accepted in config_version 9; use {target}",
         )
 
     for parts, target in _V9_REMOVED_KEYS:
