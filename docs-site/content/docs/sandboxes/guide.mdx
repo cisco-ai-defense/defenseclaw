@@ -1656,6 +1656,9 @@ that integration set up as root, which you remove by hand before you set up
 OpenShell 0.1 sandboxes:
 
 ```bash
+D=~/.defenseclaw   # DefenseClaw's data_dir, if you changed it
+# A host without systemd ran the sandbox with the launcher setup wrote:
+[ -x "$D/scripts/run-sandbox.sh" ] && sudo "$D/scripts/run-sandbox.sh" stop
 sudo systemctl disable --now defenseclaw-sandbox.target openshell-sandbox.service
 sudo rm -f /etc/systemd/system/defenseclaw-sandbox.target /etc/systemd/system/openshell-sandbox.service
 sudo rm -f /usr/local/lib/defenseclaw/{pre,start,post,cleanup}-sandbox.sh
@@ -1666,7 +1669,20 @@ sudo pgrep -u sandbox                    # nothing may run as the sandbox user a
 sudo userdel -r sandbox                  # also removes /home/sandbox and its .openclaw link
 ```
 
-Then give the OpenClaw home back to your user
+Then put `net.ipv4.conf.all.route_localnet` back and remove what setup left
+in the data directory:
+
+```bash
+cd "$D"
+cat saved.route_localnet   # the value before setup: sudo sysctl -w net.ipv4.conf.all.route_localnet=VALUE
+sudo rm -f systemd/openshell-sandbox.service systemd/defenseclaw-sandbox.target \
+  scripts/{pre,start,post,cleanup,run}-sandbox.sh sandbox-resolv.conf \
+  openshell-policy.rego openshell-policy.yaml saved.route_localnet \
+  sandbox.netns sandbox.pids openshell.pid openclaw-ownership-backup.json
+rmdir systemd scripts 2>/dev/null
+```
+
+Give the OpenClaw home back to your user
 (`sudo chown -R "$USER": ~/.openclaw`, and `sudo setfacl -R -b ~/.openclaw` if
 `getfacl` still lists ACL entries; when 0.8.x had pinned the OpenClaw home
 somewhere else, the notes in `migration-v9.json` name it), point
@@ -1674,8 +1690,9 @@ somewhere else, the notes in `migration-v9.json` name it), point
 (`defenseclaw config set claw.home_dir ~/.openclaw` and
 `defenseclaw config set claw.config_file ~/.openclaw/openclaw.json`),
 and in `openclaw.json` set `gateway.bind` back to `loopback` and the
-`defenseclaw` provider's `baseUrl` back to `localhost`. If you had not set
-`net.ipv4.conf.all.route_localnet` yourself, set it back to `0`. The agent
+`defenseclaw` provider's `baseUrl` back to `localhost`. Without a
+`saved.route_localnet`, set `route_localnet` back to `0` unless you had set
+it yourself. The agent
 could write anywhere in the OpenClaw home while it was sandboxed, so scan it
 before OpenClaw runs on the host again, then rewire the guardrail:
 
