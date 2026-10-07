@@ -213,12 +213,8 @@ func (circuit *Circuit) Snapshot() CircuitSnapshot {
 	}
 	circuit.mu.Lock()
 	defer circuit.mu.Unlock()
-	state := circuit.state
-	if state == CircuitOpen && !time.Now().UTC().Before(circuit.openUntil) {
-		state = CircuitHalfOpen
-	}
 	return CircuitSnapshot{
-		State:               state,
+		State:               circuit.state,
 		ConsecutiveFailures: circuit.consecutiveFailures,
 		OpenUntil:           circuit.openUntil,
 		LastFailureClass:    circuit.lastFailureClass,

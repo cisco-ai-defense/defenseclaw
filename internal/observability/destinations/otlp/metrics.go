@@ -608,7 +608,9 @@ func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot
 	lastFailureCode := exporter.lastFailureCode
 	exporter.healthMu.Unlock()
 	circuit := exporter.circuit.Snapshot()
-	if circuit.State == delivery.CircuitHalfOpen && state == delivery.HealthFailing {
+	if state == delivery.HealthFailing && circuit.State == delivery.CircuitOpen &&
+		!exporter.nowUTC().Before(circuit.OpenUntil) {
+		circuit.State = delivery.CircuitHalfOpen
 		state = delivery.HealthDegraded
 		reason = delivery.HealthReasonCircuitHalfOpen
 	}
