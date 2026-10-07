@@ -778,7 +778,7 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			now := dispatcher.nowUTC()
 			dispatcher.recordFailure(now, failureCode)
 			if attempt == maxAttempts {
-				dispatcher.counters.rejected.Add(uint64(len(payloads)))
+				dispatcher.counters.dropped.Add(uint64(len(payloads)))
 				reason := HealthReasonDeliveryFailed
 				if dispatcher.recordCircuitFailure(FailureClassTransient, now) {
 					reason = HealthReasonCircuitOpen
@@ -934,8 +934,9 @@ func boundedBackoff(policy RetryPolicy, attempt int) time.Duration {
 	if policy.Jitter != nil {
 		delay = safeJitter(policy.Jitter, delay, attempt)
 	} else if delay > 0 {
-		// Full jitter avoids synchronized retry waves and is still bounded.
-		delay = time.Duration(rand.Float64() * float64(delay))
+		// Keep at least half the exponential delay. Full jitter could retry a
+		// busy collector immediately and amplify an outage.
+		delay = delay/2 + time.Duration(rand.Float64()*float64(delay-delay/2))
 	}
 	if delay < 0 {
 		return 0

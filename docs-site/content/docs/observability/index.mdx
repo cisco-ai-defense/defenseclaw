@@ -219,9 +219,13 @@ pull-based and rejects `batch`.
 If a queue count or byte limit would be exceeded, DefenseClaw drops the newest
 attempted enqueue, preserves older FIFO work and mandatory SQLite history, and
 records bounded health telemetry. Sibling destinations continue independently.
-Transient or ambiguous acknowledgement failures retry the exact immutable
-projection; a lost acknowledgement can create a duplicate, so consumers use the
-record ID for deduplication. See the generated
+Transient or ambiguous acknowledgement failures keep the exact immutable
+projection queued for at most 24 attempts, with exponential backoff beginning
+at 2 seconds and capped at 30 seconds. Each attempt has a bounded timeout.
+A batch still unacknowledged after that window is counted as dropped; queued
+records also vanish on gateway restart. Mandatory SQLite history remains, but
+optional destinations do not automatically backfill it. A lost acknowledgement
+can create a duplicate, so consumers use the record ID for deduplication. See the generated
 [configuration reference](/docs/reference/configuration) for kind-specific fields.
 
 ### Destination failure circuits
