@@ -114,6 +114,17 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(copilot_hook_target("copilot:UserPromptSubmit"), "copilot:userPromptSubmitted")
         self.assertEqual(copilot_hook_target("claudecode:PreToolUse"), "claudecode:PreToolUse")
 
+    def test_opencode_hook_target_keeps_event_name_in_list(self):
+        self.app.store.log_event(Event(
+            action="scan-finding", target="", severity="HIGH", connector="opencode",
+            details="finding.observed", timestamp=datetime.now(timezone.utc),
+            structured={**FINDING, "defenseclaw.finding.target_ref": "opencode:tool.execute.before"},
+        ))
+        table = self.runner.invoke(alerts, ["--connector", "opencode"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertIn("tool.execute.before", table.output)
+        self.assertNotIn("....execute.before", table.output)
+
     def test_target_selector_sends_the_shown_copilot_target(self):
         # GAP-2619: acknowledge/dismiss --target takes the Target alerts print.
         def selector(target, connector=None):

@@ -530,7 +530,7 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     term_width = console.size.width
     # A wide terminal shows the whole hook event (UserPromptSubmit,
     # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
-    w_target = _W_TARGET if term_width < 100 else 18
+    w_target = _W_TARGET if term_width < 100 else 20
     w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 
     scope = f" — connector={connector}" if (connector or "").strip() else ""
@@ -565,7 +565,8 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(copilot_hook_target(e.target or "", _event_connector(e)), w_target)
+        hook_target = copilot_hook_target(e.target or "", _event_connector(e))
+        target = _trunc_path(_short_hook_target(hook_target, _event_connector(e)), w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         facts = _finding_facts(e, hook_details, targets)
