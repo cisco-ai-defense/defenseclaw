@@ -1157,6 +1157,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		BaseContext: func(_ net.Listener) context.Context {
 			return baseCtx
 		},
+		ConnContext: acpPeerConnContext,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During

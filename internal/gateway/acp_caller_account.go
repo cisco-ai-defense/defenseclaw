@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
@@ -22,14 +23,56 @@ import (
 
 // acpLoopbackPeerUID names the account of the process on the client end of
 // a loopback TCP request, from the kernel connection table; replaceable in
-// tests.
+// tests. A connection is looked up once: the guard sends every evaluation of
+// a session over the same connection, one per streamed frame.
 var acpLoopbackPeerUID = func(r *http.Request) (int, error) {
+	if peer, ok := r.Context().Value(acpConnPeerKey{}).(*acpConnPeer); ok {
+		return peer.lookup()
+	}
 	local, _ := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
 	remote, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
 	if local == nil || err != nil {
 		return -1, errors.New("the request carries no TCP addresses")
 	}
 	return peercred.LoopbackTCPPeerUID(local, remote)
+}
+
+// acpConnPeerKey carries the peer account lookup of one TCP connection.
+type acpConnPeerKey struct{}
+
+// acpConnPeer is the account on the client end of one accepted TCP
+// connection, read from the kernel on first use. A failed lookup is not
+// kept, so the next request asks again.
+type acpConnPeer struct {
+	mu            sync.Mutex
+	local, remote *net.TCPAddr
+	uid           int
+	known         bool
+}
+
+func (p *acpConnPeer) lookup() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.known {
+		return p.uid, nil
+	}
+	uid, err := peercred.LoopbackTCPPeerUID(p.local, p.remote)
+	if err != nil {
+		return -1, err
+	}
+	p.uid, p.known = uid, true
+	return uid, nil
+}
+
+// acpPeerConnContext gives each accepted TCP connection its peer account
+// lookup. It reads nothing until an ACP request needs it.
+func acpPeerConnContext(ctx context.Context, conn net.Conn) context.Context {
+	local, _ := conn.LocalAddr().(*net.TCPAddr)
+	remote, _ := conn.RemoteAddr().(*net.TCPAddr)
+	if local == nil || remote == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, acpConnPeerKey{}, &acpConnPeer{local: local, remote: remote})
 }
 
 // acpCallerAccountChecked reports whether this gateway checks the OS account
