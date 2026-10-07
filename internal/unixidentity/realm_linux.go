@@ -14,6 +14,8 @@ package unixidentity
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -75,32 +77,47 @@ var realmCache struct {
 	fetched time.Time
 }
 
-func cachedRealms(ctx context.Context) []Realm {
+func cachedRealms(ctx context.Context) ([]Realm, error) {
 	realmCache.mu.Lock()
 	defer realmCache.mu.Unlock()
-	if realmCache.fetched.IsZero() || time.Since(realmCache.fetched) >= realmCacheTTL {
-		realmCache.realms, realmCache.fetched = configuredRealms(ctx), time.Now()
+	if !realmCache.fetched.IsZero() && time.Since(realmCache.fetched) < realmCacheTTL {
+		return realmCache.realms, nil
 	}
-	return realmCache.realms
+	realms, err := configuredRealms(ctx)
+	if err != nil {
+		return nil, err
+	}
+	realmCache.realms, realmCache.fetched = realms, time.Now()
+	return realms, nil
 }
 
-// configuredRealms asks realmd on the system bus for the realms it reports
-// as configured. Any failure means no realms.
-func configuredRealms(ctx context.Context) []Realm {
+// configuredRealms asks realmd on the system bus for configured realms. An
+// absent realmd service means an unjoined host; a failed query is unknown.
+func configuredRealms(ctx context.Context) ([]Realm, error) {
 	ctx, cancel := context.WithTimeout(ctx, realmdTimeout)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer conn.Close()
 	var paths []dbus.ObjectPath
 	if err := conn.Object(realmdService, realmdPath).CallWithContext(ctx, dbusGetProperty, 0, realmdProvider, "Realms").Store(&paths); err != nil {
-		return nil
+		var busErr dbus.Error
+		if errors.As(err, &busErr) && busErr.Name == "org.freedesktop.DBus.Error.ServiceUnknown" {
+			return nil, nil
+		}
+		return nil, err
 	}
 	var owner uint32
-	if err := conn.BusObject().CallWithContext(ctx, dbusUnixUser, 0, realmdService).Store(&owner); err != nil || owner != 0 {
-		return nil
+	if err := conn.BusObject().CallWithContext(ctx, dbusUnixUser, 0, realmdService).Store(&owner); err != nil {
+		return nil, err
+	}
+	if owner != 0 {
+		return nil, fmt.Errorf("realmd system-bus owner uid %d is not root", owner)
 	}
 	var realms []Realm
 	for _, path := range paths {
@@ -109,15 +126,15 @@ func configuredRealms(ctx context.Context) []Realm {
 		}
 		object := conn.Object(realmdService, path)
 		var realm, kerberos map[string]dbus.Variant
-		if object.CallWithContext(ctx, dbusGetAll, 0, realmdRealm).Store(&realm) != nil {
-			continue
+		if err := object.CallWithContext(ctx, dbusGetAll, 0, realmdRealm).Store(&realm); err != nil {
+			return nil, err
 		}
-		// Configured names the membership interface of a joined realm; it
-		// is empty for a realm that was only discovered.
 		if configured, _ := realm["Configured"].Value().(string); configured == "" {
 			continue
 		}
-		_ = object.CallWithContext(ctx, dbusGetAll, 0, realmdKerberos).Store(&kerberos)
+		if err := object.CallWithContext(ctx, dbusGetAll, 0, realmdKerberos).Store(&kerberos); err != nil {
+			return nil, err
+		}
 		entry := Realm{
 			Domain: strings.ToLower(variantString(kerberos["DomainName"])),
 			Name:   strings.ToUpper(variantString(kerberos["RealmName"])),
@@ -144,7 +161,7 @@ func configuredRealms(ctx context.Context) []Realm {
 			realms = append(realms, entry)
 		}
 	}
-	return realms
+	return realms, nil
 }
 
 func variantString(v dbus.Variant) string {
@@ -165,31 +182,37 @@ func netBIOSName(formats []string) string {
 	return ""
 }
 
-// realmFor picks the configured realm that serves an account in domain:
-// the realm of that DNS domain or of its nearest parent (an Active
-// Directory child domain), the realm whose NetBIOS name a winbind domain
-// is, or, for a name without a DNS domain that names no realm (a bare
-// name, a domain of an SSSD realm), the only realm of the host. Nothing
-// else is guessed, so a plain LDAP domain SSSD serves next to a joined
-// realm, or the NetBIOS domain of a trusted domain, gets no realm facts.
-func realmFor(domain string, realms []Realm) (Realm, bool) {
+// realmFor only associates a joined realm with an account when its qualified
+// name identifies that realm and realmd names the account's NSS backend.
+// A bare SSSD name may belong to any of several domains, including LDAP.
+func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
-	if !strings.Contains(domain, ".") {
-		for _, realm := range realms {
-			if domain != "" && strings.EqualFold(domain, realm.NetBIOS) {
-				return realm, true
-			}
+	client := "sssd"
+	if source == useridentity.SourceWinbind {
+		client = "winbind"
+	}
+	var candidates []Realm
+	for _, realm := range realms {
+		if strings.EqualFold(realm.ClientSoftware, client) {
+			candidates = append(candidates, realm)
 		}
-		// winbind qualifies the names of its own domain with the NetBIOS
-		// name realmd reports, or not at all (winbind use default domain),
-		// so another NetBIOS domain is a trusted domain of unknown realm.
-		if len(realms) == 1 && (domain == "" || (realms[0].NetBIOS == "" && realms[0].ClientSoftware != "winbind")) {
-			return realms[0], true
+	}
+	if !strings.Contains(domain, ".") {
+		if client == "winbind" {
+			for _, realm := range candidates {
+				if domain != "" && strings.EqualFold(domain, realm.NetBIOS) {
+					return realm, true
+				}
+			}
+			// Only an unqualified winbind name can use its sole default realm.
+			if domain == "" && len(candidates) == 1 {
+				return candidates[0], true
+			}
 		}
 		return Realm{}, false
 	}
 	best, found := Realm{}, false
-	for _, realm := range realms {
+	for _, realm := range candidates {
 		if domain == realm.Domain {
 			return realm, true
 		}
@@ -201,12 +224,12 @@ func realmFor(domain string, realms []Realm) (Realm, bool) {
 }
 
 // applyRealm adds the facts of the realm that serves an SSSD or winbind
-// account: its DNS domain when the name carries none or only a NetBIOS
-// domain (CORP\alice), as Windows reports the same account; the Kerberos
+// account: its DNS domain when a winbind name carries none or only a
+// NetBIOS domain (CORP\alice), as Windows reports the same account; the Kerberos
 // realm; the directory type of an Active Directory or IPA realm; and the
 // sAMAccountName@REALM principal, in the UPN form, when there is none yet.
 func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {
-	realm, ok := realmFor(facts.Domain, realms)
+	realm, ok := realmFor(facts.Domain, facts.Source, realms)
 	if !ok {
 		return
 	}

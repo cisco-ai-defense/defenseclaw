@@ -118,6 +118,29 @@ rules:
 	}
 }
 
+// Proxy records must describe the configuration the proxy actually applies.
+func TestProxyTelemetryOmitsUnappliedProfile(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"contractors": {Mode: "action"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
+	}
+	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}}
+	request := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	if profile := proxyProfileFor(request.Context()); profile != nil {
+		t.Fatalf("unverified proxy applied profile %+v", profile.decision)
+	}
+	meta := proxyLLMEventMeta(proxy, request, &ChatRequest{Model: "test-model"}, "test-provider")
+	if name, present := meta.Profile.Name.Get(); present {
+		t.Fatalf("unapplied profile %q appeared in proxy telemetry", name)
+	}
+}
+
 type testVerifiedSubjectKey struct{}
 
 // stubProfileSources replaces the verified-identity sources for one test:
@@ -190,7 +213,7 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 		{name: "verified UPN in any case", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "Alice@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
 		{name: "verified group", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", Groups: []string{"S-1-5-21-1", `corp\contractors`}})}, connector: "cursor", profile: "strict", match: profileMatchGroup, group: `CORP\Contractors`},
 		{name: "verified Windows group by bare name", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1001", Groups: []string{"S-1-5-21-7-1037", `HOST\DCIDR-grp`}})}, connector: "cursor", profile: "tooling", match: profileMatchGroup, group: "dcidr-grp"},
-		{name: "verified DOMAIN\\user of the Windows domain", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1105", UserName: "carol", Domain: "corp.example", Principal: "carol@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
+		{name: "verified DOMAIN\\user of the Windows domain", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1105", UserName: "carol", Domain: "corp.example", AccountDomain: "CORP", Principal: "carol@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
 		{name: "DOMAIN\\user of another domain keeps default", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1005", UserName: "carol", Domain: "other.example"})}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "verified other user keeps default", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"})}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "claimed headers alone", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefaultUnverified},
@@ -498,6 +521,9 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 // default_lookup_failed; it must not answer from the OS account database
 // with a profile no request receives.
 func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	prevAccount, prevFacts := profileExplainAccount, profileExplainDirectoryFacts
 	t.Cleanup(func() { profileExplainAccount, profileExplainDirectoryFacts = prevAccount, prevFacts })
 	profileExplainAccount = func(string) (string, string, error) { return "94401116", "dcad-manygroups@dclab.test", nil }
@@ -515,6 +541,9 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 // default_lookup_failed while its own lookups fail, and explain says so; groups
 // kept as numbers are named as a sign of an unreachable directory.
 func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	prevFacts, prevFailure := cachedDirectoryFacts, cachedDirectoryFailure
 	t.Cleanup(func() { cachedDirectoryFacts, cachedDirectoryFailure = prevFacts, prevFailure })
 	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
@@ -796,6 +825,9 @@ func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
 // OS names but cannot resolve (an Entra user the aad module has not cached)
 // reported default_lookup_failed with no lookup_error and no user id.
 func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	prev := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "10259079", UserName: "bob", LookupFailed: true}, fmt.Errorf("uid 10259079: not found")
@@ -820,5 +852,106 @@ func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
 	}
 	if out.Match != profileMatchDefaultLookupFailed || !strings.Contains(out.LookupError, "not found") || out.Subject["user_id"] != "10259079" {
 		t.Fatalf("explain = %s", rec.Body.String())
+	}
+}
+
+func TestProfileExplainWarnsUnknownConnectorNames(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Connectors: map[string]config.PerConnectorGuardrailConfig{"claude": {}}},
+	}
+	set := &guardrailProfileSet{
+		base:        cfg,
+		assignments: []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"claude"}}}},
+	}
+	warnings := profileExplainWarnings(set, profileDecision{}, &profileSubject{LookupFailed: true})
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "profile_assignments[0].match.connectors") ||
+		!strings.Contains(warnings[1], `profiles["strict"].connectors`) {
+		t.Fatalf("unknown connector warnings = %q", warnings)
+	}
+}
+
+// A DOMAIN\\user assignment uses the account domain reported by the verified
+// account name, not the first label of an unrelated DNS realm.
+func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "1201", UserName: `CONTOSO\\alice`,
+		Directory: useridentity.DirectoryFacts{
+			Domain: "corp.contoso.com", Principal: "alice@CORP.CONTOSO.COM",
+			ResolvedAt: time.Now(),
+		},
+	}, true)
+	if !userEntryMatches(&subject, `CONTOSO\\alice`) {
+		t.Fatal("the verified NetBIOS account domain did not match")
+	}
+	if userEntryMatches(&subject, `CORP\\alice`) {
+		t.Fatal("a DNS first label selected another account domain")
+	}
+}
+
+// Windows LSA facts do not establish group membership until the guardian's
+// current identity record supplies its token groups.
+func TestProfileWindowsAwaitingSpoolUsesLookupFailed(t *testing.T) {
+	previous := currentIdentitySpoolDir()
+	setIdentitySpoolDir(t.TempDir())
+	t.Cleanup(func() { setIdentitySpoolDir(previous) })
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "S-1-5-21-1-2-3-1001", UserName: "alice",
+		Directory: useridentity.DirectoryFacts{
+			Source: useridentity.SourceWindowsLSA, Domain: "corp.example.com",
+			Directory: useridentity.DirectoryActiveDirectory, ResolvedAt: time.Now(),
+		},
+	}, true)
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		assignments: []config.ProfileAssignment{
+			{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\\Contractors`}}},
+			{Profile: "tooling", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+		},
+	}
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("missing spool groups selected %+v", got)
+	}
+}
+
+// Explain and its live-cache view keep agent matches when the configuration
+// never requires a directory lookup.
+func TestProfileExplainKeepsAgentWhenLookupFails(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(false)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
+	prevAccount, prevFacts := profileExplainAccount, profileExplainDirectoryFacts
+	prevCached, prevFailure := cachedDirectoryFacts, cachedDirectoryFailure
+	t.Cleanup(func() {
+		profileExplainAccount, profileExplainDirectoryFacts = prevAccount, prevFacts
+		cachedDirectoryFacts, cachedDirectoryFailure = prevCached, prevFailure
+	})
+	profileExplainAccount = func(string) (string, string, error) { return "1201", "alice", nil }
+	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, errors.New("directory unavailable")
+	}
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
+		return useridentity.DirectoryFacts{}, time.Time{}, false
+	}
+	cachedDirectoryFailure = func(string) (time.Time, string, bool) {
+		return time.Now().Add(-time.Minute), "directory unavailable", true
+	}
+	subject, err := lookupDirectoryProfileSubject("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		assignments: []config.ProfileAssignment{
+			{Profile: "tooling", Match: config.ProfileMatch{Agents: []string{"agt-0123456789abcdef"}}},
+		},
+	}
+	decision := set.match(&subject, profileSubjectLookup, "", "agt-0123456789abcdef")
+	if decision.Match != profileMatchAgent {
+		t.Fatalf("explain selected %+v", decision)
+	}
+	view, _ := explainCacheView(set, &subject, decision, "", "agt-0123456789abcdef", time.Now())
+	if view == nil || view["match"] != profileMatchAgent {
+		t.Fatalf("cache view = %v", view)
 	}
 }

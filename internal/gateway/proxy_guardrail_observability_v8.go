@@ -74,6 +74,7 @@ type proxyGuardrailV8Facts struct {
 	startedAt    time.Time
 	meta         llmEventMeta
 	identity     AgentIdentity
+	profile      guardrailProfileTelemetry
 }
 
 type proxyGuardrailTraceV8Operation struct {
@@ -567,7 +568,8 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 		event, err := observability.NewSpanAgentInvokeGuardrailDecisionEvent(
 			observability.SpanAgentInvokeGuardrailDecisionEventInput{
 				TimeUnixNano: timestamp, DefenseClawEvaluationID: evaluationID,
-				DefenseClawGuardrailDecision: decision, DefenseClawGuardrailEffectiveAction: effective,
+				DefenseClawGuardrailProfileName: facts.profile.Name,
+				DefenseClawGuardrailDecision:    decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
 				DefenseClawGuardrailEnforced: enforced,
 			},
@@ -579,7 +581,8 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 		event, err := observability.NewSpanModelChatGuardrailDecisionEvent(
 			observability.SpanModelChatGuardrailDecisionEventInput{
 				TimeUnixNano: timestamp, DefenseClawEvaluationID: evaluationID,
-				DefenseClawGuardrailDecision: decision, DefenseClawGuardrailEffectiveAction: effective,
+				DefenseClawGuardrailProfileName: facts.profile.Name,
+				DefenseClawGuardrailDecision:    decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
 				DefenseClawGuardrailEnforced: enforced,
 			},
@@ -636,6 +639,7 @@ func proxyGuardrailV8FactsFrom(
 		wouldBlock: wouldBlock, enforced: enforced, ciscoMs: verdict.CiscoElapsedMs,
 		observedAt: observedAt, startedAt: observedAt.Add(-elapsed),
 		meta: hookDecisionMetricMeta(ctx, connector), identity: AgentIdentityFromContext(ctx),
+		profile: proxyGuardrailProfileTelemetryFor(ctx),
 	}
 	if verdict.Confidence > 0 && verdict.Confidence <= 1 &&
 		!math.IsNaN(verdict.Confidence) && !math.IsInf(verdict.Confidence, 0) {
@@ -729,8 +733,10 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		}
 		events = append(events, event)
 	}
+	profileTelemetry := proxyGuardrailProfileTelemetryFor(ctx)
 	decisionEvent, err := observability.NewSpanGuardrailApplyGuardrailDecisionEvent(
 		observability.SpanGuardrailApplyGuardrailDecisionEventInput{
+			DefenseClawGuardrailProfileName:     profileTelemetry.Name,
 			TimeUnixNano:                        uint64(facts.observedAt.UnixNano()),
 			DefenseClawEvaluationID:             observability.Present(facts.evaluationID),
 			DefenseClawGuardrailDecision:        observability.Present(facts.decision),
@@ -758,7 +764,6 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		}
 		events = append(events, enforcementEvent)
 	}
-	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
@@ -810,7 +815,13 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		DefenseClawGuardrailReason:          facts.reason,
 		ConditionConnectorKnown:             connectorKnown, ConditionOperationTerminal: true,
 	}
-	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	}
+	caller.Identity.applyTo(&input)
 	return input, true
 }
 
@@ -839,7 +850,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		profileTelemetry := guardrailProfileTelemetryFor(ctx)
+		profileTelemetry := proxyGuardrailProfileTelemetryFor(ctx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
@@ -875,7 +886,13 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 			DefenseClawGuardrailReason:          facts.reason,
 			ConditionSecuritySeverityAvailable:  true,
 		}
-		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(ctx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err

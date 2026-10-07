@@ -260,3 +260,10 @@ func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 		t.Fatalf("the refusal does not name the pin that disagrees: %v", err)
 	}
 }
+
+func TestEnterpriseACPSetupPathQuotesForPowerShell(t *testing.T) {
+	got := enterpriseACPQuotePath(`C:\Program Files\DefenseClaw\bin\gateway.exe`, true)
+	if got != `'C:\Program Files\DefenseClaw\bin\gateway.exe'` {
+		t.Fatalf("PowerShell path = %q", got)
+	}
+}

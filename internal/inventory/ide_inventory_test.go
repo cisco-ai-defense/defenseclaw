@@ -200,9 +200,9 @@ func TestIDEAIIndexFlagsJetBrainsAIAssistant(t *testing.T) {
 	}
 }
 
-// A v3 inventory.db (the 1.0.0 schema) migrates to v4 in place: existing
+// A v3 inventory.db migrates in place: existing
 // rows survive and the new columns and tables are there.
-func TestInventoryStoreMigratesV3ToV4(t *testing.T) {
+func TestInventoryStoreMigratesV3ToV5(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inventory.db")
 	db, err := sql.Open("sqlite", path+inventoryPragmas)
 	if err != nil {
@@ -236,8 +236,8 @@ func TestInventoryStoreMigratesV3ToV4(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if v, _ := st.SchemaVersion(); v != 4 {
-		t.Fatalf("schema version = %d, want 4", v)
+	if v, _ := st.SchemaVersion(); v != 5 {
+		t.Fatalf("schema version = %d, want 5", v)
 	}
 	var name string
 	var user sql.NullString

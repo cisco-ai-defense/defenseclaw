@@ -97,12 +97,18 @@ class Okta:
             try:
                 with self._opener.open(request, timeout=30) as response:
                     raw = response.read()
-                    return response.status, (json.loads(raw) if raw else None), dict(response.headers)
+                    headers = dict(response.headers)
+                    # Okta sends self and next as separate Link fields; dict() keeps only one.
+                    links = response.headers.get_all("Link", [])
+                    if links:
+                        headers["Link"] = ", ".join(links)
+                    return response.status, (json.loads(raw) if raw else None), headers
             except urllib.error.HTTPError as err:
                 raw = err.read()
                 headers = dict(err.headers)
                 if err.code == 429 and attempt < 4:
-                    reset = int(headers.get("X-Rate-Limit-Reset", "0") or 0)
+                    lowered = {key.lower(): value for key, value in headers.items()}
+                    reset = int(lowered.get("x-rate-limit-reset", "0") or 0)
                     time.sleep(min(max(reset - time.time(), 1), 60))
                     continue
                 try:
@@ -376,6 +382,9 @@ def ensure_group(client: Okta, report: Report, name: str, want_gid: int | None, 
     the gidNumber is the planned one), or when it cannot carry a gidNumber."""
     group = find_group(client, name)
     if group is None:
+        if want_gid is not None and want_gid in used:
+            report.problem(f"gid {want_gid} for group {name} is already used by another group")
+            return None, None
         report.change(f"create group {name}")
         if report.dry_run:
             return None, pick_gid(want_gid, used, gid_base)
@@ -393,10 +402,10 @@ def ensure_group(client: Okta, report: Report, name: str, want_gid: int | None, 
         else:
             report.ok(f"group {name} has gidNumber {have}")
         return group, int(have)
-    gid = pick_gid(want_gid, used, gid_base)
     if want_gid is not None and want_gid in used:
         report.problem(f"gid {want_gid} for group {name} is already used by another group")
         return group, None
+    gid = pick_gid(want_gid, used, gid_base)
     report.change(f"set gidNumber {gid} on group {name}")
     if not report.dry_run:
         profile["gidNumber"] = gid
@@ -526,11 +535,12 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
     else:
         granted = client.must("GET", f"/api/v1/iam/roles/{role['id']}/permissions") or {}
         labels = {p.get("label") for p in granted.get("permissions", [])}
-        if set(BIND_PERMISSIONS) <= labels:
-            report.ok(f"role '{args.role_label}' exists with the read permissions")
+        if labels == set(BIND_PERMISSIONS):
+            report.ok(f"role '{args.role_label}' has only the read permissions")
         else:
-            lacking = ", ".join(sorted(set(BIND_PERMISSIONS) - labels))
-            report.problem(f"role '{args.role_label}' exists but lacks {lacking}")
+            report.problem(f"role '{args.role_label}' has permissions {', '.join(sorted(labels))}; "
+                           f"it must have only {', '.join(BIND_PERMISSIONS)}")
+            role = None  # Never assign a role with unexpected permissions.
 
     sets = client.get_all("/api/v1/iam/resource-sets", key="resource-sets")
     rset = next((s for s in sets if s.get("label") == args.resource_set_label), None)
@@ -543,7 +553,14 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
                 "resources": [f"{client.org_url}/api/v1/users", f"{client.org_url}/api/v1/groups"],
             })
     else:
-        report.ok(f"resource set '{args.resource_set_label}' exists")
+        resources = client.get_all(f"/api/v1/iam/resource-sets/{rset['id']}/resources", key="resources")
+        covered = {((entry.get("_links") or {}).get("self") or {}).get("href") for entry in resources}
+        required = {f"{client.org_url}/api/v1/{kind}" for kind in ("users", "groups")}
+        if required <= covered:
+            report.ok(f"resource set '{args.resource_set_label}' covers all users and groups")
+        else:
+            report.problem(f"resource set '{args.resource_set_label}' does not cover all users and groups")
+            rset = None  # Do not assign a resource set with incomplete coverage.
 
     assigned = client.must("GET", f"/api/v1/users/{user['id']}/roles") or []
     if role and rset and any(
@@ -579,16 +596,36 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
             client.must("POST", f"/api/v1/policies/{policy['id']}/rules", body)
         return
     have = (rule.get("conditions") or {}).get("people") or {}
-    same = all(
-        set((have.get(kind) or {}).get("include") or []) == set((people.get(kind) or {}).get("include") or [])
-        for kind in ("users", "groups")
+    action = (rule.get("actions") or {}).get("appSignOn") or {}
+    method = action.get("verificationMethod") or {}
+    constraints = method.get("constraints") or []
+    password_only = (
+        method.get("type") == "ASSURANCE"
+        and method.get("factorMode") == "1FA"
+        and len(constraints) == 1
+        and set(constraints[0]) == {"knowledge"}
+        and constraints[0]["knowledge"].get("types") == ["password"]
+        and constraints[0]["knowledge"].get("required") is not False
+    )
+    same = (
+        all(
+            set((have.get(kind) or {}).get("include") or []) == set((people.get(kind) or {}).get("include") or [])
+            and not (have.get(kind) or {}).get("exclude")
+            for kind in ("users", "groups")
+        )
+        and rule.get("status") == "ACTIVE"
+        and action.get("access") == "ALLOW"
+        and password_only
     )
     if same:
         report.ok(f"rule '{name}' already does this: {purpose}")
         return
     report.change(f"update rule '{name}': {purpose}")
     if not report.dry_run and policy is not None:
-        client.must("PUT", f"/api/v1/policies/{policy['id']}/rules/{rule['id']}", body)
+        path = f"/api/v1/policies/{policy['id']}/rules/{rule['id']}"
+        client.must("PUT", path, body)
+        if rule.get("status") != "ACTIVE":
+            client.must("POST", path + "/lifecycle/activate")
 
 
 def cmd_signon_policy(client: Okta, args: argparse.Namespace) -> int:

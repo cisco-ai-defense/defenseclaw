@@ -420,8 +420,8 @@ type proxyV8Facts struct {
 	agentIdentity  string
 	policyID       string
 	destination    string
-	// identity is the caller's correlation.identity facts.
-	identity *llmEventIdentity
+	// caller supplies the user fields and correlation.identity from one verified source.
+	caller auditCaller
 }
 
 func (p *GuardrailProxy) proxyV8Envelope(
@@ -438,7 +438,7 @@ func (p *GuardrailProxy) proxyV8Envelope(
 		policyID:      proxyV8StableID(firstNonEmpty(auditEnvelope.PolicyID, p.defaultPolicyID)),
 		destination:   proxyV8StableID(auditEnvelope.DestinationApp),
 		agentIdentity: agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
-		identity:      auditCallerIdentity(ctx).Identity,
+		caller:        auditCallerIdentity(ctx),
 	}
 	facts.connectorKnown = facts.connector != "" && facts.connector != "unknown"
 	return observability.FamilyEnvelopeInput{
@@ -491,7 +491,12 @@ func applyProxyV8FactsToAgent(input *observability.SpanAgentInvokeInput, facts p
 	input.GenAIAgentName = proxyV8OptionalID(facts.agentName)
 	input.DefenseClawAgentInstanceID = proxyV8OptionalID(facts.agentInstance)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(facts.agentIdentity)
-	facts.identity.applyTo(input)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(facts.caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(facts.caller.IDKind)
+		input.DefenseClawUserName = hookV8OptionalIdentifier(facts.caller.Name)
+	}
+	facts.caller.Identity.applyTo(input)
 	input.DefenseClawAgentRootID = proxyV8OptionalID(facts.agentID)
 	input.DefenseClawSessionRootID = proxyV8OptionalID(facts.sessionID)
 	if facts.agentID != "" {
@@ -517,7 +522,12 @@ func applyProxyV8FactsToModel(input *observability.SpanModelChatInput, facts pro
 	input.GenAIAgentName = proxyV8OptionalID(facts.agentName)
 	input.DefenseClawAgentInstanceID = proxyV8OptionalID(facts.agentInstance)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(facts.agentIdentity)
-	facts.identity.applyTo(input)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(facts.caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(facts.caller.IDKind)
+		input.DefenseClawUserName = hookV8OptionalIdentifier(facts.caller.Name)
+	}
+	facts.caller.Identity.applyTo(input)
 	input.DefenseClawAgentRootID = proxyV8OptionalID(facts.agentID)
 	input.DefenseClawSessionRootID = proxyV8OptionalID(facts.sessionID)
 	if facts.agentID != "" {

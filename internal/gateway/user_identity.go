@@ -186,8 +186,9 @@ func newUntrustedLLMEventUser(userID, userName string) llmEventUser {
 func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	userID = sanitizeLLMEventUser(userID)
 	userName = sanitizeLLMEventUser(userName)
-	if trustedID {
-		// An OS-derived name may be fully qualified (SSSD's alice@realm).
+	if trustedID && identityFactsEnabled.Load() {
+		// New identity records use a bare account name. Secure Client keeps
+		// the qualified passwd name that main reports.
 		userName = useridentity.BareAccountName(userName)
 	}
 	if userID == "" && userName == "" {
@@ -203,6 +204,25 @@ func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 		IDKind: idKind,
 		Name:   userName,
 	}
+}
+
+func localAccountName(name string) string {
+	if identityFactsEnabled.Load() {
+		return useridentity.BareAccountName(name)
+	}
+	return name
+}
+
+func processAccountName(name string) string {
+	if identityFactsEnabled.Load() {
+		return useridentity.BareAccountName(name)
+	}
+	// main strips only a Windows-style domain prefix here.
+	name = strings.TrimSpace(name)
+	if idx := strings.LastIndexByte(name, '\\'); idx >= 0 && idx+1 < len(name) {
+		return name[idx+1:]
+	}
+	return name
 }
 
 // localProcessUser reports the gateway's own OS user, and only when that is
@@ -223,7 +243,7 @@ func localProcessUser() (string, string) {
 		return "", ""
 	}
 	return sanitizeLLMEventUser(firstNonEmpty(current.Uid, current.Username)),
-		sanitizeLLMEventUser(firstNonEmpty(useridentity.BareAccountName(current.Username), current.Name, current.Uid))
+		sanitizeLLMEventUser(firstNonEmpty(processAccountName(current.Username), current.Name, current.Uid))
 }
 
 // userFieldsFromHookPayload pulls the user fields a connector may report in

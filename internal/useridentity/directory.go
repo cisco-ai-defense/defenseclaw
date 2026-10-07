@@ -99,6 +99,9 @@ type DirectoryFacts struct {
 	// Domain is the account's domain in lower case, by its DNS name where
 	// the OS knows it, else its NetBIOS name (defenseclaw.user.domain).
 	Domain string `json:"domain,omitempty"`
+	// AccountDomain is the verified account namespace (NetBIOS or local
+	// computer name). It is only used for profile matching, never emitted.
+	AccountDomain string `json:"-"`
 	// Realm is the Kerberos realm, usually the upper-case DNS domain.
 	Realm string `json:"realm,omitempty"`
 	// Directory is the directory that owns the account.

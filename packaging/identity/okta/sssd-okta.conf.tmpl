@@ -16,7 +16,8 @@ domains = @DOMAIN@
 
 [nss]
 filter_users = root
-filter_groups = root
+# Include every local /etc/group name at render time, plus common privileged names.
+filter_groups = @FILTER_GROUPS@
 
 [pam]
 

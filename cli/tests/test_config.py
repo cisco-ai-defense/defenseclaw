@@ -1066,6 +1066,22 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(loaded.asset_policy.effective_mode("codex"), "action")
             self.assertEqual(loaded.asset_policy.effective_mode("hermes"), "observe")
 
+    def test_empty_profile_hilt_inherits_global_hilt(self):
+        guardrail = _merge_guardrail(
+            {
+                "hilt": {"enabled": True},
+                "connectors": {"cursor": {"hilt": {}}},
+                "profiles": {
+                    "baseline": {"hilt": {}, "connectors": {"codex": {"hilt": {}}}},
+                },
+            },
+            "/tmp",
+        )
+        profile = guardrail.profiles["baseline"]
+        self.assertIsNone(profile.hilt)
+        self.assertIsNone(profile.connectors["codex"].hilt)
+        self.assertFalse(guardrail.connectors["cursor"].hilt.enabled)
+
     def test_guardrail_profiles_and_ide_inventory_roundtrip(self):
         # Parity with internal/config: profiles, ordered assignments, the
         # default profile and the two ai_discovery identity keys survive a
