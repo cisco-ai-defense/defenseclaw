@@ -24,9 +24,17 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from defenseclaw.kernel_sensor import (
+    admin_command,
+    kernel_controls_line,
+    kernel_sensor_summary,
+    your_policies_line,
+)
 
 #: Severity order, worst first. Used for sorting and for the scope filter.
 SEVERITY_ORDER: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
@@ -127,14 +135,14 @@ class PlaneRow:
     backend_kind: str = ""
     backend_version: str = ""
     backend_mode: str = ""
-    #: ``None`` when the helper cannot vouch for the count: a number it cannot
-    #: stand behind would read as a clean stream.
-    backend_events_lost: int | None = None
-    backend_fallback: str = ""
     kernel_policies: tuple[KernelPolicyRow, ...] = ()
-    #: The kernel floor as one line, e.g. ``enforce for 2 of 3 users (1 in burn-in)``.
-    kernel_floor: str = ""
+    #: The ``backend`` object as the gateway sent it. The shared formatters in
+    #: ``defenseclaw.kernel_sensor`` read it, so this panel, the doctor row and
+    #: ``runtime status`` word the same facts the same way.
+    backend: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
     kernel_paused_until: str = ""
+    #: ``paused until 14:05Z by alice``; empty when the kernel controls run.
+    kernel_paused_label: str = ""
 
     @property
     def is_tetragon(self) -> bool:
@@ -149,36 +157,35 @@ class PlaneRow:
         return ", ".join(part for part in (f"Tetragon {self.backend_version}".strip(), self.backend_mode) if part)
 
     @property
-    def backend_loss(self) -> str:
-        """``0 events lost``, or ``events lost unknown`` when not measurable."""
-
-        if self.backend_events_lost is None:
-            return "events lost unknown"
-        return f"{self.backend_events_lost} events lost"
-
-    @property
     def strip_label(self) -> str:
-        """The badge in the one-line strip, with the kernel sensor when there is one."""
+        """The badge in the one-line strip: ``agent actions: up (Tetragon, enforce)``."""
 
         text = f"{self.name}: {self.badge}"
         if self.is_tetragon:
-            text += " (Tetragon, paused)" if self.kernel_paused_until else " (Tetragon)"
+            state = "paused" if self.kernel_paused_until else self.backend_mode
+            text += f" (Tetragon, {state})" if state else " (Tetragon)"
         return text
 
     def detail_lines(self) -> tuple[str, ...]:
         """Kernel sensor facts for the expanded plane view; empty without a backend.
 
-        Plain text: the caller escapes it. Bounded, so it never crowds the
-        findings table.
+        Plain text: the caller escapes it. Each line is at most 77 columns for
+        the longest realistic values, and the whole block is bounded, so it
+        never crowds the findings table.
         """
 
         lines: list[str] = []
-        if self.is_tetragon:
-            lines.append(f"kernel sensor: {self.backend_label}, {self.backend_loss}")
-        elif self.backend_fallback:
-            lines.append(
-                f"kernel sensor: cn_proc and fanotify (Tetragon not used: {_clip(self.backend_fallback)})"
-            )
+        sensor = kernel_sensor_summary(self.backend)
+        if sensor:
+            lines.append(f"kernel sensor: {sensor}")
+        floor = self.backend.get("kernel_floor")
+        controls = kernel_controls_line(floor if isinstance(floor, Mapping) else None)
+        if controls:
+            lines.append(f"kernel controls: {controls}")
+        activity = [_blocks_text(floor if isinstance(floor, Mapping) else {}), your_policies_line(self.backend)]
+        activity = [part for part in activity if part]
+        if activity:
+            lines.append("; ".join(activity))
         if self.kernel_policies:
             healthy = [policy for policy in self.kernel_policies if policy.healthy]
             broken = [policy for policy in self.kernel_policies if not policy.healthy]
@@ -189,10 +196,10 @@ class PlaneRow:
             for policy in broken[:_MAX_POLICY_ERRORS]:
                 why = _clip(policy.error or policy.state or "not loaded")
                 lines.append(f"  {policy.family}: {why}")
-        if self.kernel_floor:
-            lines.append(f"kernel floor: {self.kernel_floor}")
         if self.kernel_paused_until:
-            lines.append("resume: defenseclaw-gateway enterprise linux tetragon resume")
+            # Root runs it, and the binaries are not on PATH: print what runs.
+            lines.append(f"{self.kernel_paused_label}; root can resume it with")
+            lines.append(admin_command("enterprise", "linux", "tetragon", "resume"))
         return tuple(lines)
 
     @property
@@ -254,6 +261,9 @@ class RuntimeRow:
     correlation_reason: str
     first_seen: str
     last_seen: str
+    #: What the kernel did to this agent and what the customer's own Tetragon
+    #: policies saw, one short line each (at most 3). Empty on older gateways.
+    kernel_notes: tuple[str, ...] = ()
 
     @property
     def rank(self) -> int:
@@ -329,21 +339,115 @@ class RuntimeOverview:
     degraded_reason: str = ""
 
 
-def _kernel_floor_line(floor: dict[str, Any]) -> str:
-    """``enforce for 2 of 3 users (1 in burn-in)``, worded like the CLI's status."""
+_OUTCOME_WORDS = {"observed": "observed", "would_block": "would have blocked", "blocked": "blocked"}
+_OUTCOME_RANK = {"blocked": 0, "would_block": 1, "observed": 2}
 
-    mode = str(floor.get("mode") or "").strip() or "monitor"
-    enrolled = _int(floor.get("enrolled_users"))
-    if mode == "enforce":
-        text = f"enforce for {_int(floor.get('enforced_users'))} of {enrolled} users"
-        burning = _int(floor.get("burn_in_users"))
-        if burning:
-            text += f" ({burning} in burn-in)"
-        return text
-    return f"{mode} for {enrolled} users"
+#: Notes under a selected finding: the kernel control line(s) and the customer's
+#: policy line(s) together stay within this, so the detail never grows with the
+#: number of events.
+_MAX_KERNEL_NOTES = 3
 
 
-def _decode_backend(raw: Any) -> dict[str, Any]:
+def _blocks_text(floor: Mapping[str, Any]) -> str:
+    """``blocks (1h): 2 denied, 5 would-block``; empty unless the helper reports the counts."""
+
+    if "blocked_1h" not in floor and "would_block_1h" not in floor:
+        return ""
+    return f"blocks (1h): {_int(floor.get('blocked_1h'))} denied, {_int(floor.get('would_block_1h'))} would-block"
+
+
+def _paused_label(until: str, by: str, scanned_at: str) -> str:
+    """``paused until 14:05Z by alice`` (the date only when it is not the poll's day)."""
+
+    if until == "reboot":
+        when = "the next reboot"
+    else:
+        when = _clip(until, 40)
+        if len(until) >= 16 and until[10] == "T" and until.endswith("Z"):
+            clock = until[11:16] + "Z"
+            when = clock if scanned_at[:10] == until[:10] else f"{until[:10]} {clock}"
+    who = _clip(by, 32)
+    return f"paused until {when}" + (f" by {who}" if who else "")
+
+
+def _kernel_activity_notes(raw: Any) -> list[str]:
+    """``kernel: blocked kernel.ssh_private_key_read (hook: exact)`` per distinct kernel outcome."""
+
+    notes: list[str] = []
+    if not isinstance(raw, list):
+        return notes
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        outcome = str(item.get("kernel_outcome") or "").strip().lower()
+        words = _OUTCOME_WORDS.get(outcome)
+        if words is None or outcome == "observed":
+            continue
+        control = _clip(str(item.get("kernel_control") or "a kernel control"), 48)
+        join = str(item.get("hook_join") or "").strip().lower()
+        if join in {"exact", "temporal"}:
+            hook = f" (hook: {join})"
+        elif item.get("hook_seen") is False:
+            hook = " (no hook decision)"
+        else:
+            hook = ""
+        note = f"kernel: {words} {control}{hook}"
+        if note not in notes:
+            notes.append(note)
+    return notes[:2]
+
+
+def _decode_customer_events(raw: Any) -> list[dict[str, Any]]:
+    """The runtime API's ``customer_kernel_events``: events of the customer's own policies."""
+
+    events: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return events
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        policy = str(item.get("policy_name") or item.get("policy") or "").strip()
+        if not policy:
+            continue
+        events.append({
+            "policy": policy,
+            "function": str(item.get("function") or "").strip(),
+            "outcome": str(item.get("outcome") or "observed").strip().lower(),
+            "process": str(item.get("process") or "").strip(),
+            "count": max(1, _int(item.get("count"))),
+            "pids": {_int(item.get("pid")), _int(item.get("root_pid"))} - {0},
+            "finding_id": str(item.get("finding_id") or ""),
+        })
+    return events
+
+
+def _policy_notes(events: list[dict[str, Any]], finding_id: str, pid: int) -> list[str]:
+    """``your policy file-sensitive: observed security_file_open by cat``, worst outcome first."""
+
+    folded: dict[tuple[str, str, str, str], int] = {}
+    for event in events:
+        if event["finding_id"]:
+            if event["finding_id"] != finding_id:
+                continue
+        elif pid not in event["pids"]:
+            continue
+        key = (event["policy"], event["function"], event["outcome"], event["process"])
+        folded[key] = folded.get(key, 0) + event["count"]
+    notes: list[tuple[int, str]] = []
+    for (policy, function, outcome, process), count in folded.items():
+        words = _OUTCOME_WORDS.get(outcome, "saw")
+        text = f"your policy {_clip(policy, 40)}: {words}"
+        if function:
+            text += f" {_clip(function, 32)}"
+        if process:
+            text += f" by {_clip(process, 24)}"
+        if count > 1:
+            text += f" (x{count})"
+        notes.append((_OUTCOME_RANK.get(outcome, 3), text))
+    return [text for _rank, text in sorted(notes, key=lambda note: note[0])]
+
+
+def _decode_backend(raw: Any, scanned_at: str = "") -> dict[str, Any]:
     """Plane C backend fields from ``planes[].backend``; empty when absent.
 
     Only the managed Linux sensor helper reports a backend. An older gateway,
@@ -357,11 +461,8 @@ def _decode_backend(raw: Any) -> dict[str, Any]:
         "backend_kind": str(raw.get("kind") or "").strip().lower(),
         "backend_version": str(raw.get("version") or "").strip(),
         "backend_mode": str(raw.get("mode") or "").strip().lower(),
-        "backend_fallback": str(raw.get("fallback_reason") or "").strip(),
+        "backend": dict(raw),
     }
-    # Unknown unless the helper says it could measure it (same rule as the CLI).
-    if raw.get("loss_known") is not False and "events_lost" in raw:
-        fields["backend_events_lost"] = _int(raw.get("events_lost"))
     policies = tuple(
         KernelPolicyRow(
             name=str(item.get("name") or ""),
@@ -377,8 +478,10 @@ def _decode_backend(raw: Any) -> dict[str, Any]:
     floor = raw.get("kernel_floor")
     if isinstance(floor, dict) and floor:
         paused = str(floor.get("paused_until") or "").strip()
-        fields["kernel_floor"] = _kernel_floor_line(floor) + (f"; paused until {paused}" if paused else "")
-        fields["kernel_paused_until"] = paused
+        # "resumed" is the gateway's word for a pause record that has ended.
+        if paused and paused != "resumed":
+            fields["kernel_paused_until"] = paused
+            fields["kernel_paused_label"] = _paused_label(paused, str(floor.get("paused_by") or ""), scanned_at)
     return fields
 
 
@@ -392,6 +495,7 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
     if not isinstance(payload, dict):
         return RuntimeSnapshot()
 
+    scanned_at = str(payload.get("scanned_at") or "")
     planes: list[PlaneRow] = []
     for raw in payload.get("planes") or []:
         if not isinstance(raw, dict):
@@ -403,9 +507,10 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
             running=bool(raw.get("running")),
             mechanism=str(raw.get("mechanism") or ""),
             reason=str(raw.get("reason") or ""),
-            **_decode_backend(raw.get("backend")),
+            **_decode_backend(raw.get("backend"), scanned_at),
         ))
 
+    customer_events = _decode_customer_events(payload.get("customer_kernel_events"))
     rows: list[RuntimeRow] = []
     for raw in payload.get("findings") or []:
         if not isinstance(raw, dict):
@@ -434,12 +539,18 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
             correlation_reason=str(correlation.get("reason") or ""),
             first_seen=str(raw.get("first_seen") or ""),
             last_seen=str(raw.get("last_seen") or ""),
+            kernel_notes=tuple(
+                (
+                    _kernel_activity_notes(raw.get("activities"))
+                    + _policy_notes(customer_events, str(raw.get("finding_id") or ""), _int(raw.get("pid")))
+                )[:_MAX_KERNEL_NOTES]
+            ),
         ))
     rows.sort(key=lambda row: (row.rank, -row.score, row.process, row.pid))
 
     return RuntimeSnapshot(
         enabled=bool(payload.get("enabled")),
-        scanned_at=str(payload.get("scanned_at") or ""),
+        scanned_at=scanned_at,
         rows=tuple(rows),
         planes=tuple(planes),
         processes_observed=_int(payload.get("processes_observed")),
@@ -855,6 +966,7 @@ class RuntimePanelModel:
             lines.append(f"agent     {row.agent_name}")
         if row.cmdline:
             lines.append(f"cmdline   {row.cmdline}")
+        lines.extend(row.kernel_notes)
         if row.chain:
             lines.append("")
             lines.append(f"chain     {row.chain}")
