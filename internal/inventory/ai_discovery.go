@@ -670,7 +670,7 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 	// queries are disabled.
 	if opts.DataDir != "" {
 		dbPath := filepath.Join(opts.DataDir, "inventory.db")
-		if inv, err := NewInventoryStore(dbPath); err == nil {
+		if inv, err := NewInventoryStoreForProfile(dbPath, opts.SecureClient); err == nil {
 			svc.invStore = inv
 		} else {
 			fmt.Fprintf(os.Stderr, "[ai-discovery] inventory history disabled: %v\n", err)

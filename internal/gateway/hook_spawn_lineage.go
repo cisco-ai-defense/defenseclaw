@@ -338,7 +338,8 @@ func hookChildThreadKey(source, sessionID string) string {
 // rememberHookChildThread records the thread a completed create_thread call
 // started, so the first hook of that session is linked to the calling agent.
 func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response string) {
-	if a == nil || !isCodexThreadSpawnTool(tool) {
+	// Secure Client keeps the lineage of main (issue #1092).
+	if a == nil || a.managedAIDOnly() || !isCodexThreadSpawnTool(tool) {
 		return
 	}
 	match := codexThreadIDPattern.FindStringSubmatch(response)
