@@ -536,16 +536,30 @@ func mergeAgentIdentityRows(
 // like the rest (GAP-0103). A row whose account no longer resolves keeps its
 // name.
 func nameAgentIdentityRows(rows []agentIdentityRow) {
-	names := map[string]string{}
+	name := hostAccountNamer()
 	for i := range rows {
-		name, ok := names[rows[i].UserID]
+		if n := name(rows[i].UserID); n != "" {
+			rows[i].UserName = n
+		}
+	}
+}
+
+// hostAccountNamer names accounts by uid or SID as the host's account
+// database does (an SSSD account keeps its qualified name), looking each id
+// up once. The admin views that list accounts (agent identities, IDE
+// plugins) name a user the same way (GAP-0278).
+func hostAccountNamer() func(id string) string {
+	names := map[string]string{}
+	return func(id string) string {
+		if id == "" {
+			return ""
+		}
+		name, ok := names[id]
 		if !ok {
-			name = sanitizeLLMEventUser(userScopedIdentityName(rows[i].UserID))
-			names[rows[i].UserID] = name
+			name = sanitizeLLMEventUser(userScopedIdentityName(id))
+			names[id] = name
 		}
-		if name != "" {
-			rows[i].UserName = name
-		}
+		return name
 	}
 }
 

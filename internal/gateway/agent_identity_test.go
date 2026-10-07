@@ -61,6 +61,12 @@ func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
 	if nameAgentIdentityRows(rows); len(rows) != 1 || rows[0].UserName != "dcad-bob@dclab.test" {
 		t.Fatalf("listed rows = %+v, want the host's account name", rows)
 	}
+	// GAP-0278: the IDE plugin rows of the same account read the same.
+	plugins := []inventory.IDEPlugin{{UserID: "4646", UserName: "dcad-bob"}}
+	installs := []inventory.IDEInstallation{{UserID: "4646", UserName: "dcad-bob"}}
+	if nameIDERows(plugins, installs); plugins[0].UserName != "dcad-bob@dclab.test" || installs[0].UserName != "dcad-bob@dclab.test" {
+		t.Fatalf("IDE rows = %+v %+v, want the host's account name", plugins, installs)
+	}
 }
 
 // The agent identity comes from verified facts only: forged identity headers
