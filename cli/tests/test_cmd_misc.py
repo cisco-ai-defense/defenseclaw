@@ -33,6 +33,15 @@ from defenseclaw.models import Event
 
 from tests.helpers import cleanup_app, make_app_context
 
+
+def test_aibom_ide_scope_off_is_uncollected():
+    from defenseclaw.inventory.claw_inventory import attach_ide_plugins
+
+    inv = {"summary": {}}
+    attach_ide_plugins(inv, {"enabled": True, "scope": "off", "plugins": []})
+    assert inv["summary"]["ide_plugins"]["collected"] is False
+
+
 # ---------------------------------------------------------------------------
 # Status command
 # ---------------------------------------------------------------------------

@@ -63,6 +63,8 @@ type WindowsGrant struct {
 	// only the folder or file itself is granted: Scan lists the folder's
 	// names, or reads that one file, and nothing else below it.
 	Tree bool
+	// Attributes grants only metadata needed to reject intermediate reparse points.
+	Attributes bool
 }
 
 // WindowsHomeGrants lists what Scan reads in a Windows home with the
@@ -154,6 +156,22 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 	self(`eclipse` + bundles)
 	for _, name := range windowsSubdirs(home, `eclipse`, eclipseMaxInstalls) {
 		self(`eclipse\` + name + `\eclipse` + bundles)
+	}
+	// Lstat checks every parent. Grant only attributes on those folders:
+	// listing or reading sibling files is unnecessary.
+	seen := make(map[string]bool, len(out))
+	for _, g := range out {
+		seen[g.Path] = true
+	}
+	for _, g := range append([]WindowsGrant(nil), out...) {
+		parts := strings.Split(g.Path, `\`)
+		for i := 1; i < len(parts); i++ {
+			parent := strings.Join(parts[:i], `\`)
+			if !seen[parent] {
+				out = append(out, WindowsGrant{Path: parent, Attributes: true})
+				seen[parent] = true
+			}
+		}
 	}
 	return out
 }
