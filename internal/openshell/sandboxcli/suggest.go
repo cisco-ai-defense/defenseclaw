@@ -690,9 +690,10 @@ func (a *App) suggestionDiff(ctx context.Context, api API, sandbox string, s *su
 	forced := map[string]bool{}
 	for _, st := range current.Settings {
 		now[st.Key] = st.Value
-		// The gateway's compute driver holds it (a MicroVM gateway works on
-		// a copy): whatever the pack says, a run gets the same.
-		forced[st.Key] = st.Source == string(packs.SourceGateway)
+		// The gateway's compute driver or a run flag holds it (a MicroVM
+		// gateway works on a copy, and `sandbox run` passes --copy there):
+		// whatever the pack says, a run with the same flags gets the same.
+		forced[st.Key] = st.Source == string(packs.SourceGateway) || st.Source == string(packs.SourceFlag)
 	}
 	for _, st := range eff.Explain() {
 		from, ok := now[st.Key]

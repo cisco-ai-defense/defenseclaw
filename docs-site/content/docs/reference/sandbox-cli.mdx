@@ -1414,7 +1414,9 @@ a relative FILE is in the current folder) and checks it as `sandbox pack
 validate` would, removing it if it doesn't load. `--diff` prints what the pack
 changes against the effective policy (the sandbox's, or a run's in this
 folder): the settings that differ, and every reached destination the pack
-would block. Nothing is applied: lock a project to the pack with
+would block. Settings a `sandbox run` flag or the gateway decides (such as
+the copy a Mac always works on) are left out, since the pack doesn't change
+them. Nothing is applied: lock a project to the pack with
 `sandbox run --pack FILE`. See
 [Record, then lock](/docs/sandboxes/policy-packs#record-then-lock).
 
