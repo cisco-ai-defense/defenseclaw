@@ -32,8 +32,8 @@ import (
 // enrolled accounts changed or the refresh interval elapsed, so the gateway
 // can report a verified UPN its sandbox cannot read itself.
 
-// enterpriseHookIdentitySpoolInterval matches the gateway's identity cache
-// lifetime, so the gateway's refresh always finds a current record.
+// Successful passes refresh before the gateway's identity cache expires.
+// Failed passes retry on the guardian's next one-minute reconcile tick.
 const enterpriseHookIdentitySpoolInterval = 15 * time.Minute
 const enterpriseHookIdentitySpoolRetryInterval = time.Minute
 

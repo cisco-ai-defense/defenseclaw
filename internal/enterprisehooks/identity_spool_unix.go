@@ -37,8 +37,8 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // an account no longer enrolled. setOwnership gives each new file (and the
 // directory) the guardian authorization ownership, root:<gateway group>,
 // before it is renamed into place, so the gateway never reads a partial or
-// unreadable record. An account whose lookups fail keeps no record; the
-// gateway then reports only what it resolves itself.
+// unreadable record. A failed privileged lookup keeps a previous verified
+// record; a newly enrolled account gets its basic facts until retry succeeds.
 //
 // The record of an account missing from accounts is removed only once it is
 // older than IdentitySpoolMaxAge, when the gateway ignores it anyway. A pass
