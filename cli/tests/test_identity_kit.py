@@ -118,6 +118,28 @@ def test_intune_script_validates_group_before_upsert(tmp_path: Path, command: st
     assert not mutations
 
 
+def test_intune_check_counts_every_managed_device_page() -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get(self, path: str, headers=None):
+            if "managedDevices" in path:
+                return {"value": [{"operatingSystem": "Windows", "complianceState": "compliant"}]}
+            return {"value": []}
+
+        def get_all(self, path: str, headers=None):
+            if "managedDevices" in path:
+                return [
+                    {"operatingSystem": "Windows", "complianceState": "compliant"},
+                    {"operatingSystem": "Windows", "complianceState": "compliant"},
+                ]
+            return []
+
+    items = intune.check_items(Graph(), ["windows"], [])
+    count = next(item["detail"] for item in items if item["item"] == "managed devices")
+    assert count == "windows/compliant: 2"
+
+
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
     entra = _load(ENTRA)
     # Data1 = 1; Data2 and Data3 share one little-endian word; Data4 is two more.

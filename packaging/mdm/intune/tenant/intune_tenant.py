@@ -394,12 +394,13 @@ def check_items(graph: Graph, platforms: list[str], groups: list[str]) -> list[d
         members = graph.get_all(f"{V1}/groups/{found[0]['id']}/members?$select=id")
         add(PASS, f"group {name}", f"{len(members)} member(s)")
 
-    data, err = try_get(graph, f"{BETA}/deviceManagement/managedDevices?$select=operatingSystem,complianceState")
-    if err:
-        add(WARN, "managed devices", f"cannot read: {err}")
+    try:
+        devices = graph.get_all(f"{BETA}/deviceManagement/managedDevices?$select=operatingSystem,complianceState")
+    except GraphError as exc:
+        add(WARN, "managed devices", f"cannot read: {exc}")
     else:
         counts: dict[str, int] = {}
-        for device in data.get("value", []):
+        for device in devices:
             key = f"{str(device.get('operatingSystem')).lower()}/{device.get('complianceState')}"
             counts[key] = counts.get(key, 0) + 1
         add(INFO, "managed devices", ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "none")
