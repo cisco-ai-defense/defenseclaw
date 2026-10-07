@@ -282,7 +282,19 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 				continue
 			}
 			if prev := seen[sig.ID]; prev != "" {
-				return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				// This ID was introduced in the 1.0 builtin catalog. An older
+				// operator pack with the same ID keeps its configured signature.
+				if sig.ID != "jetbrains-ai" || prev != "builtin" || opts.SecureClient {
+					return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				}
+				for i := range merged {
+					if merged[i].ID == sig.ID {
+						merged[i] = sig
+						break
+					}
+				}
+				seen[sig.ID] = packPath
+				continue
 			}
 			merged = append(merged, sig)
 			seen[sig.ID] = packPath

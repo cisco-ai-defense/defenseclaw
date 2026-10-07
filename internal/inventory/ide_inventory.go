@@ -60,6 +60,8 @@ type IDEInventory struct {
 	// at least every ideRecordInterval so retention pruning never drops
 	// the last recorded inventory.
 	persist bool
+	// savedPlugins includes baseline rows retained from partial installations.
+	savedPlugins []IDEPlugin
 }
 
 // ideRecordInterval is how long an unchanged IDE inventory goes without
@@ -513,13 +515,20 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 	}
 	sort.Slice(inv.Removed, func(i, j int) bool { return inv.Removed[i].Fingerprint < inv.Removed[j].Fingerprint })
 	inv.ScannedAt = now
-	changed := len(inv.Removed) > 0 || len(current) != len(inv.Plugins)
+	changed := len(inv.Removed) > 0
 	for _, p := range inv.Plugins {
 		changed = changed || p.State != AIStateSeen
 	}
 	if changed || now.Sub(s.ideRecordedAt) >= ideRecordInterval {
 		inv.persist = true
 		s.ideRecordedAt = now
+		inv.savedPlugins = make([]IDEPlugin, 0, len(current))
+		for _, p := range current {
+			inv.savedPlugins = append(inv.savedPlugins, p)
+		}
+		sort.Slice(inv.savedPlugins, func(i, j int) bool {
+			return inv.savedPlugins[i].Fingerprint < inv.savedPlugins[j].Fingerprint
+		})
 	}
 	s.ideBaseline = current
 	return inv
@@ -534,6 +543,9 @@ func (s *ContinuousDiscoveryService) loadIDEBaseline() map[string]IDEPlugin {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if at, err := s.invStore.LatestIDEInventoryRecordedAt(ctx); err == nil {
+		s.ideRecordedAt = at
+	}
 	plugins, err := s.invStore.LatestIDEPlugins(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ai-discovery] ide inventory baseline: %v\n", err)
