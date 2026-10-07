@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -28,6 +29,10 @@ import (
 // lists; the event also carries the total.
 const maxConfigChangePaths = 64
 
+// unattributedConfigActor is the actor of a config.change.applied event that
+// covers more than one generation (GAP-0318).
+const unattributedConfigActor = "unattributed"
+
 // configChangeActivity describes an applied config.yaml change for the audit
 // trail (spec section 3, step 7): who wrote it (the actor
 // config.generation.json recorded for exactly these bytes, such as
@@ -37,12 +42,19 @@ const maxConfigChangePaths = 64
 // without it the changed top-level sections stand in for the paths. ok is
 // false when no writer recorded these bytes (a Secure Client host, a missing
 // state file), and the caller keeps its plain config-update action.
-func configChangeActivity(path string, previous, raw []byte, sections []string) (audit.ActivityInput, bool) {
+//
+// config.generation.json keeps only the last generation, so the event names
+// its writer only when it is the one generation since last, the generation
+// the gateway applied before (lastKnown). Generations coalesced by the reload
+// debounce, or written while reloads were rejected, carry the paths of other
+// writers too: that event says unattributed and gives the generation range
+// and the last writer instead (GAP-0318). generation is the applied one.
+func configChangeActivity(path string, previous, raw []byte, sections []string, last uint64, lastKnown bool) (in audit.ActivityInput, generation uint64, ok bool) {
 	state, err := configwrite.ReadGenerationState(path)
 	sum := configwrite.SHA256Hex(raw)
 	if err != nil || strings.TrimSpace(state.Actor) == "" ||
 		!strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), sum) {
-		return audit.ActivityInput{}, false
+		return audit.ActivityInput{}, 0, false
 	}
 	paths := sections
 	if len(previous) > 0 {
@@ -62,7 +74,7 @@ func configChangeActivity(path string, previous, raw []byte, sections []string) 
 	for i, changed := range paths {
 		diff[i] = audit.ActivityDiffEntry{Path: changed, Op: "replace"}
 	}
-	return audit.ActivityInput{
+	in = audit.ActivityInput{
 		Actor:      state.Actor,
 		Action:     audit.ActionConfigUpdate,
 		TargetType: "config",
@@ -76,5 +88,27 @@ func configChangeActivity(path string, previous, raw []byte, sections []string) 
 		},
 		Diff:     diff,
 		Severity: "INFO",
-	}, true
+	}
+	if lastKnown && (state.Generation > last+1 || state.Generation < last) {
+		in.Actor = unattributedConfigActor
+		in.After["last_actor"] = state.Actor
+		if state.Generation > last {
+			in.After["first_generation"] = last + 1
+			in.Reason = fmt.Sprintf("generations %d-%d applied together; last writer %s", last+1, state.Generation, state.Actor)
+		} else {
+			in.Reason = fmt.Sprintf("generation %d follows %d (the generation record was reset); last writer %s", state.Generation, last, state.Actor)
+		}
+	}
+	return in, state.Generation, true
+}
+
+// appliedGenerationOf returns the generation config.generation.json records
+// for raw, so the next applied change can tell whether it is the only
+// generation since (GAP-0318).
+func appliedGenerationOf(path string, raw []byte) (uint64, bool) {
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+		return 0, false
+	}
+	return state.Generation, true
 }
