@@ -39,6 +39,11 @@ type ProxyOptions struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 	Evaluator Evaluator
+	// Managed marks the guard of a managed enrollment, whose user has no
+	// DefenseClaw command to run and is pointed at the administrator.
+	Managed bool
+	// SetupCommand writes this editor entry again ("" when unknown).
+	SetupCommand string
 }
 
 // Run starts an ACP agent without a shell and mediates every NDJSON frame in
@@ -137,6 +142,9 @@ type proxyState struct {
 	// the guard ends without internals (GAP-0351). Off on a Secure Client
 	// host, which keeps the guard of main (issue #1092).
 	peerProtocolFixes bool
+	// uncheckedNoticeSent records that an observe-mode user was told once
+	// that nothing is being checked (GAP-0354).
+	uncheckedNoticeSent bool
 }
 
 // errAbortedTurnFrame marks a frame of a turn the guard already ended. It is
@@ -499,6 +507,73 @@ func unavailableReason(err error) string {
 	return evaluationUnavailableReason
 }
 
+// refusalReason is what the editor sees for a frame refused because it
+// could not be evaluated. A revoked credential used to read as a gateway
+// that did not answer, and a managed user was told to run commands the host
+// does not have, so they retried for ever (GAP-0354). Secure Client hosts
+// keep the wording of main.
+func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
+	if !s.peerProtocolFixes {
+		return unavailableReason(err)
+	}
+	const prefix = "DefenseClaw could not check this step because "
+	next := "if it keeps happening, contact your administrator."
+	switch {
+	case errors.Is(err, ErrACPDisabled) && opts.Managed:
+		return prefix + "your administrator switched ACP checking off, so it was not delivered. Contact your administrator."
+	case errors.Is(err, ErrACPDisabled):
+		return prefix + "the ACP guard is turned off (acp.enabled is false), so it was not delivered. " +
+			"Turn it on again with defenseclaw acp setup, or remove this editor entry."
+	case errors.Is(err, ErrCredentialRejected) && opts.Managed:
+		return prefix + "the gateway did not accept this editor's ACP credential: your administrator may have revoked " +
+			"your access. It was not delivered. Contact your administrator."
+	case errors.Is(err, ErrCredentialRejected):
+		rerun := "Run defenseclaw acp setup for this editor and agent again."
+		if opts.SetupCommand != "" {
+			rerun = "Run '" + opts.SetupCommand + "' again."
+		}
+		return prefix + "the gateway did not accept the ACP token, so it was not delivered. " + rerun
+	case !opts.Managed:
+		return unavailableReason(err)
+	case errors.Is(err, ErrGatewayNotReady):
+		return prefix + "the gateway is not ready to check ACP traffic yet (it may still be loading a setup change), " +
+			"so it was not delivered. Try again in a few seconds; " + next
+	}
+	return prefix + "the gateway did not answer, so it was not delivered. Try again; " + next
+}
+
+// noticeUnchecked tells an observe-mode user, once, that the gateway refused
+// the guard and nothing is being checked: observe mode lets the session go
+// on, and the user was never told (GAP-0354). It answers the first prompt
+// after the refusal with an agent message in that prompt's session.
+func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg Message, err error, client io.Writer) {
+	if !s.peerProtocolFixes || direction != ClientToAgent || msg.Method != "session/prompt" ||
+		!(errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrACPDisabled)) {
+		return
+	}
+	session := promptSessionID(msg)
+	s.mu.Lock()
+	sent := s.uncheckedNoticeSent
+	s.uncheckedNoticeSent = sent || session != ""
+	s.mu.Unlock()
+	if sent || session == "" {
+		return
+	}
+	why := "the gateway did not accept the ACP token"
+	switch {
+	case errors.Is(err, ErrACPDisabled):
+		why = "ACP checking is switched off"
+	case opts.Managed:
+		why = "the gateway did not accept this editor's ACP credential (your administrator may have revoked your access)"
+	}
+	next := "Contact your administrator."
+	if !opts.Managed && opts.SetupCommand != "" {
+		next = "Run '" + opts.SetupCommand + "' again."
+	}
+	_, _ = client.Write(agentMessageChunk(session, "DefenseClaw is not checking this session: "+why+
+		", so your messages reach the agent unchecked. "+next))
+}
+
 func boundedBlockReason(reason string) string {
 	reason = strings.TrimSpace(reason)
 	if len(reason) > maxBlockReasonBytes {
@@ -569,6 +644,23 @@ func blockedTurnFrames(id json.RawMessage, sessionID, reason string) []byte {
 	if sessionID == "" {
 		return append(blockResponse(id, reason), '\n')
 	}
+	result := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  struct {
+			StopReason string `json:"stopReason"`
+		} `json:"result"`
+	}{JSONRPC: "2.0", ID: id}
+	result.Result.StopReason = "end_turn"
+	second, _ := json.Marshal(result)
+	out := agentMessageChunk(sessionID, blockMessage(reason))
+	out = append(out, second...)
+	return append(out, '\n')
+}
+
+// agentMessageChunk is a session/update notification that shows text as an
+// agent message in sessionID, with its newline.
+func agentMessageChunk(sessionID, text string) []byte {
 	type textContent struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -588,20 +680,9 @@ func blockedTurnFrames(id json.RawMessage, sessionID, reason string) []byte {
 	notification.Params.SessionID = sessionID
 	notification.Params.Update = update{
 		SessionUpdate: "agent_message_chunk",
-		Content:       textContent{Type: "text", Text: blockMessage(reason)},
+		Content:       textContent{Type: "text", Text: text},
 	}
-	result := struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Result  struct {
-			StopReason string `json:"stopReason"`
-		} `json:"result"`
-	}{JSONRPC: "2.0", ID: id}
-	result.Result.StopReason = "end_turn"
-	first, _ := json.Marshal(notification)
-	second, _ := json.Marshal(result)
-	out := append(first, '\n')
-	out = append(out, second...)
+	out, _ := json.Marshal(notification)
 	return append(out, '\n')
 }
 
@@ -689,10 +770,11 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			if opts.Mode == ModeAction {
 				// Fail closed for this frame only, exactly as for a block.
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
-				verdict = Verdict{Action: "block", Reason: unavailableReason(evalErr)}
+				verdict = Verdict{Action: "block", Reason: state.refusalReason(opts, evalErr)}
 			} else {
 				logf(opts.Stderr, "[defenseclaw-acp] observe evaluation error: %v\n", evalErr)
 				verdict = Verdict{Action: "allow"}
+				state.noticeUnchecked(opts, direction, msg, evalErr, rejectDst)
 			}
 		}
 		if verdict.Action == "block" || verdict.Action == "confirm" {
@@ -720,7 +802,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 						return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
 					}
 					logf(opts.Stderr, "[defenseclaw-acp] completed-turn evaluation unavailable, refused the turn: %v\n", turnErr)
-					turnVerdict = Verdict{Action: "block", Reason: unavailableReason(turnErr)}
+					turnVerdict = Verdict{Action: "block", Reason: state.refusalReason(opts, turnErr)}
 				}
 				if turnVerdict.Action == "block" || turnVerdict.Action == "confirm" {
 					if _, err := dst.Write(blockedTurnFrames(msg.ID, session, turnVerdict.Reason)); err != nil {

@@ -360,7 +360,16 @@ check its effects." To stop such a step before it runs, keep the agent's own
 connector hooks in action mode next to the guard. If the gateway does not answer an evaluation
 (the guard retries once), only that step is refused, with "DefenseClaw could
 not check this step because the gateway did not answer"; the session stays
-open.
+open. A credential the gateway no longer accepts, such as a revoked managed
+enrollment, is refused as "the gateway did not accept this editor's ACP
+credential: your administrator may have revoked your access", and ACP
+checking switched off centrally as "your administrator switched ACP checking
+off"; on a managed computer every such message ends with "contact your
+administrator" rather than a command that computer does not have. In observe
+mode the session goes on unchecked, and the guard says so once in the editor:
+"DefenseClaw is not checking this session". On Linux and macOS the gateway's
+authentication-failure audit row names the account (uid) the kernel reports
+for the refused caller.
 
 The guard starts the agent directly, never through a shell. It talks only to
 the gateway on a loopback address, ignores proxy settings and redirects, and

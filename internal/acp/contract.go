@@ -129,6 +129,10 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	return nil
 }
 
+// SecureClientHost reports a Secure Client install, whose guard keeps the
+// behaviour of main (issue #1092).
+func SecureClientHost() bool { return secureClientHost() }
+
 func samePath(left, right string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
