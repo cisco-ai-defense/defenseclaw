@@ -237,8 +237,9 @@ because retrying an unchanged unsafe endpoint would repeat unsafe work.
 While a circuit is open, new and already queued work for that route remains
 in its bounded in-memory queue. When the queue fills, the newest record for
 that route is dropped and counted. Sibling signals, destinations, and mandatory
-local SQLite persistence continue. After cooldown, the oldest queued batch is
-the half-open recovery probe. Success closes the circuit; another terminal
+local SQLite persistence continue. After cooldown, doctor and gateway health report half-open as a warning even
+if no producer has sent another record. The oldest queued batch is the
+half-open recovery probe. Success closes the circuit; another terminal
 failure reopens it. A gateway restart loses queued optional exports, and
 records permanently rejected by a collector or exhausted by the bounded retry
 window are not automatically replayed. The local SQLite event history retains

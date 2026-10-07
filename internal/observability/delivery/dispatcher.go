@@ -405,6 +405,13 @@ func (dispatcher *Dispatcher) DeliveryHealthSnapshot() HealthSnapshot {
 	lastSuccess := dispatcher.lastSuccess
 	lastFailure := dispatcher.lastFailure
 	dispatcher.healthMu.Unlock()
+	if circuitState == CircuitOpen && !dispatcher.nowUTC().Before(circuitOpenUntil) {
+		// The cooldown expired, but no producer has supplied a recovery batch.
+		// Surface the pending half-open state rather than a stale failed check.
+		circuitState = CircuitHalfOpen
+		state = HealthDegraded
+		reason = HealthReasonCircuitHalfOpen
+	}
 	items, bytes, inFlightItems, inFlightBytes := dispatcher.QueueUsage()
 	return HealthSnapshot{
 		Destination:         dispatcher.config.Destination,

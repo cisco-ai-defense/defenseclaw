@@ -270,6 +270,19 @@ func TestSinglePermanentPayloadFailureDoesNotSuppressNextValidRecord(t *testing.
 	closeCircuitTestDispatcher(t, dispatcher)
 }
 
+func TestExpiredCircuitAppearsHalfOpenWithoutProducerTraffic(t *testing.T) {
+	config := circuitTestConfig(91)
+	dispatcher, err := NewDispatcher(config, &circuitTestAdapter{})
+	if err != nil { t.Fatal(err) }
+	past := time.Now().Add(-config.Circuit.OpenDuration - time.Second)
+	if !dispatcher.recordCircuitFailure(FailureClassAuthentication, past) { t.Fatal("circuit did not open") }
+	snapshot := dispatcher.DeliveryHealthSnapshot()
+	if snapshot.CircuitState != CircuitHalfOpen || snapshot.State != HealthDegraded ||
+		snapshot.Reason != string(HealthReasonCircuitHalfOpen) {
+		t.Fatalf("expired circuit snapshot = %+v", snapshot)
+	}
+}
+
 func TestCircuitCooldownHalfOpenRecoveryAndGenerationReset(t *testing.T) {
 	start := time.Date(2026, time.July, 30, 13, 0, 0, 0, time.UTC)
 	config := circuitTestConfig(41)
