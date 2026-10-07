@@ -13,6 +13,8 @@ or a password that was expanded a second time would only show up on a Linux host
 from __future__ import annotations
 
 import importlib.util
+import io
+from email.message import Message
 import os
 import re
 import shutil
@@ -124,3 +126,21 @@ def test_okta_sssd_render_fills_every_placeholder_once(tmp_path: Path) -> None:
     assert "ldap_default_bind_dn = uid=ldap-bind@example.com,dc=example,dc=okta,dc=com\n" in text
     assert "ldap_user_principal = uid\n" in text
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_okta_pagination_reads_separate_link_headers() -> None:
+    okta = _load(OKTA)
+    headers = Message()
+    headers.add_header("Link", '<https://example.okta.com/api/v1/users?limit=1>; rel="self"')
+    headers.add_header("Link", '<https://example.okta.com/api/v1/users?after=one>; rel="next"')
+
+    class Response(io.BytesIO):
+        status = 200
+        def __init__(self, body: bytes, response_headers: Message):
+            super().__init__(body)
+            self.headers = response_headers
+
+    responses = iter([Response(b'[{"id":"one"}]', headers), Response(b'[{"id":"two"}]', Message())])
+    client = okta.Okta("https://example.okta.com", "token")
+    client._opener.open = lambda *_args, **_kwargs: next(responses)
+    assert [user["id"] for user in client.get_all("/api/v1/users?limit=1")] == ["one", "two"]

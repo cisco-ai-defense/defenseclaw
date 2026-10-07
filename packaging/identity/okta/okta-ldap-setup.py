@@ -97,7 +97,12 @@ class Okta:
             try:
                 with self._opener.open(request, timeout=30) as response:
                     raw = response.read()
-                    return response.status, (json.loads(raw) if raw else None), dict(response.headers)
+                    headers = dict(response.headers)
+                    # Okta sends self and next as separate Link fields; dict() keeps only one.
+                    links = response.headers.get_all("Link", [])
+                    if links:
+                        headers["Link"] = ", ".join(links)
+                    return response.status, (json.loads(raw) if raw else None), headers
             except urllib.error.HTTPError as err:
                 raw = err.read()
                 headers = dict(err.headers)
