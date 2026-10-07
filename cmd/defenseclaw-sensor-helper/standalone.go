@@ -60,16 +60,57 @@ func resolveServiceAccount(name string) (int, int, error) {
 
 type helperManifest struct {
 	Targets []struct {
-		User     string `yaml:"user"`
-		UserHome string `yaml:"user_home"`
-		Enabled  *bool  `yaml:"enabled"`
+		User      string `yaml:"user"`
+		UserHome  string `yaml:"user_home"`
+		UID       *int   `yaml:"uid"`
+		Connector string `yaml:"connector"`
+		Enabled   *bool  `yaml:"enabled"`
 	} `yaml:"targets"`
+}
+
+// helperTarget is one enabled row of the guardian manifest: who is enrolled
+// with which connector. The kernel-policy reconciler anchors enforcement
+// only on these (and resolves their installs itself).
+type helperTarget struct {
+	User      string
+	Home      string
+	UID       *int
+	Connector string
 }
 
 // manifestHomes returns the homes of the enabled rows of the guardian
 // manifest and a digest of its bytes. A missing manifest means "no homes
 // yet"; an untrusted one is an error.
 func manifestHomes(path string) ([]string, string, error) {
+	targets, digest, err := manifestTargets(path)
+	if err != nil {
+		return nil, "", err
+	}
+	set := map[string]bool{}
+	for _, target := range targets {
+		if target.Home != "" {
+			set[target.Home] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil, digest, nil
+	}
+	homes := make([]string, 0, len(set))
+	for home := range set {
+		homes = append(homes, home)
+	}
+	sort.Strings(homes)
+	return homes, digest, nil
+}
+
+// manifestTargets returns the enabled rows of the guardian manifest, with
+// each row's home resolved and checked (absolute, not /), and a digest of
+// the manifest's bytes. A missing manifest is no rows; an untrusted one is
+// an error.
+func manifestTargets(path string) ([]helperTarget, string, error) {
+	if path == "" {
+		return nil, "", nil
+	}
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return nil, "", nil
 	}
@@ -96,28 +137,31 @@ func manifestHomes(path string) ([]string, string, error) {
 			return nil, "", fmt.Errorf("parse guardian manifest: %w", err)
 		}
 	}
-	set := map[string]bool{}
-	for _, target := range manifest.Targets {
-		if target.Enabled != nil && !*target.Enabled {
+	var targets []helperTarget
+	for _, row := range manifest.Targets {
+		if row.Enabled != nil && !*row.Enabled {
 			continue
 		}
-		home := strings.TrimSpace(target.UserHome)
-		if home == "" && target.User != "" {
-			if account, err := user.Lookup(target.User); err == nil {
+		home := strings.TrimSpace(row.UserHome)
+		if home == "" && row.User != "" {
+			if account, err := user.Lookup(row.User); err == nil {
 				home = account.HomeDir
 			}
 		}
 		if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) == "/" {
 			continue
 		}
-		set[filepath.Clean(home)] = true
+		target := helperTarget{
+			User: strings.TrimSpace(row.User), Home: filepath.Clean(home),
+			Connector: strings.ToLower(strings.TrimSpace(row.Connector)),
+		}
+		if row.UID != nil && *row.UID >= 0 {
+			uid := *row.UID
+			target.UID = &uid
+		}
+		targets = append(targets, target)
 	}
-	homes := make([]string, 0, len(set))
-	for home := range set {
-		homes = append(homes, home)
-	}
-	sort.Strings(homes)
-	return homes, digest, nil
+	return targets, digest, nil
 }
 
 // watchManifest cancels the returned context when the manifest bytes
