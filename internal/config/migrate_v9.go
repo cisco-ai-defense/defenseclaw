@@ -442,6 +442,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	}
 	m.migrateTelemetryAliases(root)
 	m.migratePrivacy(root)
+	m.migrateRegistrySources(root)
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
@@ -1101,6 +1102,21 @@ func (m *v9Migrator) migratePrivacy(root *yaml.Node) {
 		if key == "disable_redaction" && section.Content[index+1].Decode(&disabled) == nil && disabled {
 			m.note("privacy.disable_redaction: true was dropped: no config_version 8 or 9 runtime applies it; " +
 				"redaction follows observability.redaction_profiles (set a destination's redaction_profile to none to send unredacted data)")
+		}
+	}
+}
+
+// migrateRegistrySources drops registries.sources[].auto_sync and
+// sync_interval_hours, reserved for a scheduled sync that never shipped:
+// nothing read them, and `defenseclaw registry sync` is the only ingest path.
+// Keep this until the config_version 8 migration is dropped (1.1.0).
+func (m *v9Migrator) migrateRegistrySources(root *yaml.Node) {
+	sources := v8YAMLMapValue(v8YAMLMapValue(root, "registries"), "sources")
+	for index, source := range v9SeqItems(sources) {
+		for _, key := range []string{"auto_sync", "sync_interval_hours"} {
+			if v9Pop(source, key) != nil {
+				m.record.Removed = append(m.record.Removed, fmt.Sprintf("registries.sources[%d].%s", index, key))
+			}
 		}
 	}
 }

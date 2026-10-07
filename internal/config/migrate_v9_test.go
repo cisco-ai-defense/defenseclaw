@@ -771,6 +771,9 @@ mcp_actions:
   medium: {file: none, runtime: enable, install: block}
 plugin_actions:
   critical: {file: quarantine, runtime: disable, install: block}
+registries:
+  sources:
+    - {id: corp, kind: http_yaml, url: "https://registry.example.test/s.yaml", content: skill, enabled: true, auto_sync: true, sync_interval_hours: 12}
 observability: {}
 `
 	dataJSON := filepath.Join(dir, "data.json")
@@ -825,6 +828,21 @@ observability: {}
 		if err := ValidateCandidate(configPath, []byte(v9)); err == nil || !strings.Contains(err.Error(), row.key) {
 			t.Errorf("%s in a v9 file: got %v, want an error naming it", row.key, err)
 		}
+	}
+	// The reserved registry sync keys are dropped from each source (GAP-0227)
+	// and refused in a v9 file.
+	for _, key := range []string{"auto_sync", "sync_interval_hours"} {
+		if !slices.Contains(result.Record.Removed, "registries.sources[0]."+key) {
+			t.Errorf("removed = %v, want registries.sources[0].%s", result.Record.Removed, key)
+		}
+		v9 := "config_version: 9\nregistries:\n  sources:\n    - {id: corp, kind: file, " + key + ": 1}\nobservability: {}\n"
+		if err := ValidateCandidate(configPath, []byte(v9)); err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("registries.sources[0].%s in a v9 file: got %v, want an error naming it", key, err)
+		}
+	}
+	if sources, _ := doc["registries"].(map[string]any)["sources"].([]any); len(sources) != 1 ||
+		sources[0].(map[string]any)["auto_sync"] != nil || sources[0].(map[string]any)["sync_interval_hours"] != nil {
+		t.Errorf("registries = %v, want the source without auto_sync and sync_interval_hours", doc["registries"])
 	}
 	if update, _ := doc["update"].(map[string]any); update["check"] != false {
 		t.Errorf("update = %v, want check: false", doc["update"])

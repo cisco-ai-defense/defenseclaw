@@ -35,7 +35,6 @@ registries:
       content: skill
       auth_env: DEFENSECLAW_REGISTRY_TOKEN
       enabled: true
-      sync_interval_hours: 12
     - id: smithery-public
       kind: smithery
       content: mcp
@@ -71,9 +70,6 @@ registries:
 	}
 	if !first.Enabled {
 		t.Error("Sources[0].Enabled should be true")
-	}
-	if first.SyncIntervalHours != 12 {
-		t.Errorf("Sources[0].SyncIntervalHours = %d, want 12", first.SyncIntervalHours)
 	}
 
 	second := cfg.Registries.Sources[1]

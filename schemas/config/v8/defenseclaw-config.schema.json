@@ -5575,6 +5575,18 @@
         "mcp_actions": false,
         "plugin_actions": false,
         "privacy": false,
+        "registries": {
+          "properties": {
+            "sources": {
+              "items": {
+                "properties": {
+                  "auto_sync": false,
+                  "sync_interval_hours": false
+                }
+              }
+            }
+          }
+        },
         "observability": {
           "properties": {
             "trace_policy": {

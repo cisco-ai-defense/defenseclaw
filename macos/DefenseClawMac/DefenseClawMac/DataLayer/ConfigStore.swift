@@ -71,8 +71,6 @@ struct DefenseClawConfig: Sendable {
         var url: String
         var authEnv: String
         var enabled: Bool
-        var autoSync: Bool
-        var syncIntervalHours: Int
         var lastSync: String
         var lastStatus: String
     }
@@ -1026,8 +1024,6 @@ actor ConfigStore {
                     url: fields["url"]?.string ?? "",
                     authEnv: fields["auth_env"]?.string ?? "",
                     enabled: fields["enabled"]?.bool ?? true,
-                    autoSync: fields["auto_sync"]?.bool ?? false,
-                    syncIntervalHours: fields["sync_interval_hours"]?.int ?? 24,
                     lastSync: fields["last_sync"]?.string ?? "",
                     lastStatus: fields["last_status"]?.string ?? ""
                 )

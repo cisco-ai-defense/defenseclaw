@@ -284,8 +284,6 @@ def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
         "content": source.content,
         "auth_env": source.auth_env,
         "enabled": source.enabled,
-        "auto_sync": source.auto_sync,
-        "sync_interval_hours": source.sync_interval_hours,
         "last_sync": source.last_sync,
         "last_status": source.last_status,
     }
