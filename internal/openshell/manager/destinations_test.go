@@ -429,3 +429,30 @@ func TestProxiedDestinationsNameTheirProgram(t *testing.T) {
 		t.Fatalf("api.openai.com, two programs at once = %+v", r)
 	}
 }
+
+// TestAProxiedRefusalKeepsTheBinaryThatGotThrough: a proxied request is
+// paired with its program only after a window, and a refusal paired then
+// still does not move its program ahead of the one whose traffic got
+// through (the row's view shows the last binary).
+func TestAProxiedRefusalKeepsTheBinaryThatGotThrough(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "rbox"})
+	b := e.boxOf("rbox")
+	request := func(bin string, pid int, kind egress.EventKind) {
+		e.m.egressEvent(t.Context(), egress.Event{Kind: kind, SandboxName: "rbox", Host: "example.org", Port: 443, Method: "CONNECT",
+			Time: now(), FirstSeen: true, Category: egress.CategoryNotAllowlisted}, 0)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: bin, PID: pid, HasPID: true, Host: openshellHostAlias,
+			Port: testEgressPort, Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+		advance(time.Minute)
+		_, err := e.m.Destinations(t.Context(), "rbox")
+		must(t, err)
+	}
+	request("/usr/bin/curl", 77, egress.EventAllowed)
+	request("/usr/bin/wget", 78, egress.EventBlocked)
+	d, err := e.m.Destinations(t.Context(), "rbox")
+	must(t, err)
+	if len(d.Destinations) != 1 || !slices.Equal(d.Destinations[0].Binaries, []string{"/usr/bin/wget", "/usr/bin/curl"}) {
+		t.Fatalf("destinations = %+v, want curl last (its traffic got through)", d.Destinations)
+	}
+}
