@@ -3408,6 +3408,7 @@ def _llm_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
             "regional",
             "Use a regional provider (Bedrock / Vertex / Azure)",
             summary="Switch to a cloud-region provider; auth rows appear on pick.",
+            presets={"--provider": "bedrock"},
             fields=("Provider", "Model", *_LLM_PROVIDER_SECTIONS),
         ),
         WizardGoal(

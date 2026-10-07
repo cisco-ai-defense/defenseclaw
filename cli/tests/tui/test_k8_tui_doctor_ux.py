@@ -113,3 +113,24 @@ def test_overview_keyboard_actions_reach_gateway_and_ai_discovery(tmp_path, monk
         "defenseclaw-gateway start",
         "defenseclaw agent discovery enable --yes",
     ]
+
+
+def test_default_policy_survives_reload_and_regional_goal_starts_on_bedrock(tmp_path) -> None:
+    from defenseclaw import policy_catalog
+    from defenseclaw.config import default_config, load
+    from defenseclaw.tui.panels.setup import SetupPanelModel, SetupWizard, wizard_goals
+
+    cfg = default_config()
+    cfg.data_dir = str(tmp_path)
+    cfg.policy_dir = str(tmp_path / "policies")
+    before = policy_catalog.active_policy_name(cfg.policy_dir, cfg)
+    cfg.save()
+    loaded = load(data_dir=tmp_path)
+    assert before == "default"
+    assert policy_catalog.active_policy_name(loaded.policy_dir, loaded) == before
+
+    model = SetupPanelModel(cfg=loaded)
+    goal = next(goal for goal in wizard_goals(SetupWizard.LLM, loaded) if goal.id == "regional")
+    model.open_wizard_form(SetupWizard.LLM, goal=goal)
+    provider = next(field for field in model.form_fields if field.flag == "--provider")
+    assert provider.value == "bedrock"
