@@ -3225,7 +3225,7 @@ func WatcherWatchesDirs(cfg *config.Config) bool {
 	if !w.Enabled {
 		return false
 	}
-	return watcherUsesConnectorDirs(cfg) ||
+	return watcherUsesConnectorDirs(cfg) || watcherUsesEnrolledUserDirs(cfg) ||
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 

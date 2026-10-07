@@ -49,6 +49,10 @@ var (
 func init() {
 	for _, command := range []*cobra.Command{scanSkillCmd, scanMCPCmd, scanPluginCmd} {
 		command.Flags().BoolVar(&scanGatewayJSON, "json", false, "Print the gateway's scan response as JSON")
+		// A managed computer has no per-user config for the bootstrap to
+		// load: the managed gateway's endpoint comes from its layout, and
+		// any other host loads its config in scanGatewayEndpoint.
+		command.Annotations = map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"}
 		scanCmd.AddCommand(command)
 	}
 }
@@ -58,6 +62,11 @@ func init() {
 var scanGatewayEndpoint = func() (string, string, error) {
 	if base, token, ok, err := managedScanGatewayEndpoint(); ok || err != nil {
 		return base, token, err
+	}
+	if cfg == nil {
+		if err := loadGatewayCommandConfigOnly(); err != nil {
+			return "", "", err
+		}
 	}
 	if cfg == nil {
 		return "", "", errors.New("no DefenseClaw config is loaded")

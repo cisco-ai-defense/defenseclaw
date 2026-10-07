@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -2709,11 +2710,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	// only for tests that still pass ``InspectLLMConfig``.
 	// The live config: scanner and llm edits reload hot.
 	cfg := a.liveConfig()
-	ss := scanner.NewSkillScannerFromLLM(
+	// The rule pack an install-time scan applies to a skill (none under the
+	// Secure Client integration), so a scan reports what admission sees.
+	ss := guardrail.NewArtifactOverlay(scanner.NewSkillScannerFromLLM(
 		cfg.Scanners.SkillScanner,
 		cfg.ResolveLLM("scanners.skill"),
 		cfg.CiscoAIDefense,
-	)
+	), installScanRulePack(""))
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
