@@ -204,6 +204,11 @@ func TestProcessCmdlineRedactsSecrets(t *testing.T) {
 		{[]string{"sh", "-c", `python3 -c "import time; time.sleep(90)" --token=dccertvalue`}, `"import time; time.sleep(90)" --token=<redacted`},
 		{[]string{"bash", "-c", `eval 'curl -H "Authorization: Bearer dccertvalue" https://example.invalid/'`}, `"Authorization: Bearer <redacted`},
 		{[]string{"curl", "-H", "X-Api-Key: dccertvalue", "https://example.invalid/"}, "X-Api-Key: <redacted"},
+		// Claude Code's wrapper of every Bash call: the escaped quotes of the
+		// nested script hid the header from the rules (GAP-0144).
+		{[]string{"/bin/bash", "-c", `source /sandbox/.claude/shell-snapshots/snapshot-bash.sh && eval 'sh -c "curl -s -H \"Authorization: Bearer dccertvalue\" https://example.invalid; sleep 40"' < /dev/null`},
+			`\"Authorization: Bearer <redacted`},
+		{[]string{"/bin/bash", "-c", `eval 'curl -H '\''X-Api-Key: dccertvalue'\'' https://example.invalid/'`}, `'\''X-Api-Key: <redacted`},
 	} {
 		if got := processCmdline(tc.argv); strings.Contains(got, "dccertvalue") || !strings.Contains(got, tc.kept) {
 			t.Fatalf("cmdline %q of %q, want %q kept", got, tc.argv, tc.kept)
