@@ -22,8 +22,8 @@ func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
 	now := time.Unix(3_000_000, 0)
 	limiter := &hookCallerLimiter{now: func() time.Time { return now }, rate: 2, burst: 2, inFlight: 3}
 	admit := func(caller string) (func(), bool) {
-		release, _, ok, _ := limiter.acquire(caller)
-		return release, ok
+		release, _, refusal, _ := limiter.acquire(caller)
+		return release, refusal == ""
 	}
 	for i := 0; i < 2; i++ {
 		release, ok := admit("1001")
@@ -93,6 +93,56 @@ func TestAdmitHookCallerAnswersRateLimited(t *testing.T) {
 	if refused.Code != http.StatusTooManyRequests || refused.Header().Get("Retry-After") == "" ||
 		!strings.Contains(refused.Body.String(), managedHookReasonRateLimited) {
 		t.Fatalf("refusal = %d %v %q", refused.Code, refused.Header(), refused.Body.String())
+	}
+}
+
+// 200 accounts under their own caps can still hold more requests than the
+// gateway answers before the hook deadline, and then every hook times out. The
+// gateway also bounds the requests it holds at once: the next one gets an
+// immediate 429 with its own reason whoever sends it, and a finished request
+// frees a place. A client that left before it had a slot costs nothing.
+func TestAdmitHookCallerBoundsAllCallersTogether(t *testing.T) {
+	const route = "/api/v1/inspect/tool"
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1000, burst: 1000, globalInFlight: 2}
+	admit := func(identity string) (*httptest.ResponseRecorder, func()) {
+		w := httptest.NewRecorder()
+		_, release := api.admitHookCaller(w, httptest.NewRequest(http.MethodPost, route, nil), identity, route)
+		return w, release
+	}
+	_, first := admit("1001")
+	_, second := admit("1002")
+	if first == nil || second == nil {
+		t.Fatal("requests inside the gateway-wide bound were refused")
+	}
+	refused, third := admit("1003")
+	if third != nil || refused.Code != http.StatusTooManyRequests || refused.Header().Get("Retry-After") == "" ||
+		!strings.Contains(refused.Body.String(), managedHookReasonOverloaded) {
+		t.Fatalf("request past the bound = %d %v %q", refused.Code, refused.Header(), refused.Body.String())
+	}
+	// Telemetry batches are outside the bound: a refused hook would deny the
+	// tool call, while an exporter retries.
+	otlp := httptest.NewRecorder()
+	if _, release := api.admitHookCaller(otlp, httptest.NewRequest(http.MethodPost, "/v1/logs", nil), "1003", "otlp"); release == nil {
+		t.Fatalf("telemetry refused by the hook bound: %d %q", otlp.Code, otlp.Body.String())
+	} else {
+		release()
+	}
+	first()
+	_, again := admit("1003")
+	if again == nil {
+		t.Fatal("a finished request did not free its place")
+	}
+	again()
+	second()
+
+	gone, hangUp := context.WithCancel(t.Context())
+	hangUp()
+	if _, release := api.admitHookCaller(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, route, nil).WithContext(gone), "1004", route); release != nil {
+		t.Fatal("a request whose client had left was admitted")
+	}
+	if got := api.hookCallerLimits.total; got != 0 {
+		t.Fatalf("%d requests still counted after all finished", got)
 	}
 }
 

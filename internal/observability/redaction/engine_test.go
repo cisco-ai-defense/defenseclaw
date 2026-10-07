@@ -501,6 +501,41 @@ func TestEngineIndependentDestinationsAndTrustedReprojection(t *testing.T) {
 	}
 }
 
+func TestStrictRemovesPersonalIdentifiersButKeepsJoinKeys(t *testing.T) {
+	payload := map[string]any{
+		"user.id": "1001", "defenseclaw.user.name": "alice",
+		"defenseclaw.user.principal":             "alice@corp.example",
+		"defenseclaw.session.kerberos_principal": "alice@CORP.EXAMPLE",
+		"client.address":                         "10.0.0.8",
+		"defenseclaw.user.tenant_id":             "tenant-1",
+		"defenseclaw.user.email":                 "alice@corp.example",
+	}
+	classes := make(map[string]observability.FieldClass, len(payload))
+	for key := range payload {
+		classes["/"+key] = observability.FieldClassIdentifier
+	}
+	soc, err := NewCustomProfile("soc", ProfileStrict, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sensitive, _ := BuiltInProfile(ProfileSensitive)
+	strict, _ := BuiltInProfile(ProfileStrict)
+	engine := newTestEngine(t)
+	for _, signal := range []observability.Signal{observability.SignalLogs, observability.SignalTraces} {
+		record := newTestRecord(t, signal, payload, classes)
+		for profile, want := range map[Profile]int{sensitive: 7, strict: 2, soc: 2} {
+			projection, _, err := engine.Project(record, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			object, _ := projection.Payload().Object()
+			if len(object) != want || object["user.id"] != "1001" || object["defenseclaw.user.name"] != "alice" {
+				t.Errorf("%s %s kept %v", signal, profile.Name(), object)
+			}
+		}
+	}
+}
+
 func TestEngineMetricClassEnforcement(t *testing.T) {
 	engine := newTestEngine(t)
 	none, _ := BuiltInProfile(ProfileNone)

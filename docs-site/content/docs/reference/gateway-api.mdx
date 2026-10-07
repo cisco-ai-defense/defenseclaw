@@ -166,7 +166,9 @@ home directory), the active connectors with per-agent request and block
 counts, and the guardrail, routing and telemetry state, including
 telemetry destinations. In a managed install on the standalone profile it
 also carries `inspection` (whether local and AI Defense inspection are
-active) and `user_scoped_credentials.key_ids`, the non-secret SHA-256
+active), `directory` while directory lookups fail (how many accounts, since
+when, with neither a reason nor an account name), and
+`user_scoped_credentials.key_ids`, the non-secret SHA-256
 fingerprints of the per-machine keys from which the per-user credentials
 that authenticate right now are derived (the current key, plus a staged or
 retiring one during a key rotation). They let the lifecycle check a key

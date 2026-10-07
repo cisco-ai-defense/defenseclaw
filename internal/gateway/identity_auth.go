@@ -36,10 +36,14 @@ func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, u
 		return ctx
 	}
 	facts, _ := verifiedIdentityDirectory(userID, identityLookupBlocking.Load())
+	name := useridentity.BareAccountName(userName)
+	if name == "" {
+		name = spooledAccountName(userID)
+	}
 	subject := VerifiedSubject{
 		UserID:    userID,
 		IDKind:    useridentity.KindForID(userID),
-		UserName:  useridentity.BareAccountName(userName),
+		UserName:  name,
 		Directory: facts,
 		Source:    source,
 	}
@@ -63,6 +67,23 @@ func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, u
 	}
 	observeIdentity(ctx, emitter, subject, session)
 	return ctx
+}
+
+// spooledAccountName is the bare name the guardian recorded for the account
+// id, for a request whose caller was proved by id but not named: a domain
+// controller that is down and an SSSD with a cold cache answer "no such user"
+// for a uid that exists, and the audit rows of the request then carried no
+// name at all (GAP-0231). The guardian resolved the name as root while the
+// directory answered, and the record is trusted for as long as its facts
+// (identitySpoolMaxAge). The name only attributes the audit rows: it takes no
+// part in authorization, which keeps matching the name the account database
+// gave (managedHookPeer.Name).
+func spooledAccountName(id string) string {
+	record, ok := readIdentitySpoolFacts(id, time.Now())
+	if !ok {
+		return ""
+	}
+	return useridentity.BareAccountName(sanitizeLLMEventUser(record.User))
 }
 
 // attachProcessOwnerSubject verifies the caller of a per-user gateway as the

@@ -632,7 +632,12 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		legacyToolID = nullStr(legacy.ToolID)
 		legacyStepIndex = nullInt(legacy.StepIdx)
 		legacyEnforced = nullBool(legacy.Enforced)
-		legacyRulePackDir = nullStr(legacy.RulePackDir)
+		// The directory is a path-class field of the projection: the column keeps
+		// what the local profile kept, as target and details do, so a store that
+		// hashes or removes paths never holds the raw one.
+		if value, kept := keptCompatibilityValue(projected, "rule_pack_dir", strings.TrimSpace(legacy.RulePackDir)); kept {
+			legacyRulePackDir = nullStr(value)
+		}
 	}
 
 	_, err = txExecContextObserved(ctx, tx, "v8_event_history_insert", writer.store.sqliteBusyObservabilityV8(), `
