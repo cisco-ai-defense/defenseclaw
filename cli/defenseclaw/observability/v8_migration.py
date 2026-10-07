@@ -631,11 +631,15 @@ def convert_v7_observability_to_v8(
     # complete candidate through the canonical Go compiler before activation.
     try:
         load_validate_v8(candidate, source_name=source_name)
-    except V8ConfigError:
+    except V8ConfigError as exc:
+        # The validator message carries a path and a keyword, never a source
+        # value. Name them: the converted document is what failed, and "fix the
+        # source" alone gave the operator nothing to act on.
         raise V8MigrationError(
             "candidate_validation_failed",
             "$.observability",
-            "fix the reported supported-v7 source shape before retrying the upgrade",
+            f"the converted configuration is not valid at {exc.path} ({exc.keyword}): {exc.corrective_action}; "
+            "adjust the matching section of the source and retry the upgrade",
             source_name=source_name,
         ) from None
 
@@ -2526,19 +2530,50 @@ def _convert_sink(
         }
         _legacy_skip_verify(target, block, name, ctx)
     elif kind == "otlp_logs":
-        target["endpoint"] = _text(block.get("endpoint"), "$.audit_sinks[].otlp_logs.endpoint", ctx)
-        target["protocol"] = _protocol(block.get("protocol") or "grpc", "$.audit_sinks[].otlp_logs.protocol", ctx)
+        endpoint_label = "$.audit_sinks[].otlp_logs.endpoint"
+        raw_endpoint = _text(block.get("endpoint"), endpoint_label, ctx)
+        protocol = _protocol(block.get("protocol") or "grpc", "$.audit_sinks[].otlp_logs.protocol", ctx)
+        ca_cert = _text(block["ca_cert"], "$.audit_sinks[].otlp_logs.ca_cert", ctx) if block.get("ca_cert") else ""
+        # The released sink sent plaintext to an http:// collector (and to any
+        # gRPC URL that was not https://) without an insecure flag, and the v8
+        # schema requires that choice to be explicit.
+        insecure = _legacy_otlp_endpoint_insecure(
+            raw_endpoint,
+            protocol,
+            block.get("insecure") is True,
+            ca_cert,
+            ctx=ctx,
+            path=endpoint_label,
+        )
+        endpoint, endpoint_path = _normalize_legacy_otlp_endpoint(
+            raw_endpoint, protocol, insecure, ctx=ctx, path=endpoint_label
+        )
+        target["endpoint"] = _text(endpoint or raw_endpoint, endpoint_label, ctx)
+        target["protocol"] = protocol
         if headers := _convert_headers(block.get("headers", {}), name, ctx):
             target["headers"] = headers
         tls: dict[str, Any] = {}
-        if block.get("insecure") is True:
+        if insecure:
             tls["insecure"] = True
-        if ca_cert := block.get("ca_cert"):
-            tls["ca_cert"] = _text(ca_cert, "$.audit_sinks[].otlp_logs.ca_cert", ctx)
+            if ca_cert:
+                ctx.warning(f"legacy_plaintext_otlp_ca_ignored:{name}")
+        elif ca_cert:
+            tls["ca_cert"] = ca_cert
         if tls:
             target["tls"] = tls
-        if url_path := block.get("url_path"):
-            target["signal_overrides"] = {"logs": {"path": _text(url_path, "url_path", ctx)}}
+        url_path = block.get("url_path")
+        if protocol.startswith("http"):
+            effective_path = ""
+            if url_path:
+                effective_path = _normalize_legacy_otlp_url_path(
+                    _text(url_path, "$.audit_sinks[].otlp_logs.url_path", ctx), "logs"
+                )
+            elif endpoint_path:
+                effective_path = _normalize_legacy_otlp_endpoint_path(endpoint_path, "logs", endpoint_label, ctx)
+            if effective_path:
+                target["signal_overrides"] = {"logs": {"path": effective_path}}
+        elif url_path or endpoint_path:
+            ctx.warning(f"legacy_grpc_path_ignored:{name}:logs")
         target["logger_name"] = _text(
             block.get("logger_name", "defenseclaw.audit"), "$.audit_sinks[].otlp_logs.logger_name", ctx
         )

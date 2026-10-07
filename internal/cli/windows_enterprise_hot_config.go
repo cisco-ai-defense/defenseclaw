@@ -69,6 +69,44 @@ var (
 	}
 )
 
+// windowsEnterpriseServicePins are the environment pins the gateway service
+// starts with. Any process that loads the managed config as the service
+// does must carry all five: without them an administrator or SYSTEM is
+// refused by the managed-host guard, and without the service account the
+// protected credentials the config references are not trusted.
+func windowsEnterpriseServicePins(layout managed.StandaloneLayout) map[string]string {
+	return map[string]string{
+		managed.ConfigPathEnv:            layout.ConfigPath,
+		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
+		managed.WindowsServiceAccountEnv: layout.ServiceUser,
+		"DEFENSECLAW_HOME":               layout.DataDir,
+	}
+}
+
+// windowsEnterpriseEnvironmentWith returns base with the pins set,
+// replacing any entry of the same name (Windows names are case-insensitive).
+func windowsEnterpriseEnvironmentWith(base []string, pins map[string]string) []string {
+	environment := make([]string, 0, len(base)+len(pins))
+	for _, entry := range base {
+		name, _, _ := strings.Cut(entry, "=")
+		replaced := false
+		for pin := range pins {
+			if strings.EqualFold(name, pin) {
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			environment = append(environment, entry)
+		}
+	}
+	for name, value := range pins {
+		environment = append(environment, name+"="+value)
+	}
+	return environment
+}
+
 // windowsEnterpriseHotConfigCandidate reports whether this ensure is the
 // production deployment's config-only change: a healthy, idle deployment, a
 // supplied config, and nothing else asked for.
@@ -122,13 +160,7 @@ func windowsEnterpriseHotConfigApply(
 	}
 	defer release()
 
-	restoreEnvironment := setTemporaryEnvironment(map[string]string{
-		managed.ConfigPathEnv:            layout.ConfigPath,
-		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
-		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
-		managed.WindowsServiceAccountEnv: layout.ServiceUser,
-		"DEFENSECLAW_HOME":               layout.DataDir,
-	})
+	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
 
 	kept := keepWindowsEnterpriseEditedConfig(layout, previous)

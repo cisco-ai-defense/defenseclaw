@@ -282,7 +282,7 @@ class ConfigShowTests(unittest.TestCase):
         cfg = default_config()
         cfg._loaded_authoritative_dicts = {
             "guardrail.connectors": {
-                "codex": {"mode": "observe", "rule_pack_dir": ""}
+                "codex": {"mode": "observe", "rule_pack": ""}
             }
         }
         cfg._loaded_owned_nested_values = {

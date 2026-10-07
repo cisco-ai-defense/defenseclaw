@@ -212,8 +212,8 @@ async def test_multi_connector_add_disable_and_independent_policy_refresh(
     initial = _config_payload(
         tmp_path,
         {
-            "claudecode": {"mode": "observe", "rule_pack_dir": "/packs/base"},
-            "codex": {"mode": "action", "rule_pack_dir": "/packs/strict"},
+            "claudecode": {"mode": "observe", "rule_pack": "default"},
+            "codex": {"mode": "action", "rule_pack": "strict"},
         },
     )
     path = _configure_active_path(monkeypatch, tmp_path, initial)
@@ -224,9 +224,9 @@ async def test_multi_connector_add_disable_and_independent_policy_refresh(
     changed = _config_payload(
         tmp_path,
         {
-            "claudecode": {"mode": "action", "rule_pack_dir": "/packs/strict"},
-            "codex": {"mode": "observe", "rule_pack_dir": "/packs/base", "enabled": False},
-            "cursor": {"mode": "observe", "rule_pack_dir": "/packs/cursor"},
+            "claudecode": {"mode": "action", "rule_pack": "strict"},
+            "codex": {"mode": "observe", "rule_pack": "default", "enabled": False},
+            "cursor": {"mode": "observe", "rule_pack": "permissive"},
         },
     )
     changed["asset_policy"] = {
@@ -245,8 +245,8 @@ async def test_multi_connector_add_disable_and_independent_policy_refresh(
     }
     assert dict(cfg.connector_packs) == {
         "claudecode": "strict",
-        "codex": "base",
-        "cursor": "cursor",
+        "codex": "default",
+        "cursor": "permissive",
     }
     assert cfg.connector_is_disabled("codex") is True
     assert app.overview_model.enforcement.total_scans == 17

@@ -487,21 +487,18 @@ def _guardrail(cfg: Any) -> Any:
 def configured_pack_dir(cfg: Any, block: Any) -> str:
     """The directory a guardrail scope block selects, "" when it selects none.
 
-    ``rule_pack`` (a preset name or a ``guardrail.custom_packs`` key) wins
-    over the v8 ``rule_pack_dir`` at the same scope, as in the gateway
-    (``config.ResolveRulePackDir``).
+    A scope selects its ``rule_pack``: a preset name or a
+    ``guardrail.custom_packs`` key (``config.ResolveRulePackDir`` in the gateway).
     """
-    if block is None:
-        return ""
     name = str(getattr(block, "rule_pack", "") or "").strip()
-    if name:
-        custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
-        if custom is not None:
-            return normalize_pack_path(str(getattr(custom, "path", "") or ""))
-        if name in RULE_PACK_PRESETS:
-            return preset_pack_dir(cfg, name)
+    if not name:
         return ""
-    return normalize_pack_path(str(getattr(block, "rule_pack_dir", "") or ""))
+    custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
+    if custom is not None:
+        return normalize_pack_path(str(getattr(custom, "path", "") or ""))
+    if name in RULE_PACK_PRESETS:
+        return preset_pack_dir(cfg, name)
+    return ""
 
 
 def global_pack(cfg: Any) -> ConnectorPack:
@@ -530,18 +527,7 @@ def _override_dir(gc: Any, connector: str, cfg: Any = None) -> str:
     if block is None:
         connectors = getattr(gc, "connectors", None)
         block = connectors.get(connector) if isinstance(connectors, Mapping) else None
-    if block is not None:
-        return configured_pack_dir(cfg, block)
-    if callable(getter) or not callable(getattr(gc, "effective_rule_pack_dir", None)):
-        return ""
-    # Duck-typed configs that only expose the effective resolver: anything
-    # that differs from the global dir is a per-connector override.
-    try:
-        effective = normalize_pack_path(str(gc.effective_rule_pack_dir(connector) or ""))
-    except Exception:  # noqa: BLE001
-        return ""
-    global_dir = normalize_pack_path(str(getattr(gc, "rule_pack_dir", "") or ""))
-    return effective if effective and effective != global_dir else ""
+    return configured_pack_dir(cfg, block)
 
 
 def _active_connectors(cfg: Any) -> list[str]:

@@ -3262,6 +3262,11 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	default:
+		if r.Method == http.MethodPatch && a.managedAIDOnly() {
+			// Secure Client keeps the managed refusal of main (issue #1092).
+			a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian"})
+			return
+		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }

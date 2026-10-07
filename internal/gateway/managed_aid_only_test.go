@@ -2255,4 +2255,17 @@ func TestManagedAIDOnly_ServesNoIdentityRoutes(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("POST /config/patch = %d, want the bridge 503", resp.StatusCode)
 	}
+	// PATCH /v1/guardrail/config keeps the managed 403 (GAP-0089).
+	req, _ = http.NewRequest(http.MethodPatch, "http://"+addr+"/v1/guardrail/config", strings.NewReader(`{"mode":"observe"}`))
+	req.Header.Set("Authorization", "Bearer sc-route-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", "secure-client-test")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("PATCH /v1/guardrail/config = %d, want the managed 403", resp.StatusCode)
+	}
 }

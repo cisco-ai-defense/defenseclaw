@@ -929,12 +929,12 @@ def _apply_global_registry_required_field(cfg: object | dict[str, Any], key: str
 # B4/E4c/E4d: the config editor exposes every per-connector guardrail override.
 # Top-level ``PerConnectorGuardrailConfig`` fields editable via the 4-part
 # ``guardrail.connectors.<c>.<field>`` key; the nested HILT block is edited via
-# the 5-part ``guardrail.connectors.<c>.hilt.<field>`` key. ``rule_pack_dir`` /
+# the 5-part ``guardrail.connectors.<c>.hilt.<field>`` key. ``rule_pack`` /
 # ``block_message`` are free-text strings; ``mode`` is an enum string;
 # ``hook_fail_mode`` normalizes to open/closed; ``enabled`` is a bool. The
 # per-connector judge state is NOT here — it is membership in the
 # ``guardrail.judge.hook_connectors`` list (see _apply_judge_hook_connector_toggle).
-_PER_CONNECTOR_GUARDRAIL_STR_FIELDS = frozenset({"mode", "rule_pack_dir", "block_message"})
+_PER_CONNECTOR_GUARDRAIL_STR_FIELDS = frozenset({"mode", "rule_pack", "block_message"})
 _PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS = frozenset({"enabled"})
 _PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS = frozenset({"hook_fail_mode"})
 _PER_CONNECTOR_GUARDRAIL_FIELDS = (

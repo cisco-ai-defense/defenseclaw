@@ -771,6 +771,7 @@ class TestSkillScan(SkillCommandTestBase):
         ))
         mock_client.assert_not_called()
 
+    @patch("defenseclaw.scanner.rulepack.maybe_wrap", new=lambda scanner, *args, **kwargs: scanner)
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_all_flag_uses_bulk_scan_path(self, mock_scanner_cls, mock_scan_all):
@@ -782,6 +783,7 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False, connector=None)
 
+    @patch("defenseclaw.scanner.rulepack.maybe_wrap", new=lambda scanner, *args, **kwargs: scanner)
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_without_target_uses_bulk_scan_path(self, mock_scanner_cls, mock_scan_all):
@@ -843,6 +845,7 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(len(caches), 2)
         self.assertIs(caches[0], caches[1])
 
+    @patch("defenseclaw.scanner.rulepack.maybe_wrap", new=lambda scanner, *args, **kwargs: scanner)
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_all_connector_flag_targets_one(self, mock_scanner_cls, mock_scan_all):
@@ -856,6 +859,7 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False, connector="codex")
 
+    @patch("defenseclaw.scanner.rulepack.maybe_wrap", new=lambda scanner, *args, **kwargs: scanner)
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_scan_connector_without_target_scans_that_connector(self, mock_scanner_cls, mock_scan_all):

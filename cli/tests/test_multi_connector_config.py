@@ -142,14 +142,14 @@ class TestEffectiveResolvers(unittest.TestCase):
             mode="observe",
             hook_fail_mode="open",
             block_message="global-msg",
-            rule_pack_dir="/global/rules",
+            rule_pack="strict",
             hilt=HILTConfig(enabled=False, min_severity="HIGH"),
             connectors={
                 "codex": PerConnectorGuardrailConfig(
                     mode="action",
                     hook_fail_mode="closed",
                     block_message="codex-msg",
-                    rule_pack_dir="/codex/rules",
+                    rule_pack="permissive",
                     hilt=HILTConfig(enabled=True, min_severity="LOW"),
                 ),
                 "empty": PerConnectorGuardrailConfig(),
@@ -161,7 +161,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("codex"), "action")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(g.effective_block_message("codex"), "codex-msg")
-        self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.abspath("/codex/rules"))
+        self.assertEqual(g.effective_rule_pack("codex"), "permissive")
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
 
@@ -170,7 +170,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("empty"), "observe")
         self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
-        self.assertEqual(g.effective_rule_pack_dir("empty"), os.path.abspath("/global/rules"))
+        self.assertEqual(g.effective_rule_pack("empty"), "strict")
         self.assertFalse(g.effective_hilt("empty").enabled)
         self.assertEqual(g.effective_hilt("empty").min_severity, "HIGH")
 
@@ -200,12 +200,12 @@ class TestEffectiveResolvers(unittest.TestCase):
             self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "permissive"))
             self.assertEqual(g.effective_rule_pack_dir("claudecode"), os.path.join(tmp, "guardrail", "strict"))
             # A global selection clears every connector's pack, v9 key included.
-            _apply_rule_pack_selection(g, os.path.join(tmp, "guardrail", "strict"), connector=None)
+            _apply_rule_pack_selection(g, "strict", connector=None)
             self.assertEqual(g.connectors["codex"].rule_pack, "")
             self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "strict"))
 
     def test_safe_fallbacks_when_unset(self):
-        g = GuardrailConfig(mode="", hook_fail_mode="", rule_pack_dir="")
+        g = GuardrailConfig(mode="", hook_fail_mode="")
         self.assertEqual(g.effective_mode(""), "observe")
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
         self.assertEqual(g.effective_block_message(""), "")

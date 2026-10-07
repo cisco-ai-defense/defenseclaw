@@ -1123,11 +1123,29 @@ undo_snapshot() {
     rm -rf "${SNAP}"
 }
 
+# private_bin_dir: drop group and other write from BIN_DIR and its parent when
+# this account owns them. DefenseClaw refuses to run a gateway from a folder
+# another account could change, and a user-private-group umask (002, the
+# Debian and Ubuntu default) leaves ~/.local/bin group-writable when another
+# installer created it: install and init succeeded, then every later command
+# refused, naming one folder per run.
+private_bin_dir() {
+    local dir mode
+    for dir in "${BIN_DIR%/*}" "${BIN_DIR}"; do
+        [[ -d "${dir}" && ! -L "${dir}" && -O "${dir}" ]] || continue
+        mode="$(stat -c %a "${dir}" 2>/dev/null || stat -f %Lp "${dir}" 2>/dev/null)" || continue
+        [[ "${mode}" =~ ^[0-7]+$ ]] && (( 8#${mode} & 8#022 )) || continue
+        chmod go-w "${dir}" && info "Removed group and other write access from ${dir}: the gateway does not run from a folder other accounts can change"
+    done
+    return 0
+}
+
 swap_in() {
     local binary link target
     info "Installing DefenseClaw ${VERSION}"
     make_venv "${VENV}" || return 1
     mkdir -p "${BIN_DIR}" || return 1
+    private_bin_dir
     for binary in ${MANAGED_BINARIES}; do
         [[ -f "${STAGING}/bin/${binary}" ]] || continue
         cp -p "${STAGING}/bin/${binary}" "${BIN_DIR}/.${binary}.new" \

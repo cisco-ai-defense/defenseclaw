@@ -77,12 +77,7 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     """
     if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
         return None
-    import getpass
-
-    try:
-        user = getpass.getuser()
-    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
-        user = ""
+    user, label = current_profile_account()
     if not user:
         return {"user": "", "error": "the account name is unknown"}
     try:
@@ -101,8 +96,32 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
         # The gateway took the connection and was still resolving the user.
         return {"user": user, "error": str(exc), "timed_out": True}
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
-        return {"user": user, "error": str(exc)}
-    return {**result, "user": user, "overrides": overrides}
+        return {"user": label, "error": str(exc)}
+    return {**result, "user": label, "overrides": overrides}
+
+
+def current_profile_account() -> tuple[str, str]:
+    """The account the gateway resolves for "you", and the name to show for it.
+
+    On Windows the gateway is asked for the process token SID: the login name
+    of an Entra ID account (EntraAlice) is no name Windows can look up, so
+    every Entra user got default_lookup_failed. Elsewhere both are the login
+    name.
+    """
+    import getpass
+
+    try:
+        label = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
+        label = ""
+    if os.name == "nt":
+        from defenseclaw.file_permissions import _windows_current_user_sid
+
+        try:
+            return _windows_current_user_sid(), label
+        except OSError:
+            pass
+    return label, label
 
 
 _PROFILE_OVERRIDE_PROBES = 16
@@ -1387,6 +1406,7 @@ def resolve_gateway_binary() -> str | None:
     4. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
+    5. The enterprise package's gateway on a managed Linux or macOS host.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
@@ -1409,7 +1429,27 @@ def resolve_gateway_binary() -> str | None:
     if _is_runnable_file(canonical):
         return canonical
 
-    return None
+    return _managed_gateway_binary()
+
+
+#: The gateway each managed runtime descriptor's package installs.
+_MANAGED_GATEWAY_BINARIES = {
+    "/etc/defenseclaw/managed-runtime.json": "/opt/defenseclaw/bin/defenseclaw-gateway",
+    "/opt/cisco/defenseclaw/etc/managed-runtime.json": "/opt/cisco/defenseclaw/bin/defenseclaw-gateway",
+}
+
+
+def _managed_gateway_binary() -> str | None:
+    """The enterprise package's gateway on a managed Linux or macOS host.
+
+    An administrator's shell has it on no PATH, and the answer to "gateway
+    not found" there must not be ``defenseclaw upgrade``, which a managed
+    device refuses (GAP-0168).
+    """
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    binary = _MANAGED_GATEWAY_BINARIES.get(managed_descriptor() or "")
+    return binary if binary and _is_runnable_file(binary) else None
 
 
 def resolve_trusted_gateway_binary() -> str | None:

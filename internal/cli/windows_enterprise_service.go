@@ -404,7 +404,8 @@ func runWindowsEnterpriseLifecycle(
 	}
 	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure") {
 		if err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath); err != nil {
-			return failPreflight(fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
+				fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
 		}
 	}
 	opts.resolvedInstaller = script

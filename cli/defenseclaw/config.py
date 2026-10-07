@@ -23,7 +23,6 @@ so that the Go orchestrator and Python CLI share the same config file.
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import ntpath
 import os
@@ -315,7 +314,10 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
     if not is_current_schema(version):
         if version == 0 and config_is_empty(path):
             raise ConfigVersionError(empty_config_message(path))
-        raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+        raise ConfigVersionError(
+            "This configuration was written by an older DefenseClaw"
+            " — run 'defenseclaw migrate' first."
+        )
 
 
 require_v8_config = require_current_config
@@ -2223,7 +2225,6 @@ class PerConnectorGuardrailConfig:
     hilt: HILTConfig | None = None
     hook_fail_mode: str = ""
     block_message: str = ""
-    rule_pack_dir: str = ""  # v8 key; config_version 9 uses rule_pack
     rule_pack: str = ""
     rules: GuardrailRulesConfig | None = None
     # Per-connector on/off switch toggled by
@@ -2286,7 +2287,6 @@ class GuardrailProfile:
     block_at: str = ""
     alert_at: str = ""
     hilt: HILTConfig | None = None
-    rule_pack_dir: str = ""  # v8 key; config_version 9 uses rule_pack
     rule_pack: str = ""
     rules: GuardrailRulesConfig | None = None
     block_message: str = ""
@@ -2334,7 +2334,6 @@ class GuardrailConfig:
     # (the YAML parser below uses .get(key, <default>) so the presence
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
-    rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory (v8 key)
     # config_version 9: built-in pack name or a custom_packs key, the custom
     # packs pinned by digest, and the in-memory rule customisation.
     rule_pack: str = ""
@@ -2501,10 +2500,9 @@ class GuardrailConfig:
     def effective_rule_pack_dir(self, connector: str = "") -> str:
         """Directory of the rule pack a connector enforces, "" for the built-in default.
 
-        A connector scope that selects a pack wins over the global one. At each
-        scope ``rule_pack`` (a preset under ``policy_dir`` or a
-        ``guardrail.custom_packs`` key) wins over the v8 ``rule_pack_dir``, as
-        in the gateway; the resolution is ``policy_catalog.configured_pack_dir``.
+        A connector scope that selects a pack wins over the global one. A scope
+        selects its ``rule_pack``: a preset under ``policy_dir`` or a
+        ``guardrail.custom_packs`` key (``policy_catalog.configured_pack_dir``).
         """
         from types import SimpleNamespace
 
@@ -3601,7 +3599,10 @@ class Config:
             version = CURRENT_CONFIG_VERSION
             baseline = _config_to_dict(default_config())
         if not is_current_schema(version):
-            raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+            raise ConfigVersionError(
+                "This configuration was written by an older DefenseClaw"
+                " — run 'defenseclaw migrate' first."
+            )
         existing = _load_existing_config_yaml(path)
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
@@ -3623,7 +3624,7 @@ class Config:
                 raise ConfigVersionError("acp must be a mapping")
             acp_document["default_profile"] = self.acp.default_profile
         if version >= CONFIG_VERSION_V9:
-            _project_v9_modeled_keys(merged, self.policy_dir)
+            _project_v9_modeled_keys(merged)
         return merged
 
 
@@ -3673,70 +3674,14 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
     )
 
 
-_V9_PRESET_PACKS = ("default", "strict", "permissive")
-
-
-def _v9_same_dir(a: str, b: str) -> bool:
-    a, b = os.path.normpath(os.path.expanduser(a)), os.path.normpath(os.path.expanduser(b))
-    return os.path.normcase(a) == os.path.normcase(b)
-
-
-def _v9_rule_pack_for_dir(directory: str, policy_dir: str) -> tuple[str, list[str]]:
-    """Map a v8 rule_pack_dir to a v9 rule_pack name (and protections).
-
-    A preset name resolves to ``<policy_dir>/guardrail/<name>``, so only that
-    directory is the preset; an edited copy elsewhere is a custom pack.
-    """
-    clean = os.path.normpath(directory)
-    base = os.path.basename(clean).lower()
-    parent = os.path.basename(os.path.dirname(clean))
-    preset = "default" if base == "balanced" else base
-    if preset in _V9_PRESET_PACKS and policy_dir and _v9_same_dir(
-        clean, os.path.join(policy_dir, "guardrail", os.path.basename(clean))
-    ):
-        return preset, []
-    base = preset
-    if base in _V9_PRESET_PACKS and parent.startswith("protected-"):
-        try:
-            with open(os.path.join(clean, "defenseclaw-pack.json"), encoding="utf-8") as handle:
-                manifest = json.load(handle)
-            protections = [str(p) for p in manifest.get("protection", []) if str(p).strip()]
-        except (OSError, ValueError, AttributeError):
-            protections = []
-        return base, protections
-    raise ConfigVersionError(
-        f"guardrail rule pack folder {directory} is a custom pack; config_version 9 references custom packs by "
-        f"digest under guardrail.custom_packs: select it with 'defenseclaw guardrail use-pack {directory}'"
-    )
-
-
-def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> None:
+def _project_v9_modeled_keys(merged: dict[str, Any]) -> None:
     """Write v8-modeled fields a caller changed in their config_version 9 keys.
 
-    Setup commands that still set a v8 field (``rule_pack_dir``) would
-    otherwise write a key config_version 9 rejects. This maps them the way the
-    Go migration does; it goes away as each caller moves to the v9 key.
+    Setup commands that still set the v8 comma-separated
+    ``scanners.mcp_scanner.analyzers`` string would otherwise write a value
+    config_version 9 rejects. This maps it the way the Go migration does; it
+    goes away as each caller moves to the v9 list.
     """
-    watch = merged.get("watch")
-    if isinstance(watch, dict):
-        watch.pop("allow_list_bypass_scan", None)
-        if not watch:
-            merged.pop("watch")
-    guardrail = merged.get("guardrail")
-    if isinstance(guardrail, dict):
-        scopes = [guardrail]
-        scopes += [c for c in (guardrail.get("connectors") or {}).values() if isinstance(c, dict)]
-        for profile in (guardrail.get("profiles") or {}).values():
-            if isinstance(profile, dict):
-                scopes.append(profile)
-                scopes += [c for c in (profile.get("connectors") or {}).values() if isinstance(c, dict)]
-        for scope in scopes:
-            directory = scope.pop("rule_pack_dir", None)
-            if isinstance(directory, str) and directory.strip():
-                name, protections = _v9_rule_pack_for_dir(directory.strip(), policy_dir)
-                scope["rule_pack"] = name
-                if protections:
-                    scope.setdefault("rules", {})["protections"] = protections
     scanners = merged.get("scanners")
     if not isinstance(scanners, dict):
         return
@@ -4116,7 +4061,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 continue
             _strip_empty_keys(
                 profile,
-                ("description", "mode", "rule_pack_dir", "block_message", "hilt", "enabled", "hook_fail_mode"),
+                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode"),
             )
             _strip_unset_levels(profile)
             _serialize_v9_rules_scope(profile)
@@ -4127,7 +4072,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
             for entry in connectors.values():
                 if isinstance(entry, dict):
                     _strip_empty_keys(
-                        entry, ("mode", "hilt", "hook_fail_mode", "block_message", "rule_pack_dir", "enabled")
+                        entry, ("mode", "hilt", "hook_fail_mode", "block_message", "enabled")
                     )
                     _strip_unset_levels(entry)
                     _serialize_v9_rules_scope(entry)
@@ -5249,7 +5194,6 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
-        rule_pack_dir=raw.get("rule_pack_dir", ""),
         rule_pack=str(raw.get("rule_pack", "") or ""),
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
@@ -5295,7 +5239,6 @@ def _merge_guardrail_connectors(
             hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
             hook_fail_mode=entry.get("hook_fail_mode", ""),
             block_message=entry.get("block_message", ""),
-            rule_pack_dir=entry.get("rule_pack_dir", ""),
             rule_pack=str(entry.get("rule_pack", "") or ""),
             rules=_merge_guardrail_rules(entry.get("rules")),
             enabled=enabled,
@@ -5327,7 +5270,6 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
             hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) else None,
-            rule_pack_dir=str(entry.get("rule_pack_dir", "") or ""),
             rule_pack=str(entry.get("rule_pack", "") or ""),
             rules=_merge_guardrail_rules(entry.get("rules")),
             block_message=str(entry.get("block_message", "") or ""),
@@ -6504,7 +6446,6 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
         hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
         hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
         block_message=str(raw.get("block_message", "") or ""),
-        rule_pack_dir=str(raw.get("rule_pack_dir", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),

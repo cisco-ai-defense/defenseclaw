@@ -296,11 +296,10 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 	}
 
 	// The inspection loader decodes without the YAML entrypoint, so it reaches
-	// the runtime gate directly. The gate must report the declared version, not
-	// the v7 stamp the compatibility decoder applies to older sources.
+	// the runtime gate directly. The gate must report the declared version.
 	_, err := ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 5\n"))
 	if err == nil || !strings.Contains(err.Error(), "config_version 5 is older than 8") {
-		t.Fatalf("pre-v8 inspection error = %v, want declared-version migrate guidance", err)
+		t.Fatalf("older-version inspection error = %v, want declared-version migrate guidance", err)
 	}
 	_, err = ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 10\n"))
 	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 10)") {
@@ -452,7 +451,7 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 // Client one) still enables VirusTotal and AI Defense through its v8 keys; the
 // model carries them only as analyzers (GAP-0157).
 func TestRuntimeV8FoldsTheRetiredScannerKeysIntoAnalyzers(t *testing.T) {
-	const keyEnv = "DEFENSECLAW_TEST_GAP0157_VT"
+	const keyEnv = "GAP0157_TEST_VT_KEY"
 	t.Setenv(keyEnv, "")
 	raw := []byte("config_version: 8\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    use_aidefense: true\n" +
 		"    virustotal_api_key_env: " + keyEnv + "\n    virustotal_api_key: inline-test-value\nobservability: {}\n")

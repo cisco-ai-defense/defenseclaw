@@ -27,6 +27,7 @@ from defenseclaw.config import CustomRulePack, PerConnectorGuardrailConfig, defa
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
+from tests.helpers import select_pack
 
 
 def _valid(path, **_kwargs):
@@ -67,7 +68,7 @@ def env(tmp_path, monkeypatch):
     cfg.guardrail.enabled = True
     cfg.guardrail.mode = "action"
     cfg.guardrail.port = 4321
-    cfg.guardrail.rule_pack_dir = str(guardrail_root / "default")
+    cfg.guardrail.rule_pack = "default"
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -86,9 +87,9 @@ def _run(app, args):
 
 
 def _multi(app, overrides: dict[str, str]):
-    app.cfg.guardrail.connectors = {
-        name: PerConnectorGuardrailConfig(rule_pack_dir=path) for name, path in overrides.items()
-    }
+    app.cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig() for name in overrides}
+    for name, path in overrides.items():
+        select_pack(app.cfg, app.cfg.guardrail.connectors[name], path)
 
 
 def test_global_switch_clears_overrides_and_reports_them(env):
@@ -125,7 +126,6 @@ def test_connector_scope_leaves_peers_alone(env):
     assert paths == [
         "guardrail.custom_packs.team",
         "guardrail.connectors.codex.rule_pack",
-        "guardrail.connectors.codex.rule_pack_dir",
     ]
 
 
@@ -137,10 +137,7 @@ def test_registered_custom_pack_key_is_selected_by_name(env):
     result = _run(app, ["use-pack", "team", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["pack"] == "team"
-    assert writes[-1] == [
-        config_writer.Change("guardrail.rule_pack", "team"),
-        config_writer.Change("guardrail.rule_pack_dir", unset=True),
-    ]
+    assert writes[-1] == [config_writer.Change("guardrail.rule_pack", "team")]
 
     app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
     refused = _run(app, ["use-pack", "team"])
@@ -210,12 +207,7 @@ def test_clear_connector_override(env):
     payload = json.loads(result.output)
     assert payload["connector"] == "codex"
     assert payload["path"] == str(root / "default")
-    assert writes == [
-        [
-            config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
-            config_writer.Change("guardrail.connectors.codex.rule_pack_dir", unset=True),
-        ]
-    ]
+    assert writes == [[config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True)]]
 
 
 def test_usage_errors(env):

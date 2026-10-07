@@ -473,7 +473,7 @@ def test_read_catalog_survives_a_broken_protection_catalog(monkeypatch) -> None:
     monkeypatch.setattr(policy_catalog, "scope_postures", lambda cfg: list(POSTURES), raising=False)
     monkeypatch.setattr(policy_catalog, "protection_packs", lambda: list(PACKS), raising=False)
     monkeypatch.setattr(policy_catalog, "rule_families", lambda path: list(FAMILIES.get(path, ())), raising=False)
-    config = SimpleNamespace(policy_dir="", data_dir="", guardrail=SimpleNamespace(rule_pack_dir="", connectors={}))
+    config = SimpleNamespace(policy_dir="", data_dir="", guardrail=SimpleNamespace(rule_pack="", connectors={}))
     read = policy_panel.read_policy_catalog(config)
     assert read.posture_error == "tool-chains.json is unreadable"
     assert [row.scope for row in read.postures] == ["global", "codex", "claudecode"]
