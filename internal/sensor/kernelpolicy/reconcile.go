@@ -487,8 +487,12 @@ func (c *Controller) recordLoaded(name string) error {
 	if c.recorded[name] {
 		return nil
 	}
+	names := append(sortedKeys(c.recorded), name)
+	if err := writeLoaded(c.cfg.Dirs, names); err != nil {
+		return err
+	}
 	c.recorded[name] = true
-	return writeLoaded(c.cfg.Dirs, sortedKeys(c.recorded))
+	return nil
 }
 
 func (c *Controller) forgetLoaded(name string) {

@@ -307,11 +307,9 @@ func (c *Controller) load(ctx context.Context, g guardedClient, agent Agent, p P
 	c.setIndex(p.Name, p.Paths)
 	c.persist()
 	if err := g.AddTracingPolicy(ctx, p.YAML); err != nil {
-		// Not loaded: forget it, so its absence is never read as an
-		// operator's deletion.
-		delete(c.st.Applied, p.Name)
-		c.forgetLoaded(p.Name)
-		c.persist()
+		// A lost response does not prove Tetragon rejected the Add. Keep the
+		// write-ahead name and pending call so the next List can resolve it,
+		// and so cleanup can always retire a policy that did load.
 		c.cfg.Logger.Warn("add tracing policy failed", "policy", p.Name, "error", err)
 		return err
 	}

@@ -605,9 +605,13 @@ func TestFailedAddLeavesEnforcingPoliciesInMonitor(t *testing.T) {
 			t.Fatalf("call %s after a failed add; the old policy stays", call)
 		}
 	}
-	// The name that failed to load is not recorded as loaded.
-	if len(h.loadedFile()) != len(h.tg.names()) {
-		t.Fatalf("recorded %v, loaded %v", h.loadedFile(), h.tg.names())
+	// A failed response can still mean Tetragon loaded the name. Keep it in
+	// the cleanup record until the next List resolves the pending call.
+	recorded := h.loadedFile()
+	for _, name := range h.tg.names() {
+		if !contains(recorded, name) {
+			t.Fatalf("loaded name %s absent from the cleanup record %v", name, recorded)
+		}
 	}
 	// And a later pass does not mistake the missing name for an operator.
 	h.tg.failAll = false
