@@ -186,10 +186,11 @@ are unavailable while the installation is read-only.
 `defenseclaw sandbox setup --non-interactive` plus the flags your answers
 choose. Its fields are the action (`setup`, or `doctor` to only check this
 machine), **Claude Code** and **Codex** (at least one; defaults follow
-`openshell.harnesses`), **Shell wrappers** and **Build images now**. There is
-no telemetry question: the Homebrew gateway does not read `gateway.env`, so
-setup cannot turn OpenShell's anonymous usage telemetry off on a Mac (see
-[sandbox setup](/docs/sandboxes/guide)). Nor is there a mounts question: setup
+`openshell.harnesses`), **OpenShell telemetry off**, **Shell wrappers** and
+**Build images now**. On (the default), setup turns OpenShell's anonymous
+usage telemetry off in `~/.config/openshell/gateway.env`, which the Homebrew
+service reads; off passes `--upstream-telemetry` and keeps it on (see
+[sandbox setup](/docs/sandboxes/guide)). There is no mounts question: setup
 sets `compute_driver = "vm"` in the gateway's `gateway.toml`, restarts the
 gateway once, and every run works on a copy. The first run of each image
 prepares its MicroVM disk, which takes about a minute and 5 GB.

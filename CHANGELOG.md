@@ -1214,8 +1214,9 @@ deleted.
   which the Homebrew service reads, in the same change and restart as the
   MicroVM settings, and records the answer in
   `openshell.upstream_telemetry`. The doctor's telemetry check runs on a Mac
-  too (it was skipped), and `--fix` repairs a mismatch. A Mac gateway that no
-  Homebrew service runs is still left alone.
+  too (it was skipped), and `--fix` repairs a mismatch. The TUI's and the
+  macOS app's Sandbox wizards ask it on a Mac too (**OpenShell Telemetry
+  Off**). A Mac gateway that no Homebrew service runs is still left alone.
 - **The banner says how the model hosts are reached.** A new line under
   `Model` states that OpenShell opens them to the harness's own program
   directly, around the egress proxy, and that for an npm or Python harness
