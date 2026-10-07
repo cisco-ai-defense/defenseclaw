@@ -305,6 +305,14 @@ func enterpriseACPTargetCredentials(enrollment enterpriseACPEnrollment) enterpri
 	}
 }
 
+// enterpriseACPQuotePath formats a path for the shell shown to the user.
+func enterpriseACPQuotePath(path string, windows bool) string {
+	if windows {
+		return "'" + strings.ReplaceAll(path, "'", "''") + "'"
+	}
+	return fmt.Sprintf("%q", path)
+}
+
 // enterpriseACPSetupCommand is the user-side command an enrollment reports:
 // this executable's own setup subcommand, because a managed host has no other
 // DefenseClaw command to run (GAP-0254). Secure Client has no setup
@@ -332,13 +340,14 @@ func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath str
 			enrollment.client, enrollment.agent, enrollment.profile, activate, enrollment.dataDir, tokenPath, guard,
 		)
 	}
-	invoke := fmt.Sprintf("%q", executable)
+	quote := func(path string) string { return enterpriseACPQuotePath(path, runtime.GOOS == "windows") }
+	invoke := quote(executable)
 	if runtime.GOOS == "windows" {
 		invoke = "& " + invoke
 	}
 	return fmt.Sprintf(
-		"%s enterprise acp setup --client %s --agent %s --profile %s%s --data-dir %q --api-port %d --guard-binary %q",
-		invoke, enrollment.client, enrollment.agent, enrollment.profile, activate, enrollment.dataDir, cfg.Gateway.APIPort, guard,
+		"%s enterprise acp setup --client %s --agent %s --profile %s%s --data-dir %s --api-port %d --guard-binary %s",
+		invoke, enrollment.client, enrollment.agent, enrollment.profile, activate, quote(enrollment.dataDir), cfg.Gateway.APIPort, quote(guard),
 	)
 }
 
