@@ -276,6 +276,9 @@ type Manager struct {
 	procs       ProcessLookup
 	// procGate paces each sandbox's process and SSH records.
 	procGate *rateGate
+	// ownExecs are DefenseClaw's own execs, whose SSH OPEN records are
+	// dropped.
+	ownExecs ownExecs
 	// authFails paces the proxy's refusals of invalid credentials into
 	// health records (authFailed).
 	authFails authFailures

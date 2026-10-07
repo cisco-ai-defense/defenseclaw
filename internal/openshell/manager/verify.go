@@ -362,7 +362,7 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // it, so one not as prepared never keeps running, and outcome (what the
 // caller does with it, "it was deleted") ends the refusal's message.
 func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, outcome string) (workloadFacts, error) {
-	res, err := gw.Client.Exec(ctx, name, verifyArgv(want), openshell.ExecOptions{
+	res, err := m.ownExec(ctx, gw, name, verifyArgv(want), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
 	if err != nil {

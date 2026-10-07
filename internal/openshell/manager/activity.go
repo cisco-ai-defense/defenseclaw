@@ -21,9 +21,11 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 )
 
@@ -72,9 +74,12 @@ func (m *Manager) processEvent(ctx context.Context, id audit.SandboxIdentity, r 
 }
 
 // sshEvent records an SSH listener or connection event of the sandbox
-// (`sandbox connect`, `sandbox exec`, an upload or pull).
+// (`sandbox connect`, `sandbox exec`, an upload or pull). Every exec is an
+// SSH session in the sandbox: the OPEN of one DefenseClaw ran itself
+// (ownExec) is not the sandbox's activity, and is dropped.
 func (m *Manager) sshEvent(ctx context.Context, id audit.SandboxIdentity, r ocsf.Record, at time.Time) {
-	if r.Activity == "" || !m.procGate.take(id.Name+"\x00ssh", m.now()) {
+	if r.Activity == "" || strings.EqualFold(r.Activity, "OPEN") && m.ownExecs.claim(id.Name, m.now()) ||
+		!m.procGate.take(id.Name+"\x00ssh", m.now()) {
 		return
 	}
 	peer := r.Host
@@ -85,6 +90,64 @@ func (m *Manager) sshEvent(ctx context.Context, id audit.SandboxIdentity, r ocsf
 		Sandbox: id, Kind: audit.SandboxActivitySSH, SSHActivity: r.Activity, SSHAllowed: r.Allowed(), SSHDenied: r.Denied(),
 		SSHAuth: r.Auth, Peer: peer, Timestamp: at,
 	})
+}
+
+// ownExecs are the execs DefenseClaw runs in each sandbox itself (process
+// samples every 5 s, discovery, verification, the end-of-session steps).
+// OpenShell reports each as an SSH OPEN, without anything that tells it
+// from a user's `sandbox exec`: sshEvent drops one OPEN for each exec that
+// started at most ownExecWindow before it arrived.
+type ownExecs struct {
+	mu sync.Mutex
+	at map[string][]time.Time
+}
+
+// ownExecWindow bounds how late an exec's SSH OPEN arrives; ownExecMax
+// bounds the execs remembered per sandbox.
+const (
+	ownExecWindow = 30 * time.Second
+	ownExecMax    = 64
+)
+
+func (o *ownExecs) started(sandbox string, at time.Time) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.at == nil {
+		o.at = map[string][]time.Time{}
+	}
+	q := append(o.at[sandbox], at)
+	if len(q) > ownExecMax {
+		q = q[len(q)-ownExecMax:]
+	}
+	o.at[sandbox] = q
+}
+
+// claim reports whether an SSH OPEN that arrived at at is one of
+// DefenseClaw's own execs, which it then no longer waits for.
+func (o *ownExecs) claim(sandbox string, at time.Time) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	q := o.at[sandbox]
+	for len(q) > 0 && q[0].Before(at.Add(-ownExecWindow)) {
+		q = q[1:]
+	}
+	own := len(q) > 0 && !q[0].After(at)
+	if own {
+		q = q[1:]
+	}
+	if len(q) == 0 {
+		delete(o.at, sandbox)
+	} else {
+		o.at[sandbox] = q
+	}
+	return own
+}
+
+// ownExec runs one of DefenseClaw's own commands in a sandbox
+// (Client.Exec), noting it for sshEvent first.
+func (m *Manager) ownExec(ctx context.Context, gw *Gateway, sandbox string, argv []string, opts openshell.ExecOptions) (*openshell.ExecResult, error) {
+	m.ownExecs.started(sandbox, m.now())
+	return gw.Client.Exec(ctx, sandbox, argv, opts)
 }
 
 // inferenceEvent records a model call OpenShell's inference route reported

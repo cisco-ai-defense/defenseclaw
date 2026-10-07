@@ -203,6 +203,7 @@ func TestOCSFActivityRecords(t *testing.T) {
 	// sandbox's goroutines read it.
 	e.fakeClock(at)
 	e.live(sandboxapi.CreateRequest{Name: "actbox"})
+	forgetOwnExecs(e.m, "actbox")
 	for _, line := range []string{
 		"PROC:LAUNCH [INFO] python3(42) [cmd:python3 /work/app/main.py dccert-block-marker --password dccertvalue]",
 		"PROC:TERMINATE [INFO] python3(42) [exit:3]",
@@ -248,6 +249,43 @@ func TestOCSFActivityRecords(t *testing.T) {
 	// The burst, of which the first launch and the terminate took two.
 	if n := len(launches); n != activityBurst-1 {
 		t.Fatalf("paced launches = %d, want %d", n, activityBurst-1)
+	}
+}
+
+// forgetOwnExecs forgets the execs the creation of a sandbox ran: the fake
+// gateway reports no SSH OPEN for them.
+func forgetOwnExecs(m *Manager, sandbox string) {
+	m.ownExecs.mu.Lock()
+	defer m.ownExecs.mu.Unlock()
+	delete(m.ownExecs.at, sandbox)
+}
+
+// TestOwnExecsAreNoSSHActivity (GAP-0083, GAP-0089): every exec is an SSH
+// session in the sandbox, so with the process tree on an idle sandbox's
+// 5-second samples were a sandbox.ssh OPEN record each, about 17000 a day.
+// The OPEN of an exec DefenseClaw ran itself is dropped; a user's is kept.
+func TestOwnExecsAreNoSSHActivity(t *testing.T) {
+	e := newEnv(t, nil)
+	at := time.Now()
+	e.fakeClock(at)
+	e.live(sandboxapi.CreateRequest{Name: "sshbox"})
+	forgetOwnExecs(e.m, "sshbox")
+	ssh := func() int {
+		return len(where(&e.tel.mu, &e.tel.activity, func(a audit.SandboxActivityEvent) bool { return a.Kind == audit.SandboxActivitySSH }))
+	}
+	e.m.ownExecs.started("sshbox", at)
+	e.m.ownExecs.started("sshbox", at)
+	for range 3 {
+		e.ocsf("sshbox", "SSH:OPEN [INFO] ALLOWED", at)
+	}
+	if n := ssh(); n != 1 {
+		t.Fatalf("ssh records = %d, want the one exec DefenseClaw did not run", n)
+	}
+	// An exec whose OPEN never came is forgotten after ownExecWindow.
+	e.m.ownExecs.started("sshbox", at.Add(-2*ownExecWindow))
+	e.ocsf("sshbox", "SSH:OPEN [INFO] ALLOWED", at)
+	if n := ssh(); n != 2 {
+		t.Fatalf("ssh records = %d after a stale exec", n)
 	}
 }
 

@@ -186,7 +186,7 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.D
 	// What the script printed before a failure still counts: a flush that
 	// the exec's timeout cut short comes after the run's lines.
 	streamed := &headBuffer{limit: harnessEndOutput}
-	res, err := gw.Client.Exec(execCtx, name, []string{"/bin/sh", "-c", script, "defenseclaw-end-harness", spec.InstallRoot(),
+	res, err := m.ownExec(execCtx, gw, name, []string{"/bin/sh", "-c", script, "defenseclaw-end-harness", spec.InstallRoot(),
 		strconv.Itoa(ticks), runs}, openshell.ExecOptions{Timeout: timeout, Attempts: 1, MaxOutputBytes: harnessEndOutput, Stdout: streamed})
 	if err != nil {
 		m.logf("sandbox %s: ask the harness to exit before the stop: %v", name, err)
@@ -224,7 +224,7 @@ const harnessEndOutput = 256
 func (m *Manager) probeRun(ctx context.Context, gw *Gateway, name string) harness.DetachedRun {
 	ctx, cancel := context.WithTimeout(ctx, runProbeWait+5*time.Second)
 	defer cancel()
-	res, err := gw.Client.Exec(ctx, name, []string{"/bin/sh", "-c", runProbeScript, "defenseclaw-run-probe", harness.RunDir},
+	res, err := m.ownExec(ctx, gw, name, []string{"/bin/sh", "-c", runProbeScript, "defenseclaw-run-probe", harness.RunDir},
 		openshell.ExecOptions{Timeout: runProbeWait, Attempts: 1, MaxOutputBytes: harnessEndOutput})
 	if err != nil {
 		m.logf("sandbox %s: look at its detached run before the stop: %v", name, err)
@@ -253,7 +253,7 @@ func (b *headBuffer) Bytes() []byte { return b.buf.Bytes() }
 func (m *Manager) flushSandbox(ctx context.Context, gw *Gateway, name string) {
 	ctx, cancel := context.WithTimeout(ctx, flushWait+5*time.Second)
 	defer cancel()
-	res, err := gw.Client.Exec(ctx, name, []string{"/bin/sync"}, openshell.ExecOptions{Timeout: flushWait, Attempts: 1, MaxOutputBytes: 256})
+	res, err := m.ownExec(ctx, gw, name, []string{"/bin/sync"}, openshell.ExecOptions{Timeout: flushWait, Attempts: 1, MaxOutputBytes: 256})
 	if err == nil && res.ExitCode != 0 {
 		err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
 	}
