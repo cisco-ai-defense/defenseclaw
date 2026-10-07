@@ -15265,17 +15265,25 @@ def _restart_openclaw_gateway() -> bool:
             timeout=60,
         )
         output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
-        if result.returncode == 0 and (
-            "openclaw gateway install" in output
-            or re.search(r"service (?:is )?not (?:loaded|enabled|installed|registered|found)", output)
+        # A gateway started with `openclaw gateway run` has no service to restart:
+        # OpenClaw 2026.9 exits non-zero ("Foreground Gateway owner pid N no longer
+        # listens ...") while that gateway keeps running (GAP-0191).
+        foreground_gateway = result.returncode != 0 and "foreground gateway" in output
+        if foreground_gateway or (
+            result.returncode == 0
+            and (
+                "openclaw gateway install" in output
+                or re.search(r"service (?:is )?not (?:loaded|enabled|installed|registered|found)", output)
+            )
         ):
-            # OpenClaw exits 0 but restarted nothing: there is no installed
-            # gateway service (for example a foreground `openclaw gateway`).
-            # Don't claim a restart happened (GAP-1408).
+            # OpenClaw restarted nothing: there is no installed gateway service
+            # (for example a foreground `openclaw gateway run`). Don't claim a
+            # restart happened (GAP-1408); the health check that follows confirms
+            # the gateway answers, and it reloads openclaw.json on its own.
             click.echo(" - (no OpenClaw gateway service to restart)")
             click.echo(
-                "    If OpenClaw runs in a terminal (openclaw gateway), restart it there so it loads "
-                "the DefenseClaw plugin."
+                "    If OpenClaw runs in a terminal (openclaw gateway run), restart it there if it does not "
+                "load the DefenseClaw plugin."
             )
             return True
         if result.returncode == 0:
