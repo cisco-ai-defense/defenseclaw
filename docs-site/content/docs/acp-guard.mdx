@@ -252,8 +252,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll \
 
 On Windows only LocalSystem can write the token into a user profile. Run the
 enrollment as LocalSystem (an MDM script or a SYSTEM scheduled task) while the
-user is signed in, and name the user with `--user` or `--sid`. An elevated
-administrator prompt is refused, and `--user-home` alone names the owner of the
+user is signed in, and name the user with `--user` or `--sid` (an Entra ID
+account as `--user AzureAD\name`, resolved like `enterprise policy show
+--user`; it needs a profile on the computer). An elevated administrator prompt
+is refused, and `--user-home` alone names the owner of the
 profile folder, which can be SYSTEM:
 
 ```powershell
