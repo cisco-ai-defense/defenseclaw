@@ -104,7 +104,7 @@ When local policy cannot decide (e.g., the tool is not in any deny/allow list an
 - Local evaluation results from stages 1–7
 - Device identity and session context
 
-The cloud instance can run YARA rules, an LLM judge, or OPA policies that are too expensive for the device. The escalation mode (`speculative` vs `sync_block`) determines whether the tool call proceeds optimistically or waits for the cloud verdict.
+The cloud instance can run additional analysis that is too expensive for the device. The escalation mode (`speculative` vs `sync_block`) determines whether the tool call proceeds optimistically or waits for the cloud verdict.
 
 ## Trust boundary inference
 
@@ -170,7 +170,7 @@ The fleet management and verdict cache run as Go services alongside the main Def
 ## OTA policy updates
 
 Policy updates are distributed over MQTT with:
-- **Ed25519 signatures** — every update is cryptographically signed
+- **HMAC-SHA256 signatures** — every update is cryptographically signed
 - **Anti-rollback** — monotonic version counter prevents downgrade attacks
 - **Canary deployment** — new policies are tested on a subset of devices before fleet-wide rollout
 - **Sequence replay protection** — duplicate or out-of-order updates are rejected

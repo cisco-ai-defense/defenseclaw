@@ -40,7 +40,7 @@ _MOSQUITTO_IMAGE = "eclipse-mosquitto:2"
 _CONTAINER_NAME = "defenseclaw-mqtt"
 _ENV_KEY = "DCLAW_MQTT_BROKER_URL"
 
-_MOSQUITTO_CONF = """\
+_MOSQUITTO_CONF_TEMPLATE = """\
 # DefenseClaw MQTT broker configuration
 listener 1883
 allow_anonymous false
@@ -136,11 +136,15 @@ def _setup_docker(port: int) -> dict | bool:
     os.makedirs(conf_dir, exist_ok=True)
     ux.ok(f"Config directory: {conf_dir}")
 
-    # Step 2: Write mosquitto.conf with persistence enabled
+    # Step 2: Write mosquitto.conf with persistence enabled.
+    # P1-10 fix: The listener inside the container is always 1883.
+    # Docker's -p flag maps the user's external port to 1883 internally.
+    # Previously this used the user's port, which broke when --port != 1883
+    # because the container would listen on a non-mapped port.
     conf_file = conf_dir / "mosquitto.conf"
     mosquitto_conf = (
         "# DefenseClaw MQTT broker configuration\n"
-        f"listener {port}\n"
+        "listener 1883\n"
         "allow_anonymous false\n"
         "password_file /mosquitto/config/passwd\n"
         "persistence true\n"
@@ -178,6 +182,18 @@ def _setup_docker(port: int) -> dict | bool:
     if passwd_result.returncode != 0:
         ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
         return False
+
+    # P1-10 fix: chmod the password file to 0644 so the broker process
+    # (which may run as a non-root user inside the container) can read it.
+    # The mosquitto_passwd container runs as root, creating the file with
+    # root:root 0600 permissions, which the broker's mosquitto user cannot
+    # read — causing silent authentication failures.
+    passwd_file = conf_dir / "passwd"
+    try:
+        passwd_file.chmod(0o644)
+    except OSError:
+        ux.warn("Could not chmod password file to 0644 — broker may fail to read it.")
+
     ux.ok(f"MQTT user '{mqtt_user}' password file generated")
 
     # Step 4: Start the broker container mounting config and data directories.
@@ -239,7 +255,14 @@ def _setup_docker(port: int) -> dict | bool:
     if connack_ok:
         ux.ok("MQTT CONNACK verified -- broker accepts credentials")
     else:
-        ux.warn("Could not verify MQTT CONNACK. The broker may still be starting.")
+        # P1-10 fix: If CONNACK fails, the broker is broken. Clean up the
+        # container and return failure instead of reporting success.
+        ux.err(
+            "MQTT CONNACK verification failed -- broker is not accepting connections.\n"
+            "  Cleaning up container..."
+        )
+        subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
+        return False
 
     return {"mqtt_user": mqtt_user, "mqtt_pass": mqtt_pass}
 

@@ -139,9 +139,26 @@ def _build_remote(target: str, user: str, remote_dir: str, profile: str) -> bool
     return True
 
 
+def _load_local_env_value(key: str) -> str:
+    """Read a value from ~/.defenseclaw/.env (local operator machine)."""
+    env_path = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
+    if not env_path.is_file():
+        return ""
+    try:
+        for line in env_path.read_text().splitlines():
+            s = line.strip()
+            for prefix in (f"{key}=", f"export {key}="):
+                if s.startswith(prefix):
+                    return s.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
 def _configure_remote_env(
     target: str, user: str,
     tenant_id: str, fleet_id: str, device_id: str, broker_url: str,
+    device_key: str = "",
 ) -> None:
     """Write device env vars to /etc/defenseclaw/edge-connector.env on the remote."""
     ux.echo()
@@ -152,6 +169,24 @@ def _configure_remote_env(
         f"DCLAW_DEVICE_ID={shlex.quote(str(device_id))}\n"
         f"DCLAW_BROKER_URL={shlex.quote(str(broker_url))}\n"
     )
+
+    # Provision device key from registration response (if available)
+    if device_key:
+        env_lines += f"DCLAW_DEVICE_KEY={shlex.quote(device_key)}\n"
+
+    # Provision MQTT credentials from the operator's local .env
+    mqtt_user = _load_local_env_value("DCLAW_MQTT_USER")
+    mqtt_pass = _load_local_env_value("DCLAW_MQTT_PASS")
+    if mqtt_user:
+        env_lines += f"DCLAW_MQTT_USER={shlex.quote(mqtt_user)}\n"
+    if mqtt_pass:
+        env_lines += f"DCLAW_MQTT_PASS={shlex.quote(mqtt_pass)}\n"
+
+    # Provision OTA signing key from the operator's local .env
+    ota_key = _load_local_env_value("DCLAW_OTA_KEY")
+    if ota_key:
+        env_lines += f"DCLAW_OTA_KEY={shlex.quote(ota_key)}\n"
+
     configure_cmd = (
         "sudo mkdir -p /etc/defenseclaw && "
         f"printf %s {shlex.quote(env_lines)} | sudo tee /etc/defenseclaw/edge-connector.env > /dev/null && "
@@ -163,6 +198,10 @@ def _configure_remote_env(
     )
     if result.returncode == 0:
         ux.ok("Device environment configured at /etc/defenseclaw/edge-connector.env")
+        if not mqtt_user:
+            ux.warn("DCLAW_MQTT_USER not found in ~/.defenseclaw/.env -- configure manually on the device.")
+        if not ota_key:
+            ux.warn("DCLAW_OTA_KEY not found in ~/.defenseclaw/.env -- configure manually on the device.")
     else:
         ux.warn("Could not write env file. Configure manually on the device.")
 

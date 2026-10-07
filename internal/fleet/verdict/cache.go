@@ -147,7 +147,9 @@ func (c *Cache) Store(toolHash [32]byte, action Action, severity uint8) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.entries) >= c.maxSize {
+	_, replacing := c.entries[toolHash]
+
+	if !replacing && len(c.entries) >= c.maxSize {
 		c.evictLRU()
 	}
 
@@ -159,7 +161,8 @@ func (c *Cache) Store(toolHash [32]byte, action Action, severity uint8) {
 		TTL:        ttl,
 		LastAccess: now,
 	}
-	if c.onStore != nil {
+	// Only increment size on new entries, not replacements.
+	if !replacing && c.onStore != nil {
 		c.onStore()
 	}
 }

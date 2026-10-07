@@ -21,6 +21,7 @@ static uint16_t ring_head = 0; /* next write position in flash ring */
 #define AUDIT_KEY_LEN 32
 static uint8_t s_audit_key[AUDIT_KEY_LEN];
 static bool    s_audit_key_loaded = false;
+static bool    s_audit_key_provisioned = false; /* true only when DCLAW_AUDIT_KEY is valid */
 
 static const uint8_t *get_audit_key(void) {
     if (s_audit_key_loaded) return s_audit_key;
@@ -44,15 +45,18 @@ static const uint8_t *get_audit_key(void) {
             else { valid = false; break; }
             s_audit_key[i] = (uint8_t)((hi << 4) | lo);
         }
-        if (valid) return s_audit_key;
+        if (valid) {
+            s_audit_key_provisioned = true;
+            return s_audit_key;
+        }
         fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY has invalid hex, "
                 "using dev fallback key.\n");
     } else if (env != NULL) {
         fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY must be 64 hex chars, "
                 "using dev fallback key.\n");
     } else {
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY not set — using dev "
-                "fallback key. Audit chain integrity is reduced.\n");
+        fprintf(stderr, "[DCLAW] WARNING: Audit integrity guarantees disabled "
+                "-- set DCLAW_AUDIT_KEY for tamper-evident logging.\n");
     }
 
     /* Dev fallback: deterministic but non-zero key */
@@ -275,4 +279,10 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 int dclaw_flush_audit(void) {
     dclaw_state_t *s = dclaw_get_state();
     return flush_buffer_to_flash(&s->audit_writer);
+}
+
+bool dclaw_audit_key_provisioned(void) {
+    /* Trigger lazy key load if not yet done */
+    get_audit_key();
+    return s_audit_key_provisioned;
 }

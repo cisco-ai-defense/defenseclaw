@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 )
 
@@ -71,10 +72,10 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// WireMetrics connects GlobalMetrics to the FleetManager and verdict Cache
-// via their metrics hook interfaces. Call this once at startup after creating
-// the manager and cache.
-func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache) {
+// WireMetrics connects GlobalMetrics to the FleetManager, verdict Cache,
+// and MQTT Bridge via their metrics hook interfaces. Call this once at
+// startup after creating the manager, cache, and bridge.
+func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache, bridge *mqtt.Bridge) {
 	mgr.SetMetricsHooks(
 		func() { // onDeviceRegistered
 			GlobalMetrics.DevicesOnline.Add(1)
@@ -102,4 +103,10 @@ func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache) {
 			GlobalMetrics.VerdictCacheSize.Add(-1)
 		},
 	)
+
+	if bridge != nil {
+		bridge.SetOnBlock(func() {
+			GlobalMetrics.BlocksTotal.Add(1)
+		})
+	}
 }

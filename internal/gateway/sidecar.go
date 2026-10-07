@@ -6900,7 +6900,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		// when no cloud inspection pipeline is configured.
 		return fleetverdict.ActionBlock, 3 // severity=3 (high)
 	})
-	fleet.WireMetrics(fleetMgr, fleetCache)
+	fleet.WireMetrics(fleetMgr, fleetCache, nil)
 
 	// Wire the policy service so policy endpoints (push, emergency, versions)
 	// are functional instead of returning 501.
@@ -6925,6 +6925,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		} else {
 			fleetMQTTClient = tcpClient
 			bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+			// Wire block metric so BLOCK verdicts increment the Prometheus counter
+			bridge.SetOnBlock(func() { fleet.GlobalMetrics.BlocksTotal.Add(1) })
 			// Wire per-device key resolution from the SQLite store so the
 			// bridge verifies/computes verdict HMACs with the correct key
 			// instead of falling back to the fleet-wide shared key.

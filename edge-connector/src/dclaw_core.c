@@ -29,7 +29,12 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint16_t target_hash, uint16_t session_id);
 extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_config_load_brokers(void);
+#if DCLAW_MQTT_ENABLED
 extern void dclaw_canary_record_block(void);
+extern void dclaw_emergency_load_from_flash(void);
+#else
+static inline void dclaw_canary_record_block(void) { /* no-op: canary is part of OTA/MQTT */ }
+#endif
 extern void dclaw_policy_tables_init(void);
 
 dclaw_state_t *dclaw_get_state(void) {
@@ -45,7 +50,25 @@ int dclaw_init(const dclaw_device_info_t *info) {
     g_state.next_request_id = 1;
     g_state.initialized = true;
     dclaw_policy_tables_init();
+
+#if DCLAW_MQTT_ENABLED
+    /* P1-07 fix: After loading compiled-in defaults, attempt to reload
+     * OTA'd policy tables from the active flash partition. This restores
+     * the most recent OTA policy on restart instead of reverting to
+     * compiled defaults. If flash is empty or corrupt, the compiled
+     * defaults remain in effect.
+     * Only available when MQTT/OTA is enabled (ota_receiver.c compiled). */
+    dclaw_policy_reload_from_flash();
+#endif
+
     dclaw_config_load_brokers();
+
+#if DCLAW_MQTT_ENABLED
+    /* P1-09 fix: Restore emergency lockdown state from flash so that
+     * BLOCK_ALL / ENTER_LOCKDOWN persists across daemon restarts.
+     * Only available when MQTT/OTA is enabled (ota_receiver.c compiled). */
+    dclaw_emergency_load_from_flash();
+#endif
 
     uint64_t now = hal_tick_ms();
     g_state.audit_writer.last_flush_tick = now;
@@ -158,8 +181,19 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
      * is the SHA-256 of the submitted tool_name. An attacker could submit
      * exec_shell's hash with sensor_read as the name to bypass capability
      * lookup (which is based on name) while the cache/verdict uses the hash.
-     * This check binds them together: if they don't match, BLOCK. */
-    if (req->tool_name[0] != '\0') {
+     * This check binds them together: if they don't match, BLOCK.
+     *
+     * P1-05 fix: An empty tool_name is rejected as INVALID_INPUT. Previously
+     * an empty name skipped this check entirely, allowing an attacker to
+     * submit any hash with no name and bypass capability-based controls. */
+    if (req->tool_name[0] == '\0') {
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
+                          target_hash, req->session_id);
+        g_state.eval_denied_count++;
+        dclaw_canary_record_block();
+        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
+    }
+    {
         uint8_t computed_hash[DCLAW_SHA256_DIGEST_SIZE];
         size_t name_len = strlen(req->tool_name);
         dclaw_sha256((const uint8_t *)req->tool_name, name_len, computed_hash);

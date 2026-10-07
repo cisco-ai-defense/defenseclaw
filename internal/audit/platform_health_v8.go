@@ -357,6 +357,35 @@ func auditPlatformHealthV8Occurrence(event Event) (sinkHealthV8Occurrence, bool)
 		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, event.Severity
 		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
 		occurrence.errorCode = observability.Present("fleet_alert")
+	case ActionFleetDeviceRegistered:
+		occurrence.durableHealthTransition = true
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "registration"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+	case ActionFleetDeviceDecommission:
+		occurrence.durableHealthTransition = true
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "decommission"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "stopped"
+	case ActionFleetDeviceCommand:
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "command"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+	case ActionFleetPolicyPush:
+		occurrence.durableHealthTransition = true
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "policy"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+	case ActionFleetPolicyEmergency:
+		occurrence.durableHealthTransition = true
+		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "emergency"
+		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "HIGH"
+		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
+		occurrence.errorCode = observability.Present("emergency_command")
+	case ActionFleetThreatIntel:
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "threat_intel"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
 
 	default:
 		return sinkHealthV8Occurrence{}, false

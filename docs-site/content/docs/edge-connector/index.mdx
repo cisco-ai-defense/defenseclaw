@@ -29,7 +29,7 @@ Desktop connectors intercept tool calls via hooks or proxy and delegate evaluati
 | Network | Always-on | Intermittent or absent |
 | Consequences of failure | Bad file on disk | **Physical world action** |
 
-The Edge Connector solves this by running an 8-stage evaluation pipeline entirely on-device, delegating complex analysis (YARA, LLM judge, OPA) to a cloud DefenseClaw instance only when local policy cannot decide.
+The Edge Connector solves this by running an 8-stage evaluation pipeline entirely on-device, delegating complex analysis to a cloud DefenseClaw instance only when local policy cannot decide.
 
 ## What it does
 
@@ -39,7 +39,7 @@ The Edge Connector solves this by running an 8-stage evaluation pipeline entirel
   <Card title="Sequence correlation" description="FSM-based detection of dangerous multi-step capability patterns (e.g., net_fetch → exec_shell)." />
   <Card title="Rate limiting" description="Three independent token buckets — tool calls, network requests, and physical actuations — each configurable per-minute." />
   <Card title="Verdict caching" description="LRU cache with TTL and clock-trust validation so repeated safe calls skip the full pipeline." />
-  <Card title="Cloud escalation" description="Forwards content snippets via MQTT 3.1.1 to a cloud DefenseClaw instance for YARA, LLM judge, or OPA when local policy is insufficient." />
+  <Card title="Cloud escalation" description="Forwards content snippets via MQTT 3.1.1 to a cloud DefenseClaw instance for further analysis when local policy is insufficient." />
 </Cards>
 
 ## 8-stage evaluation pipeline

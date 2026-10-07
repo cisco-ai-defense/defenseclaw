@@ -144,7 +144,7 @@ iot_extensions:
 Only needed when you change the policy. Pre-built binaries include the default policy.
 
 ```bash
-python3 tools/policy_compiler.py \
+python3 edge-connector/tools/policy_compiler.py \
   --input ~/.defenseclaw/policy.yaml \
   --profile standard --version 1 \
   --output-header generated/policy_tables.h \
@@ -385,12 +385,14 @@ docker run -d --name mosquitto -p 1883:1883 \
 **Authenticated setup (recommended for production):**
 
 ```bash
+# Create the mqtt directory first (prevents Docker from creating it as root)
+mkdir -p mqtt
+
 # Create a password file with a broker user (runs mosquitto_passwd inside a container)
 docker run --rm -v ./mqtt:/mosquitto/config eclipse-mosquitto \
   mosquitto_passwd -b -c /mosquitto/config/passwd dclaw yourpassword
 
 # Create a config that requires authentication
-mkdir -p mqtt
 cat > mqtt/mosquitto.conf <<'EOF'
 listener 1883 0.0.0.0
 allow_anonymous false
@@ -402,14 +404,18 @@ docker run -d --name mosquitto -p 1883:1883 \
   eclipse-mosquitto:2
 ```
 
-Set the broker credentials on both sides:
+Set the broker credentials on both sides using environment variables (the Go and C MQTT clients do not parse userinfo from the broker URL):
 
 ```bash
 # Gateway (Go fleet server)
-export DCLAW_MQTT_BROKER_URL=tcp://dclaw:yourpassword@broker-host:1883
+export DCLAW_MQTT_BROKER_URL=tcp://broker-host:1883
+export DCLAW_MQTT_USER=dclaw
+export DCLAW_MQTT_PASS=yourpassword
 
 # Edge devices (C edge connector)
-export DCLAW_BROKER_URL=mqtt://dclaw:yourpassword@broker-host:1883
+export DCLAW_BROKER_URL=mqtt://broker-host:1883
+export DCLAW_MQTT_USER=dclaw
+export DCLAW_MQTT_PASS=yourpassword
 ```
 
 <Callout type="warn">

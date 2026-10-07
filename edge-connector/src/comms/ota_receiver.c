@@ -28,6 +28,8 @@ void dclaw_policy_rollback(void);
 void dclaw_canary_tick(void);
 void dclaw_canary_record_block(void);
 int dclaw_policy_reload_from_flash(void);
+void dclaw_emergency_persist(void);
+void dclaw_emergency_load_from_flash(void);
 
 /* Policy blob header format (first 8 bytes of blob) */
 typedef struct {
@@ -354,6 +356,13 @@ void dclaw_policy_rollback(void) {
     dclaw_config_switch_policy_partition();
     s->canary.canary_active = false;
     dclaw_cache_flush_all();
+
+    /* P1-07 fix: Reload policy tables from the rolled-back partition so the
+     * runtime tables actually reflect the old policy. Without this, the
+     * partition was switched but the in-memory tables still held the new
+     * (bad) policy rules. */
+    dclaw_policy_reload_from_flash();
+
     dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_POLICY_TABLE, 0xFFFF, 0);
 }
 
@@ -445,6 +454,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     /* Update sequence counter */
     s->emergency.last_seen_seq = seq;
 
+    /* P1-09 fix: Persist emergency state to flash so lockdown survives restart */
+    dclaw_emergency_persist();
+
     dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_BLOCK, 0, 0);
     return 0;
 }
@@ -494,20 +506,19 @@ int dclaw_policy_reload_from_flash(void) {
         return 1;
     }
 
-    /* Parse into a staging area. Only commit to the live tables if we
-     * extracted at least one meaningful section. This ensures that a
-     * minimal/test blob with an all-zero payload does not wipe the
-     * compiled-in defaults. */
+    /* P1-08 fix: Stage from a COPY of the current runtime tables (not zeros).
+     * This way, sections omitted from the OTA blob preserve their existing
+     * values instead of being zeroed. Only sections present in the blob are
+     * overwritten. Previously, staging from zeros meant a partial OTA that
+     * only contained severity rules would wipe out destination allowlists
+     * and sequence rules. */
     dclaw_policy_table_t staged;
-    memset(&staged, 0, sizeof(staged));
+    memcpy(&staged, &s->rt_policy, sizeof(staged));
 
-    /* Preserve existing deny hashes.
+    /* Deny hashes are preserved from the copy above.
      * NOTE: The OTA binary blob format (policy_compiler.py generate_binary_blob)
      * does not currently include deny hashes — they are only populated via the
-     * threat-intel push API at runtime. Deny hash updates via OTA require a
-     * daemon restart or a threat-intel push. Log a warning so operators know. */
-    memcpy(staged.deny_hashes, s->rt_policy.deny_hashes, sizeof(staged.deny_hashes));
-    staged.deny_hashes_count = s->rt_policy.deny_hashes_count;
+     * threat-intel push API at runtime. */
     if (staged.deny_hashes_count > 0) {
         fprintf(stderr, "[DCLAW] WARNING: %zu deny hashes preserved from previous policy. "
                 "OTA blob does not carry deny hashes — updates require restart or "
@@ -519,10 +530,14 @@ int dclaw_policy_reload_from_flash(void) {
     size_t pos = 0;
     bool any_parsed = false;
 
-    /* Parse severity rules */
+    /* Parse severity rules — reset this section's count so entries from
+     * the blob REPLACE (not append to) the inherited values. */
     if (pos >= remaining) goto parse_done;
     {
         uint8_t sev_count = payload[pos++];
+        if (sev_count > 0) {
+            staged.severity_rules_count = 0;  /* replace section */
+        }
         for (uint8_t i = 0; i < sev_count && pos + 1 < remaining; i++) {
             if (staged.severity_rules_count < DCLAW_RT_MAX_SEVERITY_RULES) {
                 staged.severity_rules[staged.severity_rules_count].severity = payload[pos];
@@ -534,10 +549,13 @@ int dclaw_policy_reload_from_flash(void) {
         }
     }
 
-    /* Parse sequence rules */
+    /* Parse sequence rules — same replace-if-present logic. */
     if (pos >= remaining) goto parse_done;
     {
         uint8_t seq_count = payload[pos++];
+        if (seq_count > 0) {
+            staged.sequence_rules_count = 0;  /* replace section */
+        }
         for (uint8_t i = 0; i < seq_count && pos + 5 < remaining; i++) {
             if (staged.sequence_rules_count < DCLAW_RT_MAX_SEQUENCE_RULES) {
                 memcpy(staged.sequence_rules[staged.sequence_rules_count].seq, payload + pos, 4);
@@ -550,10 +568,13 @@ int dclaw_policy_reload_from_flash(void) {
         }
     }
 
-    /* Parse destination allowlist */
+    /* Parse destination allowlist — same replace-if-present logic. */
     if (pos >= remaining) goto parse_done;
     {
         uint8_t dest_count = payload[pos++];
+        if (dest_count > 0) {
+            staged.dest_allowlist_count = 0;  /* replace section */
+        }
         for (uint8_t i = 0; i < dest_count && pos < remaining; i++) {
             uint8_t dlen = payload[pos++];
             if (pos + dlen > remaining) break;
@@ -596,4 +617,63 @@ bool dclaw_emergency_has_gap(uint32_t cloud_current_seq) {
         return true;
     }
     return false;
+}
+
+/* === P1-09 fix: Persist emergency state to flash === */
+
+/*
+ * Emergency state is stored in the first 8 bytes of the config partition
+ * (HAL_FLASH_CONFIG_OFFSET). Layout:
+ *   [0..1] magic marker (0xDC, 0xE9) — "DC Emergency 9"
+ *   [2]    block_all_active (0x00 or 0x01)
+ *   [3]    reserved (0x00)
+ *   [4..7] last_seen_seq  (big-endian uint32)
+ *
+ * The 2-byte magic ensures we don't misinterpret stale/uninitialized flash
+ * (which reads as all-zeros or all-0xFF) as a valid emergency state.
+ */
+#define EMERGENCY_FLASH_OFFSET  HAL_FLASH_CONFIG_OFFSET
+#define EMERGENCY_FLASH_SIZE    8
+#define EMERGENCY_MAGIC_0       0xDC
+#define EMERGENCY_MAGIC_1       0xE9
+
+void dclaw_emergency_persist(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint8_t buf[EMERGENCY_FLASH_SIZE];
+
+    buf[0] = EMERGENCY_MAGIC_0;
+    buf[1] = EMERGENCY_MAGIC_1;
+    buf[2] = s->emergency.block_all_active ? 0x01 : 0x00;
+    buf[3] = 0x00;
+    buf[4] = (uint8_t)(s->emergency.last_seen_seq >> 24);
+    buf[5] = (uint8_t)(s->emergency.last_seen_seq >> 16);
+    buf[6] = (uint8_t)(s->emergency.last_seen_seq >> 8);
+    buf[7] = (uint8_t)(s->emergency.last_seen_seq);
+
+    if (hal_flash_write(EMERGENCY_FLASH_OFFSET, buf, EMERGENCY_FLASH_SIZE) != 0) {
+        fprintf(stderr, "[DCLAW] WARNING: Failed to persist emergency state to flash.\n");
+    }
+}
+
+void dclaw_emergency_load_from_flash(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    uint8_t buf[EMERGENCY_FLASH_SIZE];
+
+    if (hal_flash_read(EMERGENCY_FLASH_OFFSET, buf, EMERGENCY_FLASH_SIZE) != 0) {
+        return; /* Flash read failed — start fresh */
+    }
+
+    /* Verify magic marker — rejects uninitialized flash (all 0x00 or 0xFF) */
+    if (buf[0] != EMERGENCY_MAGIC_0 || buf[1] != EMERGENCY_MAGIC_1) {
+        return; /* No valid persisted emergency state */
+    }
+
+    s->emergency.block_all_active = (buf[2] == 0x01);
+    s->emergency.last_seen_seq = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
+                                 ((uint32_t)buf[6] << 8) | (uint32_t)buf[7];
+    s->emergency.initialized = true;
+
+    if (s->emergency.block_all_active) {
+        fprintf(stderr, "[DCLAW] Emergency lockdown state restored from flash.\n");
+    }
 }

@@ -339,7 +339,15 @@ static int mqtt_send_connect(int fd) {
     if (user_len > 0) remaining += 2 + user_len;
     if (pass_len > 0) remaining += 2 + pass_len;
 
-    uint8_t pkt[256];
+    /* P1-04 fix: Reject if the packet would overflow the fixed buffer.
+     * The fixed header is at most 5 bytes (1 type + 4 remaining-length). */
+    uint8_t pkt[512];
+    if (1 + 4 + remaining > sizeof(pkt)) {
+        fprintf(stderr, "[DCLAW-MQTT] CONNECT packet too large (%u bytes) — "
+                "check DCLAW_MQTT_USER/DCLAW_MQTT_PASS length\n",
+                (unsigned)(1 + 4 + remaining));
+        return -1;
+    }
     int pos = 0;
 
     /* Fixed header */

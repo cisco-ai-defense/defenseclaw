@@ -316,6 +316,7 @@ dclaw_action_t dclaw_check_destination(const char *host, uint16_t port);
 void dclaw_report_result(uint16_t session_id, const char *tool_name,
                          bool success, const char *output_summary);
 int dclaw_flush_audit(void);
+bool dclaw_audit_key_provisioned(void);
 int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                        const uint8_t *signature);
 int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);

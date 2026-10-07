@@ -109,11 +109,21 @@ type Bridge struct {
 	// P0-6 fix: default is false to prevent unauthenticated auto-registration.
 	AllowAutoRegistration bool
 
+	// Metrics hooks (set externally to avoid circular imports)
+	onBlock func()
+
 	// Stats for observability
 	mu                  sync.RWMutex
 	heartbeatsProcessed uint64
 	verdictsProcessed   uint64
 	decodeErrors        uint64
+}
+
+// SetOnBlock configures a callback that fires when a verdict request
+// results in a BLOCK action.  Used by WireMetrics to increment the
+// fleet-level blocks counter without a circular import.
+func (b *Bridge) SetOnBlock(fn func()) {
+	b.onBlock = fn
 }
 
 // BridgeConfig holds configuration for the MQTT bridge.
@@ -367,6 +377,11 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 
 	// Evaluate via the verdict cache (cache hit or pipeline execution)
 	action, severity := b.cache.Evaluate(vr.ToolHash)
+
+	// Wire block count metric
+	if action == verdict.ActionBlock && b.onBlock != nil {
+		b.onBlock()
+	}
 
 	// Build a response
 	resp := &VerdictResponse{

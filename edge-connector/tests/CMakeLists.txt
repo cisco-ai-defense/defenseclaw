@@ -37,12 +37,18 @@ if(DCLAW_MQTT_ENABLED)
     add_executable(test_ota_emergency test_ota_emergency.c)
     target_link_libraries(test_ota_emergency PRIVATE dclaw_core)
     add_test(NAME ota_emergency COMMAND test_ota_emergency)
+    # P1-09: Give each test its own flash file so persisted emergency state
+    # from one test does not leak into another.
+    set_tests_properties(ota_emergency PROPERTIES
+        ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-ota-emergency.bin")
 endif()
 
 if(DCLAW_CONTENT_SCAN AND DCLAW_MQTT_ENABLED)
     add_executable(test_acceptance test_acceptance.c)
     target_link_libraries(test_acceptance PRIVATE dclaw_core)
     add_test(NAME acceptance COMMAND test_acceptance)
+    set_tests_properties(acceptance PROPERTIES
+        ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-acceptance.bin")
 endif()
 
 add_executable(bench_latency bench_latency.c)

@@ -136,9 +136,9 @@ def _build_edge_connector_tool(
             object.__setattr__(self, "_wrapped_tool", tool)
             object.__setattr__(self, "_wrapped_connector", connector)
 
-        def _run(self, *args: Any, **kwargs: Any) -> str:
+        def _run(self, tool_input: Any = None, *args: Any, **kwargs: Any) -> str:
             ec = self._wrapped_connector or get_connector(fail_open=False)
-            arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
+            arguments = kwargs if kwargs else ({"input": tool_input} if tool_input is not None else {})
             verdict_result = ec.evaluate(
                 tool_name=self._wrapped_tool.name,
                 arguments=arguments,
@@ -150,11 +150,11 @@ def _build_edge_connector_tool(
                 )
                 logger.warning(msg)
                 return msg
-            return self._wrapped_tool.run(*args, **kwargs)
+            return self._wrapped_tool.run(tool_input, *args, **kwargs)
 
-        async def _arun(self, *args: Any, **kwargs: Any) -> str:
+        async def _arun(self, tool_input: Any = None, *args: Any, **kwargs: Any) -> str:
             ec = self._wrapped_connector or get_connector(fail_open=False)
-            arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
+            arguments = kwargs if kwargs else ({"input": tool_input} if tool_input is not None else {})
             verdict_result = ec.evaluate(
                 tool_name=self._wrapped_tool.name,
                 arguments=arguments,
@@ -166,7 +166,7 @@ def _build_edge_connector_tool(
                 )
                 logger.warning(msg)
                 return msg
-            return self._wrapped_tool.run(*args, **kwargs)
+            return await self._wrapped_tool.ainvoke(tool_input, **kwargs)
 
     # Set __module__ explicitly to prevent KeyError in Pydantic introspection.
     EdgeConnectorTool.__module__ = __name__

@@ -161,27 +161,46 @@ def devices(app: AppContext, as_json: bool) -> None:
         ux.echo(f"  {did:<28s} {ux._style(st, fg=color):<22s} {ls}")
 
 
+def _compose_device_id(device_id: str, tenant_id: int, fleet_id: int) -> str:
+    """Compose a full 64-bit device ID from short ID + tenant/fleet.
+
+    If *device_id* is already a large integer (>= 2^32), it is assumed to be
+    the composite ID and returned as-is.  Otherwise the same formula the Go
+    manager uses is applied: ``(tenantID << 48) | (fleetID << 32) | deviceID``.
+    """
+    try:
+        raw = int(device_id)
+    except ValueError:
+        return device_id  # non-numeric -- pass through and let the API decide
+    if raw < (1 << 32):
+        raw = (tenant_id << 48) | (fleet_id << 32) | raw
+    return str(raw)
+
+
 @edge_connector_group.command("device")
 @click.argument("device_id")
+@click.option("--tenant-id", default=1, type=int, help="Tenant ID for composing the full device ID (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Fleet ID for composing the full device ID (default 1).")
 @click.option("--json", "as_json", is_flag=True, help="Emit device details as JSON.")
 @pass_ctx
-def device_detail(app: AppContext, device_id: str, as_json: bool) -> None:
+def device_detail(app: AppContext, device_id: str, tenant_id: int, fleet_id: int, as_json: bool) -> None:
     """Show detailed information for a single device."""
+    full_id = _compose_device_id(device_id, tenant_id, fleet_id)
     c = _client(app)
     try:
-        resp = c.get(f"/devices/{device_id}")
+        resp = c.get(f"/devices/{full_id}")
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
     if resp.status_code == 404:
-        ux.err(f"Device '{device_id}' not found.")
+        ux.err(f"Device '{device_id}' not found (looked up as {full_id}).")
         raise SystemExit(1)
     _check(resp, f"Failed to get device '{device_id}'")
     data = _body(resp) or {}
     if as_json:
         click.echo(json.dumps(data, indent=2))
         return
-    ux.echo(ux.bold(f"  Device: {device_id}"))
+    ux.echo(ux.bold(f"  Device: {full_id}"))
     for key in ("status", "last_seen", "last_heartbeat", "firmware", "policy_version",
                 "ip_address", "hostname", "tags", "registered_at"):
         val = data.get(key)
@@ -324,24 +343,27 @@ def health(app: AppContext, as_json: bool) -> None:
 @edge_connector_group.command("command")
 @click.argument("device_id")
 @click.argument("cmd", type=click.Choice(["reboot", "policy-refresh", "diagnostics"]))
+@click.option("--tenant-id", default=1, type=int, help="Tenant ID for composing the full device ID (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Fleet ID for composing the full device ID (default 1).")
 @click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
 @pass_ctx
-def send_command(app: AppContext, device_id: str, cmd: str, as_json: bool) -> None:
+def send_command(app: AppContext, device_id: str, cmd: str, tenant_id: int, fleet_id: int, as_json: bool) -> None:
     """Send a command to a device (reboot, policy-refresh, diagnostics)."""
+    full_id = _compose_device_id(device_id, tenant_id, fleet_id)
     c = _client(app)
     try:
-        resp = c.post(f"/devices/{device_id}/command", {"command": cmd})
+        resp = c.post(f"/devices/{full_id}/command", {"command": cmd})
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
     if resp.status_code == 404:
-        ux.err(f"Device '{device_id}' not found.")
+        ux.err(f"Device '{device_id}' not found (looked up as {full_id}).")
         raise SystemExit(1)
     _check(resp, f"Failed to send '{cmd}' to '{device_id}'")
     if as_json:
         click.echo(json.dumps(_body(resp) or {"status": "sent"}, indent=2))
         return
-    ux.ok(f"Command '{cmd}' sent to device '{device_id}'.")
+    ux.ok(f"Command '{cmd}' sent to device '{full_id}'.")
 
 
 # ---------------------------------------------------------------------------

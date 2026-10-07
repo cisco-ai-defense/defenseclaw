@@ -113,12 +113,16 @@ type FleetManager struct {
 }
 
 // New creates a new FleetManager instance.
+// P1-06 fix: AutoRegister defaults to false. The sidecar sets it from
+// env var DCLAW_FLEET_AUTO_REGISTER, so explicit opt-in is required.
+// Previously the default was true, which allowed anonymous devices to
+// enroll themselves without operator approval.
 func New(alertHandler AlertHandler) *FleetManager {
 	return &FleetManager{
 		devices:           make(map[uint64]*Device),
 		alertHandler:      alertHandler,
 		heartbeatInterval: 30 * time.Second,
-		AutoRegister:      true,
+		AutoRegister:      false,
 	}
 }
 

@@ -160,86 +160,12 @@ echo "ACL written to $ACL_FILE"
 echo "Reload Mosquitto: sudo systemctl reload mosquitto"
 ```
 
-## 3. mTLS Setup (When mbedTLS Is Available)
+## 3. TLS / mTLS (Phase 2 -- Not Yet Implemented)
 
-For production deployments, MQTT traffic should be encrypted with TLS and
-clients should authenticate with X.509 certificates (mutual TLS).
-
-### Broker TLS Configuration
-
-Add to `/etc/mosquitto/mosquitto.conf`:
-
-```
-# TLS listener (replaces plaintext 1883)
-listener 8883
-
-# Broker certificate and key
-cafile   /etc/mosquitto/certs/ca.crt
-certfile /etc/mosquitto/certs/broker.crt
-keyfile  /etc/mosquitto/certs/broker.key
-
-# Require client certificates (mTLS)
-require_certificate true
-
-# Use the CN field of the client certificate as the MQTT username
-# for ACL matching. The CN must match dclaw-device-{device_id}.
-use_identity_as_username true
-
-# TLS version — require 1.2 minimum
-tls_version tlsv1.2
-```
-
-### Device Certificate Generation
-
-```bash
-#!/bin/bash
-# generate-device-cert.sh — Generate mTLS certificate for a device
-#
-# Usage: ./generate-device-cert.sh <device_id>
-#
-# Prerequisites: CA key and cert in /etc/defenseclaw/pki/
-
-set -euo pipefail
-
-DEVICE_ID="${1:?Usage: $0 <device_id>}"
-PKI_DIR="${PKI_DIR:-/etc/defenseclaw/pki}"
-OUT_DIR="${OUT_DIR:-/etc/defenseclaw/devices/${DEVICE_ID}}"
-
-mkdir -p "$OUT_DIR"
-
-# Generate device private key
-openssl ecparam -genkey -name prime256v1 -noout \
-    -out "$OUT_DIR/device.key"
-
-# Generate CSR with CN matching the MQTT username pattern
-openssl req -new -key "$OUT_DIR/device.key" \
-    -subj "/CN=dclaw-device-${DEVICE_ID}/O=DefenseClaw/OU=EdgeDevices" \
-    -out "$OUT_DIR/device.csr"
-
-# Sign with CA
-openssl x509 -req -in "$OUT_DIR/device.csr" \
-    -CA "$PKI_DIR/ca.crt" -CAkey "$PKI_DIR/ca.key" \
-    -CAcreateserial -days 365 \
-    -out "$OUT_DIR/device.crt"
-
-# Clean up CSR
-rm "$OUT_DIR/device.csr"
-
-echo "Device $DEVICE_ID certificates generated in $OUT_DIR/"
-echo "  device.key — Private key (deploy to /etc/edge-connector/device.key)"
-echo "  device.crt — Certificate (deploy to /etc/edge-connector/device.crt)"
-echo ""
-echo "Deploy CA cert to device: cp $PKI_DIR/ca.crt /etc/edge-connector/ca.crt"
-```
-
-### Edge Connector mTLS Usage
-
-When building with `DCLAW_HAS_MBEDTLS=1`, the edge-connector will use:
-- `/etc/edge-connector/device.key` — Device private key
-- `/etc/edge-connector/device.crt` — Device certificate
-- `/etc/edge-connector/ca.crt` — CA certificate to verify the broker
-
-Use `mqtts://` URLs in the broker configuration to enable TLS connections.
+> **Status:** TLS transport is not yet implemented in the Edge Connector.
+> The `tls_engine.c` file contains only stubs. Use plaintext MQTT on a trusted
+> network for now and rely on authentication + ACLs (sections 1-2 above) for
+> access control. mTLS support is planned for a future release.
 
 ## 4. Security Hardening Checklist
 
@@ -248,10 +174,9 @@ Use `mqtts://` URLs in the broker configuration to enable TLS connections.
 - [ ] Password file uses hashed passwords (generated with `mosquitto_passwd -b`)
 - [ ] ACL file restricts each device to its own topic subtree
 - [ ] Fleet manager credential uses a strong random password (32+ bytes)
-- [ ] Plaintext listener (port 1883) is disabled in production
-- [ ] TLS listener (port 8883) is enabled with `require_certificate true`
-- [ ] TLS version minimum is 1.2 (`tls_version tlsv1.2`)
 - [ ] Broker logs are monitored for authentication failures
+- [ ] (Phase 2) TLS listener (port 8883) enabled with `require_certificate true`
+- [ ] (Phase 2) Plaintext listener (port 1883) disabled in production
 
 ### Network
 - [ ] MQTT port is not exposed to the public internet
@@ -265,7 +190,7 @@ Use `mqtts://` URLs in the broker configuration to enable TLS connections.
 - [ ] Compromised device credentials can be revoked without affecting fleet
 - [ ] Fleet manager credential stored in a secrets manager (not in env files)
 
-### Certificate Management (mTLS)
+### Certificate Management (Phase 2 -- mTLS not yet implemented)
 - [ ] CA private key stored in HSM or offline secure storage
 - [ ] Device certificates have a bounded validity period (e.g., 1 year)
 - [ ] Certificate revocation list (CRL) or OCSP configured on broker
@@ -274,7 +199,6 @@ Use `mqtts://` URLs in the broker configuration to enable TLS connections.
 ### Monitoring
 - [ ] Alert on repeated CONNACK failures (brute force attempts)
 - [ ] Alert on topic ACL violations (device attempting cross-device access)
-- [ ] Log and alert on certificate verification failures
 - [ ] Monitor for unusual message rates per device
 - [ ] Correlate MQTT auth failures with fleet manager device status
 
@@ -282,6 +206,6 @@ Use `mqtts://` URLs in the broker configuration to enable TLS connections.
 - [ ] Even with broker ACLs, the fleet manager validates topic-to-payload
       device ID consistency (P0-2 fix in bridge.go)
 - [ ] Verdict responses are HMAC-authenticated with per-device keys
-- [ ] Policy OTA updates are signature-verified (Ed25519/HMAC-SHA256)
+- [ ] Policy OTA updates are signature-verified (HMAC-SHA256)
 - [ ] Emergency broadcasts are signature-verified before application
 - [ ] Auto-registration is disabled in production (`DCLAW_FLEET_AUTO_REGISTER=false`)
