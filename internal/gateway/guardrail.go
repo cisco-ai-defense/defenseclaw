@@ -2417,9 +2417,34 @@ func promptSideInstructionText(messages []ChatMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// promptInspectText is the pre-call inspection source: the latest user
-// turn when present, otherwise prompt-side system/developer text.
+// currentTurnUserText joins the user messages after the last assistant or tool
+// message: the turn the model is about to answer. Most clients send one, but
+// OpenClaw 2026.9 appends a synthetic context message after the prompt, so the
+// last message alone would leave the prompt itself unscanned (GAP-0190).
+func currentTurnUserText(messages []ChatMessage) string {
+	var turn []string
+	for i := len(messages) - 1; i >= 0; i-- {
+		role := messages[i].Role
+		if role == "assistant" || role == "tool" {
+			break
+		}
+		if role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			turn = append(turn, messages[i].Content)
+		}
+	}
+	for i, j := 0, len(turn)-1; i < j; i, j = i+1, j-1 {
+		turn[i], turn[j] = turn[j], turn[i]
+	}
+	return strings.Join(turn, "\n")
+}
+
+// promptInspectText is the pre-call inspection source: the user turn in
+// progress, else the latest user message, else prompt-side system/developer
+// text.
 func promptInspectText(messages []ChatMessage) string {
+	if text := currentTurnUserText(messages); text != "" {
+		return text
+	}
 	if text := lastUserText(messages); strings.TrimSpace(text) != "" {
 		return text
 	}

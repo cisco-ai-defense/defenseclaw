@@ -1308,6 +1308,20 @@ func TestPromptInspectText(t *testing.T) {
 		}
 	})
 
+	t.Run("inspects the prompt before a trailing context message", func(t *testing.T) {
+		// OpenClaw 2026.9 appends its own context as a second user message (GAP-0190).
+		got := promptInspectText([]ChatMessage{
+			{Role: "system", Content: "You are helpful."},
+			{Role: "user", Content: "first turn"},
+			{Role: "assistant", Content: "first reply"},
+			{Role: "user", Content: "the current prompt"},
+			{Role: "user", Content: "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>none<<<END_OPENCLAW_INTERNAL_CONTEXT>>>"},
+		})
+		if want := "the current prompt\n<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>none<<<END_OPENCLAW_INTERNAL_CONTEXT>>>"; got != want {
+			t.Fatalf("promptInspectText() = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("skips whitespace-only trailing user turn", func(t *testing.T) {
 		got := promptInspectText([]ChatMessage{
 			{Role: "system", Content: "You are helpful."},
