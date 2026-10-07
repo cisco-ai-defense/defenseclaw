@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -456,7 +457,18 @@ func TestInspectToolResponse_SensitiveToolRaisesResultAlert(t *testing.T) {
 func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
 	var delivered atomic.Int32
+	var deliveredMu sync.Mutex
+	var deliveredIDs []string
 	hooks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Event struct {
+				ID string `json:"id"`
+			} `json:"event"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		deliveredMu.Lock()
+		deliveredIDs = append(deliveredIDs, body.Event.ID)
+		deliveredMu.Unlock()
 		delivered.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -511,10 +523,11 @@ func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list alerts: %v", err)
 	}
-	var listed []string
+	var listed, rowIDs []string
 	for _, alert := range alerts {
 		if alert.Action == "tool-result-pii-alert" {
 			listed = append(listed, alert.Connector+":"+alert.Severity)
+			rowIDs = append(rowIDs, alert.ID)
 		}
 	}
 	slices.Sort(listed)
@@ -524,6 +537,16 @@ func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 	webhooks.Close()
 	if delivered.Load() == 0 {
 		t.Fatal("tool-result-pii-alert reached no webhook")
+	}
+	// GAP-0218: each delivery carries the id of its audit row (the second alert of the same
+	// tool is held back by the webhook cooldown, so there may be fewer deliveries than rows).
+	deliveredMu.Lock()
+	gotIDs := slices.Clone(deliveredIDs)
+	deliveredMu.Unlock()
+	for _, id := range gotIDs {
+		if !slices.Contains(rowIDs, id) {
+			t.Fatalf("webhook event id %q is not an alert row id (rows %v)", id, rowIDs)
+		}
 	}
 }
 
