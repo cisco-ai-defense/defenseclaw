@@ -148,6 +148,32 @@ func TestUserScanBoundsOddIDEFolderNames(t *testing.T) {
 	}
 }
 
+// An editor-extension row stored by 0.8.x or 1.0.0 (keyed on the extension
+// id) is the predecessor of the signal the IDE inventory keys on the
+// installation: the first scan after an upgrade keeps its first-seen time
+// and reports nothing gone.
+func TestUpgradeCarriesEditorExtensionRowsKeyedOnTheExtensionID(t *testing.T) {
+	withoutMachineIDEs(t)
+	home := t.TempDir()
+	writeVSCodeExtensions(t, home, "github.copilot")
+	copilot := AISignature{ID: "copilot", Name: "GitHub Copilot", Category: SignalSupportedConnector, ExtensionIDs: []string{"GitHub.copilot", "github.copilot-chat"}}
+	service := &ContinuousDiscoveryService{
+		catalog: []AISignature{copilot},
+		opts:    AIDiscoveryOptions{Mode: "passive", HomeDir: home, HomeDirs: []string{home}},
+		store:   NewAIStateStore(filepath.Join(t.TempDir(), "state.json")),
+	}
+	legacy := service.signalFromValue(copilot, SignalEditorExtension, "editor_extension", "github.copilot")
+	legacy.FirstSeen = time.Now().Add(-48 * time.Hour).UTC()
+	prev := aiStateFile{Signals: map[string]aiStoredSignal{legacy.Fingerprint: {AISignal: legacy}}}
+	signals, _ := service.detectEditorExtensions()
+	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
+	report := service.classifyAndPersist("full-1", "test", time.Now(), signals, stats, prev, true)
+	if len(report.Signals) != 1 || report.Signals[0].Fingerprint == legacy.Fingerprint ||
+		report.Signals[0].State != AIStateSeen || !report.Signals[0].FirstSeen.Equal(legacy.FirstSeen) {
+		t.Fatalf("signals = %+v, want the installation's signal, seen since the stored row", report.Signals)
+	}
+}
+
 // The Devin vendor's plugins keep pre-rename ids that the catalog does not
 // spell; the AI index still flags them as Devin plugins.
 func TestIDEAIIndexFlagsPreRenameDevinPlugins(t *testing.T) {

@@ -258,6 +258,48 @@ func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, i
 	return out
 }
 
+// legacyEditorExtensionRows matches the editor-extension rows of 0.8.x and
+// 1.0.0 to the signals that replace them. Those builds keyed a signal on the
+// matched extension id (signalFromValue, as detectEditorExtensionsLegacy
+// still does for Secure Client); ideSignals keys it on the installation. A
+// full scan's editor-extension signal with no stored row takes the oldest
+// stored row of its signature's extension ids as its predecessor, and those
+// rows are replaced rather than gone: an upgrade keeps first-seen times and
+// reports no removal of a tool that is still installed. Remove once
+// upgrades from 0.8.x state files are no longer supported.
+func (s *ContinuousDiscoveryService) legacyEditorExtensionRows(prevMap map[string]aiStoredSignal, signals []AISignal, full bool) (map[string]aiStoredSignal, map[string]bool) {
+	if !full || s.opts.SecureClient || len(prevMap) == 0 {
+		return nil, nil
+	}
+	emitted := make(map[string]bool, len(signals))
+	for _, sig := range signals {
+		emitted[sig.Fingerprint] = true
+	}
+	catalog := make(map[string]AISignature, len(s.catalog))
+	for _, sig := range s.catalog {
+		catalog[sig.ID] = sig
+	}
+	predecessors, replaced := map[string]aiStoredSignal{}, map[string]bool{}
+	for _, sig := range signals {
+		if _, stored := prevMap[sig.Fingerprint]; stored || sig.Detector != "editor_extension" {
+			continue
+		}
+		signature := catalog[sig.SignatureID]
+		for _, ext := range signature.ExtensionIDs {
+			fp := s.signalFromValue(signature, SignalEditorExtension, "editor_extension", strings.ToLower(ext)).Fingerprint
+			old, ok := prevMap[fp]
+			if !ok || emitted[fp] || old.Detector != "editor_extension" {
+				continue
+			}
+			replaced[fp] = true
+			if first, have := predecessors[sig.Fingerprint]; !have || old.FirstSeen.Before(first.FirstSeen) {
+				predecessors[sig.Fingerprint] = old
+			}
+		}
+	}
+	return predecessors, replaced
+}
+
 // ideOwnerForHome names the account of a home: the profile owner on a
 // service-context scan, otherwise the account this process runs as.
 func (s *ContinuousDiscoveryService) ideOwnerForHome(home string, serviceContext bool) ideOwner {
