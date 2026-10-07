@@ -11,6 +11,7 @@
 package kernelpolicy
 
 import (
+	"crypto/sha256"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -52,6 +53,9 @@ type Root struct {
 	// Native roots contribute their exe path to the binaries anchor;
 	// script-hosted roots never do (that path is a shared interpreter).
 	Native bool
+	// A script-hosted root must keep the same interpreter argv across scans.
+	// Keep only a digest: argv may carry secrets and is never published.
+	argvHash [32]byte
 }
 
 // Observed counts processes that look like agents but are never anchored,
@@ -84,6 +88,10 @@ type Tracker struct {
 
 // NewTracker returns an empty Tracker.
 func NewTracker() *Tracker { return &Tracker{known: map[rootKey]Root{}} }
+
+func commandHash(argv []string) [32]byte {
+	return sha256.Sum256([]byte(strings.Join(argv, "\x00")))
+}
 
 // interpreterNames are the programs whose first script argument identifies
 // what they run. Any other program that merely names an agent's entry file
@@ -151,9 +159,16 @@ func (t *Tracker) Update(fsys FS, procs []Proc, installs []Install, enrollment E
 		live[rootKey{p.PID, p.StartTicks}] = p
 		byPID[p.PID] = p
 	}
-	// Forget roots that exited (or whose pid was reused).
-	for key := range t.known {
-		if _, ok := live[key]; !ok {
+	// A PID and start tick alone do not prove that an old anchor is still
+	// the enrolled agent. In particular, exec retains the process start time.
+	// Discard it if the account, connector, namespace, binary or script argv
+	// changed. An auto-updated native executable keeps its old /proc exe until
+	// that process exits, so it remains anchored.
+	for key, root := range t.known {
+		p, ok := live[key]
+		if !ok || !p.Host || p.UID != root.UID || p.EUID != root.UID ||
+			p.Exe != root.Exe || !contains(enrollment.Connectors(root.UID), root.Connector) ||
+			(!root.Native && root.argvHash != commandHash(p.Cmdline)) {
 			delete(t.known, key)
 		}
 	}
@@ -170,8 +185,12 @@ func (t *Tracker) Update(fsys FS, procs []Proc, installs []Install, enrollment E
 					continue
 				}
 			}
-			t.known[key] = Root{UID: p.UID, PID: p.PID, StartTicks: p.StartTicks,
+			root := Root{UID: p.UID, PID: p.PID, StartTicks: p.StartTicks,
 				Connector: install.Connector, Exe: p.Exe, Native: native}
+			if !native {
+				root.argvHash = commandHash(p.Cmdline)
+			}
+			t.known[key] = root
 			break
 		}
 	}

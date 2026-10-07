@@ -38,7 +38,7 @@ func ScanProcs(procRoot string, enrolled func(uid int) bool) ([]Proc, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostNS, _ := os.Readlink(filepath.Join(procRoot, "self", "ns", "pid"))
+	hostNS, hostErr := os.Readlink(filepath.Join(procRoot, "self", "ns", "pid"))
 	var out []Proc
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
@@ -50,8 +50,8 @@ func ScanProcs(procRoot string, enrolled func(uid int) bool) ([]Proc, error) {
 		if !ok {
 			continue
 		}
-		p := Proc{PID: pid, UID: uid, EUID: euid, Host: true}
-		if hostNS != "" {
+		p := Proc{PID: pid, UID: uid, EUID: euid}
+		if hostErr == nil && hostNS != "" {
 			if ns, err := os.Readlink(filepath.Join(dir, "ns", "pid")); err == nil {
 				p.Host = ns == hostNS
 			}
@@ -74,6 +74,13 @@ func ScanProcs(procRoot string, enrolled func(uid int) bool) ([]Proc, error) {
 			p.Cwd = cwd
 		}
 		p.Cmdline = readCmdline(filepath.Join(dir, "cmdline"))
+		// /proc files are read separately. A PID can exit and be reused while
+		// we read exe and argv; never combine an old identity with a new one.
+		again, statOK := readStat(filepath.Join(dir, "stat"))
+		againUID, againEUID, uidOK := readUIDs(filepath.Join(dir, "status"))
+		if !statOK || !uidOK || again.start != p.StartTicks || againUID != uid || againEUID != euid {
+			continue
+		}
 		out = append(out, p)
 	}
 	return out, nil
