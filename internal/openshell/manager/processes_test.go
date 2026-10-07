@@ -243,8 +243,14 @@ func treeEnv(t *testing.T, name string, sample *atomic.Pointer[string]) *harness
 	return e
 }
 
+// psAnswer is a ps answer of a sandbox that booted two seconds ago, so its
+// processes started just before now.
 func psAnswer(lines ...string) *string {
-	s := string(answerOf(append(append([]string{"T 100 1700000000"}, lines...), collectEnd)...))
+	return psAnswerBoot(time.Now().Add(-2*time.Second), lines...)
+}
+
+func psAnswerBoot(boot time.Time, lines ...string) *string {
+	s := string(answerOf(append(append([]string{fmt.Sprintf("T 100 %d", boot.Unix())}, lines...), collectEnd)...))
 	return &s
 }
 
@@ -294,6 +300,32 @@ func TestDestinationLineageWithoutExe(t *testing.T) {
 	if err != nil || len(d.Destinations) != 1 || len(d.Destinations[0].Lineage) != 4 || d.Destinations[0].Lineage[0].PID != 526 ||
 		d.Destinations[0].Lineage[2].Comm != "claude" {
 		t.Fatalf("destinations = %+v, %v", d.Destinations, err)
+	}
+}
+
+// TestDestinationLineageNeedsARecentStart (GAP-0174): a program too short for
+// a sample (a quick curl, a `sandbox exec`) is not in the tree, so a copy of
+// it that started long before and still runs (a slow download) is not
+// credited with its connection; the copy that started just before one is.
+func TestDestinationLineageNeedsARecentStart(t *testing.T) {
+	var sample atomic.Pointer[string]
+	now := time.Now()
+	// curl 526 started a minute ago; curl 530 starts in 29 seconds.
+	sample.Store(psAnswerBoot(now.Add(-60*time.Second), "P 1 0 1000 10", "Pc 1 init", "P 124 1 1000 20", "Pc 124 claude",
+		"P 521 124 1000 30", "Pc 521 bash", "P 526 521 1000 100", "Pc 526 curl", "Pa 526 curl",
+		"P 530 521 1000 8900", "Pc 530 curl", "Pa 530 curl"))
+	e := treeEnv(t, "slowbox", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("slowbox")); !ok {
+		t.Fatal("no sample")
+	}
+	e.ocsf("slowbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> example.net:443/tcp [policy:allow_example engine:opa]", now)
+	e.ocsf("slowbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> example.org:443/tcp [policy:allow_example engine:opa]", now.Add(30*time.Second))
+	rows := destinationKinds(t, e, "slowbox")
+	if l := rows["example.net"].Lineage; len(l) != 0 {
+		t.Fatalf("example.net lineage %+v, want none: the only curl then started a minute before", l)
+	}
+	if l := rows["example.org"].Lineage; len(l) != 4 || l[0].PID != 530 || l[1].Comm != "bash" {
+		t.Fatalf("example.org lineage %+v, want curl 530's", l)
 	}
 }
 
@@ -360,6 +392,34 @@ func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	}
 	if starts < 2 || exits < 1 {
 		t.Fatalf("records: %d starts, %d exits", starts, exits)
+	}
+}
+
+// TestLineageNamesTheProgramInFull (GAP-0172): the kernel keeps 15 bytes of a
+// process's name, so a lineage, a process record's name and the dashboard's
+// top programs said openshell-sandb for openshell-sandbox; its first
+// argument gives the name in full. A shorter comm stays as it is.
+func TestLineageNamesTheProgramInFull(t *testing.T) {
+	var sample atomic.Pointer[string]
+	sample.Store(psAnswer("P 1 0 1000 10", "Pc 1 openshell-sandb", "Pa 1 /.openshell/runtime/openshell-sandbox",
+		"P 42 1 1000 20", "Pc 42 bash", "Pa 42 -bash", "P 43 42 1000 30", "Pc 43 curl", "Pa 43 curl"))
+	e := treeEnv(t, "namebox", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("namebox")); !ok {
+		t.Fatal("no sample")
+	}
+	if l := e.m.Lineage("namebox", 43); len(l) != 3 || l[1].Comm != "bash" || l[2].Comm != "openshell-sandbox" {
+		t.Fatalf("lineage = %+v", l)
+	}
+	names := map[int]string{}
+	var lineage []string
+	for _, ev := range where(&e.tel.mu, &e.tel.processes, func(ev audit.SandboxProcessEvent) bool { return ev.Sandbox.Name == "namebox" }) {
+		names[ev.PID] = ev.Name
+		if ev.PID == 43 {
+			lineage = ev.Lineage
+		}
+	}
+	if names[1] != "openshell-sandbox" || names[42] != "bash" || strings.Join(lineage, ",") != "bash,openshell-sandbox" {
+		t.Fatalf("records: names %v, lineage of 43 %v", names, lineage)
 	}
 }
 

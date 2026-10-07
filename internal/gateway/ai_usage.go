@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -229,6 +230,26 @@ func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {
 		"signals":                        report.Signals,
 	})
 }
+
+// rescanAIDiscovery runs an AI discovery scan off the caller's goroutine,
+// as `agent usage --refresh` does: a deleted sandbox's discovery record is
+// gone, and its signals should not read as seen until the next scheduled
+// scan (GAP-0184). It does nothing while AI discovery is off.
+func (a *APIServer) rescanAIDiscovery() {
+	go func() {
+		discovery, release := a.leaseAIDiscovery()
+		defer release()
+		if discovery == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), aiDiscoveryRescanTimeout)
+		defer cancel()
+		_, _ = discovery.ScanNow(ctx)
+	}()
+}
+
+// aiDiscoveryRescanTimeout bounds rescanAIDiscovery's scan.
+const aiDiscoveryRescanTimeout = 5 * time.Minute
 
 func (a *APIServer) sanitizeAIUsageReportForResponse(report inventory.AIDiscoveryReport) inventory.AIDiscoveryReport {
 	if a == nil {

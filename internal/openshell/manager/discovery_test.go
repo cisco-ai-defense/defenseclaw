@@ -165,10 +165,16 @@ func TestDiscoverInventoriesTheSandbox(t *testing.T) {
 		t.Fatalf("discover of a stopped sandbox = %v, want conflict", err)
 	}
 
-	// A delete removes the record and its tree.
+	// A delete removes the record and its tree, and tells the AI inventory,
+	// which drops its signals at once (GAP-0184).
+	var removed atomic.Value
+	e.m.opts.DiscoveryRemoved = func(name string) { removed.Store(name) }
 	e.deleteBox("discbox", sandboxapi.DeleteRequest{})
 	if _, err := os.Stat(e.m.discoveryDir("discbox")); !os.IsNotExist(err) {
 		t.Fatalf("discovery folder after delete: %v", err)
+	}
+	if got, _ := removed.Load().(string); got != "discbox" {
+		t.Fatalf("DiscoveryRemoved got %q, want discbox", got)
 	}
 }
 

@@ -1039,13 +1039,6 @@
       ],
       "transformations": [
         {
-          "id": "renameByRegex",
-          "options": {
-            "regexp": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
-        {
           "id": "merge"
         },
         {
@@ -1056,10 +1049,10 @@
             },
             "renameByName": {
               "dest": "Destination",
-              "ALLOWED": "Allowed",
-              "BLOCKED": "Blocked",
-              "UP": "Bytes up",
-              "DOWN": "Bytes down"
+              "Value #ALLOWED": "Allowed",
+              "Value #BLOCKED": "Blocked",
+              "Value #UP": "Bytes up",
+              "Value #DOWN": "Bytes down"
             }
           }
         }
@@ -1072,6 +1065,18 @@
           }
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Allowed|Blocked|Bytes up|Bytes down)$"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "0"
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",

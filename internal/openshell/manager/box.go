@@ -236,8 +236,11 @@ type hookStats struct {
 // hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
 // so a restarted daemon goes on from them as it does from the kept
 // destinations: sandbox status and the Sandboxes list keep the counts of the
-// sandbox's life (GAP-0156). The times, the silence and reach state and the
-// notices start over with the daemon: they judge the current session.
+// sandbox's life (GAP-0156). It keeps the verdict on the last session's
+// hooks too (unreachable, silent), so a stopped sandbox says the same of
+// its session after a restart (GAP-0186); a session that starts, and so a
+// running sandbox a restarted daemon adopts, is judged afresh (lifecycle).
+// The other times and the notices start over with the daemon.
 type hookCounts struct {
 	Requests       int64            `json:"requests,omitempty"`
 	ToolCalls      int64            `json:"tool_calls,omitempty"`
@@ -250,6 +253,12 @@ type hookCounts struct {
 	Tampered       int64            `json:"tampered,omitempty"`
 	Failed         int64            `json:"failed,omitempty"`
 	IngressRefused int64            `json:"ingress_refused,omitempty"`
+	// UnreachableSince, UnreachableReason and NoHookYet are the session's
+	// reach verdict (hookReach), SilentSince when its hooks fell silent.
+	UnreachableSince  time.Time `json:"unreachable_since,omitzero"`
+	UnreachableReason string    `json:"unreachable_reason,omitempty"`
+	NoHookYet         bool      `json:"no_hook_yet,omitempty"`
+	SilentSince       time.Time `json:"silent_since,omitzero"`
 }
 
 // counts are the counters of h a record keeps.
@@ -282,11 +291,13 @@ func (h *hookStats) restore(c *hookCounts) {
 	}
 }
 
-// noteHookCountsLocked puts the box's hook counters in its record and
-// reports whether they moved since the record last kept them. Callers hold
-// Manager.mu.
+// noteHookCountsLocked puts the box's hook counters and its session's hook
+// verdict in its record and reports whether they moved since the record
+// last kept them. Callers hold Manager.mu.
 func (b *box) noteHookCountsLocked() bool {
 	c := b.hooks.counts()
+	c.UnreachableSince, c.UnreachableReason, c.NoHookYet = b.reach.since, b.reach.reason, b.reach.noHookYet
+	c.SilentSince = b.silentSince
 	kept := b.rec.HookCounts
 	if kept == nil {
 		kept = &hookCounts{}

@@ -1025,6 +1025,31 @@ def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
         assert panel["fieldConfig"]["defaults"]["displayName"] == "${__field.labels." + label + "}", panel["title"]
 
 
+def test_merged_loki_tables_name_their_value_columns() -> None:
+    # GAP-0178: a Loki instant query has no table format, so a table that
+    # merges several shows each value column as "Value #<refId>" until
+    # organize renames it by that name. The Sandboxes Destinations table
+    # renamed "ALLOWED" (the Prometheus tables' renameByRegex before the
+    # merge), so its headers read Value #ALLOWED and its unit, colour and
+    # sort settings matched nothing.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        panels = [*board.get("panels", []), *(child for row in board.get("panels", []) for child in row.get("panels", []))]
+        for panel in panels:
+            steps = panel.get("transformations", [])
+            targets = panel.get("targets", [])
+            if panel.get("type") != "table" or not any(step["id"] == "merge" for step in steps):
+                continue
+            if not targets or any((target.get("datasource") or {}).get("type") != "loki" for target in targets):
+                continue
+            renames = next(step for step in steps if step["id"] == "organize")["options"]["renameByName"]
+            for target in targets:
+                assert f"Value #{target['refId']}" in renames, (path.name, panel["title"], target["refId"])
+            checked += 1
+    assert checked
+
+
 def test_sandboxes_blocked_egress_leaves_out_audit_only_refusals() -> None:
     # GAP-0134: a refused name lookup is audited before the refused
     # connection it precedes, and a harness's own request is expected

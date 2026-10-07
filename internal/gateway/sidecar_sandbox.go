@@ -212,6 +212,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
+		DiscoveryRemoved:   func(string) { api.rescanAIDiscovery() },
 	})
 	if err != nil {
 		return nil, err

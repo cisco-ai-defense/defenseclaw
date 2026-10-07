@@ -565,13 +565,19 @@ func (m *Manager) dropDiscoveredProcesses(name string) {
 }
 
 // removeDiscovery removes a gone sandbox's discovery folder: its tree and
-// scan record, whose signals then go.
+// scan record, whose signals then go (DiscoveryRemoved tells the AI
+// inventory).
 func (m *Manager) removeDiscovery(name string) error {
 	if !openshell.ValidSandboxName(name) || name == recordDirName {
 		return nil
 	}
+	_, err := os.Lstat(m.scanRecordPath(name))
+	recorded := err == nil
 	if err := removeTree(m.discoveryDir(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove the discovery record of %s: %w", name, err)
+	}
+	if recorded && m.opts.DiscoveryRemoved != nil {
+		m.opts.DiscoveryRemoved(name)
 	}
 	return nil
 }

@@ -334,7 +334,8 @@ adds OpenShell's `PROC` launch and terminate records. One record when a
 process joins the tree and one when it exits:
 `defenseclaw.sandbox.process.event` (`start`, `exit`), `.source` (`sample`,
 `ocsf`), `.pid`, `.parent_pid` (absent while only OpenShell reported the
-process, which names no parent), `.name` (comm), `.executable`,
+process, which names no parent), `.name` (comm; in full from the
+executable or first argument when the kernel cut it at 15 bytes), `.executable`,
 `.command_line` (the first 16 arguments, joined, the values of arguments that
 name secrets replaced, at most 1,024 bytes), `.working_directory`,
 `.exit_code` (when OpenShell reported it) and `.lineage` (the names of up to
@@ -353,8 +354,10 @@ With the tree on, `sandbox destinations` and its API name the lineage of the
 process that made each connection (`lineage`, the process first). OpenShell's
 NET records name the program but pid 0 (both drivers), so a row takes the
 one process of its last binary (by path, or by name when the sample could
-not read the process's executable) that ran when the host was last seen; none,
-or two copies at once, leave it without a lineage.
+not read the process's executable) that started in the 5 seconds before that
+binary was last seen connecting; none, or two copies, leave it without a
+lineage. An older copy that is still running is not taken: a program too
+short for a sample is not in the tree and cannot be told from it.
 
 ### AI discovery inside a sandbox
 
