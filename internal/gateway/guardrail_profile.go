@@ -85,7 +85,7 @@ type profileSubject struct {
 // S1 already verified as the process owner never takes that fallback.
 // `guardrail profile explain --user` resolves the named account's facts the
 // same way (lookupDirectoryProfileSubject), falling back to the OS account
-// database (lookupLocalProfileSubject).
+// database on Linux and macOS (profileExplainUnresolved).
 var (
 	// profileSubjectSource returns the kernel- or credential-verified
 	// subject of a request.
@@ -488,15 +488,16 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 // lookupDirectoryProfileSubject resolves the account an administrator names
 // to `guardrail profile explain --user` with the directory facts a request
 // from that account would carry. An account the directory lookup cannot
-// name falls back to the OS account database.
+// name falls back to the OS account database on Linux and macOS; on Windows
+// both are the LSA, and the LSA's reason is reported.
 func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return profileSubject{}, fmt.Errorf("no user named")
 	}
-	id, userName, ok := profileExplainAccount(name)
-	if !ok {
-		return lookupLocalProfileSubject(name)
+	id, userName, err := profileExplainAccount(name)
+	if err != nil {
+		return profileExplainUnresolved(name, err)
 	}
 	facts, err := profileExplainDirectoryFacts(id)
 	if err != nil {
@@ -513,12 +514,10 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
 			return local, nil
 		}
-		if err == nil {
-			err = fmt.Errorf("the operating system returned no directory facts for %s", id)
-		}
 		// The account is named, so explain shows it with the reason, not a
 		// bare default_lookup_failed.
-		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true}, err
+		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true},
+			fmt.Errorf("the operating system returned no directory facts for %s", id)
 	}
 	return profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
