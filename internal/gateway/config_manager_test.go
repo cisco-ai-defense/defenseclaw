@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -48,7 +49,8 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 		t.Fatalf("initial load: %v", err)
 	}
 	applied := false
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff, source configReloadSource) error {
+	health := NewSidecarHealth()
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, health, "", func(_ context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff, source configReloadSource) error {
 		applied = true
 		if source.compiledV8 == nil || source.compiledV8.Plan == nil {
 			t.Fatal("apply did not receive a compiled v8 source")
@@ -71,6 +73,11 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	}
 	if got := mgr.Current().Guardrail.Mode; got != "action" {
 		t.Fatalf("current mode = %q, want action", got)
+	}
+	// Nothing needs a restart: restart_required is [] as on main, not null
+	// (GAP-0109).
+	if raw, _ := json.Marshal(health.Snapshot().Config.Details["restart_required"]); string(raw) != "[]" {
+		t.Fatalf("restart_required = %s, want []", raw)
 	}
 }
 

@@ -204,6 +204,24 @@ func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 		}
 	})
 
+	// A Secure Client host keeps policy show, validate and evaluate of main
+	// (GAP-0114, issue #1092): each needs the data.json that no Secure
+	// Client layout ships, and there is no policy digest.
+	t.Run("Secure Client", func(t *testing.T) {
+		setPolicyPathTestConfig(t, &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()})
+		setPolicyPathTestFlags(t)
+		for _, command := range policyPathTestCommands() {
+			_, err := capturePolicyPathTestOutput(t, func() error { return command.cmd.RunE(command.cmd, nil) })
+			if err == nil || !strings.Contains(err.Error(), "policy: read data.json: open ") ||
+				!strings.Contains(err.Error(), filepath.Join("rego", "data.json")) {
+				t.Fatalf("%s error = %v", command.name, err)
+			}
+		}
+		if err := policyDigestCmd.RunE(policyDigestCmd, nil); err == nil || !strings.Contains(err.Error(), `unknown command "digest" for`) {
+			t.Fatalf("digest error = %v", err)
+		}
+	})
+
 	// An upgraded 0.8 install can still hold the firewall and audit modules
 	// and the firewall data file (an edited copy is kept): the gateway's load
 	// and every policy command work around them.

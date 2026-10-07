@@ -3301,6 +3301,13 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	// action mode (and an explicit alert in observe mode for
 	// audit visibility).
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
+		if a.scannerCfg.SecureClientIntegration() {
+			// Secure Client keeps the engine load error of main (issue #1092).
+			if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+				return policyOutageVerdict(input,
+					fmt.Sprintf("policy engine load failed: %v", err)), nil
+			}
+		}
 		prepared, err := a.preparedPolicy(ctx)
 		if err != nil {
 			return policyOutageVerdict(input,
@@ -3945,7 +3952,8 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
-	if cfg != nil && cfg.SecureClientIntegration() {
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	if secureClient {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
 	}
 	if a.generationSource != nil || (a.scannerCfg != nil && a.scannerCfg.PolicyDir != "") {
@@ -3955,7 +3963,19 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 			}
 		}
 	}
+	if secureClient {
+		// Secure Client keeps the admission fallback of main (issue #1092).
+		return policy.EvaluateSecureClientAdmission(input, a.startPolicyDir()), nil
+	}
 	return policy.EvaluateAdmissionFallback(input), nil
+}
+
+// startPolicyDir is the policy_dir of the start-time configuration.
+func (a *APIServer) startPolicyDir() string {
+	if a.scannerCfg == nil {
+		return ""
+	}
+	return a.scannerCfg.PolicyDir
 }
 
 // legacyPolicyListEntries is the Secure Client block/allow list read from
@@ -4023,6 +4043,19 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	recordFailure := func(reason string) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
+
+	// Secure Client keeps the reload check of main (issue #1092): it fails
+	// while the policy directory has no data.json.
+	if a.scannerCfg.SecureClientIntegration() {
+		if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+			recordFailure(err.Error())
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error":  "reload failed: " + err.Error(),
+				"status": "failed",
+			})
+			return
+		}
 	}
 
 	// Rebuild the configuration generation now: Rego modules and rule packs

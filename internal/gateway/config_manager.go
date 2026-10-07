@@ -861,7 +861,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			"generation":       gen,
 			"reason":           reason,
 			"changed":          diff.Changed,
-			"restart_required": append(append([]string(nil), diff.RestartRequired...), pendingRestart...),
+			"restart_required": append(append([]string{}, diff.RestartRequired...), pendingRestart...),
 			"last_success":     time.Now().UTC().Format(time.RFC3339),
 		}
 		m.health.SetConfig(state, msg, detail)
