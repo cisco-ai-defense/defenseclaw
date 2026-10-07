@@ -6,6 +6,7 @@ package ideplugins
 import (
 	"archive/zip"
 	"database/sql"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -271,6 +272,18 @@ func TestScanOtherEditors(t *testing.T) {
 // servers, %LOCALAPPDATA%\JetBrains and Android Studio included, must be
 // granted, while the caches and other data beside those folders and a
 // linked folder are not (GAP-0042).
+func TestVisualStudioEnabledNamesAcceptsShortEnumeration(t *testing.T) {
+	enabled, ok := visualStudioEnabledNames(func(limit int) ([]string, error) {
+		if limit != visualStudioMaxExtensions {
+			t.Fatalf("limit = %d", limit)
+		}
+		return []string{"Example.Tool,1.0"}, io.EOF
+	})
+	if !ok || !enabled["example.tool"] {
+		t.Fatalf("short registry enumeration: %v, %v", enabled, ok)
+	}
+}
+
 func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 	home := t.TempDir()
 	local, roaming := filepath.Join(home, "AppData", "Local"), filepath.Join(home, "AppData", "Roaming")

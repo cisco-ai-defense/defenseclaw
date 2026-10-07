@@ -7,7 +7,6 @@ package ideplugins
 
 import (
 	"path/filepath"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -50,19 +49,9 @@ func readVisualStudioEnabled(instanceDir, instanceName string) (map[string]bool,
 		if err != nil {
 			continue
 		}
-		names, err := k.ReadValueNames(visualStudioMaxExtensions)
+		out, ok := visualStudioEnabledNames(k.ReadValueNames)
 		k.Close()
-		if err != nil {
-			return nil, false
-		}
-		out := make(map[string]bool, len(names))
-		for _, name := range names {
-			id, _, _ := strings.Cut(name, ",")
-			if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
-				out[id] = true
-			}
-		}
-		return out, true
+		return out, ok
 	}
 	return nil, false
 }
