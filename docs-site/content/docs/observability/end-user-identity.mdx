@@ -62,7 +62,7 @@ account.
 | Hook and inspect routes | The gateway's own account | The peer uid of the hook socket, or the uid or SID of the per-user credential. A request whose headers name another user is refused with `403` |
 | ACP routes | The gateway's own account, for signed requests and bearer tokens | The uid (Linux, macOS) or SID (Windows) of the enterprise ACP credential the request presents, which `enterprise acp enroll` issued for one user. Identity headers are ignored. A credential enrolled by home directory alone binds no user: its records name none and the default profile applies |
 | LLM proxy | The gateway's own account when the request presents the gateway token or the master key. The `X-DefenseClaw-User-*` pair is removed from every proxy request, because no proxy client sends it | No user is bound. The pair is removed |
-| Sandbox ingress | The host user on the sandbox binding. Identity headers from the sandbox are ignored | A sandbox of a service-account gateway records the host user on its binding, without a verified user |
+| Sandbox ingress | The host user on the sandbox binding is recorded for attribution, without a verified user or directory facts. Identity headers from the sandbox are ignored | The host user on the binding is recorded for attribution, without a verified user or directory facts |
 | Other API routes that take the gateway token | The gateway's own account | No user is bound |
 
 A request that proves nothing has no verified user. On the LLM proxy that is a
