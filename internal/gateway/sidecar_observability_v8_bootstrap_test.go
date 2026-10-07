@@ -2013,3 +2013,46 @@ func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0300: strict removes the personal identifiers, except under Secure
+// Client, which keeps every identifier under every profile as on main
+// (issue #1092).
+func TestObservabilityV8RedactionEngineSecureClientKeepsUserEmail(t *testing.T) {
+	key, err := observabilityredaction.LoadOrCreateCorrelationKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	email := observability.TelemetryAttributeDefenseClawUserEmail
+	record, err := observability.NewRecord(observability.RecordInput{
+		Timestamp: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC), RecordID: "gap-0300",
+		Identity: observability.EventIdentity{
+			Bucket: observability.BucketDiagnostic, Signal: observability.SignalLogs, Name: "diagnostic.message",
+		},
+		Source: observability.SourceGateway,
+		Provenance: observability.Provenance{
+			Producer: "gateway", BinaryVersion: "v8", RegistrySchemaVersion: 1, ConfigGeneration: 1,
+		},
+		Body:         map[string]any{email: "alice@corp.example"},
+		FieldClasses: map[string]observability.FieldClass{"/" + email: observability.FieldClassIdentifier},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, _ := observabilityredaction.BuiltInProfile(observabilityredaction.ProfileStrict)
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = profile
+		engine, err := newObservabilityV8RedactionEngine(cfg, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		projection, _, err := engine.Project(record, strict)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object, _ := projection.Payload().Object()
+		if _, kept := object[email]; kept != (profile == managed.ProfileSecureClient) {
+			t.Errorf("%s: strict kept %s = %v", profile, email, kept)
+		}
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -408,45 +409,58 @@ func TestOTLPInboundRealCodexTurnProjectsOnceAndJoinsHookRoot(t *testing.T) {
 // still names the conversation's root agent, the one the hook records derive,
 // so it joins them (GAP-0082).
 func TestOTLPInboundCodexPromptBeforeHooksNamesConversationRootAgent(t *testing.T) {
-	fixture := newCodexNativeOTLPFixture(t)
 	const conversationID = "019f4f18-3c1c-7f00-80b2-8248d5894a11"
-	api := &APIServer{}
-	api.bindOTLPObservabilityRuntime(fixture.runtime)
-	now := time.Now().UTC()
-	request := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
-		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
-			otlpClassifierStringAttribute("service.name", "codex_cli_rs"),
-		}},
-		ScopeLogs: []*logspb.ScopeLogs{{
-			Scope: &commonpb.InstrumentationScope{Name: "codex_cli_rs"},
-			LogRecords: []*logspb.LogRecord{{
-				TimeUnixNano: uint64(now.Add(-time.Second).UnixNano()),
-				Attributes: []*commonpb.KeyValue{
-					otlpClassifierStringAttribute("event.name", "codex.user_prompt"),
-					otlpClassifierStringAttribute("conversation.id", conversationID),
-					otlpClassifierStringAttribute("prompt", "neutral marker prompt"),
-				},
+	InstallSharedAgentRegistry("", "")
+	importPrompt := func(api *APIServer) string {
+		t.Helper()
+		fixture := newCodexNativeOTLPFixture(t)
+		api.bindOTLPObservabilityRuntime(fixture.runtime)
+		now := time.Now().UTC()
+		request := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+			Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
+				otlpClassifierStringAttribute("service.name", "codex_cli_rs"),
 			}},
-		}},
-	}}}
-	accounting, err := api.importDecodedOTLPRequestV8(context.Background(), request, otelSignalLogs, "codex", now)
-	if err != nil || !accounting.valid() {
-		t.Fatalf("native Codex prompt accounting=%+v err=%v", accounting, err)
+			ScopeLogs: []*logspb.ScopeLogs{{
+				Scope: &commonpb.InstrumentationScope{Name: "codex_cli_rs"},
+				LogRecords: []*logspb.LogRecord{{
+					TimeUnixNano: uint64(now.Add(-time.Second).UnixNano()),
+					Attributes: []*commonpb.KeyValue{
+						otlpClassifierStringAttribute("event.name", "codex.user_prompt"),
+						otlpClassifierStringAttribute("conversation.id", conversationID),
+						otlpClassifierStringAttribute("prompt", "neutral marker prompt"),
+					},
+				}},
+			}},
+		}}}
+		accounting, err := api.importDecodedOTLPRequestV8(context.Background(), request, otelSignalLogs, "codex", now)
+		if err != nil || !accounting.valid() {
+			t.Fatalf("native Codex prompt accounting=%+v err=%v", accounting, err)
+		}
+		database, err := sql.Open("sqlite", fixture.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		var agentID string
+		if err := database.QueryRow(
+			`SELECT COALESCE(agent_id, '') FROM audit_events WHERE event_name = 'model.request'`,
+		).Scan(&agentID); err != nil {
+			t.Fatal(err)
+		}
+		return agentID
 	}
-	database, err := sql.Open("sqlite", fixture.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	var agentID string
-	if err := database.QueryRow(
-		`SELECT COALESCE(agent_id, '') FROM audit_events WHERE event_name = 'model.request'`,
-	).Scan(&agentID); err != nil {
-		t.Fatal(err)
-	}
-	want := hookLLMEventMeta(t.Context(), "codex", conversationID, "", "", "", "", "", "", map[string]interface{}{}).AgentID
+	agentID := importPrompt(&APIServer{})
+	// The root agent the session's hooks record, scoped by the agent
+	// identity the hook path derives (GAP-0232).
+	hookCtx := enrichAgentHookContext(t.Context(), agentHookRequest{ConnectorName: "codex", SessionID: conversationID})
+	want := hookLLMEventMeta(hookCtx, "codex", conversationID, "", "", "", "", "", "", map[string]interface{}{}).AgentID
 	if agentID != want {
 		t.Fatalf("model.request agent_id=%q, want the hook records' root agent %q", agentID, want)
+	}
+	// Secure Client keeps its agentless native rows (issue #1092).
+	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}}
+	if got := importPrompt(secureClient); got != "" {
+		t.Fatalf("Secure Client model.request agent_id=%q; main leaves the row agentless", got)
 	}
 }
 

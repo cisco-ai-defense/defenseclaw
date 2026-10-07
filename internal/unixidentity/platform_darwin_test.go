@@ -84,7 +84,7 @@ func TestAccountGroupIDsListPastTheOSUserLimit(t *testing.T) {
 	listErr := errors.New("user: list groups for alice failed")
 	var gotArgs []string
 	runWith := func(gids int, exitCode int) commandRunner {
-		return func(_ context.Context, path string, args []string) (commandResult, error) {
+		return func(_ context.Context, path string, args []string, _ ...outputFilter) (commandResult, error) {
 			gotArgs = args
 			var out strings.Builder
 			for gid := 20; gid < 20+gids; gid++ {

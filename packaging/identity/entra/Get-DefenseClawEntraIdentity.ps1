@@ -38,8 +38,8 @@ Entra group SIDs to check (S-1-12-1-<a>-<b>-<c>-<d>). Read a SID with
 entra_setup.py sids --group NAME.
 
 .PARAMETER User
-The account to ask DefenseClaw about: a SID or AzureAD\Name. A UPN is not accepted
-by the Windows lookup. The default is the account that runs the script.
+The account to ask DefenseClaw about: a SID, AzureAD\Name, the bare name or the UPN.
+The default is the account that runs the script.
 
 .PARAMETER Connector
 The connector for the profile answer. The default is claudecode.
@@ -79,9 +79,6 @@ foreach ($sid in $GroupSid) {
     if ($sid -notmatch '^S-1-12-1-\d+-\d+-\d+-\d+$') {
         Exit-WithError "'$sid' is not the SID of an Entra group (S-1-12-1-<a>-<b>-<c>-<d>)."
     }
-}
-if ($User -and $User -match '@') {
-    Exit-WithError "A Windows computer cannot look up a UPN. Pass the user's SID or AzureAD\Name to -User."
 }
 
 if (-not ('DcIdentityKit.LocalGroupMembers' -as [type])) {

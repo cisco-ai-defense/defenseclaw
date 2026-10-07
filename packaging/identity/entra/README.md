@@ -153,4 +153,5 @@ Lint: `ruff` (line length 120), `shellcheck` and PSScriptAnalyzer (including the
 - SSSD after `realm join` names groups `ml-team@DOMAIN`; write that in the assignment, or switch
   to short names.
 - macOS Platform SSO gives no Entra groups; a local group has to carry the membership.
+- On Windows, `guardrail profile explain --user` takes a SID, `AzureAD\Name`, the bare name or the UPN.
 - `entra_setup.py` uses the commercial Microsoft cloud (`graph.microsoft.com`).

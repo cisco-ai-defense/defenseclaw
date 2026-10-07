@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +42,45 @@ type commandResult struct {
 
 // commandRunner runs a trusted directory tool with a cleared environment.
 // Tests replace it; production uses runTrustedCommand.
-type commandRunner func(ctx context.Context, path string, args []string) (commandResult, error)
+type commandRunner func(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error)
+
+// outputFilter wraps the bounded stdout of one command, so that output the
+// caller does not read never counts against the limit.
+type outputFilter func(io.Writer) io.Writer
+
+// withoutGroupMembers drops the member list of each group(5) line as the
+// tool writes it. DefenseClaw reads only a group's name and gid, and getent
+// lists every member of a directory group (SSSD and winbind do by default):
+// one Active Directory group of a few thousand members passed the output
+// limit on its own, so the group lookup of each of its members failed.
+func withoutGroupMembers(w io.Writer) io.Writer { return &groupLineWriter{w: w} }
+
+// groupLineWriter passes on name:passwd:gid: of each line and drops the rest
+// of the line, however long.
+type groupLineWriter struct {
+	w      io.Writer
+	colons int // separators seen on the current line
+	out    []byte
+}
+
+func (g *groupLineWriter) Write(p []byte) (int, error) {
+	g.out = g.out[:0]
+	for _, b := range p {
+		switch {
+		case b == '\n':
+			g.colons = 0
+		case g.colons == 3:
+			continue
+		case b == ':':
+			g.colons++
+		}
+		g.out = append(g.out, b)
+	}
+	if _, err := g.w.Write(g.out); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
 
 // limitedBuffer fails writes past its limit so a hostile or broken
 // directory backend cannot grow the guardian's memory without bound.
@@ -64,9 +103,10 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 }
 
 // runTrustedCommand executes path with args, a minimal fixed environment,
-// a timeout, and bounded stdout/stderr. A non-zero exit is returned in the
-// result, not as an error, so callers can map tool-specific exit codes.
-func runTrustedCommand(ctx context.Context, path string, args []string) (commandResult, error) {
+// a timeout, and bounded stdout/stderr; filters apply to stdout before the
+// bound. A non-zero exit is returned in the result, not as an error, so
+// callers can map tool-specific exit codes.
+func runTrustedCommand(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -77,7 +117,11 @@ func runTrustedCommand(ctx context.Context, path string, args []string) (command
 	cmd.Dir = "/"
 	stdout := &limitedBuffer{limit: defaultOutputLimit}
 	stderr := &limitedBuffer{limit: stderrLimit}
-	cmd.Stdout = stdout
+	var out io.Writer = stdout
+	for _, filter := range filters {
+		out = filter(out)
+	}
+	cmd.Stdout = out
 	cmd.Stderr = stderr
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -100,6 +101,14 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Secure Client has no setup subcommand and reports the step of main
+	// (GAP-0302, issue #1092).
+	cfg.Enterprise.Profile = ""
+	want := fmt.Sprintf("defenseclaw acp setup --managed --client zed --agent kiro --profile locked --activate --runtime-data-dir %q --token-file %q --guard-binary ", userData, tokenPath)
+	if next := enterpriseACPSetupCommand(enrollment, tokenPath); !strings.HasPrefix(next, want) {
+		t.Fatalf("Secure Client setup command = %q, want the one of main (%q...)", next, want)
+	}
+	cfg.Enterprise.Profile = "standalone"
 	credential, err := acp.LoadEnterpriseCredential(serviceData, enrollment.principal, "zed", "kiro", "locked")
 	if err != nil {
 		t.Fatal(err)

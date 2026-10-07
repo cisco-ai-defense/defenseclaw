@@ -36,16 +36,23 @@ var (
 	enterpriseACPJSON        bool
 )
 
-var enterpriseACPCmd = &cobra.Command{
-	Use:   "acp",
-	Short: "Provision and revoke managed per-user ACP credentials",
-	Long: `Manage administrator-owned ACP enrollments for interactive users.
+const enterpriseACPLongIntro = `Manage administrator-owned ACP enrollments for interactive users.
 
 Each enrollment receives a unique bearer scoped to one principal, editor,
 agent, and central policy profile. The service record remains in protected
 machine state; only the bearer copy is published into the target user's private
-ACP runtime. The administrator commands never write an editor profile; the
+ACP runtime.`
+
+var enterpriseACPCmd = &cobra.Command{
+	Use:   "acp",
+	Short: "Provision and revoke managed per-user ACP credentials",
+	Long: enterpriseACPLongIntro + ` The administrator commands never write an editor profile; the
 enrolled user runs "setup" to write their own editor entry.`,
+	// Secure Client has no setup command and keeps the help of main (issue
+	// #1092).
+	Annotations: map[string]string{
+		secureClientLongAnnotation: enterpriseACPLongIntro + " The gateway never writes an editor profile or user home.",
+	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// The administrator commands read the managed deployment (GAP-0249).
 		// The user-side setup reads no central config and runs as the user
@@ -239,23 +246,20 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	payload := map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
-		"next": enterpriseACPSetupCommand(enrollment),
+		"next": enterpriseACPSetupCommand(enrollment, tokenPath),
 	}
 	return enterpriseACPResult(cmd, payload, nil)
 }
 
 // enterpriseACPSetupCommand is the user-side command an enrollment reports:
 // this executable's own setup subcommand, because a managed host has no other
-// DefenseClaw command to run (GAP-0254).
-func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment) string {
+// DefenseClaw command to run (GAP-0254). Secure Client has no setup
+// subcommand and reports the step of main (issue #1092).
+func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath string) string {
 	executable, guard := managedHostGatewayCommand(), "defenseclaw-acp"
 	if path, err := os.Executable(); err == nil {
 		executable = path
 		guard = filepath.Join(filepath.Dir(path), "defenseclaw-acp"+filepath.Ext(path))
-	}
-	invoke := fmt.Sprintf("%q", executable)
-	if runtime.GOOS == "windows" {
-		invoke = "& " + invoke
 	}
 	activate := ""
 	mode := strings.TrimSpace(cfg.ACP.Mode)
@@ -267,6 +271,16 @@ func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment) string {
 	}
 	if mode == "action" {
 		activate = " --activate"
+	}
+	if cfg.SecureClientIntegration() {
+		return fmt.Sprintf(
+			"defenseclaw acp setup --managed --client %s --agent %s --profile %s%s --runtime-data-dir %q --token-file %q --guard-binary %q",
+			enrollment.client, enrollment.agent, enrollment.profile, activate, enrollment.dataDir, tokenPath, guard,
+		)
+	}
+	invoke := fmt.Sprintf("%q", executable)
+	if runtime.GOOS == "windows" {
+		invoke = "& " + invoke
 	}
 	return fmt.Sprintf(
 		"%s enterprise acp setup --client %s --agent %s --profile %s%s --data-dir %q --api-port %d --guard-binary %q",

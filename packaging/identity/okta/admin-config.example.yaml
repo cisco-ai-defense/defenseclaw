@@ -38,9 +38,7 @@ guardrail:
   enabled: true
   mode: observe
   connectors:
-    # Give every connector at least one key. An empty entry such as
-    # `claudecode: {}` is dropped when the config loads, and then the
-    # enumerator enrolls nobody for that connector.
+    # The agents to protect. An empty entry such as `claudecode: {}` enables one too.
     claudecode: {enabled: true}
     codex: {enabled: true}
   profiles:

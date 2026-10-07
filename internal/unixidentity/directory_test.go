@@ -104,13 +104,13 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 		resolver := newFakeNSS(f)
 		run := resolver.runner
 		var inflight, peak atomic.Int32
-		resolver.runner = func(ctx context.Context, path string, args []string) (commandResult, error) {
+		resolver.runner = func(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error) {
 			n := inflight.Add(1)
 			defer inflight.Add(-1)
 			for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
 			}
 			time.Sleep(time.Millisecond)
-			return run(ctx, path, args)
+			return run(ctx, path, args, filters...)
 		}
 		facts, err := resolver.DirectoryFactsForUID(1001, time.Now())
 		if (err != nil) != tc.fails || (err == nil && len(facts.Groups) != tc.count+1) {
@@ -119,6 +119,39 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 		if peak.Load() != 1 {
 			t.Errorf("%d groups: %d getent calls at once, want one at a time", tc.count, peak.Load())
 		}
+	}
+}
+
+// TestDirectoryFactsNameLargeDirectoryGroups: getent prints every member of
+// a group, and a batch that held one Active Directory group of a few
+// thousand members passed the 64 KiB output limit, so the lookup failed for
+// each of its members and none got a group profile. A real getent run (a
+// script) checks that the member lists never count against the limit.
+func TestDirectoryFactsNameLargeDirectoryGroups(t *testing.T) {
+	dir := t.TempDir()
+	orig := nsswitchPath
+	nsswitchPath = filepath.Join(dir, "nsswitch.conf")
+	t.Cleanup(func() { nsswitchPath = orig })
+	members := make([]string, 4000)
+	for i := range members {
+		members[i] = fmt.Sprintf("user%d@corp.example.com", i)
+	}
+	groups := "alice@corp.example.com:*:1001:\nall-staff@corp.example.com:*:5001:" + strings.Join(members, ",") + "\n"
+	script := filepath.Join(dir, "getent")
+	body := "#!/bin/sh\ncase \"$*\" in\n" +
+		"\"passwd 1001\") echo \"alice@corp.example.com:*:1001:1001::/home/alice:/bin/bash\" ;;\n" +
+		"\"initgroups alice@corp.example.com\") echo \"alice@corp.example.com 1001 5001\" ;;\n" +
+		"\"group 1001 5001\") cat \"$(dirname \"$0\")/group\" ;;\n" +
+		"*) exit 2 ;;\nesac\n"
+	for path, content := range map[string]string{nsswitchPath: "passwd: files\n", filepath.Join(dir, "group"): groups, script: body} {
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &NSSResolver{path: script, runner: runTrustedCommand}
+	facts, err := r.DirectoryFactsForUID(1001, time.Now())
+	if err != nil || !reflect.DeepEqual(facts.Groups, []string{"alice@corp.example.com", "all-staff@corp.example.com"}) {
+		t.Fatalf("facts = %+v, %v", facts, err)
 	}
 }
 

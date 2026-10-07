@@ -70,13 +70,16 @@ func TestManagedHookPeerHomeResolvesTheCallersHome(t *testing.T) {
 
 func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	created := 0
+	directoryUp := true
 	now := time.Unix(1_000_000, 0)
 	cache := &managedHookPeerHomeCache{
 		newResolver: func() unixidentity.Resolver {
 			created++
-			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
-				1001: {Name: "alice", UID: 1001, Home: "/home/alice"},
-			}}
+			accounts := map[int]unixidentity.Account{}
+			if directoryUp {
+				accounts[1001] = unixidentity.Account{Name: "alice", UID: 1001, Home: "/home/alice"}
+			}
+			return &fakePeerHomeResolver{accounts: accounts}
 		},
 		now: func() time.Time { return now },
 	}
@@ -89,6 +92,16 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	cache.lookup(1001)
 	if created != 2 {
 		t.Fatalf("resolver not refreshed after the TTL (created %d)", created)
+	}
+	// A directory outage answers "no such account": the uid keeps its last
+	// home, so its config root and agent identity do not move (GAP-0314).
+	directoryUp = false
+	now = now.Add(managedHookPeerHomeTTL + time.Second)
+	if home := cache.lookup(1001); home != "/home/alice" {
+		t.Fatalf("lookup during a directory outage = %q, want the last home /home/alice", home)
+	}
+	if home := cache.lookup(1002); home != "" {
+		t.Fatalf("a uid that never resolved got the home %q", home)
 	}
 }
 

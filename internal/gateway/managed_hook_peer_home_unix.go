@@ -79,7 +79,16 @@ type managedHookPeerHomeCache struct {
 	// and groups, plus the guardian identity spool's UPN.
 	directoriesOnce sync.Once
 	directories     *identityDirectoryCache
+	// homes keeps the last home each uid resolved to, across resolver
+	// refreshes. A later lookup that fails or answers "no such account" (an
+	// offline SSSD answers that for directory accounts) serves it, so the
+	// config root and the agent identity derived from it do not move while
+	// the directory is away (GAP-0314).
+	homes map[int]string
 }
+
+// managedHookPeerHomesMax bounds the last resolved homes kept, one per uid.
+const managedHookPeerHomesMax = 16384
 
 type managedHookPeerAccount struct {
 	ready   chan struct{} // closed once account, ok and expires are set
@@ -196,13 +205,25 @@ func verifiedIdentityDirectory(identity string, block bool) (useridentity.Direct
 	return managedHookPeerDirectory(uid, block)
 }
 
-// lookup returns the caller's normalized home, or "".
+// lookup returns the caller's normalized home, or "". A lookup that fails
+// returns the last home the uid resolved to.
 func (c *managedHookPeerHomeCache) lookup(uid int) string {
 	account, ok := c.account(uid)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !ok {
-		return ""
+		return c.homes[uid]
 	}
-	return normalizeManagedHookPeerHome(account.Home)
+	home := normalizeManagedHookPeerHome(account.Home)
+	if _, known := c.homes[uid]; home == "" {
+		delete(c.homes, uid)
+	} else if known || len(c.homes) < managedHookPeerHomesMax {
+		if c.homes == nil {
+			c.homes = make(map[int]string)
+		}
+		c.homes[uid] = home
+	}
+	return home
 }
 
 // lookupName returns the caller's sanitized account name, or "".

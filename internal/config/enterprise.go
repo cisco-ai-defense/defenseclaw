@@ -960,16 +960,8 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 	if err := check("policy_dir", cfg.PolicyDir); err != nil {
 		return err
 	}
-	if err := check("guardrail.rule_pack_dir", cfg.Guardrail.RulePackDir); err != nil {
-		return err
-	}
-	names := make([]string, 0, len(cfg.Guardrail.Connectors))
-	for name := range cfg.Guardrail.Connectors {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := check("guardrail.connectors."+name+".rule_pack_dir", cfg.EffectiveRulePackDirForConnector(name)); err != nil {
+	for _, setting := range cfg.RulePackSettings() {
+		if err := check(setting.Key, setting.Dir); err != nil {
 			return err
 		}
 	}
