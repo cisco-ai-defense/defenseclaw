@@ -310,6 +310,7 @@ def write_with(
 _held = threading.local()
 
 
+    refuse_when_managed(target, actor)
 @contextmanager
 def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT_LOCK_TIMEOUT_S) -> Iterator[None]:
     """Hold ``config.yaml.lock``; reentrant in the thread that holds it.
@@ -594,6 +595,19 @@ def managed_refuses(current: bytes, actor: str) -> bool:
 
 
 _warned_python_only = False
+
+
+def refuse_when_managed(path: str | os.PathLike[str], actor: str | None = None) -> None:
+    """Raise :class:`ManagedConfigWriteError` when the managed gate would refuse
+    this writer, before it takes ``config.yaml.lock`` or touches the folder: a
+    refused writer leaves nothing behind (an empty lock file in a service-owned
+    folder). The locked transaction checks the same gate again."""
+    try:
+        current, _mode, _exists = _read_current(_resolve(path))
+    except (ConfigWriteError, OSError):
+        return  # the locked transaction reports it
+    if managed_refuses(current, actor or current_actor(ACTOR_PREFIX_CLI)):
+        raise ManagedConfigWriteError(MANAGED_REFUSAL)
 
 
 def _use_go_validator() -> bool:

@@ -23,6 +23,7 @@ import stat
 
 import pytest
 from defenseclaw import config_writer
+from defenseclaw.config import locked_config_yaml
 from defenseclaw.config_writer import Change
 
 
@@ -120,9 +121,14 @@ def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, mo
     monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
     with pytest.raises(config_writer.ManagedConfigWriteError):
         config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        with locked_config_yaml(path):
+            pass
     with pytest.raises(FileNotFoundError):
         config_writer.read_generation_state(path)
-    # A refusal leaves the lifecycle's folder as it was: every user's hook reads it.
+    # A refusal leaves nothing behind: no lock file (GAP-0171), and the
+    # lifecycle's folder keeps its mode, because every user's hook reads it.
+    assert not os.path.lexists(path + config_writer.LOCK_SUFFIX)
     if os.name != "nt":
         assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
 

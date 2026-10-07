@@ -3648,6 +3648,7 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
             # A writer creating config.yaml writes a current-schema document.
             document = {"config_version": CURRENT_CONFIG_VERSION, **document}
             document.setdefault("observability", {})
+    config_writer.refuse_when_managed(path)
         candidate = config_writer.render_document(current, document, source_name)
         return candidate, config_writer.diff_documents(current, candidate)
 
