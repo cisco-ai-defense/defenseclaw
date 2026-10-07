@@ -876,7 +876,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
 	sessionID := codexNotifySessionID(p)
 	ctx := ContextWithSessionID(r.Context(), sessionID)
-	agentID := codexNotifyAgentID(sessionID)
+	agentID := a.codexNotifyAgentID(sessionID)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -911,9 +911,55 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 	recordCodexNotifyV8(ctx, metricRuntime, kind, statusLabel, result, p.TurnID)
 
+	// Secure Client keeps folding a parsed notify into the unified hook
+	// collector as a synthetic Stop event: a connector-hook-synthetic row
+	// and its hook records (issue #1092).
+	if parseErr == nil && a.managedAIDOnly() {
+		synthetic := codexNotifyToAgentHookRequest(p, body)
+		a.handleAgentHookSynthetic(ctx, "codex", synthetic, body)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
+}
+
+// codexNotifyToAgentHookRequest translates a codexNotifyPayload into
+// a generic agentHookRequest carrying a synthetic HookEventName=Stop.
+// The translation preserves the codex notify fields in
+// req.Payload so a downstream consumer (hook profile evaluator,
+// audit envelope renderer) can still recover the type / status /
+// model values that the codex schema provides.
+//
+// PR 7 cleanup deletes codexNotifyPayload entirely once every
+// downstream that reads Type / Status / Model has switched to
+// pulling them out of req.Payload directly via firstString.
+func codexNotifyToAgentHookRequest(p codexNotifyPayload, raw []byte) agentHookRequest {
+	payload := map[string]interface{}{
+		"hook_event_name": "Stop",
+		"session_id":      codexNotifySessionID(p),
+		"turn_id":         p.TurnID,
+		"model":           p.Model,
+		"agent_id":        "codex",
+		"agent_type":      "codex",
+		"codex_notify": map[string]interface{}{
+			"type":   p.Type,
+			"status": p.Status,
+		},
+		"raw_notify_body_len": len(raw),
+	}
+	return agentHookRequest{
+		ConnectorName: "codex",
+		HookEventName: "Stop",
+		SessionID:     codexNotifySessionID(p),
+		TurnID:        p.TurnID,
+		AgentID:       "codex",
+		AgentName:     "codex",
+		AgentType:     "codex",
+		ToolName:      "codex-notify",
+		Direction:     "tool_result",
+		Payload:       payload,
+	}
 }
 
 func codexNotifySessionID(p codexNotifyPayload) string {
@@ -926,8 +972,9 @@ func codexNotifySessionID(p codexNotifyPayload) string {
 // codexNotifyAgentID is the root agent of the notify's thread: the ID the
 // correlation ledger mints for the Codex session and its hook rows carry,
 // so the notify row and its model records join them on agent_id.
-func codexNotifyAgentID(sessionID string) string {
-	if sessionID == "" {
+func (a *APIServer) codexNotifyAgentID(sessionID string) string {
+	// Secure Client keeps its notify records without an agent (issue #1092).
+	if sessionID == "" || a.managedAIDOnly() {
 		return ""
 	}
 	return stableLLMEventID("agent", "codex", sessionID, "root")
@@ -986,7 +1033,7 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		SessionID:  sessionID,
 		TurnID:     turnID,
 		PromptID:   promptID,
-		AgentID:    codexNotifyAgentID(sessionID),
+		AgentID:    a.codexNotifyAgentID(sessionID),
 		AgentName:  "codex",
 		AgentType:  "codex",
 		UserID:     user.ID,
