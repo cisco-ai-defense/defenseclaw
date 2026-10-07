@@ -171,8 +171,9 @@ agents: the main agent's ID is made from the user's `agt-`, the connector and
 the session ID, so `gen_ai.agent.id` and the lineage IDs below differ too. A
 chat that resumes after a gateway restart keeps its `ais-` ID and is not
 counted again in the Sessions column of `defenseclaw agent identities`, however
-many chats were open at the restart. The Secure Client profile keeps its
-existing agent IDs and gets no new attributes.
+many chats were open at the restart. The column counts chats: a sub-agent that
+runs in a session of its own, as a Codex 0.160 thread does, is not counted. The
+Secure Client profile keeps its existing agent IDs and gets no new attributes.
 
 Claude Code and Codex name a sub-agent on every hook it makes, so each of those
 hooks carries the sub-agent's `ais-` at depth one with the main agent as its

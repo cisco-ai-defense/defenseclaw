@@ -2152,6 +2152,11 @@ func (a *APIServer) rememberHookSessionState(ctx context.Context, meta llmEventM
 	if a == nil {
 		return
 	}
+	// A session that names a parent session is a sub-agent's: agent
+	// identities counts chats, not the threads an agent spawned (GAP-0226).
+	if meta.ParentSessionID != "" && meta.ParentSessionID != meta.SessionID {
+		sharedAgentIdentities.markSubagentSession(meta.AgentIdentityID, meta.SessionID)
+	}
 	key := hookSessionStateKey(meta)
 	if key == "" {
 		return

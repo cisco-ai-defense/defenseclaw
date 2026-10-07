@@ -37,6 +37,13 @@ type agentIdentityRecorder struct {
 	// hints keeps the latest claimed install hint per identity. Hints are not
 	// stored in inventory.db; the API reports the ones this process saw.
 	hints map[string]string
+	// subSessions are the sessions known to be a sub-agent's, per agent
+	// identity: a Codex 0.160 thread a spawn call started, or any session that
+	// names a parent session. They are not chats of the agent, so they are
+	// neither counted nor its last session. Past the bound the oldest are
+	// dropped, and one of them that hooks again counts as a session.
+	subSessions     map[string]struct{}
+	subSessionOrder []string
 
 	storeMu         sync.Mutex
 	storeGeneration uint64
@@ -77,6 +84,9 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 		rec.UserName = facts.UserName
 	}
 	sessionID = strings.TrimSpace(sessionID)
+	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
+		sessionID = ""
+	}
 	if newSession {
 		rec.NoteSession(sessionID)
 	}
@@ -85,6 +95,35 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	}
 	if facts.InstallHint != "" && (len(r.hints) < agentIdentityRecorderMaxPending || r.hints[facts.ID] != "") {
 		r.hints[facts.ID] = facts.InstallHint
+	}
+}
+
+func subSessionKey(agentID, sessionID string) string { return agentID + "\x00" + sessionID }
+
+// markSubagentSession records that sessionID belongs to a sub-agent of
+// agentID, which may have counted it already: the link to the parent can be
+// learned after the session's first hook (GAP-0226).
+func (r *agentIdentityRecorder) markSubagentSession(agentID, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if r == nil || agentID == "" || sessionID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := subSessionKey(agentID, sessionID)
+	if _, known := r.subSessions[key]; !known {
+		if r.subSessions == nil {
+			r.subSessions = make(map[string]struct{})
+		}
+		for len(r.subSessionOrder) >= agentIdentityRecorderMaxPending {
+			delete(r.subSessions, r.subSessionOrder[0])
+			r.subSessionOrder = r.subSessionOrder[1:]
+		}
+		r.subSessions[key] = struct{}{}
+		r.subSessionOrder = append(r.subSessionOrder, key)
+	}
+	if rec, ok := r.pending[agentID]; ok {
+		rec.ForgetSession(sessionID)
 	}
 }
 
