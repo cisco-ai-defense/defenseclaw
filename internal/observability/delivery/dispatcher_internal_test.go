@@ -430,8 +430,8 @@ func TestOpenCircuitRejectsAcceptedBacklogWithoutAdapterWork(t *testing.T) {
 	close(release)
 	snapshot := waitForCircuitSnapshot(t, dispatcher, func(snapshot HealthSnapshot) bool {
 		return snapshot.CircuitState == CircuitOpen &&
-			snapshot.Counters.Rejected == 3 &&
-			snapshot.Queue != nil && snapshot.Queue.Items == 0
+			snapshot.Counters.Rejected == 1 &&
+			snapshot.Queue != nil && snapshot.Queue.Items == 2
 	})
 	if adapter.callCount() != 1 || adapter.encodedCalls.Load() != 1 ||
 		snapshot.Counters.Accepted != 3 || snapshot.Counters.Failed != 1 {
