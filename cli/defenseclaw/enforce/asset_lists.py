@@ -372,8 +372,19 @@ def _connector_key(connector: str) -> str:
     return connector_paths.normalize(connector) if connector else ""
 
 
-def _same_asset(rule: Any, name: str, connector: str) -> bool:
-    return (getattr(rule, "name", "") or "").strip() == name and _connector_key(
+def _same_name(rule_name: str, name: str, target_type: str) -> bool:
+    """Names compare as the readers match them: skill, MCP and plugin names
+    case-insensitively (``_asset_rule_matches``), tool names exactly
+    (``tool_decision``). An exact compare left a denied ``MySkill`` in place
+    on an unblock or allow of ``myskill``, which still matched it (GAP-0319)."""
+    rule_name, name = (rule_name or "").strip(), (name or "").strip()
+    if target_type == "tool":
+        return rule_name == name
+    return rule_name.lower() == name.lower()
+
+
+def _same_asset(rule: Any, name: str, connector: str, target_type: str) -> bool:
+    return _same_name(getattr(rule, "name", ""), name, target_type) and _connector_key(
         getattr(rule, "connector", "")
     ) == _connector_key(connector)
 
@@ -413,8 +424,8 @@ def write_operator_decision(
         holder = getattr(cfg.asset_policy, target_type)
         if path:
             _reload_lists_from_disk(cfg, holder, target_type, path)
-        denied = [r for r in holder.denied if not _same_asset(r, name, connector)]
-        allowed = [r for r in holder.allowed if not _same_asset(r, name, connector)]
+        denied = [r for r in holder.denied if not _same_asset(r, name, connector, target_type)]
+        allowed = [r for r in holder.allowed if not _same_asset(r, name, connector, target_type)]
         if target_type == "tool":
             rule: Any = AssetPolicyToolRule(name=name, connector=connector, reason=reason)
         else:
@@ -481,7 +492,7 @@ def has_entry(cfg: Any, store: Any, target_type: str, name: str, connector: str,
     want = connector_paths.normalize(connector) if connector else ""
     for rule in rules or []:
         rule_connector = (getattr(rule, "connector", "") or "").strip()
-        if (getattr(rule, "name", "") or "").strip() != name:
+        if not _same_name(getattr(rule, "name", ""), name, target_type):
             continue
         if (connector_paths.normalize(rule_connector) if rule_connector else "") == want:
             return True

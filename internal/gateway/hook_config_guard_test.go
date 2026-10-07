@@ -397,6 +397,19 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before+1 {
 		t.Fatalf("second refresh: err=%v, Setup calls %d, want %d", err, setupCalls(), before+1)
 	}
+
+	// A mode change inside the suppression window of that re-render is
+	// applied when the window ends, not dropped (GAP-0317).
+	guard.mu.Lock()
+	guard.suppressUntil = time.Now().Add(100 * time.Millisecond)
+	guard.mu.Unlock()
+	sidecar.publishConfig(live)
+	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before+2 {
+		t.Fatalf("refresh inside the suppression window: err=%v, Setup calls %d, want %d", err, setupCalls(), before+2)
+	}
+	if body, err := os.ReadFile(configPath); err != nil || !strings.Contains(string(body), `"failMode":"open"`) {
+		t.Fatalf("rendered hooks = %q (%v), want fail mode open", body, err)
+	}
 }
 
 func TestHookConfigGuard_ContinuesAfterWatcherReplacement(t *testing.T) {

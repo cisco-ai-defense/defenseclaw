@@ -63,10 +63,19 @@ type assetListEdit struct {
 // lists: a block or allow first drops every rule for the same name and
 // connector from both lists (one decision per asset, as the actions table
 // kept), then appends the new rule; an unblock only drops the denied rule.
+// Names compare as the readers match them: skill, MCP and plugin names
+// case-insensitively (assetRuleMatches), tool names exactly
+// (ToolListDecision). An exact compare left a denied MySkill in place on an
+// unblock or allow of myskill, which still matched it (GAP-0319).
 func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Change {
 	base := "asset_policy." + edit.TargetType
 	sameAsset := func(name, connector string) bool {
-		return strings.TrimSpace(name) == edit.Name && config.SameConnector(connector, edit.Connector)
+		name = strings.TrimSpace(name)
+		sameName := strings.EqualFold(name, strings.TrimSpace(edit.Name))
+		if edit.TargetType == "tool" {
+			sameName = name == edit.Name
+		}
+		return sameName && config.SameConnector(connector, edit.Connector)
 	}
 	if edit.TargetType == "tool" {
 		denied, allowed := cfg.AssetPolicy.Tool.Denied, cfg.AssetPolicy.Tool.Allowed

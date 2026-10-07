@@ -64,6 +64,10 @@ const (
 
 var newHookConfigFSWatcher = fsnotify.NewWatcher
 
+// errHookRepairSuppressed is the repairCurrent answer inside the suppression
+// window, while the writes of a recent Setup or a connector switch settle.
+var errHookRepairSuppressed = errors.New("hook registration repair is suppressed during connector transition")
+
 type hookRuntimePolicy struct {
 	hookFailMode  string
 	guardrailMode string
@@ -740,7 +744,7 @@ func (g *HookConfigGuard) repairCurrent(
 		changed = append(changed, "stale runtime registration evidence")
 	}
 	if suppressed {
-		return errors.New("hook registration repair is suppressed during connector transition")
+		return errHookRepairSuppressed
 	}
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -773,8 +777,49 @@ func (g *HookConfigGuard) repairCurrent(
 // guardrail.mode action), so the generated hook scripts follow config instead
 // of waiting for a gateway restart. A guard whose hooks are intact and
 // current does nothing.
+//
+// Inside the suppression window of a recent re-render or connector switch it
+// waits the window out and checks again: no later reload asks for this fail
+// mode again, so a second mode change within seconds of the first would
+// otherwise leave the hooks on the previous fail mode (GAP-0317).
 func (g *HookConfigGuard) RefreshPolicy(ctx context.Context) error {
-	return g.repairCurrent(ctx, "", "", []string{"effective hook policy changed"})
+	for {
+		err := g.repairCurrent(ctx, "", "", []string{"effective hook policy changed"})
+		if !errors.Is(err, errHookRepairSuppressed) {
+			return err
+		}
+		if err := g.waitSuppressionWindow(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+// waitSuppressionWindow returns when the current suppression window ends, or
+// with an error when ctx ends or the guard stops first.
+func (g *HookConfigGuard) waitSuppressionWindow(ctx context.Context) error {
+	g.mu.Lock()
+	wait := time.Until(g.suppressUntil)
+	guardCtx := g.ctx
+	g.mu.Unlock()
+	if wait <= 0 {
+		return nil
+	}
+	if guardCtx == nil {
+		return errors.New("hook registration guard is not active")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-guardCtx.Done():
+		return errors.New("hook registration guard is retiring")
+	}
 }
 
 // activeConnector is the connector this guard currently owns, or nil.

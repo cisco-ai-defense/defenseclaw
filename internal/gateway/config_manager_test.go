@@ -1107,6 +1107,17 @@ func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	if !watcherNeedsRestart(oldCfg, newCfg) {
 		t.Fatal("watcherNeedsRestart returned false for llm change")
 	}
+
+	// An operator block/allow (asset_policy) or an admission edit applies to
+	// the next decision without a restart, which would cancel an install
+	// scan in flight and fail it closed (GAP-0315).
+	listEdit := &config.Config{}
+	listEdit.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "foo"}}
+	scanOff := false
+	listEdit.Admission.Skill.ScanOnInstall = &scanOff
+	if watcherNeedsRestart(&config.Config{}, listEdit) {
+		t.Fatal("watcherNeedsRestart returned true for an asset_policy or admission edit")
+	}
 }
 
 func TestGuardrailRestartPredicateIncludesSingularConnector(t *testing.T) {

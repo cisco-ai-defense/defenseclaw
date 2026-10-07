@@ -93,6 +93,14 @@ func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 		t.Fatalf("GET /enforce/allowed = %v %s", err, w.Body.String())
 	}
 
+	// Skill names match case-insensitively, so an unblock in another case
+	// removes the rule that still blocked it (GAP-0319).
+	cased, casedRecorded := enforceTestAPI(t, "asset_policy:\n  skill:\n    denied:\n      - {name: MySkill}\n")
+	if code, out := enforceRequest(t, cased.handleEnforceBlock, http.MethodDelete, `{"target_type":"skill","target_name":"myskill"}`); code != http.StatusOK ||
+		!reflect.DeepEqual(*casedRecorded, []configwrite.Change{{Path: "asset_policy.skill.denied", Value: []map[string]any{}}}) {
+		t.Fatalf("unblock in another case = %d %v %#v", code, out, *casedRecorded)
+	}
+
 	*recorded = nil
 	// A reload the gateway refused is reported, not the old digest.
 	api.configReloader = func(context.Context, string) error { return errors.New("requires gateway restart for: data_dir") }

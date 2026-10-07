@@ -212,10 +212,8 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	for key, digest := range signaturePackDigests(cfg) {
 		out[key] = digest
 	}
-	if path := strings.TrimSpace(cfg.AIDiscovery.ConfidencePolicyPath); path != "" {
-		if digest := fileDigest(path); digest != "missing" {
-			out["confidence_policy"] = digest
-		}
+	if digest := confidencePolicyDigest(cfg); digest != "" {
+		out[confidencePolicyComponent] = digest
 	}
 	if ref := cfg.Scanners.SkillScanner.PolicyFile; strings.TrimSpace(ref.Path) != "" {
 		out["scanner_policy:skill"] = assetRefDigest(ref)
@@ -265,11 +263,31 @@ func signaturePackDigests(cfg *config.Config) map[string]string {
 	return out
 }
 
-// signaturePacksChanged reports whether a signature pack file changed on disk
-// since the live generation was built. AI discovery loads its catalog once, when
-// its service is built, so a pack edited in place only takes effect (or is
-// refused, under its pin) when the service is rebuilt.
-func signaturePacksChanged(live *Generation, cfg *config.Config) bool {
+// confidencePolicyComponent is the generation component of the discovery
+// confidence policy file.
+const confidencePolicyComponent = "confidence_policy"
+
+// confidencePolicyDigest digests ai_discovery.confidence_policy_path, or is
+// "" when no path is set or the file does not exist (the built-in policy).
+func confidencePolicyDigest(cfg *config.Config) string {
+	path := strings.TrimSpace(cfg.AIDiscovery.ConfidencePolicyPath)
+	if path == "" {
+		return ""
+	}
+	if digest := fileDigest(path); digest != "missing" {
+		return digest
+	}
+	return ""
+}
+
+// discoveryAssetsChanged reports whether a file AI discovery loads once, when
+// its service is built, changed on disk since the live generation was built: a
+// signature pack or the confidence policy. Such a file edited, created or
+// removed in place only takes effect (or is refused, under its pin) when the
+// service is rebuilt; without the rebuild the reported digest named a
+// confidence policy discovery did not apply (GAP-0316). Secure Client keeps the
+// discovery service of main, which a confidence policy edit never rebuilt.
+func discoveryAssetsChanged(live *Generation, cfg *config.Config) bool {
 	if live == nil || cfg == nil || !cfg.AIDiscovery.Enabled {
 		return false
 	}
@@ -278,7 +296,7 @@ func signaturePacksChanged(live *Generation, cfg *config.Config) bool {
 			return true
 		}
 	}
-	return false
+	return !cfg.SecureClientIntegration() && live.Components[confidencePolicyComponent] != confidencePolicyDigest(cfg)
 }
 
 // assetRefDigest is a reference's pinned digest, else the file's.

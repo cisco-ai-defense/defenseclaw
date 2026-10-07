@@ -345,6 +345,14 @@ def test_operator_block_from_a_stale_config_keeps_a_concurrent_block(tmp_path, m
     written = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))["asset_policy"]
     assert written == {"skill": {"denied": [{"name": "evil-a"}, {"name": "evil-b"}]}}
 
+    # Names match case-insensitively, as the readers match them: an unblock
+    # in another case finds and removes the rule (GAP-0319).
+    cfg = config_module.load(data_dir=str(tmp_path))
+    assert asset_lists.has_entry(cfg, None, "skill", "EVIL-A", "", "block")
+    asset_lists.write_operator_decision(cfg, op=asset_lists.OP_UNBLOCK, target_type="skill", name="EVIL-A")
+    on_disk = config_module.load(data_dir=str(tmp_path)).asset_policy.skill.denied
+    assert [rule.name for rule in on_disk] == ["evil-b"]
+
 
 def test_plain_error_names_the_key_without_the_validator_internals():
     """GAP-0050: a refused change says the key and the fix, not the JSON path, the bracketed code or the schema."""
