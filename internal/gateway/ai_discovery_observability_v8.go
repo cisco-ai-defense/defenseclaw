@@ -406,10 +406,9 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 var errIDEPluginSkipped = errors.New("ide plugin outside the registered attribute syntax")
 
 var (
-	// ideV8PluginIDPattern is the defenseclaw.ide.plugin.id syntax. It admits
-	// interior spaces because JetBrains ids are free text ("String
-	// Manipulation").
-	ideV8PluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9@][A-Za-z0-9._@/:+ -]*$`)
+	// IDE inventory accepts bounded Unicode text without control characters.
+	// Keep the telemetry contract equally broad so valid plugin ids are emitted.
+	ideV8PluginIDPattern = regexp.MustCompile(`^[^\x00-\x1f\x7f-\x9f]+$`)
 	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
 	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
@@ -444,8 +443,9 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 	default:
 		return nil
 	}
-	pluginID := strings.TrimSpace(plugin.PluginID)
-	if len(pluginID) > 256 || !ideV8PluginIDPattern.MatchString(pluginID) || !ideV8ProductPattern.MatchString(plugin.Product) {
+	pluginID := plugin.PluginID
+	if strings.TrimSpace(pluginID) == "" || len(pluginID) > 256 ||
+		!ideV8PluginIDPattern.MatchString(pluginID) || !ideV8ProductPattern.MatchString(plugin.Product) {
 		return errIDEPluginSkipped
 	}
 	metadata, err := router.NewClassifiedLogMetadata(
