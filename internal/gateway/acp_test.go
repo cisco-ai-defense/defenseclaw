@@ -487,6 +487,12 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	if none := instance(`{}`); none != "" {
 		t.Fatalf("a frame without a session got the instance %q", none)
 	}
+	restore := ManagedEnterpriseActive()
+	t.Cleanup(func() { SetManagedEnterpriseActive(restore) })
+	SetManagedEnterpriseActive(true)
+	if sc := instance(`{"sessionId":"acp-session-3"}`); sc != "" {
+		t.Fatalf("a Secure Client ACP frame got the instance %q; main records none (issue #1092)", sc)
+	}
 }
 
 func acpAuthenticatedTestHandler(api *APIServer) http.Handler {

@@ -303,8 +303,9 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 	}
 	// And the instance (ais-) of the ACP session the frame belongs to,
 	// derived from that identity as the hook path derives one per session; a
-	// frame that names no session has none (GAP-0252).
-	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && session != "" {
+	// frame that names no session has none (GAP-0252). Secure Client ACP
+	// records carry no instance, as on main (issue #1092).
+	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && session != "" && !ManagedEnterpriseActive() {
 		if registry := SharedAgentRegistry(); registry != nil {
 			resolved, _ := registry.ResolveForAgentIdentity(ctx, identity.IdentityID, session, "")
 			if resolved.AgentInstanceID != "" {
