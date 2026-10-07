@@ -84,6 +84,13 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 	if err := ta.PolicySuggest(bg, SuggestOptions{PackOut: out}); err == nil {
 		t.Fatal("the suggestion wrote over a file")
 	}
+	// GAP-0126: written into the project folder (a relative --pack-out run
+	// there), the pack is one a mounted run refuses; the hint said to run
+	// with it anyway.
+	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{PackOut: "recorded.yaml"}))
+	has(t, ta.output(), "is inside the project folder, where a run that mounts the project refuses a pack",
+		"then move it to ", "and lock the project to it: defenseclaw sandbox run --pack recorded (or run with --copy --pack ")
+	lacks(t, ta.output(), "lock a project to it: defenseclaw sandbox run --pack /")
 
 	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
 		sandboxapi.Setting{Key: "network.mode", Value: "open", Source: "pack", Origin: "profile open"},
@@ -144,7 +151,7 @@ func TestPolicySuggestPackOutPaths(t *testing.T) {
 		{Host: "artifacts.example.com", Kind: sandboxapi.DestinationOther, Tunnels: 1}}}}
 	ta.ok(t, ta.PolicySuggest(bg, SuggestOptions{PackOut: "rel/recorded.yaml"}))
 	rel := filepath.Join(ta.project, "rel", "recorded.yaml")
-	has(t, ta.output(), "wrote "+rel+": pack recorded", "run --pack "+rel)
+	has(t, ta.output(), "wrote "+rel+": pack recorded", "--copy --pack "+rel)
 	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{PackOut: "~/team/pack.yaml"}))
 	if p, err := packs.Validate(filepath.Join(ta.home, "team", packs.PackFileName), ""); err != nil || p.Name != "team" {
 		t.Fatalf("~/team/pack.yaml: %v", err)
