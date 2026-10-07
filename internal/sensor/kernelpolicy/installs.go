@@ -118,9 +118,8 @@ func resolveInstall(fsys FS, row Enrolled, probe cliProbe, opts ResolveOptions) 
 // regular executable file that no other account can change.
 //
 // A candidate inside the user's home is the user's own file, and must stay
-// there: binaries anchors are shared by every user of a policy, and a link the
-// user controls must never be able to name a system program (a shell, an
-// interpreter) and so pull other users' ordinary processes into the scope. A
+// there: a link the user controls must never be able to name a system
+// program (a shell or interpreter) and pull ordinary processes into scope. A
 // candidate outside the home (a machine prefix, an administrator's
 // agent_prefixes) must be reached through a chain that Trusted admits for the
 // uid, root-owned and not writable by anyone else.

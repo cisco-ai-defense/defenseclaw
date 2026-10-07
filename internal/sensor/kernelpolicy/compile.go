@@ -402,14 +402,24 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		homeDirs = append(homeDirs, homes[uid])
 	}
 
-	// Anchors.
-	bins := map[string]bool{}
+	// A binary selector can carry only one uid set. Keep its binaries from
+	// one uid: taking the union of both would deny one enrolled user's
+	// ordinary process when it runs the other user's agent binary. The PID
+	// selector still covers the verified live roots of every enrolled uid.
+	binsByUID := map[int]map[string]bool{}
+	addBin := func(uid int, native string) {
+		if !validBinary(native) {
+			return
+		}
+		if binsByUID[uid] == nil {
+			binsByUID[uid] = map[string]bool{}
+		}
+		binsByUID[uid][native] = true
+	}
 	for _, install := range in.Installs {
 		if uidSet[install.UID] && scope.allows(install.Connector) {
 			for _, native := range install.Native {
-				if validBinary(native) {
-					bins[native] = true
-				}
+				addBin(install.UID, native)
 			}
 		}
 	}
@@ -424,12 +434,22 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 			continue
 		}
 		pids = append(pids, root.PID)
-		if root.Native && validBinary(root.Exe) {
-			bins[root.Exe] = true
+		if root.Native {
+			addBin(root.UID, root.Exe)
 		}
 	}
 	sort.Ints(pids)
-	binList := sortedKeys(bins)
+	binaryUID := 0
+	for _, uid := range uids {
+		if len(binsByUID[uid]) > 0 {
+			binaryUID = uid
+			break
+		}
+	}
+	if len(binsByUID) > 1 {
+		notes = append(notes, "binary_anchor_scope_limited")
+	}
+	binList := sortedKeys(binsByUID[binaryUID])
 	if over > 0 {
 		notes = append(notes, fmt.Sprintf("%s:%d", WarnRootsOverLimit, over))
 	}
@@ -457,7 +477,11 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		if write {
 			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 1, Operator: "Mask", Values: []string{writeMask}})
 		}
-		sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 2, Operator: "Equal", Values: uidValues})
+		selectorUIDs := uidValues
+		if anchor == "binaries" {
+			selectorUIDs = []string{strconv.Itoa(binaryUID)}
+		}
+		sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 2, Operator: "Equal", Values: selectorUIDs})
 		eperm := eperm
 		sel.MatchActions = []tpAction{{Action: "Override", ArgError: &eperm}, {Action: "Post"}}
 		return sel
@@ -501,7 +525,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	if len(tp.Spec.LsmHooks) == 0 {
 		return tp, Policy{}, append(notes, ReasonNoAnchors), over
 	}
-	meta := Policy{UIDs: uids, PIDs: pids, Binaries: binList, Paths: PathIndex{Exact: map[string]string{}, Prefixes: map[string]string{}}}
+	meta := Policy{UIDs: uids, PIDs: pids, BinaryUID: binaryUID, Binaries: binList, Paths: PathIndex{Exact: map[string]string{}, Prefixes: map[string]string{}}}
 	for _, p := range sshFiles {
 		meta.Paths.Exact[p] = kernel.ControlSSHPrivateKeyRead
 	}

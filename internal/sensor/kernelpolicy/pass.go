@@ -614,11 +614,14 @@ func (c *Controller) rescanFromPolicies() {
 // hasAnchor reports whether uid has anything to anchor an enforcing control
 // to: a resolved native install of an anchored connector or a live root.
 func (c *Controller) hasAnchor(uid int, plan Plan, compiled Compiled) bool {
-	if plan.Controls == nil || c.alive[uid] > 0 {
-		return c.alive[uid] > 0
+	if plan.Controls == nil {
+		return false
 	}
-	for _, install := range c.installs {
-		if install.UID == uid && plan.Controls.allows(install.Connector) && len(install.Native) > 0 {
+	if c.alive[uid] > 0 {
+		return true
+	}
+	for _, policy := range compiled.Policies {
+		if policy.Family == FamilyControls && policy.BinaryUID == uid && len(policy.Binaries) > 0 {
 			return true
 		}
 	}

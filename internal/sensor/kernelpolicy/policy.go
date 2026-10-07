@@ -188,6 +188,9 @@ type Policy struct {
 	YAML []byte
 	UIDs []int
 	PIDs []int
+	// BinaryUID is the sole uid covered by the binaries anchor. Zero means
+	// that no native binary was selected.
+	BinaryUID int
 	// Binaries are the binaries-anchor values of the controls families.
 	Binaries []string
 	// Paths maps a matched path back to the control it belongs to.
