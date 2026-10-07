@@ -139,10 +139,6 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
   defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
-# Drop inherited export attributes before these names receive private values.
-# A plain Bash assignment preserves the exported bit of an inherited variable,
-# which would otherwise copy the hook payload or bearer into curl's environment.
-unset PAYLOAD API_TOKEN
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
@@ -174,7 +170,6 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
     IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"

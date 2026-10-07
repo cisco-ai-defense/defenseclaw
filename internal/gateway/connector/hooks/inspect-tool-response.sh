@@ -80,9 +80,11 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
     # shellcheck source=/dev/null
     . "$TOKEN_FILE"
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# Only the private copy is used from here on: no child process inherits the
+# bearer in its environment.
+unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_OUTPUT="$(defenseclaw_read_stdin_capped)" || {

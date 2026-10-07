@@ -58,18 +58,22 @@ var hookArgvTools = []string{
 
 // hookArgvRecorder is a directory of wrappers that log the arguments of each
 // call (and, on Linux, the /proc/<pid>/cmdline of the wrapper process, which
-// is what another account would read) before they exec the real program.
+// is what another account would read) and its environment, which monitors
+// that capture process environments record, before they exec the real
+// program.
 type hookArgvRecorder struct {
-	dir string
-	log string
+	dir    string
+	log    string
+	envLog string
 }
 
 func newHookArgvRecorder(t *testing.T) *hookArgvRecorder {
 	t.Helper()
-	r := &hookArgvRecorder{dir: t.TempDir(), log: filepath.Join(t.TempDir(), "argv.log")}
-	cat := hookArgvLookPath("cat")
-	if cat == "" {
-		t.Skip("cat is required")
+	logDir := t.TempDir()
+	r := &hookArgvRecorder{dir: t.TempDir(), log: filepath.Join(logDir, "argv.log"), envLog: filepath.Join(logDir, "env.log")}
+	cat, envBin := hookArgvLookPath("cat"), hookArgvLookPath("env")
+	if cat == "" || envBin == "" {
+		t.Skip("cat and env are required")
 	}
 	for _, name := range hookArgvTools {
 		// The macOS /usr/bin/python3 may be the developer-tools stub that
@@ -88,6 +92,7 @@ func newHookArgvRecorder(t *testing.T) *hookArgvRecorder {
 			"  printf '\\036'\n" +
 			"  if [ -r /proc/$$/cmdline ]; then " + shellSingleQuoteForTest(cat) + " /proc/$$/cmdline; printf '\\036'; fi\n" +
 			"} >> " + shellSingleQuoteForTest(r.log) + "\n" +
+			"{ printf '%s\\n' " + shellSingleQuoteForTest(name) + "; " + shellSingleQuoteForTest(envBin) + "; printf '\\036'; } >> " + shellSingleQuoteForTest(r.envLog) + "\n" +
 			"exec " + shellSingleQuoteForTest(real) + " \"$@\"\n"
 		if err := os.WriteFile(filepath.Join(r.dir, name), []byte(wrapper), 0o755); err != nil {
 			t.Fatal(err)
@@ -114,8 +119,33 @@ func hookArgvLookPath(name string) string {
 
 func (r *hookArgvRecorder) reset(t *testing.T) {
 	t.Helper()
-	if err := os.WriteFile(r.log, nil, 0o600); err != nil {
+	for _, log := range []string{r.log, r.envLog} {
+		if err := os.WriteFile(log, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// requireNoneInEnvironment fails if any recorded child process started with
+// one of secrets in its environment.
+func (r *hookArgvRecorder) requireNoneInEnvironment(t *testing.T, secrets ...string) {
+	t.Helper()
+	data, err := os.ReadFile(r.envLog)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("no child process environment was recorded")
+	}
+	for _, rec := range strings.Split(string(data), "\x1e") {
+		name, env, _ := strings.Cut(strings.TrimLeft(rec, "\n"), "\n")
+		for _, line := range strings.Split(env, "\n") {
+			for _, secret := range secrets {
+				if strings.Contains(line, secret) {
+					t.Fatalf("%s started with %q in its environment: %s", name, secret, line)
+				}
+			}
+		}
 	}
 }
 
@@ -295,7 +325,7 @@ func runHookArgvCase(t *testing.T, hookDir string, tc hookArgvCase, env []string
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, systemBashForTest(t), append([]string{filepath.Join(hookDir, tc.script)}, tc.args...)...)
-	cmd.Env = append(append(hookArgvBaseEnv(), env...), tc.env...)
+	cmd.Env = append(append(append(hookArgvBaseEnv(), hookArgvInheritedEnv()...), env...), tc.env...)
 	cmd.Stdin = strings.NewReader(tc.stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -308,6 +338,18 @@ func runHookArgvCase(t *testing.T, hookDir string, tc hookArgvCase, env []string
 		t.Fatalf("run %s: %v", tc.script, err)
 	}
 	return code, stdout.String(), stderr.String()
+}
+
+// hookArgvInheritedEnv exports, as an agent's environment may, every name the
+// hooks keep the bearer, the payload or the gateway's answer in. An
+// assignment keeps the export bit of an inherited variable, which would put
+// the value in the environment of every child process.
+func hookArgvInheritedEnv() []string {
+	var env []string
+	for _, name := range []string{"API_TOKEN", "PAYLOAD", "CONTENT", "TOOL_INPUT", "TOOL_OUTPUT", "INSPECT_BODY", "RESPONSE", "RESULT", "OUTPUT"} {
+		env = append(env, name+"=dccert-inherited")
+	}
+	return env
 }
 
 // hookArgvBaseEnv is the test process environment without DefenseClaw
@@ -362,6 +404,7 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 						tc.script, req.path, req.authorization, strings.Contains(req.body, hookArgvPayloadMarker), tc.route)
 				}
 				rec.requireNone(t, token, hookArgvPayloadMarker)
+				rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
 				rec.requireCurlUsesDescriptors(t, true)
 			}
 		})
@@ -388,6 +431,7 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 			t.Fatalf("%s: exit %d, requests %+v\nstdout=%s\nstderr=%s", tc.script, code, requests, stdout, stderr)
 		}
 		rec.requireNone(t, token, hookArgvPayloadMarker)
+		rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
 		rec.requireCurlUsesDescriptors(t, true)
 	}
 }
@@ -451,6 +495,7 @@ func TestStandaloneSocketHooksKeepPayloadOffEveryCommandLine(t *testing.T) {
 						code, paths, authorization, tc.route, stdout, stderr)
 				}
 				rec.requireNone(t, "dccert-fake-token-socket", hookArgvPayloadMarker)
+				rec.requireNoneInEnvironment(t, "dccert-fake-token-socket", hookArgvPayloadMarker)
 				rec.requireCurlUsesDescriptors(t, false)
 			})
 		}
@@ -489,6 +534,7 @@ func TestPathShimsKeepTokenOffEveryCommandLine(t *testing.T) {
 				t.Fatalf("shim %s: gateway requests %+v, want one authenticated inspection carrying the tool arguments\n%s", name, requests, out.String())
 			}
 			rec.requireNone(t, token)
+			rec.requireNoneInEnvironment(t, token)
 			for _, call := range rec.records(t) {
 				if strings.Contains(call, "/api/v1/inspect/tool") && strings.Contains(call, hookArgvPayloadMarker) {
 					t.Fatalf("shim %s put the tool arguments on the gateway request's command line:\n%s", name, call)

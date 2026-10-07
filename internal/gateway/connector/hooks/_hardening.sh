@@ -53,6 +53,9 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        command line, which every local account can read. Hooks rendered by
 #        this build call it directly: writeHookHelpers never replaces a newer
 #        helper with an older one, and older hooks do not call it.
+#        defenseclaw_harden_env also drops inherited variables named like the
+#        hooks' private values (API_TOKEN, PAYLOAD, ...), so neither the
+#        bearer nor the payload reaches a child process's environment.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -141,6 +144,12 @@ defenseclaw_harden_resources() {
 # spawns sees a known-good search path (no $HOME/bin first, no agent-
 # injected entries) and a git that ignores user / system config.
 defenseclaw_harden_env() {
+  # The hooks keep the bearer, the payload and the gateway's answer in these
+  # names. An assignment keeps the export bit of an inherited variable of the
+  # same name, which would copy the value into the environment of every child
+  # process (curl, jq, the cold-started gateway), so drop inherited ones first.
+  unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+
   # Per-hook ephemeral HOME so any tool that stores state under $HOME
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if

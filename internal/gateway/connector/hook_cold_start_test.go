@@ -45,7 +45,7 @@ printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 `
 
 const coldStartGatewayStub = `#!/bin/sh
-printf '%s|%s|%s|%s\n' "$HOME" "$*" "$(ulimit -S -t)" "$(ulimit -H -t)" >> "$DC_COLD_CAP/gateway.log"
+printf '%s|%s|%s|%s|%s\n' "$HOME" "$*" "$(ulimit -S -t)" "$(ulimit -H -t)" "${DEFENSECLAW_GATEWAY_TOKEN+inherited}" >> "$DC_COLD_CAP/gateway.log"
 exit 0
 `
 
@@ -153,7 +153,7 @@ func TestShellHooksColdStartTheGatewayAfterARefusedRequest(t *testing.T) {
 			}
 			log := strings.TrimSpace(readColdStartCapture(t, run.capDir, "gateway.log"))
 			fields := strings.Split(log, "|")
-			if len(fields) != 4 || strings.Contains(log, "\n") {
+			if len(fields) != 5 || strings.Contains(log, "\n") {
 				t.Fatalf("gateway start ran %q, want exactly one start", log)
 			}
 			if fields[0] != run.home {
@@ -164,6 +164,11 @@ func TestShellHooksColdStartTheGatewayAfterARefusedRequest(t *testing.T) {
 			}
 			if fields[2] != fields[3] {
 				t.Errorf("gateway start kept the hook's CPU soft limit %q (hard %q)", fields[2], fields[3])
+			}
+			// The hook's token is the connector-scoped one: a gateway that took
+			// it from DEFENSECLAW_GATEWAY_TOKEN would make it its own.
+			if fields[4] != "" {
+				t.Errorf("the started gateway inherited the hook's DEFENSECLAW_GATEWAY_TOKEN")
 			}
 			// The retry sends the same request: same body and, for Codex, the
 			// same credential through a fresh descriptor.
