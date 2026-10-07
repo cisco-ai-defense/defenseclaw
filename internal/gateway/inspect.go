@@ -1384,6 +1384,15 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 			connector, strategyDirection, failedScanner)
 		return nil
 	}
+	if !cfg.SecureClientIntegration() {
+		// The judge severity goes through block_at / alert_at like every
+		// other finding: the judges block any HIGH verdict on their own,
+		// which blocked a plain read at the default block_at CRITICAL
+		// (GAP-0235). Secure Client keeps the judge action (issue #1092).
+		out := *v
+		out.Action = guardrailContentAction(cfg, connector, v.Severity, false)
+		return &out
+	}
 	return v
 }
 

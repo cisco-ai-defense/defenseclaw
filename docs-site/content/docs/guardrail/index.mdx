@@ -269,6 +269,10 @@ Regex still runs first (cheap and offline) and the judge adjudicates what regex
 flags. `--detection-strategy judge_first` flips the order, which helps when
 regex is too noisy. Hook connectors are judged only in action mode; use
 `--judge-hook-connectors` to choose which hook connectors the judge covers.
+A judge verdict goes through `block_at` and `alert_at` like a rule finding:
+at the default `block_at: CRITICAL` a HIGH verdict (for example a request to
+print a credential file) alerts, and a read combined with an upload
+(CRITICAL) blocks.
 
 </Tab>
 

@@ -1382,22 +1382,23 @@ class TestSetupSplunkCommand(unittest.TestCase):
                 )
             )
         if local:
-            destinations.append(
-                _build_v8_preset_destination(
-                    PRESETS["splunk-hec"],
-                    {
-                        "host": "127.0.0.1",
-                        "port": "8088",
-                        "index": "defenseclaw_local",
-                        "source": "defenseclaw",
-                        "sourcetype": "defenseclaw:json",
-                    },
-                    name="splunk-hec-local",
-                    enabled=True,
-                    signals=None,
-                    target=None,
-                )
+            local_destination = _build_v8_preset_destination(
+                PRESETS["splunk-hec"],
+                {
+                    "host": "127.0.0.1",
+                    "port": "8088",
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                },
+                name="splunk-hec-local",
+                enabled=True,
+                signals=None,
+                target=None,
             )
+            # As the local Splunk setup writes it (GAP-0208).
+            local_destination["network_safety"] = {"allow_private_networks": True}
+            destinations.append(local_destination)
         self._write_v8_destinations(destinations)
 
     def tearDown(self):

@@ -18,6 +18,7 @@ package watcher
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -196,6 +197,15 @@ type InstallWatcher struct {
 
 	// rescanNow asks the rescan loop for a cycle before its interval ends.
 	rescanNow chan struct{}
+
+	// addedMCP names the MCP servers AdmitAddedMCPServers queued; admitMCPNow
+	// wakes the loop that admits them outside the rescan cycle (GAP-0254).
+	addedMCPMu  sync.Mutex
+	addedMCP    map[string]bool
+	admitMCPNow chan struct{}
+	// mcpMu serializes MCP admission between that loop and the rescan
+	// cycle, so a server is admitted once.
+	mcpMu sync.Mutex
 }
 
 type rootConnector struct {
@@ -231,6 +241,8 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		onAdmit:    onAdmit,
 		pending:    make(map[string]time.Time),
 		rescanNow:  make(chan struct{}, 1),
+
+		admitMCPNow: make(chan struct{}, 1),
 	}
 }
 
@@ -266,6 +278,72 @@ func (w *InstallWatcher) RequestRescan() {
 	select {
 	case w.rescanNow <- struct{}{}:
 	default:
+	}
+}
+
+// AdmitAddedMCPServers runs install admission now for MCP servers the caller
+// saw appear, outside the rescan cycle (GAP-0254): after an upgrade the cycle
+// rescans every target and takes minutes, and a server a user just added
+// must not wait for it. It never blocks.
+func (w *InstallWatcher) AdmitAddedMCPServers(names []string) {
+	if w == nil || !w.admitNewMCP || len(names) == 0 {
+		return
+	}
+	w.addedMCPMu.Lock()
+	if w.addedMCP == nil {
+		w.addedMCP = map[string]bool{}
+	}
+	for _, name := range names {
+		w.addedMCP[name] = true
+	}
+	w.addedMCPMu.Unlock()
+	select {
+	case w.admitMCPNow <- struct{}{}:
+	default:
+	}
+}
+
+func (w *InstallWatcher) addedMCPLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.admitMCPNow:
+			w.admitAddedMCPServers(ctx)
+		}
+	}
+}
+
+// admitAddedMCPServers admits each queued server that has no baseline yet.
+func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
+	w.addedMCPMu.Lock()
+	names := w.addedMCP
+	w.addedMCP = nil
+	w.addedMCPMu.Unlock()
+	servers, err := w.readMCPServers()
+	if err != nil {
+		return
+	}
+	for _, server := range servers {
+		if ctx.Err() != nil {
+			return
+		}
+		if !names[server.Name] || server.Bundled {
+			continue
+		}
+		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: server.Name, Connector: server.Connector, Timestamp: time.Now().UTC()}
+		w.mcpMu.Lock()
+		if _, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path); errors.Is(err, sql.ErrNoRows) {
+			if snap, err := w.snapshotForEvent(evt); err == nil {
+				fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
+				res := w.runAdmission(ctx, evt)
+				if w.onAdmit != nil {
+					w.onAdmit(res)
+				}
+				w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
+			}
+		}
+		w.mcpMu.Unlock()
 	}
 }
 
@@ -502,6 +580,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	if w.cfg.Watch.RescanEnabled {
 		go w.rescanLoop(ctx)
+	}
+	if w.admitNewMCP {
+		go w.addedMCPLoop(ctx)
 	}
 
 	ticker := time.NewTicker(w.debounce)

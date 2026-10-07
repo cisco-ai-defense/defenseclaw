@@ -17200,6 +17200,7 @@ def _apply_v8_observability_preset(
     signals: tuple[str, ...] | None = None,
     secret_value: str | None = None,
     secret_env_name: str | None = None,
+    allow_private_networks: bool = False,
 ) -> str:
     """Write one setup alias through the canonical v8 destination writer."""
 
@@ -17228,6 +17229,7 @@ def _apply_v8_observability_preset(
         token_value=secret_value,
         target=None,
         dry_run=False,
+        allow_private_networks=allow_private_networks,
     )
     return resolved_name
 
@@ -17352,6 +17354,8 @@ def _apply_logs_config(
             "verify_tls": "false",
         },
         secret_value=hec_token or None,
+        # The local Splunk container listens on this computer.
+        allow_private_networks=True,
     )
     _reload_cfg_from_data_dir(app)
 
@@ -17434,6 +17438,7 @@ def _apply_native_windows_logs_config(
             name="local-splunk",
             secret_value=contract.hec_token,
             secret_env_name=LOCAL_TOKEN_ENV,
+            allow_private_networks=True,
         )
         _reload_cfg_from_data_dir(app)
 

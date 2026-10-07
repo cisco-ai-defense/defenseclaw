@@ -80,6 +80,8 @@ type APIServer struct {
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
+	// managedRefusalLimits bounds the managed refusal rows per account.
+	managedRefusalLimits managedRefusalLimiter
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe

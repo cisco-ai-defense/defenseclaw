@@ -617,6 +617,10 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 // Targets whose content and scanner fingerprint are unchanged are skipped
 // without invoking the scanner or writing a scan_results row.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[InstallType]string) rescanOutcome {
+	if evt.Type == InstallMCP {
+		w.mcpMu.Lock()
+		defer w.mcpMu.Unlock()
+	}
 	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
 		return rescanSkipped
 	}

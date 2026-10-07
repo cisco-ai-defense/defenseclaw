@@ -60,6 +60,7 @@ from defenseclaw.observability.v8_presets import (
 from defenseclaw.observability.v8_presets import (
     _load_dotenv,
     adapter_destination_fields,
+    restore_secret,
     secret_note_is_info,
 )
 from defenseclaw.observability.v8_presets import (
@@ -149,7 +150,7 @@ def observability() -> None:
 @click.option("--url", default=None, help="Webhook URL, https only (webhook)")
 @click.option("--method", default=None, help="Webhook HTTP method: POST, PUT or PATCH (webhook)")
 @click.option("--verify-tls/--no-verify-tls", "verify_tls", default=None,
-              help="Verify the Splunk HEC TLS certificate (default: off for splunk-hec, on for splunk-enterprise)")
+              help="Verify the Splunk HEC TLS certificate (default: on; --no-verify-tls for a self-signed collector)")
 @click.option(
     "--allow-private-networks",
     is_flag=True,
@@ -568,21 +569,29 @@ def _add_v8_destination(
                 "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
             )
     secret_before = _stored_secret(data_dir, preset.token_env)
+    environ_before = os.environ.get(preset.token_env) if preset.token_env else None
     warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
-    if not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before:
-        # GAP-2356: the running gateway still holds the old key, and
-        # config.yaml may be unchanged, so the restart has to be asked for.
-        mark_setup_secret_changed()
+    secret_changed = not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before
     validator = None
     if dry_run and stored_secret and preset.token_env:
         validator = _staged_secret_validator({preset.token_env: stored_secret})
-    result = mutate_v8_config(
-        config_path_for_data_dir(data_dir),
-        mutations,
-        data_dir=data_dir,
-        validator=validator,
-        dry_run=dry_run,
-    )
+    try:
+        result = mutate_v8_config(
+            config_path_for_data_dir(data_dir),
+            mutations,
+            data_dir=data_dir,
+            validator=validator,
+            dry_run=dry_run,
+        )
+    except BaseException:
+        if secret_changed:
+            # GAP-0210: a failed add leaves no key behind in .env.
+            restore_secret(data_dir, preset.token_env, secret_before, environ_before)
+        raise
+    if secret_changed:
+        # GAP-2356: the running gateway still holds the old key, and
+        # config.yaml may be unchanged, so the restart has to be asked for.
+        mark_setup_secret_changed()
     return result, warnings
 
 
@@ -601,8 +610,9 @@ def _stored_secret(data_dir: str, key: str) -> str | None:
 def _staged_secret_validator(overrides: dict[str, str]):
     """Validate a dry-run candidate with the unwritten --token value (GAP-1890).
 
-    A real add writes the key to .env and the environment before it validates;
-    a dry run writes nothing, so the value goes to the validator directly.
+    A real add writes the key to .env and the environment before it validates
+    (and takes it back out if the candidate fails, GAP-0210); a dry run writes
+    nothing, so the value goes to the validator directly.
     """
     from defenseclaw.observability import v8_writer
 

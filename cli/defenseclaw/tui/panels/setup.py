@@ -7195,7 +7195,8 @@ def observability_wizard_fields(
                 WizardFormField("Index", "string", "--index", value="defenseclaw", default="defenseclaw"),
                 WizardFormField("Source", "string", "--source", value="defenseclaw", default="defenseclaw"),
                 WizardFormField("Sourcetype", "string", "--sourcetype", value="_json", default="_json"),
-                WizardFormField("Verify TLS", "bool", "--verify-tls", "--no-verify-tls", value="no", default="no"),
+                WizardFormField("Verify TLS", "bool", "--verify-tls", "--no-verify-tls", value="yes", default="yes"),
+                WizardFormField("Allow Private Networks", "bool", "--allow-private-networks", value="no", default="no"),
                 WizardFormField("HEC Token", "password", "--token"),
             ),
         )

@@ -93,14 +93,11 @@ def adapter_destination_fields(preset: Preset, inputs: dict[str, str]) -> dict[s
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
         }
-        insecure_default = preset.id != "splunk-enterprise"
-        insecure = insecure_default
-        if "verify_tls" in inputs:
-            insecure = not parse_bool(inputs["verify_tls"])
-        if insecure:
+        # GAP-0208: every HEC preset verifies TLS and stays off private
+        # networks unless the operator opts out (--no-verify-tls,
+        # --allow-private-networks), as splunk-enterprise and otlp do.
+        if "verify_tls" in inputs and not parse_bool(inputs["verify_tls"]):
             fields["tls"] = {"insecure_skip_verify": True}
-        if preset.id == "splunk-hec":
-            fields["network_safety"] = {"allow_private_networks": True}
         return fields
     if preset.adapter_kind == "http_jsonl":
         endpoint = inputs.get("url", "").strip()
@@ -161,6 +158,24 @@ def apply_secret(
     return [f"{preset.token_env}: written to {path}"]
 
 
+def restore_secret(data_dir: str, key: str, previous: str | None, previous_environ: str | None) -> None:
+    """Put ``key`` back as it was before :func:`apply_secret` (GAP-0210)."""
+
+    def merge(payload: bytes) -> bytes:
+        existing = _load_dotenv(payload)
+        if previous is None:
+            existing.pop(key, None)
+        else:
+            existing[key] = previous
+        return _write_dotenv(existing)
+
+    update_private_file(os.path.join(data_dir, DOTENV_FILE_NAME), owner_directory=data_dir, transform=merge)
+    if previous_environ is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = previous_environ
+
+
 def secret_note_is_info(preset: Preset, message: str) -> bool:
     """Whether an :func:`apply_secret` message reports a write, not a problem."""
 
@@ -215,5 +230,6 @@ __all__ = [
     "render_header_template",
     "render_template",
     "resolve_inputs",
+    "restore_secret",
     "secret_note_is_info",
 ]

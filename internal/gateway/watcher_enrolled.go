@@ -194,6 +194,43 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 	return set
 }
 
+// EnrolledWatchRoot is a skill or plugin folder a managed Windows gateway
+// watches for an enrolled user, with that user's profile and SID.
+type EnrolledWatchRoot struct {
+	Dir, Home, SID string
+}
+
+// EnrolledWatchRoots lists the folders a managed Windows gateway watches for
+// its enrolled users, as its watcher resolves them. The hook guardian removes
+// a quarantined source only inside one of them (GAP-0202).
+func EnrolledWatchRoots(cfg *config.Config) []EnrolledWatchRoot {
+	if !watcherUsesEnrolledUserDirs(cfg) {
+		return nil
+	}
+	set := resolveEnrolledWatchSet(cfg, connector.NewDefaultRegistry(), cfg.Gateway.Watcher, serviceHomeDir())
+	authorization, _ := readManagedGuardianAuthorization(cfg.DataDir)
+	if authorization == nil {
+		return nil
+	}
+	var roots []EnrolledWatchRoot
+	for dir := range set.roots {
+		for _, target := range authorization.ProtectedTargets {
+			home := strings.TrimSpace(target.UserHome)
+			if home == "" && target.Result != nil {
+				home = strings.TrimSpace(target.Result.UserHome)
+			}
+			if target.OK && strings.TrimSpace(target.SID) != "" && filepath.IsAbs(home) {
+				if _, ok := rebaseUnderHome(dir, home, home); ok {
+					roots = append(roots, EnrolledWatchRoot{Dir: dir, Home: filepath.Clean(home), SID: strings.TrimSpace(target.SID)})
+					break
+				}
+			}
+		}
+	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i].Dir < roots[j].Dir })
+	return roots
+}
+
 // enrolledRootPrecedence orders the connectors whose folder layout the
 // watcher interprets itself ahead of the ones that only share a folder.
 func enrolledRootPrecedence(connectorName string) int {
@@ -229,6 +266,10 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 	ticker := time.NewTicker(enrolledWatchPollInterval)
 	defer ticker.Stop()
 	dirs, mcp := current.dirsKey(), current.mcpKey()
+	known := map[string]bool{}
+	for _, entry := range current.mcp {
+		known[entry.Name] = true
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -242,7 +283,20 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 			if key := next.mcpKey(); key != mcp {
 				mcp = key
 				current.live.set(next.mcp)
+				var added []string
+				for _, entry := range next.mcp {
+					if !known[entry.Name] {
+						added = append(added, entry.Name)
+					}
+				}
+				known = map[string]bool{}
+				for _, entry := range next.mcp {
+					known[entry.Name] = true
+				}
 				if w != nil {
+					// Admit a server the user added within this poll, not
+					// after the running rescan cycle (GAP-0254).
+					w.AdmitAddedMCPServers(added)
 					w.RequestRescan()
 				}
 			}
