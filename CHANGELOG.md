@@ -116,16 +116,24 @@ stopped`. Nothing is changed; use the install command above.
   blocked MCP tools, a stop on hook tamper. It can only tighten: a key that
   would loosen refuses the run, one line per key. The file is untrusted
   input (16 KiB, no links, strict YAML, no includes), read when the sandbox
-  is created; the sandbox keeps that copy, so an edit applies from the next
-  run on, and the file is on every session's review list. The banner, `policy
-  show` and `policy explain` (source `repo`) say what it tightened.
+  is created; the sandbox keeps that copy, so an edit applies to the next
+  new sandbox (`sandbox run` names a changed file among what resuming the
+  folder's sandbox ignores, and defaults to a new one), and the file is on
+  every session's review list. The banner, `policy show` and `policy
+  explain` (source `repo`) say what it tightened. It applies to runs
+  started in the folder that holds it; a run in a subfolder of the
+  repository warns that the root's file does not apply there.
 - `defenseclaw sandbox policy suggest` now works from each sandbox's kept
   destinations (they survive daemon restarts) instead of the in-memory
   activity buffer, and suggests a pack that extends `balanced` with the hosts
   reached that balanced does not cover, each with the programs that reached
   it. Hosts only ever refused, shadow AI, blocklist-feed hosts and the
-  sandbox's model provider are listed apart. `--pack-out FILE` writes the
-  pack (a new file, checked like `pack validate`), `--diff` shows the
+  sandbox's model provider are listed apart. Ports beyond balanced's 80 and
+  443 that the allowed hosts used go in `egress.ports`; past what a pack
+  holds (1024 allow entries with balanced's, 64 KiB) the most requested
+  hosts stay and a warning names the rest. `--pack-out FILE` writes the
+  pack (a new file, relative paths in the current folder, checked like
+  `pack validate`), `--diff` shows the
   settings it changes and the reached hosts it would block. The old
   `openshell.egress.allow` snippet output and its JSON shape are gone.
 - New `defenseclaw sandbox policy test --host H [--port P] [--binary B]`
