@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,8 +52,10 @@ type SuggestOptions struct {
 // with DefenseClaw's curated developer allowlist.
 const suggestBase = "balanced"
 
-// maxSuggestedHosts is the most allow entries a pack holds.
-const maxSuggestedHosts = 1024
+// suggestGroupBytes bounds each list of hosts a suggested pack names in
+// comments, so the pack's allow list keeps the room of the file
+// (packs.MaxPackBytes).
+const suggestGroupBytes = 4 << 10
 
 // suggestedHost is one destination of a suggestion.
 type suggestedHost struct {
@@ -77,6 +80,11 @@ type suggestion struct {
 	Curated   []suggestedHost `json:"curated,omitempty"`
 	Blocked   []suggestedHost `json:"blocked,omitempty"`
 	Excluded  []suggestedHost `json:"excluded,omitempty"`
+	// LeftOut are reached hosts the pack had no room for (fit).
+	LeftOut []suggestedHost `json:"left_out,omitempty"`
+	// Ports is the pack's egress.ports when the hosts it allows were
+	// reached on ports beyond the base pack's (packPorts), else empty.
+	Ports []int `json:"ports,omitempty"`
 	// Pack is the suggested pack file; PackName its name.
 	PackName string          `json:"pack_name"`
 	Pack     string          `json:"pack"`
@@ -85,6 +93,10 @@ type suggestion struct {
 	byHost   map[string]*suggestedHost
 	ports    map[string][]int
 	order    []string
+	// basePorts are the base pack's egress.ports, and room how many allow
+	// entries a pack that extends it has left.
+	basePorts []int
+	room      int
 }
 
 // suggestionDiff is what the suggested pack changes against the effective
@@ -132,7 +144,7 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 		}
 	}
 	s.PackName = suggestPackName(o.PackOut, o.Sandbox)
-	s.Pack = s.render(a.Now().Format("2006-01-02"), o.Sandbox)
+	s.fit(a.Now().Format("2006-01-02"), o.Sandbox)
 	// The pack must load as `pack validate` would load it.
 	if _, err := packs.ParseIn([]byte(s.Pack), "suggested pack "+s.PackName, a.packDir()); err != nil {
 		return fmt.Errorf("the suggested pack does not validate (please report it): %w", err)
@@ -152,6 +164,11 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 			return fmt.Errorf("the written pack does not validate: %w", err)
 		}
 		s.Wrote = o.PackOut
+	}
+	if n := len(s.LeftOut); n > 0 && o.Output != OutputJSON {
+		// On stderr: the printed pack may be going to a file.
+		a.warnErr(plural(int64(n), "reached host", "reached hosts") + " did not fit in the pack (" + s.fullText() +
+			"); it lists them as comments. Suggest per sandbox with --sandbox, or add the ones you need by hand")
 	}
 	switch {
 	case o.Output == OutputJSON:
@@ -200,6 +217,7 @@ func (a *App) recordDestinations(ctx context.Context, api API, sandbox string) (
 			s.add(name, r)
 		}
 	}
+	sort.Strings(s.order)
 	if len(s.byHost) == 0 {
 		what := "no sandbox has reached a destination yet"
 		if sandbox != "" {
@@ -242,9 +260,8 @@ func (a *App) recordDestinations(ctx context.Context, api API, sandbox string) (
 			s.Allow = append(s.Allow, *h)
 		}
 	}
-	if len(s.Allow) > maxSuggestedHosts {
-		s.Allow = s.Allow[:maxSuggestedHosts]
-	}
+	// The pack's allow list is balanced's with these appended.
+	s.basePorts, s.room = balanced.Egress.Ports, max(packs.MaxListEntries-len(balanced.Egress.Allow), 0)
 	return s, nil
 }
 
@@ -258,8 +275,7 @@ func (s *suggestion) add(sandbox string, r sandboxapi.DestinationRow) {
 	if h == nil {
 		h = &suggestedHost{Host: host, kind: r.Kind}
 		s.byHost[host] = h
-		s.order = append(s.order, host)
-		sort.Strings(s.order)
+		s.order = append(s.order, host) // sorted once every row is in
 	}
 	h.Requests += r.Connections + r.Tunnels
 	h.Refused += r.Refused + r.Blocked
@@ -381,24 +397,142 @@ func (s *suggestion) render(day, sandbox string) string {
 			fmt.Fprintf(&b, "    - %s # %s\n", strconv.Quote(h.Host), hostComment(h))
 		}
 	}
+	ports, added, unsure := s.packPorts()
+	s.Ports = ports
+	if len(ports) > 0 {
+		fmt.Fprintf(&b, "  # Beyond %s's ports %s, reached by %s. A pack's ports are open to every host it allows.\n",
+			suggestBase, intsText(s.basePorts), listFit(strings.Join(added, ", "), 200))
+		fmt.Fprintf(&b, "  ports: [%s]\n", intsText(ports))
+	}
+	if len(unsure) > 0 {
+		fmt.Fprintf(&b, "  # Not opened, since these hosts were also refused (perhaps for the port; add one if they need it): %s\n",
+			listFit(strings.Join(unsure, ", "), 200))
+	}
 	if len(s.Curated) > 0 {
 		fmt.Fprintf(&b, "# Covered by the %s pack's curated allowlist: %s\n", suggestBase, joinHosts(s.Curated))
 	}
 	for _, group := range []struct {
 		what  string
 		hosts []suggestedHost
-	}{{"Not suggested, only ever refused", s.Blocked}, {"Not suggested", s.Excluded}} {
+	}{{"Not suggested, only ever refused", s.Blocked}, {"Not suggested", s.Excluded},
+		{"Not suggested, no room in the pack (" + s.fullText() + ")", s.LeftOut}} {
 		if len(group.hosts) == 0 {
 			continue
 		}
 		fmt.Fprintf(&b, "# %s:\n", group.what)
-		for _, h := range group.hosts {
+		size := 0
+		for i, h := range group.hosts {
 			// These hosts are not checked as host names: any text the
 			// sandbox's traffic carried.
-			fmt.Fprintf(&b, "#   %s: %s\n", commentText(h.Host, 256), h.Why)
+			line := fmt.Sprintf("#   %s: %s\n", commentText(h.Host, 256), h.Why)
+			if size += len(line); size > suggestGroupBytes {
+				fmt.Fprintf(&b, "#   and %d more (`%s policy suggest -o json` lists them)\n", len(group.hosts)-i, CommandName)
+				break
+			}
+			b.WriteString(line)
 		}
 	}
 	return b.String()
+}
+
+// fit renders the pack with as many of the hosts to allow as a pack holds:
+// at most room allow entries (the base pack's own count against the limit)
+// and a file of packs.MaxPackBytes. The most requested hosts stay; the
+// rest are left out and listed apart.
+func (s *suggestion) fit(day, sandbox string) {
+	reached := s.Allow
+	byUse := slices.Clone(reached)
+	sort.SliceStable(byUse, func(i, j int) bool { return byUse[i].Requests > byUse[j].Requests })
+	keep := func(n int) {
+		kept := map[string]bool{}
+		for _, h := range byUse[:n] {
+			kept[h.Host] = true
+		}
+		s.Allow, s.LeftOut = []suggestedHost{}, nil
+		for _, h := range reached {
+			if kept[h.Host] {
+				s.Allow = append(s.Allow, h)
+			} else {
+				h.Why = "no room in the pack"
+				s.LeftOut = append(s.LeftOut, h)
+			}
+		}
+		s.Pack = s.render(day, sandbox)
+	}
+	n := min(len(reached), s.room)
+	if keep(n); len(s.Pack) <= packs.MaxPackBytes {
+		return
+	}
+	// The comments are bounded (suggestGroupBytes), so a pack without
+	// hosts fits: find the most that do.
+	lo, hi := 0, n-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if keep(mid); len(s.Pack) <= packs.MaxPackBytes {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	keep(lo)
+}
+
+// fullText says what a pack holds.
+func (s *suggestion) fullText() string {
+	return fmt.Sprintf("a pack holds %d allow entries, %d of them %s's, and %d KiB", packs.MaxListEntries,
+		packs.MaxListEntries-s.room, suggestBase, packs.MaxPackBytes>>10)
+}
+
+// packPorts is egress.ports for the pack (nil: the base pack's) when the
+// hosts it allows, the suggested and the curated ones, were reached on
+// ports beyond the base pack's. A port is added (a pack's ports are open
+// to every host it allows) with the hosts that used it (added). A host that
+// was also refused may have been refused for its port: its other ports are
+// only named (unsure), as are the ones past packs.MaxPorts.
+func (s *suggestion) packPorts() (ports []int, added, unsure []string) {
+	users := map[int][]string{}
+	for _, h := range slices.Concat(s.Allow, s.Curated) {
+		for _, p := range s.ports[h.Host] {
+			switch {
+			case slices.Contains(s.basePorts, p):
+			case h.Refused > 0:
+				unsure = append(unsure, commentText(h.Host, 256)+":"+strconv.Itoa(p))
+			default:
+				users[p] = append(users[p], commentText(h.Host, 256))
+			}
+		}
+	}
+	extra := slices.Sorted(maps.Keys(users))
+	if room := max(packs.MaxPorts-len(s.basePorts), 0); len(extra) > room {
+		for _, p := range extra[room:] {
+			for _, host := range users[p] {
+				unsure = append(unsure, host+":"+strconv.Itoa(p))
+			}
+		}
+		extra = extra[:room]
+	}
+	if len(extra) == 0 {
+		return nil, nil, unsure
+	}
+	ports = slices.Concat(s.basePorts, extra)
+	slices.Sort(ports)
+	for _, p := range extra {
+		who := users[p][0]
+		if more := len(users[p]) - 1; more > 0 {
+			who += fmt.Sprintf(" and %d more", more)
+		}
+		added = append(added, fmt.Sprintf("%d (%s)", p, who))
+	}
+	return ports, added, unsure
+}
+
+// intsText is a list of ports: "80, 443".
+func intsText(list []int) string {
+	out := make([]string, 0, len(list))
+	for _, p := range list {
+		out = append(out, strconv.Itoa(p))
+	}
+	return strings.Join(out, ", ")
 }
 
 func hostComment(h suggestedHost) string {

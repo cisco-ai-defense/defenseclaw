@@ -1331,7 +1331,11 @@ host they reached that the balanced pack's curated allowlist doesn't cover.
 Each host carries a comment with its request count and the programs that
 reached it. Hosts that were only ever refused, shadow AI, hosts on the
 blocklist feed, and the sandbox's own model provider are listed apart as
-comments, not suggested. Without `--pack-out` it prints the pack.
+comments, not suggested. Ports beyond balanced's 80 and 443 that the allowed
+hosts were reached on go in `egress.ports`. When the hosts don't fit in a
+pack (1024 allow entries with balanced's, 64 KiB), the most requested stay
+and a warning names how many were left out. Without `--pack-out` it prints
+the pack.
 
 `--pack-out FILE` writes the pack to a new file (never over an existing one;
 a relative FILE is in the current folder) and checks it as `sandbox pack

@@ -815,8 +815,15 @@ it actually reached:
    balanced's curated allowlist doesn't cover, each with a comment naming the
    programs that reached it. Hosts only ever refused, shadow AI, hosts on the
    blocklist feed, and the sandbox's own model provider are listed as
-   comments, not allowed. The file is never written over, and it is checked
-   as `pack validate` would check it. Review it before you use it.
+   comments, not allowed. When the allowed hosts were reached on ports beyond
+   balanced's 80 and 443, the pack sets `egress.ports` to balanced's plus
+   those, with a comment naming who used each (a pack's ports are open to
+   every host it allows); a port seen only on a host that was also refused is
+   named but not opened. A pack holds 1024 allow entries (balanced's
+   included) and 64 KiB: past that the most requested hosts stay, and the
+   others are listed as comments and named on the terminal. The file is never
+   written over, and it is checked as `pack validate` would check it. Review
+   it before you use it.
 4. Lock the project to it: `defenseclaw sandbox run --pack myapp`, or
    `openshell.pack: myapp`.
 5. Keep it locked in CI with `policy test` and a fixture (below).

@@ -61,10 +61,16 @@ const PackFileName = "pack.yaml"
 // MaxPackBytes bounds a pack file.
 const MaxPackBytes = 64 << 10
 
+// MaxListEntries bounds a pack list (egress.allow with what it inherits,
+// egress.block, the workspace globs, mcp.blocked_tools); MaxPorts bounds
+// egress.ports.
 const (
-	maxListEntries = 1024
+	MaxListEntries = 1024
+	MaxPorts       = 64
+)
+
+const (
 	maxFeeds       = 16
-	maxPorts       = 64
 	maxDescription = 1024
 	maxUploadMB    = 1 << 20
 )
@@ -708,7 +714,7 @@ func (v *validator) feeds(field string, feeds []string) []string {
 }
 
 func (v *validator) hostGlobs(field string, globs []string) []string {
-	if !v.listLimit(field, len(globs), maxListEntries) {
+	if !v.listLimit(field, len(globs), MaxListEntries) {
 		return nil
 	}
 	out := make([]string, 0, len(globs))
@@ -736,7 +742,7 @@ func (v *validator) allowGlobs(field string, globs []string) []string {
 }
 
 func (v *validator) ports(field string, ports []int) []int {
-	if !v.listLimit(field, len(ports), maxPorts) {
+	if !v.listLimit(field, len(ports), MaxPorts) {
 		return nil
 	}
 	out := make([]int, 0, len(ports))
@@ -759,7 +765,7 @@ func (v *validator) ports(field string, ports []int) []int {
 // openshell.workdir keys (config.ValidateOpenShellProjectGlob): no absolute
 // paths, no ".." segments, no NUL bytes.
 func (v *validator) projectGlobs(field string, globs []string) []string {
-	if !v.listLimit(field, len(globs), maxListEntries) {
+	if !v.listLimit(field, len(globs), MaxListEntries) {
 		return nil
 	}
 	out := make([]string, 0, len(globs))
@@ -790,7 +796,7 @@ func (v *validator) harnesses(field string, names []string) []string {
 }
 
 func (v *validator) blockedTools(field string, tools []string) []string {
-	if !v.listLimit(field, len(tools), maxListEntries) {
+	if !v.listLimit(field, len(tools), MaxListEntries) {
 		return nil
 	}
 	out := make([]string, 0, len(tools))

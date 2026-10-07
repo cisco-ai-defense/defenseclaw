@@ -19,9 +19,11 @@
 package sandboxcli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -154,5 +156,57 @@ func TestPolicySuggestPackOutPaths(t *testing.T) {
 	undo()
 	if _, err := os.Lstat(filepath.Join(ta.home, "a")); err == nil {
 		t.Fatal("undo kept the folders it made")
+	}
+}
+
+// A suggested pack holds what a pack can: 1024 allow entries with
+// balanced's, and 64 KiB. The most requested hosts stay, the others are
+// listed apart and named on stderr. Ports beyond balanced's that the
+// allowed hosts were reached on are added, unless the host was also
+// refused (perhaps for the port).
+func TestPolicySuggestFitsThePack(t *testing.T) {
+	balanced, err := packs.Builtin("balanced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, label string
+		hosts       int
+	}{{"entries", "h", 1100}, {"bytes", strings.Repeat("a", 58), 900}} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := []sandboxapi.DestinationRow{
+				{Host: "artifacts.example.net", Ports: []int{443, 8443}, Kind: sandboxapi.DestinationOther, Tunnels: 5000},
+				{Host: "flaky.example.net", Ports: []int{443, 9000}, Kind: sandboxapi.DestinationOther, Tunnels: 4000, Blocked: 1},
+			}
+			for i := range c.hosts {
+				rows = append(rows, sandboxapi.DestinationRow{Host: fmt.Sprintf("%s%04d.example.com", c.label, i), Kind: sandboxapi.DestinationOther, Tunnels: int64(i + 1)})
+			}
+			ta := newTestApp(t, "", sandboxapi.Sandbox{Name: "web", Harness: "claudecode"})
+			ta.daemon.destinations = map[string]*sandboxapi.Destinations{"web": {Name: "web", Destinations: rows}}
+			out := filepath.Join(ta.home, "recorded.yaml")
+			ta.ok(t, ta.PolicySuggest(bg, SuggestOptions{PackOut: out}))
+			pack, err := packs.Validate(out, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			least, most := fmt.Sprintf("%s%04d.example.com", c.label, 0), fmt.Sprintf("%s%04d.example.com", c.label, c.hosts-1)
+			if !slices.Contains(pack.Egress.Allow, "artifacts.example.net") || !slices.Contains(pack.Egress.Allow, most) ||
+				slices.Contains(pack.Egress.Allow, least) {
+				t.Fatalf("kept %d allow entries, not the most requested", len(pack.Egress.Allow))
+			}
+			if c.name == "entries" && len(pack.Egress.Allow) != packs.MaxListEntries {
+				t.Fatalf("allow entries = %d, want %d (%d of them balanced's)", len(pack.Egress.Allow), packs.MaxListEntries, len(balanced.Egress.Allow))
+			}
+			if !slices.Equal(pack.Egress.Ports, []int{80, 443, 8443}) {
+				t.Fatalf("ports = %v", pack.Egress.Ports)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			has(t, string(data), "# Not suggested, no room in the pack (a pack holds 1024 allow entries", "#   "+least+": no room in the pack",
+				"8443 (artifacts.example.net)", "  ports: [80, 443, 8443]", "Not opened", "flaky.example.net:9000")
+			has(t, ta.err.String(), "did not fit in the pack")
+		})
 	}
 }
