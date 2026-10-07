@@ -1395,7 +1395,9 @@ export function createFetchInterceptor(
       opts.origin = proxyBase;
       const existingHeaders = undiciHeadersToRecord(opts.headers);
       const providerKey = extractProviderKeyFromRecord(existingHeaders);
-      const proxyHdrs = buildProxyHeaders(urlStr, providerKey, getCorrelationHeaders);
+      // The proxy rejoins the request path to X-DC-Target-URL, so the header
+      // carries the origin only, as on the fetch and https layers (GAP-0242).
+      const proxyHdrs = buildProxyHeaders(new URL(origin).origin, providerKey, getCorrelationHeaders);
       opts.headers = { ...existingHeaders, ...proxyHdrs };
 
       noteInterceptLayer(layer === "host" ? "undici-host" : "undici", urlStr);
