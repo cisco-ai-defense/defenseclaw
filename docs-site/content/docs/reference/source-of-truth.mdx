@@ -96,10 +96,14 @@ the old value until you restart it:
 - the hook self-heal settings (`guardrail.hook_self_heal` and
   `guardrail.hook_self_heal_debounce_ms`) and
   `guardrail.connectors.<c>.enabled`
-- `claw`, `agent` and `routing`
+- `claw`, `agent`, `routing` and `plugin_dir`
 - `deployment_mode`, `enterprise.profile` and `enterprise.network`
 - the resource-identity keys (`environment`, `tenant_id`, `workspace_id`,
   `discovery_source`)
+
+The storage paths and `deployment_mode` can not be kept that way: after a
+change to one, the gateway refuses that reload, and every later one, until you
+restart it, and `/health` shows the error as `last_reload_error`.
 
 [Restart-required keys](/docs/reference/cli#restart-required-keys) is the
 reference list. When your change touches one, `config set` says so:

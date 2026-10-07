@@ -320,7 +320,8 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 // self-heal settings.
 // "*" matches one segment. Everything else is hot; a
 // running gateway keeps a restart-required value at its running value and
-// applies the rest of the change.
+// applies the rest of the change, except for the storage paths and
+// deployment_mode, which fail the reload until a restart.
 var restartKeys = []string{
 	"data_dir",
 	"observability.local.path",

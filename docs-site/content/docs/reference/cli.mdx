@@ -1091,8 +1091,14 @@ is saved, but the running gateway keeps the old value until you run
   `guardrail.retain_judge_bodies`, `guardrail.hook_self_heal`,
   `guardrail.hook_self_heal_debounce_ms`, and
   `guardrail.connectors.<c>.enabled`
-- `claw`, `agent` and `routing`
+- `claw`, `agent`, `routing` and `plugin_dir`
 - `observability.local.path` and `observability.local.judge_bodies_path`
+
+The storage paths (`data_dir` and the two `observability.local` paths) and
+`deployment_mode` are the exception: the gateway can not keep their old value,
+so it refuses that reload, and every later one, until you restart it. `/health`
+shows the error as `last_reload_error`, and an `/enforce` write answers
+`applied: false`.
 
 Thresholds, rule packs and rules, suppressions, `guardrail.hook_fail_mode`, `admission`, `asset_policy`,
 `scanners`, `llm_providers`, `update` and the observability destinations and
