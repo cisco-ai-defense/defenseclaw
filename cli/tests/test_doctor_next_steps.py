@@ -877,6 +877,7 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     recent = row("2026-10-03T06:10:00Z")
     assert "last 12 min ago" in recent["detail"]
     assert "defenseclaw setup <connector>" in recent["remediation"]
+    assert "Restart any running affected agent (for example Codex)" in recent["remediation"]
 
     # GAP-2335: a few seconds old reads naturally, not "last 0 min ago".
     fresh = row("2026-10-03T06:21:55Z")

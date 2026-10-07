@@ -10124,9 +10124,9 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
     else:
         remediation = (
             "attempts are recent: a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent "
-            "config usually causes this. Re-run 'defenseclaw setup <connector>' for each agent that "
-            "exports telemetry; if the count keeps growing, look for other OTLP senders pointed at "
-            "the gateway port"
+            "config usually causes this. Restart any running affected agent (for example Codex) "
+            "so it loads refreshed OTLP credentials. If attempts continue, re-run "
+            "'defenseclaw setup <connector>' and check other OTLP senders pointed at the gateway port"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
