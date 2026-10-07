@@ -51,7 +51,8 @@ harness: {yolo: false}
 	}
 	balanced, _ := Builtin("balanced")
 	if pack.Network.Mode != NetworkAllowlist || pack.Approvals.Mode != ApprovalsTriage || pack.Harness.Yolo ||
-		!pack.MCP.Import || pack.Hooks.OnTamper != OnTamperStop || !reflect.DeepEqual(pack.Egress.Ports, []int{443}) {
+		!pack.MCP.Import || pack.Hooks.OnTamper != OnTamperStop || !reflect.DeepEqual(pack.Egress.Ports, []int{443}) ||
+		pack.Hooks.OnSilence != OnSilenceStop || pack.Hooks.SilenceAfterDuration() != DefaultSilenceAfter || pack.Observe.ProcessTree {
 		t.Fatalf("merged pack = %+v", pack)
 	}
 	if len(pack.Egress.Allow) != len(balanced.Egress.Allow)+1 || !containsString(pack.Egress.Allow, "artifacts.example.com") ||

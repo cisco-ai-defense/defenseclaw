@@ -353,6 +353,7 @@ func wantPosture(t *testing.T, eff *Effective, want string) {
 		"pack": eff.Pack.Name, "profile": eff.Profile, "network": s(eff.NetworkMode), "approvals": s(eff.Approvals),
 		"yolo": s(eff.Yolo), "mode": eff.Workspace.Mode, "import": s(eff.MCP.Import), "learn": s(eff.Learn),
 		"harness": eff.Harness, "any_harness": s(eff.AnyHarness), "fail_mode": s(eff.HookFailMode), "on_tamper": s(eff.HookOnTamper),
+		"on_silence": eff.HookOnSilence, "process_tree": s(eff.ProcessTree),
 		"project_servers": s(eff.MCP.ProjectServers), "host_port_access": s(eff.MCP.HostPortAccess), "host_ports": s(eff.MCP.HostPorts),
 		"feeds": s(eff.Egress.Feeds), "ports": s(eff.Egress.Ports), "block": s(eff.Egress.Block), "admin_block": s(eff.Egress.AdminBlock),
 		"unmask": s(eff.Workspace.Unmask), "cpu": eff.Resources.CPU, "memory": eff.Resources.Memory,

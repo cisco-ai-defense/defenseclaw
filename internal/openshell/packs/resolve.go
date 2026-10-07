@@ -500,6 +500,11 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 		r.repoRequested["hooks.on_tamper"] = pack.Hooks.OnTamper
 		r.set("hooks.on_tamper", OnTamperStop, r.tightened("hooks.on_tamper"))
 	}
+	if r.eff.HookOnSilence != OnSilenceStop && r.repo != nil && r.repo.SilenceStop {
+		r.repoRequested["hooks.on_silence"] = r.eff.HookOnSilence
+		r.eff.HookOnSilence = OnSilenceStop
+		r.set("hooks.on_silence", OnSilenceStop, r.tightened("hooks.on_silence"))
+	}
 	r.finishRepo()
 	r.eff.policySources = r.policySources(o)
 	return r.eff, r.violations, nil
@@ -1533,8 +1538,9 @@ func (r *resolver) resolveLearn(flags Flags) {
 }
 
 // resolveProcessTree takes observe.process_tree from the pack, or on from
-// --process-tree. Watching more is never a loosening, so no policy refuses
-// it, and an administrator who wants it on sets it in the required pack.
+// --process-tree or the repository policy. Watching more is never a
+// loosening, so no policy refuses it, and an administrator who wants it on
+// sets it in the required pack.
 func (r *resolver) resolveProcessTree(flags Flags) {
 	switch {
 	case r.eff.Pack.Observe.ProcessTree:
@@ -1543,6 +1549,10 @@ func (r *resolver) resolveProcessTree(flags Flags) {
 	case flags.ProcessTree:
 		r.eff.ProcessTree = true
 		r.set("observe.process_tree", "true", layer{SourceFlag, "--process-tree"})
+	case r.repo != nil && r.repo.ProcessTree:
+		r.eff.ProcessTree = true
+		r.repoRequested["observe.process_tree"] = "false"
+		r.set("observe.process_tree", "true", r.tightened("observe.process_tree"))
 	default:
 		r.set("observe.process_tree", "false", r.packLayer)
 	}

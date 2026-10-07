@@ -52,8 +52,8 @@ func TestRepoPolicyTightens(t *testing.T) {
 			map[string]string{"network.mode": "open", "profile": "open"}},
 		{"deny and manual", "open", "version: 1\nnetwork: {mode: deny}\napprovals: {mode: manual}\n",
 			"profile=strict network=deny approvals=manual", []string{"network.mode"}, nil},
-		{"floors already met", "strict", "version: 1\nnetwork: {mode: allowlist}\napprovals: {mode: triage}\nworkspace: {mode: copy}\n",
-			"profile=strict approvals=manual mode=copy", nil, nil},
+		{"floors already met", "strict", "version: 1\nnetwork: {mode: allowlist}\napprovals: {mode: triage}\nworkspace: {mode: copy}\nhooks: {on_silence: stop}\n",
+			"profile=strict approvals=manual mode=copy on_silence=stop", nil, nil},
 		{"egress", "open", "version: 1\negress: {block: [files.example.net], ports: [443, 8443], large_upload_mb: 5, block_large_uploads: true}\n",
 			"ports=443 block=files.example.net", []string{"egress.block", "egress.ports", "egress.large_upload_mb", "egress.block_large_uploads"},
 			map[string]string{"egress.ports": "80, 443", "egress.large_upload_mb": "25", "egress.block_large_uploads": "false"}},
@@ -62,6 +62,9 @@ func TestRepoPolicyTightens(t *testing.T) {
 		{"harness, mcp, hooks", "open", "version: 1\nharness: {yolo: false}\nmcp: {import: false, blocked_tools: [\"fs.*\"]}\nhooks: {on_tamper: stop}\n",
 			"yolo=false import=false on_tamper=stop", []string{"harness.yolo", "mcp.import", "mcp.blocked_tools", "hooks.on_tamper"},
 			map[string]string{"yolo": "true", "mcp.import": "true", "hooks.on_tamper": "alert"}},
+		{"hook silence and process tree", "open", "version: 1\nhooks: {on_silence: stop}\nobserve: {process_tree: true}\n",
+			"on_silence=stop process_tree=true", []string{"observe.process_tree", "hooks.on_silence"},
+			map[string]string{"observe.process_tree": "false", "hooks.on_silence": "alert"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rp := mustRepoPolicy(t, tc.doc)
@@ -119,6 +122,8 @@ func TestRepoPolicyRefusesLoosening(t *testing.T) {
 		{"harness: {yolo: true}", "harness.yolo"},
 		{"mcp: {import: true}", "mcp.import"},
 		{"hooks: {on_tamper: alert}", "hooks.on_tamper"},
+		{"hooks: {on_silence: alert}", "hooks.on_silence"},
+		{"observe: {process_tree: false}", "observe.process_tree"},
 	} {
 		rp := mustRepoPolicy(t, "version: 1\n"+tc.doc+"\n")
 		_, violations := mustResolve(t, testConfig(nil), Flags{RepoPolicy: rp})

@@ -129,8 +129,10 @@ stopped`. Nothing is changed; use the install command above.
   network and approvals floors, block entries, fewer ports, a lower
   large-upload threshold or the large-upload block, copy mode, more masks
   and review globs, the harness's prompts kept, MCP servers left behind,
-  blocked MCP tools, a stop on hook tamper. It can only tighten: a key that
-  would loosen refuses the run, one line per key. The file is untrusted
+  blocked MCP tools, a stop on hook tamper or on silent hooks
+  (`hooks.on_silence: stop`), the process tree turned on
+  (`observe.process_tree: true`). It can only tighten: a key that would
+  loosen refuses the run, one line per key. The file is untrusted
   input (16 KiB, no links, strict YAML, no includes), read when the sandbox
   is created; the sandbox keeps that copy, so an edit applies to the next
   new sandbox (`sandbox run` names a changed file among what resuming the

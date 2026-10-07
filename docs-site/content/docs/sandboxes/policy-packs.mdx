@@ -793,11 +793,14 @@ harness:
 | `mcp.import` | `false`: your MCP servers stay behind. |
 | `mcp.blocked_tools` | MCP tools added to the blocked tools. |
 | `hooks.on_tamper` | `stop`: a hook tamper stops the sandbox. |
+| `hooks.on_silence` | `stop`: a user-tier harness that works without its hooks for the pack's `hooks.silence_after` stops the sandbox (see the silent hooks response above). |
+| `observe.process_tree` | `true`: the sandbox's processes are sampled while it runs, as with `--process-tree`. |
 
 A value that would loosen the policy is refused, one line per key: the
 loosest value of a mode (`network.mode: open`, `approvals.mode: auto`,
-`workspace.mode: mount`, `hooks.on_tamper: alert`), `harness.yolo: true`,
-`mcp.import: true`, `egress.block_large_uploads: false`,
+`workspace.mode: mount`, `hooks.on_tamper: alert`,
+`hooks.on_silence: alert`), `harness.yolo: true`, `mcp.import: true`,
+`observe.process_tree: false`, `egress.block_large_uploads: false`,
 `egress.large_upload_mb: 0`, and any `egress.allow` or `workspace.unmask`
 entry. The run is refused, as when your organization refuses a harness, and
 nothing is created:

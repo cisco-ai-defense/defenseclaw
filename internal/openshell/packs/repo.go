@@ -62,13 +62,16 @@ type RepoPolicy struct {
 	// manual: floors.
 	NetworkMode string `json:"network_mode,omitempty"`
 	Approvals   string `json:"approvals,omitempty"`
-	// Copy, NoYolo, NoMCPImport, BlockLargeUploads and TamperStop are the
-	// switches the repository set to their strict value.
+	// Copy, NoYolo, NoMCPImport, BlockLargeUploads, TamperStop, SilenceStop
+	// and ProcessTree are the switches the repository set to their strict
+	// value.
 	Copy              bool `json:"copy,omitempty"`
 	NoYolo            bool `json:"no_yolo,omitempty"`
 	NoMCPImport       bool `json:"no_mcp_import,omitempty"`
 	BlockLargeUploads bool `json:"block_large_uploads,omitempty"`
 	TamperStop        bool `json:"tamper_stop,omitempty"`
+	SilenceStop       bool `json:"silence_stop,omitempty"`
+	ProcessTree       bool `json:"process_tree,omitempty"`
 	// LargeUploadMB lowers the large-upload threshold (0 unset).
 	LargeUploadMB int `json:"large_upload_mb,omitempty"`
 	// Ports are the ports the project needs: the run keeps only these of
@@ -105,6 +108,7 @@ type repoPolicyFile struct {
 	Harness   *repoHarnessFile   `yaml:"harness"`
 	MCP       *repoMCPFile       `yaml:"mcp"`
 	Hooks     *repoHooksFile     `yaml:"hooks"`
+	Observe   *repoObserveFile   `yaml:"observe"`
 }
 
 type repoEgressFile struct {
@@ -132,14 +136,19 @@ type repoMCPFile struct {
 }
 
 type repoHooksFile struct {
-	OnTamper *string `yaml:"on_tamper"`
+	OnTamper  *string `yaml:"on_tamper"`
+	OnSilence *string `yaml:"on_silence"`
+}
+
+type repoObserveFile struct {
+	ProcessTree *bool `yaml:"process_tree"`
 }
 
 // repoPolicyKeys lists what a repository policy may set, for the unknown
 // key error.
 const repoPolicyKeys = "version, network.mode, approvals.mode, egress.block, egress.ports, egress.large_upload_mb, " +
 	"egress.block_large_uploads, workspace.mode, workspace.masks, workspace.review, harness.yolo, mcp.import, " +
-	"mcp.blocked_tools, hooks.on_tamper"
+	"mcp.blocked_tools, hooks.on_tamper, hooks.on_silence, observe.process_tree"
 
 // LoadRepoPolicy reads <project>/.defenseclaw/sandbox.yaml. It returns nil
 // and no error when the project has none. Neither the .defenseclaw folder
@@ -324,6 +333,21 @@ func ParseRepoPolicy(data []byte, source string) (*RepoPolicy, error) {
 			refuse("hooks.on_tamper", mode, "alert keeps a tampered sandbox running; ask for stop")
 		case OnTamperStop:
 			rp.TamperStop = true
+		}
+	}
+	if h := f.Hooks; h != nil && h.OnSilence != nil {
+		switch mode := v.enum("hooks.on_silence", h.OnSilence, OnSilenceStop, OnSilenceAlert); mode {
+		case OnSilenceAlert:
+			refuse("hooks.on_silence", mode, "alert keeps a silent sandbox running; ask for stop")
+		case OnSilenceStop:
+			rp.SilenceStop = true
+		}
+	}
+	if o := f.Observe; o != nil && o.ProcessTree != nil {
+		if *o.ProcessTree {
+			rp.ProcessTree = true
+		} else {
+			refuse("observe.process_tree", "false", "false never watches more")
 		}
 	}
 	if v.err != nil {
