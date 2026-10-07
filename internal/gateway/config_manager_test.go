@@ -1350,7 +1350,7 @@ func TestLoadRuntimeConfigCandidateRefusesAFailedV8Migration(t *testing.T) {
 func TestConfigManagerSecureClientReloadReadsNoDotEnv(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
-	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\nobservability: {}\n")
+	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\ndata_dir: " + dir + "\nobservability: {}\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
