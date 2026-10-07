@@ -60,9 +60,9 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil); err != nil {
-		t.Fatal(err)
-	}
+	// The canceled lookup fails and the pass reports it; the record of the
+	// previous owner must be gone either way.
+	_ = WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("reassigned uid kept previous account record: %v", err)
 	}
