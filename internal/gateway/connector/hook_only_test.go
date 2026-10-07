@@ -3757,3 +3757,50 @@ func raceInstrumentedBuild() bool {
 	}
 	return false
 }
+
+func TestRemoveJSONHookReferencesKeepsOperatorEmptyHook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	owned := "/defenseclaw/openhands-hook.sh"
+	body := `{"hooks":{"PreToolUse":[{"command":"/defenseclaw/openhands-hook.sh"}],"Custom":[]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeJSONHookReferences(path, owned); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"Custom": []`) {
+		t.Fatalf("operator empty hook lost: %s", got)
+	}
+	if strings.Contains(string(got), "PreToolUse") {
+		t.Fatalf("owned hook remains: %s", got)
+	}
+}
+
+func TestRemoveOpenHandsHookReferencesKeepsOperatorKeysAndHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	source := `{"extra":{"keep":[]},"hooks":{"pre":[{"hooks":[{"command":"dc-hook"},{"command":"user-hook"}]}]}}`
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeJSONHookReferences(path, "dc-hook"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := result["extra"]; !ok {
+		t.Fatalf("operator key lost: %s", body)
+	}
+	if !strings.Contains(string(body), "user-hook") || strings.Contains(string(body), "dc-hook") {
+		t.Fatalf("hook cleanup changed operator hook or retained managed hook: %s", body)
+	}
+}
