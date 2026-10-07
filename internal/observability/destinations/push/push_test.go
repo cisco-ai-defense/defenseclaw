@@ -516,9 +516,9 @@ func TestAdaptersCloseResponseBodiesOnSuccessAndFailure(t *testing.T) {
 		wantCode  delivery.FailureCode
 	}{
 		{"http success", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 204, "ignored", 1, 0, ""},
-		{"http failure", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 500, "secret failure body", 0, 1, delivery.FailureCodeHTTPRetryable},
+		{"http failure", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 500, "secret failure body", 0, 0, delivery.FailureCodeHTTPRetryable},
 		{"hec success", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 200, `{"code":0}`, 1, 0, ""},
-		{"hec failure", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 500, "secret failure body", 0, 1, delivery.FailureCodeHTTPRetryable},
+		{"hec failure", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 500, "secret failure body", 0, 0, delivery.FailureCodeHTTPRetryable},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -532,7 +532,8 @@ func TestAdaptersCloseResponseBodiesOnSuccessAndFailure(t *testing.T) {
 			counters, health := deliverBatchHealth(
 				t, "body-close-"+string(rune('a'+index)), test.adapter, `{"record_id":"one"}`,
 			)
-			if counters.Delivered != test.delivered || counters.Rejected != test.rejected {
+			if counters.Delivered != test.delivered || counters.Rejected != test.rejected ||
+				(test.status == 500 && counters.Dropped != 1) {
 				t.Fatalf("counters=%+v", counters)
 			}
 			if health.LastFailureCode != test.wantCode {
@@ -883,7 +884,7 @@ func TestTimeoutAfterServerReceivesBodyTerminatesAmbiguousAttempt(t *testing.T) 
 	if err := dispatcher.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if counters := dispatcher.Counters(); counters.Rejected != 1 {
+	if counters := dispatcher.Counters(); counters.Dropped != 1 {
 		t.Fatalf("counters=%+v", counters)
 	}
 	if err := dispatcher.Close(ctx); err != nil {
