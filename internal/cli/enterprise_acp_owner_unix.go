@@ -8,13 +8,29 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 
-	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
-func alignEnterpriseACPCredentialOwner(dataDir, principal, client, agent, profile, token string) error {
+// Seams for tests.
+var (
+	enterpriseACPEUID         = os.Geteuid
+	enterpriseACPRunAsAccount = enterprisehooks.RunAsAccount
+)
+
+// withEnterpriseACPServiceOwner runs a change to the service-side ACP
+// credentials as the account that owns the managed data_dir, the account
+// whose gateway reads them. On a standalone host that is the gateway service
+// account. Root used to write the records and then hand them to that
+// account; safefile then refused roots next write into the accounts
+// directory, so a standalone host could enroll only one user (GAP-0251).
+// A root-owned data_dir (Secure Client) and a caller that is not root run fn
+// unchanged.
+func withEnterpriseACPServiceOwner(dataDir string, fn func() error) error {
+	if enterpriseACPEUID() != 0 {
+		return fn()
+	}
 	info, err := os.Stat(dataDir)
 	if err != nil {
 		return fmt.Errorf("enterprise ACP: inspect managed data_dir owner: %w", err)
@@ -23,36 +39,13 @@ func alignEnterpriseACPCredentialOwner(dataDir, principal, client, agent, profil
 	if !ok {
 		return fmt.Errorf("enterprise ACP: cannot inspect managed data_dir owner")
 	}
-	path, err := acp.EnterpriseCredentialPath(dataDir, principal, client, agent, profile)
-	if err != nil {
-		return err
+	if stat.Uid == 0 {
+		return fn()
 	}
-	indexPath, err := acp.EnterpriseCredentialIndexPath(dataDir, token)
-	if err != nil {
-		return err
-	}
-	for _, item := range []string{
-		filepath.Join(dataDir, "acp"), filepath.Dir(path), path, filepath.Dir(indexPath), indexPath,
-	} {
-		entry, err := os.Lstat(item)
-		if err != nil {
-			return err
-		}
-		if entry.Mode()&os.ModeSymlink != 0 || (!entry.IsDir() && !entry.Mode().IsRegular()) {
-			return fmt.Errorf("enterprise ACP: unsafe service credential path: %s", item)
-		}
-		if os.Geteuid() == 0 {
-			if err := os.Lchown(item, int(stat.Uid), int(stat.Gid)); err != nil {
-				return fmt.Errorf("enterprise ACP: align service credential owner: %w", err)
-			}
-		}
-		mode := os.FileMode(0o600)
-		if entry.IsDir() {
-			mode = 0o700
-		}
-		if err := os.Chmod(item, mode); err != nil {
-			return err
-		}
-	}
-	return nil
+	return enterpriseACPRunAsAccount(int(stat.Uid), int(stat.Gid), fn)
 }
+
+// alignEnterpriseACPCredentialOwner has nothing to do on Unix: the data_dir
+// owner writes the records itself (withEnterpriseACPServiceOwner), with the
+// 0600 and 0700 modes safefile gives them.
+func alignEnterpriseACPCredentialOwner(_, _, _, _, _, _ string) error { return nil }

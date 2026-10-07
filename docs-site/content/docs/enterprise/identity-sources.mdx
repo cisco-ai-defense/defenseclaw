@@ -95,8 +95,10 @@ An **enterprise ACP credential** is the bearer that
 and ACP profile (see [managed enterprise enrollment](/docs/acp-guard#managed-enterprise-enrollment)).
 The gateway keeps the record in its protected data directory, and only the
 bearer copy is in that user's private ACP runtime. An ACP evaluation that
-presents it is bound to the uid or SID the enrollment named, and gets that
-user's directory facts and guardrail profile, as the user's hooks do. The
+presents it is bound to the uid (Linux and macOS) or SID (Windows) the
+enrollment named, and gets that user's directory facts and guardrail profile,
+as the user's hooks do. Enrollment refuses the other platform's kind:
+`--sid` on Linux and macOS, `--uid` and `--gid` on Windows. The
 guard sends no identity headers, and the gateway ignores any that a request
 carries. An enrollment that names only a home directory, with no uid or SID,
 binds no user, so its evaluations have no verified user.
