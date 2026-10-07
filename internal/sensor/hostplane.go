@@ -612,6 +612,7 @@ func copyActivity(activity RuntimeActivity) RuntimeActivity {
 	activity.UID, activity.AUID = copyIntPtr(activity.UID), copyIntPtr(activity.AUID)
 	if activity.Hook != nil {
 		join := *activity.Hook
+		join.RuleIDs = append([]string(nil), join.RuleIDs...)
 		activity.Hook = &join
 	}
 	return activity
@@ -653,6 +654,11 @@ type HookDecision struct {
 	PeerPID int
 	PeerUID int
 	At      time.Time
+	// Action is the decision's verdict for the tool it let run (allow or
+	// alert) and RuleIDs its rule ids; the join keeps the first
+	// MaxHookRuleIDs.
+	Action  string
+	RuleIDs []string
 }
 
 // hookExec is a tool-call process as the join sees it.
@@ -751,10 +757,15 @@ func (r *hookRing) join(exec hookExec, rootOf func(pid int) (int, bool)) HookJoi
 	if picked.CommandHash != "" {
 		picked.used = true
 	}
-	return HookJoin{
+	join := HookJoin{
 		Seen: true, Confidence: confidence, Connector: picked.Connector,
 		SessionID: picked.SessionID, ToolInvocationID: picked.ToolInvocationID,
+		Action: picked.Action,
 	}
+	if len(picked.RuleIDs) > 0 {
+		join.RuleIDs = append([]string(nil), picked.RuleIDs[:min(len(picked.RuleIDs), MaxHookRuleIDs)]...)
+	}
+	return join
 }
 
 func containsString(values []string, want string) bool {

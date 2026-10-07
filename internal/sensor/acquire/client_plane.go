@@ -112,16 +112,20 @@ func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 		if err := json.Unmarshal(response.Body, &frame); err != nil {
 			continue
 		}
-		if frame.Event == nil {
-			if frame.Coverage != nil {
-				coverage := decodeCoverage(*frame.Coverage)
-				s.mu.Lock()
-				s.coverage = coverage
-				s.mu.Unlock()
-			}
-			continue
+		switch {
+		case frame.Event != nil:
+			s.buffer.Push(decodeEvent(*frame.Event))
+		case frame.PolicyEvent != nil:
+			// The member names the owner; the event cannot claim another.
+			event := decodeEvent(*frame.PolicyEvent)
+			event.PolicyOwner, event.Kind = plane.PolicyOwnerCustomer, plane.KindPolicyEvent
+			s.buffer.Push(event)
+		case frame.Coverage != nil:
+			coverage := decodeCoverage(*frame.Coverage)
+			s.mu.Lock()
+			s.coverage = coverage
+			s.mu.Unlock()
 		}
-		s.buffer.Push(decodeEvent(*frame.Event))
 	}
 }
 

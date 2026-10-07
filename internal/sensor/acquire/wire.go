@@ -139,6 +139,40 @@ type KernelStatus struct {
 	// first; the gateway drains it by Seq into log.ai.runtime.kernel_policy
 	// records (the helper emits no telemetry itself).
 	Changes []KernelChange `json:"changes,omitempty"`
+	// IntentMode is the enterprise.tetragon mode the drop-in asks for, before
+	// any cap (Mode is what runs). Approval says whether enforce_ack approves
+	// this build's kernel controls: not_needed (the mode is not enforce),
+	// missing, stale or approved.
+	IntentMode string `json:"intent_mode,omitempty"`
+	Approval   string `json:"approval,omitempty"`
+	// CustomerPolicies are the host's own Tetragon policies (at most 64):
+	// names, modes and the helper's counts of their kprobe and LSM events.
+	// CustomerEvents totals every customer policy, listed or not. Present
+	// in every mode with an event stream (consume, observe, enforce).
+	CustomerPolicies []KernelCustomerPolicy `json:"customer_policies,omitempty"`
+	CustomerEvents   *KernelCustomerEvents  `json:"customer_events,omitempty"`
+}
+
+// KernelCustomerPolicy is one of the host's own Tetragon policies as the
+// helper saw it. DefenseClaw reads its events and never changes it.
+type KernelCustomerPolicy struct {
+	Name  string `json:"name"`
+	Mode  string `json:"mode,omitempty"`
+	State string `json:"state,omitempty"`
+	KernelCustomerEvents
+}
+
+// KernelCustomerEvents count kprobe and LSM events of the host's own
+// policies in the helper: every one it received (seen), the ones it
+// forwarded (forwarded, folded repeats included), the ones it did not
+// (dropped: over the volume budget, DefenseClaw's own processes, or
+// customer_events off) and those of container processes (container, never
+// forwarded).
+type KernelCustomerEvents struct {
+	Seen      int64 `json:"seen"`
+	Forwarded int64 `json:"forwarded"`
+	Dropped   int64 `json:"dropped"`
+	Container int64 `json:"container,omitempty"`
 }
 
 // KernelChange is one kernel-policy state change.
@@ -155,6 +189,10 @@ type KernelChange struct {
 	State  string `json:"state,omitempty"`
 	UID    *int   `json:"uid,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// CoveredSeconds and NeededSeconds are the user's burn-in progress at
+	// the change, on uid_progress, uid_burnin and uid_ready.
+	CoveredSeconds int64 `json:"covered_seconds,omitempty"`
+	NeededSeconds  int64 `json:"needed_seconds,omitempty"`
 }
 
 // KernelTetragon is the agent the reconciler talks to.
@@ -167,6 +205,10 @@ type KernelTetragon struct {
 	// nil when unknown (Tetragon 1.6 has no GetInfo).
 	KeepSensorsOnExit *bool `json:"keep_sensors_on_exit,omitempty"`
 	LSM               *bool `json:"lsm,omitempty"`
+	// Installed is whether Tetragon's discovery file exists, so a host
+	// without Tetragon on the native backend is not read as a fallback; nil
+	// from a helper that predates it.
+	Installed *bool `json:"installed,omitempty"`
 }
 
 // KernelPolicyStatus is one DefenseClaw policy.

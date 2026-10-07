@@ -131,7 +131,16 @@ type HookJoin struct {
 	Connector        string
 	SessionID        string
 	ToolInvocationID string
+	// Action is the joined decision's verdict (allow, or alert for one that
+	// let the tool run with a finding) and RuleIDs its first rule ids (at
+	// most MaxHookRuleIDs), so a record can say the hook allowed a tool call
+	// (rule X alerted) that a kernel policy then denied.
+	Action  string
+	RuleIDs []string
 }
+
+// MaxHookRuleIDs bounds the rule ids a hook join carries.
+const MaxHookRuleIDs = 3
 
 // Kernel control rule ids: the guardrail rules each built-in kernel control
 // enforces at the kernel, so a kernel denial joins the hook record of the
