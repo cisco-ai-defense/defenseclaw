@@ -155,10 +155,15 @@ builds:
 # Release asset names are flat and permanent: installers fetch
 # defenseclaw-<version>-<os>-<arch>.{tar.gz,zip} by name.
 archives:
+  # The per-user archive carries the sensor helper too: on Linux it is the
+  # sandbox kernel feed (`sudo defenseclaw-gateway sandbox kernel-feed
+  # install` copies it into a root service); install.sh keeps it on Linux
+  # only.
   - id: default
     ids:
       - defenseclaw
       - defenseclaw-acp-posix
+      - defenseclaw-sensor-helper-posix
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
