@@ -77,3 +77,14 @@ def test_codeguard_skill_alert_names_folder_and_file() -> None:
     alert = _v8_alert_event(row)
     assert alert.target == "tf-skill-004/SKILL.md"
     assert ("File", path) in alert.facts
+
+
+def test_invalid_config_banner_names_file_line_and_repair() -> None:
+    from pathlib import Path
+
+    from defenseclaw.tui.app import _config_error_summary
+
+    detail = "Cannot read the DefenseClaw configuration config.yaml: invalid YAML at line 62, column 1"
+    banner = _config_error_summary(Path("/home/user/.defenseclaw/config.yaml"), ValueError(detail))
+    assert banner == "config.yaml line 62 is invalid; run defenseclaw config validate"
+    assert len(banner) <= 80

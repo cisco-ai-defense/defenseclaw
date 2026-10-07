@@ -302,6 +302,14 @@ def _widen_windows_default_executor(loop: asyncio.AbstractEventLoop, *, platform
 TOKENS = DEFAULT_TOKENS
 
 
+def _config_error_summary(path: Path, error: Exception) -> str:
+    """Keep the actionable config failure visible at 80 columns."""
+
+    match = re.search(r"\bline (\d+)\b", str(error))
+    location = f" line {match.group(1)}" if match else ""
+    return f"{path.name}{location} is invalid; run defenseclaw config validate"
+
+
 class _ConfigGenerationChangedError(RuntimeError):
     """The watched config moved while a background reload was in flight."""
 
@@ -1323,6 +1331,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
         self._config_reload_count = 0
+        self._config_error = ""
         # Set on each config-editor save: saved sections the CLI already applies.
         self._setup_cli_live_sections = ""
         self.data_dir = _resolve_data_dir(config, data_dir)
@@ -10261,6 +10270,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         connector_scope = self._overview_connector_scope_text()
 
         notice_lines = []
+        if self._config_error:
+            notice_lines.append(f"[{TOKENS.accent_red}][ERROR][/] {rich_escape(self._config_error)}")
         for notice in notices[:4]:
             color = TOKENS.accent_red if notice.level == "error" else TOKENS.accent_amber
             if notice.level == "info":
@@ -10652,7 +10663,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.status_text = text
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
-        if _status_text_fills_line(text, self.size.width):
+        if self._config_error:
+            rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
+        elif _status_text_fills_line(text, self.size.width):
             # A "Done: ..." fitted to the line lost its last cell to the "…"
             # of the cut-off health strip ("press i for readines…", GAP-2133).
             rendered = text
@@ -13572,6 +13585,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # evaluates the new generation; the current snapshot remains.
                 return
             except Exception as exc:  # noqa: BLE001 - malformed/locked config is retryable.
+                summary = _config_error_summary(watcher.path, exc)
+                if summary != self._config_error:
+                    self._config_error = summary
+                    self._render_chrome()
                 if watcher.reject(generation, now=now):
                     self._write_activity(
                         f"[#FBBF24]external config reload deferred:[/] "
@@ -13594,6 +13611,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return
 
             watcher.accept(generation)
+            self._config_error = ""
             self._config_reload_count += 1
             self._set_status("Configuration refreshed from disk.")
             self._schedule_active_panel_refresh("config-generation")
@@ -13655,6 +13673,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         try:
             new_cfg: object | None = config_module.load()
         except Exception as exc:  # noqa: BLE001 — bad YAML must not crash the TUI.
+            if self._config_watcher is not None:
+                self._config_error = _config_error_summary(self._config_watcher.path, exc)
+                self._render_chrome()
             self._write_activity(
                 f"[#FBBF24]config reload failed:[/] {rich_escape(str(exc))}; keeping current snapshot."
             )
@@ -13665,6 +13686,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             external=False,
             refresh_disk=True,
         )
+        self._config_error = ""
         if self._config_watcher is not None:
             self._config_watcher.sync_to_disk()
         self._schedule_active_panel_refresh("internal-config-generation")
@@ -13985,7 +14007,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 results.append((name, stdout.decode(errors="replace")))
         self.inventory_model.apply_merged(results)
         if not any(text for _name, text in results):
-            self.inventory_model.message = "Could not load inventory for any connector."
+            self.inventory_model.message = self._config_error or "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
@@ -14335,7 +14357,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         model.apply_merged(results)
         if not any(text for _name, text in results):
-            model.message = f"Could not load {panel} for any connector."
+            model.message = self._config_error or f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
         self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
