@@ -11,7 +11,7 @@ keywords:
   - first-party allow list
 ---
 
-DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, or `block`—for guardrail events. Connector adapters then map that action onto the host's actual response vocabulary, such as allow/ask/deny. Admission, firewall, and asset-policy evaluations have their own domain-specific outputs.
+DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, or `block`—for guardrail events. Connector adapters then map that action onto the host's actual response vocabulary, such as allow/ask/deny. Admission and asset-policy evaluations have their own domain-specific outputs.
 
 <DefenseClawDemo scenario="policy-decision-trace" />
 
@@ -104,7 +104,7 @@ patterns such as the lethal trifecta. Separately, fixed ordered tool-call
 chains join exact authenticated hook events before the verdict; only an
 enforcement-safe synchronous pre-tool final step can deny, and only when the
 active profile maps the chain's severity to `block`. OPA/Rego continues to
-power admission, firewall, audit, and direct guardrail-policy evaluation.
+power admission and direct guardrail-policy evaluation.
 
 ## Layer 1 — Admission policy and the OPA engine
 
@@ -241,8 +241,6 @@ The running gateway applies the new policy without a restart. If the preset also
 | --- | --- |
 | `defenseclaw.admission` | `verdict`, `reason` |
 | `defenseclaw.guardrail` | `action`, `severity`, `reason`, `scanner_sources` |
-| `defenseclaw.firewall` | `action`, `rule_name` |
-| `defenseclaw.audit` | `retain`, `retain_reason`, `export_to` |
 
 You can hand-edit the Rego — the engine is just OPA — but most operators stay in `config.yaml` because the bundled Rego covers the common cases.
 

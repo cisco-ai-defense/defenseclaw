@@ -54,19 +54,14 @@ processors:
   # Defense-in-depth resource enrichment so every signal carries the
   # service.namespace=defenseclaw label even if the sidecar forgets to
   # set it. The `insert` actions keep sidecar-supplied values when present.
-  # The legacy deployment.environment alias is copied from the canonical
-  # deployment.environment.name first; local-dev is only a fallback when
-  # neither spelling was supplied. This prevents a canonical production
-  # resource from being paired with a contradictory local-dev alias.
+  # deployment.environment.name defaults to local-dev only when the sender
+  # supplied none, so a canonical production resource is never overwritten.
   resource:
     attributes:
       - key: service.namespace
         value: defenseclaw
         action: insert
-      - key: deployment.environment
-        from_attribute: deployment.environment.name
-        action: insert
-      - key: deployment.environment
+      - key: deployment.environment.name
         value: local-dev
         action: insert
 

@@ -1041,7 +1041,6 @@ def _roster_config(active_connectors, guardrail) -> SimpleNamespace:
         llm=SimpleNamespace(provider="", model=""),
         inspect_llm=SimpleNamespace(provider="", model=""),
         cisco_ai_defense=SimpleNamespace(endpoint=""),
-        privacy=SimpleNamespace(disable_redaction=False),
         active_connectors=active_connectors,
     )
 

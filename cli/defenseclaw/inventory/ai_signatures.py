@@ -227,10 +227,6 @@ def install_signature_pack(
     return dest
 
 
-def signature_pack_dir(data_dir: str | Path) -> Path:
-    return Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME
-
-
 def _parse_catalog_text(text: str, *, source: str) -> list[AISignature]:
     try:
         payload = json.loads(text)

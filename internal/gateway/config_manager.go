@@ -894,14 +894,15 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			}
 			return nil, configReloadSource{}, beforeErr
 		}
-		defaultDataDir := ""
+		defaultDataDir, secureClient := "", false
 		if current := m.Current(); current != nil {
-			defaultDataDir = current.DataDir
+			defaultDataDir, secureClient = current.DataDir, current.SecureClientIntegration()
 		}
-		if defaultDataDir != "" {
+		if defaultDataDir != "" && !secureClient {
 			// A destination key added to .env after the gateway started (by
 			// `setup galileo --persist-api-key` or `keys set`) must resolve
-			// when the config that references it reloads (GAP-0017).
+			// when the config that references it reloads (GAP-0017). Secure
+			// Client reads .env only at start (issue #1092).
 			config.LoadDotEnv(filepath.Join(defaultDataDir, ".env"))
 		}
 		compiled, compileErr := config.ParseCompileObservabilityV8(
@@ -1186,6 +1187,12 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("data_dir", oldCfg.DataDir, newCfg.DataDir)
 	add("audit_db", oldCfg.AuditDB, newCfg.AuditDB)
 	add("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
+	// Secure Client keeps the reload classification it had before the
+	// configuration generation (issue #1092): the hot set below, a restart
+	// for any gateway edit but the reload mode, and every per-connector
+	// guardrail setting. Its v8 action keys (skill_actions, mcp_actions,
+	// plugin_actions) are read as admission, which the restart set covers.
+	secureClient := oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration()
 	standalone := oldCfg.StandaloneEnterprise() || newCfg.StandaloneEnterprise()
 	if standalone {
 		// The standalone profile keeps its runtime settings in the enterprise
@@ -1260,6 +1267,12 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// log sink folds the endpoint (otelNeedsReload).
 		"cisco_ai_defense": {},
 	}
+	if secureClient {
+		hotReloadable = map[string]struct{}{
+			"acp": {}, "guardrail": {}, "guardrail.profiles": {}, "webhooks": {}, "observability": {},
+			"notifications": {}, "registries": {}, "openshell": {}, "cisco_ai_defense": {},
+		}
+	}
 	// standalone: inspectorNeedsRebuild covers the enterprise AI Defense
 	// settings, so they stay hot. enterprise.network is restart-required
 	// (see above).
@@ -1280,7 +1293,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 			restart = append(restart, path)
 			continue
 		}
-		if path == "gateway" {
+		if path == "gateway" && (!secureClient || onlyConfigReloadModeChanged(oldCfg, newCfg)) {
 			// gateway.config_reload is read per reload and gateway.watcher
 			// restarts the install watcher in-process; every other gateway
 			// key (listeners, TLS, device key, token) is process-level.
@@ -1301,15 +1314,20 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	oldGateway := oldEffectiveGateway
 	newGateway := newEffectiveGateway
 	oldGateway.ConfigReload, newGateway.ConfigReload = config.GatewayConfigReloadConfig{}, config.GatewayConfigReloadConfig{}
-	oldGateway.Watcher, newGateway.Watcher = config.GatewayWatcherConfig{}, config.GatewayWatcherConfig{}
+	if !secureClient {
+		oldGateway.Watcher, newGateway.Watcher = config.GatewayWatcherConfig{}, config.GatewayWatcherConfig{}
+	}
 	if !reflect.DeepEqual(oldGateway, newGateway) {
 		restart = append(restart, "gateway")
 	}
 	if oldCfg.Guardrail.ScannerMode != newCfg.Guardrail.ScannerMode {
 		restart = append(restart, "guardrail.scanner_mode")
 	}
-	if oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector ||
-		!reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors)) {
+	connectorsChanged := !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
+	if secureClient {
+		connectorsChanged = !reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
+	}
+	if oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector || connectorsChanged {
 		restart = append(restart, "guardrail.connectors")
 	}
 	return ConfigDiff{Changed: changed, RestartRequired: sortedUniqueStrings(restart)}

@@ -102,19 +102,13 @@ func renderCopilotPluginManifest() ([]byte, error) {
 }
 
 // copilotVSCodeLocalCommandOwned reports whether command is exactly the
-// Local harness command DefenseClaw renders for one of its events, or the
-// one an earlier build rendered for the same binary (GAP-1098: a managed
-// 1.0.2 install kept the earlier plugin and then blocked every Copilot CLI
-// call as a foreign hook).
+// Local harness command DefenseClaw renders for one of its events.
 func copilotVSCodeLocalCommandOwned(goos, hookBinary, command string) bool {
 	if strings.TrimSpace(hookBinary) == "" || command == "" {
 		return false
 	}
 	for _, event := range connector.CopilotVSCodeLocalHookEvents {
 		if command == strings.TrimSpace(connector.CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event)) {
-			return true
-		}
-		if legacy := strings.TrimSpace(connector.CopilotVSCodeLocalLegacyManagedHookCommand(goos, hookBinary, event)); legacy != "" && command == legacy {
 			return true
 		}
 	}

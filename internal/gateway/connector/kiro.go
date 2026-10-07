@@ -547,13 +547,9 @@ func windowsKiroHookCommandForBinary(hookBinary, surface string, managed bool) s
 // bridge the Kiro command runs: the shared awaited-hook bridge
 // (windowsAwaitedHookStatements), which starts the launcher with Process.Start
 // and returns a fast-exiting launcher's block, with a Constrained Language
-// mode fallback. Earlier builds wrote this bridge as the whole command, which
-// lost the block under a PowerShell host, so it stays owned for repair and
-// teardown. The arguments are fixed tokens without spaces or quotes, so the
-// rendered bridge is byte-identical to the one those builds wrote. Managed
-// Windows writes the same bridge under the target user token with managed
-// set; there hookBinary is the standalone defenseclaw-hook.exe and the
-// arguments add --enterprise-managed.
+// mode fallback. Managed Windows writes the same bridge under the target user
+// token with managed set; there hookBinary is the standalone
+// defenseclaw-hook.exe and the arguments add --enterprise-managed.
 func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string, managed bool) string {
 	var extra []string
 	if managed {
@@ -565,42 +561,20 @@ func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string, managed bo
 	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, extra...)
 }
 
-// legacyWindowsKiroStartProcessHookCommandForBinary is the Start-Process
-// -Wait bridge earlier builds wrote for Kiro. It is never generated.
-func legacyWindowsKiroStartProcessHookCommandForBinary(hookBinary, surface string) string {
-	if surface == "" {
-		return legacyStartProcessWindowsNativePowerShellHookCommand("kiro", "", "", hookBinary)
-	}
-	return legacyStartProcessWindowsNativePowerShellHookCommand("kiro", "", "", hookBinary, "--hook-surface", surface)
-}
-
 // kiroWindowsOwnedHookCommands are the Windows Kiro commands DefenseClaw
-// wrote for every launcher it may have registered: the current command, the
-// bare Process.Start and Start-Process bridges (both surfaces), and the
-// `& '<launcher>' hook --connector kiro` call-operator form earlier builds
-// wrote. Setup replaces
-// and teardown removes an older form in the CLI 2.x agent files, whose
-// entries are otherwise matched by exact command.
+// writes for every launcher it may have registered: the per-user and the
+// managed command, for the v2 and v3 surfaces. Setup replaces and teardown
+// removes them in the CLI 2.x agent files, whose entries are otherwise
+// matched by exact command.
 func kiroWindowsOwnedHookCommands() []string {
 	var commands []string
 	for _, binary := range nativeHookBinaryOwnershipCandidates() {
-		legacy := "& " + powershellQuoteLiteral(binary) + " " + nativeHookFlag + "kiro"
-		// Managed and per-user forms, and the managed form without
-		// --enterprise-managed that earlier managed builds wrote.
 		for _, managed := range []bool{false, true} {
 			commands = append(commands,
 				windowsKiroHookCommandForBinary(binary, "", managed),
 				windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3, managed),
-				windowsKiroPowerShellBridgeForBinary(binary, "", managed),
-				windowsKiroPowerShellBridgeForBinary(binary, KiroHookSurfaceV3, managed),
 			)
 		}
-		commands = append(commands,
-			legacyWindowsKiroStartProcessHookCommandForBinary(binary, ""),
-			legacyWindowsKiroStartProcessHookCommandForBinary(binary, KiroHookSurfaceV3),
-			legacy,
-			legacy+" --hook-surface "+KiroHookSurfaceV3,
-		)
 	}
 	return uniqueNonEmptyStrings(commands)
 }

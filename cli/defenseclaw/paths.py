@@ -61,7 +61,7 @@ def bundled_policies_dir() -> Path:
 
 
 def bundled_rego_dir() -> Path:
-    """Rego modules and data.json for OPA."""
+    """Rego modules for OPA."""
     return _first_existing(
         _DATA_DIR / "policies" / "rego",
         _REPO_ROOT / "policies" / "rego",

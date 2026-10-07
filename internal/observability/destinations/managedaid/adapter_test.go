@@ -90,7 +90,9 @@ func testConfig(endpoint string) Config {
 			Values: map[string]string{
 				"service.name": "defenseclaw", "service.instance.id": "managed-generation",
 				"defenseclaw.device.public_key_fingerprint": "sha256:managed-device",
-				"host.name": "managed-host",
+				"deployment.environment.name":               "managed-env",
+				"defenseclaw.deployment.mode":               "managed_enterprise",
+				"host.name":                                 "managed-host",
 			},
 		},
 	}
@@ -354,6 +356,8 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 		resource := managedGoldenAttributeValues(envelope.Payload.ResourceLogs[0].Resource.Attributes)
 		if resource["defenseclaw.device.public_key_fingerprint"] != "sha256:managed-device" ||
 			resource["defenseclaw.device.id"] != "sha256:managed-device" ||
+			resource["deployment.environment"] != "managed-env" ||
+			resource["deployment.mode"] != "managed_enterprise" ||
 			resource["host.name"] != "managed-host" {
 			t.Fatalf("managed resource anchor = %#v", resource)
 		}

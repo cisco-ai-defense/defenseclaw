@@ -148,6 +148,10 @@ def test_registered_custom_pack_key_is_selected_by_name(env):
     assert "config set guardrail.custom_packs.team.digest sha256:" + "a" * 64 in refused.output
     assert len(writes) == 1
 
+    # GAP-0159: an unknown name lists the registered custom_packs names it could have been.
+    unknown = _run(app, ["use-pack", "nosuch"])
+    assert unknown.exit_code == 1 and "guardrail.custom_packs name (team)" in unknown.output
+
 
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):
     """GAP-1576: an unrelated ./vsg2 folder does not shadow the installed vsg2 pack."""

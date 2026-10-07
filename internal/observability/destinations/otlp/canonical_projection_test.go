@@ -364,7 +364,6 @@ func canonicalProjectionModelRecordForPlan(t *testing.T, digest string, generati
 	}}}
 	customResource, err := observability.NewTelemetryCustomResourceAttributes(
 		map[string]string{"operator.profile": "soc"},
-		false,
 	)
 	if err != nil {
 		t.Fatal(err)

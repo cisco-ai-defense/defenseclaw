@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -485,7 +485,3 @@ def ignored_in_managed_mode(env: Mapping[str, str] | None = None) -> list[str]:
         if entry.managed == MANAGED_IGNORE and environ.get(entry.name)
     )
 
-
-def iter_entries() -> Iterable[EnvVar]:
-    """Convenience iterator over every entry."""
-    return iter(load_registry().entries)

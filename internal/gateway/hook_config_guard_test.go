@@ -391,6 +391,9 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	if body, err := os.ReadFile(configPath); err != nil || !strings.Contains(string(body), `"failMode":"closed"`) {
 		t.Fatalf("rendered hooks = %q (%v), want fail mode closed", body, err)
 	}
+	if lock := connector.LoadHookContractLockEntry(root, conn.Name()); lock.HookFailMode != "closed" {
+		t.Fatalf("hook contract lock fail mode = %q, want closed (doctor compares it with the rendered hooks)", lock.HookFailMode)
+	}
 	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before+1 {
 		t.Fatalf("second refresh: err=%v, Setup calls %d, want %d", err, setupCalls(), before+1)
 	}

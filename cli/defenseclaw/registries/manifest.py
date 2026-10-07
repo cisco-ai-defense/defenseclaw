@@ -260,16 +260,6 @@ def _yaml_error_detail(exc: yaml.YAMLError) -> str:
     return f" ({where}: {problem})" if problem else f" ({where})"
 
 
-def load_manifest_file(path: str | Path) -> Manifest:
-    """Read *path* from disk and return a validated :class:`Manifest`."""
-    p = Path(path)
-    try:
-        raw = p.read_bytes()
-    except OSError as exc:
-        raise ManifestError(f"could not read manifest {p}: {exc}") from exc
-    return parse_manifest(raw)
-
-
 # ---------------------------------------------------------------------------
 # Validation — hand-written so the security guards stay on even when the
 # optional jsonschema package is missing. When jsonschema IS available we

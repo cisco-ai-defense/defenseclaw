@@ -793,10 +793,6 @@ func inspectEmbeddedAuthenticodePayload(
 	}, nil
 }
 
-func verifyInstalledAuthenticodePolicy(filePath string, policy authenticodeFilePolicy) error {
-	return verifyInstalledAuthenticodePolicyWith(filePath, policy, verifyEmbeddedAuthenticodeTrust)
-}
-
 func verifyInstalledAuthenticodePolicyWith(
 	filePath string,
 	policy authenticodeFilePolicy,

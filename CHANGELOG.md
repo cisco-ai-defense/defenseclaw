@@ -64,6 +64,78 @@ stopped`. Nothing is changed; use the install command above.
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
 
+### Removed
+
+1.0.0 is not released yet, so these are intentional breaking changes. Items
+marked **0.8.x** were visible in 0.8.x; the others only ever existed in
+pre-release builds. An upgrade from a released 0.8.x install still starts and
+works with the leftover files, and nothing you configured is dropped without a
+line in `migration-v9.json`.
+
+- **0.8.x: command-line options that did nothing.** `setup observability add
+  --url-path`, `policy delete --force`, `registry add|edit --auto-sync` and
+  `--sync-interval-hours`, `alerts --tui` and `--no-tui`, `quickstart
+  --non-interactive` and `--yes`, `setup rotate-token --no-restart` and `init
+  --sandbox` are gone. A script that still passes one now fails with a normal
+  usage error instead of the option being ignored. `install.sh`, `install.ps1`
+  and `install-dev.sh` no longer pass them.
+- **0.8.x: wizard fields that always produced a failing or ignored command.**
+  The "Refresh Hooks" toggle in the TUI Token rotation wizard, the matching
+  macOS app toggle and the macOS "Webhook URL path" field.
+- **0.8.x: the firewall and audit Rego policies.** `firewall.rego`,
+  `audit.rego` and `data-sandbox.json`, with the `defenseclaw-gateway policy
+  evaluate-firewall` and `policy domains` dry-run commands. They read the
+  retired `data.json` and nothing enforced through them; network egress
+  enforcement is unchanged. The `config_version` 9 migration removes the
+  unmodified 0.8 copies from the policy folder, keeps a copy you edited and
+  lists it in `migration-v9.json` and in `defenseclaw-gateway config migrate`
+  output. On a managed standalone host the files are only reported. The
+  docs-site policy creator Live Test now evaluates the admission and
+  guardrail Rego only. `defenseclaw init` seeds only `.rego` files, and the
+  Python wheel no longer lists Rego JSON data files.
+- **0.8.x: the `skill_actions`, `mcp_actions` and `plugin_actions` config
+  keys, `update_check` and the empty `privacy` section.** Use the `admission`
+  section and `update.check`. `defenseclaw upgrade` moves existing values,
+  records overridden severities in `migration-v9.json`, drops a leftover
+  `privacy` section and notes a `privacy.disable_redaction: true` there;
+  redaction follows `observability.redaction_profiles`. In a
+  `config_version` 9 file any of these keys is rejected with the normal
+  unknown-key error naming the key.
+- **0.8.x, breaking (telemetry): the resource attribute aliases.** DefenseClaw
+  emits only canonical names: `deployment.environment` is now
+  `deployment.environment.name`, `deployment.mode` is now
+  `defenseclaw.deployment.mode`, and `defenseclaw.device.id` is now
+  `defenseclaw.device.public_key_fingerprint`. Queries, dashboards and alerts
+  on an exported backend must use the canonical names. The Prometheus labels
+  follow: `deployment_environment` is now `deployment_environment_name` and
+  `defenseclaw_device_id` is now `defenseclaw_device_public_key_fingerprint`.
+  The bundled Grafana and Splunk Observability dashboards are updated; custom
+  dashboards need a hand edit. The managed AI Defense sink output is
+  unchanged: it still sends the three alias spellings on its own resource.
+  The `local-observability-v1` profile attributes and the Splunk HEC v7 flat
+  fields are not part of this change.
+- **0.8.x: the config key `observability.trace_policy.compatibility_aliases`**
+  (default `true`, no environment variable). The 0.8.x to 1.0 config
+  migration drops it and records it as removed in `migration-v9.json`; a
+  `config_version` 9 file that still contains it is refused with a message to
+  remove it. A configured `observability.resource.attributes` entry
+  `deployment.environment` is migrated to `deployment.environment.name`, and
+  `config_version` 9 refuses the old spelling. `defenseclaw setup
+  observability add ... --environment` removes a retired
+  `deployment.environment`. The local observability stack collector defaults
+  `deployment.environment.name` to `local-dev` when the sender supplies none.
+- The enterprise Unix uninstall option `--remove-service-account`. Uninstall
+  already deletes the gateway service account by default;
+  `--keep-service-account` keeps it.
+- The hidden `--restart`, `--no-restart` and `--no-validate` options of
+  `guardrail use-pack`, `protection enable|disable`, `block-at` and
+  `alert-at`. They never did anything.
+- Pre-release leftovers with no released equivalent: audit chain migrations,
+  the Windows hook-command forms for Devin, Kiro and event-bound hooks,
+  `defenseclaw migrate --yes`, dead helpers, and audit.db files from
+  pre-release builds at `schema_version` 30-52, which are not migrated and
+  must start from a fresh `audit.db`.
+
 ## [Unreleased] — Enterprise hardening
 
 Entries that name the enterprise standalone profile apply only there; the
@@ -71,6 +143,10 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **macOS app: the Local observability wizard no longer fails when "Configure
+  audit sink" is cleared.** The field passed `--no-audit-sink`, which
+  `defenseclaw setup local-observability up` does not accept, so the command
+  ended with a usage error. The field is gone.
 - **Amp traces in a built-in mode reach Galileo.** Galileo needs a provider
   on an agent span, and Amp names no model in its built-in modes (such as
   `medium`), so those agent spans were left out of the Galileo export and
@@ -142,8 +218,7 @@ rest also reach per-user installs.
   `Process.Start`, which keeps that handle. In Constrained Language mode,
   which does not allow those calls, it runs the hook with the call operator
   and pipes its output, so PowerShell waits on the handle it started the
-  hook with. Run `defenseclaw setup kiro` again to replace the older
-  command. Other connectors are unchanged.
+  hook with. Other connectors are unchanged.
 - **Uninstall removes the empty OpenCode folders DefenseClaw created.** The
   gateway's install watcher creates missing `plugin`, `skill` and `skills`
   folders under `~/.config/opencode`, and a per-user uninstall left them
@@ -1201,8 +1276,8 @@ deleted.
   `scripts/bundle-sandbox-test.sh`, `scripts/test-e2e-sandbox*.sh`,
   `scripts/test-e2e-tool-block-sandbox.sh`, `scripts/test-proxy-sandbox.py`,
   `scripts/fix-sandbox-acls.sh` and `scripts/install-openshell-sandbox.sh`.
-- `defenseclaw init --sandbox` is hidden and deprecated: it prints a notice and
-  continues a normal init.
+- `defenseclaw init --sandbox`, which was hidden and deprecated, is removed: it
+  is now a usage error.
 - **Breaking:** `install.sh --sandbox` is a usage error: the installer stops
   before installing anything (exit 1) and points at `defenseclaw sandbox setup`
   and `defenseclaw sandbox legacy-cleanup`.
@@ -1356,11 +1431,6 @@ deleted.
   `defenseclaw uninstall` handle such names without aborting, and
   `setup remove` does not require `--force` when such a name is the last
   connector.
-- **Native Windows state from pre-release builds.** Setup and the uninstaller
-  accept install state from pre-release native builds that selected Windsurf;
-  repair and upgrade move the selection to `devin`. Native Windows installs
-  made from pre-release main builds that selected Gemini CLI must be
-  uninstalled with their original build before installing this release.
 - **Devin on macOS.** Devin hooks are registered in `~/.config/devin/config.json`
   (or `$XDG_CONFIG_HOME/devin`) on macOS, where the Devin CLI reads them,
   instead of `~/Library/Application Support/devin`.
