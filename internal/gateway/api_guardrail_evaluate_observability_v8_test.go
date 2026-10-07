@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -172,6 +173,52 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 		attributes["user.id"] != "1201" ||
 		attributes["defenseclaw.user.name"] != "dcad-alice" {
 		t.Fatalf("generated OPA span parent=%s/%t record=%v", spanParent, hasParent, attributes)
+	}
+}
+
+// A decision event must carry the profile named on its parent span.
+func TestGuardrailDecisionEventCarriesProfileName(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
+	correlated, _ := platformHealthCorrelatedContext(t)
+	ctx := context.WithValue(correlated, resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
+		decision: profileDecision{Name: "contractors", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Match: profileMatchGroup},
+	})
+	body, err := json.Marshal(guardrailEvaluateRequest{
+		EvaluationID: "eval-profile-event", Direction: "prompt", Mode: "action",
+		LocalResult: &policy.GuardrailScanResult{Action: "block", Severity: "HIGH"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body)).WithContext(ctx)
+	response := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	spans := proxyGeneratedSpansForFamily(capture.snapshot(), observability.TelemetryFamilyGuardrailApply)
+	if len(spans) != 1 {
+		t.Fatalf("guardrail spans=%d", len(spans))
+	}
+	traceBody, ok := spans[0].Record().Body()
+	if !ok {
+		t.Fatal("span body missing")
+	}
+	object, err := traceBody.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, ok := object["events"].([]any)
+	if !ok || len(events) != 1 {
+		t.Fatalf("decision events = %v", object["events"])
+	}
+	event, ok := events[0].(map[string]any)
+	if !ok {
+		t.Fatalf("decision event = %T", events[0])
+	}
+	attrs, ok := event["attributes"].(map[string]any)
+	if !ok || attrs["defenseclaw.guardrail.profile.name"] != "contractors" {
+		t.Fatalf("decision event attributes = %v", event["attributes"])
 	}
 }
 
