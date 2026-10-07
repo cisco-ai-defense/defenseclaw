@@ -36,7 +36,7 @@ import rego.v1
 #     scan_on_install, allow_list_bypass_scan          - bool
 #     actions.<SEVERITY>                               - {install, file, runtime, verdict?}
 #     scanner_overrides.<scanner_name>.<SEVERITY>      - the same, per scanner
-#     first_party_allow_list                           - [{name, source_path_contains}]
+#     first_party_allow_list                           - [{name, source_path_contains, reason?}]
 
 default verdict := "scan"
 
@@ -71,12 +71,17 @@ verdict := "allowed" if {
 	input.admission.allow_list_bypass_scan == true
 }
 
-reason := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name]) if {
+reason := _first_party_reason if {
 	not _is_blocked
 	not _is_explicit_allow_listed
 	_is_policy_allow_listed
 	input.admission.allow_list_bypass_scan == true
 }
+
+_first_party_reason := r if {
+	r := object.get(_first_party_matches[0], "reason", "")
+	r != ""
+} else := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name])
 
 # --- scan_on_install disabled: skip scan when no result present ---
 
@@ -205,11 +210,16 @@ _entry_path_matches(entry) if {
 	_provenance_prefix_matches(input.path, entry.source_path)
 }
 
-_is_policy_allow_listed if {
-	some entry in input.admission.first_party_allow_list
+_is_policy_allow_listed if count(_first_party_matches) > 0
+
+# An array comprehension keeps entry order, so the first matching reason
+# agrees with EvaluateAdmissionFallback when names appear more than once.
+_first_party_matches := [entry |
+	some i
+	entry := input.admission.first_party_allow_list[i]
 	entry.name == input.target_name
 	_path_has_component_marker(input.path, entry.source_path_contains)
-}
+]
 
 _path_has_component_marker(path, markers) if {
 	some marker in markers

@@ -116,6 +116,28 @@ func TestAdmissionRegoAndFallbackAgree(t *testing.T) {
 	}
 }
 
+// TestFirstPartyConfiguredReason keeps the v9 reason in both admission paths.
+func TestFirstPartyConfiguredReason(t *testing.T) {
+	cfg := &config.Config{Admission: config.AdmissionConfig{
+		Skill: config.AdmissionAssetType{FirstPartyAllowList: []config.AdmissionFirstParty{{
+			Name: "team-skill", SourcePathContains: []string{"team/skills"}, Reason: "approved by security",
+		}}},
+	}}
+	in := AdmissionInput{TargetType: "skill", TargetName: "team-skill", Path: "/opt/team/skills/team-skill"}
+	in.Admission = AdmissionFor(CompileAdmission(cfg), in.TargetType)
+	eng := repoEngine(t)
+	rego, err := eng.Evaluate(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := EvaluateAdmissionFallback(in)
+	for name, out := range map[string]*AdmissionOutput{"rego": rego, "fallback": fallback} {
+		if out.Verdict != "allowed" || out.Reason != "approved by security" {
+			t.Errorf("%s: verdict=%q reason=%q", name, out.Verdict, out.Reason)
+		}
+	}
+}
+
 // TestCompileAdmissionLayers pins the resolution order: the type's own
 // value, then (skill) the scanner gate, then admission.defaults, then the
 // built-in default; and an empty first_party_allow_list clears the list.

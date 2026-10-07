@@ -291,7 +291,7 @@ func firstParty(lists ...[]config.AdmissionFirstParty) []CompiledFirstParty {
 		}
 		out := make([]CompiledFirstParty, 0, len(list))
 		for _, entry := range list {
-			out = append(out, CompiledFirstParty{Name: entry.Name, SourcePathContains: append([]string(nil), entry.SourcePathContains...)})
+			out = append(out, CompiledFirstParty{Name: entry.Name, SourcePathContains: append([]string(nil), entry.SourcePathContains...), Reason: entry.Reason})
 		}
 		return out
 	}
