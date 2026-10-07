@@ -65,12 +65,13 @@ the `Model` line names the model and the key:
 
 ```text
 Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
-  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
   Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
+  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t)
 ```
 
 </Tab>
