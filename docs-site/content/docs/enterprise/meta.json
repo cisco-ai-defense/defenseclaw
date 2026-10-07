@@ -19,6 +19,7 @@
     "identity-and-authentication",
     "identity-sources",
     "identity-okta",
+    "identity-entra-id",
     "foreign-hook-guard",
     "ai-defense-key",
     "---Operate---",
