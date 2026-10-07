@@ -239,6 +239,22 @@ func TestRescanCycleGatedSkipsUnchangedTargets(t *testing.T) {
 	if fake.calls != 4 {
 		t.Fatalf("after rule-pack change: scanner calls = %d, want 4", fake.calls)
 	}
+
+	// Fingerprints are cached within a cycle. A skill under another
+	// connector must not inherit this connector's pack fingerprint.
+	otherPack := &guardrail.RulePack{}
+	w.SetRulePackSource(func(connector string) *guardrail.RulePack {
+		if connector == "other" {
+			return otherPack
+		}
+		return pack
+	})
+	cache := make(map[scannerFingerprintKey]string)
+	first := w.cachedFingerprint(InstallEvent{Type: InstallSkill, Connector: "codex"}, cache)
+	second := w.cachedFingerprint(InstallEvent{Type: InstallSkill, Connector: "other"}, cache)
+	if first == second {
+		t.Fatal("connector-specific rule packs share one cached fingerprint")
+	}
 }
 
 func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {

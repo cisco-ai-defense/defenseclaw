@@ -130,9 +130,9 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 
 	fmt.Fprintf(os.Stderr, "[rescan] starting periodic re-scan of %d targets\n", len(targets))
 
-	// Scanner fingerprints depend on the target *type*, not the individual
-	// target, so compute them at most once per kind per cycle.
-	fpCache := make(map[InstallType]string)
+	// Skill overlays vary by connector. Cache at that grain while sharing
+	// fingerprints for the other target kinds within this cycle.
+	fpCache := make(map[scannerFingerprintKey]string)
 
 	var scanned, skipped int
 	for _, evt := range targets {
@@ -616,7 +616,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 // the scanner, diffs findings, emits drift alerts, and refreshes the baseline.
 // Targets whose content and scanner fingerprint are unchanged are skipped
 // without invoking the scanner or writing a scan_results row.
-func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[InstallType]string) rescanOutcome {
+func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[scannerFingerprintKey]string) rescanOutcome {
 	if evt.Type == InstallMCP {
 		w.mcpMu.Lock()
 		defer w.mcpMu.Unlock()
@@ -868,18 +868,26 @@ func (w *InstallWatcher) findingDrift(baseline *audit.SnapshotRow, current *scan
 	return deltas
 }
 
-// cachedFingerprint returns the scanner fingerprint for evt's type, computing
-// it (and caching) on first use within a cycle. The fingerprint depends only on
-// the scanner kind + config + binary version, not the individual target.
-func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[InstallType]string) string {
+type scannerFingerprintKey struct {
+	kind      InstallType
+	connector string
+}
+
+// cachedFingerprint computes one fingerprint per scanner kind and, for skill
+// overlays, connector. A second connector can have a different composed pack.
+func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[scannerFingerprintKey]string) string {
+	key := scannerFingerprintKey{kind: evt.Type}
+	if evt.Type == InstallSkill {
+		key.connector = w.eventConnector(evt)
+	}
 	if cache != nil {
-		if fp, ok := cache[evt.Type]; ok {
+		if fp, ok := cache[key]; ok {
 			return fp
 		}
 	}
 	fp := w.scannerFingerprint(evt)
 	if cache != nil {
-		cache[evt.Type] = fp
+		cache[key] = fp
 	}
 	return fp
 }
