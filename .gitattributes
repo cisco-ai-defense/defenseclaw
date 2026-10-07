@@ -44,3 +44,7 @@ schemas/telemetry/v8/upstream/** -text
 # SHA-256 over exact bytes. They must survive a Windows checkout without CRLF
 # rewriting before the strict normalization gate reads them.
 benchmarks/fixtures/** -text
+
+# The Secure Client evaluation goldens are compared byte for byte, also on a
+# Windows checkout.
+internal/gateway/testdata/secure_client_evaluation/** text eol=lf
