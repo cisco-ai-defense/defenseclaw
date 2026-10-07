@@ -5254,16 +5254,19 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "CodexManagedHooksLockPath" in module
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
-    # A standalone purge then removes the Claude Code folders Setup created
-    # once they are empty (GAP-0100), and stale protected PowerShell temp
+    # A standalone purge then removes the runtime selector state (GAP-0262)
+    # and the Claude Code folders Setup created once they are empty
+    # (GAP-0100), and stale protected PowerShell temp
     # folders (GAP-1734), and reports what it kept (behaviour in
     # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
     assert (
         "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
         "    $machineStateRemaining = [string[]]@()\n"
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
-        "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
+        "        $machineStateRemaining = [string[]]@(\n"
+        "            @(Remove-DefenseClawRuntimeSelectorState -Directories @("
     ) in module
+    assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.
     assert (
         "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
