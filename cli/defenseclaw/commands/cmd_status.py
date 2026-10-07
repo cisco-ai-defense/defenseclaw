@@ -87,8 +87,9 @@ def _enterprise_profile(cfg) -> str:
     try:
         import yaml
 
-        with open(config_path()) as handle:
-            raw = yaml.safe_load(handle) or {}
+        from defenseclaw.config import read_config_text
+
+        raw = yaml.safe_load(read_config_text(config_path())) or {}
         enterprise = raw.get("enterprise") if isinstance(raw, dict) else None
         if isinstance(enterprise, dict):
             configured = str(enterprise.get("profile") or "").strip().lower()

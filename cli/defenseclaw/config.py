@@ -22,7 +22,9 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import codecs
 import copy
+import locale
 import logging
 import ntpath
 import os
@@ -97,6 +99,26 @@ _GatewayBooleanLoader.yaml_implicit_resolvers = {
 _GatewayBooleanLoader.add_implicit_resolver(
     _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
 )
+
+
+def read_config_text(path: str | os.PathLike[str]) -> str:
+    """Read config.yaml as text: UTF-8, a leading byte order mark dropped.
+
+    Windows editors (Notepad "UTF-8 with BOM", PowerShell 5 Set-Content
+    -Encoding UTF8) start the file with a BOM. Read with the locale
+    encoding (cp1252 on Windows) it became a ``\u00ef\u00bb\u00bf`` prefix on
+    the first key, so that key went missing and a save wrote the bogus key
+    back, which the validator refused (GAP-0386). The gateway reads the
+    file as UTF-8 and skips the mark; a file that is not UTF-8 is decoded
+    with the locale encoding, as before.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    data = data.removeprefix(codecs.BOM_UTF8)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False))
 
 
 def parse_config_yaml(text: str) -> Any:
@@ -4226,8 +4248,7 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
     this: it reads the file with :func:`_existing_document_for_save`.
     """
     try:
-        with open(path) as f:
-            raw = parse_config_yaml(f.read()) or {}
+        raw = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
@@ -4254,7 +4275,7 @@ def _existing_document_for_save(path: str, current: bytes) -> dict[str, Any]:
     from defenseclaw.config_writer import ConfigUnparseableError
 
     try:
-        text = current.decode("utf-8")
+        text = current.removeprefix(codecs.BOM_UTF8).decode("utf-8")
         raw = parse_config_yaml(text) if text.strip() else {}
     except UnicodeDecodeError as exc:
         raise ConfigUnparseableError(
@@ -6273,8 +6294,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
 
     raw: dict[str, Any] = {}
     try:
-        with open(cfg_file) as f:
-            raw = parse_config_yaml(f.read()) or {}
+        raw = parse_config_yaml(read_config_text(cfg_file)) or {}
     except OSError:
         pass
     _warn_untrusted_managed_config(cfg_file, raw)

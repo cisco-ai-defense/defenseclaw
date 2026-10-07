@@ -517,6 +517,41 @@ class TestConfigSaveResilienceContinued(unittest.TestCase):
                     self.assertEqual(f.read(), broken)
 
 
+def test_bom_crlf_config_loads_and_saves_with_the_windows_locale(tmp_path, monkeypatch):
+    """GAP-0386: Notepad and PowerShell 5 start config.yaml with a UTF-8 BOM.
+    Read with the Windows locale encoding the mark became a prefix on the
+    first key, and a save wrote that unknown key back (refused). A BOM and
+    CRLF file loads and saves like any other."""
+    import builtins
+
+    from defenseclaw import config as config_module
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    real_open = builtins.open
+
+    def windows_open(file, mode="r", *args, encoding=None, **kwargs):
+        if "b" not in mode and encoding is None:
+            encoding = "cp1252"
+        return real_open(file, mode, *args, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(config_module, "open", windows_open, raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    cfg = _make_cfg(str(tmp_path))
+    cfg.guardrail.connectors = {"opencode": PerConnectorGuardrailConfig()}
+    cfg.save()
+    path = tmp_path / "config.yaml"
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes().replace(b"\n", b"\r\n"))
+
+    loaded = config_module.load()
+    loaded.guardrail.connectors["opencode"].mode = "action"
+    loaded.save()
+
+    saved = yaml.safe_load(path.read_bytes())
+    assert loaded.data_dir == str(tmp_path) and not any(str(key).startswith("\u00ef") for key in saved)
+    assert saved["guardrail"]["connectors"]["opencode"]["mode"] == "action"
+
+
 class TestConfigSaveAtomicity(unittest.TestCase):
     """The save must be atomic via tmp + rename so a crash mid-write
     cannot leave a half-written ``config.yaml`` that bricks the gateway."""

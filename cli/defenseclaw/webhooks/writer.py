@@ -581,9 +581,10 @@ def redact_webhook_url(url: str) -> str:
 
 
 def _load_yaml(path: str) -> dict[str, Any]:
+    from defenseclaw.config import read_config_text
+
     try:
-        with open(path) as f:
-            data = parse_config_yaml(f.read()) or {}
+        data = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
