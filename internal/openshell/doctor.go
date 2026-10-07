@@ -34,6 +34,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -279,21 +280,33 @@ func (r *DoctorReport) String() string {
 }
 
 // FixOutcome reports one ApplyFixes attempt. Title is the check's, which
-// the consent question names it by.
+// the consent question names it by. Skipped says why a fix was not tried.
 type FixOutcome struct {
 	ID      string `json:"id"`
 	Title   string `json:"title"`
 	Applied bool   `json:"applied"`
 	Error   string `json:"error,omitempty"`
+	Skipped string `json:"skipped,omitempty"`
 }
 
 // ApplyFixes runs the automatic fixes of failing and warning checks, in
 // report order, each after consent. A declined fix is skipped; a failed
-// one is reported and the rest still run. Re-run Doctor afterwards.
+// one is reported and the rest still run, except the fixes that need the
+// gateway running (a restart, the registration, the gateway's own) while
+// the Gateway service check failed and its fix did not apply: each would
+// wait for a gateway that does not come up. Re-run Doctor afterwards.
 func (r *DoctorReport) ApplyFixes(ctx context.Context, consent func(Check) (bool, error)) ([]FixOutcome, error) {
 	var out []FixOutcome
+	down := false
+	if c := r.Get(CheckIDGatewayService); c != nil && c.Status == StatusFail {
+		down = true
+	}
 	for _, c := range r.Checks {
 		if c.Fix == nil || c.Fix.Apply == nil || c.Status == StatusPass || c.Status == StatusSkip {
+			continue
+		}
+		if down && (c.Fix.RestartsGateway || c.ID == CheckIDRegistration || c.ID == CheckIDGatewayVersion) {
+			out = append(out, FixOutcome{ID: c.ID, Title: c.Title, Skipped: "the gateway service does not run (see \"Gateway service\")"})
 			continue
 		}
 		ok, err := consent(c)
@@ -308,6 +321,7 @@ func (r *DoctorReport) ApplyFixes(ctx context.Context, consent func(Check) (bool
 			o.Error = err.Error()
 		} else {
 			o.Applied = true
+			down = down && c.ID != CheckIDGatewayService
 		}
 		out = append(out, o)
 	}
@@ -386,6 +400,10 @@ type Doctor struct {
 	HostMemory func() uint64
 	DiskFree   func(path string) (uint64, error)
 	Listen     func(network, address string) (net.Listener, error)
+	// PortHolder names the process that listens on a local TCP port
+	// (default daemon.FindPortHolder): what holds the gateway's port when
+	// the gateway service does not run.
+	PortHolder func(host string, port int) (daemon.PortHolder, error)
 	Geteuid    func() int
 	// Getegid is the user's group, which with Geteuid the MicroVM driver
 	// must run sandboxes as (DefenseClaw's images are built for them).
@@ -453,6 +471,9 @@ func (d *Doctor) defaults() {
 	}
 	if d.Listen == nil {
 		d.Listen = net.Listen
+	}
+	if d.PortHolder == nil {
+		d.PortHolder = daemon.FindPortHolder
 	}
 	if d.Geteuid == nil {
 		d.Geteuid = os.Geteuid
@@ -1039,6 +1060,15 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	case !st.Active:
 		c.Status, c.Detail = StatusFail, st.Unit+" is "+st.Status
 		c.Fix = &Fix{Summary: "start the gateway and enable it at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, true)}
+		if r.canRegisterLocal() {
+			c.Fix.Summary += ", then register it (" + r.addCommand().String() + ")"
+		}
+		if held, other := r.gatewayPortHeld(); held != "" {
+			// Its gateway would not get the port: started, the service
+			// would only restart over and over.
+			c.Detail += "; " + held
+			c.Fix = r.portHeldFix(other)
+		}
 	case !st.Enabled:
 		c.Status, c.Detail = StatusWarn, st.Unit+" runs but does not start at login"
 		c.Fix = &Fix{Summary: "enable the gateway at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, false)}
@@ -1078,6 +1108,13 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 		}
 		if out, err := r.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
 			return fmt.Errorf("%s: %v: %s", c, err, strings.TrimSpace(string(out)))
+		}
+		// A gateway started for the first time has no registration, which
+		// the wait below needs: NVIDIA's installer registers it next.
+		if starts && r.canRegisterLocal() {
+			if err := r.registerLocal(ctx); err != nil {
+				return err
+			}
 		}
 		if err := r.Gateway.VerifyGateway(ctx); err != nil {
 			return err
@@ -1494,7 +1531,7 @@ func (r *doctorRun) checkRegistration() {
 			Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
 	case errors.Is(err, ErrNoGateway), errors.Is(err, ErrGatewayNotFound):
 		c.Status, c.Detail = StatusFail, err.Error()
-		c.Fix = &Fix{Summary: "register the local gateway", Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
+		c.Fix = r.registrationFix()
 	case errors.Is(err, ErrRemoteGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "select the local gateway with openshell.gateway.name, or `openshell gateway select " + DefaultGatewayName + "`"}
@@ -1527,6 +1564,27 @@ func (r *doctorRun) checkRegistration() {
 	default:
 		m.Status, m.Detail = StatusPass, "private key is owner-only"
 	}
+}
+
+// registrationFix registers a missing local gateway. The gateway writes
+// the client certificates a registration takes when it starts, so with its
+// service stopped the service's fix comes first: it starts the gateway and
+// registers it.
+func (r *doctorRun) registrationFix() *Fix {
+	add := r.addCommand().String()
+	switch {
+	case r.service != nil && r.service.Installed && !r.service.Active:
+		return &Fix{Summary: "start the gateway first (Gateway service): it writes the client certificates a registration takes; " +
+			"`defenseclaw sandbox doctor --fix` starts and registers it", Command: r.startCommand().String() + " && " + add}
+	case !r.canRegisterLocal():
+		return &Fix{Summary: "register the local gateway", Command: add}
+	}
+	return &Fix{Summary: "register the local gateway", Command: add, Automatic: true, Apply: func(ctx context.Context) error {
+		if _, err := Discover(r.Discover); err == nil {
+			return nil
+		}
+		return r.registerLocal(ctx)
+	}}
 }
 
 func joinWarnings(warnings []modeWarning) string {

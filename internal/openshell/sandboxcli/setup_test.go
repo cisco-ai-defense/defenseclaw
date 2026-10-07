@@ -471,6 +471,37 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 	})
 }
 
+// TestSetupStartsAStoppedGatewayService (GAP-0054, GAP-0063): with the
+// OpenShell package installed machine-wide and this account's gateway
+// service stopped and unregistered, setup stopped on the registration's
+// hint (which could not work before the gateway had started), then on the
+// service's, and reached the upgrade question only on a third run. It stops
+// on the service first, offers its fix (start, then register) and goes on
+// in the same run.
+func TestSetupStartsAStoppedGatewayService(t *testing.T) {
+	started := false
+	ta := setupApp(t, "\nn\n", "", true)
+	ta.HostDoctor = upgradableReport(func(r *openshell.DoctorReport) {
+		if started {
+			return
+		}
+		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService, Installed: true}
+		svc := r.Get(openshell.CheckIDGatewayService)
+		svc.Status, svc.Detail = openshell.StatusFail, "openshell-gateway is inactive (dead)"
+		svc.Fix = &openshell.Fix{Summary: "start the gateway and enable it at login, then register it", Command: "systemctl --user enable --now openshell-gateway",
+			Automatic: true, Apply: func(context.Context) error { started = true; return nil }}
+		reg := r.Get(openshell.CheckIDRegistration)
+		reg.Status, reg.Detail = openshell.StatusFail, "openshell: no gateway registration found"
+	})
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+	if !started {
+		t.Fatal("the service fix did not run")
+	}
+	has(t, ta.output(), "✗ Gateway service: openshell-gateway is inactive (dead)", `Fix "Gateway service" now: start the gateway and enable it at login, then register it?`,
+		`fixed "Gateway service"`, "Upgrade OpenShell 0.1.1 to "+openshell.InstallerVersion)
+	lacks(t, ta.output(), "Gateway registration:")
+}
+
 // TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when
 // Homebrew refuses the nvidia/openshell formula (an Xcode older than it
 // wants), and setup said only "install OpenShell: openshell: installer
@@ -627,7 +658,7 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 			c := r.Get(openshell.CheckIDGatewayVersion)
 			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering: connection refused"
 			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
-		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway: " + start + "\n"},
+		}, "Gateway service", "✗ Gateway service: openshell-gateway is inactive\n", "→ start the gateway and enable it at login: " + start + "\n"},
 		// Something else answers: the service's own fix, which the doctor
 		// gives as the operator's (it does not start the unit over it).
 		{"service stopped, a gateway answers", func(r *openshell.DoctorReport) {
@@ -647,7 +678,9 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 	} {
 		for _, o := range []SetupOptions{{}, {InstallOpenShell: true}, {NonInteractive: true}} {
 			t.Run(fmt.Sprintf("%s %+v", tc.name, o), func(t *testing.T) {
-				ta := setupApp(t, "", "", false)
+				// A stopped service's fix is offered (no); -n takes it, and
+				// stops when the service is still stopped.
+				ta := setupApp(t, "n\n", "", false)
 				ta.HostDoctor = hostReport(tc.edit)
 				inst := &fakeInstaller{}
 				ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {

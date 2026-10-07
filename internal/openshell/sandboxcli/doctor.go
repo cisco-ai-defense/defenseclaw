@@ -438,7 +438,12 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			if o.Output == OutputJSON {
 				return o.Yes && def, nil
 			}
-			return a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), def, o.Yes)
+			yes, err := a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), def, o.Yes)
+			if yes && err == nil {
+				// A fix that starts or restarts the gateway waits for it.
+				a.note(fmt.Sprintf("fixing %q…", c.Title))
+			}
+			return yes, err
 		})
 		if err != nil {
 			return err
@@ -447,10 +452,13 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// Named as the question named them (`Fix "Gateway": …?`), not
 			// by their ids.
 			for _, out := range outcomes {
-				if out.Applied {
+				switch {
+				case out.Applied:
 					a.ok(fmt.Sprintf("fixed %q", out.Title))
-				} else if out.Error != "" {
+				case out.Error != "":
 					a.bad(fmt.Sprintf("could not fix %q: %s", out.Title, out.Error))
+				case out.Skipped != "":
+					a.warn(fmt.Sprintf("did not fix %q: %s", out.Title, out.Skipped))
 				}
 			}
 		}

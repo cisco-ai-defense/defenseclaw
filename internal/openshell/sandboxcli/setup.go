@@ -246,27 +246,23 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
 		}
 		rep = a.runDoctor(ctx)
-	} else if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn &&
-		!slices.ContainsFunc(gatewayStops, func(id string) bool { return failed(rep, id) }) {
+	} else if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn {
 		// A supported OpenShell older than the release DefenseClaw
-		// installs, whose gateway is usable: it works, and setup offers the
-		// upgrade. With a gateway check failing, setup stops on its fix
-		// first (below); the upgrade is offered on the next run.
+		// installs works, and setup offers the upgrade once its gateway is
+		// usable (settleGateway, which may start it first).
 		var err error
-		if rep, err = a.offerOpenShellUpgrade(ctx, o, rep, *c); err != nil {
+		if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
 			return err
 		}
-	}
-	// A stopped service leaves the gateway not answering, whose fix (start
-	// it) comes first; with the gateway answering, the service's own fix.
-	for _, id := range gatewayStops {
-		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
-			a.bad(c.Title + ": " + c.Detail)
-			if c.Fix != nil {
-				a.note("→ " + c.Fix.Line())
+		if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn {
+			if rep, err = a.offerOpenShellUpgrade(ctx, o, rep, *c); err != nil {
+				return err
 			}
-			return &Silent{Err: fmt.Errorf("the OpenShell gateway is not usable yet (%s); see `%s doctor`", c.Title, CommandName)}
 		}
+	}
+	var err error
+	if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
+		return err
 	}
 	if unmanaged = rep.GatewayUnmanaged(); unmanaged {
 		// Its gateway answers (the Gateway check passed).
@@ -647,8 +643,65 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 
 // gatewayStops are the checks setup stops on, in this order, once
 // OpenShell is installed: the gateway must be usable before setup goes on.
+// A stopped gateway service comes right after the CLI (gatewayStop).
 var gatewayStops = []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
 	openshell.CheckIDGatewayService}
+
+// gatewayStop is the first check of gatewayStops that fails, nil when none
+// does. A gateway service that is installed but stopped comes before the
+// registration and the gateway: its gateway does not answer, and one that
+// never started has not written the client certificates a registration
+// takes.
+func gatewayStop(rep *openshell.DoctorReport) *openshell.Check {
+	order := gatewayStops
+	if svc := rep.Service; svc != nil && svc.Installed && !svc.Active {
+		order = []string{openshell.CheckIDCLI, openshell.CheckIDGatewayService, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion}
+	}
+	for _, id := range order {
+		if failed(rep, id) {
+			return rep.Get(id)
+		}
+	}
+	return nil
+}
+
+// settleGateway returns once no check in gatewayStops fails. The first
+// that fails stops setup with its fix, unless the doctor applies that fix
+// without restarting a gateway that runs (it starts a stopped gateway
+// service, and registers a gateway that never was): setup offers it, as
+// `doctor --fix` does, and checks again. It returns the doctor report of
+// the machine as it is then.
+func (a *App) settleGateway(ctx context.Context, rep *openshell.DoctorReport, assume bool) (*openshell.DoctorReport, error) {
+	tried := map[string]bool{}
+	for {
+		c := gatewayStop(rep)
+		if c == nil {
+			return rep, nil
+		}
+		a.bad(c.Title + ": " + c.Detail)
+		if f := c.Fix; f != nil && f.Apply != nil && !f.RestartsGateway && !tried[c.ID] {
+			tried[c.ID] = true
+			yes, err := a.ask(fmt.Sprintf("Fix %q now: %s?", c.Title, f.Summary), true, assume)
+			if err != nil {
+				return nil, err
+			}
+			if yes {
+				a.note(fmt.Sprintf("fixing %q…", c.Title))
+				if err := f.Apply(ctx); err != nil {
+					a.bad(fmt.Sprintf("could not fix %q: %s", c.Title, err))
+				} else {
+					a.ok(fmt.Sprintf("fixed %q", c.Title))
+				}
+				rep = a.runDoctor(ctx)
+				continue
+			}
+		}
+		if c.Fix != nil {
+			a.note("→ " + c.Fix.Line())
+		}
+		return nil, &Silent{Err: fmt.Errorf("the OpenShell gateway is not usable yet (%s); see `%s doctor`", c.Title, CommandName)}
+	}
+}
 
 // installerHow says how NVIDIA's installer installs OpenShell here: on
 // macOS a Homebrew formula, without sudo.

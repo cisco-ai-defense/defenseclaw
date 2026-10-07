@@ -1216,20 +1216,9 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	if a := s.Auth.AllowUnauthenticatedUsers; a != nil && *a {
 		issues = append(issues, "[openshell.gateway.auth] allow_unauthenticated_users is on")
 	}
-	host, port := "127.0.0.1", strconv.Itoa(defaultGatewayPort)
-	if s.BindAddress != "" {
-		h, p, err := net.SplitHostPort(s.BindAddress)
-		if err != nil {
-			return fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, s.BindAddress, st.TOMLPath)
-		}
-		host, port = h, p
-	}
-	// An empty variable counts as unset, as it does for the gateway.
-	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
-		host = v
-	}
-	if v := strings.TrimSpace(env[envServerPort]); v != "" {
-		port = v
+	host, port, err := st.listenAddress(env)
+	if err != nil {
+		return err
 	}
 	if !isLoopbackHost(host) {
 		issues = append(issues, fmt.Sprintf("the gateway listens on %q, beyond this machine", host))
@@ -1251,6 +1240,26 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 		return fmt.Errorf("%w: registration %s reaches %s, but the %s service listens on port %s", ErrGatewayMismatch, reg.Name, reg.Endpoint, GatewayService, port)
 	}
 	return nil
+}
+
+// listenAddress is where the gateway listens: gateway.toml's bind_address
+// (default 127.0.0.1:17670), then OPENSHELL_BIND_ADDRESS and
+// OPENSHELL_SERVER_PORT in env.
+func (s *GatewayConfigState) listenAddress(env map[string]string) (host, port string, err error) {
+	host, port = "127.0.0.1", strconv.Itoa(defaultGatewayPort)
+	if b := s.server.BindAddress; b != "" {
+		if host, port, err = net.SplitHostPort(b); err != nil {
+			return "", "", fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, b, s.TOMLPath)
+		}
+	}
+	// An empty variable counts as unset, as it does for the gateway.
+	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
+		host = v
+	}
+	if v := strings.TrimSpace(env[envServerPort]); v != "" {
+		port = v
+	}
+	return host, port, nil
 }
 
 // envFlag reads a boolean flag variable the way the gateway's command
