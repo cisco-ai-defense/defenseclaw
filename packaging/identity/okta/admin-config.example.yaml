@@ -9,7 +9,8 @@
 #       --config /root/defenseclaw-config.yaml --json
 #
 # The file must be root-owned and not writable by anyone else. ensure validates it
-# first and keeps the installed config when it is invalid.
+# first and keeps the installed config when it is invalid. A config_version 8 file is
+# migrated to 9 by ensure.
 #
 # Group names are the names `id -Gn <user>` prints on the host. SSSD serves only
 # Okta groups that have a gidNumber, so every group named here needs one in Okta
@@ -18,7 +19,7 @@
 # Guardrail profiles are not supported with the Secure Client integration; this
 # file is for the standalone enterprise profile and would be rejected there.
 
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
 policy_dir: /etc/defenseclaw/policies
