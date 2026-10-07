@@ -294,7 +294,7 @@ if unknown:
 body = re.sub(r"@([A-Z_]+)@", lambda m: values[m.group(1)], body)
 fd, temporary = tempfile.mkstemp(prefix=".sssd-okta-", dir=os.path.dirname(out) or ".")
 try:
-    with os.fdopen(fd, "w", encoding="ascii") as handle:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
     os.replace(temporary, out)
 finally:

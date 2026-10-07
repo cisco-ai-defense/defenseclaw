@@ -274,3 +274,17 @@ def test_okta_render_only_replaces_world_readable_output(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
     assert "ldap_default_authtok = test-password" in out.read_text()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_render_accepts_utf8_bind_password(tmp_path: Path) -> None:
+    out = tmp_path / "sssd.conf"
+    password = "P@ssw\u00f6rd"
+    result = subprocess.run(
+        ["bash", str(OKTA_INSTALL), "--org", "example", "--bind-login", "bind@example.com",
+         "--allow-group", "linux-users", "--render-only", str(out)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "OKTA_BIND_PASSWORD": password},
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"ldap_default_authtok = {password}" in out.read_text(encoding="utf-8")
