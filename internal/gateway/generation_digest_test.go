@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -174,5 +175,30 @@ func TestSignaturePacksChangedFollowsTheFileNotTheConfig(t *testing.T) {
 	cfg.AIDiscovery.Enabled = false
 	if signaturePacksChanged(live, cfg) {
 		t.Fatal("a disabled discovery service was rebuilt for a pack edit")
+	}
+
+	// A directory or glob entry follows the packs it names: a new pack
+	// rebuilds discovery, and the entry is watched.
+	packs := t.TempDir()
+	for _, entry := range []string{packs, filepath.Join(packs, "*.json")} {
+		cfg.AIDiscovery.Enabled = true
+		cfg.AIDiscovery.SignaturePacks = []string{entry}
+		live = &Generation{Components: assetDigestComponents(cfg)}
+		if signaturePacksChanged(live, cfg) {
+			t.Fatalf("%s: an untouched entry rebuilt discovery", entry)
+		}
+		added := filepath.Join(packs, "added.json")
+		if err := os.WriteFile(added, []byte(`{"version":1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !signaturePacksChanged(live, cfg) {
+			t.Fatalf("%s: a new pack did not rebuild discovery", entry)
+		}
+		if !slices.Contains(generationAssetDirs(cfg, &Generation{}), packs) {
+			t.Fatalf("%s: the folder is not watched", entry)
+		}
+		if err := os.Remove(added); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
