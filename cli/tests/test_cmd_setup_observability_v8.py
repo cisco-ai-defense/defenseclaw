@@ -1690,6 +1690,9 @@ def test_no_restart_connector_setup_says_a_hot_change_applies_on_its_own(tmp_pat
 
     rule_pack = base.replace("{mode: observe}", "{mode: observe, rule_pack: strict}")
     assert "applies it on its own, without a restart" in run(rule_pack)
-    assert "once the gateway restarts" in run(rule_pack, gateway_running=False)
+    # GAP-0204: a stopped gateway is told to start, not restart.
+    stopped = run(rule_pack, gateway_running=False)
+    assert "once the gateway starts" in stopped and "defenseclaw-gateway start" in stopped
+    assert "restart" not in stopped
     roster = base.replace("{codex: {mode: observe}}", "{codex: {mode: observe}, claudecode: {mode: observe}}")
     assert "once the gateway restarts" in run(roster)

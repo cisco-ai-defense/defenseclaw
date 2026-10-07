@@ -724,7 +724,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         # One restart note, from the batch summary (GAP-1951).
-        self.assertEqual(result.output.count("takes effect once the gateway restarts"), 1, msg=result.output)
+        self.assertEqual(result.output.count("takes effect once the gateway starts"), 1, msg=result.output)
         self.assertNotIn("--no-restart: config updated", result.output)
         restart.assert_not_called()
         generic.assert_not_called()

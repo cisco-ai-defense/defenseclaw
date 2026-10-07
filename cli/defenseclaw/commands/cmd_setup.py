@@ -293,6 +293,9 @@ class _GatewayRuntimeGeneration:
 
 _SETUP_OFFLINE_NOTED_KEY = "defenseclaw.setup.offline_noted"
 _SETUP_OFFLINE_AUDIT_NOTE_KEY = "defenseclaw.setup.offline_audit_note"
+#: Set once the run has told the user to start a stopped gateway, so the audit note
+#: and the closing line do not give a second, differently worded next step (GAP-0204).
+_SETUP_START_HINT_KEY = "defenseclaw.setup.start_hint"
 
 
 def _log_setup_action(
@@ -333,12 +336,16 @@ def _log_setup_action(
                 "the command's offline option (--no-restart or --no-verify, where it has one) to "
                 "stage the change for the next gateway start."
             ) from exc
-        note = (
-            offline_note
-            or "  ⚠ Change saved, but the gateway isn't running, so the setup audit event was not "
-            "recorded. Start it with 'defenseclaw-gateway start' before the next change."
-        )
         current = click.get_current_context(silent=True)
+        if offline_note:
+            note = offline_note
+        elif current is not None and current.meta.get(_SETUP_START_HINT_KEY):
+            note = "  ⚠ Change saved, but the gateway isn't running, so the setup audit event was not recorded."
+        else:
+            note = (
+                "  ⚠ Change saved, but the gateway isn't running, so the setup audit event was not "
+                "recorded. Start it with 'defenseclaw-gateway start' before the next change."
+            )
         # A multi-connector run audits once per connector; say it once (GAP-1951).
         if current is not None and current.meta.get(_SETUP_OFFLINE_AUDIT_NOTE_KEY) == note:
             return
@@ -434,23 +441,23 @@ def _echo_saved_without_restart(*, plural: bool = False) -> None:
     """Closing line of a connector setup run with ``--no-restart`` (GAP-0199).
 
     A running gateway applies a hot key (a rule pack, a mode) from its next
-    config generation on its own; anything else waits for a restart.
+    config generation on its own; anything else waits for a restart. A stopped
+    gateway needs a start, not a restart: that is the one next step (GAP-0204).
     """
     ctx = click.get_current_context(silent=True)
     app = ctx.find_object(AppContext) if ctx is not None else None
-    if (
-        ctx is not None
-        and app is not None
-        and app.cfg is not None
-        and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
-        and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx))
-    ):
+    known = ctx is not None and app is not None and app.cfg is not None
+    running = known and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    noun = "connectors" if plural else "connector"
+    if running and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx)):
         ux.echo("  ℹ Saved. The running gateway applies it on its own, without a restart.")
         return
-    ux.echo(
-        "  ℹ Saved. It takes effect once the gateway restarts and confirms the "
-        f"{'connectors' if plural else 'connector'} (defenseclaw-gateway restart)."
-    )
+    if known and not running:
+        ux.echo(f"  ℹ Saved. It takes effect once the gateway starts and confirms the {noun} (defenseclaw-gateway start).")
+        ctx.meta[_SETUP_START_HINT_KEY] = True
+        ctx.meta[_SETUP_OFFLINE_NOTED_KEY] = True
+        return
+    ux.echo(f"  ℹ Saved. It takes effect once the gateway restarts and confirms the {noun} (defenseclaw-gateway restart).")
 
 
 @click.group(cls=_SetupGroup, invoke_without_command=True)

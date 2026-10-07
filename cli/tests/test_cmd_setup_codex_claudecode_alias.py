@@ -470,7 +470,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(self.app.cfg.guardrail.scanner_mode, "local")
                 self.assertFalse(self.app.cfg.guardrail.judge.enabled)
                 self.assertIn(f"Desired connector {connector!r} staged", result.output)
-                self.assertIn("It takes effect once the gateway restarts", result.output)
+                self.assertIn("It takes effect once the gateway starts", result.output)
                 self.assertNotIn("claw.mode=", result.output)
                 self.assertNotIn("claw.mode:", result.output)
                 self.assertIn(f"{connector} mode=observe", result.output)
