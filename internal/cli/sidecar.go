@@ -343,7 +343,8 @@ func tokenStatus(token string) string {
 // dials none: a hook-only or managed install never connects to
 // gateway.host:port, so the default 127.0.0.1:18789 misled (GAP-0077).
 func fleetBannerLine(cfg *config.Config) string {
-	if !gateway.RequiresFleetGateway(cfg) {
+	// Secure Client keeps the banner of its service log (issue #1092).
+	if !cfg.SecureClientIntegration() && !gateway.RequiresFleetGateway(cfg) {
 		return "  Gateway:      none (no OpenClaw fleet to connect to)"
 	}
 	return fmt.Sprintf("  Gateway:      %s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
@@ -354,16 +355,27 @@ func fleetBannerLine(cfg *config.Config) string {
 // its own profile's agent folders (GAP-0026, GAP-0077).
 func watcherBannerLines(cfg *config.Config) []string {
 	w := cfg.Gateway.Watcher
+	secureClient := cfg.SecureClientIntegration()
+	var lines []string
 	switch {
+	case secureClient:
+		// Secure Client keeps the banner of its service log (issue #1092).
+		if lines = []string{fmt.Sprintf("  Watcher:      %v", w.Enabled)}; !w.Enabled {
+			return lines
+		}
 	case !w.Enabled:
 		return []string{"  Watcher:      disabled"}
 	case !gateway.WatcherWatchesDirs(cfg):
 		return []string{"  Watcher:      idle (no directories to watch)"}
+	default:
+		lines = []string{"  Watcher:      enabled"}
 	}
-	lines := []string{"  Watcher:      enabled",
-		fmt.Sprintf("    Skill:      enabled=%v take_action=%v", w.Skill.Enabled, w.Skill.TakeAction)}
+	lines = append(lines, fmt.Sprintf("    Skill:      enabled=%v take_action=%v", w.Skill.Enabled, w.Skill.TakeAction))
 	if len(w.Skill.Dirs) > 0 {
 		return append(lines, fmt.Sprintf("    Skill dirs: %v", w.Skill.Dirs))
+	}
+	if secureClient {
+		return append(lines, "    Skill dirs: autodiscover (from claw mode)")
 	}
 	return append(lines, "    Skill dirs: autodiscover (from the connector)")
 }

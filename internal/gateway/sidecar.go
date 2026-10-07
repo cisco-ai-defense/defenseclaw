@@ -272,7 +272,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// A hook-only topology (managed standalone, no OpenClaw fleet) never
 	// dials gateway.host:port, so only announce the fleet client when the
 	// gateway loop will actually use it; the device identity still loads.
-	if RequiresFleetGateway(cfg) {
+	// Secure Client keeps the line of its service log (issue #1092).
+	if RequiresFleetGateway(cfg) || cfg.SecureClientIntegration() {
 		fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 			cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 	}

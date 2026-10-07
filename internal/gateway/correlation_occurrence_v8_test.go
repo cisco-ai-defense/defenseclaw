@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -108,6 +110,35 @@ func TestHookOccurrenceMintsOnlyAtReviewedBoundariesAndRestoresCursor(t *testing
 	}
 	if parsed, parseErr := uuid.Parse(tool.ToolInvocationID); parseErr != nil || parsed.Version() != 7 {
 		t.Fatalf("minted tool id=%q err=%v", tool.ToolInvocationID, parseErr)
+	}
+}
+
+// GAP-0102: the ledger mints the session root agent with the ID the hook model
+// records derive (GAP-0031), except under Secure Client, which keeps the
+// UUIDv7 agent of main (issue #1092).
+func TestHookOccurrenceRootAgentKeepsUUIDv7UnderSecureClient(t *testing.T) {
+	installCorrelationHMACForTest()
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+		server.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		server.scannerCfg.Enterprise.Profile = profile
+		hookProfile := server.hookProfileForConnector("claudecode")
+		body := `{"hook_event_name":"UserPromptSubmit","session_id":"session-1","prompt":"hello"}`
+		var payload map[string]interface{}
+		_ = json.Unmarshal([]byte(body), &payload)
+		_, prompt, err := server.correlateHookOccurrence(t.Context(), hookProfile,
+			normalizeAgentHookRequestWithProfile("claudecode", payload, hookProfile), []byte(body))
+		_ = store.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if profile == managed.ProfileSecureClient {
+			if parsed, parseErr := uuid.Parse(prompt.AgentID); parseErr != nil || parsed.Version() != 7 {
+				t.Fatalf("Secure Client root agent %q is not UUIDv7", prompt.AgentID)
+			}
+		} else if want := stableLLMEventID("agent", "claudecode", "session-1", "root"); prompt.AgentID != want {
+			t.Fatalf("standalone root agent = %q, want %q", prompt.AgentID, want)
+		}
 	}
 }
 

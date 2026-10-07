@@ -37,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -533,6 +534,37 @@ func TestConfidencePolicyPinnedByDigest(t *testing.T) {
 	}
 	if lr, refusal := identityLR(pin, true); lr == 12 || refusal == "" {
 		t.Fatalf("unreadable pinned file = %v %q, want a refusal", lr, refusal)
+	}
+}
+
+// GAP-0170: the Secure Client profile keeps the embedded catalog of 1.0.0
+// (issue #1092); every other profile gets the signatures added since.
+func TestLoadAISignaturesSecureClientKeepsReleaseCatalog(t *testing.T) {
+	load := func(profile string) map[string]AISignature {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = profile
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		byID := map[string]AISignature{}
+		for _, sig := range sigs {
+			byID[sig.ID] = sig
+		}
+		return byID
+	}
+	secureClient, standalone := load(managed.ProfileSecureClient), load(managed.ProfileStandalone)
+	if _, ok := standalone["jetbrains-ai"]; !ok || len(standalone["codex"].ExtensionIDs) == 0 {
+		t.Fatalf("standalone catalog lacks the post-1.0.0 signatures")
+	}
+	if _, ok := secureClient["jetbrains-ai"]; ok || len(secureClient) != len(standalone)-1 {
+		t.Fatalf("Secure Client catalog has %d signatures (jetbrains-ai %t), want %d", len(secureClient), ok, len(standalone)-1)
+	}
+	for id, sig := range secureClient {
+		if (id == "codex" || id == "claudecode") && len(sig.ExtensionIDs) != 0 ||
+			len(sig.JetBrainsPluginIDs)+len(sig.ZedExtensionIDs)+len(sig.VimPlugins) != 0 {
+			t.Fatalf("Secure Client signature %s keeps post-1.0.0 ids: %+v", id, sig)
+		}
 	}
 }
 

@@ -132,7 +132,9 @@ only `profile`.
 
 List each agent under `guardrail.connectors`. The key is the connector
 name; the value can be empty (`{}`) or override guardrail settings for that
-agent. A config without this map protects nothing.
+agent. An empty value enables the agent with the default settings, and only
+`enabled: false` turns a listed agent off. A config without this map protects
+nothing, and `verify` fails on it (`no_connectors_enabled`).
 
 ```yaml title="config.yaml (excerpt)"
 guardrail:
