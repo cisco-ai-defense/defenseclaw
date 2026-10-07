@@ -23,8 +23,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -112,6 +114,12 @@ func TestRepoPolicyText(t *testing.T) {
 	got := repoPolicyText(&sandboxapi.RepoPolicy{Path: "/p/" + packs.RepoPolicyPath, Tightened: []string{"network.mode", "egress.block"}})
 	if got != "repo policy .defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)" {
 		t.Fatalf("banner text %q", got)
+	}
+	// A run the repository policy puts on a copy says so.
+	ex := &sandboxapi.Explain{Settings: []sandboxapi.Setting{{Key: "workdir.mode", Value: "copy", Source: string(packs.SourceRepo),
+		Origin: packs.RepoPolicyConstraint, Requested: "mount"}}}
+	if note := copyPolicyNote(ex, RunOptions{}, openshell.Driver{}); !strings.Contains(note, "repository policy (.defenseclaw/sandbox.yaml) asks for a copy") {
+		t.Fatalf("copy note %q", note)
 	}
 	// A copy that does not match its digest is not used.
 	if _, err := parseRepoPolicy(&sandboxapi.RepoPolicy{Content: []byte("version: 1\n"), Digest: "sha256:00"}); err == nil {

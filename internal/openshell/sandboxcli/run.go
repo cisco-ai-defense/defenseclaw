@@ -1009,6 +1009,9 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) st
 			// organization.
 			return driverCopyNote(d)
 		}
+		if s.Source == string(packs.SourceRepo) {
+			return "copy mode: the project's repository policy (" + packs.RepoPolicyPath + ") asks for a copy; " + copyBackText
+		}
 		if s.Source != string(packs.SourceAdmin) {
 			continue
 		}
