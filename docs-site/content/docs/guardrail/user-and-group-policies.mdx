@@ -214,8 +214,10 @@ What follows when the identity is missing:
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
   than 2,048 groups, has no facts rather than part of its membership. On
-  Linux the group names are looked up 64 at a time, so an account in several
-  hundred groups resolves in one background lookup even when SSSD starts cold.
+  Linux the group names are looked up 64 at a time, one batch after the other
+  because a cold SSSD answers one request at a time, so an account in several
+  hundred groups resolves in one background lookup even when SSSD starts cold
+  (about 30 ms per group, so 400 groups take around 12 seconds).
   Facts that still hold a group as a bare number (no group answered for that
   id) are served but refreshed after two minutes, not 15. The gateway log
   names the account and the reason once when its lookup starts failing (`[identity]
