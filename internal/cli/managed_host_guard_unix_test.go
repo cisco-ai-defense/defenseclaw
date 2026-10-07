@@ -298,6 +298,17 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 		}
 	}
 
+	// enterprise acp enroll|verify|revoke pin the deployment too (GAP-0249).
+	// The temporary layout holds no config.yaml, so the load itself fails.
+	clearManagedStandaloneAdminEnv(t)
+	withManagedHostCallerUID(t, 0)
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+	_ = enterpriseACPCmd.PersistentPreRunE(enterpriseACPEnrollCmd, nil)
+	if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+		t.Errorf("enterprise acp enroll read %q, want the managed config %q", got, layout.ConfigPath)
+	}
+
 	clearManagedStandaloneAdminEnv(t)
 	withManagedHostCallerUID(t, 1000)
 	if applyManagedStandaloneAdminEnv(nil) || os.Getenv(managed.ConfigPathEnv) != "" {
