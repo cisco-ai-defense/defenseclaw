@@ -137,10 +137,23 @@ def config_validate(quiet: bool) -> None:
     for warning in result.warnings:
         ux.warn(warning, indent="  ")
 
+    # The file is checked, not the running gateway: say when the gateway has
+    # not applied it (GAP-0352, GAP-0363).
+    if notice := _gateway_reload_notice():
+        ux.warn(notice, indent="  ")
     click.echo()
     if not result.ok:
         raise SystemExit(1)
     ux.ok("config is valid", indent="  ")
+
+
+def _gateway_reload_notice() -> str:
+    try:
+        from defenseclaw.gateway import gateway_reload_notice
+
+        return gateway_reload_notice(config_module.load())
+    except Exception:  # noqa: BLE001 - an unloadable file has no gateway to ask about.
+        return ""
 
 
 # ---------------------------------------------------------------------------
