@@ -83,10 +83,10 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	ad := useridentity.DirectoryActiveDirectory
 	want := map[int]view{
-		70001: {ad, "corp.example.com", "CORP.EXAMPLE.COM", "alice@CORP.EXAMPLE.COM"},
-		70002: {ad, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@EMEA.CORP.EXAMPLE.COM"},
-		70003: {ad, "corp.example.com", "CORP.EXAMPLE.COM", "carol@CORP.EXAMPLE.COM"},
-		70004: {"", "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@LDAP.EXAMPLE.ORG"},
+		70001: {ad, "corp.example.com", "CORP.EXAMPLE.COM", "alice@corp.example.com"},
+		70002: {ad, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@emea.corp.example.com"},
+		70003: {ad, "corp.example.com", "CORP.EXAMPLE.COM", "carol@corp.example.com"},
+		70004: {"", "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@ldap.example.org"},
 	}
 	r := newFakeNSS(f)
 	for uid, expected := range want {

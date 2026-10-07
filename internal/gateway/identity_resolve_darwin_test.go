@@ -60,7 +60,7 @@ func TestResolvePeerDirectoryFactsKeepsGroupsUnderSpool(t *testing.T) {
 	setIdentitySpoolDir(dir)
 	facts, err := resolvePeerDirectoryFacts(current.Uid)
 	if err != nil || len(facts.Groups) == 0 || facts.Directory != useridentity.DirectoryActiveDirectory ||
-		facts.Principal != "alice@CORP.EXAMPLE.COM" || facts.Assurance != useridentity.AssuranceVerified {
+		facts.Principal != "alice@corp.example.com" || facts.Assurance != useridentity.AssuranceVerified {
 		t.Fatalf("facts = %+v, err = %v; want the account groups under the record's directory facts", facts, err)
 	}
 }

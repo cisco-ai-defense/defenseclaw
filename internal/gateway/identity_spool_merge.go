@@ -79,7 +79,12 @@ func mergeSpoolFacts(own, spool useridentity.DirectoryFacts) useridentity.Direct
 		merged.UPN = spool.UPN
 	}
 	if spool.Principal != "" {
+		// One principal form per account, whichever guardian build wrote
+		// the record (GAP-0259).
 		merged.Principal = spool.Principal
+		if upn := useridentity.NormalizeUPN(spool.Principal); upn != "" {
+			merged.Principal = upn
+		}
 	}
 	if spool.Realm != "" {
 		merged.Realm = spool.Realm

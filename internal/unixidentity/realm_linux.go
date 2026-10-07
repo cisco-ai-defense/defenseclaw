@@ -169,7 +169,7 @@ func realmFor(domain string, realms []Realm) (Realm, bool) {
 // applyRealm adds the facts of the realm that serves an SSSD or winbind
 // account: the domain and Kerberos realm when its name carries none, the
 // directory type of an Active Directory or IPA realm, and the
-// sAMAccountName@REALM principal when there is none yet.
+// sAMAccountName@REALM principal, in the UPN form, when there is none yet.
 func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {
 	realm, ok := realmFor(facts.Domain, realms)
 	if !ok {
@@ -189,6 +189,6 @@ func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms [
 	}
 	if facts.Principal == "" && facts.Realm != "" {
 		bare, _ := useridentity.SplitQualifiedName(accountName)
-		facts.Principal = useridentity.NormalizePrincipal(bare + "@" + facts.Realm)
+		facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
 	}
 }

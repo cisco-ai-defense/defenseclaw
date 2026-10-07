@@ -23,8 +23,13 @@ import (
 //   - a UPN (NormalizeUPN) is lower-cased as a whole, the form directory
 //     consoles display: alice@corp.example.com.
 //
-// DirectoryFacts.Principal holds the UPN form when a UPN is known and the
-// Kerberos form otherwise.
+// DirectoryFacts.Principal, the account's defenseclaw.user.principal, is
+// always in the UPN form: the UPN when a UPN is known, else the account's
+// Kerberos principal rendered like one (AccountPrincipal). One account
+// therefore shows one principal whether its UPN resolved or not, on a
+// per-user or a managed gateway and on every OS (GAP-0259, GAP-0284).
+// DirectoryFacts.Realm and the session's Kerberos principal keep the
+// upper-case realm.
 
 // maxPrincipalLength bounds a principal before it is used; the v8 registry
 // accepts at most 512 bytes.
@@ -43,6 +48,17 @@ func NormalizePrincipal(principal string) string {
 		return ""
 	}
 	return principal[:at] + "@" + strings.ToUpper(principal[at+1:])
+}
+
+// AccountPrincipal is the principal of an account known by its account name
+// and Kerberos realm when no UPN resolved, in the UPN form:
+// alice@corp.example.com. It returns empty when either part is missing.
+func AccountPrincipal(account, realm string) string {
+	account, realm = strings.TrimSpace(account), strings.TrimSpace(realm)
+	if account == "" || realm == "" {
+		return ""
+	}
+	return NormalizeUPN(account + "@" + realm)
 }
 
 // NormalizeUPN renders a userPrincipalName lower-cased. It returns empty for

@@ -110,8 +110,8 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 				if strings.Contains(domain, ".") {
 					facts.Realm = strings.ToUpper(domain)
 					// sAMAccountName@REALM, the Kerberos principal SSSD
-					// and winbind accounts authenticate as.
-					facts.Principal = useridentity.NormalizePrincipal(bare + "@" + facts.Realm)
+					// and winbind accounts authenticate as, in the UPN form.
+					facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
 				}
 			}
 			break

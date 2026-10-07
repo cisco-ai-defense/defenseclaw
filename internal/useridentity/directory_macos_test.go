@@ -47,15 +47,15 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 		domain    string
 	}{
 		{"mobile AD account", MacOSDirectoryInputs{DSCL: mobileAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
-			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 		{"network AD account on a bound Mac", MacOSDirectoryInputs{DSCL: networkAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
-			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "bob@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", ""},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "bob@corp.example.com", "CORP.EXAMPLE.COM", ""},
 		// Without dsconfigad only the original node can name the directory and the domain.
 		{"mobile AD account on a Mac without dsconfigad", MacOSDirectoryInputs{DSCL: mobileAccount, AppSSO: noPlatformSSO},
-			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 		// The forest-wide node ("All Domains") names no domain: dsconfigad's applies.
 		{"AD account of a forest-wide search node", MacOSDirectoryInputs{DSCL: forestAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
-			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "dave@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "dave@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 		{"local account with an LKDC authority", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: noPlatformSSO},
 			DirectoryLocal, SourceMacOSOpenDirectory, "", "", ""},
 		{"Entra ID Platform SSO", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: platformSSO("com.microsoft.CompanyPortalMac.ssoextension")},
@@ -65,7 +65,7 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 		{"other Platform SSO", MacOSDirectoryInputs{DSCL: localAccount, AppSSO: platformSSO("com.example.psso")},
 			DirectoryOther, SourceMacOSPlatformSSO, "", "", ""},
 		{"a bound directory wins over Platform SSO", MacOSDirectoryInputs{DSCL: mobileAccount, DSConfigAD: dsconfigadBound, AppSSO: platformSSO("com.microsoft.CompanyPortalMac.ssoextension")},
-			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
