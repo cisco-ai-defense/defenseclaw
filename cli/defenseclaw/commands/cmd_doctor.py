@@ -620,19 +620,24 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     return ""
 
 
+# defenseclaw_gateway_post: hooks rendered before it gave curl the gateway
+# bearer and the prompt or tool payload as command-line arguments, which every
+# local account can read (GAP-0027).
 _GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
     "codex": {
-        "codex-hook.sh": ("defenseclaw_response_failure_reason",),
+        "codex-hook.sh": ("defenseclaw_response_failure_reason", "defenseclaw_gateway_post"),
         "_hardening.sh": (
             "defenseclaw_response_failure_reason",
             "possible token drift",
+            "defenseclaw_gateway_post",
         ),
     },
     "claudecode": {
-        "claude-code-hook.sh": ("defenseclaw_response_failure_reason",),
+        "claude-code-hook.sh": ("defenseclaw_response_failure_reason", "defenseclaw_gateway_post"),
         "_hardening.sh": (
             "defenseclaw_response_failure_reason",
             "possible token drift",
+            "defenseclaw_gateway_post",
         ),
     },
 }
