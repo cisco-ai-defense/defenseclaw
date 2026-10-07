@@ -129,6 +129,32 @@ class SandboxTeardownTests(unittest.TestCase):
                 cmd_uninstall._sandbox_teardown(plan)
         self.assertIn("--skip-sandbox-teardown", ctx.exception.message)
 
+    def test_teardown_failure_names_the_failed_step_not_the_last_one(self):
+        # GAP-0282: teardown goes on past a failed step, so the last line it
+        # printed was a success and the abort named that as the reason.
+        plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)
+
+        def fake_run(argv, **_kwargs):
+            if argv[-1] == "--help":
+                return _completed(stdout="--keep-images\n")
+            return _completed(
+                returncode=1,
+                stdout=(
+                    "  ✓ deleted provider profile dc-anthropic\n"
+                    "  ✗ remove images: docker image rm t:1: docker image exited 1: Cannot connect to the Docker daemon\n"
+                    "  ✓ openshell.enabled is off\n"
+                ),
+            )
+
+        with patch("subprocess.run", side_effect=fake_run), capture_click_output():
+            with self.assertRaises(click.ClickException) as ctx:
+                cmd_uninstall._sandbox_teardown(plan)
+        message = ctx.exception.message
+        self.assertIn("(remove images: docker image rm t:1: docker image exited 1: Cannot connect to the Docker daemon)", message)
+        self.assertNotIn("openshell.enabled is off)", message)
+        self.assertIn("2 step(s) listed above already ran", message)
+        self.assertIn("--skip-sandbox-teardown", message)
+
     def test_unsupported_sandboxes_skip_the_teardown(self):
         # A managed_enterprise deployment (or a platform without sandboxes):
         # teardown exits 3 and the uninstall goes on.
