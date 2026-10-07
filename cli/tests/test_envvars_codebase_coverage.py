@@ -112,6 +112,12 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # splitting trips the regex. The values are explained in the
     # registry-backed env-vars page.
     "docs-site/content/docs/reference/fail-modes.mdx",
+    # The 1.0.0 release notes, and the test that checks them, name the 0.8.x
+    # environment variable 1.0 removed (DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE)
+    # to tell operators what replaces it. They document a removal; nothing
+    # reads the name.
+    "CHANGELOG.md",
+    "cli/tests/test_cmd_config.py",
     # Test fixtures that use synthetic env-var names as labels for
     # --auth-env / --token-env flags. The labels are example operator
     # configuration, not env vars DefenseClaw itself reads.
