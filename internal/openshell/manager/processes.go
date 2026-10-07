@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
 )
 
 // The process tree (opt-in: the pack's observe.process_tree, or `sandbox run
@@ -38,15 +39,22 @@ import (
 // uid, start time, comm, executable, working folder and first arguments of
 // every process. OpenShell's PROC LAUNCH and TERMINATE records join the tree
 // as they arrive (they name a process and its binary, not its parent; the
-// next sample fills that in). The tree is bounded (procTreeMaxLive live
-// processes, the procTreeMaxExited most recently ended ones), every process
-// that joins it is recorded once as started and once as exited
-// (sandbox.process_tree, at most processRecordBurst at once and
-// processRecordRate a second per sandbox), and Lineage walks it for the
-// egress destinations. Its limits are those of sampling: a process that
-// starts and ends between two samples, and that OpenShell does not report,
-// is never seen; and every field is the agent's to choose (its arguments,
-// its comm, its executable path): display text, never a decision.
+// next sample fills that in). On a Linux docker sandbox whose host runs the
+// sandbox kernel feed (kernelfeed.go), every exec and exit Tetragon saw
+// joins it too, with Tetragon's exec ids: a process that lives for
+// milliseconds is still recorded. Such a process is in the tree by its
+// in-sandbox pid only when the feed could read that pid at the exec (most
+// short-lived ones are gone by then); otherwise it is there by its exec id
+// and host pid alone, never under a pid of another namespace. The tree is
+// bounded (procTreeMaxLive live processes, the procTreeMaxExited most
+// recently ended ones), every process that joins it is recorded once as
+// started and once as exited (sandbox.process_tree, at most
+// processRecordBurst at once and processRecordRate a second per sandbox),
+// and Lineage walks it for the egress destinations. Without the feed its
+// limits are those of sampling: a process that starts and ends between two
+// samples, and that OpenShell does not report, is never seen. Every field
+// is the agent's to choose (its arguments, its comm, its executable path):
+// display text, never a decision.
 
 const (
 	processSampleInterval   = 5 * time.Second
@@ -64,7 +72,7 @@ const (
 )
 
 // procNode is one process of the tree. startTicks is its start in clock
-// ticks since boot, 0 while only OpenShell reported it.
+// ticks since boot, 0 while only OpenShell or the kernel feed reported it.
 type procNode struct {
 	PID, PPID, UID int
 	startTicks     int64
@@ -75,6 +83,11 @@ type procNode struct {
 	FirstSeen      time.Time
 	ExitedAt       time.Time
 	ExitCode       *int
+	// ExecID and ParentExecID are Tetragon's ids of the image and of its
+	// parent's, and HostPID the host's pid, for a process the kernel feed
+	// reported. PID is 0 for one whose in-sandbox pid was not captured.
+	ExecID, ParentExecID string
+	HostPID              int
 }
 
 // procTree is one sandbox's process tree.
@@ -90,10 +103,26 @@ type procTree struct {
 	heldAt time.Time
 	// interval is how often the sandbox is sampled now (0 until a sample).
 	interval time.Duration
+	// byExec holds every process the kernel feed reported that is still in
+	// the tree, live or among the ended ones kept; byHost the live ones by
+	// host pid. kernel counts what the feed brought.
+	byExec map[string]*procNode
+	byHost map[int]*procNode
+	kernel kernelCounts
+}
+
+// kernelCounts are what one sandbox's tree took from the kernel feed: execs
+// (pinned: with the in-sandbox pid), its supervisor's summarized execs, and
+// DefenseClaw's own collector's execs, which are left out.
+type kernelCounts struct {
+	execs, pinned, supervisor, collector int64
 }
 
 func newProcTree() *procTree {
-	return &procTree{live: map[int]*procNode{}, gate: newRateGate(processRecordBurst, processRecordRate)}
+	return &procTree{
+		live: map[int]*procNode{}, gate: newRateGate(processRecordBurst, processRecordRate),
+		byExec: map[string]*procNode{}, byHost: map[int]*procNode{},
+	}
 }
 
 // processTreeOn reports whether the box's policy has the process tree on.
@@ -221,12 +250,26 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 }
 
 // exitLocked moves a live process to the exited ones, the least recently
-// ended dropped past procTreeMaxExited. Callers hold t.mu.
+// ended dropped past procTreeMaxExited. A process already ended stays as it
+// was. Callers hold t.mu.
 func (t *procTree) exitLocked(node *procNode, at time.Time, code *int) *procNode {
-	delete(t.live, node.PID)
+	if !node.ExitedAt.IsZero() {
+		return node
+	}
+	if node.PID > 0 && t.live[node.PID] == node {
+		delete(t.live, node.PID)
+	}
+	if node.HostPID > 0 && t.byHost[node.HostPID] == node {
+		delete(t.byHost, node.HostPID)
+	}
 	node.ExitedAt, node.ExitCode = at, code
 	t.exited = append(t.exited, node)
 	if over := len(t.exited) - procTreeMaxExited; over > 0 {
+		for _, old := range t.exited[:over] {
+			if old.ExecID != "" && t.byExec[old.ExecID] == old {
+				delete(t.byExec, old.ExecID)
+			}
+		}
 		t.exited = slices.Delete(t.exited, 0, over)
 	}
 	return node
@@ -273,6 +316,131 @@ func (m *Manager) observeOCSFProcess(ctx context.Context, b *box, r ocsf.Record,
 	m.recordProcesses(ctx, b, id, t, started, exited)
 }
 
+// observeKernelFrame adds an exec, or ends a process, the sandbox kernel
+// feed reported for a sandbox whose process tree is on.
+func (m *Manager) observeKernelFrame(ctx context.Context, b *box, f sandboxfeed.Frame) {
+	at := f.At
+	if now := m.now(); at.IsZero() || at.After(now) {
+		at = now
+	}
+	m.mu.Lock()
+	if !b.processTreeOn() || b.deleted {
+		m.mu.Unlock()
+		return
+	}
+	t := b.tree()
+	id := b.identity()
+	m.mu.Unlock()
+	var started, exited []*procNode
+	t.mu.Lock()
+	switch f.Kind {
+	case sandboxfeed.FrameExec:
+		started, exited = t.kernelExecLocked(f, at)
+	case sandboxfeed.FrameExit:
+		exited = t.kernelExitLocked(f, at)
+	case sandboxfeed.FrameSummary:
+		t.kernel.supervisor += max(f.Execs, 0)
+	}
+	t.mu.Unlock()
+	m.recordProcesses(ctx, b, id, t, started, exited)
+}
+
+// kernelExecLocked adds one exec. A new image at a host pid ends the image it
+// replaced (an exec without a fork); one at an in-sandbox pid ends the other
+// process the tree had there, unless that is this same process as the sample
+// or OpenShell saw it first, which it then names. DefenseClaw's own
+// collector is counted and left out. Callers hold t.mu.
+func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started, exited []*procNode) {
+	if f.ExecID == "" || t.byExec[f.ExecID] != nil {
+		return nil, nil
+	}
+	if f.Collector {
+		t.kernel.collector++
+		return nil, nil
+	}
+	binary := collectText(f.Binary, collectMaxPathBytes)
+	if f.HostPID > 0 {
+		if previous := t.byHost[f.HostPID]; previous != nil {
+			exited = append(exited, t.exitLocked(previous, at, nil))
+		}
+	}
+	var node *procNode
+	if f.PID > 0 {
+		if current := t.live[f.PID]; current != nil {
+			if current.ExecID == "" && (current.Exe == "" || current.Exe == binary || !current.FirstSeen.Before(at.Add(-time.Second))) {
+				node = current
+			} else {
+				exited = append(exited, t.exitLocked(current, at, nil))
+			}
+		}
+	}
+	fresh := node == nil
+	if fresh {
+		if len(t.byHost) >= procTreeMaxLive || (f.PID > 0 && len(t.live) >= procTreeMaxLive) {
+			t.truncated = true
+			return started, exited
+		}
+		node = &procNode{PID: max(f.PID, 0), FirstSeen: at, Source: audit.SandboxProcessSourceTetragon}
+		if node.PID > 0 {
+			t.live[node.PID] = node
+		}
+	}
+	node.ExecID, node.ParentExecID, node.HostPID = f.ExecID, f.ParentExecID, max(f.HostPID, 0)
+	if parent := t.byExec[f.ParentExecID]; f.PPID <= 0 && parent != nil && parent.PID > 0 {
+		node.PPID = parent.PID
+	} else if f.PPID > 0 {
+		node.PPID = f.PPID
+	}
+	if f.UID != nil {
+		node.UID = *f.UID
+	}
+	if node.Start.IsZero() && f.StartNS > 0 {
+		node.Start = time.Unix(0, f.StartNS)
+	}
+	if binary != "" {
+		node.Exe = binary
+		if fresh || node.Comm == "" {
+			node.Comm = collectText(path.Base(binary), collectMaxCommBytes)
+		}
+	}
+	// The feed redacted the command line before it left the root process;
+	// the same rules run again here, so an older feed cannot pass less.
+	if f.Cmdline != "" {
+		node.Cmdline = redaction.CommandLine(strings.Fields(f.Cmdline), maxCmdlineBytes)
+	}
+	if f.Cwd != "" {
+		node.Cwd = collectText(f.Cwd, collectMaxPathBytes)
+	}
+	t.byExec[f.ExecID] = node
+	if node.HostPID > 0 {
+		t.byHost[node.HostPID] = node
+	}
+	t.kernel.execs++
+	if node.PID > 0 {
+		t.kernel.pinned++
+	}
+	if fresh {
+		started = append(started, node)
+	}
+	return started, exited
+}
+
+// kernelExitLocked ends the process an exit names: by its exec id, or the
+// latest image of its host pid. Callers hold t.mu.
+func (t *procTree) kernelExitLocked(f sandboxfeed.Frame, at time.Time) []*procNode {
+	if f.Collector {
+		return nil
+	}
+	node := t.byExec[f.ExecID]
+	if node == nil && f.HostPID > 0 {
+		node = t.byHost[f.HostPID]
+	}
+	if node == nil || !node.ExitedAt.IsZero() {
+		return nil
+	}
+	return []*procNode{t.exitLocked(node, at, f.ExitCode)}
+}
+
 // endProcessTree ends every live process of a sandbox that stopped or was
 // deleted.
 func (m *Manager) endProcessTree(b *box) {
@@ -289,6 +457,9 @@ func (m *Manager) endProcessTree(b *box) {
 	for _, node := range t.live {
 		exited = append(exited, t.exitLocked(node, now, nil))
 	}
+	for _, node := range t.byHost {
+		exited = append(exited, t.exitLocked(node, now, nil))
+	}
 	t.mu.Unlock()
 	if ctx := m.running(); ctx != nil {
 		m.recordProcesses(ctx, b, id, t, nil, exited)
@@ -300,13 +471,14 @@ func (m *Manager) endProcessTree(b *box) {
 func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxIdentity, t *procTree, started, exited []*procNode) {
 	emit := func(node *procNode, event string, at time.Time) {
 		t.mu.Lock()
-		lineage := t.lineageNamesLocked(node.PPID)
+		lineage := t.ancestryLocked(t.parentLocked(node))
 		t.mu.Unlock()
 		if !t.gate.take(processGateKey, at) {
 			return
 		}
 		ev := audit.SandboxProcessEvent{
 			Sandbox: id, Event: event, Source: node.Source, PID: node.PID, ParentPID: node.PPID,
+			HostPID: node.HostPID, ExecID: node.ExecID,
 			Executable: node.Exe, Name: node.Comm, CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
 			ExitCode: node.ExitCode, Lineage: lineage, Timestamp: at,
 		}
@@ -336,27 +508,75 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 // processGateKey is the one key of a tree's record gate.
 const processGateKey = "processes"
 
-// lineageNamesLocked is the comm of each ancestor from pid up, at most
-// maxLineageDepth of them. Callers hold t.mu.
-func (t *procTree) lineageNamesLocked(pid int) []string {
-	var out []string
-	seen := map[int]bool{}
-	for pid > 0 && len(out) < maxLineageDepth && !seen[pid] {
-		seen[pid] = true
-		node := t.live[pid]
-		if node == nil {
-			break
+// parentLocked is a process's parent in the tree: by exec id for one the
+// kernel feed reported, else by pid, live first, then the most recently
+// ended. Callers hold t.mu.
+func (t *procTree) parentLocked(node *procNode) *procNode {
+	if node == nil {
+		return nil
+	}
+	if node.ParentExecID != "" {
+		if parent := t.byExec[node.ParentExecID]; parent != nil {
+			return parent
 		}
+	}
+	if node.PPID > 0 && node.PPID != node.PID {
+		return t.byPIDLocked(node.PPID, "")
+	}
+	return nil
+}
+
+// byPIDLocked is the process the tree has at in-sandbox pid, live first,
+// then the most recently ended. With exe, a process the kernel feed reported
+// matches only when it ran exe: that is the join key of a lookup (sandbox,
+// pid, executable), which keeps a pid the sandbox reused from naming
+// another process's lineage. Callers hold t.mu.
+func (t *procTree) byPIDLocked(pid int, exe string) *procNode {
+	if pid <= 0 {
+		return nil
+	}
+	matches := func(n *procNode) bool { return exe == "" || n.ExecID == "" || n.Exe == exe }
+	if node := t.live[pid]; node != nil && matches(node) {
+		return node
+	}
+	for i := len(t.exited) - 1; i >= 0; i-- {
+		if node := t.exited[i]; node.PID == pid && matches(node) {
+			return node
+		}
+	}
+	return nil
+}
+
+// ancestryLocked is the comm of node and of each of its ancestors, at most
+// maxLineageDepth of them. Callers hold t.mu.
+func (t *procTree) ancestryLocked(node *procNode) []string {
+	var out []string
+	seen := map[*procNode]bool{}
+	for node != nil && len(out) < maxLineageDepth && !seen[node] {
+		seen[node] = true
 		out = append(out, node.Comm)
-		pid = node.PPID
+		node = t.parentLocked(node)
 	}
 	return out
+}
+
+// lineageNamesLocked is the comm of each ancestor from the live process pid
+// up. Callers hold t.mu.
+func (t *procTree) lineageNamesLocked(pid int) []string {
+	return t.ancestryLocked(t.live[pid])
 }
 
 // Lineage returns the process pid of sandbox sandboxName and its ancestors,
 // nearest first, from the sandbox's process tree; nil while the tree is
 // off or does not hold the process. It implements ProcessLookup.
 func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
+	return m.LineageFor(sandboxName, pid, "")
+}
+
+// LineageFor is Lineage for the process at pid that runs exe (the binary
+// the record that names the pid reported): a process the kernel feed
+// reported is taken only when its executable is exe.
+func (m *Manager) LineageFor(sandboxName string, pid int, exe string) []ProcessRef {
 	m.mu.Lock()
 	b := m.boxes[sandboxName]
 	var t *procTree
@@ -370,23 +590,10 @@ func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var out []ProcessRef
-	seen := map[int]bool{}
-	for pid > 0 && len(out) < maxLineageDepth && !seen[pid] {
-		seen[pid] = true
-		node := t.live[pid]
-		if node == nil {
-			for i := len(t.exited) - 1; i >= 0; i-- {
-				if t.exited[i].PID == pid {
-					node = t.exited[i]
-					break
-				}
-			}
-		}
-		if node == nil {
-			break
-		}
+	seen := map[*procNode]bool{}
+	for node := t.byPIDLocked(pid, exe); node != nil && len(out) < maxLineageDepth && !seen[node]; node = t.parentLocked(node) {
+		seen[node] = true
 		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.Comm, Exe: node.Exe, Start: node.Start})
-		pid = node.PPID
 	}
 	return out
 }
@@ -394,8 +601,11 @@ func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
 var _ ProcessLookup = (*Manager)(nil)
 
 // Processes returns a sandbox's process tree (GET
-// /sandboxes/{name}/processes): its live processes, and the ones that
-// ended most recently.
+// /sandboxes/{name}/processes): its live processes by in-sandbox pid, and
+// the ones that ended most recently. A live process the kernel feed
+// reported without its in-sandbox pid is not listed among the live ones
+// (they are keyed by that pid); it is listed once it ended, with its host
+// pid.
 func (m *Manager) Processes(_ context.Context, name string) (*sandboxapi.ProcessList, error) {
 	b, err := m.box(name)
 	if err != nil {
@@ -407,7 +617,11 @@ func (m *Manager) Processes(_ context.Context, name string) (*sandboxapi.Process
 	if out.Enabled {
 		out.IntervalSeconds = int(processSampleInterval / time.Second)
 	}
+	kernel := out.Enabled && kernelFeedApplies(b)
 	m.mu.Unlock()
+	if kernel {
+		out.Kernel = m.kfeed.view()
+	}
 	if t == nil {
 		return out, nil
 	}
@@ -416,6 +630,10 @@ func (m *Manager) Processes(_ context.Context, name string) (*sandboxapi.Process
 	out.SampledAt, out.Truncated = t.sampledAt, t.truncated
 	if t.interval > 0 {
 		out.IntervalSeconds = int(t.interval / time.Second)
+	}
+	if out.Kernel != nil {
+		out.Kernel.Execs, out.Kernel.Pinned = t.kernel.execs, t.kernel.pinned
+		out.Kernel.SupervisorExecs, out.Kernel.CollectorExecs = t.kernel.supervisor, t.kernel.collector
 	}
 	for _, node := range t.live {
 		out.Processes = append(out.Processes, node.view())
@@ -431,6 +649,6 @@ func (n *procNode) view() sandboxapi.Process {
 	return sandboxapi.Process{
 		PID: n.PID, PPID: n.PPID, UID: n.UID, StartedAt: n.Start, ExitedAt: n.ExitedAt, ExitCode: n.ExitCode,
 		Comm: sandboxapi.DisplayText(n.Comm), Exe: sandboxapi.DisplayText(n.Exe), Cwd: sandboxapi.DisplayText(n.Cwd),
-		Cmdline: sandboxapi.DisplayText(n.Cmdline), Source: n.Source,
+		Cmdline: sandboxapi.DisplayText(n.Cmdline), Source: n.Source, HostPID: n.HostPID,
 	}
 }
