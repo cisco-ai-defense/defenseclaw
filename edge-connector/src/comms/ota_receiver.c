@@ -360,8 +360,17 @@ void dclaw_policy_rollback(void) {
     /* P1-07 fix: Reload policy tables from the rolled-back partition so the
      * runtime tables actually reflect the old policy. Without this, the
      * partition was switched but the in-memory tables still held the new
-     * (bad) policy rules. */
-    dclaw_policy_reload_from_flash();
+     * (bad) policy rules.
+     *
+     * P1-07 fix (part 2): If the rolled-back partition is blank (first OTA
+     * went to B, rollback switches to A which was never written), the reload
+     * will fail. In that case, fall back to compiled-in defaults instead of
+     * leaving the new (bad) policy active. */
+    if (dclaw_policy_reload_from_flash() != 0) {
+        fprintf(stderr, "[DCLAW] WARNING: Rollback partition is blank or corrupt. "
+                "Falling back to compiled-in policy defaults.\n");
+        dclaw_policy_tables_init();
+    }
 
     dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_POLICY_TABLE, 0xFFFF, 0);
 }
@@ -447,6 +456,21 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         s->emergency.block_all_active = true;
         break;
 
+    case 0x05: /* RELEASE_LOCKDOWN */
+        /* P1-09 fix: Clear the global emergency block flag so normal policy
+         * evaluation resumes. Without this command, lockdown could only be
+         * lifted by restarting the daemon — which is unacceptable for
+         * remote/headless devices.
+         *
+         * Recovery procedure:
+         *   1. Operator sends RELEASE_LOCKDOWN via fleet API
+         *   2. Device clears block_all_active and persists cleared state
+         *   3. Normal policy evaluation resumes on next tool call
+         *   4. Verdict cache is flushed to force re-evaluation */
+        s->emergency.block_all_active = false;
+        dclaw_cache_flush_all();
+        break;
+
     default:
         return -4;
     }
@@ -530,13 +554,41 @@ int dclaw_policy_reload_from_flash(void) {
     size_t pos = 0;
     bool any_parsed = false;
 
-    /* Parse severity rules — reset this section's count so entries from
-     * the blob REPLACE (not append to) the inherited values. */
+    /*
+     * P1-08 fix: Binary format extension — "sections present" bitmask.
+     *
+     * If the first byte of the payload has the high bit set (0x80 | mask),
+     * it is a sections-present bitmask:
+     *   bit 0 = severity rules section present
+     *   bit 1 = sequence rules section present
+     *   bit 2 = destination allowlist section present
+     *   bits 3-6 = reserved
+     *   bit 7 = bitmask marker (always 1)
+     *
+     * When a section is "present" but has count=0, the fix is to CLEAR
+     * that section (revoke/empty the list). When a section is NOT present
+     * (bit clear), preserve the existing values.
+     *
+     * For backward compatibility, if the first byte does NOT have bit 7 set,
+     * the old parsing logic applies (sections with count>0 replace, count==0
+     * is treated as omitted/preserve).
+     */
+    uint8_t sections_bitmask = 0xFF; /* default: all sections "present" for compat */
+    bool has_bitmask = false;
+    if (remaining > 0 && (payload[0] & 0x80)) {
+        sections_bitmask = payload[0] & 0x7F;
+        has_bitmask = true;
+        pos++;
+        any_parsed = true; /* bitmask itself counts as valid content */
+    }
+
+    /* Parse severity rules — section bit 0 */
     if (pos >= remaining) goto parse_done;
     {
         uint8_t sev_count = payload[pos++];
-        if (sev_count > 0) {
-            staged.severity_rules_count = 0;  /* replace section */
+        bool section_present = has_bitmask ? (sections_bitmask & 0x01) : (sev_count > 0);
+        if (section_present) {
+            staged.severity_rules_count = 0;  /* replace section (even if count==0 = clear) */
         }
         for (uint8_t i = 0; i < sev_count && pos + 1 < remaining; i++) {
             if (staged.severity_rules_count < DCLAW_RT_MAX_SEVERITY_RULES) {
@@ -549,11 +601,12 @@ int dclaw_policy_reload_from_flash(void) {
         }
     }
 
-    /* Parse sequence rules — same replace-if-present logic. */
+    /* Parse sequence rules — section bit 1 */
     if (pos >= remaining) goto parse_done;
     {
         uint8_t seq_count = payload[pos++];
-        if (seq_count > 0) {
+        bool section_present = has_bitmask ? (sections_bitmask & 0x02) : (seq_count > 0);
+        if (section_present) {
             staged.sequence_rules_count = 0;  /* replace section */
         }
         for (uint8_t i = 0; i < seq_count && pos + 5 < remaining; i++) {
@@ -568,12 +621,19 @@ int dclaw_policy_reload_from_flash(void) {
         }
     }
 
-    /* Parse destination allowlist — same replace-if-present logic. */
+    /* Parse destination allowlist — section bit 2.
+     * P1-08 fix: When bit 2 is set AND dest_count==0, the sender explicitly
+     * wants an empty allowlist (revoke all destinations). This is different
+     * from "section not present" (bit 2 clear) which preserves existing. */
     if (pos >= remaining) goto parse_done;
     {
         uint8_t dest_count = payload[pos++];
-        if (dest_count > 0) {
-            staged.dest_allowlist_count = 0;  /* replace section */
+        bool section_present = has_bitmask ? (sections_bitmask & 0x04) : (dest_count > 0);
+        if (section_present) {
+            staged.dest_allowlist_count = 0;  /* replace section (even if count==0 = clear) */
+            if (dest_count == 0) {
+                any_parsed = true; /* explicit empty list is a valid policy change */
+            }
         }
         for (uint8_t i = 0; i < dest_count && pos < remaining; i++) {
             uint8_t dlen = payload[pos++];

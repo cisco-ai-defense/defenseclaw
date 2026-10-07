@@ -39,4 +39,10 @@
 #define DCLAW_MAX_DFA_CATEGORIES       6
 #define DCLAW_ESCALATION_PAYLOAD_MAX   @DCLAW_ESCALATION_PAYLOAD_MAX@
 
+/* P2-18 fix: Dev mode flag. When ON (default for development), missing
+ * DCLAW_AUDIT_KEY uses a dev fallback key with a warning. When OFF
+ * (production/release builds), the audit ring refuses to start without
+ * a real key. Set via cmake: -DDCLAW_DEV_MODE=OFF for release. */
+#cmakedefine01 DCLAW_DEV_MODE
+
 #endif /* DCLAW_CONFIG_H */

@@ -288,6 +288,19 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		fm.onHeartbeat()
 	}
 
+	// P2-19 fix: Detect canary rollback flag (bit 0x08) from heartbeat.
+	// When set, the device performed an OTA canary rollback. Fire an alert
+	// and increment the rollback counter for the metrics/dashboard.
+	if hb.Flags&0x08 != 0 {
+		fm.fireAlert(Alert{
+			Type:      AlertCanaryRollback,
+			DeviceID:  fullID,
+			Message:   fmt.Sprintf("Device performed OTA canary rollback (policy_v=%d)", hb.PolicyVersion),
+			Severity:  "high",
+			Timestamp: time.Now(),
+		})
+	}
+
 	// Update status based on flags
 	if hb.Flags&0x04 != 0 { // TAMPER_DETECT
 		dev.Status = StatusLockdown
@@ -464,6 +477,18 @@ func (fm *FleetManager) fireAlert(alert Alert) {
 	if fm.alertHandler != nil {
 		fm.alertHandler(alert)
 	}
+}
+
+// GetAlertHandler returns the current alert handler (may be nil).
+// P2-19 fix: Needed by WireMetrics to wrap the handler with metric counters.
+func (fm *FleetManager) GetAlertHandler() AlertHandler {
+	return fm.alertHandler
+}
+
+// SetAlertHandler replaces the alert handler.
+// P2-19 fix: Needed by WireMetrics to wrap the handler with metric counters.
+func (fm *FleetManager) SetAlertHandler(h AlertHandler) {
+	fm.alertHandler = h
 }
 
 // Sentinel errors

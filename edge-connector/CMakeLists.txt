@@ -53,6 +53,11 @@ elseif(DCLAW_PROFILE STREQUAL "EDGE")
     set(DCLAW_ESCALATION_PAYLOAD_MAX 2048)
 endif()
 
+# P2-18 fix: Dev mode flag — controls audit key enforcement behavior.
+# ON (default): missing DCLAW_AUDIT_KEY uses dev fallback key with warning.
+# OFF (release): audit ring refuses to start without a real key.
+option(DCLAW_DEV_MODE "Enable development mode (relaxed key requirements)" ON)
+
 # Sanitizer support (ASan + UBSan)
 option(DCLAW_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(DCLAW_SANITIZE)

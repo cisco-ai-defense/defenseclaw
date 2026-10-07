@@ -151,11 +151,11 @@ iot_extensions:
 ## Compile the policy
 
 ```bash
-python3 tools/policy_compiler.py \
+python3 edge-connector/tools/policy_compiler.py \
   --input ~/.defenseclaw/policy.yaml \
   --profile standard \
   --version 1 \
-  --output-header generated/policy_tables.h \
+  --output-header edge-connector/generated/policy_tables.h \
   --output-binary dist/policy.bin
 ```
 

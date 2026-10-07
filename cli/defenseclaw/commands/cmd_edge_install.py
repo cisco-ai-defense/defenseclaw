@@ -283,6 +283,87 @@ def _install_local_systemd_unit() -> bool:
     return True
 
 
+def _register_device_via_api(
+    tenant_id: str, fleet_id: str, device_id: str,
+) -> str:
+    """Register the device with the fleet API and return the device key hex string.
+
+    P1-15 fix: The remote install must obtain a device key by calling the
+    registration endpoint. Without this, the device cannot authenticate
+    heartbeats or receive signed verdict responses.
+
+    Returns the hex-encoded device key on success, or "" on failure.
+    """
+    import json as _json
+
+    ux.echo()
+    ux.section("Registering device with fleet manager")
+
+    # The fleet API base URL comes from the operator's local env, or defaults
+    # to the local gateway.
+    api_base = os.environ.get("DCLAW_FLEET_API_URL", "http://localhost:8080/api/v1/fleet")
+    api_token = _load_local_env_value("DCLAW_FLEET_API_TOKEN") or os.environ.get("DCLAW_FLEET_API_TOKEN", "")
+
+    url = f"{api_base}/devices"
+    body = _json.dumps({
+        "tenant_id": int(tenant_id),
+        "fleet_id": int(fleet_id),
+        "device_id": int(device_id),
+    })
+
+    curl_cmd = [
+        "curl", "-s", "-X", "POST", url,
+        "-H", "Content-Type: application/json",
+        "-H", "X-DefenseClaw-Client: true",
+    ]
+    if api_token:
+        curl_cmd += ["-H", f"Authorization: Bearer {api_token}"]
+    curl_cmd += ["-d", body]
+
+    result = subprocess.run(curl_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        ux.warn(f"Device registration API call failed (exit {result.returncode}). "
+                "Register the device manually via: defenseclaw fleet register")
+        return ""
+
+    try:
+        resp = _json.loads(result.stdout)
+        device_key = resp.get("device_key", "")
+        if device_key:
+            ux.ok(f"Device registered, key obtained ({len(device_key)} hex chars)")
+        else:
+            ux.warn("Device registered but no device_key returned (key store may not be configured).")
+        return device_key
+    except (_json.JSONDecodeError, KeyError):
+        ux.warn("Could not parse registration response. Register the device manually.")
+        return ""
+
+
+def _verify_remote_daemon(target: str, user: str) -> bool:
+    """P1-15 fix: After starting the daemon, verify it's actually running.
+
+    Checks the systemd service status, then tries the IPC socket as a
+    secondary signal. Returns True if the daemon appears healthy.
+    """
+    ux.echo()
+    ux.section("Verifying daemon health")
+
+    # Check systemd service status
+    result = subprocess.run(
+        _ssh_cmd(target, user, "systemctl is-active edge-connector 2>/dev/null || "
+                               "pgrep -x edge-connector >/dev/null 2>&1 && echo active || echo inactive"),
+        capture_output=True, text=True,
+    )
+    status = result.stdout.strip()
+    if status == "active":
+        ux.ok("edge-connector daemon is running")
+        return True
+
+    ux.warn("edge-connector daemon does not appear to be running. "
+            "Check logs with: ssh {user}@{target} 'journalctl -u edge-connector -n 20'")
+    return False
+
+
 def _start_remote_daemon(target: str, user: str) -> None:
     """Install the systemd unit and start the service on the remote device.
 
@@ -290,6 +371,8 @@ def _start_remote_daemon(target: str, user: str) -> None:
     or the install fails.
     """
     if _install_systemd_unit(target, user):
+        # P1-15 fix: Verify the daemon is actually running after install
+        _verify_remote_daemon(target, user)
         return
 
     ux.echo()
@@ -379,7 +462,13 @@ def edge_install(
             import uuid
             device_id = str(uuid.uuid4().int & 0xFFFFFFFF)  # 32-bit
 
-        _configure_remote_env(target, user, tenant_id, fleet_id, device_id, broker_url)
+        # P1-15 fix: Register the device with the fleet API to get a per-device
+        # signing key. Without this, the device cannot authenticate heartbeats
+        # or receive signed verdict responses.
+        device_key = _register_device_via_api(tenant_id, fleet_id, device_id)
+
+        _configure_remote_env(target, user, tenant_id, fleet_id, device_id, broker_url,
+                              device_key=device_key)
         _start_remote_daemon(target, user)
 
         ux.echo()

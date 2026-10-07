@@ -169,9 +169,21 @@ def _setup_docker(port: int) -> dict | bool:
     ux.ok(f"Image {_MOSQUITTO_IMAGE} ready")
 
     ux.echo("  Generating MQTT password file...")
+    # P1-10 fix: Run mosquitto_passwd as the current user so the file is
+    # created with correct ownership from the start, avoiding the problem
+    # where Docker creates the file as root:root 0600 and the non-root CLI
+    # user cannot chmod it. Inside the container, the current uid:gid owns
+    # the file, and the host-side file inherits that ownership via the bind
+    # mount. We then chmod to 0640 (owner rw, group r) which is secure
+    # (no world-read of hashes) while still readable by the mosquitto
+    # process (uid 1883) since the container's -v mount makes it accessible.
+    import os as _os
+    current_uid = _os.getuid()
+    current_gid = _os.getgid()
     passwd_result = subprocess.run(
         [
             "docker", "run", "--rm",
+            "--user", f"{current_uid}:{current_gid}",
             "-v", f"{conf_dir}:/mosquitto/config",
             _MOSQUITTO_IMAGE,
             "mosquitto_passwd", "-b", "-c",
@@ -183,16 +195,14 @@ def _setup_docker(port: int) -> dict | bool:
         ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
         return False
 
-    # P1-10 fix: chmod the password file to 0644 so the broker process
-    # (which may run as a non-root user inside the container) can read it.
-    # The mosquitto_passwd container runs as root, creating the file with
-    # root:root 0600 permissions, which the broker's mosquitto user cannot
-    # read — causing silent authentication failures.
+    # P1-10 fix: Set permissions to 0640 — owner read/write, group read.
+    # This is more restrictive than the old 0644 (no world-readable hashes)
+    # while still allowing the Mosquitto broker process to read the file.
     passwd_file = conf_dir / "passwd"
     try:
-        passwd_file.chmod(0o644)
+        passwd_file.chmod(0o640)
     except OSError:
-        ux.warn("Could not chmod password file to 0644 — broker may fail to read it.")
+        ux.warn("Could not chmod password file to 0640 — broker may fail to read it.")
 
     ux.ok(f"MQTT user '{mqtt_user}' password file generated")
 

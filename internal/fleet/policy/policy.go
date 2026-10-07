@@ -43,6 +43,12 @@ const (
 	// (flushes caches and blocks ALL requests, same effect as BLOCK_ALL).
 	// C-side ota_receiver.c: case 0x04 — ENTER_LOCKDOWN.
 	EmergencyEnterLockdown EmergencyCommand = 0x04
+
+	// EmergencyReleaseLockdown clears the global block_all_active flag so
+	// normal policy evaluation resumes. P1-09 fix: without this, lockdown
+	// could only be lifted by restarting the daemon.
+	// C-side ota_receiver.c: case 0x05 — RELEASE_LOCKDOWN.
+	EmergencyReleaseLockdown EmergencyCommand = 0x05
 )
 
 // PolicyHeader matches the C-side dclaw_policy_header_t structure (8 bytes, big-endian).

@@ -254,6 +254,17 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		return
 	}
 
+	// P1-06 fix: Validate that the device_id in the payload matches the
+	// topic's device_id. A mismatch indicates a spoofed heartbeat — an
+	// attacker publishing to another device's topic to manipulate its
+	// status. This is the same validation pattern as handleRegistration.
+	if hw.DeviceID != parts.DeviceID {
+		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — topic device_id=%d does not match payload device_id=%d (possible spoofing attempt)",
+			parts.DeviceID, hw.DeviceID)
+		b.incErrors()
+		return
+	}
+
 	// Convert to the manager's Heartbeat type
 	hb := &manager.Heartbeat{
 		DeviceID:       hw.DeviceID,

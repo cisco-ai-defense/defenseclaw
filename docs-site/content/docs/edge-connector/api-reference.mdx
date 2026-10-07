@@ -445,7 +445,7 @@ Distributes an emergency command to all devices in a fleet via MQTT. Use for inc
 | --- | --- | --- | --- |
 | `tenant_id` | uint64 | yes | Tenant identifier |
 | `fleet_id` | uint64 | yes | Fleet identifier |
-| `command` | string | yes | One of: `BLOCK_ALL`, `ENTER_LOCKDOWN`, `REVOKE_SESSIONS`, `FORCE_SYNC` |
+| `command` | string | yes | One of: `BLOCK_ALL`, `ENTER_LOCKDOWN`, `RELEASE_LOCKDOWN`, `REVOKE_SESSIONS`, `FORCE_SYNC` |
 
 ```json
 {
@@ -470,8 +470,9 @@ Distributes an emergency command to all devices in a fleet via MQTT. Use for inc
 | --- | --- |
 | `BLOCK_ALL` | Sets all fleet devices to block every tool call |
 | `ENTER_LOCKDOWN` | Puts all fleet devices into lockdown mode (block all tool calls) |
+| `RELEASE_LOCKDOWN` | Clears emergency lockdown so normal policy evaluation resumes |
 | `REVOKE_SESSIONS` | Terminates all active agent sessions on fleet devices |
-| `FORCE_SYNC` | Forces all fleet devices to re-sync policy from the cloud |
+| `FORCE_SYNC` | Flushes the in-RAM audit buffer to flash and syncs to durable storage on all fleet devices |
 
 **Status codes**
 

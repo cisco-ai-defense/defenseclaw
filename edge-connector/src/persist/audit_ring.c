@@ -23,6 +23,14 @@ static uint8_t s_audit_key[AUDIT_KEY_LEN];
 static bool    s_audit_key_loaded = false;
 static bool    s_audit_key_provisioned = false; /* true only when DCLAW_AUDIT_KEY is valid */
 
+/*
+ * P2-18 fix: s_audit_key_refused is set to true when DCLAW_DEV_MODE is OFF
+ * (production) and no valid DCLAW_AUDIT_KEY is provisioned. When true,
+ * audit writes are silently dropped to prevent tamper-evident logging
+ * with a known/predictable key.
+ */
+static bool s_audit_key_refused = false;
+
 static const uint8_t *get_audit_key(void) {
     if (s_audit_key_loaded) return s_audit_key;
     s_audit_key_loaded = true;
@@ -49,21 +57,37 @@ static const uint8_t *get_audit_key(void) {
             s_audit_key_provisioned = true;
             return s_audit_key;
         }
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY has invalid hex, "
-                "using dev fallback key.\n");
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY has invalid hex.\n");
     } else if (env != NULL) {
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY must be 64 hex chars, "
-                "using dev fallback key.\n");
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY must be 64 hex chars.\n");
     } else {
-        fprintf(stderr, "[DCLAW] WARNING: Audit integrity guarantees disabled "
-                "-- set DCLAW_AUDIT_KEY for tamper-evident logging.\n");
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_AUDIT_KEY not set.\n");
     }
 
+    /*
+     * P2-18 fix: In production builds (DCLAW_DEV_MODE=OFF), refuse to
+     * start the audit ring with a fallback key. This prevents shipping
+     * tamper-evident logs with a known/predictable key that attackers
+     * could forge.
+     *
+     * In dev builds (DCLAW_DEV_MODE=ON, the default), use the fallback
+     * key with a warning for development convenience.
+     */
+#if !DCLAW_DEV_MODE
+    fprintf(stderr, "[DCLAW] ERROR: Audit ring DISABLED — DCLAW_AUDIT_KEY required "
+            "in production builds. Set a valid 64-hex-char key.\n");
+    s_audit_key_refused = true;
+    memset(s_audit_key, 0, AUDIT_KEY_LEN);
+    return s_audit_key;
+#else
+    fprintf(stderr, "[DCLAW] WARNING: Using dev fallback audit key. "
+            "Set DCLAW_AUDIT_KEY for tamper-evident logging.\n");
     /* Dev fallback: deterministic but non-zero key */
     for (int i = 0; i < AUDIT_KEY_LEN; i++) {
         s_audit_key[i] = (uint8_t)(0xDC ^ i);
     }
     return s_audit_key;
+#endif
 }
 
 /*
@@ -206,6 +230,14 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
 
 int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                       uint16_t target_hash, uint16_t session_id) {
+    /* P2-18 fix: If the audit key was refused (production build without
+     * DCLAW_AUDIT_KEY), silently drop the write. The audit ring is
+     * non-functional without a proper key. */
+    get_audit_key(); /* ensure lazy init */
+    if (s_audit_key_refused) {
+        return -1;
+    }
+
     dclaw_state_t *s = dclaw_get_state();
     dclaw_audit_writer_t *w = &s->audit_writer;
 

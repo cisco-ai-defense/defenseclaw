@@ -137,8 +137,18 @@ def _build_edge_connector_tool(
             object.__setattr__(self, "_wrapped_connector", connector)
 
         def _run(self, tool_input: Any = None, *args: Any, **kwargs: Any) -> str:
+            # P2-13 fix: LangChain may pass tool_input as a keyword arg
+            # (especially with structured tools / Pydantic schemas), in which
+            # case the positional `tool_input` parameter is None. Merge kwargs
+            # into a single arguments dict for the Edge Connector evaluation,
+            # and forward correctly to the wrapped tool.
             ec = self._wrapped_connector or get_connector(fail_open=False)
-            arguments = kwargs if kwargs else ({"input": tool_input} if tool_input is not None else {})
+            if tool_input is not None:
+                arguments = {"input": tool_input, **kwargs} if kwargs else {"input": tool_input}
+            elif kwargs:
+                arguments = kwargs
+            else:
+                arguments = {}
             verdict_result = ec.evaluate(
                 tool_name=self._wrapped_tool.name,
                 arguments=arguments,
@@ -150,11 +160,25 @@ def _build_edge_connector_tool(
                 )
                 logger.warning(msg)
                 return msg
-            return self._wrapped_tool.run(tool_input, *args, **kwargs)
+            # P2-13 fix: Forward correctly — use invoke() with the merged
+            # arguments so LangChain's structured tool dispatch works.
+            # When tool_input is None and kwargs are present, the wrapped
+            # tool expects kwargs, not a None positional arg.
+            if tool_input is not None:
+                return self._wrapped_tool.invoke(tool_input, **kwargs)
+            elif kwargs:
+                return self._wrapped_tool.invoke(kwargs)
+            else:
+                return self._wrapped_tool.invoke("")
 
         async def _arun(self, tool_input: Any = None, *args: Any, **kwargs: Any) -> str:
             ec = self._wrapped_connector or get_connector(fail_open=False)
-            arguments = kwargs if kwargs else ({"input": tool_input} if tool_input is not None else {})
+            if tool_input is not None:
+                arguments = {"input": tool_input, **kwargs} if kwargs else {"input": tool_input}
+            elif kwargs:
+                arguments = kwargs
+            else:
+                arguments = {}
             verdict_result = ec.evaluate(
                 tool_name=self._wrapped_tool.name,
                 arguments=arguments,
@@ -166,7 +190,13 @@ def _build_edge_connector_tool(
                 )
                 logger.warning(msg)
                 return msg
-            return await self._wrapped_tool.ainvoke(tool_input, **kwargs)
+            # P2-13 fix: Same forward logic as _run for async path.
+            if tool_input is not None:
+                return await self._wrapped_tool.ainvoke(tool_input, **kwargs)
+            elif kwargs:
+                return await self._wrapped_tool.ainvoke(kwargs)
+            else:
+                return await self._wrapped_tool.ainvoke("")
 
     # Set __module__ explicitly to prevent KeyError in Pydantic introspection.
     EdgeConnectorTool.__module__ = __name__

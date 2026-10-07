@@ -26,6 +26,10 @@ type Metrics struct {
 	PolicyRollbacks    atomic.Int64
 	SpeculativeBlocks  atomic.Int64
 	EmergencySeqGaps   atomic.Int64
+	// P2-19 fix: Real alert count wired from fleet manager events.
+	AlertsTotal atomic.Int64
+	// P2-19 fix: OTA canary rollback count (reported by devices via heartbeat flags).
+	OTARollbacks atomic.Int64
 }
 
 // GlobalMetrics is the singleton metrics instance.
@@ -63,6 +67,9 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		{"defenseclaw_fleet_policy_rollback_total", "Policy canary rollbacks", "counter", GlobalMetrics.PolicyRollbacks.Load()},
 		{"defenseclaw_fleet_speculative_retroactive_blocks_total", "Speculative retroactive blocks", "counter", GlobalMetrics.SpeculativeBlocks.Load()},
 		{"defenseclaw_fleet_emergency_seq_gaps_total", "Emergency sequence gaps detected", "counter", GlobalMetrics.EmergencySeqGaps.Load()},
+		// P2-19 fix: Real alert and rollback counters wired from fleet manager.
+		{"defenseclaw_fleet_alerts_total", "Fleet alerts emitted", "counter", GlobalMetrics.AlertsTotal.Load()},
+		{"defenseclaw_fleet_ota_rollbacks_total", "OTA canary rollbacks reported by devices", "counter", GlobalMetrics.OTARollbacks.Load()},
 	}
 
 	for _, m := range metrics {
@@ -109,4 +116,19 @@ func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache, bridge *mqtt.B
 			GlobalMetrics.BlocksTotal.Add(1)
 		})
 	}
+
+	// P2-19 fix: Wire alert-type-specific metric counters by wrapping the
+	// fleet manager's alert handler. When a canary rollback alert fires,
+	// increment the OTA rollback counter. All alerts increment AlertsTotal.
+	originalAlertHandler := mgr.GetAlertHandler()
+	mgr.SetAlertHandler(func(alert manager.Alert) {
+		GlobalMetrics.AlertsTotal.Add(1)
+		if alert.Type == manager.AlertCanaryRollback {
+			GlobalMetrics.OTARollbacks.Add(1)
+			GlobalMetrics.PolicyRollbacks.Add(1)
+		}
+		if originalAlertHandler != nil {
+			originalAlertHandler(alert)
+		}
+	})
 }

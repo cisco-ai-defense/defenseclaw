@@ -4,6 +4,16 @@
 #include <string.h>
 #include <assert.h>
 
+#if DCLAW_VERDICT_CACHE_SIZE == 0
+/* MINIMAL profile has no cache — the CMakeLists.txt guard should prevent
+ * this file from being compiled, but if it is reached anyway provide a
+ * no-op main so the build does not fail (P1-03 fix). */
+int main(void) {
+    printf("test_verdict_cache: SKIPPED (DCLAW_VERDICT_CACHE_SIZE == 0)\n");
+    return 0;
+}
+#else /* DCLAW_VERDICT_CACHE_SIZE > 0 */
+
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
                               dclaw_severity_t severity);
@@ -186,3 +196,4 @@ int main(void) {
     dclaw_shutdown();
     return 0;
 }
+#endif /* DCLAW_VERDICT_CACHE_SIZE > 0 */

@@ -102,6 +102,12 @@ type sinkHealthV8Occurrence struct {
 	protectedBoundaryAuthFailure bool
 	timestamp                    time.Time
 	event                        Event
+	// P1-11 fix: Per-action bucket override. When non-empty, the
+	// classification context uses this bucket instead of the default
+	// BucketPlatformHealth. Fleet actions need different buckets
+	// (asset.lifecycle, enforcement.action, compliance.activity,
+	// security.finding) to match the generated telemetry families.
+	bucket observability.Bucket
 }
 
 func (occurrence sinkHealthV8Occurrence) mandatory() bool {
@@ -184,8 +190,17 @@ func (l *Logger) emitPlatformHealthV8Occurrence(
 		occurrence.errorSummary = platformHealthErrorSummary(event.Details)
 	}
 	stampAuditEventEnvelope(&event)
+	// P1-11 fix: Use per-action bucket when set, otherwise default to
+	// BucketPlatformHealth. Fleet actions that represent asset lifecycle,
+	// enforcement, compliance, or security findings must be routed to
+	// their correct bucket so generated telemetry families receive
+	// well-formed records.
+	classificationBucket := observability.BucketPlatformHealth
+	if occurrence.bucket != "" {
+		classificationBucket = occurrence.bucket
+	}
 	classification := observability.ClassificationContext{
-		Bucket:      observability.BucketPlatformHealth,
+		Bucket:      classificationBucket,
 		EventName:   eventName,
 		RawSeverity: occurrence.severity,
 		MandatoryFacts: observability.MandatoryFacts{
@@ -342,50 +357,62 @@ func auditPlatformHealthV8Occurrence(event Event) (sinkHealthV8Occurrence, bool)
 	// log.fleet.device.offline, log.fleet.alert) receive well-formed
 	// platform-health records instead of falling through to the compatibility
 	// adapter, which cannot supply the required family-specific fields.
+	// P1-11 fix: Route each fleet action to its correct bucket instead
+	// of defaulting all to BucketPlatformHealth. The generated telemetry
+	// families require specific buckets to produce valid records.
 	case ActionFleetDeviceHeartbeat:
 		occurrence.family, occurrence.phase = sinkHealthV8Ready, "heartbeat"
 		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
 		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		// heartbeat -> platform.health (correct default)
 	case ActionFleetDeviceOffline:
 		occurrence.durableHealthTransition = true
 		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "heartbeat"
 		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "WARN"
 		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
 		occurrence.errorCode = observability.Present("device_offline")
+		// device offline -> platform.health (correct default)
 	case ActionFleetAlert:
 		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "alert"
 		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, event.Severity
 		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
 		occurrence.errorCode = observability.Present("fleet_alert")
+		occurrence.bucket = observability.BucketSecurityFinding
 	case ActionFleetDeviceRegistered:
 		occurrence.durableHealthTransition = true
 		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "registration"
 		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
 		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketAssetLifecycle
 	case ActionFleetDeviceDecommission:
 		occurrence.durableHealthTransition = true
 		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "decommission"
 		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
 		occurrence.subsystem, occurrence.healthState = "fleet", "stopped"
+		occurrence.bucket = observability.BucketAssetLifecycle
 	case ActionFleetDeviceCommand:
 		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "command"
 		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
 		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketEnforcementAction
 	case ActionFleetPolicyPush:
 		occurrence.durableHealthTransition = true
 		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "policy"
 		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
 		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketEnforcementAction
 	case ActionFleetPolicyEmergency:
 		occurrence.durableHealthTransition = true
 		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "emergency"
 		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "HIGH"
 		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
 		occurrence.errorCode = observability.Present("emergency_command")
+		occurrence.bucket = observability.BucketEnforcementAction
 	case ActionFleetThreatIntel:
 		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "threat_intel"
 		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
 		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketComplianceActivity
 
 	default:
 		return sinkHealthV8Occurrence{}, false

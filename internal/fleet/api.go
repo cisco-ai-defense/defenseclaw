@@ -107,6 +107,8 @@ func (a *API) emitAudit(action, target, details string) {
 // emitAlert is a nil-safe helper that logs a fleet alert through
 // the platform-health pipeline.
 func (a *API) emitAlert(severity, summary string, details map[string]any) {
+	// P2-19 fix: Increment the real alerts counter for Prometheus/Grafana.
+	GlobalMetrics.AlertsTotal.Add(1)
 	if a.audit == nil {
 		return
 	}
@@ -582,13 +584,15 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 		cmd = policy.EmergencyBlockAll
 	case "ENTER_LOCKDOWN":
 		cmd = policy.EmergencyEnterLockdown
+	case "RELEASE_LOCKDOWN":
+		cmd = policy.EmergencyReleaseLockdown
 	case "REVOKE_SESSIONS":
 		cmd = policy.EmergencyRevokeSessions
 	case "FORCE_SYNC":
 		cmd = policy.EmergencyForceSync
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "unknown command: must be BLOCK_ALL, ENTER_LOCKDOWN, REVOKE_SESSIONS, or FORCE_SYNC",
+			"error": "unknown command: must be BLOCK_ALL, ENTER_LOCKDOWN, RELEASE_LOCKDOWN, REVOKE_SESSIONS, or FORCE_SYNC",
 		})
 		return
 	}

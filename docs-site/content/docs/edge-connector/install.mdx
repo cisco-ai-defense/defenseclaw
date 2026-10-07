@@ -388,9 +388,12 @@ docker run -d --name mosquitto -p 1883:1883 \
 # Create the mqtt directory first (prevents Docker from creating it as root)
 mkdir -p mqtt
 
-# Create a password file with a broker user (runs mosquitto_passwd inside a container)
-docker run --rm -v ./mqtt:/mosquitto/config eclipse-mosquitto \
+# Create a password file with a broker user (runs as current user to avoid
+# root-owned files that the non-root broker process cannot read — P2-16 fix)
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ./mqtt:/mosquitto/config eclipse-mosquitto \
   mosquitto_passwd -b -c /mosquitto/config/passwd dclaw yourpassword
+chmod 0640 mqtt/passwd
 
 # Create a config that requires authentication
 cat > mqtt/mosquitto.conf <<'EOF'
