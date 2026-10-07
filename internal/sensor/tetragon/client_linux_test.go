@@ -448,7 +448,7 @@ func TestRPCAllowlistPerScope(t *testing.T) {
 			}
 		}
 		_, results["ListTracingPolicies"] = client.ListPolicies(ctx)
-		results["AddTracingPolicy"] = client.AddPolicy(ctx, name, document)
+		_, results["AddTracingPolicy"] = client.AddPolicy(ctx, []byte(document))
 		results["DeleteTracingPolicy"] = client.DeletePolicy(ctx, name)
 		results["ConfigureTracingPolicy"] = client.ConfigurePolicy(ctx, name, pb.TracingPolicyMode_TP_MODE_MONITOR, nil)
 		// Never allowed, in any scope.
@@ -497,18 +497,19 @@ func TestPolicyWritesAreLimitedToDefenseClawNames(t *testing.T) {
 		}
 	}
 	good := "defenseclaw-observe-89abcdef"
-	for _, document := range []string{
-		"kind: TracingPolicy\nmetadata:\n  name: someone-else\n",
-		"kind: TracingPolicyNamespaced\nmetadata:\n  name: " + good + "\n  namespace: default\n",
-		"kind: TracingPolicy\nmetadata:\n  name: " + good + "\n  namespace: default\n",
-		"{not yaml",
+	for document, code := range map[string]codes.Code{
+		"kind: TracingPolicy\nmetadata:\n  name: someone-else\n":                                 codes.PermissionDenied,
+		"kind: TracingPolicy\nmetadata:\n  name: defenseclaw-observe-89abcdef0\n":                codes.PermissionDenied,
+		"kind: TracingPolicyNamespaced\nmetadata:\n  name: " + good + "\n  namespace: default\n": codes.InvalidArgument,
+		"kind: TracingPolicy\nmetadata:\n  name: " + good + "\n  namespace: default\n":           codes.InvalidArgument,
+		"{not yaml": codes.InvalidArgument,
 	} {
-		if err := client.AddPolicy(ctx, good, document); status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("add %q: %v", document, err)
+		if _, err := client.AddPolicy(ctx, []byte(document)); status.Code(err) != code {
+			t.Fatalf("add %q: %v, want %s", document, err, code)
 		}
 	}
-	if err := client.AddPolicy(ctx, good, "kind: TracingPolicy\nmetadata:\n  name: "+good+"\n"); err != nil {
-		t.Fatal(err)
+	if name, err := client.AddPolicy(ctx, []byte("kind: TracingPolicy\nmetadata:\n  name: "+good+"\n")); err != nil || name != good {
+		t.Fatalf("add: %q %v", name, err)
 	}
 	fake.mu.Lock()
 	added := len(fake.added)

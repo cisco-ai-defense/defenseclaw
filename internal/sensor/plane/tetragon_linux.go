@@ -271,8 +271,16 @@ func (s *tetragonSource) dial(ctx context.Context) error {
 	}
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.readFeed(ctx, feed) }()
+	s.stream(true)
 	s.changed()
 	return nil
+}
+
+// stream tells the reconciler whether the Tetragon stream is up.
+func (s *tetragonSource) stream(connected bool) {
+	if s.options.Stream != nil {
+		s.options.Stream(connected)
+	}
 }
 
 // startFallback starts cn_proc because Tetragon is not delivering.
@@ -337,6 +345,9 @@ func (s *tetragonSource) readFeed(ctx context.Context, feed KernelFeed) {
 }
 
 func (s *tetragonSource) handleBatch(batch KernelBatch) {
+	if s.options.Tap != nil {
+		s.options.Tap(batch)
+	}
 	now := s.now()
 	if batch.ThrottleStart || batch.ThrottleStop || batch.Dropped > 0 {
 		s.mu.Lock()
@@ -400,6 +411,7 @@ func (s *tetragonSource) feedEnded(ctx context.Context, feed KernelFeed, err err
 	s.lossAt, s.fileSince, s.observeSince, s.throttled = s.now(), time.Time{}, time.Time{}, false
 	handed := s.handed
 	s.mu.Unlock()
+	s.stream(false)
 	s.startFallback(ctx, reasonOf(fmt.Errorf("tetragon_unavailable: the event stream ended: %w", err)))
 	if handed {
 		s.startFiles(ctx)
@@ -725,6 +737,7 @@ func (s *tetragonSource) Close() error {
 	}
 	if feed != nil {
 		_ = feed.Close()
+		s.stream(false)
 	}
 	if proc != nil {
 		_ = proc.Close()

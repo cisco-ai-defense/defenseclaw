@@ -297,6 +297,14 @@ type TetragonOptions struct {
 	// observe policy, as the helper recorded it. nil keeps fanotify running
 	// for as long as the source runs: the hand-off never happens.
 	OwnObservePolicy func(name string) bool
+	// Tap, when set, sees every Tetragon batch before it is forwarded: the
+	// helper's kernel-policy reconciler counts its controls hits and the
+	// loss signals there, from the stream it can vouch for. It must not
+	// block.
+	Tap func(KernelBatch)
+	// Stream, when set, is told when the Tetragon event stream connects
+	// (true) and ends (false); burn-in time accrues only while it is up.
+	Stream func(connected bool)
 }
 
 // Complete reports whether the source is delivering every kind it knows about.

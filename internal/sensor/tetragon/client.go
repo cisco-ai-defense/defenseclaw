@@ -251,13 +251,11 @@ func (c *Client) ListPolicies(ctx context.Context) ([]*pb.TracingPolicyStatus, e
 	return reply.GetPolicies(), nil
 }
 
-// AddPolicy loads a TracingPolicy from YAML. Only a DefenseClaw-owned name
-// may be added, and the YAML must carry exactly that name, so a rendering
-// mistake cannot load a policy under a name the cleanup would not retire.
-func (c *Client) AddPolicy(ctx context.Context, name, document string) error {
-	if _, ok := OwnPolicyFamily(name); !ok {
-		return status.Errorf(codes.PermissionDenied, "tetragon: %q is not a DefenseClaw policy name", name)
-	}
+// AddPolicy loads one TracingPolicy YAML document. The document must be a
+// cluster-wide TracingPolicy whose name is a DefenseClaw name, so a rendering
+// mistake cannot load a policy the cleanup would not retire. It returns the
+// name it loaded.
+func (c *Client) AddPolicy(ctx context.Context, document []byte) (string, error) {
 	var header struct {
 		Kind     string `yaml:"kind"`
 		Metadata struct {
@@ -265,16 +263,21 @@ func (c *Client) AddPolicy(ctx context.Context, name, document string) error {
 			Namespace string `yaml:"namespace"`
 		} `yaml:"metadata"`
 	}
-	if err := yaml.Unmarshal([]byte(document), &header); err != nil {
-		return status.Errorf(codes.InvalidArgument, "tetragon: policy YAML: %v", err)
+	if err := yaml.Unmarshal(document, &header); err != nil {
+		return "", status.Errorf(codes.InvalidArgument, "tetragon: policy YAML: %v", err)
 	}
-	if header.Kind != "TracingPolicy" || header.Metadata.Name != name || header.Metadata.Namespace != "" {
-		return status.Errorf(codes.InvalidArgument,
-			"tetragon: the policy YAML is a %q named %q; want a cluster-wide TracingPolicy named %q",
-			header.Kind, header.Metadata.Name, name)
+	name := header.Metadata.Name
+	if _, ok := OwnPolicyFamily(name); !ok {
+		return "", status.Errorf(codes.PermissionDenied, "tetragon: %q is not a DefenseClaw policy name", name)
 	}
-	_, err := c.api.AddTracingPolicy(ctx, &pb.AddTracingPolicyRequest{Yaml: document})
-	return err
+	if header.Kind != "TracingPolicy" || header.Metadata.Namespace != "" {
+		return "", status.Errorf(codes.InvalidArgument,
+			"tetragon: %s is a %q in namespace %q; want a cluster-wide TracingPolicy", name, header.Kind, header.Metadata.Namespace)
+	}
+	if _, err := c.api.AddTracingPolicy(ctx, &pb.AddTracingPolicyRequest{Yaml: string(document)}); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // DeletePolicy unloads one policy by name. Only DefenseClaw-owned names may

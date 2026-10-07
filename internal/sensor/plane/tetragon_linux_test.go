@@ -353,3 +353,37 @@ func TestTetragonSourcePrefersTheTetragonFileEvent(t *testing.T) {
 		t.Fatalf("delivered %v: want Tetragon's pid 7 and fanotify's pid 8 only", got)
 	}
 }
+
+// TestTetragonSourceTapsTheStreamForTheReconciler: the reconciler sees every
+// Tetragon batch (its hit and loss tally) and the stream going up and down.
+func TestTetragonSourceTapsTheStreamForTheReconciler(t *testing.T) {
+	h := newHarness(t)
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+	h.feeds <- feed
+	var mu sync.Mutex
+	var tapped []KernelBatch
+	var stream []bool
+	source := NewTetragonSource(nil, TetragonOptions{Mode: "enforce", Dial: h.dial,
+		Tap:    func(batch KernelBatch) { mu.Lock(); tapped = append(tapped, batch); mu.Unlock() },
+		Stream: func(up bool) { mu.Lock(); stream = append(stream, up); mu.Unlock() },
+	})
+	if err := source.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	hit := Event{Kind: KindFileRead, PID: 7, Path: "/home/dcr-std1/.ssh/id_ed25519", Policy: "defenseclaw-controls-0a1b2c3d",
+		Outcome: OutcomeBlocked, Control: "kernel.ssh_private_key_read"}
+	feed.batches <- KernelBatch{Events: []Event{hit}}
+	feed.batches <- KernelBatch{ThrottleStart: true}
+	next(t, source)
+	close(feed.batches)
+	waitFor(t, "the stream to end", func() bool { mu.Lock(); defer mu.Unlock(); return len(stream) == 2 })
+	_ = source.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(tapped) != 2 || tapped[0].Events[0].Policy != hit.Policy || !tapped[1].ThrottleStart {
+		t.Fatalf("tapped %+v", tapped)
+	}
+	if stream[0] != true || stream[1] != false {
+		t.Fatalf("stream %v", stream)
+	}
+}

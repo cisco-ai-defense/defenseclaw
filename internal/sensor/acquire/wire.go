@@ -135,6 +135,26 @@ type KernelStatus struct {
 	Warnings []string `json:"warnings,omitempty"`
 	// UpdatedUnixNano is when the reconciler last wrote its state.
 	UpdatedUnixNano int64 `json:"updated_unix_ns,omitempty"`
+	// Changes is the reconciler's bounded ring of state changes, oldest
+	// first; the gateway drains it by Seq into log.ai.runtime.kernel_policy
+	// records (the helper emits no telemetry itself).
+	Changes []KernelChange `json:"changes,omitempty"`
+}
+
+// KernelChange is one kernel-policy state change.
+type KernelChange struct {
+	Seq        uint64 `json:"seq"`
+	AtUnixNano int64  `json:"at_unix_ns,omitempty"`
+	// Event is loaded, mode_changed, removed, operator_override, paused,
+	// resumed, orphaned, reconcile_failed, ack_stale, uid_ready,
+	// uid_burnin, tetragon_restarted or fallback.
+	Event  string `json:"event"`
+	Policy string `json:"policy,omitempty"`
+	Family string `json:"family,omitempty"`
+	Mode   string `json:"mode,omitempty"`
+	State  string `json:"state,omitempty"`
+	UID    *int   `json:"uid,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // KernelTetragon is the agent the reconciler talks to.

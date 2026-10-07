@@ -81,6 +81,10 @@ type TetragonConfig struct {
 	// KernelStatus answers OpKernelStatus from the reconciler's state. nil:
 	// the helper reports no kernel-policy reconciler.
 	KernelStatus func(ctx context.Context) (KernelStatus, error)
+	// Tap and Stream let the reconciler count controls hits, loss signals
+	// and connected time from the event stream (plane.TetragonOptions).
+	Tap    func(plane.KernelBatch)
+	Stream func(connected bool)
 }
 
 // tetragonMode is the effective Tetragon mode ("" when the helper has none).
@@ -387,6 +391,7 @@ func (s *Server) planeSource() plane.Source {
 	if tetragon.Mode != "" && tetragon.Mode != "off" && tetragon.Dial != nil {
 		return plane.NewTetragonSource(s.config.HomeDirs, plane.TetragonOptions{
 			Mode: tetragon.Mode, Dial: tetragon.Dial, OwnObservePolicy: tetragon.OwnObservePolicy,
+			Tap: tetragon.Tap, Stream: tetragon.Stream,
 		})
 	}
 	return nativeBackend{Source: s.acquirer.PlaneSource(s.config.HomeDirs), mode: firstNonEmpty(tetragon.Mode, "off")}
