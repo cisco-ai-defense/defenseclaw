@@ -20,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
 )
@@ -81,6 +82,14 @@ type enterpriseACPUserSetup struct {
 	guard                  string
 	agentBinary            string
 	gatewayURL             string
+}
+
+// enterpriseACPGuardCustody checks that the guard a managed lock pins is the
+// administrator-owned executable: root or Administrators own every element
+// of its path, none is a symlink and no one else can write it. Replaceable
+// in tests, whose guard is the test binary.
+var enterpriseACPGuardCustody = func(path string) error {
+	return managed.ValidateTrustedFilePath(path, "managed ACP guard")
 }
 
 type enterpriseACPUserSetupResult struct {
@@ -170,6 +179,14 @@ func setupEnterpriseACPUserFiles(in enterpriseACPUserSetup) (result enterpriseAC
 	guard, err := resolveACPExecutable(in.guard, "DefenseClaw ACP guard")
 	if err != nil {
 		return result, err
+	}
+	// The lock records managed custody, which lets an administrator upgrade
+	// change the guard bytes. A copy of the guard in the home passed the
+	// digest check and was recorded the same way, so the user ran a guard the
+	// organization does not own (GAP-0426).
+	if err := enterpriseACPGuardCustody(guard); err != nil {
+		return result, fmt.Errorf("--guard-binary %s is not the administrator-owned DefenseClaw ACP guard (%v); "+
+			"run the setup command the enrollment reports, which names the installed guard", guard, err)
 	}
 	agentCommand := catalog.Command
 	if in.agentBinary != "" {

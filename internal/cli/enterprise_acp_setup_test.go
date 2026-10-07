@@ -43,6 +43,7 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	if guard, err = filepath.EvalSymlinks(guard); err != nil {
 		t.Fatal(err)
 	}
+	stubEnterpriseACPGuardCustody(t)
 	serviceDir := t.TempDir()
 	enroll := func(agent string) string {
 		t.Helper()
@@ -117,4 +118,49 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	}
 	validate("hermes", hermesBinary, hermes.contractLock)
 	validate("kiro", kiroBinary, result.contractLock)
+}
+
+// stubEnterpriseACPGuardCustody accepts the test binary as the guard: it is
+// not in an administrator-owned directory.
+func stubEnterpriseACPGuardCustody(t *testing.T) {
+	t.Helper()
+	old := enterpriseACPGuardCustody
+	enterpriseACPGuardCustody = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseACPGuardCustody = old })
+}
+
+// A managed setup pins only the administrator-owned guard: a copy in the home
+// is refused and nothing is written (GAP-0426).
+func TestEnterpriseACPUserSetupRefusesAGuardTheUserOwns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows custody check is covered by the live managed run")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	credential, err := acp.EnsureEnterpriseCredential(t.TempDir(), "uid:1001", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acp.PublishEnterpriseUserToken(dataDir, "zed", "kiro", credential.Token); err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(home, "my-acp-guard")
+	agent := filepath.Join(home, "kiro-cli")
+	for _, path := range []string{guard, agent} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
+		client: "zed", agent: "kiro", profile: "locked", mode: acp.ModeObserve, dataDir: dataDir, guard: guard,
+		agentBinary: agent, gatewayURL: "http://127.0.0.1:18970/api/v1/acp/evaluate",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not the administrator-owned DefenseClaw ACP guard") {
+		t.Fatalf("a guard in the home was accepted: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".config", "zed", "settings.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused setup wrote the editor settings: %v", statErr)
+	}
 }
