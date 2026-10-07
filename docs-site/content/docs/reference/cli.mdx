@@ -44,8 +44,8 @@ Tables below tag each row with the binary that owns it.
 `policy activate`, the `setup` commands, the TUI) goes through the same config
 writer, which checks the change before it writes. A running gateway applies a
 valid change by itself and shows a new policy generation in `defenseclaw status`;
-only a short list of process-level keys needs `defenseclaw-gateway restart`
-(see [Restart-required keys](#restart-required-keys)). Files DefenseClaw
+only the keys listed under [Restart-required keys](#restart-required-keys) need
+`defenseclaw-gateway restart`. Files DefenseClaw
 derives from `config.yaml`, such as `custom-providers.json` and the generated
 hook scripts, are rewritten for you and never read back. See
 [Configuration: one source of truth](/docs/reference/source-of-truth).
@@ -1052,7 +1052,7 @@ misspelled one.
   ```
 
   ```text
-  Error: config.yaml was not changed: /home/alice/.defenseclaw/config.yaml: invalid configuration at $.guardrail.block_at (pattern); correct the field using the configuration schema and reference
+  Error: config.yaml was not changed: guardrail.block_at is not in the expected format. Use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits).
   ```
 
   The schema that names itself `v8` accepts `config_version` 8 and 9 files.
@@ -1158,7 +1158,7 @@ Every registry command takes `--json`, except `wizard`.
 
 ### Migrate `config.yaml` to version 9
 
-A fresh `defenseclaw init` writes `config_version: 9`. A file from 1.0.x is
+A fresh `defenseclaw init` writes `config_version: 9`. A file from 0.8.5 or later is
 at 8; `defenseclaw migrate` (or the upgrade, or `defenseclaw config migrate`)
 rewrites it as 9. Run `defenseclaw migrate --check` first to see what is
 pending:

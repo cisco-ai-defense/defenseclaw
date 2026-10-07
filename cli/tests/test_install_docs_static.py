@@ -977,3 +977,31 @@ def test_quickstart_initializes_before_setup() -> None:
     text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text()
     commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
     assert commands[0] == "defenseclaw init", commands
+
+
+def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
+    # 1.0.0 is unreleased: config_version 8 was written by 0.8.5-0.8.10, so
+    # the migration and rollback docs name 0.8.x, and the 0.x upgrade path
+    # (the one a 0.8.10 user reads) says what the v9 step moves and keeps.
+    docs = ROOT / "docs-site/content/docs"
+    for page in (
+        "reference/migrate-v9.mdx",
+        "get-started/upgrade.mdx",
+        "get-started/install.mdx",
+        "reference/cli.mdx",
+        "reference/configuration.mdx",
+        "enterprise/lifecycle.mdx",
+        "guardrail/unified-llm-key.mdx",
+        "policies/admission.mdx",
+    ):
+        assert not re.search(r"\b1\.0\.x\b|the 1\.0 (?:behavior|admission)", (docs / page).read_text()), page
+
+    upgrade = (docs / "get-started/upgrade.mdx").read_text()
+    path = upgrade.split("## Upgrading from 0.x to 1.0", 1)[1].split("\n## Rollback", 1)[0]
+    for name in ("data.json", "audit.db", "config.yaml.v8.bak", "migration-v9.json"):
+        assert name in path, name
+
+    migrate = (docs / "reference/migrate-v9.mdx").read_text()
+    back = migrate.split("## Going back to 0.8.x", 1)[1]
+    assert "Configuration schema v8 is required" in back  # what the 0.8.x CLI prints
+    assert "reads up to 8" not in migrate and "migrate --check` on" not in back  # 0.8.x has `migrations`, not `migrate`

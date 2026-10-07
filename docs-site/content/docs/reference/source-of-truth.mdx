@@ -81,13 +81,28 @@ Three parts of that path matter day to day.
    enforcing the previous generation and reports the error as
    `last_reload_error`. Doctor shows it as a failed **Policy** check.
 
-Most keys apply with no restart. A short list of process-level keys still
-needs `defenseclaw-gateway restart`: `data_dir`, the gateway listener and
-token settings, the guardrail listener, `deployment_mode`,
-`enterprise.profile`, `enterprise.network`, the resource-identity keys
-(`environment`, `tenant_id`, `workspace_id`, `discovery_source`), the hook
-self-heal settings and a connector's own `enabled`. When your change touches one,
-`config set` says so:
+Most keys apply with no restart. The keys that name a file or listener the
+gateway opened at start, or that it reads once at start, still need
+`defenseclaw-gateway restart`. A change to one is saved, and the gateway keeps
+the old value until you restart it:
+
+- `data_dir`, `observability.local.path` and
+  `observability.local.judge_bodies_path`
+- `gateway.*` (the listener, authentication and upstream keys), except
+  `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`
+- `guardrail.host`, `guardrail.port`, `guardrail.enabled`,
+  `guardrail.connector`, `guardrail.scanner_mode` and
+  `guardrail.retain_judge_bodies`
+- the hook self-heal settings (`guardrail.hook_self_heal` and
+  `guardrail.hook_self_heal_debounce_ms`) and
+  `guardrail.connectors.<c>.enabled`
+- `claw`, `agent` and `routing`
+- `deployment_mode`, `enterprise.profile` and `enterprise.network`
+- the resource-identity keys (`environment`, `tenant_id`, `workspace_id`,
+  `discovery_source`)
+
+[Restart-required keys](/docs/reference/cli#restart-required-keys) is the
+reference list. When your change touches one, `config set` says so:
 
 ```text
 Set gateway.port (config generation 9, sha256 b0683fad4394).
