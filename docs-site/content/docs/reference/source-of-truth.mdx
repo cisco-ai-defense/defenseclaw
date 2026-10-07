@@ -161,6 +161,8 @@ doctor reports the drift.
 | Hook scripts, `~/.defenseclaw/hooks/<connector>-hook.sh`, and the Windows `.hookcfg` | `guardrail.hook_fail_mode`, the connector set and the gateway address. Each script carries a `# defenseclaw-derived:` header | Doctor warns `stale generated script` for the connector | `defenseclaw-gateway restart`, or `defenseclaw setup <connector>` |
 | `~/.defenseclaw/custom-providers.json` | `llm_providers` | Doctor fails `Custom-provider overlay` when the file was edited by hand or no longer matches | `defenseclaw doctor --fix` |
 | Enterprise machine policy (for example the Codex requirements file and the Claude Code managed settings) | The administrator config, inside `ensure` | `enterprise policy show` and `status` report drift | `ensure` or `repair` |
+| Sensor helper drop-in, `/etc/systemd/system/defenseclaw-sensor-helper.service.d/30-defenseclaw-tetragon.conf` (Linux, managed) | `enterprise.tetragon`: the effective mode after the Plane C cap, `burn_in`, `enforce_ack`, and the connectors whose guardrail mode is `action`. Written only when they differ from the defaults, with a `# defenseclaw-derived:` header | `enterprise linux verify` reports drift | `ensure` or `repair` |
+| Tetragon policies the sensor helper loads, `defenseclaw-<family>-<hash>` (Linux, managed), with copies in `/run/defenseclaw-sensor/tetragon/` | The built-in control set, the enrolled users and connectors in `targets.yaml`, the running agent processes, and the drop-in. The helper renders them itself; the gateway never sends policy | `enterprise linux tetragon status`; `verify` fails on a recorded policy that is missing or in error | The helper's next pass (about a minute), or restart the helper |
 | Composed rule packs, compiled `admission:`, the threshold table | `guardrail.rules`, `rule_pack`, `admission`, `block_at`, `alert_at` | Not on disk. They live in the generation and are rebuilt on every reload | Nothing to do |
 
 Older releases wrote composed protection packs to
@@ -199,6 +201,11 @@ list, and a block list does not rewrite a quarantine record.
   `asset_policy` blocks and allows an asset by name; the journal records what
   happened to it.
 - The hook guardian's target list, `targets.yaml`, on managed hosts.
+- The sensor helper's kernel-floor state on a managed Linux host, in
+  `/var/lib/defenseclaw-sensor`: the Tetragon policy names it loaded, each
+  user's burn-in progress, operator overrides (a policy you changed or deleted
+  with `tetra`) and the pause record. Nothing reads these as policy. The
+  intent is `enterprise.tetragon` in the administrator config.
 
 ## The effective policy digest
 
@@ -224,6 +231,16 @@ The **Policy** row fails when the gateway applies a different digest than
 `config.yaml` and its assets compute to (a stale gateway), or when the last
 reload was rejected. It warns when `config.yaml` was edited outside the
 writer. The fix for a stale gateway is `defenseclaw-gateway restart`.
+
+On a managed Linux host whose `enterprise.tetragon.mode` is `observe` or
+`enforce`, the digest also has a `kernel_policy` component: the digest of the
+built-in kernel control set, with no mode, user or path in it, so it is the
+same on every host of a release. The sensor helper reports the one it
+applied; `defenseclaw doctor` and `enterprise linux status` warn
+`kernel_policy_not_applied` when it differs from the generation's. It is also
+the value you put in `enterprise.tetragon.enforce_ack`. An absent
+`enterprise.tetragon` block and one that spells out the defaults give the same
+digest.
 
 The *config generation* counts writes of the file. The *generation* counts
 applied policy builds, so it also advances when a pinned asset changes. Two
@@ -282,7 +299,9 @@ This device is managed: add it to asset_policy in the admin config (MDM or manag
 Reading is unaffected: `config get`, `config show`, `status`, `doctor` and
 `enterprise policy show` all work. Runtime actions are not config writes, so
 this gate does not apply to them: quarantine, restore, disable and enable act
-on runtime state. What a standard user may do beyond that is set by the
+on runtime state, and so do `enterprise linux tetragon pause` and `resume`,
+which stop and restart kernel enforcement from the computer without changing
+the intent in the administrator config. What a standard user may do beyond that is set by the
 enterprise profile; see [Enterprise concepts](/docs/enterprise/concepts).
 
 A hand edit of `config.yaml` does not survive. On Linux and macOS the

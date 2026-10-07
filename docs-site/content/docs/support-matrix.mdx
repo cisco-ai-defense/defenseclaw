@@ -69,6 +69,27 @@ ways:
 
 <ConnectorOsMatrix edition="enterprise" />
 
+## Kernel sensor (Tetragon)
+
+On managed Linux, the enterprise sensor helper can use the
+[Tetragon](https://tetragon.io) that the computer already runs. **Verified**
+means the live round passed on that platform. **Expected, not verified** means
+the feature is built for it but no live round has run there.
+
+| Platform | Tetragon 1.7.x | Tetragon 1.6.x |
+| --- | --- | --- |
+| RHEL 9, x86_64 | Verified: consume, observe and enforce | Consume only. Expected, not verified |
+| Ubuntu 22.04 and 24.04 | Consume only. Expected, not verified | Consume only. Expected, not verified |
+| arm64 | Consume only. Expected, not verified | Consume only. Expected, not verified |
+| RHEL 8 (kernel 4.18) | Not supported. Plane C uses `cn_proc` and `fanotify` | Not supported |
+| macOS, Windows | Not available: Tetragon has no agent for either. The setting is accepted and ignored | Not available |
+
+The open-source per-user install and the Secure Client profile never connect
+to Tetragon. See [Agent segmentation, visibility and enforcement](/docs/segmentation)
+for what the kernel floor adds and does not add, and
+[AI Discovery Plane C (Tetragon)](/docs/enterprise/linux#ai-discovery-plane-c-tetragon)
+for the setup.
+
 ## Platforms
 
 <PlatformTable />
