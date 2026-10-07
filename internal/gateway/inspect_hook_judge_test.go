@@ -202,6 +202,35 @@ func TestHookJudge_ShortDeadlineSkipsJudge(t *testing.T) {
 	}
 }
 
+// GAP-0216: a hot reload that enables the judge for a connector swaps the
+// judge (SetHookJudge) while a.scannerCfg keeps the start-time snapshot; the
+// gate must follow the live generation or the judge is never asked.
+func TestHookJudge_GatingFollowsTheLiveConfigAfterAReload(t *testing.T) {
+	mock := injectionHitProvider()
+	// The gateway booted with the judge off.
+	a := newHookJudgeAPIServer(t, config.JudgeConfig{}, "judge_first", mock)
+
+	live := &config.Config{}
+	live.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}}
+	live.Guardrail.DetectionStrategy = "judge_first"
+	a.generationSource = func() *Generation { return &Generation{Config: live} }
+	a.SetHookJudge(&LLMJudge{
+		cfg: &live.Guardrail.Judge, model: "test-model", provider: mock, rp: &guardrail.RulePack{},
+	})
+
+	verdict := a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+		Tool: "message", Content: "hello there, lovely weather today",
+		Direction: "prompt", Connector: "hermes",
+	})
+
+	if len(mock.captured) == 0 {
+		t.Fatal("judge provider was never called after a reload enabled the judge for the connector")
+	}
+	if !judgeTaggedFinding(verdict.Findings) {
+		t.Fatalf("no llm-judge: tagged finding in %v", verdict.Findings)
+	}
+}
+
 // Judge unavailability fails open to the regex/AID verdict: a provider
 // error must leave the hook verdict exactly as the local lanes decided.
 func TestHookJudge_ProviderErrorFailsOpen(t *testing.T) {

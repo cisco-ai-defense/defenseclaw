@@ -152,6 +152,17 @@ class TestRestartFailsClosed(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 _restart_openclaw_gateway()
         self.assertNotIn("✓", buf.getvalue())
+        # A foreground `openclaw gateway run` has no service: OpenClaw 2026.9 exits non-zero
+        # while that gateway keeps running, and setup must not roll back (GAP-0191).
+        foreground = subprocess.CompletedProcess(
+            ["openclaw"], 1, stdout="", stderr="Gateway restart failed: Error: Foreground Gateway owner pid 7 no longer listens on port 18789\n"
+        )
+        with patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=foreground):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertIs(_restart_openclaw_gateway(), True)
+        self.assertIn("no OpenClaw gateway service", buf.getvalue())
+        self.assertNotIn("✗", buf.getvalue())
 
     def test_gap1470_rollback_to_empty_roster_skips_openclaw(self):
         from types import SimpleNamespace

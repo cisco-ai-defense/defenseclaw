@@ -11,6 +11,7 @@
  * local proxy without leaving the box.
  */
 
+import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -57,6 +58,26 @@ describe("OpenClaw interception self-test", () => {
     expect(forwarded.some((url) => url.includes("api.openai.com"))).toBe(false);
   });
 
+  it("intercepts a request that carries its own dispatcher (GAP-0190)", async () => {
+    // OpenClaw sends every model request through an SSRF-guarded fetch that hands undici a
+    // per-request dispatcher, which skips globalThis.fetch and the global dispatcher.
+    const { Agent, request } = createRequire(import.meta.url)("undici") as typeof import("undici");
+    const agent = new Agent();
+    try {
+      const response = await request("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
+        body: "{}",
+        dispatcher: agent,
+      });
+      expect(response.headers[INTERCEPTION_PROBE_HEADER.toLowerCase()]).toBe("1");
+      await response.body.text();
+    } finally {
+      await agent.close();
+    }
+    expect(forwarded.some((url) => url.includes("api.openai.com"))).toBe(false);
+  });
+
   it("records fetch, http, https, and undici layers on the startup banner", () => {
     const layers = interceptor.describeLayers();
     expect(layers.fetch).toBe(true);
@@ -64,6 +85,7 @@ describe("OpenClaw interception self-test", () => {
     expect(layers.httpRequest).toBe(true);
     expect(layers.httpGet).toBe(true);
     expect(layers.undiciDispatcher).toBe(true);
+    expect(layers.hostUndiciDispatcher).toBe(true);
     const banner = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
     expect(banner.some((line) => line.includes("interceptor layers") && line.includes("undici=true"))).toBe(true);
   });

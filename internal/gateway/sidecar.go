@@ -516,6 +516,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		publishConnectorRulePackOverrides(name, compiled)
 	}
 	router.SetRulePack(rp)
+	router.SetHealth(sidecar.health)
 	sidecar.setEventRouter(router)
 	bootGen.Config = sidecar.publishConfig(cfg)
 	sidecar.publishGeneration(bootGen)

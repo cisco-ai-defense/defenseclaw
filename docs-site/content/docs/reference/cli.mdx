@@ -1117,6 +1117,9 @@ A standard user with no per-user config on a managed device is not sent to
 device is managed: DefenseClaw is configured by your administrator (MDM or
 management plane), so there is no per-user config to create and 'defenseclaw
 init' does not apply. Nothing was changed.` and exit `3`.
+`defenseclaw doctor` in that state skips the per-user checks with the same
+notice and exits `3`; an administrator checks the device with
+`defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS).
 `guardrail ...` writers and `policy activate` are refused on a managed device
 too; today they report it differently (`guardrail ...` as an ordinary user
 stops at `Failed to save config: managed_enterprise config changes require
