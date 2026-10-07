@@ -1883,8 +1883,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// A connector added, removed, enabled or disabled re-runs the connector
 	// setup in-process and restarts the install watcher, which watches the
 	// skill and plugin dirs of the connectors. Secure Client never gets here
-	// with such a change: diffConfigs keeps it restart-required.
-	guardrailRestart := connectorSetChanged(oldCfg, newCfg)
+	// with such a change: diffConfigs keeps it restart-required. A hook fail
+	// mode change no hook guard rewrites re-runs the setup too.
+	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookFailModeNeedsSetup(oldCfg, newCfg)
 	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || signaturePacksChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
@@ -2293,6 +2294,24 @@ func connectorSetChanged(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	return !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
+}
+
+// hookFailModeNeedsSetup reports a hook fail mode change that no hook guard
+// applies: with hook self-heal off (refreshHookGuardPolicies has no guard to
+// refresh) the connector setup runs again, so the generated hooks carry the
+// new fail mode without a gateway restart. The enterprise hook guardian owns
+// managed hooks, and Secure Client keeps its behaviour.
+func hookFailModeNeedsSetup(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || newCfg.Guardrail.HookSelfHeal ||
+		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
+		return false
+	}
+	for _, name := range newCfg.ActiveConnectors() {
+		if oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // connectorHookSettings keeps, per connector, only whether its hooks are

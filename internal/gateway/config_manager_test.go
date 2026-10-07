@@ -1069,6 +1069,27 @@ func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	}
 }
 
+// The CLI no longer restarts the gateway for a hook fail mode change
+// (GAP-0184): with hook self-heal off, no hook guard rewrites the hooks, so the
+// reload re-runs the connector setup; with it on the guards do.
+func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.Guardrail.Enabled = true
+	oldCfg.Guardrail.Connector = "codex"
+	oldCfg.Guardrail.Mode = "action"
+	oldCfg.Guardrail.HookSelfHeal = false
+	oldCfg.Guardrail.HookFailMode = "open"
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.HookFailMode = "closed"
+	if !hookFailModeNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("hook fail mode change with self-heal off did not re-run the connector setup")
+	}
+	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
+	if hookFailModeNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+	}
+}
+
 func TestAIDiscoveryRestartPredicateIncludesLiveManagedModeTransitions(t *testing.T) {
 	for _, test := range []struct {
 		name string
