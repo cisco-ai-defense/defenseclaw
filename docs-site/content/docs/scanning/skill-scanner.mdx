@@ -465,7 +465,7 @@ Running a one-shot scan is a starting point. The real value is the **install wat
   <Edge from="policy" to="q" label="block" />
 </Flow>
 
-The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (a scan is cut off after `timeouts.scan_s`), so an agent session that is already open can see it in that window. A scan that fails counts as a block. A scan cut off because the gateway stops, or because a config change restarts the watcher, decides nothing: the skill is not blocked, and the watcher admits it at its next start. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
+The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (a scan is cut off after `timeouts.scan_s`), so an agent session that is already open can see it in that window; `defenseclaw skill list` and the TUI show it as `pending` or `scanning` until the verdict. The watcher scans up to three new skills at once, and the skills that arrived while the gateway was stopped have two more slots of their own, so a bulk copy of skills is not admitted one after another. A scan that fails counts as a block. A scan cut off because the gateway stops, or because a config change restarts the watcher, decides nothing: the skill is not blocked, and the watcher admits it at its next start. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
 
 Two cases do not end in quarantine storage, and both say so in `defenseclaw alerts`, `defenseclaw skill list` and `defenseclaw skill info`:
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 // countingScanner is a scanner.Scanner test double that records how many times
 // Scan was invoked so tests can assert the watcher only scans on real drift.
 type countingScanner struct {
+	mu       sync.Mutex
 	name     string
 	calls    int
 	findings []scanner.Finding
@@ -41,7 +43,9 @@ func (s *countingScanner) Version() string            { return "fake-1" }
 func (s *countingScanner) SupportedTargets() []string { return []string{"skill"} }
 
 func (s *countingScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
 	s.calls++
+	s.mu.Unlock()
 	return &scanner.ScanResult{
 		Scanner:   s.name,
 		Target:    target,

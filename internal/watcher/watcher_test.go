@@ -18,6 +18,8 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1254,5 +1256,96 @@ func TestScanCutOffByTheWatcherStoppingDoesNotQuarantine(t *testing.T) {
 	res = w.runAdmission(context.Background(), evt)
 	if res.Interrupted || res.Verdict != VerdictBlocked {
 		t.Fatalf("scan timeout: result %+v, want blocked (fail-closed)", res)
+	}
+}
+
+// gateScanner holds every scan until release is closed and records the
+// largest number of scans that ran at once.
+type gateScanner struct {
+	countingScanner
+	release chan struct{}
+	running int
+	peak    int
+}
+
+func (s *gateScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
+	s.running++
+	if s.running > s.peak {
+		s.peak = s.running
+	}
+	s.mu.Unlock()
+	<-s.release
+	s.mu.Lock()
+	s.running--
+	s.mu.Unlock()
+	return s.countingScanner.Scan(ctx, target)
+}
+
+// GAP-0341: 33 skills dropped at once were admitted one at a time, each one
+// listed as ready and unscanned until its turn. Admission now runs a few at
+// once and AdmissionStateFile shows the rest as pending or scanning.
+func TestBulkDropIsAdmittedInParallelAndShownPending(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	gate := &gateScanner{countingScanner: countingScanner{name: "skill-scanner"}, release: make(chan struct{})}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return gate }
+	for i := 0; i < 6; i++ {
+		path := filepath.Join(skillDir, fmt.Sprintf("bulk-%d", i))
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		w.queuePending(path)
+	}
+	readState := func() map[string]string {
+		raw, err := os.ReadFile(filepath.Join(cfg.DataDir, AdmissionStateFile))
+		if err != nil {
+			return nil
+		}
+		var doc admissionStateFile
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, a := range doc.Assets {
+			out[a.Name] = a.State
+		}
+		return out
+	}
+	if st := readState(); len(st) != 6 || st["bulk-0"] != AdmissionPending {
+		t.Fatalf("state before admission = %v, want 6 pending", st)
+	}
+	w.mu.Lock()
+	for path := range w.pending {
+		w.pending[path] = time.Now().Add(-time.Hour)
+	}
+	w.mu.Unlock()
+	w.processPending(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		gate.mu.Lock()
+		running := gate.running
+		gate.mu.Unlock()
+		if running == liveAdmissionWorkers || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	scanning := 0
+	for _, state := range readState() {
+		if state == AdmissionScanning {
+			scanning++
+		}
+	}
+	close(gate.release)
+	w.waitAdmissions()
+	if gate.peak != liveAdmissionWorkers || scanning != liveAdmissionWorkers {
+		t.Fatalf("peak concurrent scans %d, scanning entries %d; want %d", gate.peak, scanning, liveAdmissionWorkers)
+	}
+	if gate.calls != 6 {
+		t.Fatalf("scans = %d, want 6", gate.calls)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, AdmissionStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("admission state file left after every admission ended (err %v)", err)
 	}
 }

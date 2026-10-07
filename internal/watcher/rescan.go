@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -134,12 +135,14 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	// target, so compute them at most once per kind per cycle.
 	fpCache := make(map[string]string)
 
-	var scanned, skipped int
-	for _, evt := range targets {
-		if ctx.Err() != nil {
-			return
-		}
-		outcome := w.rescanTarget(ctx, evt, fpCache)
+	var (
+		countMu          sync.Mutex
+		scanned, skipped int
+		startup          sync.WaitGroup
+	)
+	count := func(evt InstallEvent, outcome rescanOutcome) {
+		countMu.Lock()
+		defer countMu.Unlock()
 		if outcome == rescanScanned {
 			scanned++
 			w.recordWatcherEvent(ctx, "rescan_scan", string(evt.Type), "")
@@ -147,6 +150,36 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			skipped++
 			w.recordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
 		}
+	}
+	for _, evt := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		if w.admitsNewAtStartup(evt) {
+			// Added while the gateway was stopped: admitted by
+			// startupAdmissionWorkers at once, shown as pending until
+			// then, instead of one after another in this loop (GAP-0341).
+			w.state.set(evt, AdmissionPending)
+			startup.Add(1)
+			go func() {
+				defer startup.Done()
+				defer w.state.clear(evt.Path)
+				select {
+				case w.startupSlots <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-w.startupSlots }()
+				w.state.set(evt, AdmissionScanning)
+				count(evt, w.rescanTarget(ctx, evt, fpCache))
+			}()
+			continue
+		}
+		count(evt, w.rescanTarget(ctx, evt, fpCache))
+	}
+	startup.Wait()
+	if ctx.Err() != nil {
+		return
 	}
 	w.markWatchRoots()
 
@@ -218,6 +251,16 @@ func (w *InstallWatcher) markWatchRoots() {
 			w.markedWatchRoots[key] = true
 		}
 	}
+}
+
+// admitsNewAtStartup reports a skill or plugin the startup rescan admits:
+// one without a baseline under a root that was baselined before.
+func (w *InstallWatcher) admitsNewAtStartup(evt InstallEvent) bool {
+	if w.startupRescanDone || evt.Type == InstallMCP || w.startupSlots == nil || !w.admitsAtStartup(evt) {
+		return false
+	}
+	_, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	return errors.Is(err, sql.ErrNoRows)
 }
 
 // admitsAtStartup reports whether the startup rescan must run install
@@ -659,9 +702,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				// watcher started: admit it as `mcp set` would (GAP-0132).
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
 				res := w.runAdmission(ctx, evt)
-				if w.onAdmit != nil {
-					w.onAdmit(res)
-				}
+				w.notifyAdmission(res)
 				if !res.Interrupted {
 					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
 				}
@@ -672,9 +713,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt)
-				if w.onAdmit != nil {
-					w.onAdmit(res)
-				}
+				w.notifyAdmission(res)
 				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
@@ -884,15 +923,17 @@ func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[string]st
 	if evt.Type == InstallSkill {
 		key += "\x00" + w.eventConnector(evt)
 	}
-	if cache != nil {
-		if fp, ok := cache[key]; ok {
-			return fp
-		}
+	if cache == nil {
+		return w.scannerFingerprint(evt)
+	}
+	// The startup admissions of a cycle share the cache.
+	w.fpMu.Lock()
+	defer w.fpMu.Unlock()
+	if fp, ok := cache[key]; ok {
+		return fp
 	}
 	fp := w.scannerFingerprint(evt)
-	if cache != nil {
-		cache[key] = fp
-	}
+	cache[key] = fp
 	return fp
 }
 

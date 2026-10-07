@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -1172,6 +1173,8 @@ def _skill_status(s: dict[str, Any]) -> str:
         return "disabled"
     if s.get("blockedByAllowlist"):
         return "blocked"
+    if s.get("admission"):
+        return str(s["admission"])
     if s.get("eligible"):
         return "active"
     return "inactive"
@@ -1195,6 +1198,8 @@ def _skill_status_display(
         return "✗ disabled"
     if s.get("blockedByAllowlist"):
         return "✗ blocked"
+    if s.get("admission"):
+        return f"… {s['admission']}"
     if action_entry and not action_entry.actions.is_empty():
         a = action_entry.actions
         if a.file == "quarantine":
@@ -1364,6 +1369,45 @@ def _skill_policy_verdicts(
     return out
 
 
+# The install watcher's list of assets it has not decided on yet
+# (internal/watcher AdmissionStateFile); older than this, the watcher is gone.
+_ADMISSION_STATE_FILE = "watcher-admission.json"
+_ADMISSION_STATE_MAX_AGE_S = 30 * 60
+
+
+def _pending_admissions(app: AppContext) -> dict[str, str]:
+    """Normalized path -> pending|scanning for skills the watcher has not admitted yet."""
+    data_dir = str(getattr(getattr(app, "cfg", None), "data_dir", "") or "")
+    path = os.path.join(data_dir, _ADMISSION_STATE_FILE) if data_dir else ""
+    try:
+        if not path or time.time() - os.path.getmtime(path) > _ADMISSION_STATE_MAX_AGE_S:
+            return {}
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for asset in doc.get("assets") or []:
+        if isinstance(asset, dict) and asset.get("type") == "skill" and asset.get("path"):
+            out[os.path.normcase(os.path.abspath(str(asset["path"])))] = str(asset.get("state") or "pending")
+    return out
+
+
+def _mark_pending_admissions(app: AppContext, skills: list[dict[str, Any]]) -> None:
+    """Show a skill the watcher has not scanned yet as pending or scanning (GAP-0341).
+
+    It used to read ready with no verdict, as if it were clean, until its turn.
+    """
+    pending = _pending_admissions(app)
+    if not pending:
+        return
+    for s in skills:
+        base = str(s.get("baseDir") or "")
+        state = pending.get(os.path.normcase(os.path.abspath(base))) if base else None
+        if state:
+            s["admission"] = state
+
+
 def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) -> None:
     """Flag off-disk skills whose files are held in quarantine.
 
@@ -1442,6 +1486,7 @@ def _collect_skills_for_connector(
             known_names.add(name)
 
     _mark_quarantined_phantoms(app, skills)
+    _mark_pending_admissions(app, skills)
 
     # Vendor-bundled skills are discovery-only: DefenseClaw never scans or
     # blocks them, so a verdict on another connector's skill with the same

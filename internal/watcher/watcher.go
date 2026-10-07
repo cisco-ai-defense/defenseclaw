@@ -212,6 +212,21 @@ type InstallWatcher struct {
 
 	// binaryVersions caches each scanner binary's probed --version.
 	binaryVersions sync.Map
+
+	// state publishes the assets awaiting admission (AdmissionStateFile).
+	state *admissionState
+	// inFlight are the queued paths an admission worker holds (under mu);
+	// an event for one waits in pending until that admission ends.
+	inFlight map[string]bool
+	// liveSlots and startupSlots bound the concurrent admissions of the
+	// live watcher and of the startup rescan; admissions tracks them.
+	liveSlots    chan struct{}
+	startupSlots chan struct{}
+	admissions   sync.WaitGroup
+	// admitMu serializes onAdmit, which admission workers call.
+	admitMu sync.Mutex
+	// fpMu guards a rescan cycle's fingerprint cache.
+	fpMu sync.Mutex
 }
 
 type rootConnector struct {
@@ -249,6 +264,11 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		rescanNow:  make(chan struct{}, 1),
 
 		admitMCPNow: make(chan struct{}, 1),
+
+		state:        newAdmissionState(cfg.DataDir),
+		inFlight:     make(map[string]bool),
+		liveSlots:    make(chan struct{}, liveAdmissionWorkers),
+		startupSlots: make(chan struct{}, startupAdmissionWorkers),
 	}
 }
 
@@ -343,9 +363,7 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 			if snap, err := w.snapshotForEvent(evt); err == nil {
 				fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
 				res := w.runAdmission(ctx, evt)
-				if w.onAdmit != nil {
-					w.onAdmit(res)
-				}
+				w.notifyAdmission(res)
 				if !res.Interrupted {
 					w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
 				}
@@ -599,6 +617,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// In-flight admissions see the stop and end without a verdict
+			// (GAP-0335); wait for them before the store goes away.
+			w.admissions.Wait()
+			w.state.reset()
 			_ = w.logger.LogAction(string(audit.ActionWatchStop), "", "context cancelled")
 			return ctx.Err()
 
@@ -661,11 +683,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				evtType = "rename"
 			}
 			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(queued).Type.String(), "")
-			w.mu.Lock()
-			if _, exists := w.pending[queued]; !exists {
-				w.pending[queued] = time.Now()
-			}
-			w.mu.Unlock()
+			w.queuePending(queued)
 
 		case err, ok := <-fsw.Errors:
 			if !ok {
@@ -693,33 +711,93 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 }
 
+// queuePending queues path for admission after the debounce and shows it
+// as pending (AdmissionStateFile).
+func (w *InstallWatcher) queuePending(path string) {
+	w.mu.Lock()
+	_, exists := w.pending[path]
+	if !exists {
+		w.pending[path] = time.Now()
+	}
+	w.mu.Unlock()
+	if !exists {
+		w.state.set(w.classifyEvent(path), AdmissionPending)
+	}
+}
+
+// processPending hands each debounced path to an admission worker. At most
+// liveAdmissionWorkers scans run at once, and the Run loop keeps reading
+// events while they do: a bulk drop of skills used to be admitted one at a
+// time, about one a minute with the judge, each skill loaded and unscanned
+// until its turn (GAP-0341).
 func (w *InstallWatcher) processPending(ctx context.Context) {
 	w.mu.Lock()
 	now := time.Now()
 	var ready []string
 	for path, firstSeen := range w.pending {
+		if w.inFlight[path] {
+			continue // admitted again once the running admission ends
+		}
 		if now.Sub(firstSeen) >= w.debounce {
 			ready = append(ready, path)
 		}
 	}
 	for _, p := range ready {
 		delete(w.pending, p)
+		w.inFlight[p] = true
 	}
 	w.mu.Unlock()
 
 	for _, path := range ready {
 		if _, err := os.Stat(path); err != nil {
+			w.endAdmission(path)
 			continue
 		}
-		for _, evt := range w.pendingInstallEvents(path) {
-			snap := w.admissionSnapshot(evt)
-			result := w.runAdmission(ctx, evt)
-			w.recordAdmissionBaseline(evt, snap, result.ScanID)
-			if w.onAdmit != nil {
-				w.onAdmit(result)
+		events := w.pendingInstallEvents(path) // Run goroutine state
+		w.admissions.Add(1)
+		go func() {
+			defer w.admissions.Done()
+			defer w.endAdmission(path)
+			select {
+			case w.liveSlots <- struct{}{}:
+			case <-ctx.Done():
+				return // no baseline: the next start admits it
 			}
-		}
+			defer func() { <-w.liveSlots }()
+			for _, evt := range events {
+				if ctx.Err() != nil {
+					return
+				}
+				w.state.set(evt, AdmissionScanning)
+				snap := w.admissionSnapshot(evt)
+				result := w.runAdmission(ctx, evt)
+				w.recordAdmissionBaseline(evt, snap, result.ScanID)
+				w.state.clear(evt.Path)
+				w.notifyAdmission(result)
+			}
+		}()
 	}
+}
+
+// endAdmission releases a queued path an admission worker held.
+func (w *InstallWatcher) endAdmission(path string) {
+	w.mu.Lock()
+	delete(w.inFlight, path)
+	w.mu.Unlock()
+	w.state.clear(path)
+}
+
+// waitAdmissions waits for the admissions processPending started.
+func (w *InstallWatcher) waitAdmissions() { w.admissions.Wait() }
+
+// notifyAdmission reports an admission result; workers call it one at a time.
+func (w *InstallWatcher) notifyAdmission(res AdmissionResult) {
+	if w.onAdmit == nil {
+		return
+	}
+	w.admitMu.Lock()
+	defer w.admitMu.Unlock()
+	w.onAdmit(res)
 }
 
 // pendingInstallEvents expands a top-level Hermes category notification into
@@ -1666,6 +1744,7 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 		w.mu.Lock()
 		if _, exists := w.pending[child]; !exists {
 			w.pending[child] = time.Now()
+			defer w.state.set(w.classifyEvent(child), AdmissionPending)
 		}
 		w.mu.Unlock()
 	}
