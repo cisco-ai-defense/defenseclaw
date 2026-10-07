@@ -13,6 +13,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
@@ -51,7 +52,34 @@ func (a *APIServer) recordManagedHookDecision(ctx context.Context, connectorName
 		PeerPID:          peer.PID,
 		PeerUID:          peer.UID,
 		At:               time.Now(),
+		Action:           hookJoinAction(resp),
+		RuleIDs:          firstRuleIDs(resp.RuleIDs),
 	})
+}
+
+// hookJoinAction is a joinable decision's verdict as the join carries it:
+// alert when the tool ran with a finding (an alert, a confirm the user
+// answered, or a would-block of a connector in observe mode), else allow.
+func hookJoinAction(resp agentHookResponse) string {
+	switch strings.ToLower(strings.TrimSpace(resp.Action)) {
+	case "alert", "confirm":
+		return "alert"
+	}
+	if resp.WouldBlock {
+		return "alert"
+	}
+	return "allow"
+}
+
+// firstRuleIDs keeps the first sensor.MaxHookRuleIDs rule ids.
+func firstRuleIDs(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" && len(out) < sensor.MaxHookRuleIDs {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // hookDecisionJoinable reports a decision a tool's processes can follow: a

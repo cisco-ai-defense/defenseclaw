@@ -18,7 +18,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sort"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
@@ -49,18 +51,25 @@ func policyDialer(scope tetragon.Scope) kernelpolicy.DialFunc {
 // lifetime and returns the event stream's Tetragon wiring: the drop-in's
 // mode, the event dialer (none in off) and the hooks that feed the
 // reconciler and answer kernel_status. The drop-in is read once, here.
+//
+// One ledger counts the events of the host's own Tetragon policies for the
+// helper's lifetime: the event sessions write it, the reconciler publishes
+// it in the state file and kernel_status reads it as it is now.
 func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string, manifest string) *acquire.TetragonConfig {
 	intent := kernelPolicyIntent(envvars.Lookup, logger)
 	scope := tetragon.ScopeCleanup
 	if intent.Mode.LoadsPolicies() {
 		scope = tetragon.ScopePolicy
 	}
-	controller := kernelPolicyStart(ctx, logger, intent, policyDialer(scope), manifest)
+	ledger := tetragon.NewCustomerLedger()
+	controller := kernelPolicyStart(ctx, logger, intent, policyDialer(scope), manifest, customerSource(ledger))
 	config := &acquire.TetragonConfig{
 		Mode:             string(intent.Mode),
 		OwnObservePolicy: func(name string) bool { return controller.OwnsPolicy(name, kernelpolicy.FamilyObserve) },
 		KernelStatus: func(context.Context) (acquire.KernelStatus, error) {
-			return kernelStatusOf(controller.Status(), intent.Mode), nil
+			status := kernelStatusOf(controller.Status(), intent)
+			withCustomer(&status, ledger, time.Now(), tetragonInstalled())
+			return status, nil
 		},
 		Tap: hitTap(controller),
 		Stream: func(state plane.StreamState) {
@@ -70,9 +79,65 @@ func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string,
 		},
 	}
 	if intent.Mode != kernelpolicy.ModeOff {
-		config.Dial = tetragon.NewDialer(tetragon.DialerConfig{Homes: homes, BinDir: helperBinDir(), PolicyMode: controller.PolicyMode})
+		config.Dial = tetragon.NewDialer(tetragon.DialerConfig{
+			Homes: homes, BinDir: helperBinDir(), PolicyMode: controller.PolicyMode,
+			Owns: controller.Owns, Customer: ledger, CustomerEvents: intent.CustomerEventsSetting(),
+		})
 	}
 	return config
+}
+
+// customerSource is the ledger as the reconciler's state reads it.
+func customerSource(ledger *tetragon.CustomerLedger) kernelpolicy.CustomerSource {
+	return func(now time.Time) ([]kernelpolicy.CustomerPolicy, kernelpolicy.CustomerEvents) {
+		statuses, totals := ledger.Snapshot(now)
+		policies := make([]kernelpolicy.CustomerPolicy, 0, len(statuses))
+		for _, status := range statuses {
+			policies = append(policies, kernelpolicy.CustomerPolicy{
+				Name: status.Name, Listed: status.Listed, Mode: status.Mode, State: status.State,
+				Sensors: status.Sensors, Error: status.Error, Actions: status.Actions,
+				CustomerEvents: customerEvents(status.CustomerCounts), LastEventAt: status.LastEvent,
+			})
+		}
+		return policies, customerEvents(totals)
+	}
+}
+
+func customerEvents(counts tetragon.CustomerCounts) kernelpolicy.CustomerEvents {
+	return kernelpolicy.CustomerEvents{
+		Seen: counts.Seen, Forwarded: counts.Forwarded, Dropped: counts.Dropped(), Container: counts.Container,
+		Self: counts.Self, Capped: counts.Capped, Withheld: counts.Withheld, CappedLastHour: counts.CappedLastHour,
+	}
+}
+
+// withCustomer adds the customer policies, as the ledger counts them now,
+// to a kernel_status reply: names, modes and counts only. Off has no event
+// stream and reports none.
+func withCustomer(status *acquire.KernelStatus, ledger *tetragon.CustomerLedger, now time.Time, installed bool) {
+	if status.Tetragon != nil {
+		status.Tetragon.Installed = &installed
+	}
+	if status.IntentMode == string(kernelpolicy.ModeOff) {
+		return
+	}
+	statuses, totals := ledger.Snapshot(now)
+	for _, policy := range statuses {
+		status.CustomerPolicies = append(status.CustomerPolicies, acquire.KernelCustomerPolicy{
+			Name: policy.Name, Mode: policy.Mode, State: policy.State, KernelCustomerEvents: kernelCustomerEvents(policy.CustomerCounts),
+		})
+	}
+	events := kernelCustomerEvents(totals)
+	status.CustomerEvents = &events
+}
+
+func kernelCustomerEvents(counts tetragon.CustomerCounts) acquire.KernelCustomerEvents {
+	return acquire.KernelCustomerEvents{Seen: counts.Seen, Forwarded: counts.Forwarded, Dropped: counts.Dropped(), Container: counts.Container}
+}
+
+// tetragonInstalled reports whether Tetragon's discovery file exists.
+func tetragonInstalled() bool {
+	_, err := os.Stat(tetragon.DefaultInfoPath)
+	return err == nil
 }
 
 func cleanupKernelPolicy(ctx context.Context, out io.Writer, logger *slog.Logger) error {
@@ -101,14 +166,15 @@ type hitSink interface {
 
 // hitTap counts the events of DefenseClaw's own controls policies (the
 // controller keeps only exact names it loaded) and the loss signals, from the
-// stream the helper can vouch for. It must not block.
+// stream the helper can vouch for. An event of a customer policy is never a
+// hit. It must not block.
 func hitTap(sink hitSink) func(plane.KernelBatch) {
 	return func(batch plane.KernelBatch) {
 		if batch.ThrottleStart || batch.Dropped > 0 {
 			sink.RecordLoss()
 		}
 		for _, event := range batch.Events {
-			if event.Policy == "" || event.UID == nil {
+			if event.Policy == "" || event.PolicyOwner != plane.PolicyOwnerDefenseClaw || event.UID == nil {
 				continue
 			}
 			sink.RecordHit(kernelpolicy.Hit{
@@ -126,12 +192,14 @@ func hitTap(sink hitSink) func(plane.KernelBatch) {
 // still names what the retire step has not removed yet, with its warnings and
 // change records: that is how the gateway reports orphaned policies and
 // emits the removals.
-func kernelStatusOf(state kernelpolicy.State, mode kernelpolicy.Mode) acquire.KernelStatus {
+func kernelStatusOf(state kernelpolicy.State, intent kernelpolicy.Intent) acquire.KernelStatus {
+	mode := intent.Mode
 	if !mode.LoadsPolicies() {
 		status := acquire.KernelStatus{
 			Available: false, Mode: string(mode), KernelPolicy: state.KernelPolicy,
-			Reason:   "mode " + string(mode) + ": the helper only retires policies it recorded",
-			Warnings: append([]string(nil), state.Warnings...),
+			Reason:     "mode " + string(mode) + ": the helper only retires policies it recorded",
+			Warnings:   append([]string(nil), state.Warnings...),
+			IntentMode: string(mode), Approval: intent.Approval(),
 		}
 		if !state.UpdatedAt.IsZero() {
 			status.UpdatedUnixNano = state.UpdatedAt.UnixNano()
@@ -155,6 +223,8 @@ func kernelStatusOf(state kernelpolicy.State, mode kernelpolicy.Mode) acquire.Ke
 		Applied:      state.InSync,
 		Warnings:     append([]string(nil), state.Warnings...),
 		Counters:     map[string]int64{},
+		IntentMode:   string(mode),
+		Approval:     intent.Approval(),
 	}
 	if status.Mode == "" {
 		status.Mode = string(mode)
@@ -192,6 +262,10 @@ func kernelStatusOf(state kernelpolicy.State, mode kernelpolicy.Mode) acquire.Ke
 		status.Users = append(status.Users, entry)
 	}
 	status.Counters["would_block"], status.Counters["blocked"] = wouldBlock, blocked
+	// Since the helper started, every user's (the per-user counts above
+	// restart with burn-in): the gateway reports their growth per cycle.
+	status.Counters["would_block_total"] = state.HitTotals["would_block_total"]
+	status.Counters["blocked_total"] = state.HitTotals["blocked_total"]
 	status.Counters["roots_anchored"] = int64(state.Roots.Anchored)
 	status.Counters["roots_over_limit"] = int64(state.Roots.OverLimit)
 	for _, observed := range state.Roots.Observed {
@@ -226,6 +300,7 @@ func kernelChanges(changes []kernelpolicy.Change) []acquire.KernelChange {
 		out = append(out, acquire.KernelChange{
 			Seq: change.Seq, AtUnixNano: change.At.UnixNano(), Event: change.Event, Policy: change.Policy,
 			Family: string(change.Family), Mode: string(change.Mode), State: change.State, UID: change.UID, Reason: change.Reason,
+			CoveredSeconds: change.CoveredSeconds, NeededSeconds: change.NeededSeconds,
 		})
 	}
 	return out

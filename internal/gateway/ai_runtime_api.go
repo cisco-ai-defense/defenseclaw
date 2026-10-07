@@ -23,6 +23,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -59,6 +60,50 @@ type aiRuntimeResponse struct {
 	HostPlaneHookUnexpected int64    `json:"host_plane_hook_unexpected,omitempty"`
 	Degraded                bool     `json:"degraded"`
 	DegradedReasons         []string `json:"degraded_reasons,omitempty"`
+	// CustomerKernelEvents are the latest events of the host's own Tetragon
+	// policies below an AI agent (at most 100, oldest first), attributed to
+	// the agent, its user and the hook decision of the tool call. Absent
+	// where none was attributed. /health carries only the counts.
+	CustomerKernelEvents []aiRuntimeCustomerEvent `json:"customer_kernel_events,omitempty"`
+}
+
+// aiRuntimeCustomerEvent is one attributed event of a customer policy.
+type aiRuntimeCustomerEvent struct {
+	At         string   `json:"at"`
+	Policy     string   `json:"policy"`
+	HookType   string   `json:"hook_type,omitempty"`
+	Function   string   `json:"function,omitempty"`
+	Action     string   `json:"action,omitempty"`
+	PolicyMode string   `json:"policy_mode,omitempty"`
+	Outcome    string   `json:"outcome"`
+	Target     string   `json:"target,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	Message    string   `json:"message,omitempty"`
+	Count      int      `json:"count"`
+	PID        int      `json:"pid"`
+	Process    string   `json:"process,omitempty"`
+	Exe        string   `json:"exe,omitempty"`
+	Cmdline    string   `json:"cmdline,omitempty"`
+	UserID     string   `json:"user_id,omitempty"`
+	LoginID    string   `json:"login_id,omitempty"`
+	User       string   `json:"user,omitempty"`
+	AgentName  string   `json:"agent_name,omitempty"`
+	Connector  string   `json:"connector,omitempty"`
+	// AgentIdentityID is the agt-... id of the agent's connector install.
+	AgentIdentityID   string `json:"agent_identity_id,omitempty"`
+	RootPID           int    `json:"root_pid,omitempty"`
+	SessionRootPID    int    `json:"session_root_pid,omitempty"`
+	ToolPID           int    `json:"tool_pid,omitempty"`
+	NotEnforcedReason string `json:"not_enforced_reason,omitempty"`
+	// HookSeen, on managed hosts, says whether a hook decision covered the
+	// tool call; HookJoin, HookAction and HookRuleIDs describe it, with its
+	// session and tool call.
+	HookSeen         *bool    `json:"hook_seen,omitempty"`
+	HookJoin         string   `json:"hook_join,omitempty"`
+	HookAction       string   `json:"hook_action,omitempty"`
+	HookRuleIDs      []string `json:"hook_rule_ids,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	ToolInvocationID string   `json:"tool_invocation_id,omitempty"`
 }
 
 type aiRuntimeFinding struct {
@@ -114,6 +159,7 @@ type aiRuntimeActivity struct {
 	// (exact or temporal), with the decision's session and tool call.
 	HookSeen         *bool  `json:"hook_seen,omitempty"`
 	HookJoin         string `json:"hook_join,omitempty"`
+	HookAction       string `json:"hook_action,omitempty"`
 	SessionID        string `json:"session_id,omitempty"`
 	ToolInvocationID string `json:"tool_invocation_id,omitempty"`
 }
@@ -175,6 +221,30 @@ type aiRuntimeBackend struct {
 	// KernelFloor summarizes the kernel controls' scope per user, when the
 	// helper's reconciler runs (observe or enforce).
 	KernelFloor *aiRuntimeKernelFloor `json:"kernel_floor,omitempty"`
+	// CustomerPolicies are the host's own Tetragon policies, with the
+	// helper's and the gateway's counts of their events, and CustomerEvents
+	// the totals. DefenseClaw reads their events and never changes them.
+	CustomerPolicies []aiRuntimeCustomerPolicy `json:"customer_policies,omitempty"`
+	CustomerEvents   *aiRuntimeCustomerEvents  `json:"customer_events,omitempty"`
+}
+
+type aiRuntimeCustomerPolicy struct {
+	Name  string `json:"name"`
+	Mode  string `json:"mode,omitempty"`
+	State string `json:"state,omitempty"`
+	aiRuntimeCustomerEvents
+}
+
+// aiRuntimeCustomerEvents count a customer policy's events: in the helper
+// (seen, forwarded, dropped, container) and in the gateway (attributed: below
+// an AI agent, recorded; gated: the rest, counted only).
+type aiRuntimeCustomerEvents struct {
+	Seen       int64 `json:"seen"`
+	Forwarded  int64 `json:"forwarded"`
+	Dropped    int64 `json:"dropped"`
+	Container  int64 `json:"container"`
+	Attributed int64 `json:"attributed"`
+	Gated      int64 `json:"gated"`
 }
 
 type aiRuntimeKernelPolicy struct {
@@ -190,6 +260,12 @@ type aiRuntimeKernelFloor struct {
 	EnforcedUsers int    `json:"enforced_users"`
 	BurnInUsers   int    `json:"burn_in_users"`
 	PausedUntil   string `json:"paused_until,omitempty"`
+	// Approval is enforce_ack's state as the helper reports it: not_needed,
+	// missing, stale or approved.
+	Approval string `json:"approval,omitempty"`
+	// NextReadyHours is the covered agent time, in hours, that the user
+	// closest to the end of burn-in still needs; absent when nobody is.
+	NextReadyHours *float64 `json:"next_ready_hours,omitempty"`
 }
 
 // handleAIRuntime serves the most recent runtime-plane snapshot.
@@ -255,6 +331,9 @@ func renderAIRuntimeSnapshot(snapshot sensor.Snapshot) aiRuntimeResponse {
 			Backend: renderAIRuntimeBackend(plane.Backend, snapshot.Kernel),
 		})
 	}
+	for _, event := range snapshot.RecentCustomerKernelEvents {
+		response.CustomerKernelEvents = append(response.CustomerKernelEvents, renderCustomerEvent(event))
+	}
 	for _, finding := range snapshot.Findings {
 		identity := runtimeFindingIdentity(finding, snapshot.Kernel)
 		rendered := aiRuntimeFinding{
@@ -311,11 +390,51 @@ func renderAIRuntimeActivity(finding sensor.Finding, activity sensor.RuntimeActi
 		rendered.HookSeen = &seen
 		if seen {
 			rendered.HookJoin = activity.Hook.Confidence
+			rendered.HookAction = activity.Hook.Action
 			rendered.SessionID = activity.Hook.SessionID
 			rendered.ToolInvocationID = activity.Hook.ToolInvocationID
 		}
 	}
 	return rendered
+}
+
+// renderCustomerEvent is one attributed event of a customer policy as the
+// runtime API serves it.
+func renderCustomerEvent(event sensor.CustomerKernelEvent) aiRuntimeCustomerEvent {
+	identity := uidIdentity(event.UID, event.AUID)
+	rendered := aiRuntimeCustomerEvent{
+		Policy: event.Policy, HookType: event.HookType, Function: event.Function, Action: event.Action,
+		PolicyMode: event.PolicyMode, Outcome: string(event.Outcome), Target: event.Target,
+		Tags: append([]string(nil), event.Tags...), Message: event.Message, Count: max(event.Count, 1),
+		PID: event.PID, Process: event.Process, Exe: event.Exe, Cmdline: event.Cmdline,
+		UserID: identity.UserID, LoginID: identity.LoginID, User: event.User,
+		AgentName: event.AgentName, Connector: event.Connector, AgentIdentityID: customerAgentIdentityID(event),
+		RootPID: event.RootPID, SessionRootPID: event.SessionRootPID, ToolPID: event.ToolPID,
+		NotEnforcedReason: event.NotEnforcedReason,
+	}
+	if !event.At.IsZero() {
+		rendered.At = event.At.UTC().Format(time.RFC3339Nano)
+	}
+	if event.Hook != nil {
+		seen := event.Hook.Seen
+		rendered.HookSeen = &seen
+		if seen {
+			rendered.HookJoin, rendered.HookAction = event.Hook.Confidence, event.Hook.Action
+			rendered.HookRuleIDs = append([]string(nil), event.Hook.RuleIDs...)
+			rendered.SessionID, rendered.ToolInvocationID = event.Hook.SessionID, event.Hook.ToolInvocationID
+		}
+	}
+	return rendered
+}
+
+// customerAgentIdentityID is the agt-... id of the agent a customer policy's
+// event is attributed to, when it is an enrolled CLI connector's.
+func customerAgentIdentityID(event sensor.CustomerKernelEvent) string {
+	uid := uidString(event.UID)
+	if event.Connector == "" || uid == "" {
+		return ""
+	}
+	return inventoryAgentIdentityID(event.Connector, uid)
 }
 
 // renderAIRuntimeBackend is Plane C's backend as the runtime API and /health
@@ -336,7 +455,22 @@ func renderAIRuntimeBackend(backend *plane.Backend, kernel *sensor.KernelState) 
 		})
 	}
 	rendered.KernelFloor = renderKernelFloor(kernel)
+	for _, policy := range backend.CustomerPolicies {
+		rendered.CustomerPolicies = append(rendered.CustomerPolicies, aiRuntimeCustomerPolicy{
+			Name: policy.Name, Mode: policy.Mode, State: policy.State, aiRuntimeCustomerEvents: customerEventsOf(policy.CustomerEvents),
+		})
+	}
+	if events := customerEventsOf(backend.CustomerEvents); backend.Kind == plane.BackendTetragon || events != (aiRuntimeCustomerEvents{}) {
+		rendered.CustomerEvents = &events
+	}
 	return rendered
+}
+
+func customerEventsOf(events plane.CustomerEvents) aiRuntimeCustomerEvents {
+	return aiRuntimeCustomerEvents{
+		Seen: events.Seen, Forwarded: events.Forwarded, Dropped: events.Dropped, Container: events.Container,
+		Attributed: events.Attributed, Gated: events.Gated,
+	}
 }
 
 // renderKernelFloor counts the enrolled users by enforcing scope.
@@ -351,7 +485,7 @@ func renderKernelFloor(kernel *sensor.KernelState) *aiRuntimeKernelFloor {
 	}
 	floor := &aiRuntimeKernelFloor{
 		Mode: kernel.Status.Mode, EnrolledUsers: len(kernel.Status.Users),
-		PausedUntil: kernelPauseUntil(kernel.Status.Pause),
+		PausedUntil: kernelPauseUntil(kernel.Status.Pause), Approval: kernel.Status.Approval,
 	}
 	for _, user := range kernel.Status.Users {
 		switch user.Mode {
@@ -361,7 +495,25 @@ func renderKernelFloor(kernel *sensor.KernelState) *aiRuntimeKernelFloor {
 			floor.BurnInUsers++
 		}
 	}
+	floor.NextReadyHours = kernelNextReadyHours(kernel.Status.Users)
 	return floor
+}
+
+// kernelNextReadyHours is the covered agent time, in hours to one decimal,
+// the user closest to the end of burn-in still needs; nil when no user is
+// measuring (everyone ready, observe-only or with no burn-in).
+func kernelNextReadyHours(users []acquire.KernelUserStatus) *float64 {
+	var next *float64
+	for _, user := range users {
+		if user.Ready || user.BurnInSeconds <= 0 || user.Mode == "observe_only" {
+			continue
+		}
+		hours := math.Round(float64(max(user.BurnInSeconds-user.CoveredSeconds, 0))/360) / 10
+		if next == nil || hours < *next {
+			next = &hours
+		}
+	}
+	return next
 }
 
 // kernelPauseUntil renders a break-glass pause's end: a UTC time, "reboot"
@@ -509,6 +661,14 @@ func kernelPolicyHealth(state *sensor.KernelState, now time.Time) map[string]int
 	}
 	if !status.Available && status.Reason != "" {
 		section["reason"] = status.Reason
+	}
+	if status.IntentMode != "" {
+		// The drop-in's mode before the enforce caps, and whether
+		// enforce_ack approves this build's controls.
+		section["intent_mode"] = status.IntentMode
+	}
+	if status.Approval != "" {
+		section["approval"] = status.Approval
 	}
 	if counts := kernelModeCounts(status.Users); len(counts) > 0 {
 		section["mode_by_uid_count"] = counts

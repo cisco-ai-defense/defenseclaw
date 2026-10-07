@@ -177,6 +177,9 @@ LOKI_BUILTIN_FIELDS = {
     # The local Collector adds the sandbox name of every record that names
     # one as structured metadata (processors.transform/sandbox-identity).
     "defenseclaw_sandbox_name",
+    # The gateway's resource host.name; native OTLP ingestion keeps it as
+    # structured metadata, so a host filter works before or after `| json`.
+    "host_name",
     "level",
     "severity_text",
     "service_name",

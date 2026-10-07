@@ -68,6 +68,20 @@ const (
 	// the host (Remote). Only the Tetragon backend's connect policy produces
 	// it; the classifier has no tactic for it, so it never scores alone.
 	KindConnect Kind = "connect"
+	// KindPolicyEvent is a kprobe or LSM event of one of the host's own
+	// Tetragon policies (PolicyOwner customer): a record of its own, typed
+	// and bounded in the helper. It never enters the classifier, a score,
+	// Plane B or the fanotify hand-off, which are DefenseClaw's.
+	KindPolicyEvent Kind = "policy_event"
+)
+
+// Policy owners of a kprobe or LSM event (Event.PolicyOwner).
+const (
+	// PolicyOwnerDefenseClaw is a policy this helper recorded loading.
+	PolicyOwnerDefenseClaw = "defenseclaw"
+	// PolicyOwnerCustomer is every other policy: the host's own, including
+	// one named in DefenseClaw's pattern that this helper did not load.
+	PolicyOwnerCustomer = "customer"
 )
 
 // EventSource names the backend that produced an event.
@@ -161,15 +175,43 @@ type Event struct {
 	// Source names the backend that produced the event.
 	Source EventSource
 
-	// Policy, Outcome and Control are set only on events of DefenseClaw's
-	// own Tetragon policies: the policy name, what the policy did, and for
-	// the controls policy the control id (kernel.ssh_private_key_read or
-	// kernel.persistence_write).
-	Policy  string
-	Outcome KernelOutcome
-	Control string
+	// Policy and Outcome are set on kprobe and LSM events of a Tetragon
+	// policy: its name and what it did. PolicyOwner says whose policy it is
+	// (PolicyOwnerDefenseClaw for one this helper recorded loading,
+	// PolicyOwnerCustomer for the host's own). Control is set on events of
+	// DefenseClaw's controls policy: the control id
+	// (kernel.ssh_private_key_read or kernel.persistence_write).
+	Policy      string
+	PolicyOwner string
+	Outcome     KernelOutcome
+	Control     string
 	// Remote is the peer of a KindConnect event, as host:port.
 	Remote string
+
+	// The fields below describe a KindPolicyEvent, typed and bounded in the
+	// helper. Nothing else of the raw event crosses: no string, byte or
+	// integer argument, no data, no stack trace, no return value.
+	//
+	// KernelHookType is kprobe or lsm; KernelFunction the hooked symbol
+	// (security_file_open, tcp_connect). KernelAction is the policy action
+	// in lower case without its prefix (post, override, sigkill, signal,
+	// notify_enforcer, set, ...), other for an unknown one. PolicyMode is
+	// enforce, monitor or unknown, from the helper's latest listing (an event
+	// within one listing interval of a mode change can carry the old mode).
+	KernelHookType string
+	KernelFunction string
+	KernelAction   string
+	PolicyMode     string
+	// PolicyTags and PolicyMessage are the policy's own tags and message.
+	PolicyTags    []string
+	PolicyMessage string
+	// Target is what the hook concerned: the first file, path or binprm
+	// argument's path, or a socket argument's peer as ip:port.
+	Target string
+	// Count is how many identical events this one stands for: repeats of
+	// the same policy, process, function, action and target within a minute
+	// are folded into one. 0 means 1.
+	Count int
 
 	// Self marks DefenseClaw's own gateway, helper and ACP processes. They
 	// are excluded from scoring, never hidden.
@@ -235,6 +277,36 @@ type Backend struct {
 	FallbackReason string
 	// Policies are the DefenseClaw policies Tetragon has loaded.
 	Policies []BackendPolicy
+	// CustomerPolicies are the host's own Tetragon policies (at most 64)
+	// with what was counted of their kprobe and LSM events; CustomerEvents
+	// totals every policy, listed or not. The sensor helper's kernel_status
+	// carries its counts and the gateway adds its own (Service.Snapshot).
+	CustomerPolicies []CustomerPolicy
+	CustomerEvents   CustomerEvents
+}
+
+// CustomerPolicy is one of the host's own Tetragon policies. DefenseClaw
+// reads its events and never changes it.
+type CustomerPolicy struct {
+	Name string
+	// Mode and State are as Tetragon last listed them (Mode enforce,
+	// monitor, monitor_only or unknown); empty when it was not listed.
+	Mode  string
+	State string
+	CustomerEvents
+}
+
+// CustomerEvents count kprobe and LSM events of the host's own policies.
+type CustomerEvents struct {
+	// Seen, Forwarded, Dropped and Container are the sensor helper's: every
+	// event it received; the ones it forwarded to the gateway (repeats
+	// folded into a forwarded one included); the ones it did not (over the
+	// volume budget, DefenseClaw's own processes, customer_events off); and
+	// those of container processes, never forwarded.
+	Seen, Forwarded, Dropped, Container int64
+	// Attributed and Gated are the gateway's: forwarded events below an AI
+	// agent, which become records, and the rest, which are only counted.
+	Attributed, Gated int64
 }
 
 // BackendPolicy is one loaded Tetragon policy as ListTracingPolicies

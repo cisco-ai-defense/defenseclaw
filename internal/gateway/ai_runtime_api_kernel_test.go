@@ -96,7 +96,7 @@ func TestRenderCarriesTheTetragonBackendOnPlaneC(t *testing.T) {
 		t.Fatal("plane a carried a backend")
 	}
 	backend := planes[1].(map[string]interface{})["backend"].(map[string]interface{})
-	if got, want := sortedKeys(backend), []string{"events_lost", "kernel_floor", "kind", "loss_known", "mode", "policies", "socket", "version"}; !reflect.DeepEqual(got, want) {
+	if got, want := sortedKeys(backend), []string{"customer_events", "events_lost", "kernel_floor", "kind", "loss_known", "mode", "policies", "socket", "version"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("backend keys = %v, want %v", got, want)
 	}
 	if backend["kind"] != "tetragon" || backend["version"] != "v1.7.1" || backend["events_lost"] != float64(3) || backend["loss_known"] != true {
@@ -247,6 +247,13 @@ func TestKernelPolicyHealthIsOmittedUnlessItApplies(t *testing.T) {
 	state.Status.Pause = &acquire.KernelPause{UntilReboot: true}
 	if kernelPolicyHealth(state, now)["paused_until"] != "reboot" {
 		t.Fatal("an until-reboot pause was not rendered")
+	}
+	if _, ok := section["approval"]; ok {
+		t.Fatal("approval rendered by a helper that predates it")
+	}
+	state.Status.IntentMode, state.Status.Approval = "enforce", "stale"
+	if section := kernelPolicyHealth(state, now); section["approval"] != "stale" || section["intent_mode"] != "enforce" {
+		t.Fatalf("approval %v intent %v", section["approval"], section["intent_mode"])
 	}
 }
 

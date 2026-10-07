@@ -56,7 +56,8 @@ func (c *Controller) pass(ctx context.Context, trigger string) {
 	c.tallyMu.Unlock()
 	for uid, reason := range resets {
 		uid := uid
-		c.change(Change{Event: EventUIDBurnIn, UID: &uid, Reason: reason})
+		c.change(Change{Event: EventUIDBurnIn, UID: &uid, Reason: reason,
+			NeededSeconds: int64(intent.BurnIn / time.Second)})
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, c.cfg.Intervals.Call)
@@ -651,14 +652,36 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 		status.NeededSeconds = int64(c.cfg.Intent.BurnIn / time.Second)
 		status.WouldBlock = c.burn.Hits(uid)
 		c.st.UIDs = append(c.st.UIDs, status)
+		uid := uid
+		progress := Change{UID: &uid, CoveredSeconds: status.CoveredSeconds, NeededSeconds: status.NeededSeconds}
 		if prev, had := old[uid]; had && prev != status.State {
-			uid := uid
 			switch {
 			case status.State == UIDEnforcing:
-				c.change(Change{Event: EventUIDReady, UID: &uid, State: status.State})
+				progress.Event, progress.State = EventUIDReady, status.State
+				c.change(progress)
 			case prev == UIDEnforcing:
-				c.change(Change{Event: EventUIDBurnIn, UID: &uid, State: status.State, Reason: status.Reason})
+				progress.Event, progress.State, progress.Reason = EventUIDBurnIn, status.State, status.Reason
+				c.change(progress)
 			}
 		}
+		c.noteProgress(uid, status, progress)
 	}
+}
+
+// noteProgress emits a user's burn-in progress (uid_progress) every
+// progressInterval while the user is not ready, so a dashboard can show
+// covered and needed hours, and an ETA, without polling the host.
+func (c *Controller) noteProgress(uid int, status UIDStatus, progress Change) {
+	ready := status.NeededSeconds == 0 || status.CoveredSeconds >= status.NeededSeconds
+	if ready || status.State == UIDInactive {
+		delete(c.progressAt, uid)
+		return
+	}
+	now := c.cfg.Now()
+	if last, ok := c.progressAt[uid]; ok && now.Sub(last) < progressInterval {
+		return
+	}
+	c.progressAt[uid] = now
+	progress.Event, progress.State = EventUIDProgress, status.State
+	c.change(progress)
 }

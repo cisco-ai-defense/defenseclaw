@@ -559,7 +559,11 @@ func TestFeedStreamsLossSignalsAndEnds(t *testing.T) {
 		{Name: "defenseclaw-controls-0a1b2c3d", State: pb.TracingPolicyState_TP_STATE_ENABLED, Mode: pb.TracingPolicyMode_TP_MODE_ENFORCE},
 		{Name: "dc-tg2-file-sensitive", State: pb.TracingPolicyState_TP_STATE_ENABLED},
 	}
-	dial := NewDialer(DialerConfig{InfoPath: fake.info, Homes: []string{fixtureHome}, trust: myTrust()})
+	fake.policies[2].Sensors = []string{"generic_lsm"}
+	fake.policies[2].Stats = &pb.TracingPolicyStats{ActionCounters: &pb.TracingPolicyActionCounters{Post: 3}}
+	ledger := NewCustomerLedger()
+	dial := NewDialer(DialerConfig{InfoPath: fake.info, Homes: []string{fixtureHome}, trust: myTrust(),
+		Owns: func(name string) bool { return recordedFixture[name] }, Customer: ledger})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	feed, err := dial(ctx)
@@ -576,15 +580,22 @@ func TestFeedStreamsLossSignalsAndEnds(t *testing.T) {
 		backend.Policies[0].Mode != "enforce" || backend.Policies[1].State != "enabled" {
 		t.Fatalf("policies %+v", backend.Policies)
 	}
+	// The customer's policy is listed in the ledger, never in the backend.
+	listed, _ := ledger.Snapshot(time.Now())
+	if len(listed) != 1 || listed[0].Name != "dc-tg2-file-sensitive" || !listed[0].Listed || listed[0].State != "enabled" ||
+		listed[0].Sensors[0] != "generic_lsm" || listed[0].Actions["post"] != 3 {
+		t.Fatalf("customer policies %+v", listed)
+	}
 
 	for _, response := range loadFixture(t, "tg2-session.jsonl") {
 		fake.events <- response
 	}
 	var execs, blocked, throttles int
 	var dropped int64
-	// 26 records; the customer policy's event and the hook's four tool
-	// execs and exits map to nothing and are not returned.
-	for received := 0; received < 21; received++ {
+	// 26 records; the hook's four tool execs and exits map to nothing and
+	// are not returned.
+	customer := 0
+	for received := 0; received < 22; received++ {
 		batch, err := feed.Recv()
 		if err != nil {
 			t.Fatalf("after %d batches: %v", received, err)
@@ -600,10 +611,16 @@ func TestFeedStreamsLossSignalsAndEnds(t *testing.T) {
 			if event.Outcome == plane.OutcomeBlocked {
 				blocked++
 			}
+			if event.PolicyOwner == plane.PolicyOwnerCustomer {
+				customer++
+			}
 		}
 	}
-	if execs == 0 || blocked != 1 || throttles != 1 || dropped != 7 {
-		t.Fatalf("execs %d blocked %d throttles %d dropped %d", execs, blocked, throttles, dropped)
+	if execs == 0 || blocked != 1 || throttles != 1 || dropped != 7 || customer != 1 {
+		t.Fatalf("execs %d blocked %d throttles %d dropped %d customer %d", execs, blocked, throttles, dropped, customer)
+	}
+	if _, totals := ledger.Snapshot(time.Now()); totals.Seen != 1 || totals.Forwarded != 1 {
+		t.Fatalf("customer counts %+v", totals)
 	}
 	fake.mu.Lock()
 	requests := fake.requests

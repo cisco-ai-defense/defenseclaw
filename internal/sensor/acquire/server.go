@@ -251,12 +251,25 @@ func (s *Server) serveConnections(ctx context.Context, conn net.Conn, request Re
 	_ = writeFrame(conn, response, responseDeadline)
 }
 
-// eventStreamFrame is one frame on an OpEvents subscription: either the
-// coverage header or a single event.
+// eventStreamFrame is one frame on an OpEvents subscription: the coverage
+// header, a single event, or a single event of one of the host's own
+// Tetragon policies. That one has a member of its own so a gateway that
+// predates it skips it rather than reading it as a file or connect event of
+// DefenseClaw's.
 type eventStreamFrame struct {
-	Coverage *wireCoverage `json:"coverage,omitempty"`
-	Event    *wireEvent    `json:"event,omitempty"`
-	Error    string        `json:"error,omitempty"`
+	Coverage    *wireCoverage `json:"coverage,omitempty"`
+	Event       *wireEvent    `json:"event,omitempty"`
+	PolicyEvent *wireEvent    `json:"policy_event,omitempty"`
+	Error       string        `json:"error,omitempty"`
+}
+
+// eventFrame is the stream frame of one event.
+func eventFrame(event plane.Event) eventStreamFrame {
+	encoded := encodeEvent(event)
+	if event.PolicyOwner == plane.PolicyOwnerCustomer {
+		return eventStreamFrame{PolicyEvent: &encoded}
+	}
+	return eventStreamFrame{Event: &encoded}
 }
 
 // serveEvents streams Plane C.
@@ -354,8 +367,7 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 			if !ok {
 				return
 			}
-			encoded := encodeEvent(event)
-			body, err := json.Marshal(eventStreamFrame{Event: &encoded})
+			body, err := json.Marshal(eventFrame(event))
 			if err != nil {
 				continue
 			}

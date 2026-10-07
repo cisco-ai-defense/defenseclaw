@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -64,6 +65,11 @@ type aiRuntimeV8Adapter struct {
 	// snapshot at a time).
 	directories   map[string]*llmEventIdentity
 	directoriesMu sync.Mutex
+	// kernelDeltas remembers the helper's counters for the per-cycle
+	// growth on plane_health, and kernelState the kernel state gauge's last
+	// label set; nil means the process-wide cursors.
+	kernelDeltas *kernelDeltaCursor
+	kernelState  *kernelStateCursor
 }
 
 func newAIRuntimeV8Adapter(emitter sidecarRuntimeEmitter) *aiRuntimeV8Adapter {
@@ -87,8 +93,10 @@ func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot se
 	adapter.directoriesMu.Lock()
 	adapter.directories = nil
 	adapter.directoriesMu.Unlock()
+	// Once per cycle: the growth of the helper's counters is per cycle.
+	fleet := adapter.kernelFleetOf(snapshot, time.Now())
 	for _, health := range snapshot.Planes {
-		if err := adapter.emitPlaneHealth(ctx, snapshot, health); err != nil && firstErr == nil {
+		if err := adapter.emitPlaneHealth(ctx, snapshot, health, fleet); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -129,25 +137,15 @@ func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot se
 	if err := adapter.emitKernelPolicyChanges(ctx, snapshot); err != nil && firstErr == nil {
 		firstErr = err
 	}
+	// The host's own Tetragon policies' events below an AI agent, and the
+	// kernel metrics.
+	if err := adapter.emitCustomerKernelEvents(ctx, snapshot); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := adapter.emitKernelMetrics(ctx, snapshot, fleet); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	return firstErr
-}
-
-// planeHealthReason is what a plane-health record says happened.
-//
-// A running plane names its mechanism; a stopped or blind one names its
-// reason. One of the two is always present, so a reader never has to go to
-// the source to find out what happened.
-//
-// Exported to the test rather than restated there: a test that re-implements
-// this rule asserts against itself and keeps passing when the rule changes.
-func planeHealthReason(health sensor.PlaneHealth) string {
-	if health.Reason != "" {
-		return health.Reason
-	}
-	if health.Running {
-		return health.Mechanism
-	}
-	return ""
 }
 
 // runtimePlaneBackend is the process backend Plane C ran on; absent off the
@@ -232,7 +230,7 @@ func (adapter *aiRuntimeV8Adapter) metadata(
 }
 
 func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
-	ctx context.Context, snapshot sensor.Snapshot, health sensor.PlaneHealth,
+	ctx context.Context, snapshot sensor.Snapshot, health sensor.PlaneHealth, fleet kernelFleet,
 ) error {
 	metadata, err := adapter.metadata("ai.runtime.plane_health", "INFO")
 	if err != nil {
@@ -248,7 +246,7 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		return builder.BuildLogAIRuntimePlaneHealth(observability.LogAIRuntimePlaneHealthInput{
+		input := observability.LogAIRuntimePlaneHealthInput{
 			Envelope:                                aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime"),
 			Severity:                                observability.Present(observability.SeverityInfo),
 			LogLevel:                                observability.Present(observability.LogLevelInfo),
@@ -262,16 +260,33 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 			DefenseClawAIRuntimePlane:                   string(health.Plane),
 			DefenseClawAIRuntimePlaneAvailable:          health.Available,
 			DefenseClawAIRuntimePlaneRunning:            health.Running,
-			DefenseClawAIRuntimePlaneReason:             aiDiscoveryV8OptionalText(planeHealthReason(health)),
-			// The mechanism is its own field: plane_reason drops it on a
-			// partial cycle, which is when a reader most needs to know which
-			// backend ran.
+			// A running plane names its mechanism on every cycle, and a
+			// stopped, blind or partial one its reason, so a reader never has
+			// to go to the source to find out what a plane is doing.
+			DefenseClawAIRuntimePlaneReason:     aiDiscoveryV8OptionalText(health.Reason),
 			DefenseClawAIRuntimePlaneMechanism:  runtimeBoundedText(health.Mechanism, runtimeMechanismMaxBytes),
 			DefenseClawAIRuntimePlaneBackend:    runtimePlaneBackend(health),
 			DefenseClawAIRuntimeEventsLost:      runtimePlaneEventsLost(health),
 			DefenseClawAIRuntimeLossKnown:       runtimePlaneLossKnown(health),
 			DefenseClawAIRuntimeContainerEvents: runtimePlaneContainerEvents(health),
-		})
+		}
+		if health.Plane == platform.PlaneC && fleet.present {
+			// The fleet fields: the latest plane c record of each host is the
+			// fleet table's row.
+			input.DefenseClawAIRuntimeKernelHelperMode = fleet.helperMode
+			input.DefenseClawAIRuntimeKernelApproval = fleet.approval
+			input.DefenseClawPolicyVersion = fleet.policy
+			input.DefenseClawAIRuntimeKernelUsersEnrolled = fleet.enrolled
+			input.DefenseClawAIRuntimeKernelUsersEnforced = fleet.enforced
+			input.DefenseClawAIRuntimeKernelUsersBurnIn = fleet.burnIn
+			input.DefenseClawAIRuntimeKernelPaused = fleet.paused
+			input.DefenseClawAIRuntimeTetragonVersion = fleet.version
+			input.DefenseClawAIRuntimeTetragonInstalled = fleet.installed
+			input.DefenseClawAIRuntimeKernelWouldBlockDelta = fleet.wouldBlockDelta
+			input.DefenseClawAIRuntimeKernelBlockedDelta = fleet.blockedDelta
+			input.DefenseClawAIRuntimeKernelCustomerEventsDelta = fleet.customerDelta
+		}
+		return builder.BuildLogAIRuntimePlaneHealth(input)
 	})
 	return err
 }

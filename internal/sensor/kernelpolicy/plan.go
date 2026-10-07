@@ -121,9 +121,9 @@ func MakePlan(in PlanInput) Plan {
 	// mode: enforce.
 	capped := ""
 	switch {
-	case in.Intent.EnforceAck == "":
+	case len(in.Intent.EnforceAcks) == 0:
 		capped = WarnEnforceAckMissing
-	case !AckMatches(in.Intent.EnforceAck):
+	case !in.Intent.Approves():
 		capped = WarnEnforceAckStale
 	case !in.Agent.KeepSensorsOnExitKnown || in.Agent.KeepSensorsOnExit:
 		capped = WarnPersistentSensors

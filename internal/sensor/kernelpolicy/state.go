@@ -110,11 +110,15 @@ type RootsStatus struct {
 
 // IntentStatus is the drop-in as the helper read it.
 type IntentStatus struct {
-	Mode              Mode     `json:"mode"`
-	BurnIn            string   `json:"burn_in"`
+	Mode   Mode   `json:"mode"`
+	BurnIn string `json:"burn_in"`
+	// EnforceAck is the approved digest, or the approved digests joined
+	// with commas, as the drop-in renders a list.
 	EnforceAck        string   `json:"enforce_ack,omitempty"`
 	EnforceConnectors []string `json:"enforce_connectors,omitempty"`
-	Problems          []string `json:"problems,omitempty"`
+	// CustomerEvents is customer_events: agent or off.
+	CustomerEvents string   `json:"customer_events,omitempty"`
+	Problems       []string `json:"problems,omitempty"`
 }
 
 // Change is one state change, for log.ai.runtime.kernel_policy. The gateway
@@ -129,6 +133,10 @@ type Change struct {
 	State  string     `json:"state,omitempty"`
 	UID    *int       `json:"uid,omitempty"`
 	Reason string     `json:"reason,omitempty"`
+	// CoveredSeconds and NeededSeconds are the user's burn-in progress, on
+	// uid_progress, uid_burnin and uid_ready.
+	CoveredSeconds int64 `json:"covered_seconds,omitempty"`
+	NeededSeconds  int64 `json:"needed_seconds,omitempty"`
 }
 
 // Change event names (the enum of log.ai.runtime.kernel_policy).
@@ -146,7 +154,57 @@ const (
 	EventUIDBurnIn         = "uid_burnin"
 	EventTetragonRestarted = "tetragon_restarted"
 	EventFallback          = "fallback"
+	// EventUIDProgress is a user's burn-in progress, every
+	// progressInterval while the user is not ready yet.
+	EventUIDProgress = "uid_progress"
 )
+
+// progressInterval spaces the uid_progress changes of one user.
+const progressInterval = 6 * time.Hour
+
+// CustomerPolicy is one of the host's own Tetragon policies, which this
+// helper did not record loading: as Tetragon last listed it, with what the
+// helper counted of its kprobe and LSM events. DefenseClaw reads its events
+// and never changes it.
+type CustomerPolicy struct {
+	Name string `json:"name"`
+	// Listed is false for a policy Tetragon no longer lists that had events.
+	Listed  bool     `json:"listed"`
+	Mode    string   `json:"mode,omitempty"`
+	State   string   `json:"state,omitempty"`
+	Sensors []string `json:"sensors,omitempty"`
+	Error   string   `json:"error,omitempty"`
+	// Actions are Tetragon's own action counters of the policy (post,
+	// override, monitor_override, ...), the non-zero ones.
+	Actions map[string]int64 `json:"actions,omitempty"`
+	CustomerEvents
+	// LastEventAt is when the helper last received an event of it.
+	LastEventAt time.Time `json:"last_event_at,omitempty"`
+}
+
+// CustomerEvents count the events of customer policies in the helper.
+type CustomerEvents struct {
+	// Seen is every event received, Forwarded the ones the gateway got
+	// (repeats folded into a forwarded record included), Dropped the ones
+	// it did not (Self, Capped and Withheld), Container those of container
+	// processes, never forwarded.
+	Seen      int64 `json:"seen"`
+	Forwarded int64 `json:"forwarded"`
+	Dropped   int64 `json:"dropped"`
+	Container int64 `json:"container,omitempty"`
+	// Self are DefenseClaw's own processes' events, Capped those over the
+	// volume budget, Withheld those customer_events off kept back.
+	Self     int64 `json:"self,omitempty"`
+	Capped   int64 `json:"capped,omitempty"`
+	Withheld int64 `json:"withheld,omitempty"`
+	// CappedLastHour is how many were over the budget in the last hour; it
+	// raises tetragon_customer_events_capped.
+	CappedLastHour int64 `json:"capped_last_hour,omitempty"`
+}
+
+// CustomerSource reports the customer policies and their totals now (the
+// helper's ledger of the event stream).
+type CustomerSource func(now time.Time) ([]CustomerPolicy, CustomerEvents)
 
 // FileState is tetragon-state.json: everything the helper applied and why.
 type FileState struct {
@@ -175,6 +233,12 @@ type FileState struct {
 	Warnings  []string            `json:"warnings,omitempty"`
 	Seq       uint64              `json:"seq"`
 	Changes   []Change            `json:"changes,omitempty"`
+	// CustomerPolicies are the host's own Tetragon policies (at most 64)
+	// and CustomerEvents the totals of all of them, refreshed whenever the
+	// state is written (every Intervals.Flush in every mode with an event
+	// stream).
+	CustomerPolicies []CustomerPolicy `json:"customer_policies,omitempty"`
+	CustomerEvents   *CustomerEvents  `json:"customer_events,omitempty"`
 }
 
 // State is the helper's whole published state, read by the root CLI, verify
@@ -186,6 +250,11 @@ type State struct {
 	Pause  *PauseState `json:"pause,omitempty"`
 	// Loaded are the names the helper recorded as loaded (tetragon-loaded).
 	Loaded []string `json:"loaded,omitempty"`
+	// HitTotals count the events of DefenseClaw's controls since this helper
+	// started, every user's (would_block_total, blocked_total): the gateway
+	// reports their growth per cycle, attributed or not. Status only; not in
+	// the state file.
+	HitTotals map[string]int64 `json:"hit_totals,omitempty"`
 }
 
 // ReadState reads the published state. Missing files are an empty state, not

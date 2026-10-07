@@ -341,7 +341,31 @@ func (s *Service) Snapshot() Snapshot {
 		}
 	}
 	snapshot.Planes = planes
+	snapshot.RecentCustomerKernelEvents, _, _ = s.hostPlane.customerSnapshot()
 	return snapshot
+}
+
+// SessionRootOf is the session root of the agent a process runs under (a
+// managed hook's peer), when the host plane attributes it.
+func (s *Service) SessionRootOf(pid int) (int, bool) {
+	if s == nil || s.hostPlane == nil || pid <= 0 {
+		return 0, false
+	}
+	lineage, ok := s.tracker.Lineage(pid, "")
+	if !ok {
+		return 0, false
+	}
+	return lineage.SessionRoot.PID, true
+}
+
+// KernelBlocks returns the attributed kernel denials (DefenseClaw's controls'
+// and the host's own Tetragon policies') at or after since, oldest first,
+// for the developer notice. nil where Plane C does not run.
+func (s *Service) KernelBlocks(since time.Time) []KernelBlock {
+	if s == nil || s.hostPlane == nil {
+		return nil
+	}
+	return s.hostPlane.recentBlocks(since)
 }
 
 func copyKernelState(state *KernelState) *KernelState {
@@ -632,6 +656,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		snapshot.HostPlaneContainerEvents = s.hostPlane.containerEvents.Load()
 		snapshot.HostPlaneHookUnexpected = s.hostPlane.hookUnexpected.Load()
 		snapshot.KernelEvents, snapshot.KernelEventsDropped = s.hostPlane.drainKernelEvents()
+		snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped = s.hostPlane.drainCustomer()
 		for index := range snapshot.Planes {
 			if snapshot.Planes[index].Plane == platform.PlaneC {
 				snapshot.Planes[index].ContainerEvents = snapshot.HostPlaneContainerEvents - s.lastContainerEvents
@@ -928,7 +953,9 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 }
 
 // hostPlaneBackend is a copy of the running Plane C source's backend: what
-// the managed Linux helper runs its process half on. nil everywhere else.
+// the managed Linux helper runs its process half on, with the host's own
+// Tetragon policies as the helper's kernel_status and the gateway counted
+// them. nil everywhere else.
 func (s *Service) hostPlaneBackend() *plane.Backend {
 	if s.hostPlane == nil {
 		return nil
@@ -939,6 +966,12 @@ func (s *Service) hostPlaneBackend() *plane.Backend {
 	}
 	backend := *coverage.Backend
 	backend.Policies = append([]plane.BackendPolicy(nil), coverage.Backend.Policies...)
+	backend.CustomerPolicies = nil
+	s.mu.RLock()
+	kernel := copyKernelState(s.kernel)
+	s.mu.RUnlock()
+	_, counts, total := s.hostPlane.customerSnapshot()
+	mergeCustomer(&backend, kernel, counts, total)
 	return &backend
 }
 

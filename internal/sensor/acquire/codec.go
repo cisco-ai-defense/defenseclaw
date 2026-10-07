@@ -135,6 +135,19 @@ type wireEvent struct {
 	Self         bool   `json:"self,omitempty"`
 	Hook         string `json:"hook,omitempty"`
 	HookTools    int    `json:"hook_tools,omitempty"`
+	// The fields of an event of a Tetragon policy (plane.Event), omitempty
+	// like the ones above. An event of the host's own policies travels in an
+	// eventStreamFrame's policy_event member, which a gateway that predates
+	// it skips.
+	PolicyOwner    string   `json:"policy_owner,omitempty"`
+	KernelHookType string   `json:"kernel_hook_type,omitempty"`
+	KernelFunction string   `json:"kernel_function,omitempty"`
+	KernelAction   string   `json:"kernel_action,omitempty"`
+	PolicyMode     string   `json:"policy_mode,omitempty"`
+	PolicyTags     []string `json:"policy_tags,omitempty"`
+	PolicyMessage  string   `json:"policy_message,omitempty"`
+	Target         string   `json:"target,omitempty"`
+	Count          int      `json:"count,omitempty"`
 }
 
 func encodeEvent(event plane.Event) wireEvent {
@@ -148,6 +161,9 @@ func encodeEvent(event plane.Event) wireEvent {
 		ContainerID: event.ContainerID, Source: string(event.Source),
 		Policy: event.Policy, Outcome: string(event.Outcome), Control: event.Control, Remote: event.Remote,
 		Self: event.Self, Hook: string(event.Hook), HookTools: event.HookTools,
+		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
+		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
+		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 	}
 	if !event.At.IsZero() {
 		out.AtUnixNano = event.At.UnixNano()
@@ -166,6 +182,9 @@ func decodeEvent(event wireEvent) plane.Event {
 		ContainerID: event.ContainerID, Source: plane.EventSource(event.Source),
 		Policy: event.Policy, Outcome: plane.KernelOutcome(event.Outcome), Control: event.Control, Remote: event.Remote,
 		Self: event.Self, Hook: plane.HookMark(event.Hook), HookTools: event.HookTools,
+		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
+		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
+		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 	}
 	if event.AtUnixNano != 0 {
 		out.At = time.Unix(0, event.AtUnixNano)
@@ -180,6 +199,14 @@ func copyInt(value *int) *int {
 	}
 	copied := *value
 	return &copied
+}
+
+// copyStrings is copyInt for a list.
+func copyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
 }
 
 type wireCoverage struct {

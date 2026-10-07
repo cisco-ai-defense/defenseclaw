@@ -51,11 +51,15 @@ func TestHitTapCountsControlsEventsAndLoss(t *testing.T) {
 	tap := hitTap(sink)
 	uid, root := 1001, 0
 	at := time.Now()
+	own := plane.PolicyOwnerDefenseClaw
 	tap(plane.KernelBatch{Events: []plane.Event{
-		{Policy: "defenseclaw-controls-0123abcd", UID: &uid, Path: "/home/alice/.ssh/id_rsa", Exe: "/usr/bin/cat", At: at},
-		{Policy: "", UID: &uid, Path: "/home/alice/x"},                   // not a DefenseClaw policy event
-		{Policy: "defenseclaw-controls-0123abcd", Path: "/home/alice/y"}, // uid not observed
-		{Policy: "defenseclaw-observe-0123abcd", UID: &root, Path: "/etc/shadow"},
+		{Policy: "defenseclaw-controls-0123abcd", PolicyOwner: own, UID: &uid, Path: "/home/alice/.ssh/id_rsa", Exe: "/usr/bin/cat", At: at},
+		{Policy: "", UID: &uid, Path: "/home/alice/x"},                                     // not a DefenseClaw policy event
+		{Policy: "defenseclaw-controls-0123abcd", PolicyOwner: own, Path: "/home/alice/y"}, // uid not observed
+		{Policy: "defenseclaw-observe-0123abcd", PolicyOwner: own, UID: &root, Path: "/etc/shadow"},
+		// A customer policy named in DefenseClaw's pattern is never a hit.
+		{Kind: plane.KindPolicyEvent, Policy: "defenseclaw-controls-deadbeef", PolicyOwner: plane.PolicyOwnerCustomer,
+			UID: &uid, Target: "/home/alice/.ssh/id_rsa", Outcome: plane.OutcomeBlocked},
 	}})
 	if len(sink.hits) != 2 || sink.hits[0].UID != 1001 || sink.hits[0].Binary != "/usr/bin/cat" || !sink.hits[0].At.Equal(at) {
 		t.Fatalf("hits = %+v", sink.hits)
@@ -76,7 +80,7 @@ func TestHitTapCountsControlsEventsAndLoss(t *testing.T) {
 // warnings and the change records of the retire.
 func TestKernelStatusOfOffAndConsumeNamesWhatIsStillRecorded(t *testing.T) {
 	for _, mode := range []kernelpolicy.Mode{kernelpolicy.ModeOff, kernelpolicy.ModeConsume} {
-		status := kernelStatusOf(kernelpolicy.State{}, mode)
+		status := kernelStatusOf(kernelpolicy.State{}, kernelpolicy.Intent{Mode: mode})
 		if status.Available || status.Mode != string(mode) || status.Reason == "" || len(status.Policies) != 0 {
 			t.Fatalf("%s: %+v", mode, status)
 		}
@@ -90,7 +94,7 @@ func TestKernelStatusOfOffAndConsumeNamesWhatIsStillRecorded(t *testing.T) {
 		},
 		Loaded: []string{"defenseclaw-controls-0123abcd"},
 	}
-	status := kernelStatusOf(state, kernelpolicy.ModeConsume)
+	status := kernelStatusOf(state, kernelpolicy.Intent{Mode: kernelpolicy.ModeConsume})
 	if status.Available || len(status.Policies) != 1 || !status.Policies[0].Recorded || status.Policies[0].Family != "controls" {
 		t.Fatalf("policies = %+v", status.Policies)
 	}
@@ -100,7 +104,7 @@ func TestKernelStatusOfOffAndConsumeNamesWhatIsStillRecorded(t *testing.T) {
 	if status.Tetragon == nil || status.Tetragon.Connected {
 		t.Fatalf("tetragon = %+v", status.Tetragon)
 	}
-	if off := kernelStatusOf(state, kernelpolicy.ModeOff); off.Tetragon != nil {
+	if off := kernelStatusOf(state, kernelpolicy.Intent{Mode: kernelpolicy.ModeOff}); off.Tetragon != nil {
 		t.Fatalf("off never talks to Tetragon's stream: %+v", off.Tetragon)
 	}
 }
@@ -130,7 +134,7 @@ func TestKernelStatusOfMapsTheState(t *testing.T) {
 		}},
 		Pause: &kernelpolicy.PauseState{Pause: &kernelpolicy.Pause{Until: time.Unix(1700003600, 0), SetByUID: 0, SetAt: time.Unix(1700000000, 0), Reason: "incident"}},
 	}
-	status := kernelStatusOf(state, kernelpolicy.ModeEnforce)
+	status := kernelStatusOf(state, kernelpolicy.Intent{Mode: kernelpolicy.ModeEnforce})
 	if !status.Available || !status.Applied || status.Mode != "enforce" || status.KernelPolicy != "sha256:08b71155b713" {
 		t.Fatalf("status = %+v", status)
 	}

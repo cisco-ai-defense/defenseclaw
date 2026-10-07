@@ -38,7 +38,23 @@ func TestIntentFromLookupFallsBackToTheNarrowSide(t *testing.T) {
 		{"nil lookup", nil, Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn}},
 		{"empty mode is consume", env(EnvMode, ""), Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn}},
 		{"all four", env(EnvMode, "enforce", EnvBurnIn, "72h", EnvEnforceAck, "sha256:3f9c2a7d41b0", EnvEnforceConnectors, "codex, claudecode,codex"),
-			Intent{Mode: ModeEnforce, BurnIn: 72 * time.Hour, EnforceAck: "sha256:3f9c2a7d41b0", EnforceConnectors: []string{"claudecode", "codex"}}},
+			Intent{Mode: ModeEnforce, BurnIn: 72 * time.Hour, EnforceAcks: []string{"sha256:3f9c2a7d41b0"}, EnforceConnectors: []string{"claudecode", "codex"}}},
+		{"an ack list for a ring upgrade", env(EnvMode, "enforce", EnvEnforceAck, "sha256:3f9c2a7d41b0, sha256:000000000000,sha256:3f9c2a7d41b0"),
+			Intent{Mode: ModeEnforce, BurnIn: DefaultBurnIn, EnforceAcks: []string{"sha256:3f9c2a7d41b0", "sha256:000000000000"}}},
+		{"an ack list with a bad digest is no ack", env(EnvMode, "enforce", EnvEnforceAck, "sha256:3f9c2a7d41b0,sha256:XYZ"),
+			Intent{Mode: ModeEnforce, BurnIn: DefaultBurnIn, Problems: []string{WarnConfigInvalid + ":" + EnvEnforceAck}}},
+		{"more than four acks is no ack", env(EnvMode, "enforce", EnvEnforceAck,
+			"sha256:000000000001,sha256:000000000002,sha256:000000000003,sha256:000000000004,sha256:000000000005"),
+			Intent{Mode: ModeEnforce, BurnIn: DefaultBurnIn, Problems: []string{WarnConfigInvalid + ":" + EnvEnforceAck}}},
+		{"an empty ack is no ack and no problem", env(EnvMode, "enforce", EnvEnforceAck, " "),
+			Intent{Mode: ModeEnforce, BurnIn: DefaultBurnIn}},
+		{"customer events off", env(EnvCustomerEvents, " OFF "),
+			Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn, CustomerEvents: CustomerEventsOff}},
+		{"customer events agent is the default", env(EnvCustomerEvents, "agent"),
+			Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn}},
+		{"a bad customer events value forwards nothing", env(EnvCustomerEvents, "all"),
+			Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn, CustomerEvents: CustomerEventsOff,
+				Problems: []string{WarnConfigInvalid + ":" + EnvCustomerEvents}}},
 		{"burn-in 0 is allowed", env(EnvBurnIn, "0"), Intent{Mode: ModeConsume, BurnIn: 0}},
 		{"bad mode is consume", env(EnvMode, "enforced"),
 			Intent{Mode: ModeConsume, BurnIn: DefaultBurnIn, Problems: []string{WarnConfigInvalid + ":" + EnvMode}}},
@@ -66,9 +82,43 @@ func TestIntentFromLookupFallsBackToTheNarrowSide(t *testing.T) {
 			t.Errorf("ParseMode(%q) = %v %v", m, mode, err)
 		}
 	}
-	if (Intent{Mode: ModeEnforce, EnforceAck: "a"}).Key() == (Intent{Mode: ModeEnforce, EnforceAck: "b"}).Key() ||
+	if (Intent{Mode: ModeEnforce, EnforceAcks: []string{"a"}}).Key() == (Intent{Mode: ModeEnforce, EnforceAcks: []string{"b"}}).Key() ||
+		(Intent{Mode: ModeEnforce, EnforceAcks: []string{"a"}}).Key() == (Intent{Mode: ModeEnforce, EnforceAcks: []string{"a", "b"}}).Key() ||
 		(Intent{Mode: ModeEnforce}).Key() == (Intent{Mode: ModeObserve}).Key() {
 		t.Fatal("the intent key must change with the mode and the approval")
+	}
+}
+
+// TestApprovalOfAnAckList: a list approves when this build's digest is one
+// of its items, so a ring upgrade keeps both releases enforcing.
+func TestApprovalOfAnAckList(t *testing.T) {
+	digest := Digest()
+	for _, tc := range []struct {
+		intent Intent
+		want   string
+	}{
+		{Intent{Mode: ModeObserve, EnforceAcks: []string{digest}}, ApprovalNotNeeded},
+		{Intent{Mode: ModeConsume}, ApprovalNotNeeded},
+		{Intent{Mode: ModeEnforce}, ApprovalMissing},
+		{Intent{Mode: ModeEnforce, EnforceAcks: []string{"sha256:000000000000"}}, ApprovalStale},
+		{Intent{Mode: ModeEnforce, EnforceAcks: []string{"sha256:000000000000", digest}}, ApprovalApproved},
+		{Intent{Mode: ModeEnforce, EnforceAcks: []string{digest}}, ApprovalApproved},
+	} {
+		if got := tc.intent.Approval(); got != tc.want {
+			t.Errorf("%+v: %s, want %s", tc.intent, got, tc.want)
+		}
+	}
+	listed := IntentFromLookup(func(name string) (string, bool) {
+		switch name {
+		case EnvMode:
+			return "enforce", true
+		case EnvEnforceAck:
+			return "sha256:000000000000," + digest, true
+		}
+		return "", false
+	})
+	if listed.Approval() != ApprovalApproved || listed.ForwardsCustomerEvents() != true || listed.CustomerEventsSetting() != CustomerEventsAgent {
+		t.Fatalf("listed intent %+v", listed)
 	}
 }
 
