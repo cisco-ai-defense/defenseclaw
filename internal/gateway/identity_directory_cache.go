@@ -74,6 +74,11 @@ type identityCache[T any] struct {
 	// incomplete, when set, marks an answer to refresh after
 	// identityDirectoryIncompleteTTL.
 	incomplete func(T) bool
+	// partial, when set, marks an answer built from stale inputs (Windows
+	// groups from an account's last signed-in session, GAP-0243): it is
+	// refreshed as soon as a lookup may retry, so a sign-in shows within
+	// about one enumerator cycle.
+	partial func(T) bool
 	// logf, when set, reports a key's first failure and its recovery.
 	logf func(format string, args ...any)
 	// maxAge, when set, is the age past which facts are no longer served.
@@ -148,7 +153,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		// for, as a directory outage leaves) is replaced before a blocking
 		// caller uses it again, so a group that answers again applies at the
 		// next request rather than the one after (GAP-0326).
-		if !block || wait == nil || !expired || c.lifetime(facts) == identityDirectoryTTL {
+		if !block || wait == nil || !expired || c.lifetime(facts) != identityDirectoryIncompleteTTL {
 			c.mu.Unlock()
 			return facts, true
 		}
@@ -184,14 +189,20 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	return entry.facts, entry.ok
 }
 
-// lifetime is how long facts are served before a refresh: the full TTL, or
+// lifetime is how long facts are served before a refresh: the full TTL,
 // identityDirectoryIncompleteTTL for an answer the resolver calls
-// incomplete.
+// incomplete, or identityDirectoryRetry for one built from stale inputs.
 func (c *identityCache[T]) lifetime(facts T) time.Duration {
-	if c != nil && c.incomplete != nil && c.incomplete(facts) {
+	switch {
+	case c == nil:
+		return identityDirectoryTTL
+	case c.partial != nil && c.partial(facts):
+		return identityDirectoryRetry
+	case c.incomplete != nil && c.incomplete(facts):
 		return identityDirectoryIncompleteTTL
+	default:
+		return identityDirectoryTTL
 	}
-	return identityDirectoryTTL
 }
 
 // failing reports a key whose lookups fail and that has no facts to serve:

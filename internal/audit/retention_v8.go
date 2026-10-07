@@ -27,8 +27,9 @@ const (
 	RetentionBatchSize        = 250
 	RetentionScheduleInterval = 6 * time.Hour
 	// RetentionFollowUpInterval is the wait after a run that stopped at one of
-	// its time budgets with work left, instead of RetentionScheduleInterval:
-	// a prune of a large backlog finishes in minutes, not over several days.
+	// its time budgets with work left (RetentionRunResult.Backlog), instead of
+	// RetentionScheduleInterval: a prune of a large backlog, and the return of
+	// its free pages, finishes in minutes, not over several days.
 	RetentionFollowUpInterval = time.Minute
 	// RetentionCorrelationRunBudget caps graph drain so a multi-million-row
 	// correlation ledger cannot starve the 7-day history window. The run
@@ -212,8 +213,6 @@ type RetentionReaper struct {
 	running           atomic.Bool
 	// paceFrom is when the batch in progress started; only Run touches it.
 	paceFrom          time.Time
-	reload            chan struct{}
-	promptRun         atomic.Bool
 	correlationStart  atomic.Uint32
 	healthMu          sync.Mutex
 	lastHealthFailure RetentionFailureClass
@@ -250,7 +249,7 @@ func newRetentionReaperWithHooks(
 		store: store, judgeBodies: judgeBodies,
 		reporter: options.Reporter, healthReporter: options.HealthReporter,
 		passiveCheckpoint: options.PassiveCheckpoint,
-		hooks:             hooks.withDefaults(), reload: make(chan struct{}, 1),
+		hooks:             hooks.withDefaults(),
 	}
 	if reaper.hooks.yield == nil {
 		reaper.hooks.yield = reaper.pace
@@ -299,8 +298,9 @@ func validateRetentionDays(days int64) error {
 }
 
 // UpdateRetentionDays atomically changes the next run's single age after full
-// validation. A shorter policy requests one prompt asynchronous run; invalid
-// reloads leave the previously active policy untouched.
+// validation; invalid reloads leave the previously active policy untouched.
+// The runtime's retention controller schedules the runs, including the prompt
+// run a shorter policy asks for.
 func (reaper *RetentionReaper) UpdateRetentionDays(days int64) error {
 	if reaper == nil {
 		return errors.New("audit: retention is not initialized")
@@ -308,24 +308,8 @@ func (reaper *RetentionReaper) UpdateRetentionDays(days int64) error {
 	if err := validateRetentionDays(days); err != nil {
 		return fmt.Errorf("audit: %w", err)
 	}
-	previous := reaper.retentionDays.Swap(days)
-	if days > 0 && (previous == 0 || days < previous) {
-		reaper.promptRun.Store(true)
-	}
-	select {
-	case reaper.reload <- struct{}{}:
-	default:
-	}
+	reaper.retentionDays.Store(days)
 	return nil
-}
-
-// ScheduleInterval returns false for retention_days=0, which is the explicit
-// no-deletion/no-schedule policy.
-func (reaper *RetentionReaper) ScheduleInterval() (time.Duration, bool) {
-	if reaper == nil || reaper.retentionDays.Load() == 0 {
-		return 0, false
-	}
-	return RetentionScheduleInterval, true
 }
 
 type RetentionScheduleWake uint8
@@ -366,51 +350,6 @@ func (TimerRetentionScheduler) Wait(
 		return RetentionScheduleReload, nil
 	case <-timer.C:
 		return RetentionScheduleTick, nil
-	}
-}
-
-// RunScheduled performs the startup run and six-hour cadence. Retention errors
-// are reported by Run and do not terminate the scheduler; cancellation and a
-// scheduler implementation error do.
-func (reaper *RetentionReaper) RunScheduled(ctx context.Context, scheduler RetentionScheduler) error {
-	if reaper == nil || scheduler == nil {
-		return errors.New("audit: retention scheduler is not initialized")
-	}
-	if ctx == nil {
-		return errors.New("audit: retention scheduler context is required")
-	}
-	backlog := false
-	run := func() {
-		result, err := reaper.Run(ctx)
-		backlog = err == nil && result.Backlog
-	}
-	if reaper.retentionDays.Load() > 0 {
-		run()
-	}
-	for {
-		interval, enabled := reaper.ScheduleInterval()
-		switch {
-		case !enabled:
-			interval = 0
-		case backlog:
-			interval = RetentionFollowUpInterval
-		}
-		wake, err := scheduler.Wait(ctx, interval, reaper.reload)
-		if err != nil {
-			return err
-		}
-		switch wake {
-		case RetentionScheduleTick:
-			if reaper.retentionDays.Load() > 0 {
-				run()
-			}
-		case RetentionScheduleReload:
-			if reaper.promptRun.Swap(false) && reaper.retentionDays.Load() > 0 {
-				run()
-			}
-		default:
-			return errors.New("audit: retention scheduler returned an invalid wake reason")
-		}
 	}
 }
 

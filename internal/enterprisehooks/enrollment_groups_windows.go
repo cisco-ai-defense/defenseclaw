@@ -69,6 +69,10 @@ type WindowsEnrollmentGroupCache struct {
 	Version int                 `json:"version"`
 	Users   map[string][]string `json:"users,omitempty"`
 	Names   map[string]string   `json:"names,omitempty"`
+	// SignedIn names the users whose groups came from an active session
+	// token this cycle; the others keep their last session groups. It is not
+	// saved.
+	SignedIn map[string]bool `json:"-"`
 }
 
 // WindowsEnrollmentGroupsCachePath is the membership cache for manifestPath.
@@ -267,10 +271,12 @@ func newWindowsEnrollmentGroups(
 		cache.Names = map[string]string{}
 	}
 	signedIn := make(map[string][]string, len(sessions))
+	cache.SignedIn = make(map[string]bool, len(sessions))
 	for sid, groups := range sessions {
 		canon := canonicalManifestTargetSID(sid)
 		signedIn[canon] = canonicalWindowsGroupSIDs(groups)
 		cache.Users[canon] = signedIn[canon]
+		cache.SignedIn[canon] = true
 	}
 	groups := &windowsEnrollmentGroups{sessions: signedIn, cache: cache}
 	if len(include) == 0 && len(exclude) == 0 {

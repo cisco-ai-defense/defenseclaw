@@ -204,7 +204,7 @@ func realmFor(domain string, realms []Realm) (Realm, bool) {
 // account: its DNS domain when the name carries none or only a NetBIOS
 // domain (CORP\alice), as Windows reports the same account; the Kerberos
 // realm; the directory type of an Active Directory or IPA realm; and the
-// sAMAccountName@REALM principal when there is none yet.
+// sAMAccountName@REALM principal, in the UPN form, when there is none yet.
 func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {
 	realm, ok := realmFor(facts.Domain, realms)
 	if !ok {
@@ -224,6 +224,6 @@ func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms [
 	}
 	if facts.Principal == "" && facts.Realm != "" {
 		bare, _ := useridentity.SplitQualifiedName(accountName)
-		facts.Principal = useridentity.NormalizePrincipal(bare + "@" + facts.Realm)
+		facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
 	}
 }

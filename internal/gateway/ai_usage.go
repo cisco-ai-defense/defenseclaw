@@ -205,6 +205,9 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	}
 	resp["total"] = total
 	resp["counts"] = (&inventory.IDEInventory{Installations: installs, Plugins: plugins}).Counts()
+	if !ManagedEnterpriseActive() {
+		nameIDERows(plugins[offset:end], installs)
+	}
 	resp["installations"] = installs
 	resp["plugins"] = plugins[offset:end]
 	if snap := discovery.Snapshot(); snap.Summary.ScanID != "" {
@@ -738,4 +741,22 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// nameIDERows names the account of each row as agent identities do, so one
+// user reads the same in both lists and their TUI tabs (GAP-0278). The rows
+// are the handler's copies; the inventory keeps the bare name its telemetry
+// carries.
+func nameIDERows(plugins []inventory.IDEPlugin, installs []inventory.IDEInstallation) {
+	name := hostAccountNamer()
+	for i := range plugins {
+		if n := name(plugins[i].UserID); n != "" {
+			plugins[i].UserName = n
+		}
+	}
+	for i := range installs {
+		if n := name(installs[i].UserID); n != "" {
+			installs[i].UserName = n
+		}
+	}
 }

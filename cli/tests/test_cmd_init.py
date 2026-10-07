@@ -658,6 +658,31 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
 
+    def test_scripted_connector_leaves_the_discovery_cache_the_gateway_reads(self):
+        # GAP-0185: --connector skipped discovery, so no agent_discovery.json
+        # recorded that ZeptoClaw is absent and the gateway dialled a fleet
+        # uplink nothing listens on, every 15 s.
+        from defenseclaw.commands import cmd_init
+
+        def absent(name, **_kwargs):
+            return AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+
+        with patch.object(agent_discovery, "_scan_agent", side_effect=absent):
+            cmd_init._build_noninteractive_connector_settings(
+                connector="zeptoclaw",
+                profile=None,
+                observe_all=False,
+                action_connectors="",
+                fail_mode=None,
+                human_approval=None,
+                hilt_min_severity=None,
+                rescan_agents=False,
+                data_dir=self.tmp_dir,
+            )
+
+        cache = json.loads(Path(self.tmp_dir, "agent_discovery.json").read_text(encoding="utf-8"))
+        self.assertIs(cache["agents"]["zeptoclaw"]["installed"], False)
+
     def test_windows_opencode_is_provisional_in_noninteractive_action_filter(self):
         from defenseclaw.commands import cmd_init
 
@@ -1509,8 +1534,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(cfg["guardrail"]["connector"], "claudecode")
 
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_explicit_connector_wins_without_discovery(self, mock_discover):
-        mock_discover.side_effect = AssertionError("explicit connector should not discover")
+    def test_explicit_connector_wins_over_discovery(self, mock_discover):
+        # Discovery runs to leave the cache the gateway reads (GAP-0185) but
+        # never decides the connector.
+        mock_discover.return_value = self._discovery({"claudecode"})
 
         result = self._invoke([
             "--non-interactive",
@@ -1530,7 +1557,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
-        mock_discover.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_rescan_agents_passes_refresh_to_discovery(self, mock_discover):

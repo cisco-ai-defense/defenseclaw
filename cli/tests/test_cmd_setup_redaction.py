@@ -274,6 +274,32 @@ def test_profile_show_reads_compiler_owned_redaction_profile_catalog(
     assert payload["field_classes"]["content"] == "detect"
 
 
+def test_profile_show_says_strict_removes_the_personal_identifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0257: "identifier: preserve" alone read as strict keeping the principals.
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "_effective",
+        lambda _app: {
+            "redaction_profiles": [
+                {"name": "sensitive", "built_in": True, "field_classes": {"identifier": "preserve"}},
+                {"name": "strict", "built_in": True, "field_classes": {"identifier": "preserve"}},
+                {"name": "strictx", "built_in": False, "extends": "strict", "field_classes": {"identifier": "preserve"}},
+            ]
+        },
+    )
+
+    shown = {
+        name: CliRunner().invoke(redaction, ["profile", "show", name], obj=_app(tmp_path), catch_exceptions=False).output
+        for name in ("sensitive", "strict", "strictx")
+    }
+
+    assert "Personal identifiers: kept as recorded (user principal, Kerberos principal," in shown["sensitive"]
+    for name in ("strict", "strictx"):
+        assert "Personal identifiers: removed (user principal, Kerberos principal," in shown[name]
+
+
 def test_profile_show_unknown_name_lists_the_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # GAP-1928: "no compiled profile named X" named no valid profile.
     monkeypatch.setattr(

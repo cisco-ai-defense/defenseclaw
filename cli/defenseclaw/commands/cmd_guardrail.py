@@ -4577,14 +4577,18 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         click.echo(f"  user:    {who} ({groups})")
     profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
     click.echo(f"  profile: {profile}")
+    cache = result.get("cache") or {}
     if result.get("match"):
         reason = result["match"]
         if result.get("matched_group"):
             reason += f" ({result['matched_group']})"
+        # GAP-0275: this lookup worked, but the gateway's own is failing and its
+        # requests get default_lookup_failed; "match: default" read as a verified no-match.
+        if cache.get("match") == "default_lookup_failed" and result["match"] != "default_lookup_failed":
+            reason += " (requests get default_lookup_failed: the gateway's directory lookup for this account fails)"
         click.echo(f"  match:   {reason}")
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
-    cache = result.get("cache") or {}
     if cache:
         age = int(cache.get("age_seconds") or 0)
         lifetime = age + int(cache.get("refresh_after_seconds") or 0)

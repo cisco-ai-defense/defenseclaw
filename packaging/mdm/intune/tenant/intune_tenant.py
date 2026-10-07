@@ -193,6 +193,22 @@ class Graph:
                 time.sleep(3)
         raise GraphError(404, "NotFound", "still not readable 45 seconds after it was created: " + path)
 
+    def add_member(self, group_id: str, object_id: str) -> bool:
+        """Add a directory object to a group; False when it already was a member.
+
+        The members list lags a fresh add by seconds, so a rerun can repeat an
+        add Graph already made. Graph answers 400 "added object references
+        already exist", which is the result asked for.
+        """
+        ref = {"@odata.id": f"{GRAPH}/v1.0/directoryObjects/{object_id}"}
+        try:
+            self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
+        except GraphError as exc:
+            if exc.status == 400 and "already exist" in str(exc):
+                return False
+            raise
+        return True
+
 
 def odata_eq(field: str, value: str) -> str:
     """A URL-encoded OData $filter expression: field eq 'value'."""
@@ -207,6 +223,7 @@ PLATFORMS = ("windows", "macos", "linux")
 HEALTH_SCRIPT_MAX_BYTES = 200 * 1024
 SHELL_SCRIPT_MAX_BYTES = 1024 * 1024
 GROUP_TARGET = "#microsoft.graph.groupAssignmentTarget"
+STATUS_REPORT_ROWS = 1000
 
 PASS, WARN, FAIL, INFO = "PASS", "WARN", "FAIL", "INFO"
 
@@ -454,19 +471,29 @@ def cmd_status(graph: Graph, args: argparse.Namespace) -> int:
         raise SystemExit("error: name --app and/or --remediation")
     if args.app:
         app = one_by_name(graph, f"{BETA}/deviceAppManagement/mobileApps", args.app, "app")
-        states = graph.get_all(f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/deviceStatuses")
-        print(f"app {args.app}: {len(states)} device(s) reported")
+        # Graph no longer serves mobileApps/{id}/deviceStatuses ("Resource not found for the
+        # segment"); the per-device install state comes from the report the admin center shows.
+        report = graph.request(
+            "POST",
+            f"{BETA}/deviceManagement/reports/retrieveDeviceAppInstallationStatusReport",
+            {"filter": f"(ApplicationId eq '{app['id']}')", "top": STATUS_REPORT_ROWS},
+        )
+        columns = [str(c.get("Column", "")) for c in report.get("Schema", [])]
+        states = [dict(zip(columns, values)) for values in report.get("Values", [])]
+        total = int(report.get("TotalRowCount") or len(states))
+        shown = "" if total <= len(states) else f" (the first {len(states)} shown)"
+        print(f"app {args.app}: {total} device(s) reported{shown}")
         rows = [
             [
-                s.get("deviceName", ""),
-                s.get("installState", ""),
-                str(s.get("errorCode", "")),
-                str(s.get("lastSyncDateTime", ""))[:19],
+                str(s.get("DeviceName") or ""),
+                str(s.get("AppInstallState_loc") or s.get("AppInstallState") or ""),
+                str(s.get("HexErrorCode") or s.get("ErrorCode") or ""),
+                str(s.get("LastModifiedDateTime") or "")[:19],
             ]
             for s in states
         ]
         if rows:
-            print(table(rows, ["device", "install state", "error", "last sync (UTC)"]))
+            print(table(rows, ["device", "install state", "error", "last change (UTC)"]))
     if args.remediation:
         script = one_by_name(
             graph, f"{BETA}/deviceManagement/deviceHealthScripts", args.remediation, "Remediations package"
@@ -534,10 +561,10 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
             print(f"{tag}{device_name} is in {group_name}")
         elif not args.apply:
             print(f"{tag}add {device_name} to {group_name}: would add")
-        else:
-            ref = {"@odata.id": f"{GRAPH}{V1}/directoryObjects/{devices[0]['id']}"}
-            graph.request("POST", f"{V1}/groups/{found[0]['id']}/members/$ref", ref)
+        elif graph.add_member(found[0]["id"], devices[0]["id"]):
             print(f"added {device_name} to {group_name}")
+        else:
+            print(f"{device_name} is in {group_name}")
     if not args.apply:
         print("Nothing was changed. Run again with --apply to make these changes.")
     return 0
@@ -548,6 +575,14 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
 
 def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     app = one_by_name(graph, f"{BETA}/deviceAppManagement/mobileApps", args.app, "app")
+    state = app.get("publishingState")
+    if state not in (None, "published"):
+        # Intune refuses an assignment until the upload has finished ("PublishingState is not
+        # Published"); say so instead of passing that error on.
+        raise SystemExit(
+            f"error: app {args.app!r} is not published yet (publishing state {state}); "
+            "finish its upload in the Intune admin center, then run this again"
+        )
     group = group_by_name(graph, args.group)
     existing = graph.get_all(f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments")
     for assignment in existing:

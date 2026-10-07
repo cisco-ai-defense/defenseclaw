@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+
 	"testing"
 	"time"
 )
@@ -59,6 +62,36 @@ func TestRemovedBindingAnswersInitializeWithPlainError(t *testing.T) {
 	}
 	if string(resp.ID) != "0" || resp.Error.Code != startupErrorCode || resp.Error.Message != startup.message {
 		t.Fatalf("unexpected response %s", out.String())
+	}
+}
+
+// A managed host has only the gateway binary; the guard told its users to
+// run the Python CLI commands of a per-user install (GAP-0270).
+func TestManagedGuardStartFailureNamesTheGatewaySetup(t *testing.T) {
+	dir := t.TempDir()
+	gateway, want := filepath.Join(dir, "defenseclaw-gateway"), ""
+	if runtime.GOOS == "windows" {
+		gateway = filepath.Join(dir, "defenseclaw.exe")
+		want = "& \"" + gateway + "\" enterprise acp setup --client zed --agent hermes --profile ih3acp"
+	} else {
+		want = gateway + " enterprise acp setup --client zed --agent hermes --profile ih3acp"
+	}
+	lock := filepath.Join(dir, "zed-hermes.contract-lock.json")
+	for path, body := range map[string]string{gateway: "gateway\n", lock: `{"guard":{"managed_custody":true}}`} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := guardExecutable
+	t.Cleanup(func() { guardExecutable = previous })
+	guardExecutable = func() (string, error) { return filepath.Join(dir, "defenseclaw-acp"), nil }
+	var startup *startupError
+	if !errors.As(newStartupError(errors.New("stat token file: no such file"), "zed", "hermes", "ih3acp", "observe", lock), &startup) {
+		t.Fatal("want a startup error")
+	}
+	if !strings.Contains(startup.message, "enterprise acp enroll") || !strings.Contains(startup.message, want) ||
+		strings.Contains(startup.message, "defenseclaw acp ") {
+		t.Fatalf("the managed remediation names commands this host lacks: %q", startup.message)
 	}
 }
 

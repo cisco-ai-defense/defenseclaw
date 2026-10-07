@@ -44,7 +44,7 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 		fields := strings.Split(authority, ";")
 		if len(fields) >= 5 && fields[1] == "Kerberosv5" && !strings.HasPrefix(fields[4], "LKDC:") {
 			if principal := NormalizePrincipal(fields[3]); principal != "" {
-				facts.Principal = principal
+				facts.Principal = NormalizeUPN(principal)
 				facts.Realm = RealmOf(principal)
 			}
 		}

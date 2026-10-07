@@ -478,10 +478,47 @@ func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 	if len(record.Accounts) == 1 {
 		users = "user"
 	}
+	// Name what counts and what was ignored: an administrator with an
+	// openclaw entry read "enables no guardrail.connectors entry" as wrong
+	// (GAP-0272).
+	ignored := ""
+	if entries := ignoredConnectorEntries(validated.Loaded, env.GOOS); len(entries) > 0 {
+		ignored = " (ignored: " + strings.Join(entries, ", ") + ")"
+	}
 	r.AddWarning(codeNoConnectorsEnabled, fmt.Sprintf(
-		"the enumerator found %d eligible %s, but config.yaml enables no guardrail.connectors entry, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {}) and run `%s`",
-		len(record.Accounts), users, env.lifecycleCommand("ensure")))
+		"the enumerator found %d eligible %s, but config.yaml enables no connector the managed deployment protects in guardrail.connector or guardrail.connectors%s, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {}) and run `%s`",
+		len(record.Accounts), users, ignored, env.lifecycleCommand("ensure")))
 	r.SecurityComplete = false
+}
+
+// ignoredConnectorEntries lists the guardrail.connector and
+// guardrail.connectors entries of a config whose effective connector set is
+// empty, each with why it does not count.
+func ignoredConnectorEntries(cfg *config.Config, goos string) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := []string{cfg.Guardrail.Connector}
+	for name := range cfg.Guardrail.Connectors {
+		names = append(names, name)
+	}
+	platform := map[string]string{"linux": "Linux", "darwin": "macOS"}[goos]
+	seen := map[string]bool{}
+	out := []string{}
+	for _, name := range names {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if !cfg.Guardrail.EffectiveEnabled(name) {
+			out = append(out, key+" (enabled: false)")
+		} else {
+			out = append(out, key+" (not supported by managed enterprise on "+platform+")")
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func intersectSorted(values, allowed []string) []string {

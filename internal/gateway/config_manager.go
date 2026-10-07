@@ -19,6 +19,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,6 +90,10 @@ type ConfigManager struct {
 	v8Plan          *config.ObservabilityV8Plan
 	afterWatchAdded func()
 	observabilityV8 hookLifecycleMetricV8Runtime
+	// startupSource is the digest of the bytes the gateway booted from; the
+	// startup reconcile skips its reload while the file still holds them.
+	startupSource [sha256.Size]byte
+	startupKnown  bool
 
 	// envConfigPath is the AVC-authored env_config.json (see
 	// config.ResolveDefaultEnvConfigPath). When set, Reload overlays
@@ -413,9 +418,11 @@ func (m *ConfigManager) reconcileStartup(ctx context.Context, fsw *fsnotify.Watc
 	if m == nil || fsw == nil {
 		return fmt.Errorf("config startup reconciliation is unavailable")
 	}
-	for {
-		if err := m.Reload(ctx, "startup_reconcile"); err != nil {
-			return err
+	for first := true; ; first = false {
+		if !first || !m.startupSourceUnchanged() {
+			if err := m.Reload(ctx, "startup_reconcile"); err != nil {
+				return err
+			}
 		}
 		timer := time.NewTimer(configReloadStartupQuietPeriod)
 		dirty := false
@@ -451,6 +458,38 @@ func (m *ConfigManager) reconcileStartup(ctx context.Context, fsw *fsnotify.Watc
 			}
 		}
 	}
+}
+
+// setStartupSource records the bytes the gateway booted from, read from
+// sourceName; a source other than the watched file is not recorded.
+func (m *ConfigManager) setStartupSource(sourceName string, raw []byte) {
+	if m == nil || len(raw) == 0 || filepath.Clean(strings.TrimSpace(sourceName)) != m.path {
+		return
+	}
+	m.startupSource, m.startupKnown = sha256.Sum256(raw), true
+}
+
+// startupSourceUnchanged reports whether config.yaml still holds the bytes
+// the gateway booted from, so the startup reconcile has nothing to apply.
+// Its reload parsed, validated and compiled the whole file a second time on
+// the start path, which a large guardrail policy made the slowest part of a
+// start (GAP-0264). The Secure Client env_config overlay is applied by that
+// reload, so a gateway with one always reloads.
+func (m *ConfigManager) startupSourceUnchanged() bool {
+	if m == nil || !m.startupKnown || m.readSnapshot == nil || m.getEnvConfigPath() != "" || ManagedEnterpriseActive() {
+		return false
+	}
+	snapshot, err := m.readSnapshot(m.path)
+	if err != nil || sha256.Sum256(snapshot.raw) != m.startupSource {
+		return false
+	}
+	version.SetContentHash(snapshot.raw)
+	if m.health != nil {
+		m.health.SetConfig(StateRunning, "", map[string]interface{}{
+			"path": m.path, "generation": m.gen.Load(), "reason": "startup_reconcile", "changed": []string{},
+		})
+	}
+	return true
 }
 
 func signalConfigStartupReady(ready chan<- error, err error) {

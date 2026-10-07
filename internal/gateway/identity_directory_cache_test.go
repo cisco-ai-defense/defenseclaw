@@ -74,6 +74,38 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 	t.Fatal("incomplete facts were not refreshed after identityDirectoryIncompleteTTL")
 }
 
+// TestIdentityDirectoryCacheRefreshesPartialGroupsSoon pins GAP-0243: groups
+// the enumerator took from an account's last session token (it had no active
+// session) stay marked partial through the spool merge and are refreshed after
+// identityDirectoryRetry, so a sign-in that brings an Entra group shows within
+// about one enumerator cycle, not after the 15 minute lifetime.
+func TestIdentityDirectoryCacheRefreshesPartialGroupsSoon(t *testing.T) {
+	merged := mergeSpoolFacts(useridentity.DirectoryFacts{}, useridentity.DirectoryFacts{Groups: []string{"S-1-1-0"}, GroupsPartial: true})
+	if !merged.GroupsPartial {
+		t.Fatalf("merged facts = %+v; the spool groups lost their partial mark", merged)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		return useridentity.DirectoryFacts{Groups: []string{"S-1-1-0"}, GroupsPartial: calls == 1, ResolvedAt: now}, nil
+	})
+	cache.now = func() time.Time { return now }
+	cache.partial = func(facts useridentity.DirectoryFacts) bool { return facts.GroupsPartial }
+	if facts, ok := cache.get("S-1-12-1-1-2-3-4", false); !ok || !facts.GroupsPartial {
+		t.Fatalf("first facts = %+v, %v; want the partial groups", facts, ok)
+	}
+	now = now.Add(identityDirectoryRetry)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if facts, _ := cache.get("S-1-12-1-1-2-3-4", false); !facts.GroupsPartial {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("partial groups were not refreshed after identityDirectoryRetry")
+}
+
 // TestIdentityDirectoryCacheBlockingRequestWaitsForIncompleteRefresh pins
 // GAP-0326: once incomplete facts (a group no name answered for, as a
 // directory outage leaves) pass their short lifetime, a blocking request

@@ -77,6 +77,10 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, s
 			}
 		}
 		facts.Groups = groups
+		// Without an active session this cycle the groups are the last
+		// session token, which can miss a group the account has gained
+		// since (an Entra group after a restart, GAP-0243).
+		facts.GroupsPartial = !cache.SignedIn[sid]
 		if facts.ResolvedAt.IsZero() {
 			facts.ResolvedAt = now
 		}
@@ -86,6 +90,9 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, s
 			record.UPNSource = UPNSourceIdentityStore
 		case facts.UPN != "":
 			record.UPNSource = UPNSourceTranslateName
+		}
+		if previous, err := ReadIdentitySpoolRecord(dir, key, nil); err == nil {
+			record = KeepLastKnownUPN(record, previous)
 		}
 		if err := writeIdentitySpoolFile(dir, name, record, setOwnership); err != nil && logf != nil {
 			logf("[hook-enumerator] WARN identity facts for %s: %v", key, err)

@@ -485,6 +485,18 @@ def load_validate_v8(data: str | bytes | Mapping[str, Any], *, source_name: str 
     return ValidatedV8Config(source_name, _masked_copy(document))
 
 
+def load_masked_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> dict[str, Any]:
+    """Parse one v8 source and mask its secrets, without validating it.
+
+    For reads of a value (``config get``): the strict parse still rejects
+    malformed YAML, but the schema and semantic checks of every section, which
+    cost seconds with many guardrail profiles, are left to ``config validate``
+    and the gateway (GAP-0276).
+    """
+
+    return _masked_copy(_parse_source(data, source_name))
+
+
 def validate_v8_source(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> dict[str, Any]:
     """Return a detached, validated, display-safe source mapping."""
 

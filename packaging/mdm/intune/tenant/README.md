@@ -14,14 +14,17 @@ profile rejects them and keeps its behavior as it was.
 
 ## Validation status
 
-- **Run on a test tenant:** `check` and `devices`, read-only; and the preview mode of `groups`,
-  `assign-app`, `remediation` and `macos-script`, which read the tenant and change nothing. The tenant
-  (licences, users, groups, automatic enrollment, the Apple push certificate) was prepared for
-  this and a Windows 11 and an Ubuntu 24.04 Desktop device were enrolled and compliant.
-- **Not run yet:** every call that creates or changes an object (`--apply`), and `status`. They follow
-  Microsoft's Graph documentation (the `beta` endpoints for Intune) and are exercised first in the
-  MDM certification round, which also delivers DefenseClaw through Intune for the first time.
-  Nothing in this folder has delivered DefenseClaw to a device yet.
+- **Run on a test tenant:** `check` and `devices`, read-only; the preview mode of every command;
+  and, with throwaway objects that were removed afterwards, every `--apply` path: `groups`
+  (create two groups, add an enrolled device, run again), `remediation` (create the package from
+  the kit scripts, assign it with a daily schedule, update and reassign it), `macos-script`
+  (create, assign, update) and `assign-app` (an app assigned as required to a group, run again).
+  `status` read the install report of an app and the run states of a Remediations package, both
+  with no device yet. The tenant (licences, users, groups, automatic enrollment, the Apple push
+  certificate) was prepared for this and a Windows 11 and an Ubuntu 24.04 Desktop device were
+  enrolled and compliant.
+- **Not run yet:** delivering DefenseClaw to a device through Intune, and `status` with devices
+  reporting. The MDM certification round does that for the first time.
 
 ## Use
 

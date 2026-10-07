@@ -289,6 +289,18 @@ func TestUserScopedCredentialBindsWindowsSID(t *testing.T) {
 	}
 }
 
+// GAP-0290: a directory account the host names qualified keeps its per-user
+// credential when the caller sends the bare account name.
+func TestUserScopedNamesCompareBareAccounts(t *testing.T) {
+	if !userScopedNamesEqual("4545", "alice", "alice@corp.example.com") ||
+		!userScopedNamesEqual("4545", "alice@corp.example.com", "alice@corp.example.com") {
+		t.Fatal("the bare account of a qualified host name was refused")
+	}
+	if userScopedNamesEqual("4545", "bob", "alice@corp.example.com") || userScopedNamesEqual("4545", "Alice", "alice") {
+		t.Fatal("another account, or another case of a POSIX name, matched")
+	}
+}
+
 // Outside the standalone profile nothing changes: connector-wide
 // credentials authenticate and per-user credentials do not exist.
 func TestUserScopedCredentialsOnlyInStandaloneProfile(t *testing.T) {

@@ -553,7 +553,10 @@ These are the fields the records carried for an Entra user (the complete table i
 
 - **A group change on Windows** reaches DefenseClaw when the user signs in
   again: the token is fixed at sign-in. The enumerator decides a signed-out
-  user from the token it saw at the last sign-in. Microsoft documents that a
+  user from the token it saw at the last sign-in, and `profile explain` then
+  says that the profile is not final. After a sign-in the enumerator reads the
+  new token about 15 seconds later, and hooks use it within about a minute.
+  Microsoft documents that a
   new token can take up to 4 hours to carry a change; that was not measured
   here.
 - **A group change on Linux** takes the Himmelblau or SSSD cache time plus
