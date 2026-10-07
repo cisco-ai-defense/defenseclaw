@@ -416,7 +416,7 @@ message. This section stays for as long as the installer imports 0.x installs
 older than 0.8.5.
 
 A `privacy` section left in `config.yaml` is not a `config_version` 9 key. The upgrade
-drops it and records it in `migration-v9.json`, and notes a `privacy.disable_redaction: true` there.
+drops it and records it in `migration-v9.json`, noting there when it had turned redaction off.
 
 `DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
 does not alter the v8 destination route graph or a persistent-sink projection.
