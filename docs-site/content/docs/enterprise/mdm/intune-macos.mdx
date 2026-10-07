@@ -9,7 +9,7 @@ keywords:
   - Apple silicon
 ---
 
-<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not delivered DefenseClaw in a live tenant yet. The tenant setup and the Apple push certificate it depends on were run on a test tenant: see [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant).</Callout>
 
 <Callout title="At a glance">
 - **You upload:** one shell script that runs as root: your copy of
@@ -31,6 +31,9 @@ detection and logs.
 
 ## Before you start
 
+- **Tenant**: the Apple push certificate, device groups and licences are in place, and the Macs
+  are enrolled; see [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). No Mac has been
+  enrolled in the test tenant yet.
 - **Macs**: Apple silicon on macOS 13.0 or later. The package
   `defenseclaw-enterprise-<version>-darwin-arm64.pkg` refuses other hosts, and
   its package identifier is `com.cisco.defenseclaw.enterprise`.

@@ -215,6 +215,30 @@ def test_openclaw_restart_reports_what_happened(tmp_path: Path, output: str, rc:
     assert len(completed.stdout.strip().splitlines()) == 1
 
 
+def test_install_makes_the_owned_bin_folders_private(tmp_path: Path) -> None:
+    # A user-private-group umask (002) left ~/.local and ~/.local/bin
+    # group-writable when another installer created them; the CLI then
+    # refused the gateway in them after install and init had succeeded.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("private_bin_dir() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    for folder in (bin_dir.parent, bin_dir):
+        folder.chmod(0o775)
+    script = tmp_path / "private.sh"
+    script.write_text(
+        f"set -euo pipefail\nBIN_DIR=\"{bin_dir}\"\ninfo() {{ echo \"INFO $*\"; }}\n" + func + "private_bin_dir\nprivate_bin_dir\n",
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert [oct(folder.stat().st_mode & 0o777) for folder in (bin_dir.parent, bin_dir)] == ["0o755", "0o755"]
+    assert completed.stdout.count("INFO ") == 2, completed.stdout
+
+
 def _release(tmp_path: Path, script: str) -> Path:
     release = tmp_path / "release"
     release.mkdir()
