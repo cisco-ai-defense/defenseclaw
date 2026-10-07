@@ -32,6 +32,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -1087,6 +1089,39 @@ func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
 	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
 	if hookFailModeNeedsSetup(oldCfg, newCfg) {
 		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+	}
+}
+
+// A custom rule-pack folder that is deleted and created again is watched
+// again (and reported as added, so the 30 s tick reloads the generation from
+// it) instead of staying in the watched set with a dead watch (GAP-0266).
+func TestAssetWatchesReaddARecreatedFolder(t *testing.T) {
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsw.Close()
+	pack := filepath.Join(t.TempDir(), "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	watches := &assetWatches{fsw: fsw, watched: map[string]struct{}{}}
+	want := map[string]struct{}{pack: {}}
+	if !watches.sync(want) {
+		t.Fatal("first sync did not watch the pack folder")
+	}
+	if err := os.RemoveAll(pack); err != nil {
+		t.Fatal(err)
+	}
+	watches.removed(pack)
+	if watches.sync(want) {
+		t.Fatal("sync watched a folder that is gone")
+	}
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !watches.sync(want) {
+		t.Fatal("the recreated pack folder was not watched again")
 	}
 }
 
