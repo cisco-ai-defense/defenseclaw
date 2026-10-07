@@ -681,7 +681,9 @@ def plain_error(exc: BaseException) -> str:
         return sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
     if code == "pattern":
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
-        return f"{name} is not in the expected format{hint}."
+        # A pattern of plain words (block_at) names them in the corrective action.
+        allowed = text if text.startswith("use one of ") else ""
+        return f"{name} is not in the expected format{hint}." + (f" {allowed[:1].upper()}{allowed[1:]}." if allowed else "")
     from defenseclaw.commands.cmd_config import _plain_v8_issue
 
     return _plain_v8_issue(None, path, reason)
