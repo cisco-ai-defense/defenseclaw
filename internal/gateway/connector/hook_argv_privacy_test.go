@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -316,6 +317,34 @@ func hookArgvInspectCases() []hookArgvCase {
 var hookArgvShellConnectors = []Connector{
 	NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(), NewKiroConnector(),
 	NewDevinConnector(), NewHermesConnector(), NewOpenHandsConnector(), NewAntigravityConnector(),
+}
+
+// TestHookArgvCasesCoverEveryShellHook keeps the runtime tests in this file
+// from silently skipping a new shell hook: every hooks/*-hook.sh template
+// needs its connector in hookArgvShellConnectors and a hookArgvConnectorCase,
+// and every hooks/inspect-*.sh template a hookArgvInspectCases entry.
+func TestHookArgvCasesCoverEveryShellHook(t *testing.T) {
+	covered := map[string]bool{}
+	for _, conn := range hookArgvShellConnectors {
+		covered[hookArgvConnectorCase(t, conn.Name()).script] = true
+	}
+	for _, tc := range hookArgvInspectCases() {
+		covered[tc.script] = true
+	}
+	for _, pattern := range []string{"hooks/*-hook.sh", "hooks/inspect-*.sh"} {
+		scripts, err := fs.Glob(hookFS, pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(scripts) == 0 {
+			t.Fatalf("no embedded template matches %s", pattern)
+		}
+		for _, script := range scripts {
+			if !covered[filepath.Base(script)] {
+				t.Errorf("%s has no runtime argv case: add it to hookArgvShellConnectors and hookArgvConnectorCase, or hookArgvInspectCases", script)
+			}
+		}
+	}
 }
 
 // runHookArgvCase runs one hook with the recorder's wrappers on its baked
