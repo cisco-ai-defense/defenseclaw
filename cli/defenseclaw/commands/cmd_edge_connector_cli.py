@@ -190,16 +190,16 @@ def device_detail(app: AppContext, device_id: str, as_json: bool) -> None:
 
 
 @edge_connector_group.command("register")
-@click.argument("device_id")
+@click.argument("device_id", type=int)
 @click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
 @click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--tags", default="", help="Comma-separated tags for the device.")
 @click.option("--json", "as_json", is_flag=True, help="Emit result as JSON.")
 @pass_ctx
-def register(app: AppContext, device_id: str, tenant_id: int, fleet_id: int, tags: str, as_json: bool) -> None:
+def register(app: AppContext, device_id: int, tenant_id: int, fleet_id: int, tags: str, as_json: bool) -> None:
     """Manually register a device in the fleet."""
     c = _client(app)
-    payload: dict = {"device_id": int(device_id), "tenant_id": tenant_id, "fleet_id": fleet_id}
+    payload: dict = {"device_id": device_id, "tenant_id": tenant_id, "fleet_id": fleet_id}
     if tags:
         payload["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     try:

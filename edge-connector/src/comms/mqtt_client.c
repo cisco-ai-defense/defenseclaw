@@ -221,8 +221,28 @@ static int tcp_connect(const char *host, uint16_t port) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
 
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
-            break; /* success */
+        /* Set non-blocking before connect to enforce a timeout */
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        }
+
+        rc = connect(fd, rp->ai_addr, rp->ai_addrlen);
+        if (rc == 0) {
+            break; /* connected immediately */
+        }
+        if (errno == EINPROGRESS) {
+            /* Wait up to 5 seconds for the connection to complete */
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            int poll_rc = poll(&pfd, 1, 5000);
+            if (poll_rc > 0 && (pfd.revents & POLLOUT)) {
+                int sock_err = 0;
+                socklen_t errlen = sizeof(sock_err);
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &errlen);
+                if (sock_err == 0) {
+                    break; /* success */
+                }
+            }
         }
         close(fd);
         fd = -1;
@@ -234,7 +254,7 @@ static int tcp_connect(const char *host, uint16_t port) {
         return -1;
     }
 
-    /* Set non-blocking after successful connect */
+    /* Ensure non-blocking is set (already set above, but be explicit) */
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) {
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);

@@ -50,6 +50,7 @@ type Cache struct {
 	onHit   func()
 	onMiss  func()
 	onStore func()
+	onEvict func()
 }
 
 // NewCache creates a verdict cache with a max entry limit.
@@ -62,10 +63,11 @@ func NewCache(maxSize int, pipeline PipelineFunc) *Cache {
 }
 
 // SetMetricsHooks configures callbacks for cache metrics updates.
-func (c *Cache) SetMetricsHooks(onHit, onMiss, onStore func()) {
+func (c *Cache) SetMetricsHooks(onHit, onMiss, onStore, onEvict func()) {
 	c.onHit = onHit
 	c.onMiss = onMiss
 	c.onStore = onStore
+	c.onEvict = onEvict
 }
 
 // Lookup checks the cache for a tool hash. Returns a copy of the cached entry and true,
@@ -91,12 +93,17 @@ func (c *Cache) Lookup(toolHash [32]byte) (CacheEntry, bool) {
 
 	if expired {
 		// Slow path: take write lock to delete expired entry.
+		deleted := false
 		c.mu.Lock()
 		// Re-check under write lock (another goroutine may have deleted/updated it).
 		if e, still := c.entries[toolHash]; still && time.Since(e.CachedAt) > e.TTL {
 			delete(c.entries, toolHash)
+			deleted = true
 		}
 		c.mu.Unlock()
+		if deleted && c.onEvict != nil {
+			c.onEvict()
+		}
 		c.misses.Add(1)
 		if c.onMiss != nil {
 			c.onMiss()
@@ -157,15 +164,25 @@ func (c *Cache) Store(toolHash [32]byte, action Action, severity uint8) {
 // Invalidate removes a specific hash from the cache.
 func (c *Cache) Invalidate(toolHash [32]byte) {
 	c.mu.Lock()
+	_, existed := c.entries[toolHash]
 	delete(c.entries, toolHash)
 	c.mu.Unlock()
+	if existed && c.onEvict != nil {
+		c.onEvict()
+	}
 }
 
 // FlushAll clears the entire cache (e.g., on policy change).
 func (c *Cache) FlushAll() {
 	c.mu.Lock()
+	n := len(c.entries)
 	c.entries = make(map[[32]byte]*CacheEntry)
 	c.mu.Unlock()
+	if c.onEvict != nil {
+		for i := 0; i < n; i++ {
+			c.onEvict()
+		}
+	}
 }
 
 // Stats returns cache hit/miss statistics.
@@ -190,5 +207,8 @@ func (c *Cache) evictLRU() {
 	}
 	if !first {
 		delete(c.entries, oldestKey)
+		if c.onEvict != nil {
+			c.onEvict()
+		}
 	}
 }

@@ -272,6 +272,13 @@ func (c *TCPClient) readLoop(ctx context.Context) {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
+			log.Printf("mqtt: readLoop error: %v — closing connection", err)
+			c.mu.Lock()
+			if c.conn != nil && !c.closed {
+				c.conn.Close()
+				c.conn = nil
+			}
+			c.mu.Unlock()
 			return
 		}
 

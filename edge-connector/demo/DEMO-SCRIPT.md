@@ -11,10 +11,10 @@
 ```bash
 # Two terminals to Pi
 # Terminal 1: commands
-ssh nikghodki@nikraspberry.local
+ssh <user>@<device>.local
 
 # Terminal 2: log tail (keep visible on right side of screen)
-ssh nikghodki@nikraspberry.local "tail -f ~/edge-connector/dclaw_hook.log"
+ssh <user>@<device>.local "tail -f ~/edge-connector/dclaw_hook.log"
 
 # Clear log
 > ~/edge-connector/dclaw_hook.log

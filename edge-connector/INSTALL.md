@@ -45,7 +45,7 @@ Copy and customize the default policy:
 
 ```bash
 mkdir -p ~/.defenseclaw
-cp policies/strict.yaml ~/.defenseclaw/policy.yaml
+cp ../policies/strict.yaml ~/.defenseclaw/policy.yaml
 ```
 
 Edit `~/.defenseclaw/policy.yaml`:

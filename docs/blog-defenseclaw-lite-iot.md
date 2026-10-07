@@ -24,7 +24,7 @@ The agent also intercepts responses, not just requests. A tool call that looks b
 
 ## Trust boundary inference
 
-Not all tool calls carry equal risk. DefenseClaw Edge Connector infers trust boundaries from context: inputs originating from user-facing channels (sensor readings from untrusted environments, network payloads from external sources) are evaluated against a lower block threshold than system-internal calls. This means the agent can be strict about user input without creating false positives on internal orchestration traffic. The policy is explicit -- `user_input_block_threshold: medium`, `system_block_threshold: high` -- and teams can tune it per deployment.
+Not all tool calls carry equal risk. DefenseClaw Edge Connector infers trust boundaries from context: inputs originating from user-facing channels (sensor readings from untrusted environments, network payloads from external sources) are evaluated against a lower block threshold than system-internal calls. This means the agent can be strict about user input without creating false positives on internal orchestration traffic. Trust boundaries are derived automatically from capability flags, destination, and content risk signals at evaluation time.
 
 ## Enriched cloud escalation
 

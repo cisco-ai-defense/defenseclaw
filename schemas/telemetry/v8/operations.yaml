@@ -10319,7 +10319,7 @@ groups:
   stability: development
   introduced_in: telemetry-registry-v3
   extends:
-  - body.security.finding
+  - body.ai.runtime.finding
   attributes: []
   body_fields: []
   log:

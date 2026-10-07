@@ -38,6 +38,10 @@ static size_t find_lru_slot(void) {
 }
 
 bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out) {
+#if DCLAW_VERDICT_CACHE_SIZE == 0
+    (void)tool_hash; (void)out;
+    return false;
+#else
     dclaw_state_t *s = dclaw_get_state();
 
     for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
@@ -59,11 +63,16 @@ bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out) {
         return true;
     }
     return false;
+#endif /* DCLAW_VERDICT_CACHE_SIZE */
 }
 
 void dclaw_cache_store_enriched(const uint8_t *tool_hash, dclaw_action_t action,
                                 dclaw_severity_t severity, uint8_t category,
                                 const char *evidence) {
+#if DCLAW_VERDICT_CACHE_SIZE == 0
+    (void)tool_hash; (void)action; (void)severity; (void)category; (void)evidence;
+    return;
+#else
     dclaw_state_t *s = dclaw_get_state();
     size_t idx = find_lru_slot();
 
@@ -83,6 +92,7 @@ void dclaw_cache_store_enriched(const uint8_t *tool_hash, dclaw_action_t action,
     s->cache[idx].ttl_minutes = (uint16_t)ttl_for_action(action);
     s->cache[idx].cached_at_tick = hal_tick_ms();
     s->cache[idx].occupied = true;
+#endif /* DCLAW_VERDICT_CACHE_SIZE */
 }
 
 void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
@@ -92,6 +102,9 @@ void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
 }
 
 void dclaw_cache_invalidate(const uint8_t *tool_hash) {
+#if DCLAW_VERDICT_CACHE_SIZE == 0
+    (void)tool_hash;
+#else
     dclaw_state_t *s = dclaw_get_state();
     for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
         if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, tool_hash, 32) == 0) {
@@ -99,11 +112,16 @@ void dclaw_cache_invalidate(const uint8_t *tool_hash) {
             return;
         }
     }
+#endif
 }
 
 void dclaw_cache_flush_all(void) {
+#if DCLAW_VERDICT_CACHE_SIZE == 0
+    return;
+#else
     dclaw_state_t *s = dclaw_get_state();
     for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
         s->cache[i].occupied = false;
     }
+#endif
 }

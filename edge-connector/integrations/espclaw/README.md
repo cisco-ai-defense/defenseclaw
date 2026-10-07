@@ -1,6 +1,6 @@
 # ESP-Claw Integration for DefenseClaw Edge Connector
 
-Secure [ESP-Claw](https://github.com/nicholasgasior/espclaw) (Espressif ESP32 MCP server/client) with DefenseClaw policy enforcement.
+Secure [ESP-Claw](https://github.com/nicholasgasior/esp-claw) (Espressif ESP32 MCP server/client) with DefenseClaw policy enforcement.
 
 ESP-Claw runs on ESP32 microcontrollers and exposes hardware tools (GPIO, I2C, SPI, sensors) via MCP over HTTP. This adapter intercepts every tool call through the Edge Connector before it reaches the device.
 

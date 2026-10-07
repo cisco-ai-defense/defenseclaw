@@ -28,7 +28,6 @@ import secrets
 import shutil
 import socket
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -132,7 +131,8 @@ def _setup_docker(port: int) -> dict | bool:
     # password file BEFORE starting the container. Previously, the container
     # started with password_file referencing a file that didn't exist yet,
     # causing Mosquitto to fail on startup.
-    conf_dir = Path(tempfile.mkdtemp(prefix="dclaw-mqtt-"))
+    conf_dir = Path.home() / ".defenseclaw" / "mqtt"
+    os.makedirs(conf_dir, exist_ok=True)
     conf_file = conf_dir / "mosquitto.conf"
     conf_file.write_text(_MOSQUITTO_CONF)
     passwd_file = conf_dir / "passwd"
@@ -164,8 +164,8 @@ def _setup_docker(port: int) -> dict | bool:
         capture_output=True, text=True,
     )
     if passwd_result.returncode != 0:
-        ux.warn(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
-        ux.warn("  Broker may not accept authenticated connections.")
+        ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
+        return False
     else:
         ux.ok(f"MQTT user '{mqtt_user}' password file generated")
 

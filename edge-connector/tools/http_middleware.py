@@ -57,8 +57,10 @@ def _extract_tool_info(body: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
             tool_name = val
             break
         if isinstance(val, dict):
-            tool_name = val.get("name", "")
-            break
+            nested = val.get("name", "")
+            if nested:
+                tool_name = nested
+                break
 
     arguments: Dict[str, Any] = {}
     for key in _ARGS_KEYS:

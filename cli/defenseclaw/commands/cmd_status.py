@@ -1729,15 +1729,23 @@ def _fetch_fleet_health(client) -> dict | None:
         return None
 
 
+def _safe_int(val, default=0):
+    """Convert a value to int, returning *default* on failure."""
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def _print_fleet_health(client) -> None:
     """Render a Fleet row when the fleet API is reachable."""
     data = _fetch_fleet_health(client)
     if data is None:
         _status_row("Fleet", ux.dim("not configured"))
         return
-    online = int(data.get("online", 0))
-    offline = int(data.get("offline", 0))
-    total = int(data.get("total_devices", online + offline))
+    online = _safe_int(data.get("online", 0))
+    offline = _safe_int(data.get("offline", 0))
+    total = _safe_int(data.get("total_devices", online + offline))
     if total == 0:
         _status_row("Fleet", ux.dim("no devices registered"))
         return
@@ -1753,10 +1761,10 @@ def _fleet_health_payload(client) -> dict:
         return {"available": False}
     return {
         "available": True,
-        "total_devices": int(data.get("total_devices", 0)),
-        "online": int(data.get("online", 0)),
-        "offline": int(data.get("offline", 0)),
-        "degraded": int(data.get("degraded", 0)),
+        "total_devices": _safe_int(data.get("total_devices", 0)),
+        "online": _safe_int(data.get("online", 0)),
+        "offline": _safe_int(data.get("offline", 0)),
+        "degraded": _safe_int(data.get("degraded", 0)),
         "lockdown": int(data.get("lockdown", 0)),
     }
 

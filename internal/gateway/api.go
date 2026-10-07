@@ -3865,10 +3865,6 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/routing/") && connector.IsLoopback(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
 		route := r.Pattern
 		if route == "" {
 			// SECURITY (Plan B5): never let the path-token reach a metric label.

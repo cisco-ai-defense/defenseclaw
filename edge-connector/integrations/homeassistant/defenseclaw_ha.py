@@ -101,6 +101,8 @@ class HomeAssistantAdapter:
         self.host, self.port, self.timeout = host, port, timeout
         self.read_only = read_only
         self.ha_url = f"http://{host}:{port}"
+        if not mcp_path.startswith("/"):
+            mcp_path = f"/{mcp_path}"
         self.mcp_url = f"http://{host}:{mcp_port}{mcp_path}"
         self._access_token = access_token or os.environ.get("HA_ACCESS_TOKEN", "")
         self._connector = connector or EdgeConnector(

@@ -23,6 +23,7 @@ either locally or on a remote device via SSH.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -146,14 +147,14 @@ def _configure_remote_env(
     ux.echo()
     ux.section("Configuring device environment")
     env_lines = (
-        f"DCLAW_TENANT_ID={tenant_id}\\n"
-        f"DCLAW_FLEET_ID={fleet_id}\\n"
-        f"DCLAW_DEVICE_ID={device_id}\\n"
-        f"DCLAW_BROKER_URL={broker_url}\\n"
+        f"DCLAW_TENANT_ID={shlex.quote(str(tenant_id))}\n"
+        f"DCLAW_FLEET_ID={shlex.quote(str(fleet_id))}\n"
+        f"DCLAW_DEVICE_ID={shlex.quote(str(device_id))}\n"
+        f"DCLAW_BROKER_URL={shlex.quote(str(broker_url))}\n"
     )
     configure_cmd = (
         "sudo mkdir -p /etc/defenseclaw && "
-        f"echo -e '{env_lines}' | sudo tee /etc/defenseclaw/edge-connector.env > /dev/null && "
+        f"printf %s {shlex.quote(env_lines)} | sudo tee /etc/defenseclaw/edge-connector.env > /dev/null && "
         "sudo chmod 600 /etc/defenseclaw/edge-connector.env"
     )
     result = subprocess.run(

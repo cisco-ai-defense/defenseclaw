@@ -148,10 +148,13 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                     /* Copy content into owned buffer to avoid dangling pointer */
                     if (*p != '"') return -1;
                     const char *content_start = p + 1;
-                    /* Find closing quote */
+                    /* Find closing quote, skipping escaped characters */
                     const char *scan = content_start;
                     while (*scan != '"' && *scan != '\0') {
-                        if (*scan == '\\') scan++;
+                        if (*scan == '\\') {
+                            scan++;
+                            if (*scan == '\0') return -1; /* unterminated escape */
+                        }
                         scan++;
                     }
                     if (*scan != '"') return -1;

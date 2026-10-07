@@ -354,8 +354,8 @@ class MCPProxy:
 
         if verdict.blocked:
             logger.warning(
-                "BLOCKED tools/call: tool=%s reason=%s args=%s",
-                tool_name, verdict.reason, json.dumps(arguments, default=str)[:200],
+                "BLOCKED tools/call: tool=%s reason=%s",
+                tool_name, verdict.reason,
             )
             return _make_error(
                 req_id,

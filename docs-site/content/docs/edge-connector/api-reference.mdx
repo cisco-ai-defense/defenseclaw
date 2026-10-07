@@ -48,7 +48,7 @@ All state-changing requests (`POST`, `PUT`, `DELETE`) must include the `X-Defens
 ### List devices
 
 ```
-GET /devices
+GET /api/v1/fleet/devices
 ```
 
 Returns all registered devices with an aggregate fleet summary.
@@ -90,7 +90,7 @@ Returns all registered devices with an aggregate fleet summary.
 ### Register a device
 
 ```
-POST /devices
+POST /api/v1/fleet/devices
 ```
 
 Registers a new device with the fleet manager. If a device with the same composite ID already exists, the existing device record is returned with `200 OK` instead of `201 Created`.
@@ -154,7 +154,7 @@ Registers a new device with the fleet manager. If a device with the same composi
 ### Get device details
 
 ```
-GET /devices/{id}
+GET /api/v1/fleet/devices/{id}
 ```
 
 Returns the full device record for a specific device. The `{id}` is the 64-bit composite device ID (not the raw `device_id`).
@@ -193,7 +193,7 @@ Returns the full device record for a specific device. The `{id}` is the 64-bit c
 ### Send command to device
 
 ```
-POST /devices/{id}/command
+POST /api/v1/fleet/devices/{id}/command
 ```
 
 Dispatches a command to a specific device over MQTT. Commands are published to the topic `defenseclaw/{tenant_id}/{fleet_id}/{device_id}/cmd/request`.
@@ -238,7 +238,7 @@ The MQTT client must be configured on the server for command dispatch. If not, t
 ### Decommission devices (batch)
 
 ```
-POST /devices/decommission-batch
+POST /api/v1/fleet/devices/decommission-batch
 ```
 
 Removes multiple devices from the fleet in a single request. Returns which devices were decommissioned and which were not found.
@@ -290,7 +290,7 @@ The `not_found` field is only present when one or more devices could not be foun
 ### Push policy
 
 ```
-POST /policy/push
+POST /api/v1/fleet/policy/push
 ```
 
 Compiles a policy YAML, signs it with HMAC-SHA256 shared key, stores the version, and distributes the signed binary to devices in the target fleet via MQTT.
@@ -338,7 +338,7 @@ Compiles a policy YAML, signs it with HMAC-SHA256 shared key, stores the version
 ### List policy versions
 
 ```
-GET /policy/versions?tenant_id={tenant_id}&fleet_id={fleet_id}
+GET /api/v1/fleet/policy/versions?tenant_id={tenant_id}&fleet_id={fleet_id}
 ```
 
 Returns all stored policy versions for a tenant/fleet pair, ordered newest first.
@@ -392,7 +392,7 @@ Returns all stored policy versions for a tenant/fleet pair, ordered newest first
 ### Simulate policy (dry run)
 
 ```
-POST /policy/simulate
+POST /api/v1/fleet/policy/simulate
 ```
 
 Compiles a policy YAML without signing or distributing. Use this to validate policy changes before pushing them.
@@ -434,7 +434,7 @@ Compiles a policy YAML without signing or distributing. Use this to validate pol
 ### Send emergency command
 
 ```
-POST /policy/emergency
+POST /api/v1/fleet/policy/emergency
 ```
 
 Distributes an emergency command to all devices in a fleet via MQTT. Use for incident response.
@@ -488,7 +488,7 @@ Distributes an emergency command to all devices in a fleet via MQTT. Use for inc
 ### Push threat intelligence
 
 ```
-POST /threat-intel/push
+POST /api/v1/fleet/threat-intel/push
 ```
 
 Revokes previously allowed file hashes from the verdict cache. Optionally flushes the entire cache for emergency response.
@@ -531,7 +531,7 @@ Revokes previously allowed file hashes from the verdict cache. Optionally flushe
 ### Fleet health
 
 ```
-GET /fleet/health
+GET /api/v1/fleet/health
 ```
 
 Returns aggregate fleet status and verdict cache statistics. Use this for dashboards and alerting.

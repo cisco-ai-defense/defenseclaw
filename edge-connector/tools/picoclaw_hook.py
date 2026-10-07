@@ -305,14 +305,28 @@ def extract_destination(tool: str, arguments: dict) -> str:
     """Extract network destination from tool arguments."""
     # Any tool with network capability should have destination checked
     if TOOL_CAP_MAP.get(tool, 0) & CAP_NET_FETCH or tool in ("web_search", "fetch_url", "fetch", "web_fetch"):
-        url = arguments.get("url", arguments.get("query", arguments.get("href", "")))
-        if "://" in str(url):
+        # Check top-level keys, then nested "params" / "input" dicts
+        search_dicts = [arguments]
+        for nested_key in ("params", "input", "arguments"):
+            nested = arguments.get(nested_key)
+            if isinstance(nested, dict):
+                search_dicts.append(nested)
+        url = ""
+        for d in search_dicts:
+            for key in ("url", "query", "href", "destination"):
+                val = d.get(key)
+                if isinstance(val, str) and val:
+                    url = val
+                    break
+            if url:
+                break
+        if "://" in url:
             try:
                 from urllib.parse import urlparse
                 return urlparse(url).hostname or ""
             except Exception:
                 pass
-        return str(url) if url else ""
+        return url
     return ""
 
 

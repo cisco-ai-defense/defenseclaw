@@ -31,11 +31,11 @@ except ImportError:
     sys.exit(1)
 
 
-# Profile partition size limits
+# Profile partition size limits (must match HAL_FLASH_POLICY_*_SIZE in platform.h)
 PROFILE_LIMITS = {
     "minimal": 2048,
     "standard": 4096,
-    "edge": 8192,
+    "edge": 4096,
 }
 
 # Capability name → bitmask mapping

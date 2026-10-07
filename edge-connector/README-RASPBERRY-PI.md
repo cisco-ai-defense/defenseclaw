@@ -28,10 +28,7 @@ sudo apt update && sudo apt install -y build-essential cmake git python3
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
-cd defenseclaw
-git checkout feature/defenseclaw-lite-phase1
-
-cd edge-connector
+cd defenseclaw/edge-connector
 mkdir build && cd build
 cmake .. -DDCLAW_PROFILE=STANDARD
 make -j4

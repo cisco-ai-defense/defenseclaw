@@ -1438,7 +1438,3 @@ clean:
 	rm -rf cli/defenseclaw/_data
 	rm -rf build/macos-app
 	find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-
-# ---------------------------------------------------------------------------
-# GRPO training engine
-# ---------------------------------------------------------------------------

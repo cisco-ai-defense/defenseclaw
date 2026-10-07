@@ -98,5 +98,8 @@ func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache) {
 		func() { // onStore
 			GlobalMetrics.VerdictCacheSize.Add(1)
 		},
+		func() { // onEvict
+			GlobalMetrics.VerdictCacheSize.Add(-1)
+		},
 	)
 }
