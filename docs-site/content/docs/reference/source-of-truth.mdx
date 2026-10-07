@@ -85,8 +85,8 @@ Most keys apply with no restart. A short list of process-level keys still
 needs `defenseclaw-gateway restart`: `data_dir`, the gateway listener and
 token settings, the guardrail listener, `deployment_mode`,
 `enterprise.profile`, `enterprise.network`, the resource-identity keys
-(`environment`, `tenant_id`, `workspace_id`, `discovery_source`), and the hook
-settings that setup bakes into the hook scripts. When your change touches one,
+(`environment`, `tenant_id`, `workspace_id`, `discovery_source`), the hook
+self-heal settings and a connector's own `enabled`. When your change touches one,
 `config set` says so:
 
 ```text

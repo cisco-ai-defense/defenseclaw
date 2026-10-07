@@ -290,7 +290,7 @@ type Config struct {
 	ClaudeCode     AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
 	Codex          AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
 	ConnectorHooks map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
-	Webhooks []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+	Webhooks       []WebhookConfig            `mapstructure:"webhooks"         yaml:"webhooks"`
 	// Observability decodes the notification-only per-connector webhook
 	// overrides used by webhook setup. The canonical v8 telemetry graph is
 	// parsed and compiled independently and owns all export routing.
