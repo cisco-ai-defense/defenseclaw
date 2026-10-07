@@ -25,6 +25,10 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 # or not) without any individual test hanging; targets that run all or most
 # of it set this timeout.
 GO_TEST_TIMEOUT ?= 60m
+# -race also turns on checkptr in every package. In the transpiled SQLite
+# (modernc.org) that every audit store runs, checkptr alone doubles the cost
+# of the race suites; race detection stays on everywhere. CI uses the same flags.
+GO_RACE_FLAGS := -race -gcflags=modernc.org/...=-d=checkptr=0
 
 DIST_DIR    := dist
 
@@ -821,7 +825,7 @@ tui-test: pycli
 	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q
 
 gateway-test: sync-openclaw-extension
-	go test -race -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
+	go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
 
 # packaging-macos-test runs the pure-bash unit tests for the macOS installer
 # scripts under packaging/macos/. They don't touch /Library, sudo, or
@@ -1063,7 +1067,7 @@ contextual-judge-test:
 		benchmarks.scripts.test_benchmark_score_contextual_judge
 
 go-test-cov: sync-openclaw-extension
-	go test -race -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...
+	go test $(GO_RACE_FLAGS) -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...
 
 connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
 

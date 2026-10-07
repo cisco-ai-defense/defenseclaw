@@ -124,6 +124,9 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "GO_PACKAGE_SHARDS: 8" in workflow
     assert "internal/(audit|gateway)" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 24' in workflow
+    # checkptr in the transpiled SQLite doubled the cost of every race shard.
+    race = "go test -race -gcflags=modernc.org/...=-d=checkptr=0 "
+    assert workflow.count("go test -race ") == workflow.count(race) == 3
     assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
