@@ -254,7 +254,8 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
         load_validate_v8(f"config_version: 8\n{legacy}\n")
 
     assert captured.value.keyword in {"additionalProperties", "oneOf"}
-    assert "run defenseclaw upgrade" in str(captured.value)
+    # An upgrade cannot fix a released key left in a current file.
+    assert "run defenseclaw upgrade" not in str(captured.value)
 
 
 def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
