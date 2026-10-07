@@ -250,10 +250,10 @@ The bundle ships 18 dashboards in `bundles/local_observability_stack/grafana/das
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Process, SQLite, v8 destination/exporter, queue, and canonical gateway-error health. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
 | **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, initial and grouped follow-up prompts, descendants, per-agent model/tool-family summaries, updates, approvals, outcomes, inputs/outputs, reported tokens/cost, security decisions, and Tempo waterfall. |
-| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | Enforced and observe-mode would-block decisions, rule IDs, recurring signatures, and pivots into Agent360. |
+| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | Enforced and observe-mode would-block decisions, rule IDs, recurring signatures, and pivots into Agent360. On Linux with Tetragon it also shows kernel denials and blocks by your own Tetragon policies. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
 | **Sandboxes** (`defenseclaw-sandboxes`) | OpenShell sandboxes: active count, phase changes, egress by source and outcome, top blocked and allowed hosts, bytes per destination, shadow-AI findings, integration health. `$sandbox` reads Loki structured metadata added by the Collector. |
-| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What AI runtimes actually ran next to the discovery inventory: runtime-plane coverage and health, processes and connections, runtime findings, and host-level agent activity. |
+| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What AI runtimes actually ran next to the discovery inventory: runtime-plane coverage and health, processes and connections, runtime findings, and host-level agent activity. On Linux with Tetragon: the kernel-controls fleet table, the burn-in table, and the events of your own Tetragon policies. |
 
 See the [complete Grafana dashboard catalog](/docs/observability/grafana-dashboards)
 for the owner and purpose of every board, the drill-down map, backend usage,
