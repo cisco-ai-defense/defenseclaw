@@ -662,8 +662,10 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	}
 	_ = logFile.Close()
 	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogSpawnReadyTimeout, watchdogStartInterval); err != nil {
-		if watchdogStillStarting(pidPath) {
-			Warn(fmt.Sprintf("Watchdog is still starting (PID %d holds its ownership lock and has not published its PID yet)", cmd.pid))
+		// On a busy machine the child may not even have taken its lock yet;
+		// a live child is slow, not failed (GAP-0478).
+		if watchdogStillStarting(pidPath) || watchdogChildRunning(cmd.pid) {
+			Warn(fmt.Sprintf("Watchdog is still starting (PID %d); on a busy machine this can take a minute", cmd.pid))
 			Subhead("Check it in a minute with: defenseclaw-gateway watchdog status")
 			return nil
 		}
@@ -676,6 +678,19 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	fmt.Printf("Watchdog %s (PID %d)\n", Style("started", "fg=green", "bold"), cmd.pid)
 	fmt.Printf("  %s %s\n", Style("Log file:", "fg=bright_black", "bold"), logPath)
 	return nil
+}
+
+// watchdogChildRunning reports whether the watchdog process just spawned is
+// still alive.
+func watchdogChildRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return watchdogProcessAlive(pid, proc)
 }
 
 // watchdogStillStarting reports a watchdog that took its ownership lock but
