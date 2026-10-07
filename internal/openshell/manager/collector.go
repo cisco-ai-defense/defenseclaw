@@ -109,7 +109,8 @@ var sandboxExecutableDirs = []string{
 // that deep), C path (content), H path (content, its last MAXBYTES), W path
 // (a project searched for the manifests M name and U suffix, not entering K
 // folders), N name and R dir (an executable lookup), O argv|cwd (ps mode:
-// also each process's arguments or working directory).
+// also each process's arguments or working directory), O env (discover
+// mode: also the names of the workload's environment variables).
 //
 // Records, one per line: "T 100 <boot epoch>", "P pid ppid uid start
 // state", "Pc pid comm", "Pa pid arg", "Pt pid argv0-target", "L /proc/pid
@@ -128,13 +129,13 @@ const collectScript = `export LC_ALL=C
 mode=$1 max=$2 dirmax=$3
 shift 3
 st=() rd=() hs=() wk=() nm=() pd=() mn=() ms=() sk=() dl=() dd=()
-argv=0 cwd=0
+argv=0 cwd=0 envn=0
 while [ "$#" -ge 2 ]; do
   case $1 in
     S) st+=("$2") ;; C) rd+=("$2") ;; H) hs+=("$2") ;; W) wk+=("$2") ;;
     N) nm+=("$2") ;; R) pd+=("$2") ;; M) mn+=("$2") ;; U) ms+=("$2") ;; K) sk+=("$2") ;;
     D1|D2|D3) dl+=("$2"); dd+=("${1#D}") ;;
-    O) case $2 in argv) argv=1 ;; cwd) cwd=1 ;; esac ;;
+    O) case $2 in argv) argv=1 ;; cwd) cwd=1 ;; env) envn=1 ;; esac ;;
   esac
   shift 2
 done
@@ -193,7 +194,7 @@ for d in /proc/[0-9]*; do
       a=
     done 2>/dev/null < "$d/cmdline"
   fi
-  if [ "$mode" = discover ] && [ "${#envs[@]}" -lt 512 ]; then
+  if [ "$mode" = discover ] && [ "$envn" = 1 ] && [ "${#envs[@]}" -lt 512 ]; then
     while IFS= read -r -d '' kv; do
       k=${kv%%=*}
       [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] && envs[$k]=1
@@ -281,6 +282,9 @@ type collectScope struct {
 	// maxFiles bounds the files whose content the answer may bring
 	// (ai_discovery.max_files_per_scan, at most collectMaxEntries).
 	maxFiles int
+	// envNames is set when the names of the workload's environment
+	// variables were asked for (ai_discovery.include_env_var_names).
+	envNames bool
 }
 
 func newCollectScope() *collectScope {
@@ -512,7 +516,7 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 				p.Cwd = target
 			}
 		case "V":
-			if !collectEnvName.MatchString(rest) || envs[rest] || len(c.EnvNames) >= collectMaxEnvNames {
+			if !scope.envNames || !collectEnvName.MatchString(rest) || envs[rest] || len(c.EnvNames) >= collectMaxEnvNames {
 				refuse()
 				continue
 			}

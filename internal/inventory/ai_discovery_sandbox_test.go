@@ -254,10 +254,13 @@ func TestPlanSandboxScanNamesTheSandboxsPaths(t *testing.T) {
 	if !slices.Contains(plan.Manifests, "package.json") || !slices.Equal(plan.Binaries, []string{"dccert"}) {
 		t.Fatalf("manifests = %v binaries = %v", plan.Manifests, plan.Binaries)
 	}
+	if plan.EnvNames {
+		t.Fatal("environment names asked for with include_env_var_names off")
+	}
 	// Without a project folder nothing is walked.
-	plan, err = PlanSandboxScan(SandboxScan{Home: "/sandbox"}, SandboxScanOptions{IncludePackageManifests: true}, []AISignature{sig})
-	if err != nil || len(plan.Walk) != 0 {
-		t.Fatalf("plan = %+v, %v, want no walk without a project", plan, err)
+	plan, err = PlanSandboxScan(SandboxScan{Home: "/sandbox"}, SandboxScanOptions{IncludePackageManifests: true, IncludeEnvVarNames: true}, []AISignature{sig})
+	if err != nil || len(plan.Walk) != 0 || !plan.EnvNames {
+		t.Fatalf("plan = %+v, %v, want no walk without a project, and environment names", plan, err)
 	}
 }
 

@@ -183,6 +183,7 @@ type SandboxDir struct {
 // (skills, rules, plugins), History files whose tail it reads, Walk roots
 // searched for the package manifests Manifests names (ManifestSuffixes too;
 // SkipDirs are not entered), and the Binaries an executable lookup tries.
+// EnvNames asks for the names of the workload's environment variables.
 type SandboxCandidates struct {
 	Stat, Read, History []string
 	Dirs                []SandboxDir
@@ -191,6 +192,7 @@ type SandboxCandidates struct {
 	ManifestSuffixes    []string
 	SkipDirs            []string
 	Binaries            []string
+	EnvNames            bool
 }
 
 // sandboxFacts stand in for the host's in a sandbox scan
@@ -257,6 +259,7 @@ func PlanSandboxScan(scan SandboxScan, opts SandboxScanOptions, catalog []AISign
 		out.Dirs = append(out.Dirs, SandboxDir{Path: p, Depth: depth})
 	}
 	sort.Slice(out.Dirs, func(i, j int) bool { return out.Dirs[i].Path < out.Dirs[j].Path })
+	out.EnvNames = opts.IncludeEnvVarNames
 	if opts.IncludeShellHistory {
 		for _, home := range svc.homesToScan() {
 			add(&out.History, "history",

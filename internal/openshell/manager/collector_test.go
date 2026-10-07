@@ -40,6 +40,7 @@ func testScope() *collectScope {
 	s.walks = []string{"/sandbox/work/repo"}
 	s.manifests["package.json"] = true
 	s.exeDirs["/sandbox/.local/bin"], s.binaries["dccert"] = true, true
+	s.envNames = true
 	return s
 }
 
@@ -80,6 +81,12 @@ func TestParseCollectionKeepsWhatWasAsked(t *testing.T) {
 	}
 	if string(c.Contents["/sandbox/.dccert/mcp.json"]) != `{"mcpServers":{"dccert-marker":{}}}` {
 		t.Fatalf("contents = %q", c.Contents)
+	}
+	// Environment variable names are kept only when they were asked for.
+	scope := testScope()
+	scope.envNames = false
+	if c, err = parseCollection(out, false, scope, 1024); err != nil || len(c.EnvNames) != 0 || c.Refused != 2 {
+		t.Fatalf("env = %v refused = %d, %v, want the names refused", c.EnvNames, c.Refused, err)
 	}
 }
 
@@ -453,9 +460,10 @@ func TestCollectScriptReadsATreeWithoutHanging(t *testing.T) {
 	if _, ok := c.Contents[filepath.Join(project, "node_modules", "dep", "package.json")]; !ok {
 		t.Fatalf("contents = %v, want the nested manifest", c.Contents)
 	}
-	// The collector's own processes are this account's.
-	if len(c.Processes) == 0 || c.Boot.IsZero() {
-		t.Fatalf("processes = %d boot = %v", len(c.Processes), c.Boot)
+	// This account's processes are reported, without their environment
+	// variable names: the run did not ask for them (O env).
+	if len(c.Processes) == 0 || c.Boot.IsZero() || len(c.EnvNames) != 0 {
+		t.Fatalf("processes = %d boot = %v env = %v", len(c.Processes), c.Boot, c.EnvNames)
 	}
 	root := filepath.Join(t.TempDir(), "root")
 	if _, err := writeCollectedTree(root, c); err != nil {

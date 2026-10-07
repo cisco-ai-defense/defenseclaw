@@ -445,6 +445,10 @@ func collectPlan(plan inventory.SandboxCandidates, harnessName string) ([]string
 		scope.binaries[name] = true
 		pairs = append(pairs, "N", name)
 	}
+	if plan.EnvNames {
+		scope.envNames = true
+		pairs = append(pairs, "O", "env")
+	}
 	return pairs, scope
 }
 

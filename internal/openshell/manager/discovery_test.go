@@ -207,6 +207,33 @@ func TestDiscoverOverlappingADeleteLeavesNothing(t *testing.T) {
 	}
 }
 
+// With ai_discovery.include_env_var_names off, the collector does not read
+// the workload's environment, and names the sandbox sends are dropped.
+func TestDiscoverReadsNoEnvironmentNamesUnlessAsked(t *testing.T) {
+	e := discoveringEnv(t, "envbox", func(c *config.Config) { c.AIDiscovery.IncludeEnvVarNames = false })
+	res, err := e.m.Discover(context.Background(), "envbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := discoverCalls(e, "envbox")
+	if len(calls) == 0 || slices.Contains(collectPairs(calls[len(calls)-1]), [2]string{"O", "env"}) {
+		t.Fatalf("collector calls = %d, want none asking for environment names", len(calls))
+	}
+	for _, sig := range res.Signals {
+		if sig.Detector == "env" {
+			t.Fatalf("signal %+v from environment names that were not asked for", sig)
+		}
+	}
+	// With it on, they are asked for.
+	e = discoveringEnv(t, "envbox2", nil)
+	if _, err := e.m.Discover(context.Background(), "envbox2"); err != nil {
+		t.Fatal(err)
+	}
+	if calls = discoverCalls(e, "envbox2"); !slices.Contains(collectPairs(calls[len(calls)-1]), [2]string{"O", "env"}) {
+		t.Fatal("the collector was not asked for environment names")
+	}
+}
+
 func TestDiscoverIsOffWithAIDiscoveryOff(t *testing.T) {
 	e := discoveringEnv(t, "offbox", func(c *config.Config) { c.AIDiscovery.Enabled = false })
 	if _, err := e.m.Discover(context.Background(), "offbox"); !sandboxapi.IsCode(err, sandboxapi.CodeDisabled) {
