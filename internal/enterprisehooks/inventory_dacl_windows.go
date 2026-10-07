@@ -445,8 +445,9 @@ func ensureInventoryACE(path string, sid *windows.SID, kind inventoryACE) (inven
 	return inventoryDACLGranted, nil
 }
 
-// revokeInventoryLegacyReadACE removes only a service SID's former inherited
-// tree grant. Windows then drops its inherited copies from descendants.
+// revokeInventoryLegacyReadACE removes the service SID's former explicit tree
+// grant. Windows then drops its inherited copies from descendants. An explicit
+// deny for the service SID is left untouched rather than revoked.
 func revokeInventoryLegacyReadACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
 	fi, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -472,6 +473,16 @@ func revokeInventoryLegacyReadACE(path string, sid *windows.SID) (inventoryDACLR
 	}
 	if !daclContainsInventoryReadACE(existing, sid) {
 		return inventoryDACLSkippedMissing, nil
+	}
+	for i := uint16(0); i < existing.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(existing, uint32(i), &ace); err != nil {
+			return inventoryDACLSkippedMissing, err
+		}
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE &&
+			(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
+			return inventoryDACLSkippedMissing, errors.New("service SID has an explicit deny on legacy IDE path")
+		}
 	}
 	entry := windows.EXPLICIT_ACCESS{
 		AccessMode: windows.REVOKE_ACCESS,
