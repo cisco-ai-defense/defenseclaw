@@ -96,7 +96,8 @@ def config_cmd(ctx: click.Context) -> None:
         and not _looks_like_v8_config(str(path))
     ):
         raise click.ClickException(
-            "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
+            "This configuration was written by an older DefenseClaw"
+            " — run 'defenseclaw migrate' first."
         )
 
 

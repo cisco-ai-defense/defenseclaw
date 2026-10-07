@@ -1159,10 +1159,14 @@
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
           "description": "Windows SCM service env pin (both DefenseClawGateway + DefenseClawHookGuardian); already the source of the managed_enterprise value the spec 003 wait loops key off"
+        },
+        {
+          "location": "internal/cli/root.go",
+          "description": "Refuses the pin from .env files so only the service definition sets it"
         }
       ],
       "since": "0.8.0",
-      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases."
+      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases. Refused from .env files: only the service definition may set it."
     },
     {
       "name": "DEFENSECLAW_DEV",

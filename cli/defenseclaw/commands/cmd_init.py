@@ -398,7 +398,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         cfg = load()
         if not is_current_schema(getattr(cfg, "_source_config_version", None)):
             raise click.ClickException(
-                "this configuration was written by an older DefenseClaw; run 'defenseclaw migrate' first"
+                "this configuration was written by an older DefenseClaw"
+                "; run 'defenseclaw migrate' first"
             )
         click.echo("  Config:        " + ux.dim("preserved existing"))
 
