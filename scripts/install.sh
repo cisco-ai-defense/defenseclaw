@@ -974,6 +974,21 @@ data_entries() {
     done
 }
 
+# name_removable names what DefenseClaw itself keeps that can go to make room:
+# the copy a failed install kept and the data earlier upgrades kept.
+name_removable() {
+    local item size what
+    for item in "${DEFENSECLAW_HOME}"/.failed-* "${DEFENSECLAW_HOME}/backups"; do
+        [[ -d "${item}" && ! -L "${item}" ]] || continue
+        size="$(du -sk "${item}" 2>/dev/null | awk '{print int(($1 + 1023) / 1024)}')"
+        case "${item}" in
+            */backups) what="what earlier upgrades kept (old audit history, a replaced app)" ;;
+            *) what="the copy a failed install kept for troubleshooting" ;;
+        esac
+        info "You can remove ${item} (${size:-?} MB), ${what}: rm -rf '${item}'"
+    done
+}
+
 # require_free_space refuses before anything is written when the disk cannot
 # hold the install: uv's cache, the Python it fetches and the new environment
 # (about 1100 MB on a first install, down to 400 MB once the cache holds the
@@ -1012,10 +1027,14 @@ require_free_space() {
     [[ "${free_kb}" -lt "${need_kb}" ]] || return 0
     if [[ ${copy_kb} -gt 0 ]]; then
         err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the upgrade needs about $(((need_kb + 1023) / 1024)) MB ($((space_needed_kb / 1024)) MB for the new version and $(((copy_kb + 1023) / 1024)) MB for a rollback copy of your data) and $((free_kb / 1024)) MB is free"
-        [[ -z "${biggest}" ]] || err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+        # A 1 MB audit.db is no answer to a 462 MB shortfall (GAP-0389).
+        if [[ -n "${biggest}" && $((biggest_kb * 10)) -ge $((need_kb - free_kb)) ]]; then
+            err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+        fi
     else
         err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the install needs about $((need_kb / 1024)) MB and $((free_kb / 1024)) MB is free"
     fi
+    name_removable
     die "Free at least $(((need_kb - free_kb + 1023) / 1024)) MB on that filesystem (df -h ${dir}), then rerun; nothing was changed"
 }
 

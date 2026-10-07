@@ -886,7 +886,7 @@ def _uv_bootstrap(tmp_path: Path, free_kb: int, cache_mb: int | None = None) -> 
         'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ninfo() { echo "info: $*"; }\n'
         "has() { command -v \"$1\" >/dev/null 2>&1; }\n"
         f'OS=darwin ARCH=arm64 UV_VERSION=0 DEFENSECLAW_HOME="{data_dir}" BIN_DIR="{bin_dir}"\n'
-        f'STAGING="{data_dir}/.staging" VENV="{data_dir}/.venv" NOT_DATA=".venv .uv .staging"\n'
+        f'STAGING="{data_dir}/.staging" VENV="{data_dir}/.venv" NOT_DATA=".venv .uv .staging .failed-* backups"\n'
         f'PATH="{fake}:/usr/bin:/bin"\nunset UV_CACHE_DIR UV_PYTHON_INSTALL_DIR\n'
         + install_uv
         + preflight
@@ -967,12 +967,17 @@ def test_an_upgrade_counts_the_rollback_copy_before_staging_or_stopping(tmp_path
     data_dir = tmp_path / "home" / ".defenseclaw"
     (data_dir / ".venv").mkdir(parents=True)
     (data_dir / "audit.db").write_bytes(b"x" * (3 * 1024 * 1024))
+    failed = data_dir / ".failed-20261007T191408"
+    failed.mkdir()
+    (failed / "venv").write_bytes(b"x" * (2 * 1024 * 1024))
     proc = _uv_bootstrap(tmp_path, free_kb=450 * 1024, cache_mb=700)
 
     assert proc.returncode == 1, proc.stdout
     assert "the upgrade needs about 503 MB (400 MB for the new version and 103 MB for a rollback copy" in proc.stdout
     assert "450 MB is free" in proc.stdout and "Free at least 53 MB" in proc.stdout
-    assert f"The largest item is {data_dir}/audit.db (3 MB)" in proc.stdout
+    # GAP-0389: a 3 MB item is no answer to a 53 MB shortfall; what can go is named.
+    assert "The largest item" not in proc.stdout
+    assert f"You can remove {failed} (" in proc.stdout and "MB), the copy a failed install kept for" in proc.stdout
     assert "nothing was changed" in proc.stdout
 
 
