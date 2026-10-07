@@ -48,7 +48,30 @@ func (p *providerClient) Get(ctx context.Context, workspace, name string) (*type
 	if err := p.f.enter(MethodGetProvider); err != nil {
 		return nil, err
 	}
-	return p.inner.Get(ctx, workspace, name)
+	got, err := p.inner.Get(ctx, workspace, name)
+	if err != nil || got == nil || !p.f.withholdingCredentials() {
+		return got, err
+	}
+	out := *got
+	out.Spec.Credentials = nil
+	return &out, nil
+}
+
+// WithholdProviderCredentials makes the fake answer for providers as a
+// gateway does through the SDK: a get carries no credential values, and an
+// update merges the credentials it names into the stored ones (an empty
+// value removes one; none keeps them all). Read the stored values with
+// SDK().Providers().Get.
+func (f *Fake) WithholdProviderCredentials() {
+	f.mu.Lock()
+	f.withholdCreds = true
+	f.mu.Unlock()
+}
+
+func (f *Fake) withholdingCredentials() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.withholdCreds
 }
 
 func (p *providerClient) List(workspace string, opts ...types.ListOptions) (*v1.Pager[*types.Provider], error) {
@@ -69,6 +92,24 @@ func (p *providerClient) ListAll(ctx context.Context, workspace string, opts ...
 func (p *providerClient) Update(ctx context.Context, workspace string, provider *types.Provider) (*types.Provider, error) {
 	if err := p.f.enter(MethodUpdateProvider); err != nil {
 		return nil, err
+	}
+	if provider != nil && p.f.withholdingCredentials() {
+		if existing, err := p.inner.Get(ctx, workspace, provider.Name); err == nil {
+			merged := map[string]string{}
+			for k, v := range existing.Spec.Credentials {
+				merged[k] = v
+			}
+			for k, v := range provider.Spec.Credentials {
+				if v == "" {
+					delete(merged, k)
+				} else {
+					merged[k] = v
+				}
+			}
+			updated := *provider
+			updated.Spec.Credentials = merged
+			provider = &updated
+		}
 	}
 	return p.inner.Update(ctx, workspace, provider)
 }

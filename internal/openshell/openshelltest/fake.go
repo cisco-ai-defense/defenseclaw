@@ -116,6 +116,10 @@ type Fake struct {
 
 	profiles map[string]*types.ProviderProfile // keyed by id (platform scope)
 
+	// withholdCreds: providers answer as a gateway does
+	// (WithholdProviderCredentials).
+	withholdCreds bool
+
 	now func() time.Time
 }
 
