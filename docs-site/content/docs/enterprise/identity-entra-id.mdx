@@ -333,14 +333,6 @@ These are the fields the records carried for an Entra user (the complete table i
 | `az ssh vm` is refused | Microsoft requires the `AADSSHLoginForLinux` extension on the VM and a VM login role for the user. `setup-entra-ssh-linux.sh` without `--apply` lists what is missing |
 | `Add-EntraGroupToLocalGroup.ps1` says to run elevated | It changes a local group. Run it as an administrator or as SYSTEM, or use `-WhatIf` |
 
-## Known issues
-
-- **An empty connector entry enrolls nobody.** `guardrail.connectors` with
-  `claudecode: {}` is dropped when the config loads, so the enumerator enrolled no
-  user and no Claude Code machine policy was written, while `verify` reported
-  success. Give each connector a key, as `admin-config.windows.example.yaml` does
-  with `enabled: true`.
-
 ## Next steps
 
 <Cards>

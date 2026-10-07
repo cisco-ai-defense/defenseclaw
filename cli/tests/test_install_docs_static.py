@@ -975,3 +975,14 @@ def test_quickstart_initializes_before_setup() -> None:
     text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text()
     commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
     assert commands[0] == "defenseclaw init", commands
+
+
+def test_documented_rule_pack_dirs_are_absolute() -> None:
+    # GAP-0304: the gateway reads rule_pack_dir as written and never expands
+    # ~, so a ~ example scans with the base rule set and fails a reload.
+    offenders = []
+    for path in sorted((ROOT / "docs-site/content").rglob("*.mdx")):
+        for value in re.findall(r"^\s*rule_pack_dir:\s*(\S+)", path.read_text(encoding="utf-8"), re.MULTILINE):
+            if value.strip("\"'").startswith("~"):
+                offenders.append(f"{path.relative_to(ROOT)}: {value}")
+    assert not offenders, offenders

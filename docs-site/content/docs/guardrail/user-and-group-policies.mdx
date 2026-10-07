@@ -46,7 +46,7 @@ guardrail:
       block_at: MEDIUM
       alert_at: LOW
       hilt: {enabled: true, min_severity: HIGH}
-      rule_pack_dir: ~/.defenseclaw/policies/guardrail/strict
+      rule_pack_dir: /home/<you>/.defenseclaw/policies/guardrail/strict   # absolute: ~ is not expanded
       connectors:
         codex: {mode: observe}   # but Codex only observes for this profile
     ml-team:
@@ -92,7 +92,7 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --connector 
 | `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. The hooks of a sandboxed agent always enforce, whatever `mode` says. |
 | `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. When unset, the rule pack's level applies. |
 | `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, stored in upper case) for [human approval](/docs/hitl). |
-| `rule_pack_dir` | A rule pack for this profile. |
+| `rule_pack_dir` | A rule pack for this profile: the absolute path of its directory. `~` is not expanded. |
 | `block_message` | The text a blocked user sees. |
 | `connectors.<name>` | The same settings for one connector, except `description`. |
 
