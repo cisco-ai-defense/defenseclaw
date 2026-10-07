@@ -389,7 +389,19 @@ func TestTetragonSourceTapsTheStreamForTheReconciler(t *testing.T) {
 	feed.batches <- KernelBatch{ThrottleStart: true}
 	next(t, source)
 	close(feed.batches)
-	waitFor(t, "the stream to end", func() bool { mu.Lock(); defer mu.Unlock(); return len(stream) == 2 })
+	// The first redial after the end fails with another reason and reports
+	// again 20-40 ms later, so wait for the end report, not for a count.
+	ended := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for i := 1; i < len(stream); i++ {
+			if !stream[i].Connected && strings.HasPrefix(stream[i].Reason, "tetragon_unavailable: the event stream ended") {
+				return true
+			}
+		}
+		return false
+	}
+	waitFor(t, "the stream to end", ended)
 	_ = source.Close()
 	mu.Lock()
 	defer mu.Unlock()
@@ -399,7 +411,9 @@ func TestTetragonSourceTapsTheStreamForTheReconciler(t *testing.T) {
 	if !stream[0].Connected || stream[0].Version != "v1.7.1" || stream[0].PID != 4242 {
 		t.Fatalf("stream up %+v", stream[0])
 	}
-	if stream[1].Connected || !strings.HasPrefix(stream[1].Reason, "tetragon_unavailable: the event stream ended") {
-		t.Fatalf("stream down %+v", stream[1])
+	for _, state := range stream[1:] {
+		if state.Connected {
+			t.Fatalf("the stream came back without a new feed: %+v", stream)
+		}
 	}
 }
