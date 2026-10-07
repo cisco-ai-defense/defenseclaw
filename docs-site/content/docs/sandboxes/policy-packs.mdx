@@ -162,10 +162,11 @@ These are the settings each pack controls. The
   MicroVM is slow), with what OpenShell reports of processes starting and
   exiting, for `defenseclaw sandbox ps`, the TUI's sandbox detail and the
   `sandbox.process_tree` telemetry records. Off in every built-in pack;
-  `sandbox run --process-tree` turns it on for one sandbox. A process that
-  starts and ends between two samples, and that OpenShell does not report, is
-  not seen, and the agent chooses its processes' names and arguments, so the
-  tree is a view of what ran, not a control.
+  `sandbox run --process-tree` turns it on for one sandbox, and a
+  repository policy's `observe.process_tree: true` for the project's runs.
+  A process that starts and ends between two samples, and that OpenShell
+  does not report, is not seen, and the agent chooses its processes' names
+  and arguments, so the tree is a view of what ran, not a control.
 - **Blocklist feeds** (`egress.feeds`): `builtin` is DefenseClaw's curated
   blocklist and the only feed.
 - **Block and allow lists** (`egress.block`, `egress.allow`): host patterns.
@@ -586,7 +587,7 @@ unset follows the pack. Some settings merge instead of replacing:
 | Approvals | The pack's mode, but never looser than the profile: `balanced` triages at least, and `strict` asks about every request. |
 | Skip-permissions | The pack's `harness.yolo`, then `openshell.yolo`, then the run. Keeping the harness prompts for a run always wins. |
 | Allowed harnesses | The pack's list and `openshell.admin.allowed_harnesses`. When both are set, only harnesses on both lists can run. |
-| Process tree | The pack's `observe.process_tree`, or on for a run with `--process-tree`. Nothing turns a pack's `true` off, so an organization that wants it sets it in its required pack. |
+| Process tree | The pack's `observe.process_tree`, or on for a run with `--process-tree` or under a [repository policy](#repository-policy-defenseclawsandboxyaml) with `observe.process_tree: true`. Nothing turns a pack's `true` off, so an organization that wants it sets it in its required pack. |
 | Workspace mode | The pack's mode, then `openshell.workdir.mode`, then copy mode for a run. |
 | Secret masks | The pack's masks plus `openshell.workdir.masks`. Masks can be added but not removed; only unmask entries reveal a masked file. |
 | Unmask | The pack's list plus `openshell.workdir.unmask` plus the run's entries. |
@@ -597,7 +598,7 @@ unset follows the pack. Some settings merge instead of replacing:
 | Proxy ports | The pack's ports, or `openshell.egress.ports`, which replaces them. |
 | MCP import | The pack's `mcp.import`, then `openshell.mcp.import`, then leaving MCP servers behind for a run. |
 | Repository MCP servers | The pack's `mcp.project_servers` only. |
-| Hook fail mode, tamper and silence responses | The pack's `hooks.fail_mode`, `hooks.on_tamper`, `hooks.on_silence` and `hooks.silence_after` only. |
+| Hook fail mode, tamper and silence responses | The pack's `hooks.fail_mode`, `hooks.on_tamper`, `hooks.on_silence` and `hooks.silence_after`; a [repository policy](#repository-policy-defenseclawsandboxyaml) can raise `on_tamper` and `on_silence` to `stop`. |
 | Host ports | `openshell.mcp.host_ports` plus the run's ports. Each port is checked. |
 | Resources | `openshell.resources`, then the run's CPU and memory request, capped by `openshell.admin.max_resources`. |
 | Repository policy | Applied after the run's options and before `openshell.admin`: its modes are floors, its lists add entries, its ports and threshold only lower. |
