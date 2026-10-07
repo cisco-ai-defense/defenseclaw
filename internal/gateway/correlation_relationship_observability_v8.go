@@ -95,12 +95,12 @@ func emitCorrelationRelationshipsV8WithEmitter(
 	if source != observability.SourceConnector && source != observability.SourceOTelReceiver {
 		return fmt.Errorf("correlation relationship export has invalid source")
 	}
-	for _, relationship := range relationships {
+	itemFor := func(relationship audit.CorrelationRelationship) (observabilityruntime.LogBatchItem, error) {
 		if relationship.RuleID == "" || relationship.RuleVersion == "" {
-			return fmt.Errorf("correlation relationship export requires rule identity")
+			return observabilityruntime.LogBatchItem{}, fmt.Errorf("correlation relationship export requires rule identity")
 		}
 		if relationship.EvidenceCount <= 0 {
-			return fmt.Errorf("correlation relationship export requires durable evidence count")
+			return observabilityruntime.LogBatchItem{}, fmt.Errorf("correlation relationship export requires durable evidence count")
 		}
 		classification := observability.ClassificationContext{
 			Bucket: observability.BucketTelemetryIngest,
@@ -118,9 +118,9 @@ func emitCorrelationRelationshipsV8WithEmitter(
 			observability.ProducerKey(observability.TelemetryEventCorrelationRelationshipChanged),
 		)
 		if err != nil {
-			return err
+			return observabilityruntime.LogBatchItem{}, err
 		}
-		_, err = emitter.Emit(ctx, metadata, func(
+		return observabilityruntime.LogBatchItem{Context: ctx, Metadata: metadata, Builder: func(
 			snapshot observabilityruntime.EmitContext,
 			admission router.Admission,
 		) (observability.Record, error) {
@@ -182,8 +182,29 @@ func emitCorrelationRelationshipsV8WithEmitter(
 					DefenseClawCorrelationRelationshipEvidenceCount: relationship.EvidenceCount,
 				},
 			)
-		})
+		}}, nil
+	}
+	// Outside Secure Client the rows of one occurrence commit together: one
+	// write-ahead-log sync instead of one per relationship (GAP-0246).
+	if batcher, ok := emitter.(sidecarRuntimeAtomicBatchEmitter); ok && !ManagedEnterpriseActive() &&
+		len(relationships) > 1 && len(relationships) <= observabilityruntime.MaxLogBatchItems {
+		items := make([]observabilityruntime.LogBatchItem, 0, len(relationships))
+		for _, relationship := range relationships {
+			item, err := itemFor(relationship)
+			if err != nil {
+				return err
+			}
+			items = append(items, item)
+		}
+		_, err := batcher.EmitAtomicBatch(ctx, items)
+		return err
+	}
+	for _, relationship := range relationships {
+		item, err := itemFor(relationship)
 		if err != nil {
+			return err
+		}
+		if _, err := emitter.Emit(item.Context, item.Metadata, item.Builder); err != nil {
 			return err
 		}
 	}

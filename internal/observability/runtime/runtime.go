@@ -416,44 +416,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 	baseSnapshot := EmitContext{
 		plan: graph.Plan(), digest: graph.Digest(), generation: graph.Generation(),
 	}
-	processBuilder := func(admission router.Admission) (observability.Record, error) {
-		snapshot := baseSnapshot
-		if inbound {
-			provider, providerOK := telemetry.V8ProviderFromLease(lease)
-			if !providerOK {
-				return observability.Record{}, &emitBuilderError{}
-			}
-			resource, resourceOK := provider.V8ResourceContext()
-			if !resourceOK {
-				return observability.Record{}, &emitBuilderError{}
-			}
-			snapshot.inboundBinaryVersion = resource.ServiceVersion()
-			snapshot.inboundInstanceID = resource.TraceResourceFields().DefenseClawInstanceID
-			if snapshot.inboundBinaryVersion == "" || snapshot.inboundInstanceID == "" {
-				return observability.Record{}, &emitBuilderError{}
-			}
-		}
-		record, err := builder(snapshot, admission)
-		if err != nil {
-			return observability.Record{}, err
-		}
-		defaultMode := correlationDefaultsGenerated
-		if inbound {
-			defaultMode = correlationDefaultsImported
-		}
-		record, err = stampRuntimeCorrelation(
-			record, correlationDefaultsFromContext(ctx, defaultMode),
-		)
-		if err != nil {
-			return observability.Record{}, &emitBuilderError{}
-		}
-		provenance := record.Provenance()
-		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
-			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
-			return observability.Record{}, &emitBuilderError{}
-		}
-		return record, nil
-	}
+	processBuilder := leaseRecordBuilder(ctx, lease, baseSnapshot, builder, inbound)
 	var outcome pipeline.LocalLogOutcome
 	var processErr error
 	switch {
@@ -500,6 +463,118 @@ func (runtime *Runtime) emitWithLeaseControls(
 	}
 	runtime.dispatchOptional(lease, graph, outcome)
 	return outcome, nil
+}
+
+// leaseRecordBuilder builds one occurrence's record on the pinned generation:
+// it stamps the runtime correlation and checks the record names that
+// generation. Emit and EmitAtomicBatch share it.
+func leaseRecordBuilder(
+	ctx context.Context,
+	lease *runtimegraph.Lease,
+	baseSnapshot EmitContext,
+	builder EmitBuilder,
+	inbound bool,
+) router.RecordBuilder {
+	return func(admission router.Admission) (observability.Record, error) {
+		snapshot := baseSnapshot
+		if inbound {
+			provider, providerOK := telemetry.V8ProviderFromLease(lease)
+			if !providerOK {
+				return observability.Record{}, &emitBuilderError{}
+			}
+			resource, resourceOK := provider.V8ResourceContext()
+			if !resourceOK {
+				return observability.Record{}, &emitBuilderError{}
+			}
+			snapshot.inboundBinaryVersion = resource.ServiceVersion()
+			snapshot.inboundInstanceID = resource.TraceResourceFields().DefenseClawInstanceID
+			if snapshot.inboundBinaryVersion == "" || snapshot.inboundInstanceID == "" {
+				return observability.Record{}, &emitBuilderError{}
+			}
+		}
+		record, err := builder(snapshot, admission)
+		if err != nil {
+			return observability.Record{}, err
+		}
+		defaultMode := correlationDefaultsGenerated
+		if inbound {
+			defaultMode = correlationDefaultsImported
+		}
+		record, err = stampRuntimeCorrelation(
+			record, correlationDefaultsFromContext(ctx, defaultMode),
+		)
+		if err != nil {
+			return observability.Record{}, &emitBuilderError{}
+		}
+		provenance := record.Provenance()
+		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
+			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
+			return observability.Record{}, &emitBuilderError{}
+		}
+		return record, nil
+	}
+}
+
+// EmitAtomicBatch persists a bounded group of this gateway's related log
+// occurrences on one pinned generation with one SQLite commit (GAP-0246), then
+// hands each persisted record's optional work to that generation's
+// dispatchers, as Emit does for one. A dropped item takes Emit's
+// managed-destination fallback. When the commit fails nothing is persisted and
+// the remote projections are dispatched, as Emit does on a failed write.
+func (runtime *Runtime) EmitAtomicBatch(
+	ctx context.Context,
+	items []LogBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	if runtime == nil || runtime.manager == nil || ctx == nil || len(items) == 0 ||
+		len(items) > MaxLogBatchItems {
+		return nil, &Error{code: ErrorInvalidDependency}
+	}
+	for index := range items {
+		if items[index].Context == nil || items[index].Builder == nil {
+			return nil, &Error{code: ErrorInvalidDependency}
+		}
+	}
+	lease, err := runtime.manager.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	graph := lease.Graph()
+	component, ok := lease.Component(LocalLogComponentName)
+	if graph == nil || !ok {
+		return nil, &Error{code: ErrorComponentUnavailable}
+	}
+	local, ok := component.(*localLogComponent)
+	if !ok || local.digest != graph.Digest() {
+		return nil, &Error{code: ErrorComponentUnavailable}
+	}
+	baseSnapshot := EmitContext{
+		plan: graph.Plan(), digest: graph.Digest(), generation: graph.Generation(),
+	}
+	builders := make([]router.RecordBuilder, len(items))
+	batch := make([]pipeline.AtomicBatchItem, len(items))
+	for index := range items {
+		builders[index] = leaseRecordBuilder(items[index].Context, lease, baseSnapshot, items[index].Builder, false)
+		batch[index] = pipeline.AtomicBatchItem{Metadata: items[index].Metadata, Builder: builders[index]}
+	}
+	outcomes, processErr := local.ProcessAtomicBatch(ctx, batch)
+	for index := range outcomes {
+		if outcomes[index].Admission() == router.AdmissionDrop {
+			fallback, fallbackErr := local.ProcessManagedLogFallback(
+				items[index].Context, items[index].Metadata, builders[index],
+			)
+			if fallbackErr != nil {
+				return outcomes, fallbackErr
+			}
+			outcomes[index] = fallback
+		}
+		outcome := outcomes[index]
+		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
+			(processErr != nil && len(outcome.OptionalWork()) > 0) {
+			runtime.dispatchOptional(lease, graph, outcome)
+		}
+	}
+	return outcomes, processErr
 }
 
 // dispatchOptional enqueues a log outcome's optional-destination work and

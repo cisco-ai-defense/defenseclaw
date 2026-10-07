@@ -141,6 +141,57 @@ func TestLocalLogPipelinePersistsEveryCatalogBucketExactlyOnce(t *testing.T) {
 	}
 }
 
+// batchAppender records how many commits a batch of appends took.
+type batchAppender struct {
+	*recordingAppender
+	batches int
+}
+
+func (appender *batchAppender) AppendBatchContext(
+	ctx context.Context,
+	records []observability.Record,
+	projections []redaction.Projection,
+) error {
+	appender.batches++
+	for index := range records {
+		if err := appender.recordingAppender.AppendContext(ctx, records[index], projections[index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GAP-0246: a group of related occurrences (the relationship rows of one
+// hook) is persisted with one commit, each one persisted when it returns.
+func TestLocalLogPipelineAtomicBatchCommitsOnce(t *testing.T) {
+	plan, evaluator := mustPlanEvaluator(t, nil)
+	appender := &batchAppender{recordingAppender: &recordingAppender{graphDigest: plan.Digest()}}
+	pipeline, err := NewLocalLogPipeline(plan, evaluator, mustEngine(t), appender, mustFailureFactory(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	test := catalogLogCases()[0]
+	items := make([]AtomicBatchItem, 3)
+	for index := range items {
+		id := fmt.Sprintf("batch-record-%d", index)
+		items[index] = AtomicBatchItem{Metadata: mustMetadata(t, test), Builder: func(admission router.Admission) (observability.Record, error) {
+			return buildClassifiedLog(test, admission, id)
+		}}
+	}
+	outcomes, err := pipeline.ProcessAtomicBatch(context.Background(), items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appender.batches != 1 || len(appender.snapshot()) != 3 || len(outcomes) != 3 {
+		t.Fatalf("batches=%d appends=%d outcomes=%d, want one commit of three", appender.batches, len(appender.snapshot()), len(outcomes))
+	}
+	for index, outcome := range outcomes {
+		if !outcome.LocalPersisted() {
+			t.Fatalf("outcome %d not persisted", index)
+		}
+	}
+}
+
 func TestLocalLogPipelineAdmissionIsLazyAndFloorIsLocalOnly(t *testing.T) {
 	falseValue := false
 	source := &config.ObservabilityV8Source{

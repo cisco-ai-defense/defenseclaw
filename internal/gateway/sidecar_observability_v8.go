@@ -30,6 +30,12 @@ type sidecarRuntimeEmitter interface {
 	) (pipeline.LocalLogOutcome, error)
 }
 
+// sidecarRuntimeAtomicBatchEmitter persists a group of related records with
+// one commit.
+type sidecarRuntimeAtomicBatchEmitter interface {
+	EmitAtomicBatch(context.Context, []observabilityruntime.LogBatchItem) ([]pipeline.LocalLogOutcome, error)
+}
+
 type sidecarRuntimeLocalOnlyEmitter interface {
 	EmitLocalOnly(
 		context.Context,

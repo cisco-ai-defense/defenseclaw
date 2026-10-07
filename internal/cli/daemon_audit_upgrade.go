@@ -29,7 +29,7 @@ func upgradeAuditStoreBeforeStart(cfg *config.Config, out, warn io.Writer) {
 		return
 	}
 	fmt.Fprintf(out, "Upgrading the audit database (one time; a large history can take a few minutes)... ")
-	store, err := audit.OpenDaemonStore(cfg.AuditDB, warn)
+	store, err := audit.OpenDaemonStore(cfg.AuditDB, warn, auditStoreOptions(cfg)...)
 	if err != nil {
 		fmt.Fprintln(out, Style("not finished", "fg=yellow", "bold"))
 		fmt.Fprintf(warn, "  %v\n  The gateway retries the upgrade when it starts.\n", err)
