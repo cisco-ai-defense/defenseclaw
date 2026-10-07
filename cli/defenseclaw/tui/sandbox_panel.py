@@ -236,6 +236,19 @@ def fetch_sandbox_snapshot(config: object | None) -> SandboxFetch:
         client.close()
 
 
+def fetch_sandbox_processes(config: object | None, name: str) -> dict[str, Any] | None:
+    """Blocking read of a sandbox's process tree (run in a thread); None when it fails."""
+    client = sandbox_client(config)
+    if client is None:
+        return None
+    try:
+        return client.sandbox_processes(name)
+    except SandboxAPIError:
+        return None
+    finally:
+        client.close()
+
+
 def probe_sandbox_machine() -> Any:
     """Blocking ``defenseclaw-gateway sandbox doctor --json`` for the Sandbox wizard (run in a thread)."""
     from defenseclaw.commands.cmd_doctor import sandbox_doctor_report
@@ -728,6 +741,13 @@ class SandboxPanelMixin:
     async def _open_sandbox_detail(self) -> None:
         model = self.sandbox_model
         selected = model.selected_sandbox() if model.view == "sandboxes" else None
+        if selected is not None and selected.process_tree:
+            # A stopped sandbox has no live processes, and a failed fetch has
+            # none to show: the last tree is never shown as current.
+            payload = None
+            if selected.running:
+                payload = await asyncio.to_thread(fetch_sandbox_processes, getattr(self, "config", None), selected.name)
+            model.set_processes(selected.name, payload)
         destinations = await self._fetch_sandbox_destinations(selected.name) if selected is not None else None
         title, pairs = model.detail_pairs(destinations)
         keys, keys_hint = self._sandbox_detail_keys()

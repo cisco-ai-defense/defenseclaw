@@ -71,6 +71,7 @@
             "sandbox-health",
             "sandbox-finding",
             "sandbox-activity",
+            "sandbox-process",
             "sidecar-start",
             "sidecar-stop",
             "sidecar-connected",

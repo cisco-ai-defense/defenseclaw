@@ -485,6 +485,25 @@ func TestRunNestedRunsNatively(t *testing.T) {
 	}
 }
 
+// --process-tree reaches the daemon with the create; a resume of a sandbox
+// created without it names it among the flags it ignores.
+func TestRunProcessTreeReachesTheDaemon(t *testing.T) {
+	ta := newTestApp(t, "")
+	noChanges(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", ProcessTree: true}))
+	if req := createRequest(t, ta.daemon); !req.ProcessTree {
+		t.Fatal("--process-tree did not reach the daemon")
+	}
+	sb := sampleSandbox("box")
+	if got := resumeIgnores(RunOptions{ProcessTree: true}, &sb, nil); !slices.Equal(got, []string{"--process-tree"}) {
+		t.Fatalf("a resume of a sandbox without the tree ignores %v", got)
+	}
+	sb.ProcessTree = true
+	if got := resumeIgnores(RunOptions{ProcessTree: true}, &sb, nil); len(got) != 0 {
+		t.Fatalf("a resume of a sandbox with the tree ignores %v", got)
+	}
+}
+
 // --safe drops the harness's bypass flags and says so; a flag dropped
 // because the organization disables skip-permissions says whose doing it is
 // (manual R2-102).

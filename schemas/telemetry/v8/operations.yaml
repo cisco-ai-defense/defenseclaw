@@ -4452,7 +4452,7 @@ attributes:
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.event
   type: string
-  brief: Process event a sandbox process record reports
+  brief: What happened to the sandbox process a process or process tree record reports
   examples: [start]
   stability: stable
   owner: defenseclaw
@@ -4462,12 +4462,12 @@ attributes:
   normalization:
     id: enum-v1
     overrides: {enum: [start, exit]}
-    notes: start is a process launch, exit its termination
+    notes: On sandbox.process start is a launch and exit its termination; on sandbox.process_tree start is when the process joined the tree (a sample of the sandbox's /proc or an OpenShell PROC launch saw it) and exit once it ended
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.source
   type: string
-  brief: What observed a sandbox process
-  examples: [openshell]
+  brief: What observed the sandbox process (for the process tree, what saw it first)
+  examples: [ocsf]
   stability: stable
   owner: defenseclaw
   field_class: metadata
@@ -4475,8 +4475,8 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [openshell, sampled]}
-    notes: openshell is the supervisor's OCSF PROC record; sampled is DefenseClaw's opt-in sampling of the sandbox's process table
+    overrides: {enum: [ocsf, sample]}
+    notes: ocsf is an OpenShell supervisor PROC record; sample is DefenseClaw's opt-in sample of the sandbox's /proc
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.pid
   type: int64
@@ -4489,8 +4489,36 @@ attributes:
   cardinality: high
   normalization:
     id: numeric-range-v1
+    overrides: {min: 1, max: 4194304}
+    notes: The sandbox's own PID namespace, as its supervisor or a sample of its /proc reports it. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.parent_pid
+  type: int64
+  brief: Parent process ID in the sandbox's process namespace
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
     overrides: {min: 0, max: 4194304}
-    notes: The sandbox's own PID namespace; reported by the workload's supervisor. Never a metric label
+    notes: absent while only OpenShell reported the process, which names no parent; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.name
+  type: string
+  brief: Name the sandbox's kernel gives the process (comm)
+  examples: [node]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The process chooses its own name; display text, never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.executable
   type: string
@@ -4499,16 +4527,16 @@ attributes:
   stability: stable
   owner: defenseclaw
   field_class: path
-  sensitivity: internal
+  sensitivity: sensitive
   cardinality: high
   normalization:
     id: path-v1
-    overrides: {max_utf8_bytes: 1024}
-    notes: Untrusted display text the sandboxed process chooses (OpenShell reports what the process claims); never an attribution decision on its own and never a metric label
+    overrides: {max_utf8_bytes: 4096}
+    notes: Untrusted display text the sandboxed process chooses (OpenShell reports what the process claims; a sample reads its /proc exe link); paths can disclose project content, so each destination's redaction profile governs it. Never an attribution decision on its own and never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.command_line
   type: string
-  brief: Command line of a process the sandbox launched
+  brief: Command line of a sandbox process, values that name secrets replaced in the process tree
   examples: [python3 /work/app/main.py]
   stability: stable
   owner: defenseclaw
@@ -4518,11 +4546,25 @@ attributes:
   normalization:
     id: redacted-content-v1
     overrides: {max_utf8_bytes: 4096}
-    notes: Agent-controlled argument vector, so content class on purpose; each destination's redaction profile governs whether it leaves the host
+    notes: Agent-controlled argument vector, so content class on purpose (the process tree keeps its first sixteen arguments, cut to 1024 bytes); each destination's redaction profile governs whether it leaves the host
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.working_directory
+  type: string
+  brief: Working folder of the process, as the sandbox names it
+  examples: [/sandbox/work/myapp]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 4096}
+    notes: Folder names can disclose project content; each destination's redaction profile governs it
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.exit_code
   type: int64
-  brief: Exit code of a process the sandbox ran
+  brief: Exit code of a sandbox process, when OpenShell reported it
   examples: [0]
   stability: stable
   owner: defenseclaw
@@ -4532,7 +4574,25 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: -2147483648, max: 2147483647}
-    notes: Present on exit records only, when the supervisor reported it
+    notes: Present on exit records only, when an OpenShell PROC terminate record reported it; a sample sees only that the process is gone
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.lineage
+  type: string[]
+  brief: Names of the process's ancestors, its parent first
+  examples:
+  - [bash, claude]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides:
+      max_utf8_bytes: 2048
+      max_item_utf8_bytes: 64
+      max_items: 32
+    notes: Process-chosen names of at most 32 ancestors; log-only and subject to destination redaction
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.ssh.activity
   type: string
@@ -6444,6 +6504,10 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.agent.identity.id
     requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
   log:
     event_name: ai_component.changed
   x-defenseclaw:
@@ -6526,6 +6590,10 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.agent.identity.id
     requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
   log:
     event_name: ai_component.discovered
   x-defenseclaw:
@@ -6568,6 +6636,10 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
     requirement_level: recommended
   log:
     event_name: ai_component.observed
@@ -6627,6 +6699,10 @@ groups:
   - ref: defenseclaw.user.principal.assurance
     requirement_level: recommended
   - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
     requirement_level: recommended
   log:
     event_name: ai_component.removed
@@ -10688,6 +10764,37 @@ groups:
     requirement_level: recommended
   - ref: gen_ai.conversation.id
     requirement_level: recommended
+- id: body.sandbox.process_tree
+  type: body_group
+  brief: Sandbox process tree body for a process that started or exited in an OpenShell sandbox with the process tree on, with its parent and ancestry.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.event
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.pid
+    requirement_level: required
+  - ref: defenseclaw.sandbox.process.source
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.parent_pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.executable
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.command_line
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.working_directory
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.exit_code
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.lineage
+    requirement_level: recommended
 - id: log.sandbox.process
   type: log
   brief: Canonical sandbox.process log identity; one record per process start or exit observed in a sandbox, bounded per sandbox.
@@ -10752,6 +10859,26 @@ groups:
     allowed_outcomes:
     - completed
     - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.sandbox.process_tree
+  type: log
+  brief: Canonical sandbox.process_tree log identity; one record when a process joins a sandbox's opt-in process tree and one when it exits.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.process_tree
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.process_tree
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
     route_selector: true
     mandatory_floor: []
     compatibility_profiles:
@@ -12923,6 +13050,11 @@ producer_identity_sets:
   - event_name: sandbox.workspace
     bucket: enforcement.action
     family: log.sandbox.workspace
+- id: identity_set.sandbox_process_tree
+  identities:
+  - event_name: sandbox.process_tree
+    bucket: agent.lifecycle
+    family: log.sandbox.process_tree
 - id: identity_set.sandbox_egress
   identities:
   - event_name: egress.allowed
@@ -16083,6 +16215,17 @@ producer_mappings:
   severity_policy: canonical_or_info
   mandatory_rules:
   - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-process
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_process_tree
+  severity_policy: canonical_or_info
+  mandatory_rules: []
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v2

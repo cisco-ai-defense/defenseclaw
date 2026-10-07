@@ -128,6 +128,7 @@ ACTION_SANDBOX_POLICY: Final[str]    = "sandbox-policy"
 ACTION_SANDBOX_HEALTH: Final[str]    = "sandbox-health"
 ACTION_SANDBOX_FINDING: Final[str]   = "sandbox-finding"
 ACTION_SANDBOX_ACTIVITY: Final[str]  = "sandbox-activity"
+ACTION_SANDBOX_PROCESS: Final[str]   = "sandbox-process"
 
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"

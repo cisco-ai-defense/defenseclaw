@@ -93,6 +93,9 @@ type Flags struct {
 	NoMCP bool
 	// Learn asks for learn mode (observe-and-suggest policy discovery).
 	Learn bool
+	// ProcessTree is --process-tree: sample the sandbox's processes even
+	// where the pack leaves the process tree off.
+	ProcessTree bool
 	// CPU and Memory are resource requests (see config.ParseOpenShellCPU).
 	CPU    string
 	Memory string
@@ -296,6 +299,10 @@ type Effective struct {
 	// AnyHarness reports that neither the pack nor openshell.admin limits
 	// the harness: every harness may run and AllowedHarnesses is empty.
 	AnyHarness bool `json:"any_harness"`
+	// ProcessTree is observe.process_tree: the sandbox's processes are
+	// sampled while it runs. The pack decides (an administrator's required
+	// pack too); --process-tree turns it on, and nothing turns it off.
+	ProcessTree bool `json:"process_tree"`
 	// AllowedHarnesses is the pack ∩ admin allowlist when AnyHarness is
 	// false; empty then means no harness may run. It is never nil.
 	AllowedHarnesses []string    `json:"allowed_harnesses"`
@@ -333,7 +340,7 @@ type Effective struct {
 
 // explainOrder is the order Explain reports settings in.
 var explainOrder = []string{
-	"pack", "profile", "network.mode", "approvals.mode", "yolo", "harness", "harness.allowed",
+	"pack", "profile", "network.mode", "approvals.mode", "observe.process_tree", "yolo", "harness", "harness.allowed",
 	"workdir.mode", "workdir.masks", "workdir.unmask", "workdir.review", "workdir.max_upload_mb",
 	"workdir.git_depth", "workdir.on_exit",
 	"egress.feeds", "egress.block", "egress.admin_block", "egress.allow", "egress.allow_only",
@@ -457,6 +464,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 		return nil, nil, err
 	}
 	r.resolveLearn(flags)
+	r.resolveProcessTree(flags)
 	r.eff.HookFailMode = pack.Hooks.FailMode
 	r.set("hooks.fail_mode", pack.Hooks.FailMode, r.packLayer)
 	r.eff.HookOnTamper = pack.Hooks.OnTamper
@@ -1431,6 +1439,22 @@ func (r *resolver) resolveLearn(flags Flags) {
 	}
 	r.eff.Learn = true
 	r.set("learn", "true", layer{SourceFlag, "--learn"})
+}
+
+// resolveProcessTree takes observe.process_tree from the pack, or on from
+// --process-tree. Watching more is never a loosening, so no policy refuses
+// it, and an administrator who wants it on sets it in the required pack.
+func (r *resolver) resolveProcessTree(flags Flags) {
+	switch {
+	case r.eff.Pack.Observe.ProcessTree:
+		r.eff.ProcessTree = true
+		r.set("observe.process_tree", "true", r.packLayer)
+	case flags.ProcessTree:
+		r.eff.ProcessTree = true
+		r.set("observe.process_tree", "true", layer{SourceFlag, "--process-tree"})
+	default:
+		r.set("observe.process_tree", "false", r.packLayer)
+	}
 }
 
 // isFalse reports an explicit false in a tri-state admin switch.

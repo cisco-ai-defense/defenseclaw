@@ -54,6 +54,7 @@ type SandboxTelemetry interface {
 	RecordSandboxFinding(context.Context, SandboxFindingEvent) error
 	RecordSandboxWorkspace(context.Context, SandboxWorkspaceEvent) error
 	RecordSandboxActivity(context.Context, SandboxActivityEvent) error
+	RecordSandboxProcess(context.Context, SandboxProcessEvent) error
 }
 
 // SandboxPhase is the defenseclaw.sandbox.phase vocabulary: the OpenShell
@@ -556,15 +557,6 @@ const (
 	SandboxActivityInference SandboxActivityKind = "inference"
 )
 
-// Registered sandbox process events and sources.
-const (
-	SandboxProcessStart = "start"
-	SandboxProcessExit  = "exit"
-
-	SandboxProcessSourceOpenShell = "openshell"
-	SandboxProcessSourceSampled   = "sampled"
-)
-
 // SandboxActivityEvent is one observation of what runs in, or reaches
 // into, a sandbox: a process start or exit, an SSH event, or a model call.
 // Kind selects the family and which fields apply; the rest are ignored.
@@ -575,7 +567,7 @@ type SandboxActivityEvent struct {
 	Sandbox SandboxIdentity
 	Kind    SandboxActivityKind
 	// ProcessEvent is SandboxProcessStart or SandboxProcessExit (process,
-	// required); ProcessSource is SandboxProcessSource* (default openshell).
+	// required); ProcessSource is SandboxProcessSource* (default ocsf).
 	ProcessEvent  string
 	ProcessSource string
 	// PID and Executable name the process (process).
@@ -1420,7 +1412,7 @@ func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, inpu
 			return fmt.Errorf("audit: sandbox process event %q is not registered", input.ProcessEvent)
 		}
 		switch input.ProcessSource {
-		case "", SandboxProcessSourceOpenShell, SandboxProcessSourceSampled:
+		case "", SandboxProcessSourceOCSF, SandboxProcessSourceSample:
 		default:
 			return fmt.Errorf("audit: sandbox process source %q is not registered", input.ProcessSource)
 		}
@@ -1463,7 +1455,7 @@ func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, inpu
 			case SandboxActivityProcess:
 				source := input.ProcessSource
 				if source == "" {
-					source = SandboxProcessSourceOpenShell
+					source = SandboxProcessSourceOCSF
 				}
 				exitCode := observability.Absent[int64]()
 				if input.ExitCode != nil && input.ProcessEvent == SandboxProcessExit {

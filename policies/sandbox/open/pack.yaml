@@ -15,6 +15,11 @@ network:
 approvals:
   mode: auto
 
+# The process tree samples the sandbox's processes every 5 s (`sandbox ps`);
+# `sandbox run --process-tree` turns it on for one run.
+observe:
+  process_tree: false
+
 egress:
   feeds: [builtin]
   block: []

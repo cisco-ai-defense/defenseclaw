@@ -52,6 +52,7 @@ sandbox) and `deleted` (after it is gone).
 | `RecordSandboxHealth` | `sandbox-health` | `log.subsystem.lifecycle`, `.ready`, `.degraded`, `.restored` | `platform.health` | Always (`durable_health_transition`) |
 | `RecordSandboxFinding` | `sandbox-finding` | `log.finding.observed` | `security.finding` | No |
 | `RecordSandboxActivity` | `sandbox-activity` | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` | `tool.activity`, `compliance.activity`, `model.io` | No |
+| `RecordSandboxProcess` | `sandbox-process` | `log.sandbox.process_tree` | `agent.lifecycle` | No |
 
 The manager stamps every record with what it knows of the sandbox and the
 producer does not: the launching host account as `user.id`,
@@ -265,6 +266,33 @@ Two `degraded` records are the manager's own:
 A finding requires a severity (INFO, LOW, MEDIUM, HIGH or CRITICAL). A
 missing finding ID is generated; confidence, when reported, is in (0, 1].
 
+### Process tree
+
+Only for a sandbox whose process tree is on (the pack's
+`observe.process_tree: true`, or `sandbox run --process-tree`; off in every
+built-in pack). DefenseClaw samples the sandbox's `/proc` every 5 seconds
+while it runs (15 on the vm driver once a sample takes over a second) and
+adds OpenShell's `PROC` launch and terminate records. One record when a
+process joins the tree and one when it exits:
+`defenseclaw.sandbox.process.event` (`start`, `exit`), `.source` (`sample`,
+`ocsf`), `.pid`, `.parent_pid` (absent while only OpenShell reported the
+process, which names no parent), `.name` (comm), `.executable`,
+`.command_line` (the first 16 arguments, joined, the values of arguments that
+name secrets replaced, at most 1,024 bytes), `.working_directory`,
+`.exit_code` (when OpenShell reported it) and `.lineage` (the names of up to
+32 ancestors, the parent first). The executable, command line, working
+folder and lineage are content: each destination's redaction profile governs
+them. At most 200 records at once and 10 a second per sandbox; the daemon log
+says how many it held back. A process that starts and ends between two
+samples, and that OpenShell does not report, has no record.
+
+### AI discovery inside a sandbox
+
+What the AI discovery of a sandbox finds in it reaches the AI discovery
+families (`ai_component.discovered`, `.changed`, `.observed`, `.removed`)
+with the sandbox's `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`;
+the rest of the sandbox correlation group is not set there.
+
 ### Hook decisions and other rows
 
 Hook decisions (`log.compat.hook_decision`) accept the same correlation
@@ -324,6 +352,9 @@ record:
   every file.
 - A finding `target_ref` is cut to its registered 256 bytes; one that is not
   an identifier is omitted.
+- A process record's name, executable, command line, working folder and
+  lineage are the workload's: each is cut to its registered bound, and
+  invalid UTF-8 is omitted rather than failing the record.
 - The session and agent IDs come from the correlation envelope, which the
   agent fills through its session header and hook payload, and the session
   from the sandbox's last hook. Egress and approval records carry them as

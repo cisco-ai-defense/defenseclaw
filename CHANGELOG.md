@@ -1103,6 +1103,38 @@ deleted.
   `spawned-agent-tool-result`). A `PostToolBatch` is recorded as a
   `tool_batch` listing its calls. Both drivers.
 
+### OpenShell sandbox AI discovery and process tree
+
+- AI discovery now sees inside running sandboxes: the MCP servers, skills,
+  rules, plugins, AI CLIs and agents the agent installed or configured in a
+  sandbox, its environment variable names (never values), shell history
+  mentions and, for a copy, its package manifests. DefenseClaw reads the
+  sandbox with one read-only command it builds itself, checks every path and
+  file the sandbox sends back (absolute, printable, under the sandbox's home,
+  projects or harness install, within what was asked and within
+  `ai_discovery.max_file_bytes` a file, `max_files_per_scan` files read,
+  8,192 entries listed and a 4 MiB stream),
+  writes what passes as private regular files on this machine, scans them
+  there and removes them (only the scan record stays). It runs once a
+  sandbox is ready, every
+  `ai_discovery.scan_interval_min` while it runs, and on demand with
+  `defenseclaw sandbox discover NAME`; a stop keeps what was found (without
+  its processes) and a delete drops it. `defenseclaw agent usage --sandbox
+  NAME` shows one sandbox's components, every view tags them
+  "(sandbox NAME)", the TUI's AI discovery panel keeps them apart and names
+  the sandbox, and the `ai_component.*` telemetry records carry
+  `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`.
+- Opt-in process tree: a pack's new `observe.process_tree: true` (off in
+  `open`, `balanced` and `strict`) or `sandbox run --process-tree` samples the
+  sandbox's processes every 5 seconds while it runs (every 15 seconds on a
+  Mac when sampling its MicroVM is slow) and adds OpenShell's process launch
+  and exit reports. `defenseclaw sandbox ps NAME [--tree]` and the TUI's
+  sandbox detail show it, with the values of arguments that name secrets
+  replaced, and new `sandbox.process_tree` records (`sandbox-process` audit
+  action) report each process's start and exit with its parent and
+  ancestry. Sampling misses a process that starts and ends between two
+  samples, and the agent chooses its processes' names and arguments.
+
 ### OpenShell sandbox lifecycle and configuration
 
 - `openshell.llm` (default `auto`) chooses the model credential a sandbox

@@ -843,6 +843,8 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `GET` | `/api/v1/sandbox/sandboxes/{name}/logs` | Query `lines` (optional, 0 or absent for all of it); `404 not_found` when no log was kept | `RunLog`: `name`, `state` (`exited` or `interrupted`), `exit`, `started_at`, `kept_at`, `log` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}/destinations` | — | `Destinations`: `name`, `harness`, `destinations` (one row per host: `host`, `ports`, `kind` (`model_provider`, `harness_vendor`, `other_ai_api` and `unknown_ai` for shadow AI, else the egress category it was allowed under, `blocked` or `other`), `provider`, `vendor`, `category`, `rule`, `sources`, the `connections`, `tunnels`, `refused`, `blocked` and `model_turns` counts, `bytes_up`, `bytes_down`, the `binaries` and `pid` OpenShell named, the process `lineage` when the process tree is on, `first_seen`, `last_seen`), `models` (the `provider`, `model`, `calls` and `failed` calls OpenShell's inference route reported) and `dropped` (rows dropped over 512) |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/discover` | Optional `{}`; `409 conflict` when the sandbox is not running; `503 disabled` when `ai_discovery.enabled` is `false` | `DiscoveryResult`: `name`, `scanned_at`, `duration_ms`, `result` (`ok`, or `partial` with the `problems`), the `entries` the sandbox listed, the `files` scanned, and the `signals` found (`category`, `product`, `vendor`, `detector`, `names`, `confidence`). The gateway's AI inventory takes them up on its next scan. |
+| `GET` | `/api/v1/sandbox/sandboxes/{name}/processes` | — | `ProcessList`: `name`, `enabled` (whether the sandbox's process tree is on), `sampled_at`, `interval_seconds`, the live `processes` and up to 256 that `exited` most recently (each with `pid`, `ppid`, `uid`, `started_at`, `exited_at`, `exit_code`, `comm`, `exe`, `cwd`, `cmdline` and `source`: `sample` or `ocsf`), and `truncated` when the last sample may lack processes. The text fields are the agent's to choose. |
 | `GET` | `/api/v1/sandbox/approvals` | Query `sandbox` (optional) | `{"approvals": [Approval]}` |
 | `POST` | `/api/v1/sandbox/approvals/{id}` | `ApprovalDecision` | `ApprovalResult`: the `approval`, whether it was `persisted`, a `message` |
 | `POST` | `/api/v1/sandbox/egress/unblock` | `UnblockRequest` | `UnblockResponse`: `host`, `sandbox`, `scope` (`sandbox` or `always`), `persisted`, `message` |
@@ -861,7 +863,7 @@ it for `sandbox run`.
 | `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
 | `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
 | `name` | Optional. At most 19 lowercase letters, digits, and `-` (OpenShell 0.1.1 refuses longer names). Empty picks `<folder>-<random>`, the folder name cut to fit. |
-| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed). |
+| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `process_tree`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed). |
 | `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
 | `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
 | `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
@@ -887,8 +889,9 @@ harness's own event names in `events`, at most 48 names with the rest in
 its destinations view), `pending_approvals`, the
 `workspace` and `mcp` banner views, `snapshot`, `session` (a count that goes
 up each time the daemon sees the sandbox become ready), `violations` (settings the
-policy clamped), `warnings`, `orphaned`, and `nested_repos` (repositories the
-nested-repository guard found in a mounted project). `launch` holds what the
+policy clamped), `warnings`, `orphaned`, `nested_repos` (repositories the
+nested-repository guard found in a mounted project), and `process_tree`
+when its processes are sampled (`GET …/{name}/processes`). `launch` holds what the
 CLI needs to start the harness. `credentials` lists the sandbox's
 `--credential` bindings (`name`, `host` and `port`, never the value) and
 `host_ports` the host ports it may ask to reach: what a resume keeps.

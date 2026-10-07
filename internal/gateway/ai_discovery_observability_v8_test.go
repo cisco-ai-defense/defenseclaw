@@ -516,6 +516,43 @@ func TestContinuousAIDiscoveryV8CarriesModelProvenanceAcrossLifecycleFamilies(t 
 	}
 }
 
+// A sandbox scan's signal names its sandbox on every lifecycle family.
+func TestContinuousAIDiscoveryV8NamesTheSandboxAcrossLifecycleFamilies(t *testing.T) {
+	withManagedEnterprise(t, true)
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{
+			ScanID: "scan-sandbox-lifecycle", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok",
+			TotalSignals: 4, ActiveSignals: 3, NewSignals: 1, ChangedSignals: 1, GoneSignals: 1,
+		},
+	}
+	for _, state := range []string{inventory.AIStateNew, inventory.AIStateChanged, inventory.AIStateSeen, inventory.AIStateGone} {
+		report.Signals = append(report.Signals, inventory.AISignal{
+			SignalID: "sandbox-" + state, SignatureID: "dccert-agent", Category: inventory.SignalMCPServer,
+			Vendor: "DC", Product: "DC Cert Agent", Confidence: .9, State: state, Detector: "mcp",
+			Source: inventory.AISourceSandbox, SandboxID: "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33", SandboxName: "myapp-7f3a",
+		})
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, record := range capture.snapshot() {
+		if record.EventName() == "ai.discovery.completed" {
+			continue
+		}
+		seen++
+		body := canonicalBody(t, record)
+		if body["defenseclaw.sandbox.id"] != "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33" || body["defenseclaw.sandbox.name"] != "myapp-7f3a" {
+			t.Errorf("%s sandbox=%v/%v want the sandbox's id and name", record.EventName(), body["defenseclaw.sandbox.id"], body["defenseclaw.sandbox.name"])
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("records = %d, want one per lifecycle family", seen)
+	}
+}
+
 func asSidecarObservabilityError(err error, target **sidecarObservabilityError) bool {
 	value, ok := err.(*sidecarObservabilityError)
 	if ok {

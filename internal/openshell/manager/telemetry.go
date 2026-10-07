@@ -181,6 +181,10 @@ func (g *telemetryGuard) RecordSandboxActivity(ctx context.Context, e audit.Sand
 	return g.done(ctx, string(e.Kind), e.Sandbox.Name, g.next.RecordSandboxActivity(ctx, e))
 }
 
+func (g *telemetryGuard) RecordSandboxProcess(ctx context.Context, e audit.SandboxProcessEvent) error {
+	return g.done(ctx, "process tree", e.Sandbox.Name, g.next.RecordSandboxProcess(ctx, e))
+}
+
 type nopTelemetry struct{}
 
 func (nopTelemetry) RecordSandboxLifecycle(context.Context, audit.SandboxLifecycleEvent) error {
@@ -199,5 +203,8 @@ func (nopTelemetry) RecordSandboxWorkspace(context.Context, audit.SandboxWorkspa
 	return nil
 }
 func (nopTelemetry) RecordSandboxActivity(context.Context, audit.SandboxActivityEvent) error {
+	return nil
+}
+func (nopTelemetry) RecordSandboxProcess(context.Context, audit.SandboxProcessEvent) error {
 	return nil
 }

@@ -197,6 +197,24 @@ def test_ai_discovery_detail_toggle_and_header_omit_empty_component() -> None:
     assert panel.detail_open is False
 
 
+def test_ai_discovery_keeps_a_sandboxs_components_apart_and_names_the_sandbox() -> None:
+    snapshot = AIUsageSnapshot.from_mapping({
+        "enabled": True,
+        "signals": [
+            {"signal_id": "host", "product": "Claude Code", "vendor": "Anthropic", "state": "seen",
+             "category": "mcp_server", "detector": "mcp", "source": "sidecar"},
+            {"signal_id": "boxed", "product": "Claude Code", "vendor": "Anthropic", "state": "seen",
+             "category": "mcp_server", "detector": "mcp", "source": "sandbox", "sandbox_name": "myapp-7f3a"},
+        ],
+    })
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(snapshot)
+    assert sorted(row.product for row in panel.rows) == ["Claude Code", "Claude Code (sandbox myapp-7f3a)"]
+    panel.set_cursor([row.product for row in panel.rows].index("Claude Code (sandbox myapp-7f3a)"))
+    panel.toggle_detail()
+    assert "detector=mcp source=sandbox sandbox=myapp-7f3a" in panel.detail_lines()
+
+
 def test_ai_discovery_detail_toggle_noop_on_empty_table() -> None:
     panel = AIDiscoveryPanelModel()
     panel.set_snapshot(AIUsageSnapshot(enabled=True))

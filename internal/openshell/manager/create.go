@@ -108,7 +108,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	flags := runFlags{
 		Pack: req.Pack, Profile: req.Profile, Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo,
 		Unmask: req.Unmask, HostPorts: req.HostPorts, NoMCP: req.NoMCP, Learn: req.Learn,
-		CPU: req.CPU, Memory: req.Memory, Context: req.Context,
+		CPU: req.CPU, Memory: req.Memory, Context: req.Context, ProcessTree: req.ProcessTree,
 	}
 	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
@@ -588,6 +588,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	m.recordMountTelemetry(ctx, b, plan, !in.req.NoSnapshot)
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerCreate, false, nil, nil)
+	m.observeNow(b)
 	m.startWatch(b)
 	m.refreshEgress()
 	view := m.viewOf(b)

@@ -289,6 +289,9 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			// The agent identity of the connector install the signal belongs
 			// to, so discovery joins that agent's decisions.
 			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID)),
+			// A sandbox scan's signal names the OpenShell sandbox it was found in.
+			DefenseClawSandboxID:   aiDiscoveryV8Optional(signal.SandboxID),
+			DefenseClawSandboxName: aiDiscoveryV8Optional(signal.SandboxName),
 		}
 		identity := inventoryIdentity(signal.UserID)
 		identity.applyTo(&base)
@@ -345,6 +348,8 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAIModelProvenanceSource:       base.DefenseClawAIModelProvenanceSource,
 				DefenseClawAIModelProvenanceConfidence:   base.DefenseClawAIModelProvenanceConfidence,
 				DefenseClawAgentIdentityID:               base.DefenseClawAgentIdentityID,
+				DefenseClawSandboxID:                     base.DefenseClawSandboxID,
+				DefenseClawSandboxName:                   base.DefenseClawSandboxName,
 			}
 			identity.applyTo(&observed)
 			return builder.BuildLogAIComponentObserved(observed)

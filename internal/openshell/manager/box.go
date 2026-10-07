@@ -94,6 +94,16 @@ type box struct {
 	// included.
 	guard       *guardRun
 	guardEnding chan struct{}
+	// observe is the running AI discovery observer of the ready sandbox
+	// (discovery.go); discoverMu serializes its discoveries.
+	observe    *observeRun
+	discoverMu sync.Mutex
+	// discoveryReleased is set, under discoverMu, once cleanup removed the
+	// sandbox's discovery folder: no discovery writes it again.
+	discoveryReleased bool
+	// procs is the sandbox's process tree (processes.go), made once its
+	// process tree is on.
+	procs *procTree
 
 	hooks       hookStats
 	activeAt    time.Time
@@ -333,6 +343,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		Message: lifecycleMessage(rec.Name, phase),
 	})
 	m.syncGuard(b, phase)
+	m.syncObserve(b, phase)
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {
@@ -598,7 +609,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		RunImage: r.RunImage, RunImageID: r.RunImageID,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Session: r.Sessions, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
-		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),
+		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard), ProcessTree: b.processTreeOn(),
 		Launch:      sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
 		Credentials: slices.Clone(r.Credentials), HostPorts: slices.Clone(r.HostPorts),
 	}

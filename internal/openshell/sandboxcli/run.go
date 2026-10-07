@@ -56,6 +56,7 @@ type RunOptions struct {
 	Credentials []string
 	GitHubWrite bool
 	NoMCP       bool
+	ProcessTree bool
 	Detach      bool
 	// Rm deletes the sandbox when the session ends.
 	Rm bool
@@ -1274,6 +1275,7 @@ func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox, run *runLaunch) []strin
 		}), "--credential")
 	add(o.GitHubWrite && !had(func(r *runLaunch) bool { return r.GitHubWrite }) && !slices.ContainsFunc(sb.Credentials, githubWrite), "--github-write")
 	add(o.NoMCP && !had(func(r *runLaunch) bool { return r.NoMCP }), "--no-mcp")
+	add(o.ProcessTree && !sb.ProcessTree, "--process-tree")
 	add(o.LLM != "" && !strings.EqualFold(o.LLM, LLMAuto) && !had(func(r *runLaunch) bool { return strings.EqualFold(o.LLM, r.LLM) }), "--llm "+o.LLM)
 	add(o.BedrockRegion != "" && o.BedrockRegion != sb.Launch.BedrockRegion &&
 		!had(func(r *runLaunch) bool { return o.BedrockRegion == r.BedrockRegion }), "--bedrock-region")
@@ -1304,7 +1306,7 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 	req := sandboxapi.CreateRequest{
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
-		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env,
+		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env, ProcessTree: o.ProcessTree,
 		// The sandbox's clock reads like this machine's.
 		TimeZone: openshell.HostTimeZone(a.Getenv),
 	}

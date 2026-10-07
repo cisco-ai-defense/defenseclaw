@@ -375,6 +375,7 @@ func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, ke
 		sig := &report.Signals[i]
 		sig.Source = AISourceUserScan
 		sig.UserID, sig.UserName = "", ""
+		sig.SandboxID, sig.SandboxName = "", ""
 		if !keepRawPaths {
 			sig.Evidence = evidenceWithoutRawPaths(sig.Evidence)
 		}

@@ -1632,6 +1632,8 @@ whose last pull was never applied. Host git must be 2.29 or newer.
 <data_dir>/sandboxes/<name>/copy/            copy record, base.git, pulls
 <data_dir>/sandboxes/<name>/runlog/          the log of the last detached run, kept at a stop
 <data_dir>/sandboxes/<name>/cli/             the CLI's: run options, copy hand-over
+<data_dir>/sandboxes/<name>/discovery/       AI discovery: scan.json (what was found); root/, the
+                                             collected tree, only while a scan runs; removed at delete
 <data_dir>/sandboxes/bindings.json           ingress bindings
 <data_dir>/sandboxes/images.json             overlay image records
 <data_dir>/sandboxes/manager/<name>.json     the daemon's sandbox record
@@ -2747,6 +2749,7 @@ on metrics.
 | OCSF findings, hook silence and tamper, large uploads, nested repositories, shadow AI | `RecordSandboxFinding` | `log.finding.observed` |
 | Snapshot, undo, mask, review, upload, pull | `RecordSandboxWorkspace` | `log.sandbox.workspace` |
 | OpenShell `PROC`, `SSH` and `API:INFERENCE` records | `RecordSandboxActivity` | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` |
+| Process tree starts and exits (opt-in, `observe.process_tree`) | `RecordSandboxProcess` | `log.sandbox.process_tree` |
 
 Hook decisions from a sandbox carry the sandbox ID and name taken from the
 binding that authenticated them. The gateway sidecar builds one

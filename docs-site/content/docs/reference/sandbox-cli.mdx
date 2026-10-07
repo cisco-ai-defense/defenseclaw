@@ -686,6 +686,7 @@ A few rules the flags follow:
 | `--no-mcp` | switch |  | Leave the harness's MCP servers behind. |
 | `--no-snapshot` | switch |  | Skip the pre-session snapshot (and so undo). |
 | `--pack` | text |  | Sandbox policy pack (open, balanced, strict, or a custom pack). |
+| `--process-tree` | switch |  | Sample the sandbox's processes every 5 seconds (sandbox ps), even where the pack leaves it off. |
 | `--profile` | text |  | Network profile: open, balanced or strict. |
 | `-p`, `--prompt` | text |  | Run the harness headless with this prompt. |
 | `--refresh` | switch |  | When resuming a copy-mode sandbox, copy the folder again. |
@@ -1248,6 +1249,63 @@ defenseclaw sandbox pull fix-tests --patch-out fix-tests.patch
 | `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--patch-out` | text |  | Write the changes to this patch file. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+## What runs in a sandbox
+
+### `sandbox discover`
+
+Finds the AI components inside a running sandbox now: the MCP servers, skills,
+rules, plugins and AI CLIs the agent installed or configured under the
+sandbox's home, the agents running in it, the names (never the values) of its
+environment variables, shell history mentions and, for a copy (`--copy`, every
+sandbox on macOS), the AI packages its package manifests name. DefenseClaw
+reads the sandbox with one read-only command it builds itself, checks every
+path and file the sandbox sends back, and scans the result on this machine.
+The daemon does the same on its own once the sandbox is ready and every
+`ai_discovery.scan_interval_min` while it runs, and keeps the result when the
+sandbox stops (without its processes). The AI inventory shows the sandbox's
+components, marked with its name, after its next scan:
+`defenseclaw agent usage --sandbox NAME`. `ai_discovery.enabled: false` turns
+it off.
+
+```bash
+defenseclaw sandbox discover myapp-7f3a
+defenseclaw sandbox discover myapp-7f3a --json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags discover */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox ps`
+
+Lists the processes of a running sandbox whose process tree is on (the pack's
+`observe.process_tree: true`, or `sandbox run --process-tree`): pid, parent,
+uptime and command line, with the values of arguments that name secrets
+replaced. `--tree` shows each process under its parent. The daemon samples
+the sandbox every 5 seconds while it runs (every 15 seconds on a Mac when
+sampling its MicroVM is slow) and adds what OpenShell reports of processes
+starting and exiting, so a process that starts and ends between two samples,
+and that OpenShell does not report, is not seen. The agent chooses its
+processes' names and arguments: they are shown, never acted on. The same tree
+is in the TUI's sandbox detail and in the `sandbox.process_tree` telemetry
+records.
+
+```bash
+defenseclaw sandbox ps myapp-7f3a --tree
+defenseclaw sandbox ps myapp-7f3a --json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags ps */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--tree` | switch |  | Show each process under its parent. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ## Policy and packs

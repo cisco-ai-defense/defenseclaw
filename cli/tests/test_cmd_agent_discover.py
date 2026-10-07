@@ -527,6 +527,29 @@ class AiUsageRendererTests(unittest.TestCase):
         self.assertNotIn("Cursor", out)
         self.assertNotIn("AI SDKs", out)
 
+    def test_sandbox_filter_keeps_that_sandbox_and_tags_its_rows(self):
+        from defenseclaw.commands import cmd_agent
+
+        payload = _wide_payload()
+        found = _ai_signal(
+            state="new", category="mcp_server", product="Codex", vendor="OpenAI", detector="mcp",
+            basenames=["dccert-marker"],
+        )
+        found.update({"sandbox_name": "myapp-7f3a", "source": "sandbox"})
+        payload["signals"].append(found)
+        only = cmd_agent._filter_ai_usage_signals(
+            payload["signals"], states=(), categories=(), products=(), show_gone=False, sandboxes=("MYAPP-7F3A",),
+        )
+        self.assertEqual([sig["product"] for sig in only], ["Codex"])
+        tagged = cmd_agent._tag_sandbox_signals(payload["signals"])
+        self.assertIn("Codex (sandbox myapp-7f3a)", [sig["product"] for sig in tagged])
+        # The host's own Codex row stays apart from the sandbox's.
+        self.assertIn("Codex", [sig["product"] for sig in tagged])
+        self.assertEqual(found["product"], "Codex", "tagging must not change the payload")
+        out = cmd_agent._render_ai_usage_table(payload, sandboxes=("myapp-7f3a",))
+        self.assertIn("myapp-7f3a", out)
+        self.assertNotIn("Cursor", out)
+
     def test_category_filter_is_exact_and_case_insensitive(self):
         from defenseclaw.commands import cmd_agent
 

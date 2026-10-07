@@ -353,6 +353,9 @@ class AIUsageSignal:
     model: AIUsageModel | None = None
     runtime: AIUsageRuntime | None = None
     evidence_types: tuple[str, ...] = ()
+    # The OpenShell sandbox a sandbox scan found the signal in (empty: this
+    # machine).
+    sandbox_name: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> AIUsageSignal:
@@ -388,7 +391,15 @@ class AIUsageSignal:
             model=AIUsageModel.from_mapping(model_raw if isinstance(model_raw, Mapping) else None),
             runtime=AIUsageRuntime.from_mapping(runtime_raw if isinstance(runtime_raw, Mapping) else None),
             evidence_types=evidence_types,
+            sandbox_name=str(raw.get("sandbox_name") or ""),
         )
+
+    @property
+    def display_product(self) -> str:
+        """The product, tagged with the sandbox it was found in."""
+        if not self.sandbox_name:
+            return self.product
+        return f"{self.product} (sandbox {self.sandbox_name})" if self.product else f"(sandbox {self.sandbox_name})"
 
 
 @dataclass(frozen=True)
@@ -1096,7 +1107,8 @@ class AIDiscoveryPanelModel:
             lines.append(sig_id(signal))
             if signal.detector or signal.source:
                 source = f" source={signal.source}" if signal.source else ""
-                lines.append(f"detector={signal.detector}{source}".strip())
+                sandbox = f" sandbox={signal.sandbox_name}" if signal.sandbox_name else ""
+                lines.append(f"detector={signal.detector}{source}{sandbox}".strip())
             if signal.model:
                 model = signal.model
                 parts = [f"model: id={model.id or '(unknown)'}"]
@@ -1202,8 +1214,8 @@ class AIDiscoveryPanelModel:
             self._apply_filter()
             return
 
-        groups: dict[tuple[str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
-        order: list[tuple[str, str, str, str, str, str]] = []
+        groups: dict[tuple[str, str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
+        order: list[tuple[str, str, str, str, str, str, str]] = []
         model_groups: dict[str, _MutableAIDiscoveryRow] = {}
         model_order: list[str] = []
         for signal in self.snapshot.signals:
@@ -1241,12 +1253,14 @@ class AIDiscoveryPanelModel:
                 component_name = signal.component.name.lower()
                 if signal.component.version:
                     version = signal.component.version
-            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version)
+            # What a sandbox holds is its own row, never folded into the
+            # same product on this machine.
+            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version, signal.sandbox_name)
             row = groups.get(key)
             if row is None:
                 row = _MutableAIDiscoveryRow(
                     state=signal.state,
-                    product=signal.product,
+                    product=signal.display_product,
                     vendor=signal.vendor,
                     ecosystem=signal.component.ecosystem if signal.component else "",
                     component=signal.component.name if signal.component else "",

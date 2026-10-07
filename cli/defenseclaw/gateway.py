@@ -1189,6 +1189,11 @@ class OrchestratorClient:
         result = self._sandbox_call("GET", self._sandbox_path(name, "destinations"))
         return self._sandbox_object(result, "destinations")
 
+    def sandbox_processes(self, name: str) -> dict[str, Any]:
+        """A sandbox's process tree (``enabled`` false while it is off)."""
+        result = self._sandbox_call("GET", self._sandbox_path(name, "processes"))
+        return self._sandbox_object(result, "process list")
+
     def sandbox_approvals(self, sandbox: str = "") -> list[dict[str, Any]]:
         """Pending asks, optionally for one sandbox."""
         params = {"sandbox": sandbox} if sandbox else None

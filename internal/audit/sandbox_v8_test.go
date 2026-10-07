@@ -117,6 +117,8 @@ func recordSandboxEvent(ctx context.Context, recorder *SandboxRecorder, event an
 		return recorder.RecordSandboxWorkspace(ctx, event)
 	case SandboxActivityEvent:
 		return recorder.RecordSandboxActivity(ctx, event)
+	case SandboxProcessEvent:
+		return recorder.RecordSandboxProcess(ctx, event)
 	}
 	panic(fmt.Sprintf("recordSandboxEvent: unsupported event %T", event))
 }
@@ -1116,7 +1118,7 @@ func TestSandboxEgressEndsAndActivity(t *testing.T) {
 			eventName: observability.TelemetryEventSandboxProcess, bucket: observability.BucketToolActivity,
 			outcome: observability.OutcomeAttempted,
 			body: map[string]any{
-				"defenseclaw.sandbox.process.event": "start", "defenseclaw.sandbox.process.source": "openshell",
+				"defenseclaw.sandbox.process.event": "start", "defenseclaw.sandbox.process.source": "ocsf",
 				"defenseclaw.sandbox.process.pid": int64(42), "defenseclaw.sandbox.process.executable": "/usr/bin/python3",
 				"defenseclaw.sandbox.process.command_line": "python3 /work/app/main.py dccert-block-marker",
 				"defenseclaw.sandbox.process.exit_code":    nil, "gen_ai.conversation.id": "hook-session-7",
@@ -1127,12 +1129,12 @@ func TestSandboxEgressEndsAndActivity(t *testing.T) {
 			name: "process exit",
 			event: SandboxActivityEvent{
 				Sandbox: sb, Kind: SandboxActivityProcess, ProcessEvent: SandboxProcessExit, PID: 42, Executable: "python3",
-				ExitCode: exit(2), CommandLine: "kept off exit records", ProcessSource: SandboxProcessSourceSampled,
+				ExitCode: exit(2), CommandLine: "kept off exit records", ProcessSource: SandboxProcessSourceSample,
 			},
 			eventName: observability.TelemetryEventSandboxProcess, bucket: observability.BucketToolActivity,
 			outcome: observability.OutcomeFailed,
 			body: map[string]any{
-				"defenseclaw.sandbox.process.event": "exit", "defenseclaw.sandbox.process.source": "sampled",
+				"defenseclaw.sandbox.process.event": "exit", "defenseclaw.sandbox.process.source": "sample",
 				"defenseclaw.sandbox.process.exit_code": int64(2), "defenseclaw.sandbox.process.command_line": nil,
 			},
 		},
