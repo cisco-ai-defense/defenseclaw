@@ -168,6 +168,35 @@ func TestShadowRemediationPastesOnlyAHost(t *testing.T) {
 	}
 }
 
+// The host and binary of a shadow AI finding come from the sandbox too, so
+// the finding's title, description and evidence, and its feed line, show
+// them made safe: no line separator, bidirectional control or C1 control
+// the sandbox sent reaches telemetry or an alert view.
+func TestShadowAIFindingShowsTheHostMadeSafe(t *testing.T) {
+	e := liveEnv(t, "destbox", nil)
+	ls, rlo, csi := "\u2028", "\u202e", "\u009b"
+	e.m.observeDestination(context.Background(), e.boxOf("destbox"), destinationSighting{
+		host: "inference.example-llm.net" + ls + "x" + rlo + "y" + csi, port: 443, at: time.Now(), binary: "/usr/bin/py" + rlo + "thon" + ls})
+	shadow := e.tel.findingsOf(audit.SandboxFindingShadowAI)
+	if len(shadow) != 1 {
+		t.Fatalf("shadow AI findings = %+v", shadow)
+	}
+	f := shadow[0]
+	fields := map[string]string{"title": f.Title, "description": f.Description, "evidence": f.Evidence, "remediation": f.Remediation}
+	for _, ev := range e.events("destbox", sandboxapi.ActivityFinding, sandboxapi.ReasonShadowAI) {
+		fields["feed message"] = ev.Message
+	}
+	for field, text := range fields {
+		if strings.ContainsAny(text, ls+rlo+csi) {
+			t.Errorf("%s holds a control the sandbox sent: %q", field, text)
+		}
+	}
+	if !strings.Contains(f.Title, "the sandbox reached inference.example-llm.net x") || !strings.Contains(f.Evidence, "binary=/usr/bin/py") ||
+		fields["feed message"] == "" {
+		t.Errorf("finding = %+v, feed %q", f, fields["feed message"])
+	}
+}
+
 // A --credential binding's endpoint, which a provider rule opens as it does
 // the model endpoint, is a credential destination: no model provider (the
 // status counts one model API) and no shadow AI.
