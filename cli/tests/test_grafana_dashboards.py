@@ -848,6 +848,20 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
                 "targets": [{"expr": "sum(increase(defenseclaw_agent_token_usage_total[1h])) or vector(0)", "instant": True}],
             },
             {
+                "type": "bargauge",
+                "title": "Top hosts",
+                "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+                "targets": [
+                    {
+                        "expr": (
+                            'topk(10, sum by (dest) (count_over_time({service_name="defenseclaw"} '
+                            '| json | __error__="" [$__range])))'
+                        ),
+                        "instant": True,
+                    }
+                ],
+            },
+            {
                 "type": "traces",
                 "title": "Selected trace",
                 "description": "Trace waterfall.",
@@ -880,6 +894,7 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
     assert any("latest-value discovery gauges" in error for error in errors)
     assert any("optional token/cost absence" in error for error in errors)
     assert any("blank trace selection" in error for error in errors)
+    assert any(error.startswith("semantic-fixture/Top hosts:") and "reduced by rows" in error for error in errors)
     assert any("scope_label must be defined before" in error for error in errors)
     assert any("agent variable must enumerate" in error for error in errors)
     assert any("persisted options must match" in error for error in errors)
