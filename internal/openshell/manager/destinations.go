@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
@@ -454,6 +455,14 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
 		return sandboxapi.DestinationCredential, provider, vendor
+	case harnessFetchHost(harnessName, r.Host, 0):
+		// The harness's own background request (OpenCode's model
+		// catalog), which an open pack lets through: its vendor's, no
+		// shadow AI.
+		if spec, ok := harness.Get(harnessName); ok {
+			provider = spec.DisplayName
+		}
+		return sandboxapi.DestinationHarnessVendor, provider, ""
 	case hit != nil && hit.SupportedConnector != "" && hit.SupportedConnector == harnessName:
 		return sandboxapi.DestinationHarnessVendor, hit.DisplayName, hit.Vendor
 	case hit != nil:

@@ -171,6 +171,14 @@ func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
 		e.get("ocbox").Egress.Blocked != 0 || len(e.tel.findingsOf(audit.SandboxFindingShadowAI)) != 0 {
 		t.Fatalf("audited %d, feed %+v, destinations %+v (%v), blocked %d", len(audited), e.events("ocbox", sandboxapi.ActivityEgressBlocked, ""), d, err, e.get("ocbox").Egress.Blocked)
 	}
+	// An open pack lets it through: the harness's vendor, no shadow AI.
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "ocbox", Host: "models.opencode.ai", Port: 443, Time: time.Now(),
+		FirstSeen: true}, 0)
+	d, err = e.m.Destinations(t.Context(), "ocbox")
+	if err != nil || len(d.Destinations) != 1 || d.Destinations[0].Kind != sandboxapi.DestinationHarnessVendor ||
+		len(e.tel.findingsOf(audit.SandboxFindingShadowAI)) != 0 {
+		t.Fatalf("allowed: destinations %+v (%v), shadow AI %d", d, err, len(e.tel.findingsOf(audit.SandboxFindingShadowAI)))
+	}
 	e.images.rec = claude
 	e.live(sandboxapi.CreateRequest{Name: "claudebox", Copy: true})
 	refuse("claudebox")
