@@ -1073,6 +1073,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.runAuditWALGuard(runCtx)
 	}()
 
+	// Query-planner statistics are taken as the audit history grows, so ledger
+	// lookups stay index seeks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditPlannerStats(runCtx)
+	}()
+
 	// Agent identities seen on the hook path are written to inventory.db in
 	// one batch per flush interval, never per hook.
 	agentIdentityStoreToken := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore {
