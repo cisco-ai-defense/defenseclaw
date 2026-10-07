@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import stat
 from pathlib import Path
@@ -36,6 +37,65 @@ from typing import Any
 import tomllib
 
 _LOCK_LIMIT = 4 * 1024 * 1024
+
+
+# The Windows native hook launcher is installed by the installer, not by
+# setup, so only the installer can put it back (GAP-0378).
+LAUNCHER_REINSTALL_STEP = (
+    "run the DefenseClaw installer again the way you installed it (for example: "
+    "irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex); "
+    "setup cannot recreate the launcher"
+)
+_LAUNCHER_PROBLEM_PREFIX = "the DefenseClaw hook launcher "
+_WINDOWS_LAUNCHER = re.compile(r"([A-Za-z]:[\\/][^\"'&|<>\r\n]*?defenseclaw-hook\.exe)", re.IGNORECASE)
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def repair_command(connector: str, problem: str) -> str:
+    """The step that repairs *problem*: the installer for a missing launcher, else setup."""
+
+    if problem.startswith(_LAUNCHER_PROBLEM_PREFIX):
+        return LAUNCHER_REINSTALL_STEP
+    return setup_command(connector)
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [item for nested in value.values() for item in _strings(nested)]
+    if isinstance(value, list):
+        return [item for nested in value for item in _strings(nested)]
+    return []
+
+
+def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
+    """Report a Windows hook registration whose native launcher file is gone.
+
+    An antivirus quarantine or a cleanup tool can remove
+    ``defenseclaw-hook.exe``; every hook call then fails while status showed
+    the connector as running (GAP-0378).
+    """
+
+    if not _is_windows():
+        return []
+    for path in _hook_config_paths(cfg, connector):
+        try:
+            if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            document = tomllib.loads(text) if path.suffix == ".toml" else json.loads(text)
+        except (OSError, ValueError):
+            continue
+        for value in _strings(document):
+            for match in _WINDOWS_LAUNCHER.finditer(value):
+                launcher = match.group(1)
+                if not os.path.isfile(launcher):
+                    return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} is missing, so every hook call fails"]
+    return []
 
 
 def setup_command(connector: str) -> str:
@@ -231,8 +291,8 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
     (:func:`hook_command_problems`).
     """
 
-    if os.name == "nt":
-        return []
+    if _is_windows():
+        return hook_launcher_problems(cfg, connector)
     existing: list[Path] = []
     for path in _hook_config_paths(cfg, connector):
         try:

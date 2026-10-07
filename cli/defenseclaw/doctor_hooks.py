@@ -43,6 +43,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 
 from defenseclaw import connector_paths
 from defenseclaw.connector_contracts import resolve_connector_contract
+from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
 _SAFE_PATHEXT = (".exe", ".cmd")
@@ -3370,6 +3371,12 @@ def validate_windows_hook_registration(
         )
         resolved = _resolve_target(raw_target, kind, search_path=search_path, pathext=pathext)
         if not resolved:
+            if ntpath.basename(raw_target).casefold() == "defenseclaw-hook.exe":
+                # Only the installer puts the launcher back (GAP-0378).
+                raise _InspectionError(
+                    "launcher-missing",
+                    f"the DefenseClaw hook launcher {raw_target} is missing, so every hook call fails",
+                )
             raise _InspectionError("missing", f"registered hook target cannot be resolved with PATHEXT: {raw_target}")
         target = resolved
         basename = ntpath.basename(resolved).casefold()
@@ -3478,6 +3485,8 @@ def validate_windows_hook_registration(
             exc.state,
             exc.detail
             if exc.state in {"policy-blocked", CODEX_PROBE_TIMEOUT_STATE}
+            else f"{exc.detail}; {LAUNCHER_REINSTALL_STEP}"
+            if exc.state == "launcher-missing"
             else _repair_detail(connector, exc.detail),
             command,
             target,

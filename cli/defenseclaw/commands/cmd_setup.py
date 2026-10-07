@@ -14244,6 +14244,13 @@ def _restart_services(
             connector_registration_verified = True
         else:
             ux.echo(f" ✗{f' ({diagnostic})' if diagnostic else ''}")
+            if "registration-launcher-digest-missing" in diagnostic:
+                # The native launcher is gone; setup cannot put it back (GAP-0378).
+                from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+                click.echo(
+                    f"  The DefenseClaw hook launcher (defenseclaw-hook.exe) is missing: {LAUNCHER_REINSTALL_STEP}."
+                )
             failed.append(f"{readiness_label} readiness")
 
     # Multi-connector global change: every active hook connector is affected
