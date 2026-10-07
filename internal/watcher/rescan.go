@@ -753,7 +753,7 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 		return nil, ""
 	}
 
-	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	scanCtx, cancel := context.WithTimeout(ctx, w.scanTimeout(evt))
 	defer cancel()
 
 	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
