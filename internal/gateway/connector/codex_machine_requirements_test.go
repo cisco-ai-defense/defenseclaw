@@ -11,7 +11,6 @@ import (
 
 func TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
-	opts.EnterpriseTargetEnabled = true
 	opts.AgentApplicationControlEnforced = true
 	opts.ClaudeTargetEnabled = true
 	opts.ClaudeEffectivePolicyVerified = false
@@ -36,9 +35,16 @@ func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) 
 	if windowsCodexMachineSecurityComplete(opts) {
 		t.Fatal("zero-target deployment must not report security_complete")
 	}
+	// GAP-0238: rows without a Windows machine policy do not count, as in the
+	// installer module; they made status and verify throw instead.
+	for _, name := range []string{"copilot", "opencode", "hermes"} {
+		opts.EnableManifestTarget(name)
+	}
+	if windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("a deployment without a Codex, Claude Code or Cursor row must not report security_complete")
+	}
 
-	opts.EnterpriseTargetEnabled = true
-	opts.ClaudeTargetEnabled = true
+	opts.EnableManifestTarget("ClaudeCode")
 	opts.ClaudeEffectivePolicyVerified = true
 	if !windowsCodexMachineSecurityComplete(opts) {
 		t.Fatal("verified Claude-only target should be security-complete")
@@ -66,7 +72,7 @@ func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) 
 		t.Fatalf("Cursor target flag did not reach the report: %+v", report)
 	}
 
-	opts.EnterpriseTargetEnabled = false
+	opts.CursorTargetEnabled = false
 	if windowsCodexMachineSecurityComplete(opts) {
 		t.Fatal("disabled last target must clear security_complete")
 	}

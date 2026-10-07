@@ -236,10 +236,6 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, fmt.Errorf("resolve trusted ProgramData: %w", err)
 	}
 	requirementsPath := filepath.Join(programData, "OpenAI", "Codex", "requirements.toml")
-	applicability, err := resolveWindowsCodexManifestApplicability(stateRoot)
-	if err != nil {
-		return opts, err
-	}
 	opts = connector.WindowsCodexMachineRequirementsOptions{
 		RequirementsPath:                filepath.Clean(requirementsPath),
 		ManagedDir:                      filepath.Join(installRoot, "bin"),
@@ -249,14 +245,13 @@ func resolveWindowsCodexRequirementsLayout(
 		GatewayAddr:                     gatewayAddr,
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
-		EnterpriseTargetEnabled:         applicability.Enterprise,
-		ClaudeTargetEnabled:             applicability.Claude,
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
-		CodexTargetEnabled:              applicability.Codex,
-		CursorTargetEnabled:             applicability.Cursor,
 		HookContractID: connector.WindowsCodexStandaloneHookContract(
 			filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
 		),
+	}
+	if err := enableWindowsCodexManifestTargets(stateRoot, &opts); err != nil {
+		return connector.WindowsCodexMachineRequirementsOptions{}, err
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")
@@ -290,47 +285,29 @@ func resolveWindowsCodexRequirementsLayout(
 	return opts, nil
 }
 
-// windowsCodexManifestApplicability records which target connectors the
-// protected enterprise-hook manifest enables. It replaces four positional
-// booleans; every future target adds a named field so a swapped pair
-// cannot compile.
-type windowsCodexManifestApplicability struct {
-	Enterprise bool
-	Codex      bool
-	Claude     bool
-	Cursor     bool
-}
-
-func resolveWindowsCodexManifestApplicability(
+// enableWindowsCodexManifestTargets records in opts each target connector
+// the protected enterprise-hook manifest enables.
+func enableWindowsCodexManifestTargets(
 	stateRoot string,
-) (windowsCodexManifestApplicability, error) {
-	var applicability windowsCodexManifestApplicability
+	opts *connector.WindowsCodexMachineRequirementsOptions,
+) error {
 	manifestPath := filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
 	if err := windowsCodexRequirementsManifestTrust(
 		manifestPath,
 		"Windows enterprise hook target manifest",
 	); err != nil {
-		return applicability, err
+		return err
 	}
 	manifest, err := windowsCodexRequirementsManifestLoader(manifestPath)
 	if err != nil {
-		return applicability, err
+		return err
 	}
 	for _, target := range manifest.Targets {
-		if !target.IsEnabled() {
-			continue
-		}
-		applicability.Enterprise = true
-		switch strings.ToLower(strings.TrimSpace(target.Connector)) {
-		case "codex":
-			applicability.Codex = true
-		case "claudecode":
-			applicability.Claude = true
-		case "cursor":
-			applicability.Cursor = true
+		if target.IsEnabled() {
+			opts.EnableManifestTarget(target.Connector)
 		}
 	}
-	return applicability, nil
+	return nil
 }
 
 func exactWindowsCodexAttestationEnv(name string) (bool, error) {
