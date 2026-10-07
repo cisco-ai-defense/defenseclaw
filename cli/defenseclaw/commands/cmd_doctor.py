@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import errno
+import getpass
 import hashlib
 import hmac
 import http.client
@@ -1426,6 +1427,15 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
     return 1
 
 
+def _root_owned_file(path: str) -> bool:
+    """Whether *path* is a regular file owned by root while doctor runs as another account."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == 0 and os.geteuid() != 0
+
+
 def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     """Name root-owned ~/.defenseclaw leftovers from a sudo-started gateway."""
 
@@ -1435,6 +1445,25 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     if not data_dir:
         return
     leftovers = sudo_runtime_leftover_relpaths(data_dir)
+    # config.yaml and gateway.log are not private runtime files, but a sudo
+    # run leaves them root-owned too; chown gives them back (GAP-0398).
+    chown = [name for name in ("config.yaml", "gateway.log") if _root_owned_file(os.path.join(data_dir, name))]
+    if chown:
+        user = getpass.getuser()
+        _emit(
+            "fail",
+            "Sudo leftovers",
+            "root-owned from a sudo defenseclaw run: " + ", ".join(chown + leftovers),
+            r=r,
+            check_id="doctor.state.sudo-leftovers",
+            reason_code="sudo-runtime-leftovers",
+            remediation="give them back to this account: sudo chown "
+            + user
+            + " "
+            + " ".join(os.path.join(data_dir, name) for name in chown)
+            + (", then rerun `defenseclaw doctor`" if not leftovers else ", then rerun doctor for the rest"),
+        )
+        return
     if not leftovers:
         _emit(
             "pass",

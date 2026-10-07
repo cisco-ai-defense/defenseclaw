@@ -1376,8 +1376,9 @@ def _not_current_message(path: str) -> str:
 
     try:
         version = config_module.source_config_version(path=path)
-    except config_module.ConfigVersionError:
-        version = 0
+    except config_module.ConfigVersionError as exc:
+        # An unreadable file is not an older one (GAP-0398).
+        return str(exc)
     if version and version > config_module.CURRENT_CONFIG_VERSION:
         return config_module.newer_config_message(version)
     return "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
