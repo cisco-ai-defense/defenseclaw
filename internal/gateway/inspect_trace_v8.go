@@ -193,7 +193,22 @@ func (a *APIServer) guardrailApplyTraceV8Input(
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
-	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, identity))
+	// A session id comes from the caller and can collide across users. Resolve
+	// the connector install for the verified caller instead of joining a
+	// session-only registry entry that another account registered.
+	agentID := identity.IdentityID
+	if agentID == "" && !ManagedEnterpriseActive() {
+		if hookAgentIdentityUser(ctx).Verified {
+			if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
+				agentID = facts.ID
+			}
+		}
+	}
+	if ManagedEnterpriseActive() {
+		// Secure Client keeps its pre-identity record projection.
+		agentID = agentIdentityIDForTraffic(ctx, identity)
+	}
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentID)
 	caller.Identity.applyTo(&input)
 	if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evaluation.RuleIDs); ok {
 		applyGuardrailApplyOutcome(&input, outcome, caller, envelopeConnector, finishedAt)

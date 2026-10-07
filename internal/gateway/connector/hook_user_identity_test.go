@@ -308,6 +308,19 @@ func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
 	}
 	shell := systemBashForTest(t)
 	helperPath := materializeHookAssetForTest(t, "hooks/_hardening.sh")
+	hookDir := filepath.Join(t.TempDir(), ".defenseclaw", "hooks")
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir,
+		SetupOpts{DataDir: filepath.Dir(hookDir), APIAddr: "127.0.0.1:18970", ManagedEnterprise: true},
+		NewClaudeCodeConnector()); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(hookDir, "claude-code-hook.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), "_DC_SECURE_CLIENT_HOOK=1") {
+		t.Fatal("Secure Client render did not pin its profile")
+	}
 	run := func(extra ...string) string {
 		command := exec.Command(shell, "-c", `set -e; source "$0"; defenseclaw_user_identity_args`, helperPath)
 		command.Env = append(withoutSessionFactsEnv(os.Environ()),
@@ -319,7 +332,7 @@ func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
 		}
 		return string(out)
 	}
-	if out := run("DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_HOME=/opt/cisco/secureclient/defenseclaw/runtime"); strings.Contains(out, "Session-Facts") {
+	if out := run("DEFENSECLAW_MANAGED_HOOK=1", "_DC_SECURE_CLIENT_HOOK=1", "DEFENSECLAW_HOME="+filepath.Join(t.TempDir(), ".defenseclaw")); strings.Contains(out, "Session-Facts") {
 		t.Fatalf("Secure Client hook sent session facts:\n%s", out)
 	}
 	if out := run(); !strings.Contains(out, "X-DefenseClaw-Session-Facts: v1;k=ssh") {
@@ -330,7 +343,7 @@ func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
 // A standalone managed shell hook has no per-user gateway binary, so it takes
 // the whole session facts, Kerberos principal included, from the
 // administrator-owned hook binary its rendered transport names; without that
-// binary (Secure Client) it sends the SSH variables alone (GAP-0194).
+// binary it falls back to the SSH variables alone (GAP-0194).
 func TestManagedShellHookTakesSessionFactsFromTheAdministratorBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")

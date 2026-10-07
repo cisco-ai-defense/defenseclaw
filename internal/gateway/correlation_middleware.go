@@ -395,10 +395,7 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 					id.UserID, id.UserIDKind, id.UserName = sandboxBindingUser(binding)
 				} else if connector.IsLoopback(r) {
 					trustedID := sanitizeLLMEventUser(r.Header.Get(llmEventUserIDHeader))
-					trustedName := sanitizeLLMEventUser(r.Header.Get(llmEventUserNameHeader))
-					if !ManagedEnterpriseActive() {
-						trustedName = useridentity.BareAccountName(trustedName)
-					}
+					trustedName := useridentity.ProfileAccountName(sanitizeLLMEventUser(r.Header.Get(llmEventUserNameHeader)))
 					if trustedID != "" || trustedName != "" {
 						id.UserID = trustedID
 						id.UserIDKind = useridentity.KindForID(trustedID)

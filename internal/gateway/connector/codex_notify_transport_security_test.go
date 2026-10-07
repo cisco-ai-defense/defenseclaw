@@ -290,3 +290,20 @@ func capturedCurlAuthorizationToken(capture string) (string, bool) {
 	}
 	return "", false
 }
+
+func TestSecureClientCodexNotifyBridgeKeepsOriginalIdentityHeaders(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix bridge")
+	}
+	dir := t.TempDir()
+	if err := writeCodexNotifyBridge(SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "notify-bridge.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "X-DefenseClaw-Session-Facts") || strings.Contains(string(body), "USER_NAME%%@") {
+		t.Fatal("Secure Client notify bridge changed its original identity headers")
+	}
+}
