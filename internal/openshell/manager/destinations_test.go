@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -355,5 +356,46 @@ func TestDestinationsFullOfUnknownAIStillReportAProvider(t *testing.T) {
 	shadow := e.tel.findingsOf(audit.SandboxFindingShadowAI)
 	if len(shadow) != before+1 || shadow[len(shadow)-1].TargetRef != "api.openai.com" {
 		t.Fatalf("findings before %d, after %+v", before, shadow[before:])
+	}
+}
+
+// TestProxiedDestinationsNameTheirProgram (GAP-0084, GAP-0088): every host
+// reached through the egress proxy showed BINARY "-" (the proxy sees no
+// program, and OpenShell's record of the connection names the proxy, not
+// the host), so a shadow AI row could not say what called it. A proxied
+// request takes the program of the one connection to the proxy OpenShell
+// recorded around it, whichever came first; two programs then leave it
+// unnamed rather than guessed.
+func TestProxiedDestinationsNameTheirProgram(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "pbox"})
+	b := e.boxOf("pbox")
+	opened := func(bin string, pid int) {
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: bin, PID: pid, HasPID: true, Host: openshellHostAlias,
+			Port: testEgressPort, Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+	}
+	request := func(host string) {
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "pbox", Host: host, Port: 443, Method: "CONNECT",
+			Time: now(), FirstSeen: true}, 0)
+	}
+	request("pypi.org")
+	opened("/usr/bin/curl", 77)
+	advance(time.Minute)
+	request("api.openai.com")
+	opened("/usr/bin/curl", 78)
+	opened("/usr/bin/python3", 79)
+	advance(time.Minute)
+	d, err := e.m.Destinations(t.Context(), "pbox")
+	must(t, err)
+	got := map[string]sandboxapi.DestinationRow{}
+	for _, r := range d.Destinations {
+		got[r.Host] = r
+	}
+	if r := got["pypi.org"]; !slices.Equal(r.Binaries, []string{"/usr/bin/curl"}) || r.PID != 77 {
+		t.Fatalf("pypi.org = %+v", r)
+	}
+	if r := got["api.openai.com"]; len(r.Binaries) != 0 || r.PID != 0 {
+		t.Fatalf("api.openai.com, two programs at once = %+v", r)
 	}
 }

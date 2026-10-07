@@ -706,7 +706,16 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			return err
 		}
 		if !yes {
-			return nothing()
+			other := "--branch or --patch-out FILE"
+			if res.Kind == workspace.CopyPlain {
+				other = "--patch-out FILE"
+			}
+			a.note("not brought back; the changes stay in " + o.Name + ": review them with `" + CommandName + " review " + o.Name +
+				"`, then pull with --accept-sensitive, or " + other)
+			if err := nothing(); err != nil {
+				return err
+			}
+			return &ExitError{Code: 1, Err: &Silent{Err: errors.New("the changes were not brought back")}}
 		}
 		o.AcceptSensitive = true
 	}

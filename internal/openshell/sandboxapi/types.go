@@ -607,6 +607,11 @@ type StartRequest struct {
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+	// LLM is the model credential as the caller's environment holds it now
+	// (secret values): when it is of the profile the sandbox was created
+	// with and differs from the one its provider holds (a rotated or
+	// renewed key), the start gives the provider the new one.
+	LLM *LLMCredential `json:"llm,omitempty"`
 }
 
 // AcceptRequest is POST /sandboxes/{name}/accept: the user kept the changes
@@ -1005,6 +1010,16 @@ const (
 // the threshold, which the block cut, and later requests to the destination,
 // which it refused. An unblock of the destination lifts the block.
 const CategoryLargeUpload = "large_upload"
+
+// The Category of a block-list refusal whose entry is the pack's, the
+// repository policy's (.defenseclaw/sandbox.yaml) or the host egress
+// firewall's deny rules; the user's own openshell.egress.block keeps the
+// proxy's operator_block.
+const (
+	CategoryPackBlock       = "pack_block"
+	CategoryRepoPolicyBlock = "repo_policy_block"
+	CategoryFirewallBlock   = "firewall_block"
+)
 
 // LargeUploadBlockedText is how the feed words an egress.blocked event of
 // category large_upload, whose Reason is the egress proxy's sentence

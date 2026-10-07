@@ -276,8 +276,25 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	}
 }
 
-// harnessFetches are the requests the sandbox's harness makes around the
-// egress proxy that it does without (harness.Spec.DirectFetches).
+// harnessFetchHost reports host (and port, 0 when unknown) as one of the
+// harness's own background requests it does without
+// (harness.Spec.DirectFetches). The egress proxy's refusal of one is
+// audited but, like OpenShell's (harnessFetchDenial), neither shown on the
+// feed nor counted as a blocked site, a destination or shadow AI: the
+// proxy cannot tell the harness's request from a tool's, so the host
+// decides.
+func harnessFetchHost(harnessName, host string, port int) bool {
+	host = triage.NormalizeHost(host)
+	for _, f := range harnessFetches(harnessName) {
+		if host == triage.NormalizeHost(f.Host) && (port == 0 || port == f.Port) {
+			return true
+		}
+	}
+	return false
+}
+
+// harnessFetches are the requests the sandbox's harness makes on its own
+// that it does without (harness.Spec.DirectFetches).
 func harnessFetches(name string) []triage.HarnessFetch {
 	spec, ok := harness.Get(name)
 	if !ok {
@@ -561,6 +578,12 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 		m.storeApproval(a)
 		m.rejectChunk(ctx, gw, p.Sandbox, p.ChunkID, d.Message)
 		m.recordApproval(ctx, id, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorPolicy)
+		if d.Port == 22 {
+			// SSH out of a sandbox: OpenShell's denial is on the feed
+			// already, saying what to do instead; a second line for the
+			// one attempt, with another reason, would only confuse.
+			return
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityEgressBlocked, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port, Source: sandboxapi.SourceOpenShell,
 			Category: string(d.Reason), Reason: string(d.Reason), Message: blockedMessage(d),

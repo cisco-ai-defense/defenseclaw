@@ -77,6 +77,14 @@ func TestPolicyTestAPack(t *testing.T) {
 		t.Fatalf("report = %+v", report)
 	}
 
+	// GAP-0103, GAP-0104: on a terminal the EXPECTED cells were colour codes
+	// mangled into text, and "(unblockable)" read as "cannot be unblocked".
+	text := ta.fresh()
+	text.IO.Color = true
+	_ = text.PolicyTest(bg, PolicyTestOptions{Pack: "balanced", Fixture: fixture})
+	has(t, text.output(), "✓ allow", "✗ allow", "blocked (`defenseclaw sandbox unblock` lifts it)")
+	lacks(t, text.output(), "\ufffd", "[32m", "unblockable")
+
 	for _, o := range []PolicyTestOptions{
 		{Sandbox: "x", Pack: "strict", Host: "a.example"},
 		{Pack: "strict"},

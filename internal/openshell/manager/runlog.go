@@ -160,7 +160,7 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harne
 func (m *Manager) readRunLog(ctx context.Context, gw *Gateway, name string, meta keptRun) bool {
 	readCtx, cancel := context.WithTimeout(ctx, runLogWait+5*time.Second)
 	defer cancel()
-	res, err := gw.Client.Exec(readCtx, name, []string{"/bin/sh", "-c", runLogScript, "defenseclaw-run-log", harness.RunDir,
+	res, err := m.ownExec(readCtx, gw, name, []string{"/bin/sh", "-c", runLogScript, "defenseclaw-run-log", harness.RunDir,
 		strconv.Itoa(sandboxapi.MaxRunLogBytes)}, openshell.ExecOptions{Timeout: runLogWait, Attempts: 1, MaxOutputBytes: sandboxapi.MaxRunLogBytes})
 	var log []byte
 	switch {

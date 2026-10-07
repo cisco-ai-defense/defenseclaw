@@ -326,7 +326,7 @@ func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryRe
 	if err != nil {
 		return nil, err
 	}
-	res, err := gw.Client.Exec(ctx, rec.Name, collectArgv("discover", opts.MaxFileBytes, pairs), openshell.ExecOptions{
+	res, err := m.ownExec(ctx, gw, rec.Name, collectArgv("discover", opts.MaxFileBytes, pairs), openshell.ExecOptions{
 		Timeout: discoveryTimeout, Idempotent: true, MaxOutputBytes: collectStreamBytes,
 	})
 	if err != nil {

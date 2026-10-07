@@ -247,6 +247,35 @@ func (e *Effective) blockRefusal(key, host string, dec egress.Decision) *Violati
 	}
 }
 
+// The layers an egress.block entry comes from (Effective.BlockOrigin); the
+// user's own openshell.egress.block is BlockFromConfig.
+const (
+	BlockFromConfig     = "config"
+	BlockFromPack       = "pack"
+	BlockFromRepoPolicy = "repo_policy"
+	BlockFromFirewall   = "firewall"
+)
+
+// BlockOrigin names the layer whose entry puts host on the effective block
+// list, in the order blockVerdict explains a refusal by it: the pack's,
+// the repository policy's, the host egress firewall's deny rules, else the
+// user's own openshell.egress.block. "" when no entry matches.
+func (e *Effective) BlockOrigin(host string) string {
+	if _, ok := firstMatch(e.Egress.Block, host); !ok {
+		return ""
+	}
+	switch {
+	case e.Pack != nil && MatchAnyHost(e.Pack.Egress.Block, host):
+		return BlockFromPack
+	case e.RepoPolicy != nil && MatchAnyHost(e.RepoPolicy.Block, host):
+		return BlockFromRepoPolicy
+	}
+	if _, ok := firstMatch(e.firewallBlock, host); ok {
+		return BlockFromFirewall
+	}
+	return BlockFromConfig
+}
+
 // blockVerdict refuses a host on the block list (the pack's egress.block and
 // openshell.egress.block). The egress proxy applies those entries before any
 // unblock decision, after only the guard and the administrator's lists, so
@@ -257,20 +286,20 @@ func (e *Effective) blockVerdict(key, host string) *Violation {
 	if !ok {
 		return nil
 	}
-	if e.Pack != nil && MatchAnyHost(e.Pack.Egress.Block, host) {
+	switch e.BlockOrigin(host) {
+	case BlockFromPack:
 		return &Violation{
 			Key: key, Source: SourceUser, Attempted: host, Constraint: "pack " + e.Pack.Name,
 			Message: packMessage(e.Pack.Name, key), Detail: host + " matches " + glob + " on the pack's block list",
 		}
-	}
-	if e.RepoPolicy != nil && MatchAnyHost(e.RepoPolicy.Block, host) {
+	case BlockFromRepoPolicy:
 		return &Violation{
 			Key: key, Source: SourceUser, Attempted: host, Constraint: RepoPolicyConstraint,
 			Message: "blocked by the repository policy " + RepoPolicyPath + ": " + key,
 			Detail:  host + " matches " + glob + " on the repository's block list; remove the entry from " + RepoPolicyPath + " to reach it",
 		}
-	}
-	if fwGlob, ok := firstMatch(e.firewallBlock, host); ok {
+	case BlockFromFirewall:
+		fwGlob, _ := firstMatch(e.firewallBlock, host)
 		return &Violation{
 			Key: key, Source: SourceUser, Attempted: host, Constraint: "firewall.config_file",
 			Message: "blocked by a deny rule of the host egress firewall: " + key,

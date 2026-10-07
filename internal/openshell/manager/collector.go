@@ -120,7 +120,9 @@ var sandboxExecutableDirs = []string{
 // and text come last on their line. The collector leaves itself out of the
 // processes it reports, and the timeout(1) wrapper Exec runs it under (its
 // parent, when that is timeout): they are not the workload's, and every
-// sample would see them start anew. find prints NUL-terminated records that
+// sample would see them start anew. Kernel threads (PF_KTHREAD in the stat
+// flags: a MicroVM's guest kernel shows about 75) are left out too. find
+// prints NUL-terminated records that
 // tr turns into lines, with a newline inside one turned into \001, which the
 // host refuses; the shell's own text has its control characters replaced.
 // A path with a control character is skipped. Files are read only when
@@ -172,9 +174,10 @@ for d in /proc/[0-9]*; do
   while read -r k a b _; do [ "$k" = Uid: ] && { u=$b; break; }; done 2>/dev/null < "$d/status"
   [ -n "$u" ] || continue
   [ "$mode" = ps ] || [ "$u" = "$uid" ] || continue
+  set -f; set -- ${line##*) }; set +f
+  (( ${7:-0} & 0x200000 )) && continue
   n=$((n + 1))
   [ "$n" -le 4096 ] || { printf 'Q processes\n'; break; }
-  set -f; set -- ${line##*) }; set +f
   printf 'P %s %s %s %s\n' "$pid" "$2" "$u" "${20:-0}"
   comm=
   { read -r -d '' comm < "$d/comm"; } 2>/dev/null

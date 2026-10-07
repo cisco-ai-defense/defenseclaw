@@ -213,6 +213,45 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	return &v, nil
 }
 
+// refreshModelCredential gives the sandbox's model provider the credential
+// the caller's environment holds now (StartRequest.LLM): a provider keeps
+// what its sandbox was created with, so once that key expired (a Bedrock
+// API key lasts hours) every model call of a later session failed until
+// the sandbox was deleted and run again. Only for the profile the sandbox
+// was created with, and only the variables its provider already holds.
+func (m *Manager) refreshModelCredential(ctx context.Context, gw *Gateway, rec record, llm *sandboxapi.LLMCredential) error {
+	if llm == nil || llm.Profile == "" || llm.Profile != rec.CredentialProfile || len(llm.Credentials) == 0 {
+		return nil
+	}
+	pname := providerName(rec.Name, roleLLM, 0)
+	p, err := gw.Client.GetProvider(ctx, pname)
+	switch {
+	case openshell.IsNotFound(err):
+		return nil
+	case err != nil:
+		return upstream("get provider "+pname, err)
+	case !managedBy(p.Labels, rec.Owner) || p.Labels[LabelSandbox] != rec.Name:
+		return sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"the OpenShell provider %s is not the one DefenseClaw created for sandbox %s; delete the sandbox and run a new one", pname, rec.Name)
+	}
+	changed := false
+	for k, v := range llm.Credentials {
+		if old, ok := p.Spec.Credentials[k]; ok && v != "" && old != v {
+			p.Spec.Credentials[k] = v
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if _, err := gw.Client.UpdateProvider(ctx, p); err != nil {
+		return upstream("update provider "+pname, err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Reason: "model_credential_updated",
+		Message: "sandbox " + rec.Name + " takes the model credential your environment holds now, not the one it was created with"})
+	return nil
+}
+
 // refuseRetained refuses what needs a live sandbox on a retained box (a
 // deleted sandbox whose snapshot is kept).
 func (m *Manager) refuseRetained(b *box) error {
@@ -436,6 +475,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		if _, err := gw.Client.UpdateProvider(ctx, p); err != nil {
 			return upstream("rotate provider "+pname, err)
 		}
+	}
+	if err := m.refreshModelCredential(ctx, gw, rec, req.LLM); err != nil {
+		return err
 	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {
 		// Changes the user kept at the end of a session (Accept) are the

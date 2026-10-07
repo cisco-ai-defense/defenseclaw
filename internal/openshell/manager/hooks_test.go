@@ -615,6 +615,28 @@ func TestHookCoverage(t *testing.T) {
 	}
 }
 
+// TestLowAlertsAreNoSessionFinding (GAP-0091): a LOW default-pack alert
+// (ENT-EMAIL-BULK on one commit author's address in `git log` output) was a
+// warning on the feed, the status and the session summary. LOW alerts are
+// audited only; MEDIUM and above stay findings.
+func TestLowAlertsAreNoSessionFinding(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "lowbox"})
+	binding, d := e.binding("lowbox"), e.decider("lowbox", "Bash")
+	e.m.ObserveIngress(binding, sandboxauth.RouteHook)
+	low, medium := d("PostToolUse", "", "alert"), d("PostToolUse", "", "alert")
+	low.Severity, low.Reason = "LOW", "Allowed but flagged by DefenseClaw rule ENT-EMAIL-BULK: Email address."
+	medium.Severity, medium.Reason = "MEDIUM", "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT: E2E sandbox alert marker."
+	e.m.ObserveHookDecision(low)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 0 {
+		t.Fatalf("a LOW alert on the feed: %+v", got)
+	}
+	e.m.ObserveHookDecision(medium)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 1 || got[0].Severity != "MEDIUM" {
+		t.Fatalf("findings = %+v", got)
+	}
+}
+
 // Every verdict counts under its hook event, the harness's name for it, tool
 // events or not (#956). The counts live as long as the sandbox's other hook
 // counters: a stop and start keep them, a new sandbox of the name and a
@@ -783,6 +805,30 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	advance(time.Hour)
 	if silence() != 2 {
 		t.Fatal("an idle harness raised a finding")
+	}
+}
+
+// TestHookSilenceSeesTurnsOnAKeptConnection (GAP-0094): a harness with its
+// hooks switched off kept one model connection open and made 28 model
+// calls in 9 minutes; only its NET records name its binary, so the check
+// saw a handful of events and never fired. Its model calls on the
+// connection it opened count as its work.
+func TestHookSilenceSeesTurnsOnAKeptConnection(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "keptbox"})
+	b := e.boxOf("keptbox")
+	advance(harnessStartupGrace)
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443,
+		Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	for range 11 {
+		advance(time.Minute)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassHTTP, Host: "api.anthropic.com", Port: 443, Method: "POST", Path: "/v1/messages",
+			Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 1 {
+		t.Fatalf("hook_silence findings = %d, want 1", n)
 	}
 }
 

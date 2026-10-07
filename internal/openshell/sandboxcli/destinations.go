@@ -56,7 +56,7 @@ func (a *App) Destinations(ctx context.Context, name string, format OutputFormat
 			shadow++
 		}
 		rows = append(rows, []string{
-			destinationHost(r), destinationKindText(r.Kind), truncate(firstNonEmpty(r.Provider, r.Category, "-"), 32),
+			destinationHost(r), destinationKindText(r.Kind), truncate(destinationProviderText(r), 32),
 			destinationRequests(r), humanBytes(r.BytesUp) + " / " + humanBytes(r.BytesDown),
 			truncate(firstNonEmpty(destinationBinary(r), "-"), 40), r.LastSeen.Local().Format("01-02 15:04"),
 		})
@@ -104,6 +104,26 @@ func destinationHost(r sandboxapi.DestinationRow) string {
 }
 
 // destinationKindText is how a destination kind reads.
+// destinationProviderText is a row's PROVIDER cell: the AI provider, else
+// the egress category; for a destination only ever refused, whose list
+// refused it, in words (GAP-0125: a repository-policy block read
+// operator_block).
+func destinationProviderText(r sandboxapi.DestinationRow) string {
+	if r.Kind == sandboxapi.DestinationBlocked && r.Provider == "" {
+		switch r.Category {
+		case "operator_block":
+			return "your block list"
+		case sandboxapi.CategoryPackBlock:
+			return "the pack's block list"
+		case sandboxapi.CategoryRepoPolicyBlock:
+			return "repository policy"
+		case sandboxapi.CategoryFirewallBlock:
+			return "host egress firewall"
+		}
+	}
+	return firstNonEmpty(r.Provider, r.Category, "-")
+}
+
 func destinationKindText(kind string) string {
 	switch kind {
 	case sandboxapi.DestinationModelProvider:

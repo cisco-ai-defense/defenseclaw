@@ -142,7 +142,7 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 	}
 	start := m.now()
 	execStart := time.Now()
-	res, err := gw.Client.Exec(ctx, name, collectArgv("ps", 1, []string{"O", "argv", "O", "cwd"}), openshell.ExecOptions{
+	res, err := m.ownExec(ctx, gw, name, collectArgv("ps", 1, []string{"O", "argv", "O", "cwd"}), openshell.ExecOptions{
 		Timeout: processSampleTimeout, Attempts: 1, MaxOutputBytes: collectStreamBytes,
 	})
 	took := time.Since(execStart)

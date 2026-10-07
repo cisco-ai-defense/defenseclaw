@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
@@ -70,6 +71,10 @@ type session struct {
 	// harness or shell still runs in the sandbox (attachedSessions):
 	// nothing may stop the sandbox, or undo the folder, under them.
 	others int
+	// lost is set when the session's connection to the sandbox broke (the
+	// OpenShell gateway restarted under it, for one) while the sandbox
+	// went on running: it is left running for a reattach.
+	lost bool
 	// headless marks a one-prompt session (the resume hint says how to
 	// run the next prompt).
 	headless bool
@@ -469,6 +474,8 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	}
 	text := "✗ DefenseClaw blocked " + where
 	switch why := firstNonEmpty(ev.Category, ev.Reason); {
+	case sshPort(ev):
+		text += " (" + sshBlockedText(ev.Host) + ")"
 	case ev.Category == sandboxapi.CategoryLargeUpload:
 		// The large-upload block (egress.block_large_uploads) cut an
 		// upload there (its event counts what went up), or refused a
@@ -484,7 +491,7 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	}
 	host := strings.ToLower(ev.Host)
 	n := sessionNotice{summary: text}
-	if ev.Unblockable {
+	if ev.Unblockable && !sshPort(ev) {
 		// Once the host is unblocked the summary gives the block without
 		// the command (onUnblock).
 		n.host, n.unblocked = host, text+"; unblocked since"
@@ -715,6 +722,7 @@ func (s *session) end(ctx context.Context) error {
 	if st, err := s.api.Status(ctx); err == nil {
 		s.daemonStarted = st.StartedAt
 	}
+	after = s.settledPhase(ctx, after)
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
 		a.warn(elsewhere)
@@ -744,6 +752,8 @@ func (s *session) end(ctx context.Context) error {
 		stopped = true
 	case s.others > 0:
 		a.note(s.sb.Name + " keeps running: " + s.othersText() + ", so what changes after this review is not in it")
+	case s.lost:
+		a.note(s.sb.Name + " keeps running for a reattach, so what changes after this review is not in it")
 	case s.started && !s.liveRun:
 		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
 			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
@@ -877,10 +887,58 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 			"and that stopped " + s.harnessName()
 	}
 	if after.Phase != "ready" {
+		if h := after.Hooks; h.Silent && h.OnSilence == packs.OnSilenceStop {
+			// DefenseClaw's own stop (raiseSilence), not someone else's.
+			return "DefenseClaw stopped " + name + ": " + s.harnessName() + " worked for " + firstNonEmpty(h.SilenceAfter, "a while") +
+				" without a hook reaching DefenseClaw (hooks.on_silence: stop). Check its hook configuration in the sandbox before you start it again"
+		}
 		return name + " was stopped from outside this session (`" + CommandName + " stop` or the TUI), which ended " + s.harnessName()
+	}
+	if s.lost {
+		return "the connection to " + name + " was lost (the OpenShell gateway restarted, for one), which ended " + s.harnessName() +
+			"; " + name + " is still running → reattach: " + CommandName + " connect " + name
 	}
 	return ""
 }
+
+// settledPhase waits, at most settlePhaseWait, while the sandbox's phase
+// is passing (the OpenShell gateway restarting under it reads as unknown
+// or provisioning), and returns it as it then is. A session whose harness
+// failed while the sandbox passed through such a phase and came back
+// ready lost its connection to the sandbox, not the sandbox (lost).
+func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) *sandboxapi.Sandbox {
+	passing := func(phase string) bool {
+		switch phase {
+		case "unknown", "provisioning", "starting", "creating":
+			return true
+		}
+		return false
+	}
+	if !passing(after.Phase) {
+		return after
+	}
+	for range int(settlePhaseWait / settlePhaseInterval) {
+		if s.app.Sleep(ctx, settlePhaseInterval) != nil {
+			break
+		}
+		next, err := s.api.Get(ctx, s.sb.Name)
+		if err != nil {
+			break
+		}
+		after = next
+		if !passing(after.Phase) {
+			break
+		}
+	}
+	s.lost = after.Phase == "ready" && s.harnessCode != 0 && s.before != nil && s.before.Phase == "ready"
+	return after
+}
+
+// settlePhaseWait and settlePhaseInterval pace settledPhase.
+const (
+	settlePhaseWait     = 20 * time.Second
+	settlePhaseInterval = 2 * time.Second
+)
 
 // onExit returns k (keep), u (undo), d (diff) or i (the user pressed
 // Ctrl-C), and whether keeping was the user's choice (an answer, --yes,
@@ -971,6 +1029,9 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		case s.others > 0:
 			a.note("Sandbox " + name + " keeps running: " + s.othersText() + " → stop it once they end: " + CommandName + " stop " + name)
+			return nil
+		case s.lost:
+			a.note("Sandbox " + name + " keeps running → reattach: " + CommandName + " connect " + name + "   stop: " + CommandName + " stop " + name)
 			return nil
 		case !s.started:
 			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)

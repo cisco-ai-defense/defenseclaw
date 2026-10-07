@@ -1604,7 +1604,8 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
 // migrateRetiredStandaloneSandbox resets what the retired openshell-sandbox
 // (0.0.x) standalone integration left in a 0.8.x config. That integration
 // recorded openshell.mode: standalone and the sandbox user's home
-// (openshell.sandbox_home), and pointed guardrail.host (where the gateway
+// (openshell.sandbox_home) beside its runtime pin (openshell.version,
+// policy_dir, auto_pair, host_networking), and pointed guardrail.host (where the gateway
 // API and the guardrail proxy listened) and gateway.host (the sandboxed
 // OpenClaw gateway) at its veth link, 10.200.0.1 and 10.200.0.2 by default.
 // It also pinned the OpenClaw home it moved (claw.openclaw_home_original,
@@ -1618,10 +1619,16 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
 // units, network namespace, NAT rules and sandbox user the integration set
 // up are removed by hand (the sandbox guide's "Remove a retired standalone
 // sandbox").
+// retiredOpenShellKeys are the openshell sub-keys of the retired 0.0.x
+// integration, which 1.0 does not read.
+var retiredOpenShellKeys = []string{"mode", "sandbox_home", "policy_dir", "version", "auto_pair", "host_networking"}
+
 func (m *v9Migrator) migrateRetiredStandaloneSandbox(root *yaml.Node) {
 	openshell := v8YAMLMapValue(root, "openshell")
 	standalone := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(openshell, "mode"))) == "standalone"
-	for _, key := range []string{"mode", "sandbox_home"} {
+	// Every sub-key of that integration goes: 1.0 reads none of them
+	// (policy_dir and version pinned its 0.0.x runtime, 0.6.2 by default).
+	for _, key := range retiredOpenShellKeys {
 		if v9Pop(openshell, key) != nil {
 			m.record.Removed = append(m.record.Removed, "openshell."+key)
 		}

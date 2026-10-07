@@ -276,6 +276,9 @@ type Manager struct {
 	procs       ProcessLookup
 	// procGate paces each sandbox's process and SSH records.
 	procGate *rateGate
+	// ownExecs are DefenseClaw's own execs, whose SSH OPEN records are
+	// dropped.
+	ownExecs ownExecs
 	// authFails paces the proxy's refusals of invalid credentials into
 	// health records (authFailed).
 	authFails authFailures
@@ -452,6 +455,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer func() {
 		m.stopWatchers()
 		m.closeGateway()
+		m.feed.closeSubscribers()
 		m.runMu.Lock()
 		m.runCtx = nil
 		m.runMu.Unlock()

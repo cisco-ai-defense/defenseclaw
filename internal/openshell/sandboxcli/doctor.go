@@ -23,6 +23,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -438,7 +439,12 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			if o.Output == OutputJSON {
 				return o.Yes && def, nil
 			}
-			return a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), def, o.Yes)
+			yes, err := a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), def, o.Yes)
+			if yes && err == nil {
+				// A fix that starts or restarts the gateway waits for it.
+				a.note(fmt.Sprintf("fixing %q…", c.Title))
+			}
+			return yes, err
 		})
 		if err != nil {
 			return err
@@ -447,17 +453,32 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// Named as the question named them (`Fix "Gateway": …?`), not
 			// by their ids.
 			for _, out := range outcomes {
-				if out.Applied {
+				switch {
+				case out.Applied:
 					a.ok(fmt.Sprintf("fixed %q", out.Title))
-				} else if out.Error != "" {
+				case out.Error != "":
 					a.bad(fmt.Sprintf("could not fix %q: %s", out.Title, out.Error))
+				case out.Skipped != "":
+					a.warn(fmt.Sprintf("did not fix %q: %s", out.Title, out.Skipped))
 				}
 			}
 		}
+		restarted := false
 		for _, out := range outcomes {
 			if out.ID == openshell.CheckIDBindMounts && out.Applied {
 				a.dropCopyMode(o.Output != OutputJSON)
 			}
+			if c := rep.Get(out.ID); out.Applied && c != nil && c.Fix != nil && c.Fix.RestartsGateway {
+				restarted = true
+			}
+		}
+		if restarted && a.Cfg != nil {
+			// The daemon reconnects to a restarted gateway a few seconds
+			// later; until then it says sandboxes are unavailable.
+			if o.Output != OutputJSON {
+				a.note("waiting for the DefenseClaw daemon to reconnect to the restarted gateway…")
+			}
+			a.waitReconnect(ctx)
 		}
 		if len(outcomes) > 0 {
 			rep = a.runDoctor(ctx)
@@ -486,6 +507,26 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("sandbox doctor found problems")}}
 	}
 	return nil
+}
+
+// waitReconnect waits, at most 30 s, while the daemon runs with sandboxes
+// on but unavailable: after a gateway restart it reconnects on its own.
+func (a *App) waitReconnect(ctx context.Context) {
+	api, err := a.api()
+	if err != nil {
+		return
+	}
+	const wait, poll = 30 * time.Second, 2 * time.Second
+	deadline := a.Now().Add(wait)
+	for polls := 1; ; polls++ {
+		if st, err := api.Status(ctx); err != nil || !st.Enabled || st.Available {
+			return
+		}
+		// The polls bound the wait when the clock does not move.
+		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait || a.Sleep(ctx, poll) != nil {
+			return
+		}
+	}
 }
 
 // dropCopyMode removes the openshell.workdir.mode copy that a setup

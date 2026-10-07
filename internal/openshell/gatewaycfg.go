@@ -782,7 +782,7 @@ func (p *GatewayPlan) String() string {
 			fmt.Fprintf(&b, "  edit %s (a timestamped backup is kept)\n", f.Path)
 		}
 		for _, s := range f.Summary {
-			fmt.Fprintf(&b, "    set %s\n", s)
+			fmt.Fprintf(&b, "    %s\n", summaryLine(s))
 		}
 		if !f.TOML {
 			// gateway.env may hold credentials: show only the summary.
@@ -813,6 +813,20 @@ func (p *GatewayPlan) String() string {
 		fmt.Fprintf(&b, "  then restart the gateway (%s); running sandboxes restart with it\n", p.Restart)
 	}
 	return b.String()
+}
+
+// summaryLine is one change of a plan's file: "set KEY = VALUE", or
+// "remove KEY" for a gateway.env variable it drops (editEnvFile's
+// "unset KEY"), saying what that leaves.
+func summaryLine(s string) string {
+	k, ok := strings.CutPrefix(s, "unset ")
+	switch {
+	case !ok:
+		return "set " + s
+	case k == EnvTelemetryEnabled:
+		return "remove " + k + " (OpenShell's usage telemetry stays on, its default)"
+	}
+	return "remove " + k
 }
 
 // Plan computes the changes without touching anything. On Linux it first
@@ -1216,20 +1230,9 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	if a := s.Auth.AllowUnauthenticatedUsers; a != nil && *a {
 		issues = append(issues, "[openshell.gateway.auth] allow_unauthenticated_users is on")
 	}
-	host, port := "127.0.0.1", strconv.Itoa(defaultGatewayPort)
-	if s.BindAddress != "" {
-		h, p, err := net.SplitHostPort(s.BindAddress)
-		if err != nil {
-			return fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, s.BindAddress, st.TOMLPath)
-		}
-		host, port = h, p
-	}
-	// An empty variable counts as unset, as it does for the gateway.
-	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
-		host = v
-	}
-	if v := strings.TrimSpace(env[envServerPort]); v != "" {
-		port = v
+	host, port, err := st.listenAddress(env)
+	if err != nil {
+		return err
 	}
 	if !isLoopbackHost(host) {
 		issues = append(issues, fmt.Sprintf("the gateway listens on %q, beyond this machine", host))
@@ -1251,6 +1254,26 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 		return fmt.Errorf("%w: registration %s reaches %s, but the %s service listens on port %s", ErrGatewayMismatch, reg.Name, reg.Endpoint, GatewayService, port)
 	}
 	return nil
+}
+
+// listenAddress is where the gateway listens: gateway.toml's bind_address
+// (default 127.0.0.1:17670), then OPENSHELL_BIND_ADDRESS and
+// OPENSHELL_SERVER_PORT in env.
+func (s *GatewayConfigState) listenAddress(env map[string]string) (host, port string, err error) {
+	host, port = "127.0.0.1", strconv.Itoa(defaultGatewayPort)
+	if b := s.server.BindAddress; b != "" {
+		if host, port, err = net.SplitHostPort(b); err != nil {
+			return "", "", fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, b, s.TOMLPath)
+		}
+	}
+	// An empty variable counts as unset, as it does for the gateway.
+	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
+		host = v
+	}
+	if v := strings.TrimSpace(env[envServerPort]); v != "" {
+		port = v
+	}
+	return host, port, nil
 }
 
 // envFlag reads a boolean flag variable the way the gateway's command
@@ -1854,13 +1877,44 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 		File       string `json:"file"`
 		Registered bool   `json:"registered"`
 	}
-	if err := json.Unmarshal(out, &infos); err != nil || len(infos) == 0 {
+	// Homebrew may print warnings and hints first ("Warning: running
+	// through sudo, using user/* instead of gui/* domain!" in a shell from
+	// sudo -iu): the answer is the JSON array after them.
+	if err := json.NewDecoder(bytes.NewReader(jsonArrayStart(out))).Decode(&infos); err != nil || len(infos) == 0 {
 		return nil, fmt.Errorf("openshell: brew services info %s: unexpected output %q", GatewayFormula, strings.TrimSpace(string(out)))
 	}
 	i := infos[0]
 	st.Installed = i.File != "" || i.Loaded || i.Registered
-	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
+	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, brewStatusText(i.Status)
 	return st, nil
+}
+
+// brewStatusText says a `brew services` status in words: "none" is a
+// service launchd has not loaded, so not running.
+func brewStatusText(status string) string {
+	switch status {
+	case "none", "":
+		return "not running (not loaded)"
+	case "error":
+		return "failing (see `brew services info " + GatewayFormula + "`)"
+	}
+	return status
+}
+
+// jsonArrayStart is out from its first line that starts a JSON array (all
+// of out when none does).
+func jsonArrayStart(out []byte) []byte {
+	for i := 0; i < len(out); {
+		line := out[i:]
+		if j := bytes.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j+1]
+		}
+		if t := bytes.TrimLeft(line, " \t"); len(t) > 0 && t[0] == '[' {
+			return out[i:]
+		}
+		i += len(line)
+	}
+	return out
 }
 
 // brewFormulaInstalled reports whether GatewayFormula has a keg under a

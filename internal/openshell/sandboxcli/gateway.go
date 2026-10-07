@@ -165,6 +165,11 @@ func (a *App) recordGatewayApply(res *openshell.GatewayApplyResult) error {
 	}
 	for _, f := range res.Files {
 		sum, err := fileSHA256(f.Path)
+		if errors.Is(err, fs.ErrNotExist) {
+			// A file the apply created and its rollback removed: nothing
+			// of DefenseClaw's to restore.
+			continue
+		}
 		if err != nil {
 			return err
 		}

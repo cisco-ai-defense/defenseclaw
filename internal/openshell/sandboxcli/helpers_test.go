@@ -750,6 +750,8 @@ type fakeCopy struct {
 	staged    []workspace.StageOptions
 	refreshed []workspace.RefreshOptions
 	pulled    []workspace.PullOptions
+	// refreshErr is what Refresh fails with.
+	refreshErr error
 }
 
 func (f *fakeCopy) record(add func()) {
@@ -816,6 +818,9 @@ func (f *fakeCopy) Baseline(_ context.Context, _, name string, _ workspace.Exece
 func (f *fakeCopy) Refresh(_ context.Context, o workspace.RefreshOptions) (*workspace.CopyRecord, error) {
 	f.step("refresh " + o.Stage.Name)
 	f.record(func() { f.refreshed = append(f.refreshed, o) })
+	if f.refreshErr != nil {
+		return nil, f.refreshErr
+	}
 	return &workspace.CopyRecord{Name: o.Stage.Name}, nil
 }
 
