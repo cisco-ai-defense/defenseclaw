@@ -642,6 +642,7 @@ func (g *HookConfigGuard) repairCurrent(
 	// installedFailMode is the hook fail mode the connector's hooks were last
 	// rendered with; the resolver below replaces it with the current one.
 	installedFailMode := strings.ToLower(strings.TrimSpace(opts.HookFailMode))
+	installedOpts := opts
 	var releasePolicy func()
 	if policyResolver != nil {
 		policy, release, ok := policyResolver(conn.Name())
@@ -672,7 +673,15 @@ func (g *HookConfigGuard) repairCurrent(
 		baseCtx = ctx
 	}
 
-	present, err := connector.OwnedHooksPresent(conn, opts)
+	// Check the files against the policy that rendered them. A legitimate
+	// fail-mode change makes Windows Codex evidence differ from the new
+	// options even while every stored registration is intact.
+	failModeDrift := policyResolver != nil && installedFailMode != "" && installedFailMode != opts.HookFailMode
+	checkOpts := opts
+	if failModeDrift {
+		checkOpts = installedOpts
+	}
+	present, err := connector.OwnedHooksPresent(conn, checkOpts)
 	if err != nil {
 		if releasePolicy != nil {
 			releasePolicy()
@@ -710,7 +719,7 @@ func (g *HookConfigGuard) repairCurrent(
 			}
 			return baseCtx.Err()
 		}
-		present, err = connector.OwnedHooksPresent(conn, opts)
+		present, err = connector.OwnedHooksPresent(conn, checkOpts)
 		if err != nil {
 			if releasePolicy != nil {
 				releasePolicy()
@@ -720,7 +729,7 @@ func (g *HookConfigGuard) repairCurrent(
 		}
 	}
 	evidenceCurrent, err := connector.HookRuntimeRegistrationCurrent(
-		opts,
+		checkOpts,
 		conn,
 		version.Current().BinaryVersion,
 	)
@@ -735,7 +744,6 @@ func (g *HookConfigGuard) repairCurrent(
 	// The registration can be intact while the rendered hooks bake a stale
 	// hook fail mode: a guardrail mode change (action implies the global fail
 	// mode, observe implies open) never touches the hook entries themselves.
-	failModeDrift := policyResolver != nil && installedFailMode != "" && installedFailMode != opts.HookFailMode
 	if present && evidenceCurrent && !failModeDrift {
 		return nil
 	}
