@@ -115,26 +115,37 @@ func installWindowsScannerRuntime(source string) error {
 		return err
 	}
 	if got, err := windowsEnterpriseFileSHA256(target); err != nil || got != want {
-		if err := copyWindowsScannerRuntime(source, target, root); err != nil {
+		if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
 			return err
-		}
-		if got, err := windowsEnterpriseFileSHA256(target); err != nil || got != want {
-			return errors.New("the installed scanner runtime does not match the payload")
 		}
 	}
 	if err := managed.ValidateTrustedFilePath(target, "scanner runtime"); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), windowsScannerPrepareTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, target, "prepare").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("prepare the scanner runtime: %v: %s", err, windowsEnterpriseBoundedDiagnostic(strings.TrimSpace(string(out))))
+	// prepare is a no-op once the runtime is unpacked; prune drops the
+	// runtimes earlier builds left.
+	for _, step := range []string{"prepare", "prune"} {
+		if err := runWindowsScannerRuntime(target, step); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func copyWindowsScannerRuntime(source, target, root string) error {
+func runWindowsScannerRuntime(executable, step string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), windowsScannerPrepareTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, executable, step).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s the scanner runtime: %v: %s", step, err, windowsEnterpriseBoundedDiagnostic(strings.TrimSpace(string(out))))
+	}
+	return nil
+}
+
+// copyWindowsScannerRuntime copies source next to target, unpacks its
+// runtime from there, and only then swaps it into place, so the gateway's
+// scans never run an installed image whose runtime is not unpacked yet.
+func copyWindowsScannerRuntime(source, target, root, want string) error {
 	in, err := os.Open(source)
 	if err != nil {
 		return err
@@ -155,6 +166,16 @@ func copyWindowsScannerRuntime(source, target, root string) error {
 	if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	if want != "" {
+		if got, err := windowsEnterpriseFileSHA256(tmp); err != nil || got != want {
+			_ = os.Remove(tmp)
+			return errors.New("the copied scanner runtime does not match the payload")
+		}
+		if err := runWindowsScannerRuntime(tmp, "prepare"); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
 	}
 	// A scan the gateway is running keeps the installed image mapped, and
 	// Windows refuses to replace a mapped image but lets it be renamed: move

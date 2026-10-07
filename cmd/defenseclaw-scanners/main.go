@@ -15,7 +15,7 @@
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
 //	defenseclaw-scanners mcp-scan --json [--analyzers a,b] [--scan-prompts] [--scan-resources] [--scan-instructions] <url>
 //	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--include-self]
-//	defenseclaw-scanners versions | --version | prepare
+//	defenseclaw-scanners versions | --version | prepare | prune
 package main
 
 import (
@@ -150,6 +150,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		compileRuntime(dir, stderr)
 		fmt.Fprintln(stdout, dir)
+		return 0
+	case "prune":
+		// After the lifecycle put this runtime in place: remove the ones
+		// earlier builds unpacked (a scan still running keeps its own).
+		root, err := runtimeRoot()
+		if err != nil {
+			fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
+			return 1
+		}
+		pruneOtherRuntimes(root, manifest.SHA256[:16])
 		return 0
 	case "skill-scanner":
 		script, scriptArgs = consoleEntryPointScript, append([]string{"skill-scanner"}, args[1:]...)
@@ -298,7 +308,6 @@ func ensureRuntime(manifest runtimeManifest) (string, error) {
 		}
 		return "", fmt.Errorf("publish scanner runtime: %w", err)
 	}
-	pruneOtherRuntimes(root, filepath.Base(dir))
 	return dir, nil
 }
 

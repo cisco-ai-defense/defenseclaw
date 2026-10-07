@@ -48,7 +48,7 @@ func TestCopyWindowsScannerRuntimeReplacesARunningImage(t *testing.T) {
 	if err := os.WriteFile(source, []byte("new runtime"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := copyWindowsScannerRuntime(source, target, root); err != nil {
+	if err := copyWindowsScannerRuntime(source, target, root, ""); err != nil {
 		t.Fatalf("replace a running scanner runtime: %v", err)
 	}
 	got, err := os.ReadFile(target)
