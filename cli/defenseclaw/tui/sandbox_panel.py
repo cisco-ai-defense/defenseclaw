@@ -284,6 +284,12 @@ class SandboxPanelMixin:
     def _sandbox_supported(self) -> bool:
         return openshell_sandboxes_supported()
 
+    def _sandbox_keys_line(self) -> str:
+        """The hint bar's keys; on Windows the panel only says why, so no sandbox keys (GAP-0073)."""
+        if not self._sandbox_supported():
+            return "KEYS  Tab next panel | : commands | ? help"
+        return self.sandbox_model.keys_line()
+
     def _sandbox_mount(self) -> None:
         """Start the periodic refresh (called from on_mount)."""
         if self._sandbox_model_injected or not self._sandbox_supported():
@@ -313,6 +319,8 @@ class SandboxPanelMixin:
 
     def _schedule_sandbox_poll(self) -> None:
         if getattr(self, "_app_shutting_down", False) or self._sandbox_model_injected:
+            return
+        if not self._sandbox_supported():
             return
         if self._sandbox_poll_running:
             return

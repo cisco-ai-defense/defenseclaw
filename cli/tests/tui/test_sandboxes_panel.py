@@ -1123,6 +1123,20 @@ def fetch(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_windows_shows_only_the_unsupported_message(monkeypatch) -> None:
+    # GAP-0073: Windows kept the sandbox keys, the button bar and a t that cycled the hints.
+    monkeypatch.setattr(sandbox_panel, "openshell_sandboxes_supported", lambda os_name=None: False)
+    monkeypatch.setattr(sandbox_panel, "fetch_sandbox_snapshot", lambda _config: pytest.fail("polled"))
+    app = DefenseClawTUI(config=_config())
+    async with app.run_test(size=(160, 44)) as pilot:
+        await pilot.press("7", "t")
+        await pilot.pause()
+        assert app.sandbox_model.view == "sandboxes"
+        assert "t view" not in app.hint_text and "? help" in app.hint_text
+        assert app.query_one("#sandboxes-controls").has_class("hidden")
+
+
+@pytest.mark.asyncio
 async def test_the_panel_loads_and_renders_the_snapshot(fetch) -> None:
     app = DefenseClawTUI(config=_config())
     async with app.run_test(size=(160, 44)) as pilot:
