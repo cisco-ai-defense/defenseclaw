@@ -259,6 +259,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Direction:     "tool_call",
 			Connector:     "codex",
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
+			toolUseID:     req.ToolUseID,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{

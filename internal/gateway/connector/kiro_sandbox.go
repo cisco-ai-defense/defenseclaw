@@ -75,6 +75,13 @@ func kiroSandboxHookContracts() []HookContract {
 		ResponseFieldName:       "hook_output",
 		Events:                  append([]string(nil), kiroSandboxHookEvents...),
 		AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
+		// Built per call, so the registry's init never fills these in.
+		AIDSurfaceEvents: map[string][]string{
+			AIDSurfacePrompt:     {"userPromptSubmit"},
+			AIDSurfaceToolCall:   {"preToolUse"},
+			AIDSurfaceToolResult: {"postToolUse"},
+		},
+		AIDWireVersion: AIDWireVersionChatToolCalls,
 		Capabilities: HookCapability{
 			CanBlock:           true,
 			BlockEvents:        KiroBlockEventsForSurface(KiroHookSurfaceV2),

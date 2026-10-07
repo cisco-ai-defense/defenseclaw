@@ -64,7 +64,7 @@ class TestConnectorContractManifest(unittest.TestCase):
     """The packaged JSON manifest is the setup-time source of truth."""
 
     def test_manifest_covers_every_connector(self) -> None:
-        self.assertEqual(HOOK_CONTRACT_MANIFEST["schema_version"], 2)
+        self.assertEqual(HOOK_CONTRACT_MANIFEST["schema_version"], 3)
         self.assertEqual(
             set(HOOK_CONTRACT_MANIFEST["connectors"]),
             set(KNOWN_CONNECTORS) | set(ACP_ONLY_CONNECTORS),

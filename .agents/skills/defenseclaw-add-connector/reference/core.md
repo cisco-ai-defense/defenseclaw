@@ -131,10 +131,11 @@ Mirror every pin in the JSON `platform_overrides`.
 
 ### 3.2 JSON manifest
 
-Add `connectors.<id>` to `cli/defenseclaw/inventory/hook_contracts.json` (`schema_version` 2).
+Add `connectors.<id>` to `cli/defenseclaw/inventory/hook_contracts.json` (`schema_version` 3).
 
 - **Connector fields:** `kind` (`hook`, `proxy`, `acp-with-native-hook-defense-in-depth`), `compatibility_gate` (`hook-contract` or `not-gated`), `version_probe` (for example `copilot --version`), `contracts[]`.
-- **Contract fields:** `contract_id`, `agent_version{exact,min_inclusive,max_exclusive}`, `default_for_unversioned`, `hook_script_version`, `hook_script`, `hook_config_path_templates`, `response_field`, `events`, `aid_surfaces`, `supports_traceparent`, `native_otlp` (plus `native_otlp_auth`, `_signals` and `_endpoint_template`), `content_envelope_key`, `tool_call_lifecycle`, `capabilities{can_block,can_ask_native,ask_events,block_events,supports_fail_closed,scope}`, `platform_overrides{darwin,linux,windows}`, `notes`.
+- **Contract fields:** `contract_id`, `agent_version{exact,min_inclusive,max_exclusive}`, `default_for_unversioned`, `hook_script_version`, `hook_script`, `hook_config_path_templates`, `response_field`, `events`, `aid_surfaces`, `aid_surface_events`, `aid_wire_version`, `supports_traceparent`, `native_otlp` (plus `native_otlp_auth`, `_signals` and `_endpoint_template`), `content_envelope_key`, `tool_call_lifecycle`, `capabilities{can_block,can_ask_native,ask_events,block_events,supports_fail_closed,scope}`, `platform_overrides{darwin,linux,windows}`, `notes`.
+- **AID declaration:** Go derives `AIDSurfaceEvents` and `AIDWireVersion` in `init()` (`aid_surface_contract.go`) from `aid_surfaces`, `events` and the tool-call lifecycle routing; the JSON lists them explicitly and the parity test requires them to match. A connector with no versioned contract declares `aid_surfaces`, `aid_surface_events` and `aid_wire_version` under `native_hook_inventory`.
 - **Loader:** `connector_contracts._load_contracts_from_manifest`. It rejects unknown platforms and more than one default per platform. Override keys are listed in `_PLATFORM_OVERRIDE_FIELDS`.
 - **Parity:** `TestHookContractsManifestMatchesRuntime` (`hook_contract_test.go`) compares Go and JSON on darwin, linux and windows. `cli/tests/test_connector_contracts.py::test_manifest_covers_every_connector` requires an entry for every connector in `KNOWN_CONNECTORS` plus the ACP-only connectors.
 - **Packaging:** the file ships through `pyproject.toml` package-data.

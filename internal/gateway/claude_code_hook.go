@@ -169,6 +169,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Direction:     "tool_call",
 			Connector:     "claudecode",
 			MCPServerName: req.MCPServerName,
+			toolUseID:     req.ToolUseID,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
