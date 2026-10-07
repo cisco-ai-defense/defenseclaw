@@ -74,8 +74,28 @@ var (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "defenseclaw-sensor-helper:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitError carries a one-shot's own exit status. --tetragon-cleanup exits 3
+// when Tetragon did not answer, which the lifecycle reports differently from
+// a cleanup that failed (1).
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+// exitCode is the exit status for err: an exitError's own, otherwise 1.
+func exitCode(err error) int {
+	var coded *exitError
+	if errors.As(err, &coded) && coded.code > 0 {
+		return coded.code
+	}
+	return 1
 }
 
 func run() error {
@@ -412,7 +432,8 @@ type kernelPolicyHooks struct {
 	// returns what the event stream and the broker need from it.
 	start func(ctx context.Context, input kernelPolicyInput) kernelPolicyRuntime
 	// cleanup is --tetragon-cleanup: retire every recorded name, write what
-	// it removed to out, and empty the record.
+	// it removed to out, and empty the record. An *exitError sets the
+	// command's exit status (3: Tetragon did not answer).
 	cleanup func(ctx context.Context, out io.Writer, logger *slog.Logger) error
 }
 

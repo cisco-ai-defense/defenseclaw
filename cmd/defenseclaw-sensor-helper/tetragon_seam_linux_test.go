@@ -13,6 +13,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -32,6 +33,22 @@ func (s *recordingSink) RecordLoss()                  { s.losses++ }
 func TestTheReconcilerHooksAreRegistered(t *testing.T) {
 	if kernelPolicy.start == nil || kernelPolicy.cleanup == nil {
 		t.Fatal("the kernel-policy hooks are not filled in")
+	}
+}
+
+// The cleanup's exit code reaches the command's exit status: the lifecycle
+// tells "Tetragon did not answer" (3) from a failed cleanup (1).
+func TestCleanupResultKeepsTheExitCode(t *testing.T) {
+	if err := cleanupResult(cleanupOK); err != nil {
+		t.Fatalf("done: %v", err)
+	}
+	for _, code := range []int{cleanupUnreachable, cleanupFailed} {
+		if err := cleanupResult(code); err == nil || exitCode(err) != code {
+			t.Fatalf("code %d: err %v, exit status %d", code, err, exitCode(err))
+		}
+	}
+	if got := exitCode(errors.New("plain")); got != 1 {
+		t.Fatalf("a plain error exits %d", got)
 	}
 }
 

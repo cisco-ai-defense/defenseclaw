@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,11 +73,21 @@ func startKernelPolicy(ctx context.Context, input kernelPolicyInput) kernelPolic
 }
 
 func cleanupKernelPolicy(ctx context.Context, out io.Writer, logger *slog.Logger) error {
-	code := kernelPolicyCleanup(ctx, logger, out, kernelpolicy.DefaultDirs(), policyDialer(tetragon.ScopeCleanup), false)
-	if code != cleanupOK {
-		return fmt.Errorf("tetragon cleanup incomplete (exit %d)", code)
+	return cleanupResult(kernelPolicyCleanup(ctx, logger, out, kernelpolicy.DefaultDirs(), policyDialer(tetragon.ScopeCleanup), false))
+}
+
+// cleanupResult turns kernelPolicyCleanup's exit code into the command's
+// result, keeping the code: the lifecycle tells "Tetragon did not answer"
+// (3) from a failed cleanup (1).
+func cleanupResult(code int) error {
+	switch code {
+	case cleanupOK:
+		return nil
+	case cleanupUnreachable:
+		return &exitError{code: code, err: errors.New("tetragon cleanup incomplete: Tetragon is not reachable")}
+	default:
+		return &exitError{code: code, err: fmt.Errorf("tetragon cleanup incomplete (exit %d)", code)}
 	}
-	return nil
 }
 
 // hitSink is the part of the controller the event tap feeds.
