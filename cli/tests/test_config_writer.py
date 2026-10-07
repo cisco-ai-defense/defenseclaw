@@ -394,3 +394,24 @@ def test_a_connector_enabled_equal_to_its_default_needs_no_restart(tmp_path, mon
     assert on.changed and on.restart_required == []
     off = config_writer.apply([Change("guardrail.connectors.codex.enabled", False)], "cli:test", "t", path=path)
     assert off.restart_required == ["guardrail.connectors.codex.enabled"]
+
+
+def test_a_connector_flip_back_to_the_running_value_prints_no_restart_hint(tmp_path, monkeypatch):
+    # GAP-0221: the hint compares with what the gateway runs, not with the file before the edit.
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_config
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    local = "sha256:" + "a" * 64
+    for running, hint in ((local, False), ("sha256:" + "b" * 64, True), ("", True)):
+        _config(tmp_path, "guardrail:\n  connectors:\n    codex: {enabled: false}\n")
+        with (
+            patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
+            patch("defenseclaw.gateway.local_policy_digest", return_value={"effective_digest": local}),
+            patch("defenseclaw.gateway.running_policy_digest", return_value=running),
+        ):
+            out = CliRunner().invoke(cmd_config.config_cmd, ["set", "guardrail.connectors.codex.enabled", "true"])
+        assert out.exit_code == 0, out.output
+        assert ("Restart the gateway to apply guardrail.connectors.codex.enabled" in out.output) is hint
