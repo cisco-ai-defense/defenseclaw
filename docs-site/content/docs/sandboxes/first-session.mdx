@@ -86,7 +86,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
 | --- | --- |
 | `Sandbox …` | The name, the harness, and the permission mode. `skip-permissions ON` means the harness's own prompts are off. `--safe` keeps them. |
 | `network: …` | The network profile: `open + blocklist` (the default), `allowlist (balanced)` or `provider hosts only (strict)`. See [network and egress](/docs/sandboxes/network). |
-| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy. |
+| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy, without what git ignores (such as `node_modules/` and `.venv/`), so the dependencies are installed inside. |
 | `Hidden` | Secret files that appear empty inside a live mount. On a copy they are held back instead. |
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook that runs on your machine. |
 | `Model` | Which credential the harness uses. The sandbox gets a placeholder; OpenShell adds the real key only on requests to the model provider. |

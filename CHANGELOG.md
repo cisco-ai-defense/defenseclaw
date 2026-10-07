@@ -1031,7 +1031,10 @@ deleted.
   terminal, with `--yes` or after a skip, end with `N files changed; nothing
   was applied` and the `sandbox pull` command, and say when they keep a
   sandbox despite `--rm`. `sandbox review` of a copy-mode sandbox previews
-  its pull instead of failing. A copy above the upload cap names
+  its pull instead of failing. A git copy names, in one warning after the
+  upload, what it leaves out because git ignores it or it is a package cache
+  (`node_modules/`, `.venv/`, build output), and says to install the
+  dependencies inside the sandbox. A copy above the upload cap names
   `openshell.workdir.max_upload_mb`; on a Mac a full sandbox disk names the
   MicroVM's overlay (`overlay_disk_mib`).
 - Claude Code and Codex per-run managed settings are baked, root-owned and

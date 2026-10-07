@@ -283,6 +283,7 @@ The run says it works on a copy before it copies anything:
 
   Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)
   Uploading the copy (412 files, 3.1 MiB)…
+  ⚠ not copied (git ignores them, or they are package caches): node_modules/, dist/; install the dependencies inside the sandbox
 
 Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + blocklist
   Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
@@ -292,7 +293,11 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
 ```
 
 The copy is a shallow git clone of your project plus your working tree, with
-secret files such as `.env`, keys and certificates held back. Your folder
+secret files such as `.env`, keys and certificates held back. What git
+ignores, such as `node_modules/`, `.venv/` and build output, and package
+caches are not copied either: the line after the upload names them. Install
+the dependencies inside the sandbox (ask the agent to run `npm install` or
+`pip install -r requirements.txt`) before a build or the tests. Your folder
 does not change while the agent works.
 
 The first start of each image takes about a minute while the driver prepares

@@ -370,6 +370,7 @@ it copies anything, and the first start of an image says it takes longer:
 
   Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)
   Uploading the copy (412 files, 3.1 MiB)…
+  ⚠ not copied (git ignores them, or they are package caches): node_modules/, dist/; install the dependencies inside the sandbox
 ```
 
 ### The banner, line by line
@@ -924,8 +925,10 @@ On a Mac every run works on a copy, with or without `--copy` (see
 
 DefenseClaw copies the folder into the sandbox (a shallow git clone plus
 your working tree, with secret files held back) and nothing reaches your
-folder until you bring the work back. At the end of the session you choose
-how:
+folder until you bring the work back. What git ignores, such as
+`node_modules/`, `.venv/` and build output, and package caches are not
+copied: a line after the upload names them, and the dependencies are
+installed inside the sandbox. At the end of the session you choose how:
 
 ```text
 Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)

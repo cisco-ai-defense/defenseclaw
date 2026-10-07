@@ -132,6 +132,11 @@ func TestStageGitProjectIsSanitized(t *testing.T) {
 			t.Fatalf("a warning repeats the held-back list: %q", w)
 		}
 	}
+	// What git ignores and an untracked package cache are named, directories
+	// first, with the way on (GAP-0194).
+	if w := "not copied (git ignores them, or they are package caches): node_modules/, debug.log; install the dependencies inside the sandbox"; !strings.Contains(strings.Join(rec.Warnings, "\n"), w) {
+		t.Fatalf("warnings = %q, want %q", rec.Warnings, w)
+	}
 	stage := rec.Stage
 	sg := func(args ...string) string { return runGit(t, e.home, stage, args...) }
 	if n := sg("rev-list", "--count", "HEAD"); n != "3" {
