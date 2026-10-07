@@ -224,6 +224,44 @@ func gatewayExecutable(lookPath func(string) (string, error), cli string) string
 	return GatewayBinary
 }
 
+// brewPrefixOfCLI is the Homebrew prefix that holds the OpenShell CLI cli
+// (openshell.binary): a per-user Homebrew whose brew is not on PATH is still
+// the one the CLI was installed by (GAP-0286). "" when cli is not a formula
+// link of a prefix.
+func brewPrefixOfCLI(lookPath func(string) (string, error), cli string) string {
+	found, err := lookPath(cli)
+	if err != nil || !filepath.IsAbs(found) {
+		return ""
+	}
+	candidates := []string{found}
+	if real, err := filepath.EvalSymlinks(found); err == nil {
+		candidates = append(candidates, real)
+	}
+	for _, c := range candidates {
+		if prefix := filepath.Dir(filepath.Dir(c)); formulaKegInstalled(prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// BrewCommand is the brew to run: its bare name where it is on PATH, else
+// the brew of the prefix OpenShell was installed by (a per-user Homebrew
+// the shell has not loaded).
+func (g *GatewayConfigurator) BrewCommand() string {
+	if g.LookPath == nil {
+		g.LookPath = exec.LookPath
+	}
+	if _, err := g.LookPath("brew"); err == nil || g.BrewPrefix == "" {
+		return "brew"
+	}
+	own := filepath.Join(g.BrewPrefix, "bin", "brew")
+	if info, err := os.Stat(own); err == nil && info.Mode().IsRegular() {
+		return own
+	}
+	return "brew"
+}
+
 func (g *GatewayConfigurator) defaults() error {
 	dir := g.Dir
 	if dir == "" {
@@ -267,11 +305,15 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.Now == nil {
 		g.Now = time.Now
 	}
-	if g.BrewFormulaInstalled == nil {
-		g.BrewFormulaInstalled = brewFormulaInstalled
-	}
 	if g.BrewPrefix == "" && g.GOOS == "darwin" {
-		g.BrewPrefix = homebrewPrefix()
+		if g.BrewPrefix = brewPrefixOfCLI(g.LookPath, g.CLI); g.BrewPrefix == "" {
+			g.BrewPrefix = homebrewPrefix()
+		}
+	}
+	if g.BrewFormulaInstalled == nil {
+		g.BrewFormulaInstalled = func() bool {
+			return brewFormulaInstalled() || (g.BrewPrefix != "" && formulaKegInstalled(g.BrewPrefix))
+		}
 	}
 	if g.RunningDriver == nil {
 		g.RunningDriver = func(ctx context.Context) (Driver, error) { return runningDriver(ctx, g.Discover) }
@@ -1431,7 +1473,7 @@ func (c serviceCommand) argv() []string { return append([]string{c.name}, c.args
 
 func (g *GatewayConfigurator) restartCommand() serviceCommand {
 	if g.GOOS == "darwin" {
-		return serviceCommand{"brew", []string{"services", "restart", GatewayFormula}}
+		return serviceCommand{g.BrewCommand(), []string{"services", "restart", GatewayFormula}}
 	}
 	return serviceCommand{"systemctl", []string{"--user", "restart", GatewayService}}
 }
@@ -1826,7 +1868,7 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	if !g.BrewFormulaInstalled() {
 		return st, nil
 	}
-	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
+	out, err := g.Runner.Output(ctx, Command{Name: g.BrewCommand(), Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
 		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, strings.TrimSpace(string(out)))
 	}

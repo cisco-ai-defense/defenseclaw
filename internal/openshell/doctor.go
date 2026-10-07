@@ -1045,7 +1045,7 @@ func (r *doctorRun) checkService(ctx context.Context) {
 
 func (r *doctorRun) startCommand() serviceCommand {
 	if r.GOOS == "darwin" {
-		return serviceCommand{"brew", []string{"services", "start", GatewayFormula}}
+		return serviceCommand{r.Gateway.BrewCommand(), []string{"services", "start", GatewayFormula}}
 	}
 	return serviceCommand{"systemctl", []string{"--user", "enable", "--now", GatewayService}}
 }

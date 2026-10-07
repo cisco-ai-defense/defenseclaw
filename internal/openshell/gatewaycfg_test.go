@@ -941,6 +941,37 @@ func TestGatewayServiceState(t *testing.T) {
 			t.Fatalf("brew services info ran with env %v", env)
 		}
 	})
+	// GAP-0286: a per-user Homebrew whose brew the shell has not loaded is
+	// still the prefix the OpenShell CLI (openshell.binary) lives in; its
+	// service and gateway.toml are asked there.
+	t.Run("homebrew prefix of the CLI that is not on PATH", func(t *testing.T) {
+		prefix := filepath.Join(realTempDir(t), "homebrew")
+		for _, dir := range []string{filepath.Join(prefix, "opt", "openshell"), filepath.Join(prefix, "bin")} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range []string{"openshell", "brew"} {
+			if err := os.WriteFile(filepath.Join(prefix, "bin", name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("HOMEBREW_PREFIX", "")
+		t.Setenv("PATH", t.TempDir())
+		f := newGatewayFixture(t)
+		f.cfg.GOOS, f.cfg.BrewPrefix, f.cfg.CLI = "darwin", "", filepath.Join(prefix, "bin", "openshell")
+		f.cfg.LookPath = func(name string) (string, error) {
+			if filepath.IsAbs(name) {
+				return name, nil
+			}
+			return "", exec.ErrNotFound
+		}
+		f.runner.On(filepath.Join(prefix, "bin", "brew")+" services info nvidia/openshell/openshell --json",
+			`[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Installed || !st.Active || f.cfg.BrewPrefix != prefix {
+			t.Fatalf("state = %+v, %v; prefix %q, want %q", st, err, f.cfg.BrewPrefix, prefix)
+		}
+	})
 	// Without the formula there is no service to ask brew about, and brew
 	// took about 40 s to say so on a Mac (manual test M4): the Homebrew
 	// prefix answers instead.
