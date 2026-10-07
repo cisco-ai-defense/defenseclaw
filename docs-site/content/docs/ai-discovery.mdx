@@ -236,10 +236,10 @@ Limits do not turn a partial observation into a false deletion. API inventories 
 
 The continuous scanner runs inside the gateway. Unmanaged deployments emit
 `ai_discovery` events when a signal transitions state; managed-enterprise full
-scans emit the complete snapshot described above. Fresh CLI-generated configs
-enable discovery; an older or minimal config that omits the `ai_discovery`
-block leaves the gateway runtime default disabled. Use these commands to make
-the intended state explicit:
+scans emit the complete snapshot described above. A fresh `defenseclaw init`
+leaves AI discovery disabled. Run `defenseclaw agent discovery enable` after
+initialization to collect the IDE inventory. This also enables runtime
+monitoring planes A and B. Use these commands to make the intended state explicit:
 
 <Tabs items={['Enable', 'Status', 'One-shot scan', 'Disable']}>
   <Tab value="Enable">
