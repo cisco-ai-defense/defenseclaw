@@ -21,6 +21,10 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 			" ;Kerberosv5;;alice@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM;\n" +
 			" ;ShadowHash;HASHLIST:<SALTED-SHA512-PBKDF2>\n" +
 			"OriginalNodeName:\n /Active Directory/CORP/corp.example.com\n"
+		childDomainAccount = "AuthenticationAuthority:\n" +
+			" ;LocalCachedUser;/Active Directory/CORP/child.corp.example.com:erin:E9F6E0ED-138E-40C9-B9E7-A7F3F661DB14\n" +
+			" ;Kerberosv5;;erin@CHILD.CORP.EXAMPLE.COM;CHILD.CORP.EXAMPLE.COM;\n" +
+			"OriginalNodeName:\n /Active Directory/CORP/child.corp.example.com\n"
 		networkAccount = "AuthenticationAuthority: ;Kerberosv5;;bob@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM; ;NetLogon;bob;CORP\n" +
 			"No such key: OriginalNodeName\n"
 		forestAccount = "AuthenticationAuthority: ;Kerberosv5;;dave@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM;\n" +
@@ -53,6 +57,9 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 		// Without dsconfigad only the original node can name the directory and the domain.
 		{"mobile AD account on a Mac without dsconfigad", MacOSDirectoryInputs{DSCL: mobileAccount, AppSSO: noPlatformSSO},
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
+		// The account's own node names its domain; the Mac's bound (parent) domain must not replace it.
+		{"AD account of a child domain on a Mac bound to the parent", MacOSDirectoryInputs{DSCL: childDomainAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
+			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "erin@CHILD.CORP.EXAMPLE.COM", "CHILD.CORP.EXAMPLE.COM", "child.corp.example.com"},
 		// The forest-wide node ("All Domains") names no domain: dsconfigad's applies.
 		{"AD account of a forest-wide search node", MacOSDirectoryInputs{DSCL: forestAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "dave@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "corp.example.com"},
