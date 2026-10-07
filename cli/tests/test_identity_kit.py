@@ -235,3 +235,26 @@ def test_okta_bind_role_refuses_narrow_resource_set(monkeypatch: pytest.MonkeyPa
     args = type("Args", (), {"apply": True, "bind_login": "bind@example.com",
                              "role_label": "reader", "resource_set_label": "all"})()
     assert okta.cmd_bind_role(Client(), args) == 1
+
+
+def test_okta_signon_rule_repairs_non_password_decisions() -> None:
+    okta = _load(OKTA)
+    people = {"users": {"include": ["bind1"]}}
+    for status, access, factor in [("INACTIVE", "ALLOW", "1FA"),
+                                   ("ACTIVE", "DENY", "1FA"), ("ACTIVE", "ALLOW", "2FA")]:
+        calls = []
+
+        class Client:
+            def must(self, method, path, body=None):
+                calls.append((method, path))
+                return {}
+
+        rule = {"id": "rule1", "name": "bind", "status": status, "conditions": {"people": people},
+                "actions": {"appSignOn": {"access": access, "verificationMethod": {
+                    "type": "ASSURANCE", "factorMode": factor,
+                    "constraints": [{"knowledge": {"types": ["password"]}}]}}}}
+        report = okta.Report(dry_run=False)
+        okta.ensure_rule(Client(), report, {"id": "policy1"}, [rule], "bind", 0, people, "bind user")
+        assert ("PUT", "/api/v1/policies/policy1/rules/rule1") in calls
+        if status == "INACTIVE":
+            assert ("POST", "/api/v1/policies/policy1/rules/rule1/lifecycle/activate") in calls

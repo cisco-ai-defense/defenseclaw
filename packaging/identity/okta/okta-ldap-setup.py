@@ -596,16 +596,36 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
             client.must("POST", f"/api/v1/policies/{policy['id']}/rules", body)
         return
     have = (rule.get("conditions") or {}).get("people") or {}
-    same = all(
-        set((have.get(kind) or {}).get("include") or []) == set((people.get(kind) or {}).get("include") or [])
-        for kind in ("users", "groups")
+    action = (rule.get("actions") or {}).get("appSignOn") or {}
+    method = action.get("verificationMethod") or {}
+    constraints = method.get("constraints") or []
+    password_only = (
+        method.get("type") == "ASSURANCE"
+        and method.get("factorMode") == "1FA"
+        and len(constraints) == 1
+        and set(constraints[0]) == {"knowledge"}
+        and constraints[0]["knowledge"].get("types") == ["password"]
+        and constraints[0]["knowledge"].get("required") is not False
+    )
+    same = (
+        all(
+            set((have.get(kind) or {}).get("include") or []) == set((people.get(kind) or {}).get("include") or [])
+            and not (have.get(kind) or {}).get("exclude")
+            for kind in ("users", "groups")
+        )
+        and rule.get("status") == "ACTIVE"
+        and action.get("access") == "ALLOW"
+        and password_only
     )
     if same:
         report.ok(f"rule '{name}' already does this: {purpose}")
         return
     report.change(f"update rule '{name}': {purpose}")
     if not report.dry_run and policy is not None:
-        client.must("PUT", f"/api/v1/policies/{policy['id']}/rules/{rule['id']}", body)
+        path = f"/api/v1/policies/{policy['id']}/rules/{rule['id']}"
+        client.must("PUT", path, body)
+        if rule.get("status") != "ACTIVE":
+            client.must("POST", path + "/lifecycle/activate")
 
 
 def cmd_signon_policy(client: Okta, args: argparse.Namespace) -> int:
