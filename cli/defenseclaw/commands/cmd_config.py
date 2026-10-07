@@ -497,6 +497,26 @@ def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]
 MANAGED_EXIT_CODE = 3
 
 
+def _unloaded_signature_pack_notes(cfg: object) -> list[str]:
+    """Configured signature packs the gateway leaves out (a missing file, a
+    pin that does not match). The change still applies; discovery is blind to
+    the agents those packs describe until they are fixed (GAP-0232)."""
+    discovery = getattr(cfg, "ai_discovery", None)
+    if not getattr(discovery, "enabled", False) or not getattr(discovery, "signature_packs", None):
+        return []
+    try:
+        from defenseclaw.inventory import ai_signatures
+
+        _total, refused = ai_signatures.refused_packs(cfg)
+    except Exception:  # noqa: BLE001 - the change is committed; the note is best effort
+        return []
+    return [
+        f"Warning: signature pack {pack.path} is not loaded ({pack.reason}); "
+        "every other setting applies. See: defenseclaw doctor"
+        for pack in refused
+    ]
+
+
 def _shadowed_mode_notes(changes: list) -> list[str]:
     """Connectors that keep their own mode after a ``guardrail.mode`` change.
 
@@ -564,6 +584,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     if digest:
         click.echo(f"Effective policy digest: {digest['effective_digest']}")
     for note in _shadowed_mode_notes(changes):
+        click.echo(note)
+    for note in _unloaded_signature_pack_notes(cfg):
         click.echo(note)
     pending = result.restart_required
     if pending:

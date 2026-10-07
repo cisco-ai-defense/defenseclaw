@@ -587,6 +587,20 @@ func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
 	}
 }
 
+// A configured pack whose file is gone is left out and the rest of the
+// catalog loads, so a missing optional pack does not reject every later
+// config reload; Secure Client keeps the refusal it shipped (GAP-0232).
+func TestLoadAISignaturesWithOptionsLeavesOutAMissingPack(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.json")
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}})
+	if err != nil || len(sigs) == 0 {
+		t.Fatalf("missing pack: %d signatures, err %v; want the embedded catalog", len(sigs), err)
+	}
+	if _, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}, SecureClient: true}); err == nil {
+		t.Fatal("Secure Client loaded a catalog with a configured pack that matches nothing")
+	}
+}
+
 func TestLoadAISignaturesWorkspacePackRequiresOptIn(t *testing.T) {
 	tmp := t.TempDir()
 	workspace := filepath.Join(tmp, "workspace")

@@ -483,7 +483,15 @@ func signaturePackPaths(opts AISignatureLoadOptions) ([]string, error) {
 			return nil, err
 		}
 		if len(paths) == 0 && candidate.required {
-			return nil, fmt.Errorf("ai signature catalog: signature pack path matched nothing: %s", candidate.path)
+			if opts.SecureClient {
+				return nil, fmt.Errorf("ai signature catalog: signature pack path matched nothing: %s", candidate.path)
+			}
+			// A configured pack whose file is gone is left out, like one
+			// that fails its pin: the rest of the catalog, and every other
+			// key of the configuration generation, still applies (GAP-0232).
+			// doctor and config set name it.
+			fmt.Fprintf(os.Stderr, "[ai-discovery] signature pack %s not loaded: the path matches no file\n", candidate.path)
+			continue
 		}
 		for _, p := range paths {
 			if !seen[p] {
