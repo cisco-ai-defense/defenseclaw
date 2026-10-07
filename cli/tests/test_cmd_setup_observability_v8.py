@@ -1664,3 +1664,34 @@ def test_setup_restarts_the_gateway_only_for_a_key_it_reads_at_start(tmp_path: P
     assert not restarted and "without a restart" in output
     restarted, _ = run("config_version: 8\nobservability: {}\ngateway: {port: 18971}\n")
     assert restarted
+
+
+def test_no_restart_connector_setup_says_a_hot_change_applies_on_its_own(tmp_path: Path) -> None:
+    # GAP-0199: a rule pack on a connector that is already in the roster is a
+    # hot key; a new roster entry, or a stopped gateway, waits for a restart.
+    from defenseclaw.commands import cmd_setup
+
+    app = _setup_app(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    base = "config_version: 8\nobservability: {}\nguardrail: {connectors: {codex: {mode: observe}}}\n"
+
+    def run(edit: str, *, gateway_running: bool = True) -> str:
+        config_path.write_text(base)
+
+        @click.command()
+        @click.pass_context
+        def change(ctx: click.Context) -> None:
+            ctx.meta[cmd_setup._SETUP_CFG_BYTES_KEY] = config_path.read_bytes()
+            config_path.write_text(edit)
+            cmd_setup._echo_saved_without_restart()
+
+        with patch.object(cmd_setup, "_is_pid_alive", return_value=gateway_running):
+            result = CliRunner().invoke(change, [], obj=app)
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    rule_pack = base.replace("{mode: observe}", "{mode: observe, rule_pack: strict}")
+    assert "applies it on its own, without a restart" in run(rule_pack)
+    assert "once the gateway restarts" in run(rule_pack, gateway_running=False)
+    roster = base.replace("{codex: {mode: observe}}", "{codex: {mode: observe}, claudecode: {mode: observe}}")
+    assert "once the gateway restarts" in run(roster)
