@@ -75,6 +75,9 @@ type MCPServerEntry struct {
 	SourceScope      string            `json:"source_scope,omitempty"`
 	TrustRequired    bool              `json:"trust_required,omitempty"`
 	Bundled          bool              `json:"bundled,omitempty"`
+	// Connector is the connector whose registry listed the server when a
+	// managed gateway reads several users' registries (never serialized).
+	Connector string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never
@@ -692,6 +695,12 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 			return expandPath(configHome)
 		}
 		return filepath.Join(home, ".omnigent")
+	case "kiro":
+		// Kiro IDE and Kiro CLI share ~/.kiro; matches
+		// connector_paths.connector_home("kiro") on the Python side. It used to
+		// fall through to OpenClaw's home_dir, so Kiro's agent identity was
+		// keyed on ~/.openclaw.
+		return filepath.Join(home, ".kiro")
 	default:
 		if c == nil {
 			return expandPath("~/.openclaw")
@@ -1133,6 +1142,39 @@ func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, tru
 // resolved as a Codex user-scope config. Only this provenance-aware entry point
 // can promote an exact built-in table shape to Bundled; project and generic
 // TOML readers intentionally leave the same name/URL scan-eligible.
+// ReadUserMCPServersForHome reads the user-scope MCP registries that
+// connectorName keeps under home, for a managed gateway that watches every
+// enrolled user: Codex's config.toml, Claude Code's .claude.json and
+// settings.json. Unreadable files are skipped; each entry carries the
+// connector. Other connectors list none.
+func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return nil
+	}
+	var entries []MCPServerEntry
+	switch normalizeConnectorKey(connectorName) {
+	case "codex":
+		if e, err := ReadMCPFromCodexUserConfigTOML(filepath.Join(home, ".codex", "config.toml")); err == nil {
+			entries = append(entries, e...)
+		}
+	case "claudecode":
+		if _, user, err := readMCPFromClaudeState(filepath.Join(home, ".claude.json"), ""); err == nil {
+			entries = append(entries, user...)
+		}
+		if e, err := readMCPFromClaudeSettings(filepath.Join(home, ".claude", "settings.json")); err == nil {
+			entries = append(entries, e...)
+		}
+	default:
+		return nil
+	}
+	entries = dedupMCPEntries(entries)
+	for index := range entries {
+		entries[index].Connector = normalizeConnectorKey(connectorName)
+	}
+	return entries
+}
+
 func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 	entries, err := readMCPFromCodexConfigTOML(path)
 	if err != nil {

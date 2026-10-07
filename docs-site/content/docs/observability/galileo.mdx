@@ -379,8 +379,8 @@ The session kind, client address and Kerberos principal are not sent to
 Galileo. Filter on `defenseclaw.agent.identity.id` to see one agent across all
 its sessions, on `defenseclaw.guardrail.profile.name` to review one profile's
 decisions, or on `defenseclaw.user.principal.assurance` to separate verified
-from claimed attribution. Principals and the other identity keys are
-identifiers, so redaction profiles keep them; see
+from claimed attribution. The `strict` profile removes the principal;
+the other identity keys are join identifiers that every profile keeps. See
 [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources) and
 [Privacy controls](/docs/enterprise/identity-and-authentication#turn-off-the-principal-or-the-ide-inventory).
 

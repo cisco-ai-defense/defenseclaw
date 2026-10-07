@@ -75,12 +75,15 @@ var requiredPayloadFiles = []string{
 }
 
 // standalonePayloadFiles is the standalone flavor's inventory: the Secure
-// Client set without the CMID credential broker.
+// Client set without the CMID credential broker, plus the scanner runtime
+// (skill, MCP and plugin scanners) the standalone lifecycle installs into
+// its own root.
 var standalonePayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
 	"defenseclaw-acp.exe",
 	"defenseclaw-gateway.exe",
 	"defenseclaw-hook.exe",
+	"defenseclaw-scanners.exe",
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",

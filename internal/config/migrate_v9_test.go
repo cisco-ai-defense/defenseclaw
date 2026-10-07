@@ -529,6 +529,7 @@ func TestMigrateV9InlineKeyGoesToTheRuntimeDataDir(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	dataDir := filepath.Join(home, ".dctest")
 	if err := os.MkdirAll(filepath.Join(dataDir, "signature-packs"), 0o700); err != nil {
 		t.Fatal(err)
@@ -714,6 +715,9 @@ func TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon(t *testing.T) {
 // the strict preset (which resolves to that pack) instead of a custom pack
 // pinned to files the next package replaces.
 func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the shipped-pack preset serves the Linux and macOS standalone layouts; a Linux layout path is not absolute on Windows")
+	}
 	layout, err := managed.StandaloneLayoutFor("linux")
 	if err != nil {
 		t.Fatal(err)

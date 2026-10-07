@@ -93,7 +93,9 @@ def redaction(app: AppContext) -> None:
                  evidence and errors
       content    like sensitive, but replaces content, reasons, evidence
                  and errors whole
-      strict     keeps only metadata and identifiers; removes everything else
+      strict     keeps only metadata and join identifiers; removes everything
+                 else, including the user principal, Kerberos principal,
+                 client address, tenant ID and email
 
     With no subcommand it starts an interactive editor. 'status' shows what
     is in effect now.
@@ -440,7 +442,7 @@ _BUILT_IN_PROFILE_SUMMARIES = {
     "none": "no redaction: everything is sent as recorded (the default)",
     "sensitive": "removes credentials, hashes paths, masks PII/secrets found in content",
     "content": "like sensitive, but replaces content, reasons, evidence and errors whole",
-    "strict": "keeps only metadata and identifiers",
+    "strict": "keeps only metadata and join identifiers (drops principals, client address, tenant, email)",
 }
 
 

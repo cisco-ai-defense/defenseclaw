@@ -153,7 +153,7 @@ func mcpScannerBinary(binary string) string {
 // LLM config. Call sites should resolve once via
 // “rootCfg.ResolveLLM("scanners.mcp")“ and pass the result here.
 func NewMCPScannerFromLLM(cfg config.MCPScannerConfig, llm config.LLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
-	cfg.Binary = mcpScannerBinary(cfg.Binary)
+	cfg.Binary = resolveScannerRuntime(mcpScannerBinary(cfg.Binary), "defenseclaw", "defenseclaw.exe")
 	return &MCPScanner{
 		Config:         cfg,
 		LLM:            llm,
@@ -170,6 +170,17 @@ func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 // subcommand, so they follow “mcp scan“; the target is positional and
 // comes last. The Python CLI resolves a bare server name or a URL via
 // its own “_resolve_scan_target“, so the gateway can pass either.
+// commandArgs is the scanner command line. The embedded scanner runtime's
+// "mcp-scan" takes the options of "mcp scan" and its judge from the
+// config-derived environment (runtimeEnv).
+func (s *MCPScanner) commandArgs(target string) []string {
+	args := s.buildArgs(target)
+	if usesScannerRuntime(s.Config.Binary) {
+		return append([]string{"mcp-scan"}, args[2:]...)
+	}
+	return args
+}
+
 func (s *MCPScanner) buildArgs(target string) []string {
 	args := []string{"mcp", "scan", "--json"}
 
@@ -222,11 +233,15 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 	}
 
-	args := s.buildArgs(target)
-	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(target)...)
 	// Inherit the gateway's environment (like the plugin scanner):
 	// the Python CLI resolves LLM / Cisco AI Defense credentials from
 	// its own config, so no scanner-specific env injection is needed.
+	// The embedded runtime has no config of its own and gets the same
+	// allowlisted, config-derived environment the skill scanner does.
+	if usesScannerRuntime(s.Config.Binary) {
+		cmd.Env = s.runtimeEnv()
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

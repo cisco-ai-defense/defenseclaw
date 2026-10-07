@@ -165,7 +165,7 @@
       {
         "name": "user",
         "label": "User regex",
-        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows every Loki panel on this board to records that carry that user, except the policy update stream inside Recent OPA + egress events: policy updates carry no user. Prometheus metric panels have no per-user label and stay fleet-wide.",
         "type": "textbox",
         "query": ".*",
         "current": {
@@ -759,7 +759,7 @@
     {
       "type": "logs",
       "title": "Recent OPA + egress events",
-      "description": "Connector-scoped tool, finding, failure, and guardrail-evaluation events follow the Connector selection. Policy update and reload-rejection events are process-global control-plane records without a connector, so they remain visible for every Connector selection.",
+      "description": "Connector-scoped tool, finding, failure, and guardrail-evaluation events follow the Connector selection. Policy update and reload-rejection events are process-global control-plane records without a connector or a user, so they remain visible for every Connector and User selection.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"

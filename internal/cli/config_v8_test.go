@@ -369,14 +369,8 @@ observability:
 func TestConfigV8ReadOnlyManagedPlanAndStatusUseEffectiveConfig(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
-	t.Setenv(managed.DeploymentModeEnv, "")
-	if err := os.WriteFile(
-		filepath.Join(directory, ".env"),
-		[]byte(managed.DeploymentModeEnv+"="+managed.DeploymentModeManagedEnterprise+"\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	// The service definition pins the mode; a .env cannot (GAP-0082).
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	raw := []byte("config_version: 8\ndata_dir: " + directory + `
 observability:
   buckets:
