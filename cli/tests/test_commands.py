@@ -136,7 +136,7 @@ class TestAlertsCommand(unittest.TestCase):
                 severity="HIGH",
             ),
         ]
-        result = _invoke(alerts, args=["--no-tui"], app=_make_app(store=store))
+        result = _invoke(alerts, args=[], app=_make_app(store=store))
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Security Alerts", result.output)
 

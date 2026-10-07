@@ -89,7 +89,7 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --connector 
 | Key | Meaning |
 | --- | --- |
 | `description` | Free text for operators. |
-| `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. |
+| `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. The hooks of a sandboxed agent always enforce, whatever `mode` says. |
 | `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. When unset, the rule pack's level applies. |
 | `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, stored in upper case) for [human approval](/docs/hitl). |
 | `rule_pack` | A rule pack for this profile: `default`, `strict`, `permissive` or a `guardrail.custom_packs` name. |
@@ -184,11 +184,17 @@ than one key, the reason names the most specific key, in the order
 
 ## Only verified facts select a profile
 
-The subject of a profile decision is the user the kernel or a per-user
-credential proved, with the directory facts the gateway resolved for that
-user from the operating system. An agent in a sandbox counts as the user who
-started the sandbox, with the same facts and refresh as that user's other
-agents. **Identity headers, hook payloads and claimed
+The subject of a profile decision is the user the gateway authenticated the
+request as, with the directory facts it resolved for that user from the
+operating system: the hook socket's peer or a per-user credential on
+standalone enterprise, and the account the gateway runs as on a per-user
+install (see
+[how the gateway learns who called](/docs/enterprise/identity-sources#how-the-gateway-learns-who-called)).
+An agent in a sandbox counts as the user who started the sandbox, with the
+same facts and refresh as that user's other agents, and its hooks always
+enforce (see
+[sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents)).
+**Identity headers, hook payloads and claimed
 facts never reach the matcher.** A user who forges a header, sets
 `KRB5CCNAME`, edits a local file or overrides a config directory cannot move
 to a weaker profile.
@@ -318,6 +324,16 @@ traffic through the guardrail proxy. The proxy attributes each request to the
 connector it serves and to that connector's install for the user the gateway
 runs as, so an OpenClaw or ZeptoClaw install appears in
 `defenseclaw agent identities` after its first proxied request.
+
+A pin names one install, so keep three things in mind:
+
+- Sub-agents share the agent's `agt-`, so one pin covers the agent and its
+  sub-agents.
+- If the connector's config root moves, the install gets a new `agt-` and the
+  old pin matches nothing. List the identities again.
+- A sandboxed agent has its own `agt-` per sandbox, so pinning the host
+  install does not pin a sandboxed run. See
+  [sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents).
 
 ## Try it and read the result
 

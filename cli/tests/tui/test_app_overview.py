@@ -117,7 +117,7 @@ def test_v8_tui_status_loader_preserves_legacy_and_bounds_invalid_source_errors(
     )
     status, error = _fetch_v8_operator_status(config, tmp_path)
     assert status is None
-    assert error.startswith("invalid v8 configuration at $")
+    assert error.startswith("invalid configuration at $")
     assert "must-not-render" not in error
     assert "user:secret" not in error
 
@@ -1041,7 +1041,6 @@ def _roster_config(active_connectors, guardrail) -> SimpleNamespace:
         llm=SimpleNamespace(provider="", model=""),
         inspect_llm=SimpleNamespace(provider="", model=""),
         cisco_ai_defense=SimpleNamespace(endpoint=""),
-        privacy=SimpleNamespace(disable_redaction=False),
         active_connectors=active_connectors,
     )
 

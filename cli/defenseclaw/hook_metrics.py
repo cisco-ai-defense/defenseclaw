@@ -98,14 +98,6 @@ def detection_only_hook_label(event: str) -> str:
     return ""
 
 
-def is_post_tool_hook_event(event: str) -> bool:
-    """True for a hook event that runs after the tool call (PostToolUse, ...).
-
-    Accepts a bare event name or a ``connector:Event`` hook target."""
-    name = str(event or "").strip().rsplit(":", 1)[-1].strip().lower()
-    return name in _POST_TOOL_HOOK_EVENTS
-
-
 def parse_detail_tokens(value: str) -> dict[str, str]:
     """Parse exact whitespace-delimited ``key=value`` tokens.
 

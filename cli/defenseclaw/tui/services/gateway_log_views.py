@@ -15,20 +15,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
 
 from defenseclaw.tui.services.v8_event_history import V8EventHistoryRow, load_v8_event_history, payload_text
-
-GatewayLogEventType = Literal[
-    "verdict",
-    "judge",
-    "lifecycle",
-    "error",
-    "diagnostic",
-    "scan",
-    "scan_finding",
-    "activity",
-]
 
 EVENT_TYPE_FILTERS: tuple[str, ...] = (
     "",
@@ -702,24 +690,6 @@ def detail_pairs(row: GatewayLogRow) -> tuple[tuple[str, str], ...]:
         pairs.append(("Judge raw response", row.judge_raw))
     pairs.append(("Raw JSON", row.raw))
     return tuple(pairs)
-
-
-def is_otel_log_row(row: GatewayLogRow) -> bool:
-    """Return true when a structured event belongs in the OTEL/Codex stream."""
-
-    action = row.activity_action.strip().lower()
-    if not action:
-        action = row.lifecycle_details.get("action", "").strip().lower()
-    if (
-        action.startswith("otel.ingest.")
-        or action.startswith("codex.notify.")
-        or action in {"otel.ingest", "codex.notify", "connector-hook"}
-    ):
-        return True
-
-    subsystem = row.lifecycle_subsystem.strip().lower()
-    component = row.diagnostic_component.strip().lower()
-    return subsystem in {"otel", "telemetry"} or component in {"otel", "telemetry"}
 
 
 def severity_rank(severity: str) -> int:

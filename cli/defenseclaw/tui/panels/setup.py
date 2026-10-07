@@ -2135,7 +2135,6 @@ def _local_observability_wizard_fields() -> tuple[WizardFormField, ...]:
 def _token_rotation_wizard_fields() -> tuple[WizardFormField, ...]:
     return (
         WizardFormField("Connector", "choice", value="", default="", options=("", *CONNECTORS)),
-        WizardFormField("Refresh Hooks", "bool", value="yes", default="yes"),
     )
 
 
@@ -3618,13 +3617,7 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
             "auto",
             "Rotate the gateway token",
             summary="Make a new gateway token and update every protected agent's hooks; nothing changes if a step fails.",
-            fields=("Refresh Hooks",),
-        ),
-        WizardGoal(
-            "specific",
-            "Rotate the gateway token, refresh one agent",
-            summary="Same new token for every agent; only the chosen agent's hooks are rewritten now.",
-            fields=("Connector", "Refresh Hooks"),
+            fields=("Connector",),
         ),
     )
 
@@ -4735,8 +4728,6 @@ def _build_token_rotation_args(fields: Sequence[WizardFormField]) -> tuple[str, 
     args = ["setup", "rotate-token", "--yes"]
     if connector := wizard_field_value(fields, "Connector"):
         args.extend(("--connector", connector))
-    if wizard_bool_value(fields, "Refresh Hooks", "yes") == "no":
-        args.append("--no-restart")
     return tuple(args)
 
 
@@ -4941,7 +4932,7 @@ def _build_guardrail_setup_args(
             judge_dirty = judge_dirty or field.value != field.default
             continue
         if field.kind == "bool":
-            if field.flag in {"--human-approval", "--disable-redaction"}:
+            if field.flag == "--human-approval":
                 if field.value == "yes" and field.flag:
                     base.append(field.flag)
                 elif field.value == "no" and field.no_flag:
@@ -7830,16 +7821,6 @@ def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connecto
     return "false"
 
 
-def _judge_hook_connectors_wizard_value(cfg: object | Mapping[str, Any] | None) -> str:
-    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None)
-    if not isinstance(gate, (list, tuple)):
-        return ""
-    tokens = [str(entry or "").strip() for entry in gate if str(entry or "").strip()]
-    if tokens == ["*"]:
-        return "all"
-    return ",".join(tokens)
-
-
 def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:
     """Build per-connector guardrail override groups for the config editor (B4).
 
@@ -9076,34 +9057,6 @@ def _connector_setup_alias(wire: str) -> str:
 
 def _connector_hook_label(name: str) -> str:
     return friendly_connector_name(name) if name else "Connector"
-
-
-def _bifrost_providers() -> tuple[str, ...]:
-    return (
-        "openai",
-        "azure",
-        "anthropic",
-        "bedrock",
-        "cohere",
-        "vertex",
-        "mistral",
-        "ollama",
-        "groq",
-        "sgl",
-        "parasail",
-        "perplexity",
-        "cerebras",
-        "gemini",
-        "openrouter",
-        "elevenlabs",
-        "huggingface",
-        "nebius",
-        "xai",
-        "replicate",
-        "vllm",
-        "runway",
-        "fireworks",
-    )
 
 
 def _mapping_or_attr(obj: object, name: str, default: Any = "") -> Any:

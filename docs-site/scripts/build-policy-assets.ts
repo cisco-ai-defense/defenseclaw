@@ -85,16 +85,6 @@ const REGO_DOMAINS: Array<{
       'defenseclaw/guardrail/action',
     ],
   },
-  {
-    name: 'firewall',
-    source: 'firewall.rego',
-    entrypoints: ['defenseclaw/firewall/action', 'defenseclaw/firewall/rule_name'],
-  },
-  {
-    name: 'audit',
-    source: 'audit.rego',
-    entrypoints: ['defenseclaw/audit/retain', 'defenseclaw/audit/retain_reason'],
-  },
 ];
 
 interface PresetBundle {
@@ -623,58 +613,6 @@ function buildScenarios(): Scenario[] {
         },
         cisco_result: null,
         content_length: 256,
-      },
-    },
-    {
-      id: 'firewall-allowed-domain',
-      title: 'Allowed-domain HTTPS fetch',
-      domain: 'firewall',
-      description: 'Outbound to api.github.com:443. Allowed by default policy.',
-      expectedVerdict: 'allow',
-      input: {
-        target_type: 'plugin',
-        destination: 'api.github.com',
-        port: 443,
-        protocol: 'tcp',
-      },
-    },
-    {
-      id: 'firewall-imds',
-      title: 'AWS IMDS fetch attempt',
-      domain: 'firewall',
-      description: 'Outbound to 169.254.169.254. Blocked by default and strict policies.',
-      expectedVerdict: 'deny',
-      input: {
-        target_type: 'plugin',
-        destination: '169.254.169.254',
-        port: 80,
-        protocol: 'tcp',
-      },
-    },
-    {
-      id: 'audit-recent-info',
-      title: 'Recent INFO event',
-      domain: 'audit',
-      description: '5-day-old INFO event. Retained by default (within retention).',
-      expectedVerdict: 'true',
-      input: {
-        event_type: 'scan',
-        severity: 'INFO',
-        age_days: 5,
-        export_targets: [],
-      },
-    },
-    {
-      id: 'audit-old-critical',
-      title: 'Old CRITICAL event',
-      domain: 'audit',
-      description: '500-day-old CRITICAL. Retained indefinitely under default policy.',
-      expectedVerdict: 'true',
-      input: {
-        event_type: 'block',
-        severity: 'CRITICAL',
-        age_days: 500,
-        export_targets: ['splunk'],
       },
     },
     // ----- Layer 5: session correlator promotions ---------------------------

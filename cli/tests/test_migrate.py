@@ -325,7 +325,7 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
     unknown = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir)])
     assert unknown.exit_code == 1
 
-    done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--yes", "--json"])
+    done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--json"])
     assert done.exit_code == 0, done.output
     payload = json.loads(done.stdout)
     assert "→ step 0.8.5" in done.stderr

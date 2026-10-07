@@ -10,7 +10,6 @@
       "openinference_profile": "openinference-semantic-conventions-v0.1.30",
       "galileo_compatibility_profile": "galileo-rich-v2"
     },
-    "compatibility_aliases": true,
     "limits": {
       "max_attributes_per_span": 128,
       "max_events_per_span": 64,
@@ -832,10 +831,6 @@
       "path": "observability.resource_attributes",
       "origin": "compiled-default",
       "detail": "no resource attributes configured"
-    },
-    {
-      "path": "observability.trace_policy.compatibility_aliases",
-      "origin": "compiled-default"
     },
     {
       "path": "observability.trace_policy.limits",
@@ -1844,11 +1839,6 @@
       "value_path": "observability.resource_attributes",
       "origin": "compiled-default",
       "detail": "no resource attributes configured"
-    },
-    {
-      "path": "observability.trace_policy.compatibility_aliases",
-      "value_path": "observability.trace_policy.compatibility_aliases",
-      "origin": "compiled-default"
     },
     {
       "path": "observability.trace_policy.limits",

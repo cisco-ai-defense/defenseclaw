@@ -38,8 +38,6 @@ type Source = 'scenario' | 'custom' | 'corpus';
 const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
   { value: 'admission', label: 'admission' },
   { value: 'guardrail', label: 'guardrail' },
-  { value: 'firewall', label: 'firewall' },
-  { value: 'audit', label: 'audit' },
 ];
 
 const SOURCE_OPTIONS: Array<{ value: Source; label: string }> = [

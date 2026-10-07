@@ -149,28 +149,6 @@ Consumers that walk *installed* connectors keep using
 (inventory / agent_discovery) use this.
 """
 
-HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
-    {
-        "hermes",
-        "cursor",
-        "devin",
-        "copilot",
-        "openhands",
-        "antigravity",
-        "opencode",
-        "amp",
-        "omnigent",
-        "kiro",
-    }
-)
-"""Connectors added through lifecycle hook surfaces.
-
-Kept as a compatibility constant for older tests/importers. These connectors
-now expose connector-specific MCP/skill/rule/plugin path discovery instead of
-falling back to OpenClaw or returning hook-only empty paths.
-"""
-
-
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -3950,14 +3928,6 @@ _HERMES_LEGACY_MCP_KEY = ("mcp", "servers")
 _HERMES_MCP_HINT = "add or remove the server with `hermes mcp add` / `hermes mcp remove` instead"
 
 
-def _drop_hermes_legacy_mcp_server(path: str, name: str) -> None:
-    """Remove a server older DefenseClaw builds wrote under ``mcp.servers``."""
-    try:
-        _atomic_yaml_delete(path, _HERMES_LEGACY_MCP_KEY + (name,))
-    except MCPWriteUnsupportedError:
-        pass  # best-effort cleanup of a key Hermes never reads
-
-
 def _hermes_mcp_servers(
     *,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
@@ -4338,28 +4308,6 @@ def _opencode_mcp_servers(
     ]
 
 
-def _read_opencode_mcp_block(path: str) -> dict[str, dict[str, Any]]:
-    """Parse opencode's top-level ``mcp`` map without losing partial overrides.
-
-    Tolerates JSONC (``//`` and ``/* */`` comments) via the optional
-    ``json5`` backport — mirroring the OpenClaw reader — so a
-    hand-authored ``opencode.jsonc`` still parses. A missing file,
-    unparseable content, or missing ``mcp`` block all yield ``{}``.
-    """
-    data = _load_json_or_jsonc(path)
-    if not isinstance(data, dict):
-        return {}
-    servers = data.get("mcp")
-    if not isinstance(servers, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for name, cfg in servers.items():
-        if not isinstance(cfg, dict):
-            continue
-        out[str(name)] = cfg
-    return out
-
-
 def _merge_opencode_mcp_config(
     base: dict[str, Any],
     override: dict[str, Any],
@@ -4475,13 +4423,6 @@ def _load_json_or_jsonc(
         _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return None
     return parsed
-
-
-def _parse_json_or_jsonc(raw: str) -> Any:
-    """Parse already-read JSON/JSONC text without changing read policy."""
-
-    parsed, valid = _parse_json_or_jsonc_result(raw)
-    return parsed if valid else None
 
 
 def _parse_json_or_jsonc_result(raw: str) -> tuple[Any, bool]:
@@ -4857,17 +4798,6 @@ def _read_mcp_servers_from_openclaw_json(
     return _parse_mcp_servers_dict(servers)
 
 
-def _parse_mcp_servers_text(text: str) -> list[MCPServerEntry]:
-    text = text.strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    return _parse_mcp_servers_value(parsed)
-
-
 def _parse_mcp_servers_value(servers: Any) -> list[MCPServerEntry]:
     if isinstance(servers, dict):
         return _parse_mcp_servers_dict(servers)
@@ -5051,10 +4981,9 @@ def set_mcp_server(
         )
     if name_n == "hermes":
         # GAP-1591: Hermes loads top-level ``mcp_servers`` (what ``hermes mcp
-        # add`` writes); the old ``mcp.servers`` copy is legacy DefenseClaw.
+        # add`` writes).
         path = hermes_config_path()
         _atomic_yaml_merge(path, _HERMES_MCP_KEY + (name,), entry, hint=_HERMES_MCP_HINT)
-        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -5166,7 +5095,6 @@ def unset_mcp_server(
     if name_n == "hermes":
         path = hermes_config_path()
         _atomic_yaml_delete(path, _HERMES_MCP_KEY + (name,), hint=_HERMES_MCP_HINT)
-        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -8538,28 +8466,6 @@ def _registry_path() -> str:
     return os.path.join(_registry_dir(), "registry.json")
 
 
-def _registry_load() -> dict[str, dict[str, str]]:
-    path = _registry_path()
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, dict[str, str]] = {}
-    for k, v in data.items():
-        if isinstance(k, str) and isinstance(v, dict):
-            out[k] = {kk: str(vv) for kk, vv in v.items() if isinstance(kk, str)}
-    return out
-
-
-def _registry_save(state: dict[str, dict[str, str]]) -> None:
-    path = _registry_path()
-    payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
-    atomic_write_private_bytes(path, payload.encode("utf-8"))
-
-
 def _registry_key(abs_target: str) -> str:
     """Stable identifier for *abs_target* used as the registry key.
 
@@ -8637,23 +8543,6 @@ def _registry_register(abs_target: str, backup: str) -> None:
     with _locked_claude_mcp_mutation(abs_target):
         with _locked_claude_file_update(_registry_path(), label="legacy registry lock"):
             _registry_register_locked(abs_target, backup)
-
-
-def _registry_clear(abs_target: str) -> None:
-    with _locked_claude_mcp_mutation(abs_target):
-        with _locked_claude_file_update(_registry_path(), label="legacy registry lock"):
-            state, snapshot = _load_claude_legacy_registry()
-            keys = _registry_matching_keys(state, abs_target)
-            if not keys:
-                return
-            for key in keys:
-                state.pop(key, None)
-            _write_claude_private_metadata(
-                _registry_path(),
-                _render_json_bytes(state),
-                owner_path=abs_target,
-                expected_snapshot=snapshot,
-            )
 
 
 def _registry_backup_for(abs_target: str) -> str | None:

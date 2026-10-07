@@ -4,7 +4,7 @@
 """Small v8-only helpers shared by destination setup commands.
 
 This module resolves authored preset inputs into canonical destination fields;
-it never reads or writes a pre-v8 observability block.
+it never reads or writes a released 0.8.x observability block.
 """
 
 from __future__ import annotations

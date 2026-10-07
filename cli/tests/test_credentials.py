@@ -42,7 +42,9 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorGuardrailConfig,
     ScannersConfig,
+    SkillScannerAnalyzers,
     SkillScannerConfig,
+    SkillScannerVirusTotal,
 )
 
 
@@ -198,7 +200,9 @@ class RequirementPredicateTests(unittest.TestCase):
         on = _make_cfg(
             "/tmp/dc-test",
             scanners=ScannersConfig(
-                skill_scanner=SkillScannerConfig(use_virustotal=True),
+                skill_scanner=SkillScannerConfig(
+                    analyzers=SkillScannerAnalyzers(virustotal=SkillScannerVirusTotal(enabled=True))
+                ),
             ),
         )
         self.assertEqual(C._virustotal_key(on), C.Requirement.REQUIRED)

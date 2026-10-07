@@ -23,6 +23,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/spf13/viper"
 )
 
 // Recommended scanner settings (the skill-scanner "Lowest FPR" setup):
@@ -124,28 +126,34 @@ func (c SkillScannerConfig) ScanTimeoutSeconds() int {
 	return defaultSkillScannerScanTimeoutS
 }
 
-// VirusTotalEnabled reports analyzers.virustotal.enabled; the v8
-// use_virustotal key is migration input that still counts until the
-// config_version 9 migration rewrites it.
-func (c SkillScannerConfig) VirusTotalEnabled() bool {
-	return c.Analyzers.VirusTotal.Enabled || c.UseVirusTotal
-}
-
-// AIDefenseEnabled reports analyzers.aidefense.enabled (or the v8
-// use_aidefense key).
-func (c SkillScannerConfig) AIDefenseEnabled() bool {
-	return c.Analyzers.AIDefense.Enabled || c.UseAIDefense
-}
-
 // VirusTotalKeyEnvName is the env var holding the VirusTotal key.
 func (c SkillScannerConfig) VirusTotalKeyEnvName() string {
 	if name := strings.TrimSpace(c.Analyzers.VirusTotal.APIKeyEnv); name != "" {
 		return name
 	}
-	if name := strings.TrimSpace(c.VirusTotalKeyEnv); name != "" {
-		return name
-	}
 	return "VIRUSTOTAL_API_KEY"
+}
+
+// foldV8ScannerKeys reads the v8 spellings of the VirusTotal and AI Defense
+// settings (use_virustotal, use_aidefense, virustotal_api_key_env and the
+// inline virustotal_api_key) from the loaded source into the config_version 9
+// model. A gateway-managed config_version 8 file is rewritten by the in-memory
+// migration before it is decoded; a Secure Client document is not, and a
+// config_version 9 source cannot carry them (the schema rejects them). A key
+// written under analyzers wins.
+func foldV8ScannerKeys(cfg *Config) {
+	const skill = "scanners.skill_scanner."
+	sc := &cfg.Scanners.SkillScanner
+	if !viper.IsSet(skill+"analyzers.virustotal.enabled") && viper.GetBool(skill+"use_virustotal") {
+		sc.Analyzers.VirusTotal.Enabled = true
+	}
+	if !viper.IsSet(skill+"analyzers.aidefense.enabled") && viper.GetBool(skill+"use_aidefense") {
+		sc.Analyzers.AIDefense.Enabled = true
+	}
+	if sc.Analyzers.VirusTotal.APIKeyEnv == "" {
+		sc.Analyzers.VirusTotal.APIKeyEnv = strings.TrimSpace(viper.GetString(skill + "virustotal_api_key_env"))
+	}
+	sc.legacyVirusTotalKey = viper.GetString(skill + "virustotal_api_key")
 }
 
 // EffectiveAnalyzers is the analyzer list the MCP scanner runs, or nil for

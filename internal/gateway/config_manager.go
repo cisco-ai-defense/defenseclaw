@@ -620,7 +620,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if oldCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(next.ConfigVersion) {
 		m.recordLoadError(ctx, "schema_version")
-		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
+		return fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
 		m.recordLoadError(ctx, "managed_downgrade")
@@ -939,7 +939,7 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			raw:        append([]byte(nil), before.raw...),
 		}
 		if !config.CurrentSchemaVersion(next.ConfigVersion) {
-			return nil, configReloadSource{}, fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
+			return nil, configReloadSource{}, fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 		}
 		if compiled == nil || compiled.Plan == nil {
 			return nil, configReloadSource{}, fmt.Errorf("config reload v8 compiler returned no effective plan")
@@ -1188,15 +1188,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("audit_db", oldCfg.AuditDB, newCfg.AuditDB)
 	add("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
 	// Secure Client keeps the reload classification it had before the
-	// configuration generation (issue #1092): its v8 action keys, the hot
-	// set below, a restart for any gateway edit but the reload mode, and
-	// every per-connector guardrail setting.
+	// configuration generation (issue #1092): the hot set below, a restart
+	// for any gateway edit but the reload mode, and every per-connector
+	// guardrail setting. Its v8 action keys (skill_actions, mcp_actions,
+	// plugin_actions) are read as admission, which the restart set covers.
 	secureClient := oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration()
-	if secureClient {
-		add("skill_actions", oldCfg.SkillActions, newCfg.SkillActions)
-		add("mcp_actions", oldCfg.MCPActions, newCfg.MCPActions)
-		add("plugin_actions", oldCfg.PluginActions, newCfg.PluginActions)
-	}
 	standalone := oldCfg.StandaloneEnterprise() || newCfg.StandaloneEnterprise()
 	if standalone {
 		// The standalone profile keeps its runtime settings in the enterprise
