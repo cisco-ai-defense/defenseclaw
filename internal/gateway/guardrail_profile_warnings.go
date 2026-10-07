@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	"golang.org/x/text/unicode/norm"
 )
 
 // profileExplainWarnings lists what an administrator should know about the
@@ -139,7 +140,21 @@ type profileGroupCheck struct {
 // the background, so a command never waits for the directory: it gets the last
 // pass, or, before the first has finished, waits for it at most wait.
 func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []string {
+	if set != nil && runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
+		return perUserWindowsGroupWarnings(set.assignments)
+	}
 	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, directoryCacheHealth, wait)
+}
+
+// Per-user Windows has no trusted group facts; these assignments cannot match.
+func perUserWindowsGroupWarnings(assignments []config.ProfileAssignment) []string {
+	var warnings []string
+	for i, assignment := range assignments {
+		if len(assignment.Match.Groups) > 0 {
+			warnings = append(warnings, fmt.Sprintf("assignment %d: groups cannot match on a per-user Windows install; use users or standalone enterprise", i+1))
+		}
+	}
+	return warnings
 }
 
 // unknownGroupWarningsWith is unknownGroupWarnings with the group lookup and
@@ -196,6 +211,12 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 func (set *guardrailProfileSet) logUnknownGroups() {
 	exists, qualify, health := profileGroupExists, profileGroupQualifiedName, directoryCacheHealth
 	go func() {
+		if runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
+			for _, warning := range perUserWindowsGroupWarnings(set.assignments) {
+				fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
+			}
+			return
+		}
 		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, health, profileGroupCheckBudget+time.Second) {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 		}
@@ -229,7 +250,7 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 				if len(absent) >= profileGroupCheckMax || ctx.Err() != nil {
 					continue
 				}
-				known, err := exists(ctx, group)
+				known, err := exists(ctx, norm.NFC.String(group))
 				dead = err == nil && !known
 				absent[key] = dead
 				if known {

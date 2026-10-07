@@ -730,6 +730,28 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	}
 }
 
+func TestUnknownAssignmentGroupsNormalizeUnicode(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-cafe\u0301"}}},
+	}
+	exists := func(_ context.Context, name string) (bool, error) {
+		return name == "dc-caf\u00e9", nil
+	}
+	if warnings := unknownAssignmentGroups(context.Background(), assignments, exists, nil); len(warnings) != 0 {
+		t.Fatalf("a matching NFD group was reported unknown: %q", warnings)
+	}
+}
+
+func TestPerUserWindowsGroupAssignmentsWarn(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "team", Match: config.ProfileMatch{Groups: []string{"DOMAIN\\team"}}},
+	}
+	warnings := perUserWindowsGroupWarnings(assignments)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "groups cannot match") {
+		t.Fatalf("warnings = %q", warnings)
+	}
+}
+
 // TestExplainShowsTheProfileRequestsStillGet pins GAP-0134: explain resolves
 // the account's fresh groups, but requests keep the gateway's cached facts
 // for up to 15 minutes, so explain reports their age and the profile they
