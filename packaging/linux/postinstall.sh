@@ -90,19 +90,26 @@ case "$status" in
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package" >&2
         ;;
     *)
-        echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem, so no deployment is active." >&2
         # Name the cause (the first error of the JSON result, one line) so
         # the administrator does not have to open the file (GAP-1744).
-        # ensure --json writes indented JSON, so join the lines first and
-        # allow whitespace between the tokens.
-        cause=$(tr '\n' ' ' 2>/dev/null <"$state/last-package-result.json" |
+        cause=$(printf '%s\n' "$result" |
             sed -n 's/.*"errors":[[:space:]]*\[[[:space:]]*{[[:space:]]*"code":[[:space:]]*"\([^"]*\)",[[:space:]]*"message":[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' |
-            head -n 1 |
-            sed 's/\\"/"/g; s/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g')
+            head -n 1 | unescape)
+        # A run that refused the config, or rolled its change back, leaves the
+        # previous deployment running; only a first install, or a failed
+        # rollback, leaves none (GAP-0176).
+        running=$(printf '%s\n' "$result" | sed -n 's/.*"installed_version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+        if [ -n "$running" ] && [ -z "$(message_of rollback_failed)" ]; then
+            echo "defenseclaw-enterprise: the package is installed but not applied; the previous deployment ($running) keeps running unchanged." >&2
+            finish="apply this package with"
+        else
+            echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem, so no deployment is active." >&2
+            finish="finish the install with"
+        fi
         if [ -n "$cause" ]; then
             echo "  $cause" >&2
         fi
-        echo "  Fix that, then finish the install with: sudo $gateway enterprise linux ensure --from-package" >&2
+        echo "  Fix that, then $finish: sudo $gateway enterprise linux ensure --from-package" >&2
         echo "  The full result is in $state/last-package-result.json." >&2
         ;;
 esac

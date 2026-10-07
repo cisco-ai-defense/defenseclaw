@@ -744,12 +744,15 @@ def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(
 # credential) was only in last-package-result.json.
 # `ensure --json` writes indented JSON (Go SetIndent), so the
 # cause must be found in the multi-line form too, not only a compact line.
-@pytest.mark.parametrize("indent", [None, 2])
-def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path, indent: int | None) -> None:
+# GAP-0176: a refused config leaves the previous deployment running, but the
+# scriptlet said "no deployment is active".
+@pytest.mark.parametrize(("indent", "running"), [(None, ""), (2, ""), (2, "1.0.46-SNAPSHOT-84d98d524")])
+def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path, indent: int | None, running: str) -> None:
     document = {
         "schema_version": 2,
         "ok": False,
         "action": "ensure",
+        **({"installed": True, "installed_version": running} if running else {}),
         "errors": [
             {
                 "code": "config_invalid",
@@ -768,7 +771,13 @@ def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_pat
         'config_invalid: protected credential "galileo-api-key" is not stored; store it with '
         "`enterprise secret set --name galileo-api-key`"
     ) in result.stderr
-    assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
+    if running:
+        assert f"installed but not applied; the previous deployment ({running}) keeps running unchanged" in result.stderr
+        assert "no deployment is active" not in result.stderr
+        assert f"apply this package with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
+    else:
+        assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
+
 
 
 # GAP-0268: MDM writes config.yaml and then installs the package. The config
