@@ -3761,7 +3761,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
-	if !s.currentConfig().Guardrail.Enabled {
+	// `guardrail disable --connector X` on the only configured connector:
+	// the multi-connector boot drops X from its active set and tears it down,
+	// but a single-connector boot set X up again, so its hooks kept calling
+	// the gateway after the CLI said they were removed (GAP-0369).
+	connectorOff := s.currentConfig().Guardrail.Enabled && !guardianManagedLifecycle &&
+		!s.currentConfig().Guardrail.EffectiveEnabled(conn.Name())
+	if !s.currentConfig().Guardrail.Enabled || connectorOff {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
 		if err := conn.Teardown(ctx, setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
@@ -3779,6 +3785,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		connector.ClearActiveConnector(s.currentConfig().DataDir)
 		RemoveConnectorRulePackOverrides(conn.Name())
+		if connectorOff {
+			s.health.SetGuardrail(StateDisabled, fmt.Sprintf("connector %s disabled; its hooks were removed", conn.Name()), nil)
+			fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — hooks removed\n", conn.Name(), conn.Name())
+			<-ctx.Done()
+			return nil
+		}
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {

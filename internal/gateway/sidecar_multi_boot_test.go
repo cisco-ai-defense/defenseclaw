@@ -2383,6 +2383,42 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 	}
 }
 
+// GAP-0369: `guardrail disable --connector X` on the only configured
+// connector must tear X down; the single-connector boot set it up again.
+func TestRunGuardrailSingleConnectorDisabledOnItsOwnTearsDown(t *testing.T) {
+	dir := t.TempDir()
+	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	prevCodex := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexConfig
+	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
+	off := false
+	s := &Sidecar{
+		cfg: &config.Config{
+			DataDir: dir,
+			Gateway: config.GatewayConfig{APIPort: 18970},
+			Guardrail: config.GuardrailConfig{
+				Enabled:    true,
+				Connector:  "codex",
+				Mode:       "observe",
+				Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: &off}},
+			},
+		},
+		health: NewSidecarHealth(),
+		router: routerWithDefaultRulePack(t),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.runGuardrail(ctx); err != nil {
+		t.Fatalf("runGuardrail: %v", err)
+	}
+	if body, err := os.ReadFile(codexConfig); err == nil && strings.Contains(string(body), "codex-hook") {
+		t.Fatalf("disabled codex kept DefenseClaw hooks in config.toml:\n%s", body)
+	}
+	if snap := s.health.Snapshot(); snap.Guardrail.State != StateDisabled {
+		t.Fatalf("guardrail state = %s (%s), want %s", snap.Guardrail.State, snap.Guardrail.LastError, StateDisabled)
+	}
+}
+
 func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed enterprise hook lifecycle is rejected on native Windows")
