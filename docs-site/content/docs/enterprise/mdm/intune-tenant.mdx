@@ -137,6 +137,11 @@ python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ./d
 | --- | --- |
 | `assign-app` | Adds an assignment of an app you uploaded, by its exact display name, to a group. Intent `required` by default; `available` and `uninstall` are options. |
 | `remediation` | Creates or updates a Remediations package from `Remediate-Detect.ps1` and `Remediate-Fix.ps1`, run as SYSTEM, and assigns it on a daily schedule. It keeps assignments that exist. |
+Microsoft Graph can take about 45 seconds to list a new group. The helper waits
+before creating a missing name and retries a member add after creation. If a
+request fails, rerun it; ambiguous duplicate group names require an admin to
+choose a unique name.
+
 | `macos-script` | Creates or updates a macOS shell script from a file, run as root, and assigns it. Fill in the wrapper's settings block first ([Intune on macOS](/docs/enterprise/mdm/intune-macos)). |
 
 The Linux platform script is created in the admin center, as described on

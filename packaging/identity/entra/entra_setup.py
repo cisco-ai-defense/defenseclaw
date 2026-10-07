@@ -170,6 +170,15 @@ class Graph:
             next_path = page.get("@odata.nextLink")
         return items
 
+    def wait_for_named_object(self, path: str) -> list:
+        """Before creating by name, allow a previous run's Graph index to catch up."""
+        for _ in range(15):
+            found = self.get_all(path)
+            if found:
+                return found
+            time.sleep(3)
+        return self.get_all(path)
+
     def get_after_create(self, path: str):
         """Read an object just created: Graph answers 404 for a few seconds."""
         for _ in range(15):
@@ -189,13 +198,17 @@ class Graph:
         already exist", which is the result asked for.
         """
         ref = {"@odata.id": f"{GRAPH}/v1.0/directoryObjects/{object_id}"}
-        try:
-            self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
-        except GraphError as exc:
-            if exc.status == 400 and "already exist" in str(exc):
-                return False
-            raise
-        return True
+        for attempt in range(16):
+            try:
+                self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
+                return True
+            except GraphError as exc:
+                if exc.status == 400 and "already exist" in str(exc):
+                    return False
+                if exc.status != 404 or attempt == 15:
+                    raise
+                time.sleep(3)
+        raise AssertionError("unreachable")
 
 
 def odata_eq(field: str, value: str) -> str:
@@ -276,7 +289,8 @@ def cmd_check(graph: Graph, args: argparse.Namespace) -> int:
         print(f"default domain:  {org['default_domain']}")
         print(f"verified:        {', '.join(org['domains'])}")
     print(f"security defaults: {report['security_defaults']}")
-    print("Enabled security defaults ask every user to register for MFA, so a password-only sign-in test fails.")
+    if report["security_defaults"] == "enabled":
+        print("Enabled security defaults ask every user to register for MFA, so a password-only sign-in test fails.")
     return 0
 
 
@@ -356,12 +370,20 @@ def _load_plan(path: str) -> dict:
         raise SystemExit("error: 'domain' must be a tenant domain such as contoso.onmicrosoft.com")
     groups = plan.get("groups", [])
     users = plan.get("users", [])
+    if not isinstance(groups, list) or not isinstance(users, list):
+        raise SystemExit("error: 'groups' and 'users' must be lists")
     for group in groups:
-        if not isinstance(group, dict) or not group.get("name"):
+        if not isinstance(group, dict) or not isinstance(group.get("name"), str) or not group["name"]:
             raise SystemExit("error: every entry of 'groups' needs a 'name'")
+        _nickname(group["name"])
     for user in users:
         if not isinstance(user, dict) or not NICKNAME_RE.match(str(user.get("name", ""))):
             raise SystemExit("error: every entry of 'users' needs a 'name' of letters, digits, '-' and '_'")
+        if not isinstance(user.get("groups", []), list):
+            raise SystemExit("error: each user's groups must be a list")
+        for group in user.get("groups", []):
+            if not isinstance(group, str) or not group:
+                raise SystemExit("error: each user group must be a name")
     return plan
 
 
@@ -373,7 +395,7 @@ def _nickname(name: str) -> str:
 
 
 def _record_password(path: str, upn: str, password: str) -> None:
-    """Append 'upn<TAB>password' to a 0600 file before the user is created."""
+    """Append a newly created user's password to a 0600 file."""
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(descriptor, "a", encoding="ascii") as handle:
         handle.write(f"{upn}\t{password}\n")
@@ -383,14 +405,33 @@ def _record_password(path: str, upn: str, password: str) -> None:
 def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
     plan = _load_plan(args.config)
     apply = args.apply
+    if apply and plan.get("users"):
+        if not args.password_file:
+            raise SystemExit("error: --password-file is required before creating users; passwords are never printed")
+        descriptor = os.open(args.password_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.close(descriptor)
+        if os.stat(args.password_file).st_mode & 0o077:
+            raise SystemExit("error: --password-file must be readable only by its owner (mode 0600)")
     tag = "" if apply else "[plan] "
     usage = plan.get("usage_location", "US")
     force_change = bool(plan.get("force_password_change", True))
     created_groups: dict[str, dict | None] = {}
+    planned_groups = {spec["name"] for spec in plan.get("groups", [])}
+    for spec in plan.get("users", []):
+        for name in spec.get("groups", []):
+            if name not in planned_groups and find_group(graph, name) is None:
+                raise SystemExit(f"error: user {spec['name']} names missing group {name!r}")
 
     for spec in plan.get("groups", []):
         name = spec["name"]
         group = find_group(graph, name)
+        if group is None and apply:
+            found = graph.wait_for_named_object(
+                f"/v1.0/groups?$filter={odata_eq('displayName', name)}&$select=id,displayName,securityIdentifier"
+            )
+            if len(found) > 1:
+                raise GraphError(409, "AmbiguousName", f"{len(found)} groups are named {name!r}")
+            group = found[0] if found else None
         if group is not None:
             print(f"{tag}group {name}: exists")
         elif not apply:
@@ -416,10 +457,7 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
         elif not apply:
             print(f"{tag}user {upn}: would create; the generated password would go to --password-file")
         else:
-            if not args.password_file:
-                raise SystemExit("error: --password-file is required to create users; passwords are never printed")
             password = _generate_password()
-            _record_password(args.password_file, upn, password)
             body = {
                 "accountEnabled": True,
                 "displayName": spec.get("display_name", spec["name"]),
@@ -428,9 +466,23 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
                 "usageLocation": usage,
                 "passwordProfile": {"forceChangePasswordNextSignIn": force_change, "password": password},
             }
-            made = graph.request("POST", "/v1.0/users", body)
-            user = graph.get_after_create(f"/v1.0/users/{made['id']}?$select=id,userPrincipalName,securityIdentifier")
-            print(f"user {upn}: created (password in {args.password_file})")
+            try:
+                made = graph.request("POST", "/v1.0/users", body)
+            except GraphError as exc:
+                if exc.status != 400 or "already exist" not in str(exc).lower():
+                    raise
+                user = find_user(graph, upn)
+                if user is None:
+                    raise GraphError(
+                        409, "ExistingUserNotVisible", f"{upn} exists but Graph cannot read it yet"
+                    ) from None
+                print(f"user {upn}: exists (left unchanged; no password recorded)")
+            else:
+                _record_password(args.password_file, upn, password)
+                user = graph.get_after_create(
+                    f"/v1.0/users/{made['id']}?$select=id,userPrincipalName,securityIdentifier"
+                )
+                print(f"user {upn}: created (password in {args.password_file})")
 
         for group_name in spec.get("groups", []):
             group = created_groups.get(group_name)
