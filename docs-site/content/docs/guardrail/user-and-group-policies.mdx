@@ -147,7 +147,10 @@ How the keys combine:
   plain LDAP, never gets the AD principal. While SSSD cannot confirm the domain
   (stopped, or no answer within 2 seconds), the account has no principal and
   falls through to the next assignment or the default for up to 15 minutes.
-  Add the uid to the assignment when the account must match regardless. See
+  Add the uid to the assignment when the account must match regardless.
+  Groups follow the same rule: an account whose short name SSSD resolves to
+  another account (an LDAP `carol` next to an AD `carol`) keeps only its
+  primary group. See
   [When Linux attributes a principal](/docs/enterprise/identity-sources#when-linux-attributes-a-principal).
 - **Nothing matches: the default.** A request that no assignment selects gets
   `guardrail.default_profile`. An empty default keeps the global `guardrail.*`

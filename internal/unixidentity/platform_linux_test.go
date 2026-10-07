@@ -134,7 +134,9 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 // not an account of a plain LDAP domain, not one that shares its short name
 // with an AD account, and not when SSSD does not answer. Nor does an LDAP
 // account named by an e-mail address in the joined domain, which SSSD
-// resolves to the AD account of that short name (GAP-0568).
+// resolves to the AD account of that short name (GAP-0568). The LDAP carol,
+// whose short name SSSD resolves to the AD carol, does not get the AD
+// carol's groups either (GAP-0563).
 func TestBareSSSDAccountTakesOnlyTheRealmSSSDConfirms(t *testing.T) {
 	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
 	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
@@ -178,6 +180,17 @@ func TestBareSSSDAccountTakesOnlyTheRealmSSSDConfirms(t *testing.T) {
 			Realm: facts.Realm, Principal: facts.Principal}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("uid %d = %+v, want %+v", uid, got, want)
+		}
+	}
+	f.results["-s sss passwd alice"] = line("alice", 80001)
+	f.results["-s sss passwd carol"] = line("carol", 90003)
+	f.results["initgroups alice"] = commandResult{stdout: []byte("alice 80001 5000\n")}
+	f.results["initgroups carol"] = commandResult{stdout: []byte("carol 90003 5000\n")}
+	f.results["group 5000 80001"] = commandResult{stdout: []byte("domain users:*:5000:\nalice:*:80001:\n")}
+	f.results["group 80003"] = commandResult{stdout: []byte("ldap-devs:*:80003:\n")}
+	for uid, want := range map[int][]string{80001: {"domain users", "alice"}, 80003: {"ldap-devs"}} {
+		if facts, err := r.DirectoryFactsForUID(uid, time.Now()); err != nil || !reflect.DeepEqual(facts.Groups, want) {
+			t.Errorf("uid %d groups = %q, %v; want %q", uid, facts.Groups, err, want)
 		}
 	}
 }

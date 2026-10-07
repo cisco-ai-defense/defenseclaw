@@ -126,7 +126,7 @@ install does, never falls back to its own account.
 | Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user or enterprise ACP credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
 | Account name and the backend that owns it | NSS through `getent passwd`; each service on the `passwd` line of `nsswitch.conf` is asked for the uid in turn (`sss`, `winbind`, `ldap`, `himmelblau`, `aad`). An account no directory service knows is `local`, and so is an account `/etc/passwd` holds under its name and uid, which the SSSD files provider (the implicit files domain on RHEL 8) also answers for | Verified |
 | Domain | The fully qualified name SSSD (`alice@corp.example.com`) or winbind (`CORP\alice`) reports, in lower case. A winbind NetBIOS domain is reported by the DNS name of its realm (realmd gives the NetBIOS name in the login format `CORP\%U`), as Windows reports it; the NetBIOS domain of a trusted domain is reported as is | Verified |
-| Groups | `initgroups` plus a group lookup through NSS | Verified |
+| Groups | `initgroups` plus a group lookup through NSS. An SSSD account whose name SSSD resolves to another account keeps only its primary group ([When Linux attributes a principal](#when-linux-attributes-a-principal)) | Verified |
 | Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, the winbind realm whose NetBIOS name the domain is, the only winbind realm for an unqualified winbind name, or, for an SSSD name without a DNS domain, the realm SSSD confirms ([When Linux attributes a principal](#when-linux-attributes-a-principal)). A winbind realm never takes another NetBIOS domain, which is a trusted domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
 | UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `Users.FindByID` for the SSSD domain that holds the uid, `GetUserAttr` for the `userPrincipalName` of the name in that domain, and, when realmd names no realm for the account, the id provider of that domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@REALM`. An Entra ID account the `aad` module names, or Himmelblau with `cn_name_mapping = false`, is named by its UPN, which is reported as its UPN and principal on every install. Himmelblau's default (`cn_name_mapping = true`) names it by the short name, which carries no UPN or domain | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
@@ -173,6 +173,13 @@ for a domain that SSSD confirms the account belongs to:
   an account `bob@corp.example.com`. SSSD looks that name up in the joined
   domain and answers with the AD account `bob`, so the LDAP account gets no
   realm and no principal.
+- **Groups of a shared name.** `initgroups` looks the account up by name, and
+  with short names SSSD answers a name that two domains hold with the account
+  of the first one: an LDAP `carol` would get the groups of the AD `carol`.
+  The gateway takes the groups by name only when SSSD resolves the account's
+  name to the same account (`getent -s sss passwd carol`). Otherwise the
+  account keeps only the primary group of its own entry, and a group
+  assignment matches it only through that group.
 - **When SSSD does not confirm.** The lookup in the joined domain gets 2
   seconds. When SSSD is stopped, cannot answer, or does not answer in time, a
   short name gets no realm and no principal. A per-user install keeps that
