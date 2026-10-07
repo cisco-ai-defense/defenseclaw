@@ -187,6 +187,18 @@ func TestHandleSkillScanSaysAMissingFolderAndAnUnreadableSkillFile(t *testing.T)
 		strings.Contains(w.Body.String(), "exited") {
 		t.Fatalf("missing folder response = %d %q, want 404 with a plain sentence", w.Code, w.Body.String())
 	}
+	// Secure Client keeps the scan answers of main: the scanner runs and fails (issue #1092).
+	t.Setenv("PATH", "")
+	body, err := json.Marshal(skillScanRequest{Target: missing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	secureClient := &APIServer{scannerCfg: &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}}
+	secureClient.handleSkillScan(w, httptest.NewRequest(http.MethodPost, "/v1/skill/scan", bytes.NewReader(body)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Secure Client missing folder = %d %q, want the scanner failure", w.Code, w.Body.String())
+	}
 
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		return // a deny-read file needs a POSIX permission denial for a non-root user

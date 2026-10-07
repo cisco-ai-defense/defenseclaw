@@ -2753,8 +2753,14 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
 	info, err := os.Stat(target)
 	// Secure Client keeps the scan of main, which the scanner fails on
-	// (issue #1092).
-	if errors.Is(err, fs.ErrPermission) && !a.managedAIDOnly() {
+	// (issue #1092): nothing below applies to it.
+	if a.managedAIDOnly() {
+		if err != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "[api] warning: %s not found locally: %s\n", what, target)
+		}
+		return false
+	}
+	if errors.Is(err, fs.ErrPermission) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": fmt.Sprintf("the gateway's service account cannot read %s: copy the folder somewhere it can read, or grant that account read access", target),
 		})
