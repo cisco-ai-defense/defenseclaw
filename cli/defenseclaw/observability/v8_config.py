@@ -1245,8 +1245,20 @@ def _one_of_action(branches: Any) -> str:
 
     if not isinstance(branches, list) or not branches:
         return ""
+    resolved = [_resolve_branch(branch) for branch in branches]
+    objects = [branch for branch in resolved if branch.get("type") == "object"]
+    if len(objects) > 2:
+        # Many shapes (the destination kinds): name the keys every shape needs, not each
+        # shape's whole key list, which ran to 759 bytes for ``destinations: [5]`` (GAP-0211).
+        common = [
+            name
+            for name in objects[0].get("required") or []
+            if all(name in (other.get("required") or []) for other in objects)
+        ]
+        if common:
+            return "use a mapping with " + (", ".join(common[:-1]) + " and " + common[-1] if len(common) > 1 else common[0])
     parts: list[str] = []
-    for branch in map(_resolve_branch, branches):
+    for branch in resolved:
         values = branch.get("enum")
         if isinstance(values, list) and values and all(isinstance(value, str) for value in values):
             parts.append("one of " + ", ".join(values))

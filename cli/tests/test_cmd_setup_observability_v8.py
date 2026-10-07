@@ -1053,6 +1053,39 @@ def test_v8_secret_dry_run_sanitizes_and_reports_selected_data_dir(tmp_path: Pat
     assert not (selected / ".env").exists()
 
 
+def test_a_destination_that_is_not_a_mapping_gets_one_short_line() -> None:
+    # GAP-0211: the message listed every destination kind's keys (759 bytes).
+    from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+
+    with pytest.raises(V8ConfigError) as refused:
+        load_validate_v8(b"config_version: 9\nobservability:\n  destinations: [5]\n", source_name="config.yaml")
+    assert refused.value.corrective_action == "use a mapping with name and kind"
+
+
+def test_galileo_project_with_a_dollar_sign_is_refused_in_plain_words() -> None:
+    # GAP-0212: this guard is reachable (a --project such as "a${B}c"); only its wording was internal.
+    with pytest.raises(ValueError, match="may contain '[$]' only as one whole"):
+        _build_v8_preset_destination(
+            PRESETS["galileo"], {"endpoint": "", "project": "a${B}c", "logstream": "x"},
+            name="g", enabled=True, signals=None, target=None,
+        )
+
+
+def test_splunk_hec_http_endpoint_is_one_plain_sentence() -> None:
+    # GAP-0209: the config check named tls.insecure_skip_verify, a field the user never set.
+    def build(**inputs: str):
+        return _build_v8_preset_destination(
+            PRESETS["splunk-hec"], {"endpoint": "http://hec.example.test:8088", **inputs},
+            name="hec", enabled=True, signals=None, target=None,
+        )
+
+    with pytest.raises(ValueError) as refused:
+        build()
+    assert str(refused.value).startswith("The Splunk HEC endpoint is http://")
+    assert "$." not in str(refused.value) and "config_semantic_invalid" not in str(refused.value)
+    assert "tls" not in build(verify_tls="true")
+
+
 def test_splunk_verify_tls_rejects_non_boolean_input() -> None:
     with pytest.raises(ValueError, match="verify_tls must be a boolean"):
         _build_v8_preset_destination(

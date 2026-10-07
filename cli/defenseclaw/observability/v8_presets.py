@@ -97,6 +97,13 @@ def adapter_destination_fields(preset: Preset, inputs: dict[str, str]) -> dict[s
         insecure = insecure_default
         if "verify_tls" in inputs:
             insecure = not parse_bool(inputs["verify_tls"])
+        if insecure and endpoint.lower().startswith("http://"):
+            # Skipping certificate checks only means something over https; the config check
+            # said so with a JSON path and an error code for a field the user never set (GAP-0209).
+            raise ValueError(
+                "The Splunk HEC endpoint is http://, so there is no certificate to skip: "
+                "use an https:// endpoint, or pass --verify-tls to send over plain http."
+            )
         if insecure:
             fields["tls"] = {"insecure_skip_verify": True}
         if preset.id == "splunk-hec":
