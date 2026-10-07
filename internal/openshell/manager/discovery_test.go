@@ -59,7 +59,7 @@ func discoveringEnv(t *testing.T, name string, edit func(*config.Config)) *harne
 			edit(c)
 		}
 	})
-	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		return discoveryAnswer(call)
 	})
 	e.live(sandboxapi.CreateRequest{Name: name})
@@ -173,7 +173,7 @@ func TestDiscoverOverlappingADeleteLeavesNothing(t *testing.T) {
 	e := discoveringEnv(t, "racebox", nil)
 	var armed atomic.Bool
 	deleted := make(chan error, 1)
-	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if isCollect(call) && armed.CompareAndSwap(true, false) {
 			// The delete runs while the sandbox is read: it removes the
 			// sandbox from OpenShell and goes on to release it.

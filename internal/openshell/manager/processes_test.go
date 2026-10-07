@@ -172,7 +172,7 @@ func TestProcessCmdlineRedactsSecrets(t *testing.T) {
 func treeEnv(t *testing.T, name string, sample *atomic.Pointer[string]) *harnessEnv {
 	t.Helper()
 	e := newEnv(t, nil)
-	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if isCollect(call) && call.Command[10] == "ps" {
 			if s := sample.Load(); s != nil {
 				return openshelltest.ExecResponse{Stdout: []byte(*s)}
