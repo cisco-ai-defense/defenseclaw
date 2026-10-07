@@ -314,7 +314,9 @@ func runWorkdir(d openshell.Driver, workdir string) string {
 // --env and --credential: run, when the client sent it, says what of them
 // this run has (explainRunInputs); without it the render takes them from
 // the newest sandbox of the harness and image, and assumes none without
-// one. Always false on a driver that prepares nothing.
+// one. A disk the release before an in-place upgrade prepared does not
+// count: the gateway's release prepares its own. Always false on a driver
+// that prepares nothing.
 func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshell.Driver, flags packs.Flags, eff *packs.Effective, run *sandboxapi.ExplainRun) bool {
 	spec, ok := harness.Get(flags.Harness)
 	if d.ImageCache == "" || m.opts.Images == nil || !ok {
@@ -352,8 +354,9 @@ func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshe
 		}
 		id = ri.ImageID
 	}
+	release := m.gatewayRelease()
 	for _, disk := range image.VMDisks(cache, id) {
-		if disk.UID == img.UID && disk.GID == img.GID {
+		if disk.UID == img.UID && disk.GID == img.GID && disk.PreparedBy(release) {
 			return false
 		}
 	}

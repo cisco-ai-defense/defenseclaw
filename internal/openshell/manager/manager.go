@@ -622,6 +622,17 @@ func otherRelease(version string, info *openshell.GatewayInfo) string {
 	return info.Version
 }
 
+// gatewayRelease is the release of the connected gateway as its health
+// reported it, without dialing; "" with no connection.
+func (m *Manager) gatewayRelease() string {
+	m.gwMu.RLock()
+	defer m.gwMu.RUnlock()
+	if m.gw == nil {
+		return ""
+	}
+	return m.gw.Version
+}
+
 // gatewayUp reports whether a gateway connection is held, without dialing.
 func (m *Manager) gatewayUp() bool {
 	m.gwMu.RLock()
