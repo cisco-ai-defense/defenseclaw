@@ -299,7 +299,7 @@ observability:
 		// but, with allow_list_bypass_scan false, v8 still scanned it.
 		"asset_policy.skill.allowed": nil,
 		"llm_providers.custom": []any{map[string]any{"name": "acme", "domains": []any{"llm.acme.internal"}, "env_keys": []any{"ACME_KEY"},
-			"tls": map[string]any{"ca_cert_file": filepath.Join(dir, "provider-ca", "acme.pem")}}},
+			"tls": map[string]any{"ca_cert_file": filepath.Join(dir, "provider-ca", v9ProviderCAName("acme"))}}},
 	} {
 		if got, _ := json.Marshal(get(path)); string(got) != mustJSON(t, want) {
 			t.Errorf("%s = %s, want %s", path, got, mustJSON(t, want))
@@ -349,7 +349,7 @@ observability:
 	if _, err := os.Stat(overlay); !os.IsNotExist(err) {
 		t.Errorf("the legacy custom-providers.json is still a live input: %v", err)
 	}
-	if pem, _ := os.ReadFile(filepath.Join(dir, "provider-ca", "acme.pem")); !strings.Contains(string(pem), "BEGIN CERTIFICATE") {
+	if pem, _ := os.ReadFile(filepath.Join(dir, "provider-ca", v9ProviderCAName("acme"))); !strings.Contains(string(pem), "BEGIN CERTIFICATE") {
 		t.Error("the inline provider CA was not moved to provider-ca/acme.pem")
 	}
 	if refreshed, _ := os.ReadFile(staleRego); v9LegacyRegoData.Match(refreshed) || !strings.Contains(string(refreshed), "input.admission") {
@@ -1071,5 +1071,104 @@ func TestMigrateV9ReadsAuditDBUnderAnAwkwardPath(t *testing.T) {
 	}
 	if rows, err = readV9ActionRows(auditDB); err != nil || len(rows) != 0 {
 		t.Fatalf("rows after clear = %d, err = %v", len(rows), err)
+	}
+}
+
+func TestMigrateV9KeepsOperatorReasonBeginningWithScan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT);
+  INSERT INTO actions VALUES ('1', 'skill', 's1', '', '{"install":"block"}', 'scan: incident review', 'now', '')`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := readV9ActionRows(path)
+	if err != nil || len(rows) != 1 || rows[0].targetName != "s1" {
+		t.Fatalf("operator scan reason omitted: rows=%v err=%v", rows, err)
+	}
+}
+
+func TestMigrateV9RejectsChangedAuditSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT);
+  INSERT INTO actions VALUES ('1', 'skill', 's1', '', '{"install":"block"}', 'operator', 'now', '')`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := readV9ActionRows(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE actions SET actions_json = '{"install":"allow"}' WHERE id = '1'`); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := lockV9ActionRows(context.Background(), path, snapshot)
+	if locked != nil {
+		_ = locked.Close()
+	}
+	if err == nil {
+		t.Fatal("migration accepted a changed operator decision")
+	}
+	var state string
+	if err := db.QueryRow(`SELECT actions_json FROM actions WHERE id = '1'`).Scan(&state); err != nil || state != `{"install":"allow"}` {
+		t.Fatalf("changed decision lost: state=%q err=%v", state, err)
+	}
+}
+
+func TestMigrateV9KeepsProviderCABundlesDistinct(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, ProvidersOverlayFile)
+	if err := os.WriteFile(overlay, []byte(`{"providers":[
+  {"name":"acme.foo","tls":{"ca_cert_pem":"first certificate"}},
+  {"name":"acme_foo","tls":{"ca_cert_pem":"second certificate"}}
+ ]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		LLMProviders struct {
+			Custom []struct {
+				Name string `yaml:"name"`
+				TLS  struct {
+					CACertFile string `yaml:"ca_cert_file"`
+				} `yaml:"tls"`
+			} `yaml:"custom"`
+		} `yaml:"llm_providers"`
+	}
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.LLMProviders.Custom) != 2 {
+		t.Fatalf("providers = %d", len(cfg.LLMProviders.Custom))
+	}
+	paths := map[string]string{}
+	for _, provider := range cfg.LLMProviders.Custom {
+		paths[provider.Name] = provider.TLS.CACertFile
+	}
+	if paths["acme.foo"] == paths["acme_foo"] {
+		t.Fatal("distinct providers share a CA path")
+	}
+	for name, want := range map[string]string{"acme.foo": "first certificate", "acme_foo": "second certificate"} {
+		got, err := os.ReadFile(paths[name])
+		if err != nil || string(got) != want {
+			t.Errorf("%s CA = %q, err = %v", name, got, err)
+		}
 	}
 }

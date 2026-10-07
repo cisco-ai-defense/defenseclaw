@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -368,7 +369,9 @@ type v9Migrator struct {
 	record     MigrationRecord
 	// rows are the audit.db rows moved into asset_policy, cleared after the
 	// config commit.
-	rows []v9ActionRow
+	rows              []v9ActionRow
+	auditRowsSnapshot []v9ActionRow
+	auditRowsRead     bool
 	// envKey is an inline scanner key moved to .env on commit.
 	envKey, envValue string
 	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
@@ -532,6 +535,17 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	if !exists || !bytes.Equal(current, source) {
 		return nil, errors.New("config: config.yaml changed while the config_version 9 migration ran; run it again")
 	}
+	// Reserve audit.db before writing config so a changed operator decision
+	// cannot be committed from a stale snapshot.
+	var auditDB *sql.DB
+	if m.auditRowsRead && !m.in.Managed {
+		auditDB, err = lockV9ActionRows(ctx, m.in.AuditDBPath, m.auditRowsSnapshot)
+		if err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+		defer auditDB.Close()
+		defer func() { _, _ = auditDB.Exec("ROLLBACK") }()
+	}
 	var written []string
 	backup := m.configPath + ConfigV8BackupSuffix
 	if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
@@ -589,8 +603,13 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
 	if len(m.rows) > 0 && !m.leftOutsideRollbackCopy(m.in.AuditDBPath) {
-		if err := clearV9ActionRows(m.in.AuditDBPath, m.rows); err != nil {
-			m.note("audit.db rows were copied to asset_policy but not cleared: %v", err)
+		if err := clearV9ActionRowsDB(auditDB, m.rows); err != nil {
+			return written, fmt.Errorf("config: clean up migrated audit.db rows: %w", err)
+		}
+	}
+	if auditDB != nil {
+		if _, err := auditDB.Exec("COMMIT"); err != nil {
+			return written, fmt.Errorf("config: commit audit.db cleanup: %w", err)
 		}
 	}
 	recordPath := MigrationRecordPath(m.configPath)
@@ -2193,7 +2212,7 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 		if t := p.TLS; t != nil {
 			entry.TLS = &LLMCustomProviderTLS{InsecureSkipVerify: t.InsecureSkipVerify}
 			if pem := strings.TrimSpace(t.CACertPEM); pem != "" {
-				ca := filepath.Join(m.dataDir(), "provider-ca", v9PackNameUnsafe.ReplaceAllString(strings.ToLower(name), "_")+".pem")
+				ca := filepath.Join(m.dataDir(), "provider-ca", v9ProviderCAName(name))
 				entry.TLS.CACertFile = ca
 				m.providerCAs = append(m.providerCAs, v9RegoRefresh{path: ca, data: []byte(t.CACertPEM)})
 			}
@@ -2239,6 +2258,12 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 		m.moved(ProvidersOverlayFile, path+":ollama_ports", "llm_providers.ollama_ports", overlay.OllamaPorts)
 	}
 	m.providersOverlay = path
+}
+
+// v9ProviderCAName gives each case-insensitive provider a stable CA path.
+func v9ProviderCAName(name string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(name)))
+	return hex.EncodeToString(digest[:]) + ".pem"
 }
 
 // retireProvidersOverlay writes the moved CA bundles and renames the legacy
@@ -2307,6 +2332,7 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 	if err != nil {
 		return fmt.Errorf("config: read operator rows from %s: %w", path, err)
 	}
+	m.auditRowsSnapshot, m.auditRowsRead = rows, true
 	if m.in.Managed {
 		m.record.ActionsRowsIgnored = len(rows)
 		if len(rows) > 0 {
