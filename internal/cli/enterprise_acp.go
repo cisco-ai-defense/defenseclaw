@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -45,6 +46,10 @@ agent, and central policy profile. The service record remains in protected
 machine state; only the bearer copy is published into the target user's private
 ACP runtime. The gateway never writes an editor profile or user home.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// An administrator on a standalone host enrolls against the managed
+		// deployment, as status and enterprise hooks do; root used to read
+		// its own missing ~/.defenseclaw/config.yaml (GAP-0249).
+		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 		return rootPersistentPreRunNoAuditE(cmd, args)
 	},
 }
@@ -128,6 +133,19 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 			)
 		}
 	}
+	// The principal is the account RunAsTarget proves owns the home the
+	// bearer is published to: the uid on Linux and macOS, the SID on
+	// Windows. The gateway binds only that kind as the verified subject, so
+	// the other kind is refused, not recorded (GAP-0200). Secure Client
+	// binds no subject and keeps its selectors.
+	if !cfg.SecureClientIntegration() {
+		if runtime.GOOS == "windows" && (enterpriseACPUID >= 0 || enterpriseACPGID >= 0) {
+			return enterpriseACPEnrollment{}, errors.New("enterprise ACP enrollment: --uid and --gid apply only on Linux and macOS; use --user or --sid")
+		}
+		if runtime.GOOS != "windows" && strings.TrimSpace(enterpriseACPSID) != "" {
+			return enterpriseACPEnrollment{}, errors.New("enterprise ACP enrollment: --sid applies only on Windows; use --user or --uid")
+		}
+	}
 	target, err := resolveEnterpriseHookTargetValues(
 		enterpriseACPUser, enterpriseACPUserHome, enterpriseACPUID, enterpriseACPGID,
 		enterpriseACPSID, enterpriseACPUserDataDir,
@@ -170,15 +188,20 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	credential, err := acp.EnsureEnterpriseCredential(
-		cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
-	)
+	var credential acp.EnterpriseCredential
+	err = withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		var ensureErr error
+		credential, ensureErr = acp.EnsureEnterpriseCredential(
+			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+		)
+		if ensureErr != nil {
+			return ensureErr
+		}
+		return alignEnterpriseACPCredentialOwner(
+			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile, credential.Token,
+		)
+	})
 	if err != nil {
-		return enterpriseACPResult(cmd, nil, err)
-	}
-	if err := alignEnterpriseACPCredentialOwner(
-		cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile, credential.Token,
-	); err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
 	var tokenPath string
@@ -275,9 +298,11 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
-	if err := acp.RemoveEnterpriseCredential(
-		cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
-	); err != nil {
+	if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		return acp.RemoveEnterpriseCredential(
+			cfg.DataDir, enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
+		)
+	}); err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(enrollment.dataDir, enrollment.client, enrollment.agent)

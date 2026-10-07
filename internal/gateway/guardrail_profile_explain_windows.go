@@ -6,22 +6,52 @@
 package gateway
 
 import (
-	osuser "os/user"
-	"strings"
 	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// profileExplainAccount names an account (name or SID) through the LSA.
-var profileExplainAccount = func(name string) (id, userName string, ok bool) {
-	account, err := osuser.Lookup(name)
+// profileExplainAccount names an account (SID, DOMAIN\name, name or UPN)
+// through the LSA, as the hook path names a verified SID (see
+// resolveWindowsExplainAccount).
+var profileExplainAccount = func(name string) (id, userName string, err error) {
+	return resolveWindowsExplainAccount(name, lsaAccountBySID, lsaAccountByName)
+}
+
+// profileExplainUnresolved reports an account the LSA cannot name with the
+// LSA's reason. Windows has no second account database to try: os/user asks
+// the same LSA.
+func profileExplainUnresolved(_ string, err error) (profileSubject, error) {
+	return profileSubject{}, err
+}
+
+// lsaAccountBySID names a SID (LookupAccountSid).
+func lsaAccountBySID(sid string) (windowsAccount, error) {
+	parsed, err := windows.StringToSid(sid)
 	if err != nil {
-		if account, err = osuser.LookupId(name); err != nil {
-			return "", "", false
-		}
+		return windowsAccount{}, err
 	}
-	return strings.ToUpper(account.Uid), useridentity.BareAccountName(account.Username), true
+	return lsaAccount(parsed)
+}
+
+// lsaAccountByName resolves an account name (LookupAccountName) and names
+// the SID it maps to, so every spelling gives the account's own name.
+func lsaAccountByName(name string) (windowsAccount, error) {
+	sid, _, _, err := windows.LookupSID("", name)
+	if err != nil {
+		return windowsAccount{}, err
+	}
+	return lsaAccount(sid)
+}
+
+func lsaAccount(sid *windows.SID) (windowsAccount, error) {
+	account, _, use, err := sid.LookupAccount("")
+	if err != nil {
+		return windowsAccount{}, err
+	}
+	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), User: use == windows.SidTypeUser}, nil
 }
 
 // profileExplainUPNWait is how long explain waits for an AD account's UPN, so

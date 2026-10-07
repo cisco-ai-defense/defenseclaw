@@ -50,7 +50,7 @@ WIN_UNICODE_URL=https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972a
 WIN_UNICODE_SHA256=d4142d4d56d46f449d6f00536a73625a871cba040f0bc1a2e305a04578f07d1e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-CACHE="${DEFENSECLAW_BUILD_CACHE:-${HOME}/.cache/defenseclaw-windows-runtime}"
+CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/defenseclaw-windows-runtime"
 mkdir -p "${CACHE}" "${OUT_DIR}"
 OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/dc-scanner-runtime.XXXXXX")"
