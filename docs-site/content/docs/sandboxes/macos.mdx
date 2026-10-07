@@ -57,7 +57,7 @@ MicroVMs do not run in Docker Desktop.
 | [Homebrew](https://brew.sh) | OpenShell installs from NVIDIA's `nvidia/openshell` Homebrew formula, and its gateway runs as a Homebrew service. |
 | Xcode or the Command Line Tools | The formula may build from source, and Homebrew then wants current developer tools for your macOS release. See [developer tools](#developer-tools) below. |
 | `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it (`brew install e2fsprogs`). |
-| Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Its buildx plugin is included. |
+| Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Its buildx plugin is included. Start it once on your own account before setup: its first start needs an administrator (see [Docker Desktop's first start](#docker-desktops-first-start)). |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. The MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started. |
 
 DefenseClaw does not check for a minimum macOS release itself. What matters
@@ -80,6 +80,21 @@ setup says `Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so`.
 Update that Xcode or delete it. Updating the Command Line Tools does not
 help.
 </Callout>
+
+### Docker Desktop's first start
+
+The first time Docker Desktop starts on your account, it asks you to:
+
+- install Rosetta, when the Mac does not have it yet;
+- allow it to find devices on your local network;
+- accept its licence;
+- type an administrator's name and password, so that it can install its
+  privileged helper.
+
+On a standard account, have an administrator type their name and password at
+that last prompt. Setup does not answer these prompts for you: it only checks
+that Docker is running, and its Docker check fails until Docker Desktop has
+started once.
 
 ## Set up
 
