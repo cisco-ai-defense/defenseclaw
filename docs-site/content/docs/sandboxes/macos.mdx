@@ -283,22 +283,27 @@ The run says it works on a copy before it copies anything:
 
   Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)
   Uploading the copy (412 files, 3.1 MiB)…
+  ⚠ 1 secret file held back from the copy: .env
   ⚠ not copied (git ignores them, or they are package caches): node_modules/, dist/; install the dependencies inside the sandbox
 
 Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + blocklist
   Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
   Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
 ```
 
 The copy is a shallow git clone of your project plus your working tree, with
 secret files such as `.env`, keys and certificates held back. What git
 ignores, such as `node_modules/`, `.venv/` and build output, and package
-caches are not copied either: the line after the upload names them. Install
-the dependencies inside the sandbox (ask the agent to run `npm install` or
+caches are not copied either. The lines after the upload name the secret
+files held back and what was left out. Install the dependencies inside the
+sandbox (ask the agent to run `npm install` or
 `pip install -r requirements.txt`) before a build or the tests. Your folder
-does not change while the agent works.
+does not change while the agent works. With an Amazon Bedrock key the
+`Model` line names the model and the key, for example
+`anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)`.
 
 The first start of each image takes about a minute while the driver prepares
 its MicroVM disk. It keeps that disk, so later starts take a few seconds.

@@ -54,7 +54,11 @@ image also prepares a MicroVM disk, which takes about a minute.
 ### Read the banner
 
 Before the harness takes over your terminal, DefenseClaw prints what the
-sandbox can see and use.
+sandbox can see and use. On a Mac, where the agent works on a copy, the lines
+just before the banner say what the copy left out, such as
+`⚠ 1 secret file held back from the copy: .env`. With an Amazon Bedrock key
+the `Model` line names the model and the key:
+`Model     anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)`.
 
 <Tabs items={['Linux', 'macOS']}>
 <Tab value="Linux">
@@ -66,6 +70,7 @@ Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + bloc
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
 ```
 
 </Tab>
@@ -76,6 +81,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
   Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
   Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
 ```
 
@@ -89,7 +95,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
 | `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy, without what git ignores (such as `node_modules/` and `.venv/`), so the dependencies are installed inside. |
 | `Hidden` | Secret files that appear empty inside a live mount. On a copy they are held back instead. |
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook that runs on your machine. |
-| `Model` | Which credential the harness uses. The sandbox gets a placeholder; OpenShell adds the real key only on requests to the model provider. |
+| `Model` | Which credential the harness uses. The sandbox gets a placeholder; OpenShell adds the real key only on requests to the model provider. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. |
 
 </Step>
 
