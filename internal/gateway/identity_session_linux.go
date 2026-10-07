@@ -114,8 +114,21 @@ func logindConn(ctx context.Context) (*dbus.Conn, error) {
 	if logindBus != nil && logindBus.Connected() {
 		return logindBus, nil
 	}
-	conn, err := dbus.ConnectSystemBus(dbus.WithContext(context.Background()))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// godbus Auth and Hello can wait for a bus reply without honoring the
+	// call context. Closing the connection on deadline interrupts both.
+	connCtx, cancel := context.WithCancel(context.Background())
+	stop := context.AfterFunc(ctx, cancel)
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(connCtx))
+	stop()
 	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		cancel()
 		return nil, err
 	}
 	logindBus = conn
