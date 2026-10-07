@@ -55,6 +55,7 @@ from defenseclaw.config_inspect import (
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability.v8_config import (
     MAX_SOURCE_BYTES,
+    RETIRED_KEY_ACTION_PREFIX,
     V8ConfigError,
     load_config_value,
     load_validate_v8,
@@ -1192,6 +1193,9 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         suggestion = re.search(r"suggested field ([^;]+)", text)
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
+
+    if code == "additionalProperties" and text.startswith(RETIRED_KEY_ACTION_PREFIX):
+        return f"{where}{field} {text[len('this key '):]}"
 
     parts = [
         part.strip()

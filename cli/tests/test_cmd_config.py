@@ -332,6 +332,26 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
         v9 = v8.replace(b"8", b"9", 1)
         self.assertIn("move it to admission.skill.actions", cmd_config._plain_v8_issue(v9, "$.skill_actions", self.REASON))
 
+    def test_config_get_and_set_send_a_retired_key_to_migrate(self):
+        # A v8 file is migrated, not hand-edited: deleting the key loses its value.
+        from defenseclaw import config_writer
+        from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+
+        raw = b"config_version: 8\nskill_actions:\n  medium: {install: block}\n"
+        with self.assertRaises(V8ConfigError) as caught:
+            load_validate_v8(raw, source_name="config.yaml")
+        self.assertIn("run: defenseclaw migrate", str(caught.exception))
+        self.assertEqual(
+            config_writer.plain_error(_chained(caught.exception)),
+            "skill_actions was replaced by admission.skill.actions in config_version 9; run: defenseclaw migrate",
+        )
+
+
+def _chained(cause: BaseException) -> BaseException:
+    error = ValueError("refused")
+    error.__cause__ = cause
+    return error
+
 
 if __name__ == "__main__":
     unittest.main()
