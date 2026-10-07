@@ -123,24 +123,31 @@ Registers a new device with the fleet manager. If a device with the same composi
 
 ```json
 {
-  "device_id": 281474976841729,
-  "tenant_id": 1,
-  "fleet_id": 2,
-  "hw_profile": "rpi4",
-  "fw_version": "1.2.0",
-  "policy_version": 3,
-  "capabilities": 127,
-  "status": "online",
-  "last_heartbeat": "0001-01-01T00:00:00Z",
-  "last_audit_hmac": null,
-  "site_id": "",
-  "registered_at": "2026-10-05T14:00:00Z",
-  "flags": 0,
-  "denied_total": 0,
-  "allowed_total": 0,
-  "flash_writes": 0
+  "device": {
+    "device_id": 281474976841729,
+    "tenant_id": 1,
+    "fleet_id": 2,
+    "hw_profile": "rpi4",
+    "fw_version": "1.2.0",
+    "policy_version": 3,
+    "capabilities": 127,
+    "status": "online",
+    "last_heartbeat": "0001-01-01T00:00:00Z",
+    "last_audit_hmac": null,
+    "site_id": "",
+    "registered_at": "2026-10-05T14:00:00Z",
+    "flags": 0,
+    "denied_total": 0,
+    "allowed_total": 0,
+    "flash_writes": 0
+  },
+  "device_key": "a1b2c3d4...hex-encoded-32-byte-key..."
 }
 ```
+
+<Callout type="warn">
+The `device_key` is only returned on initial registration (`201 Created`). It is not retrievable later. Provision it on the device via `DCLAW_DEVICE_KEY` env var or `/etc/defenseclaw/device.key`. When a key store is not configured on the server, `device_key` is an empty string.
+</Callout>
 
 **Status codes**
 

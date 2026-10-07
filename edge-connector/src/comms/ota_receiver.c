@@ -18,7 +18,7 @@
 
 extern dclaw_state_t *dclaw_get_state(void);
 extern uint8_t dclaw_config_active_policy_partition(void);
-extern void dclaw_config_switch_policy_partition(void);
+extern void dclaw_config_switch_policy_partition(uint16_t policy_version);
 extern void dclaw_config_persist_policy_version(uint16_t version);
 extern void dclaw_cache_flush_all(void);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
@@ -276,12 +276,13 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
         return -3;
     }
 
-    /* Switch to new partition */
-    dclaw_config_switch_policy_partition();
+    /* P1-07 fix (atomic persistence): Switch to new partition AND persist the
+     * new policy version in a single flash write. Previously the partition and
+     * version were written in two separate calls; a power cut between them
+     * could leave the version stale while the partition had already switched,
+     * defeating the anti-rollback check (REQ-36) on the next boot. */
+    dclaw_config_switch_policy_partition(hdr.version);
     s->device.policy_version = hdr.version;
-    /* P1-10 fix: Persist the new policy version to flash so anti-rollback
-     * (REQ-36) works correctly after restart. */
-    dclaw_config_persist_policy_version(hdr.version);
 
     /* Flush verdict cache — policy changed, cached verdicts may be stale */
     dclaw_cache_flush_all();
@@ -357,7 +358,9 @@ void dclaw_canary_record_block(void) {
 /* Rollback to previous policy partition */
 void dclaw_policy_rollback(void) {
     dclaw_state_t *s = dclaw_get_state();
-    dclaw_config_switch_policy_partition();
+    /* Pass 0 to keep the currently persisted policy version — rollback does
+     * not change the version, only the active partition. */
+    dclaw_config_switch_policy_partition(0);
     s->canary.canary_active = false;
     /* P2-19 fix: Signal the next heartbeat to include flag 0x08 so the fleet
      * manager knows a canary rollback occurred. Cleared after the heartbeat

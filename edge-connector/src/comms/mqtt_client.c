@@ -681,28 +681,12 @@ int dclaw_mqtt_connect(void) {
     mqtt_ctx.state = MQTT_STATE_CONNECTING;
     mqtt_ctx.last_attempt_tick = hal_tick_ms();
 
-#if DCLAW_HAS_MBEDTLS
-    /* Comment 35 fix: mbedTLS TLS/mTLS MQTT path is not yet implemented.
-     * The -1 return is intentional — callers will fall through to the
-     * reconnect/backoff logic. For development and testing, build without
-     * DCLAW_HAS_MBEDTLS and use plaintext MQTT (mqtt:// URLs).
-     *
-     * TODO(Phase 2): Implement TLS handshake with mbedtls_ssl:
-     *   - Parse broker_url for host/port
-     *   - TCP connect
-     *   - mbedtls_ssl_handshake with device cert (mTLS)
-     *   - Send MQTT CONNECT over the TLS session
-     *   - Receive CONNACK, extract server timestamp
-     *   - Subscribe to verdict/resp, ota/policy, ota/emergency
-     */
-    (void)broker_url;
-    fprintf(stderr, "[DCLAW-MQTT] ERROR: TLS MQTT connection not yet implemented. "
-            "Build without DCLAW_HAS_MBEDTLS=1 and use mqtt:// URLs for "
-            "development/testing, or wait for Phase 2 TLS support.\n");
-    mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
-    return -1;
-#else
-    /* Dev mode: real TCP + MQTT 3.1.1, but no TLS */
+    /* P1-24 fix: Parse the broker URL first so we can distinguish mqtt://
+     * (plaintext) from mqtts:// (TLS). When mbedTLS is available, only
+     * mqtts:// URLs go through the TLS path; mqtt:// URLs always use the
+     * plaintext TCP path regardless of DCLAW_HAS_MBEDTLS. This prevents
+     * the connect function from unconditionally returning -1 when mbedTLS
+     * is linked but the broker is plaintext. */
     char host[128];
     uint16_t port;
     bool is_tls;
@@ -713,6 +697,23 @@ int dclaw_mqtt_connect(void) {
         return -1;
     }
 
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+    if (is_tls) {
+        /* TODO(Phase 2): Implement TLS handshake with mbedtls_ssl:
+         *   - TCP connect
+         *   - mbedtls_ssl_handshake with device cert (mTLS)
+         *   - Send MQTT CONNECT over the TLS session
+         *   - Receive CONNACK, extract server timestamp
+         *   - Subscribe to verdict/resp, ota/policy, ota/emergency
+         */
+        fprintf(stderr, "[DCLAW-MQTT] ERROR: TLS MQTT connection (mqtts://) not yet "
+                "implemented. Use mqtt:// URLs for development/testing, or wait "
+                "for Phase 2 TLS support.\n");
+        mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
+        return -1;
+    }
+    /* mqtt:// (plaintext) — fall through to the TCP path below */
+#else
     if (is_tls) {
         fprintf(stderr, "[DCLAW-MQTT] ERROR: mqtts:// requested but mbedTLS not available. "
                 "Refusing to connect over plain TCP. Build with DCLAW_HAS_MBEDTLS=1 "
@@ -720,6 +721,9 @@ int dclaw_mqtt_connect(void) {
         mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
     }
+#endif
+
+    /* Plaintext TCP + MQTT 3.1.1 path (used for mqtt:// URLs) */
 
     /* Step 1: TCP connect */
     int fd = tcp_connect(host, port);
@@ -799,7 +803,6 @@ int dclaw_mqtt_connect(void) {
 
     fprintf(stderr, "[DCLAW-MQTT] Connected to %s:%u\n", host, port);
     return 0;
-#endif
 }
 
 int dclaw_mqtt_reconnect(void) {
@@ -1045,7 +1048,20 @@ int dclaw_mqtt_send_heartbeat(void) {
     char topic[128];
     if (build_topic(topic, sizeof(topic), "heartbeat") != 0) return -1;
 
-    return dclaw_mqtt_publish(topic, hb_buf, hb_len, 0 /* QoS 0 */);
+    int rc = dclaw_mqtt_publish(topic, hb_buf, hb_len, 0 /* QoS 0 */);
+
+    /* P2-19 fix: Clear the rollback_pending flag only after a successful
+     * publish.  The encoder sets the CANARY_ROLLBACK bit in the heartbeat
+     * flags but no longer clears the state — we do it here so the flag is
+     * retried on the next heartbeat if this publish fails. */
+    if (rc == 0) {
+        dclaw_state_t *st = dclaw_get_state();
+        if (st->rollback_pending) {
+            st->rollback_pending = false;
+        }
+    }
+
+    return rc;
 }
 
 /* Verdict request publish */

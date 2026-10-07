@@ -40,6 +40,11 @@ type Device struct {
 	DeniedTotal   uint64       `json:"denied_total"`
 	AllowedTotal  uint64       `json:"allowed_total"`
 	FlashWrites   uint32       `json:"flash_writes"`
+
+	// NEW-3 fix: Replay detection via monotonic uptime and delta counters.
+	LastUptime  uint32 `json:"last_uptime"`
+	PrevDenied  uint16 `json:"prev_denied"`
+	PrevAllowed uint16 `json:"prev_allowed"`
 }
 
 // Heartbeat represents a parsed 32-byte device heartbeat.
@@ -110,6 +115,9 @@ type FleetManager struct {
 	onDeviceRegistered func()
 	onDeviceOffline    func()
 	onHeartbeat        func()
+	// P2-19 fix: Status transition hook so metrics gauges update correctly
+	// when a device moves between states (e.g., online → lockdown).
+	onStatusChange func(oldStatus, newStatus DeviceStatus)
 }
 
 // New creates a new FleetManager instance.
@@ -159,6 +167,13 @@ func (fm *FleetManager) SetMetricsHooks(onRegistered, onOffline, onHeartbeat fun
 	fm.onDeviceRegistered = onRegistered
 	fm.onDeviceOffline = onOffline
 	fm.onHeartbeat = onHeartbeat
+}
+
+// SetStatusChangeHook configures a callback for device status transitions.
+// P2-19 fix: Called whenever a heartbeat causes a device's status to change,
+// so metrics gauges can decrement the old status and increment the new one.
+func (fm *FleetManager) SetStatusChangeHook(hook func(oldStatus, newStatus DeviceStatus)) {
+	fm.onStatusChange = hook
 }
 
 // StartMonitoring runs CheckOfflineDevices on a recurring interval.
@@ -276,13 +291,41 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		})
 	}
 
+	// NEW-3 fix: Replay detection — reject heartbeats where the monotonic
+	// uptime has not advanced.  A legitimate device's uptime_sec increases
+	// on every heartbeat.  A replayed (or stale) heartbeat will have
+	// uptime <= the last seen value.  Allow uptime == 0 only on the very
+	// first heartbeat (LastUptime is zero-initialized).
+	if hb.UptimeSec > 0 && hb.UptimeSec <= dev.LastUptime {
+		log.Printf("[fleet] replay detected for device %d: uptime %d <= last %d, dropping",
+			deviceID, hb.UptimeSec, dev.LastUptime)
+		return
+	}
+	dev.LastUptime = hb.UptimeSec
+
 	dev.LastHeartbeat = time.Now()
 	dev.PolicyVersion = hb.PolicyVersion
 	dev.FWVersion = fmt.Sprintf("%d", hb.FWVersion)
 	dev.Flags = hb.Flags
 	dev.Capabilities = hb.Capabilities
-	dev.DeniedTotal += uint64(hb.DeniedCount)
-	dev.AllowedTotal += uint64(hb.AllowedCount)
+
+	// NEW-3 fix: Compute counter deltas instead of blindly accumulating
+	// absolute values.  The device sends cumulative counters that reset on
+	// reboot; detect reboot (new < prev) and treat the new value as the
+	// full delta.
+	if hb.DeniedCount >= dev.PrevDenied {
+		dev.DeniedTotal += uint64(hb.DeniedCount - dev.PrevDenied)
+	} else {
+		// Counter wrapped or device rebooted — treat raw value as delta
+		dev.DeniedTotal += uint64(hb.DeniedCount)
+	}
+	if hb.AllowedCount >= dev.PrevAllowed {
+		dev.AllowedTotal += uint64(hb.AllowedCount - dev.PrevAllowed)
+	} else {
+		dev.AllowedTotal += uint64(hb.AllowedCount)
+	}
+	dev.PrevDenied = hb.DeniedCount
+	dev.PrevAllowed = hb.AllowedCount
 
 	if fm.onHeartbeat != nil {
 		fm.onHeartbeat()
@@ -300,6 +343,10 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			Timestamp: time.Now(),
 		})
 	}
+
+	// P2-19 fix: Capture old status before updating so we can fire the
+	// status-change metrics hook with both old and new values.
+	oldStatus := dev.Status
 
 	// Update status based on flags
 	if hb.Flags&0x04 != 0 { // TAMPER_DETECT
@@ -324,6 +371,13 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		dev.Status = StatusDegraded
 	} else {
 		dev.Status = StatusOnline
+	}
+
+	// P2-19 fix: Fire status-change hook when device transitions between
+	// states so the Prometheus gauge decrements the old status and
+	// increments the new one.
+	if dev.Status != oldStatus && fm.onStatusChange != nil {
+		fm.onStatusChange(oldStatus, dev.Status)
 	}
 
 	// Store audit HMAC for chain verification

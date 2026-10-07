@@ -178,6 +178,9 @@ func (f *fixedKeyProvider) KeyForDevice(_ uint64) []byte {
 type perDeviceKeyProvider struct {
 	keys        map[uint64][]byte
 	fallbackKey []byte
+	// forceErr, when non-nil, is returned by HasDeviceKey to simulate
+	// key-store errors (P1-06 fail-closed testing).
+	forceErr error
 }
 
 func (p *perDeviceKeyProvider) KeyForDevice(deviceID uint64) []byte {
@@ -187,9 +190,12 @@ func (p *perDeviceKeyProvider) KeyForDevice(deviceID uint64) []byte {
 	return p.fallbackKey
 }
 
-func (p *perDeviceKeyProvider) HasDeviceKey(deviceID uint64) bool {
+func (p *perDeviceKeyProvider) HasDeviceKey(deviceID uint64) (bool, error) {
+	if p.forceErr != nil {
+		return false, p.forceErr
+	}
 	_, ok := p.keys[deviceID]
-	return ok
+	return ok, nil
 }
 
 func makeVerdictRequestPayload(requestID uint16, toolName string) []byte {
@@ -837,6 +843,280 @@ func TestBridgeUnsignedHeartbeatAcceptedWhenNoDeviceKey(t *testing.T) {
 	}
 	if errs != 0 {
 		t.Errorf("errors = %d, want 0", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+// --- P1-06 Registration HMAC tests ---
+
+func TestBridgeSignedRegistrationAccepted(t *testing.T) {
+	// A signed registration with a valid HMAC should be accepted.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	deviceKey := []byte("test-device-key-32-bytes-long!!!")
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.AllowAutoRegistration = true
+	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	payload := makeSignedHeartbeatPayload(42, 7, 0, 0, deviceKey)
+	mc.simulateMessage("defenseclaw/1/2/42/register", payload, 1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, _, errs := bridge.Stats()
+	if errs != 0 {
+		t.Errorf("errors = %d, want 0 (valid signed registration should succeed)", errs)
+	}
+
+	// Verify the device was registered
+	_, ok := fm.GetDevice(manager.ComposeID(1, 2, 42))
+	if !ok {
+		t.Error("device should be registered after valid signed registration")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeSignedRegistrationBadHMAC(t *testing.T) {
+	// A signed registration with an invalid HMAC should be rejected.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	realKey := []byte("test-device-key-32-bytes-long!!!")
+	wrongKey := []byte("wrong-key-that-attacker-uses!!!!")
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.AllowAutoRegistration = true
+	bridge.SetKeyProvider(&fixedKeyProvider{key: realKey})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	payload := makeSignedHeartbeatPayload(42, 7, 0, 0, wrongKey)
+	mc.simulateMessage("defenseclaw/1/2/42/register", payload, 1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, _, errs := bridge.Stats()
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1 (bad HMAC registration should be rejected)", errs)
+	}
+
+	// Verify the device was NOT registered
+	_, ok := fm.GetDevice(manager.ComposeID(1, 2, 42))
+	if ok {
+		t.Error("device should NOT be registered after bad-HMAC registration")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeUnsignedRegistrationRejectedWhenKeyed(t *testing.T) {
+	// P1-06: An unsigned registration for a device that has a per-device key
+	// provisioned MUST be rejected. This prevents an attacker from overwriting
+	// device inventory without the device key.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	// Pre-register so the device exists and re-registration path is taken.
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	fullDeviceID := manager.ComposeID(1, 2, 42)
+	deviceKey := []byte("per-device-key-32-bytes-long!!!!") // 32 bytes
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.AllowAutoRegistration = true
+	bridge.SetKeyProvider(&perDeviceKeyProvider{
+		keys:        map[uint64][]byte{fullDeviceID: deviceKey},
+		fallbackKey: make([]byte, 32),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send an unsigned registration — must be REJECTED because device is keyed
+	payload := makeHeartbeatPayload(42, 99, 0, 0) // tries to overwrite policy to 99
+	mc.simulateMessage("defenseclaw/1/2/42/register", payload, 1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, _, errs := bridge.Stats()
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1 (unsigned registration from keyed device must be rejected)", errs)
+	}
+
+	// Verify the device's policy version was NOT overwritten
+	dev, ok := fm.GetDevice(fullDeviceID)
+	if !ok {
+		t.Fatal("device should still exist")
+	}
+	if dev.PolicyVersion != 1 {
+		t.Errorf("PolicyVersion = %d, want 1 (should not have been overwritten by unsigned registration)", dev.PolicyVersion)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeUnsignedRegistrationAcceptedWhenNoDeviceKey(t *testing.T) {
+	// When a device has no per-device key, unsigned registrations are accepted
+	// (with a warning). This covers legacy devices not yet provisioned.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.AllowAutoRegistration = true
+	bridge.SetKeyProvider(&perDeviceKeyProvider{
+		keys:        map[uint64][]byte{},
+		fallbackKey: make([]byte, 32),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	payload := makeHeartbeatPayload(42, 7, 0, 0)
+	mc.simulateMessage("defenseclaw/1/2/42/register", payload, 1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, _, errs := bridge.Stats()
+	if errs != 0 {
+		t.Errorf("errors = %d, want 0 (no per-device key — should accept unsigned registration)", errs)
+	}
+
+	_, ok := fm.GetDevice(manager.ComposeID(1, 2, 42))
+	if !ok {
+		t.Error("device should be registered after unsigned registration (no device key)")
+	}
+
+	cancel()
+	<-errCh
+}
+
+// --- P1-06 Fail-closed tests (key-store errors) ---
+
+func TestBridgeHeartbeatRejectedOnKeyStoreError(t *testing.T) {
+	// P1-06 fail-closed: If HasDeviceKey returns an error (e.g. DB timeout),
+	// unsigned heartbeats MUST be rejected rather than silently accepted.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.SetKeyProvider(&perDeviceKeyProvider{
+		keys:        map[uint64][]byte{},
+		fallbackKey: make([]byte, 32),
+		forceErr:    fmt.Errorf("key store unavailable: connection refused"),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	payload := makeHeartbeatPayload(42, 7, 15, 0)
+	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 0 {
+		t.Errorf("heartbeats processed = %d, want 0 (key store error — must reject, fail closed)", hb)
+	}
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeRegistrationRejectedOnKeyStoreError(t *testing.T) {
+	// P1-06 fail-closed: If HasDeviceKey returns an error during registration,
+	// unsigned registrations MUST be rejected rather than silently accepted.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.AllowAutoRegistration = true
+	bridge.SetKeyProvider(&perDeviceKeyProvider{
+		keys:        map[uint64][]byte{},
+		fallbackKey: make([]byte, 32),
+		forceErr:    fmt.Errorf("key store unavailable: connection refused"),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	payload := makeHeartbeatPayload(42, 7, 0, 0)
+	mc.simulateMessage("defenseclaw/1/2/42/register", payload, 1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, _, errs := bridge.Stats()
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1 (key store error — must reject registration, fail closed)", errs)
+	}
+
+	_, ok := fm.GetDevice(manager.ComposeID(1, 2, 42))
+	if ok {
+		t.Error("device should NOT be registered when key store errors (fail closed)")
 	}
 
 	cancel()

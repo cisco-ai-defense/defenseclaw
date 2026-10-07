@@ -124,7 +124,7 @@ def edge_connector(
         "\n"
         "  cd edge-connector\n"
         "  mkdir build && cd build\n"
-        "  cmake .. -DDCLAW_PROFILE=STANDARD\n"
+        "  cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF\n"
         "  make -j$(nproc)\n"
         "  sudo make install\n"
         "\n"
@@ -155,6 +155,27 @@ def edge_connector(
     if token:
         _persist_env_var(env_path, _TOKEN_ENV, token)
         ux.ok(f"Wrote {_TOKEN_ENV} to {env_path}")
+
+    # --- 2b. Audit key ---------------------------------------------------
+    # P1-18 fix: Generate a random audit key if none exists. The audit key is
+    # a 32-byte hex-encoded HMAC key used for tamper-evident audit log signing.
+    # Without it, edge-connectors built with -DDCLAW_DEV_MODE=OFF will refuse
+    # to start because unsigned audit logs are only accepted in dev mode.
+    existing_audit = os.environ.get("DCLAW_AUDIT_KEY", "")
+    if not existing_audit:
+        # Check if already in the env file
+        if env_path.exists():
+            for _line in env_path.read_text().splitlines():
+                if _line.strip().startswith("DCLAW_AUDIT_KEY="):
+                    existing_audit = _line.strip().split("=", 1)[1].strip("'\"")
+                    break
+
+    if existing_audit:
+        ux.ok("DCLAW_AUDIT_KEY already set.")
+    else:
+        audit_key = secrets.token_hex(32)
+        _persist_env_var(env_path, "DCLAW_AUDIT_KEY", audit_key)
+        ux.ok(f"Generated DCLAW_AUDIT_KEY ({len(audit_key)} hex chars) and wrote to {env_path}")
 
     # --- 3. Fleet API endpoint -------------------------------------------
     if endpoint is None:

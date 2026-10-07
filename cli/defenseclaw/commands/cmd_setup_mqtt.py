@@ -122,53 +122,26 @@ def _setup_docker(port: int) -> dict | bool:
 
     ux.section("Docker MQTT Broker Setup")
 
-    # Check if container already exists
+    # Check if an existing container is running -- we keep it alive until the
+    # new setup is validated so the broker stays available during setup.
+    existing_container = False
     result = subprocess.run(
         ["docker", "inspect", _CONTAINER_NAME],
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        ux.warn(f"Container '{_CONTAINER_NAME}' already exists. Removing it.")
-        subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
+        existing_container = True
+        ux.warn(f"Container '{_CONTAINER_NAME}' already exists. Will replace after validation.")
 
-    # Step 1: Create config directory
+    # Step 1: Create config directory (host user owns it -- we can write files).
     conf_dir = Path.home() / ".defenseclaw" / "mqtt"
     os.makedirs(conf_dir, exist_ok=True)
-
-    # P1-10 fix: Ensure the config directory is traversable by the Mosquitto
-    # UID (1883) inside the container.  The host's umask may create the dir
-    # as 0700, which prevents the non-root broker process from traversing it.
-    # chmod 0755 makes it world-executable (traverse) and readable.
-    # chown to 1883:1883 via a throwaway container (host user typically can't
-    # chown to an arbitrary UID directly).
-    try:
-        conf_dir.chmod(0o755)
-    except OSError:
-        ux.warn("Could not chmod config directory to 0755.")
-
-    chown_dir_result = subprocess.run(
-        [
-            "docker", "run", "--rm",
-            "--user", "0",
-            "-v", f"{conf_dir}:/mosquitto/config",
-            _MOSQUITTO_IMAGE,
-            "chown", "1883:1883", "/mosquitto/config",
-        ],
-        capture_output=True, text=True,
-    )
-    if chown_dir_result.returncode != 0:
-        ux.warn(
-            f"Could not chown config dir to mosquitto (1883): {chown_dir_result.stderr.strip()}\n"
-            "  The broker may fail to traverse the config directory."
-        )
-
     ux.ok(f"Config directory: {conf_dir}")
 
-    # Step 2: Write mosquitto.conf with persistence enabled.
-    # P1-10 fix: The listener inside the container is always 1883.
-    # Docker's -p flag maps the user's external port to 1883 internally.
-    # Previously this used the user's port, which broke when --port != 1883
-    # because the container would listen on a non-mapped port.
+    # Step 2: Write mosquitto.conf BEFORE chowning the directory.
+    # P1-10 fix: The non-root CLI user must write all host-side files while
+    # the directory is still owned by the host user.  Chowning to 1883:1883
+    # first makes subsequent writes fail with EACCES.
     conf_file = conf_dir / "mosquitto.conf"
     mosquitto_conf = (
         "# DefenseClaw MQTT broker configuration\n"
@@ -182,7 +155,8 @@ def _setup_docker(port: int) -> dict | bool:
     conf_file.write_text(mosquitto_conf)
     ux.ok("mosquitto.conf written")
 
-    # Step 3: Generate credentials and password file using a throwaway container
+    # Step 3: Generate credentials and password file using a throwaway container.
+    # Still done as the host user so the file is writable during generation.
     mqtt_user = "dclaw"
     mqtt_pass = secrets.token_urlsafe(24)
 
@@ -197,11 +171,6 @@ def _setup_docker(port: int) -> dict | bool:
     ux.ok(f"Image {_MOSQUITTO_IMAGE} ready")
 
     ux.echo("  Generating MQTT password file...")
-    # Run mosquitto_passwd as the current user so the file is created with
-    # correct host-side ownership, avoiding the problem where Docker creates
-    # the file as root:root 0600 and the non-root CLI user cannot chmod it.
-    # After creation we chown the file to 1883:1883 (mosquitto's UID/GID)
-    # so the broker process can read it with the restrictive 0640 mode.
     import os as _os
     current_uid = _os.getuid()
     current_gid = _os.getgid()
@@ -220,51 +189,65 @@ def _setup_docker(port: int) -> dict | bool:
         ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
         return False
 
-    # Set permissions to 0640 — owner read/write, group read.
-    # This is more restrictive than 0644 (no world-readable password hashes).
+    ux.ok(f"MQTT user '{mqtt_user}' password file generated")
+
+    # Step 4: NOW chown the directory AND all files to 1883:1883.
+    # P1-10 fix: This must happen AFTER writing mosquitto.conf and passwd,
+    # because once the directory is owned by 1883 the host CLI user cannot
+    # create or modify files inside it.
+    try:
+        conf_dir.chmod(0o755)
+    except OSError:
+        ux.warn("Could not chmod config directory to 0755.")
+
     passwd_file = conf_dir / "passwd"
     try:
         passwd_file.chmod(0o640)
     except OSError:
         ux.warn("Could not chmod password file to 0640 — broker may fail to read it.")
 
-    # Fix ownership so Mosquitto (UID 1883) can read the file.
-    # The passwd file was created as the CLI user's UID/GID so that the
-    # host user has write access during generation.  Now we chown it to
-    # 1883:1883 (the mosquitto user inside eclipse-mosquitto:2).  With
-    # mode 0640 the owner (1883) gets rw and group (1883) gets r, which
-    # is exactly what the broker process needs.  We run the chown as
-    # root (--user 0) inside a throwaway Alpine container because the
-    # host user typically cannot chown to an arbitrary UID.
+    # chown the entire config directory (including mosquitto.conf and passwd)
+    # to 1883:1883 via a throwaway container, since the host user typically
+    # cannot chown to an arbitrary UID.
     chown_result = subprocess.run(
         [
             "docker", "run", "--rm",
             "--user", "0",
             "-v", f"{conf_dir}:/mosquitto/config",
             _MOSQUITTO_IMAGE,
-            "chown", "1883:1883", "/mosquitto/config/passwd",
+            "chown", "-R", "1883:1883", "/mosquitto/config",
         ],
         capture_output=True, text=True,
     )
     if chown_result.returncode != 0:
         ux.warn(
-            f"Could not chown passwd file to mosquitto (1883): {chown_result.stderr.strip()}\n"
-            "  The broker may fail to read the password file."
+            f"Could not chown config dir to mosquitto (1883): {chown_result.stderr.strip()}\n"
+            "  The broker may fail to read its configuration files."
         )
 
-    ux.ok(f"MQTT user '{mqtt_user}' password file generated")
-
-    # Step 4: Start the broker container mounting config and data directories.
-    # The data directory holds persistent MQTT session and retained message state.
+    # Step 5: Start a NEW broker container with a temporary name for validation.
     data_dir = conf_dir / "data"
     os.makedirs(data_dir, exist_ok=True)
 
-    ux.echo("  Starting container...")
+    # Use a staging name so the existing container keeps running during validation.
+    staging_name = f"{_CONTAINER_NAME}-staging"
+    # Clean up any leftover staging container from a previous failed attempt.
+    subprocess.run(["docker", "rm", "-f", staging_name], capture_output=True)
+
+    # If the existing container is using our port, we need to pick a temporary
+    # host port for validation. When there is no existing container we can use
+    # the target port directly.
+    if existing_container:
+        staging_port = port + 1  # temporary port for validation
+    else:
+        staging_port = port
+
+    ux.echo("  Starting staging container for validation...")
     run_result = subprocess.run(
         [
             "docker", "run", "-d",
-            "--name", _CONTAINER_NAME,
-            "-p", f"{port}:1883",
+            "--name", staging_name,
+            "-p", f"{staging_port}:1883",
             "-v", f"{conf_dir}:/mosquitto/config",
             "-v", f"{data_dir}:/mosquitto/data",
             "--restart", "unless-stopped",
@@ -276,16 +259,16 @@ def _setup_docker(port: int) -> dict | bool:
         ux.err(f"Failed to start container: {run_result.stderr.strip()}")
         return False
 
-    ux.ok(f"Container '{_CONTAINER_NAME}' started on port {port}")
+    ux.ok(f"Staging container started on port {staging_port}")
 
-    # Step 5: Verify MQTT CONNACK with the generated credentials.
+    # Step 6: Verify MQTT CONNACK against the staging container.
     # Try a TCP connect + minimal MQTT CONNECT packet to confirm the broker
     # is actually accepting authenticated connections, not just listening.
-    ux.echo("  Verifying MQTT CONNACK...")
+    ux.echo("  Verifying MQTT CONNACK on staging container...")
     connack_ok = False
     for attempt in range(6):
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            with socket.create_connection(("127.0.0.1", staging_port), timeout=5) as sock:
                 # Build a minimal MQTT 3.1.1 CONNECT packet
                 client_id = b"dclaw-verify"
                 user_bytes = mqtt_user.encode("utf-8")
@@ -310,17 +293,47 @@ def _setup_docker(port: int) -> dict | bool:
             pass
         time.sleep(0.5 * (2 ** attempt))
 
-    if connack_ok:
-        ux.ok("MQTT CONNACK verified -- broker accepts credentials")
-    else:
-        # P1-10 fix: If CONNACK fails, the broker is broken. Clean up the
-        # container and return failure instead of reporting success.
+    if not connack_ok:
+        # P1-10 fix: If CONNACK fails, the new setup is broken. Clean up the
+        # staging container and return failure -- the existing container (if any)
+        # is left running so the broker stays available.
         ux.err(
-            "MQTT CONNACK verification failed -- broker is not accepting connections.\n"
-            "  Cleaning up container..."
+            "MQTT CONNACK verification failed -- staging broker is not accepting connections.\n"
+            "  Cleaning up staging container..."
         )
-        subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", staging_name], capture_output=True)
+        if existing_container:
+            ux.echo(f"  Existing container '{_CONTAINER_NAME}' was NOT removed.")
         return False
+
+    ux.ok("MQTT CONNACK verified -- staging broker accepts credentials")
+
+    # Step 7: Swap -- remove the old container, rename staging to the final name.
+    if existing_container:
+        ux.echo(f"  Removing old container '{_CONTAINER_NAME}'...")
+        subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
+
+    # Stop the staging container, remove it, and re-create with the final name
+    # on the correct port. (Docker doesn't support rename + port change atomically.)
+    subprocess.run(["docker", "rm", "-f", staging_name], capture_output=True)
+
+    run_final = subprocess.run(
+        [
+            "docker", "run", "-d",
+            "--name", _CONTAINER_NAME,
+            "-p", f"{port}:1883",
+            "-v", f"{conf_dir}:/mosquitto/config",
+            "-v", f"{data_dir}:/mosquitto/data",
+            "--restart", "unless-stopped",
+            _MOSQUITTO_IMAGE,
+        ],
+        capture_output=True, text=True,
+    )
+    if run_final.returncode != 0:
+        ux.err(f"Failed to start final container: {run_final.stderr.strip()}")
+        return False
+
+    ux.ok(f"Container '{_CONTAINER_NAME}' started on port {port}")
 
     return {"mqtt_user": mqtt_user, "mqtt_pass": mqtt_pass}
 

@@ -92,6 +92,7 @@ func TestProcessHeartbeatUpdatesState(t *testing.T) {
 
 	hb := &Heartbeat{
 		DeviceID:      42,
+		UptimeSec:     100,
 		PolicyVersion: 3,
 		DeniedCount:   10,
 		AllowedCount:  500,
@@ -103,11 +104,75 @@ func TestProcessHeartbeatUpdatesState(t *testing.T) {
 	if dev.PolicyVersion != 3 {
 		t.Fatalf("policy_version = %d, want 3", dev.PolicyVersion)
 	}
+	// NEW-3 fix: First heartbeat, prev counters are 0, so delta == raw value.
 	if dev.DeniedTotal != 10 {
 		t.Fatalf("denied_total = %d, want 10", dev.DeniedTotal)
 	}
 	if dev.Status != StatusOnline {
 		t.Fatalf("status = %s, want online", dev.Status)
+	}
+
+	// Second heartbeat: counters are cumulative, so delta should be applied.
+	hb2 := &Heartbeat{
+		DeviceID:      42,
+		UptimeSec:     200,
+		PolicyVersion: 3,
+		DeniedCount:   15,
+		AllowedCount:  600,
+		Flags:         0,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb2)
+
+	dev, _ = fm.GetDevice(ComposeID(1, 1, 42))
+	// Delta: 15 - 10 = 5, total = 10 + 5 = 15
+	if dev.DeniedTotal != 15 {
+		t.Fatalf("denied_total after second hb = %d, want 15", dev.DeniedTotal)
+	}
+	// Delta: 600 - 500 = 100, total = 500 + 100 = 600
+	if dev.AllowedTotal != 600 {
+		t.Fatalf("allowed_total after second hb = %d, want 600", dev.AllowedTotal)
+	}
+}
+
+func TestHeartbeatReplayRejected(t *testing.T) {
+	fm := New(nil)
+	fm.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	// First heartbeat at uptime 100
+	hb1 := &Heartbeat{
+		DeviceID:     42,
+		UptimeSec:    100,
+		DeniedCount:  5,
+		AllowedCount: 50,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb1)
+
+	// Replay with same uptime — should be dropped
+	hb2 := &Heartbeat{
+		DeviceID:     42,
+		UptimeSec:    100,
+		DeniedCount:  999,
+		AllowedCount: 999,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb2)
+
+	dev, _ := fm.GetDevice(ComposeID(1, 1, 42))
+	if dev.DeniedTotal != 5 {
+		t.Fatalf("denied_total = %d, want 5 (replay should be rejected)", dev.DeniedTotal)
+	}
+
+	// Replay with lower uptime — should also be dropped
+	hb3 := &Heartbeat{
+		DeviceID:     42,
+		UptimeSec:    50,
+		DeniedCount:  999,
+		AllowedCount: 999,
+	}
+	fm.ProcessHeartbeat(1, 1, 42, hb3)
+
+	dev, _ = fm.GetDevice(ComposeID(1, 1, 42))
+	if dev.DeniedTotal != 5 {
+		t.Fatalf("denied_total = %d, want 5 (stale hb should be rejected)", dev.DeniedTotal)
 	}
 }
 
@@ -119,8 +184,9 @@ func TestTamperDetectAlert(t *testing.T) {
 	fm.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 1, 0xFF)
 
 	hb := &Heartbeat{
-		DeviceID: 42,
-		Flags:    0x04, // TAMPER_DETECT
+		DeviceID:  42,
+		UptimeSec: 10,
+		Flags:     0x04, // TAMPER_DETECT
 	}
 	fm.ProcessHeartbeat(1, 1, 42, hb)
 
@@ -142,8 +208,9 @@ func TestSEDegradedAlert(t *testing.T) {
 	fm.RegisterDevice(1, 1, 43, "sbc", "1.0.0", 1, 0xFF)
 
 	hb := &Heartbeat{
-		DeviceID: 43,
-		Flags:    0x80, // SE_DEGRADED
+		DeviceID:  43,
+		UptimeSec: 10,
+		Flags:     0x80, // SE_DEGRADED
 	}
 	fm.ProcessHeartbeat(1, 1, 43, hb)
 

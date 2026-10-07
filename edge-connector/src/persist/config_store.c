@@ -46,6 +46,9 @@ static void persist_active_partition(void) {
     if (hal_flash_write(PARTITION_FLASH_OFFSET, buf, PARTITION_FLASH_SIZE) != 0) {
         fprintf(stderr, "[DCLAW] WARNING: Failed to persist active partition to flash.\n");
     }
+    /* P1-07 fix: Flush to durable storage so a power cut after this call
+     * cannot lose the write that is sitting in the OS page cache. */
+    hal_flash_sync();
 }
 
 static void load_active_partition_from_flash(void) {
@@ -141,16 +144,34 @@ uint8_t dclaw_config_active_policy_partition(void) {
     return active_policy_partition;
 }
 
-void dclaw_config_switch_policy_partition(void) {
+/*
+ * P1-07 fix (atomic persistence): Switch the active policy partition AND
+ * persist both the new partition indicator and the policy version in a
+ * SINGLE hal_flash_write call. Previously the partition and version were
+ * written in two separate calls; a power cut between them could leave the
+ * version at the old value while the partition had already been switched,
+ * defeating the anti-rollback check (REQ-36) on the next boot.
+ *
+ * @param policy_version  The policy version to persist alongside the
+ *                        partition switch. Pass 0 to keep the currently
+ *                        persisted version (used by rollback paths that
+ *                        do not change the version).
+ */
+void dclaw_config_switch_policy_partition(uint16_t policy_version) {
     active_policy_partition = (active_policy_partition == 0) ? 1 : 0;
-    /* P1-07 fix: Persist the new active partition to flash */
+    if (policy_version != 0) {
+        persisted_policy_version = policy_version;
+    }
+    /* Single flash write covers both partition indicator and policy version */
     persist_active_partition();
 }
 
 /*
- * P1-10 fix: Persist the policy version alongside the active partition.
- * Called from ota_receiver.c after a successful OTA apply so the version
- * survives restarts and the anti-rollback check (REQ-36) works correctly.
+ * Persist a new policy version WITHOUT switching the active partition.
+ * Primarily a convenience for callers that need to update the version
+ * in-place (e.g. migration paths). The normal OTA path should use
+ * dclaw_config_switch_policy_partition(version) which writes both the
+ * partition indicator and version atomically in a single flash write.
  */
 void dclaw_config_persist_policy_version(uint16_t version) {
     persisted_policy_version = version;

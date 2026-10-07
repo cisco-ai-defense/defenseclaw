@@ -144,7 +144,8 @@ iot_extensions:
 Only needed when you change the policy. Pre-built binaries include the default policy.
 
 ```bash
-python3 edge-connector/tools/policy_compiler.py \
+cd edge-connector
+python3 tools/policy_compiler.py \
   --input ~/.defenseclaw/policy.yaml \
   --profile standard --version 1 \
   --output-header generated/policy_tables.h \

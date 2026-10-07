@@ -9,6 +9,67 @@ extern dclaw_state_t *dclaw_get_state(void);
 static uint16_t ring_head = 0; /* next write position in flash ring */
 
 /*
+ * NEW-1 fix: Persistent audit ring header.
+ *
+ * A small header is stored at the very start of the audit flash region so
+ * the write-head position and previous HMAC survive across restarts.
+ * Without this, every reboot would overwrite slot 0 and break the HMAC
+ * chain, making the entire audit ring non-tamper-evident.
+ *
+ * Flash layout (within HAL_FLASH_AUDIT_OFFSET .. +HAL_FLASH_AUDIT_SIZE):
+ *   [0..1]   magic      0xDC, 0xA1  (identifies a valid header)
+ *   [2..3]   head_pos   uint16_t LE (next write slot index)
+ *   [4..7]   last_hmac  4 bytes     (HMAC tag of the last written entry)
+ *
+ * Total header = 8 bytes (fits in one aligned flash word).
+ * Audit entries start at HAL_FLASH_AUDIT_OFFSET + AUDIT_RING_HDR_SIZE.
+ */
+#define AUDIT_RING_HDR_MAGIC_0  0xDC
+#define AUDIT_RING_HDR_MAGIC_1  0xA1
+#define AUDIT_RING_HDR_SIZE     8
+
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[2];
+    uint16_t head_pos;
+    uint8_t  last_hmac[4];
+} audit_ring_hdr_t;
+
+_Static_assert(sizeof(audit_ring_hdr_t) == AUDIT_RING_HDR_SIZE,
+               "audit ring header must be 8 bytes");
+
+/*
+ * Write the persistent header to flash.  Called after every flush and
+ * after every direct BLOCK write so the durable state is always current.
+ */
+static int audit_ring_persist_header(const uint8_t *last_hmac) {
+    audit_ring_hdr_t hdr;
+    hdr.magic[0]  = AUDIT_RING_HDR_MAGIC_0;
+    hdr.magic[1]  = AUDIT_RING_HDR_MAGIC_1;
+    hdr.head_pos  = ring_head;
+    memcpy(hdr.last_hmac, last_hmac, 4);
+    return hal_flash_write(HAL_FLASH_AUDIT_OFFSET, &hdr, sizeof(hdr));
+}
+
+/*
+ * Restore ring_head and prev_hmac from the persistent header on init.
+ * Returns 0 if a valid header was found, -1 if the region is blank /
+ * corrupt (caller should start fresh from slot 0).
+ */
+static int audit_ring_restore_header(uint16_t *out_head, uint8_t *out_last_hmac) {
+    audit_ring_hdr_t hdr;
+    if (hal_flash_read(HAL_FLASH_AUDIT_OFFSET, &hdr, sizeof(hdr)) != 0) {
+        return -1;
+    }
+    if (hdr.magic[0] != AUDIT_RING_HDR_MAGIC_0 ||
+        hdr.magic[1] != AUDIT_RING_HDR_MAGIC_1) {
+        return -1; /* no valid header — first boot or erased */
+    }
+    *out_head = hdr.head_pos;
+    memcpy(out_last_hmac, hdr.last_hmac, 4);
+    return 0;
+}
+
+/*
  * Audit HMAC key (Comment 33 fix).
  * Instead of using the previous 4-byte tag as the HMAC key (which is weak
  * and predictable), use a proper device key. The key is loaded from the
@@ -198,13 +259,18 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
 
 /*
  * Maximum number of audit entries that fit in the flash audit partition.
- * This bounds the ring to prevent writes beyond the partition boundary.
+ * The first AUDIT_RING_HDR_SIZE bytes are reserved for the persistent
+ * header (NEW-1 fix), so entries start after that.
  * (Comment 20 fix)
  */
-#define DCLAW_AUDIT_PARTITION_ENTRIES (HAL_FLASH_AUDIT_SIZE / sizeof(dclaw_audit_entry_t))
+#define DCLAW_AUDIT_ENTRY_AREA_SIZE  (HAL_FLASH_AUDIT_SIZE - AUDIT_RING_HDR_SIZE)
+#define DCLAW_AUDIT_PARTITION_ENTRIES (DCLAW_AUDIT_ENTRY_AREA_SIZE / sizeof(dclaw_audit_entry_t))
 
 static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
     if (w->count == 0) return 0;
+
+    /* NEW-1 fix: Entries start after the persistent header. */
+    const uint32_t entry_base = HAL_FLASH_AUDIT_OFFSET + AUDIT_RING_HDR_SIZE;
 
     for (uint8_t i = 0; i < w->count; i++) {
         /* Wrap ring_head within BOTH the logical ring size AND the flash
@@ -213,14 +279,14 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
         if (bounded_index >= DCLAW_AUDIT_PARTITION_ENTRIES) {
             bounded_index = bounded_index % DCLAW_AUDIT_PARTITION_ENTRIES;
         }
-        uint32_t write_offset = HAL_FLASH_AUDIT_OFFSET +
+        uint32_t write_offset = entry_base +
             (bounded_index * sizeof(dclaw_audit_entry_t));
 
         /* Verify write stays within partition bounds */
         if (write_offset + sizeof(dclaw_audit_entry_t) >
             HAL_FLASH_AUDIT_OFFSET + HAL_FLASH_AUDIT_SIZE) {
-            /* Wrap to start of partition */
-            write_offset = HAL_FLASH_AUDIT_OFFSET;
+            /* Wrap to start of entry area */
+            write_offset = entry_base;
             ring_head = 0;
         }
 
@@ -237,8 +303,42 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
     w->count = 0;
     w->last_flush_tick = hal_tick_ms();
 
+    /* NEW-1 fix: Persist head position and last HMAC to flash header */
+    audit_ring_persist_header(w->prev_hmac);
+
     /* Sync to durable storage on periodic flush */
     hal_flash_sync();
+    return 0;
+}
+
+/*
+ * NEW-1 fix: Initialise the audit ring from persistent flash state.
+ *
+ * Must be called once at boot (before any dclaw_audit_write).  Reads
+ * the persistent header to restore ring_head and prev_hmac so that
+ * new entries append after the last valid one and the HMAC chain
+ * continues unbroken across restarts.
+ *
+ * If no valid header is found (first boot / erased flash), the ring
+ * starts fresh from slot 0 with a zero prev_hmac.
+ */
+int dclaw_audit_ring_init(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    dclaw_audit_writer_t *w = &s->audit_writer;
+
+    uint16_t saved_head = 0;
+    uint8_t  saved_hmac[4] = {0};
+
+    if (audit_ring_restore_header(&saved_head, saved_hmac) == 0) {
+        ring_head = saved_head;
+        memcpy(w->prev_hmac, saved_hmac, 4);
+        fprintf(stderr, "[DCLAW-AUDIT] Restored ring head=%u from flash\n",
+                (unsigned)ring_head);
+    } else {
+        ring_head = 0;
+        memset(w->prev_hmac, 0, 4);
+        fprintf(stderr, "[DCLAW-AUDIT] No valid header — starting fresh at slot 0\n");
+    }
     return 0;
 }
 
@@ -278,16 +378,19 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
         /* Flush existing buffer first, then write BLOCK entry directly */
         flush_buffer_to_flash(w);
 
+        /* NEW-1 fix: Entries start after the persistent header. */
+        const uint32_t entry_base = HAL_FLASH_AUDIT_OFFSET + AUDIT_RING_HDR_SIZE;
+
         /* Bound the write offset within the flash audit partition (Comment 20 fix) */
         uint16_t bounded_index = ring_head % DCLAW_AUDIT_RING_SIZE;
         if (bounded_index >= DCLAW_AUDIT_PARTITION_ENTRIES) {
             bounded_index = bounded_index % DCLAW_AUDIT_PARTITION_ENTRIES;
         }
-        uint32_t write_offset = HAL_FLASH_AUDIT_OFFSET +
+        uint32_t write_offset = entry_base +
             (bounded_index * sizeof(dclaw_audit_entry_t));
         if (write_offset + sizeof(dclaw_audit_entry_t) >
             HAL_FLASH_AUDIT_OFFSET + HAL_FLASH_AUDIT_SIZE) {
-            write_offset = HAL_FLASH_AUDIT_OFFSET;
+            write_offset = entry_base;
             ring_head = 0;
         }
         if (hal_flash_write(write_offset, &entry, sizeof(dclaw_audit_entry_t)) != 0) {
@@ -297,6 +400,8 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
         w->total_flash_writes++;
         /* Update prev_hmac so the next buffered entry chains from this BLOCK entry */
         memcpy(w->prev_hmac, entry.hmac, 4);
+        /* NEW-1 fix: Persist head position and last HMAC to flash header */
+        audit_ring_persist_header(w->prev_hmac);
         /* Sync to durable storage for BLOCK durability (Comment 33 fix) */
         hal_flash_sync();
         return 0;

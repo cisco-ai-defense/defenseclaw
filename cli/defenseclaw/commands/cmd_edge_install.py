@@ -23,6 +23,7 @@ either locally or on a remote device via SSH.
 from __future__ import annotations
 
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -124,7 +125,7 @@ def _build_remote(target: str, user: str, remote_dir: str, profile: str) -> bool
     build_script = (
         f"cd {remote_dir} && "
         f"mkdir -p build && cd build && "
-        f"cmake .. -DDCLAW_PROFILE={profile} && "
+        f"cmake .. -DDCLAW_PROFILE={profile} -DDCLAW_DEV_MODE=OFF && "
         f"make -j$(nproc) && "
         f"sudo make install"
     )
@@ -159,8 +160,11 @@ def _configure_remote_env(
     target: str, user: str,
     tenant_id: str, fleet_id: str, device_id: str, broker_url: str,
     device_key: str = "",
-) -> None:
-    """Write device env vars to /etc/defenseclaw/edge-connector.env on the remote."""
+) -> bool:
+    """Write device env vars to /etc/defenseclaw/edge-connector.env on the remote.
+
+    Returns True on success, False if the SSH env write failed.
+    """
     ux.echo()
     ux.section("Configuring device environment")
     env_lines = (
@@ -187,6 +191,16 @@ def _configure_remote_env(
     if ota_key:
         env_lines += f"DCLAW_OTA_KEY={shlex.quote(ota_key)}\n"
 
+    # P1-18 fix: Generate a random audit key if none is provided.
+    # The audit key is a 32-byte hex-encoded HMAC key used for tamper-evident
+    # audit log signing on the device.  Without it the edge-connector falls
+    # back to DEV_MODE audit (unsigned), which is disabled in production builds.
+    audit_key = _load_local_env_value("DCLAW_AUDIT_KEY")
+    if not audit_key:
+        audit_key = secrets.token_hex(32)
+        ux.echo(f"  Generated random audit key ({len(audit_key)} hex chars)")
+    env_lines += f"DCLAW_AUDIT_KEY={shlex.quote(audit_key)}\n"
+
     configure_cmd = (
         "sudo mkdir -p /etc/defenseclaw && "
         f"printf %s {shlex.quote(env_lines)} | sudo tee /etc/defenseclaw/edge-connector.env > /dev/null && "
@@ -202,8 +216,10 @@ def _configure_remote_env(
             ux.warn("DCLAW_MQTT_USER not found in ~/.defenseclaw/.env -- configure manually on the device.")
         if not ota_key:
             ux.warn("DCLAW_OTA_KEY not found in ~/.defenseclaw/.env -- configure manually on the device.")
+        return True
     else:
-        ux.warn("Could not write env file. Configure manually on the device.")
+        ux.err("Failed to write env file on remote device. The device cannot start without it.")
+        return False
 
 
 def _find_service_file() -> Path | None:
@@ -299,9 +315,14 @@ def _register_device_via_api(
     ux.echo()
     ux.section("Registering device with fleet manager")
 
-    # The fleet API base URL comes from the operator's local env, or defaults
-    # to the local gateway.
-    api_base = os.environ.get("DCLAW_FLEET_API_URL", "http://localhost:8080/api/v1/fleet")
+    # The fleet API base URL comes from the operator's local env, falling back
+    # to the local .env file, or defaults to the gateway on port 13400 (consistent
+    # with _DEFAULT_FLEET_ENDPOINT in cmd_setup_edge_connector.py).
+    api_base = (
+        os.environ.get("DCLAW_FLEET_API_URL")
+        or _load_local_env_value("DCLAW_FLEET_API_URL")
+        or "http://localhost:13400/api/v1/fleet"
+    )
     api_token = _load_local_env_value("DCLAW_FLEET_API_TOKEN") or os.environ.get("DCLAW_FLEET_API_TOKEN", "")
 
     url = f"{api_base}/devices"
@@ -439,7 +460,7 @@ def _build_local(source: Path, profile: str) -> bool:
     build_dir = source / "build"
     build_dir.mkdir(exist_ok=True)
     try:
-        _run(["cmake", "..", f"-DDCLAW_PROFILE={profile}"], cwd=build_dir)
+        _run(["cmake", "..", f"-DDCLAW_PROFILE={profile}", "-DDCLAW_DEV_MODE=OFF"], cwd=build_dir)
         _run(["make", f"-j{os.cpu_count() or 1}"], cwd=build_dir)
         _run(["sudo", "make", "install"], cwd=build_dir)
     except subprocess.CalledProcessError:
@@ -461,7 +482,7 @@ def _build_local(source: Path, profile: str) -> bool:
 @click.option("--fleet-id", default="1", help="Fleet ID for device registration.")
 @click.option("--device-id", default=None, help="Device ID (auto-generated if omitted).")
 @click.option(
-    "--broker-url", default="tcp://localhost:1883",
+    "--broker-url", default="mqtt://localhost:1883",
     help="MQTT broker URL for the device.",
 )
 @pass_ctx
@@ -536,8 +557,18 @@ def edge_install(
             )
             raise SystemExit(1)
 
-        _configure_remote_env(target, user, tenant_id, fleet_id, device_id, broker_url,
-                              device_key=device_key)
+        env_ok = _configure_remote_env(target, user, tenant_id, fleet_id, device_id, broker_url,
+                                       device_key=device_key)
+        if not env_ok:
+            ux.echo()
+            ux.section("Install failed")
+            ux.err(
+                f"Could not write environment file on {target}.\n"
+                "  The device cannot start without /etc/defenseclaw/edge-connector.env.\n"
+                "  Fix SSH connectivity and re-run, or write the file manually."
+            )
+            raise SystemExit(1)
+
         daemon_ok = _start_remote_daemon(target, user)
 
         ux.echo()

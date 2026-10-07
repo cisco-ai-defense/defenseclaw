@@ -178,11 +178,11 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     if (!s->online) flags |= 0x20; /* OFFLINE_MODE */
     if (!s->clock.time_trusted) flags |= 0x02; /* POLICY_STALE (no time = stale) */
     /* P2-19 fix: Include rollback flag 0x08 when a canary rollback occurred.
-     * This is a one-shot signal — cleared after encoding so only the first
-     * heartbeat after a rollback carries the flag. */
+     * The flag is set here but NOT cleared — clearing happens in
+     * mqtt_client.c after the heartbeat publish succeeds.  This ensures the
+     * flag is retried on the next heartbeat if the publish fails. */
     if (s->rollback_pending) {
         flags |= 0x08; /* CANARY_ROLLBACK */
-        s->rollback_pending = false;
     }
     buf[pos++] = flags;
 

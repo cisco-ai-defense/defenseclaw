@@ -346,7 +346,9 @@ class _SocketBackend:
 class EdgeConnector:
     """Framework-agnostic Edge Connector client.
 
-    Tries FFI (ctypes) first, then falls back to Unix socket.
+    Prefers IPC (Unix socket to daemon) when a daemon is running, since the
+    daemon is the policy authority and applies OTA updates.  Falls back to
+    FFI (ctypes, in-process) only when no daemon socket exists.
     Set ``fail_open=True`` to allow tool calls when no backend is available.
     """
 
@@ -379,22 +381,33 @@ class EdgeConnector:
     # -- connection --------------------------------------------------------
 
     def _connect(self) -> Optional[_FFIBackend | _SocketBackend]:
-        # Try FFI first
-        try:
-            backend = _FFIBackend(self._lib_path)
-            logger.info("EdgeConnector: connected via FFI (%s)", self._lib_path)
-            return backend
-        except (OSError, RuntimeError) as exc:
-            logger.debug("EdgeConnector: FFI unavailable (%s), trying socket", exc)
+        # NEW-2 fix: Prefer IPC (daemon socket) over FFI when a daemon is
+        # running.  The daemon is the policy authority — it applies OTA
+        # updates and keeps policy state current.  FFI loads policy into
+        # the hook's own process memory, which goes stale when the daemon
+        # receives an OTA.  Only fall back to FFI when no daemon socket
+        # exists (standalone / no-daemon deployments).
 
-        # Try Unix socket
+        # Try Unix socket first (daemon is the policy authority)
         if Path(self._socket_path).exists():
             try:
                 backend = _SocketBackend(self._socket_path)
-                logger.info("EdgeConnector: connected via socket (%s)", self._socket_path)
+                logger.info(
+                    "EdgeConnector: connected via IPC socket (%s) — "
+                    "daemon is policy authority",
+                    self._socket_path,
+                )
                 return backend
             except Exception as exc:
-                logger.debug("EdgeConnector: socket unavailable (%s)", exc)
+                logger.debug("EdgeConnector: socket unavailable (%s), trying FFI", exc)
+
+        # Fall back to FFI only when no daemon is running
+        try:
+            backend = _FFIBackend(self._lib_path)
+            logger.info("EdgeConnector: connected via FFI (%s) — no daemon detected", self._lib_path)
+            return backend
+        except (OSError, RuntimeError) as exc:
+            logger.debug("EdgeConnector: FFI unavailable (%s)", exc)
 
         if self._fail_open:
             logger.warning("EdgeConnector: no backend available — running in fail-open mode")

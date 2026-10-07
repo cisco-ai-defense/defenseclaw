@@ -96,6 +96,33 @@ func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache, bridge *mqtt.B
 		},
 	)
 
+	// P2-19 fix: Wire status-change hook so gauge metrics update correctly
+	// when a device transitions between states (e.g., online → lockdown).
+	mgr.SetStatusChangeHook(func(oldStatus, newStatus manager.DeviceStatus) {
+		// Decrement old status gauge
+		switch oldStatus {
+		case manager.StatusOnline:
+			GlobalMetrics.DevicesOnline.Add(-1)
+		case manager.StatusOffline:
+			GlobalMetrics.DevicesOffline.Add(-1)
+		case manager.StatusDegraded:
+			GlobalMetrics.DevicesDegraded.Add(-1)
+		case manager.StatusLockdown:
+			GlobalMetrics.DevicesLockdown.Add(-1)
+		}
+		// Increment new status gauge
+		switch newStatus {
+		case manager.StatusOnline:
+			GlobalMetrics.DevicesOnline.Add(1)
+		case manager.StatusOffline:
+			GlobalMetrics.DevicesOffline.Add(1)
+		case manager.StatusDegraded:
+			GlobalMetrics.DevicesDegraded.Add(1)
+		case manager.StatusLockdown:
+			GlobalMetrics.DevicesLockdown.Add(1)
+		}
+	})
+
 	cache.SetMetricsHooks(
 		func() { // onHit
 			GlobalMetrics.VerdictCacheHits.Add(1)
