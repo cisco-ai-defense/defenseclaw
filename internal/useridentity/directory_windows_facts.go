@@ -112,6 +112,7 @@ func resolveWindowsDirectoryFacts(
 	}
 	join := readWindowsJoinState(r)
 	account, domain, ok := r.LookupAccount(sid)
+	account, lsaUPN := SplitLSAAccount(account)
 	upn, provider := identityStoreUPN(r, sid)
 	switch {
 	case strings.HasPrefix(sid, entraUserSIDPrefix) || (strings.EqualFold(provider, entraProviderName) && !ok):
@@ -137,6 +138,10 @@ func resolveWindowsDirectoryFacts(
 			facts.UPN = upn
 			facts.TenantID = join.TenantID
 			facts.Source = SourceWindowsIdentityStore
+		} else if lsaUPN != "" {
+			// The LSA answered with the name the user signed in with,
+			// which is the account's UPN (GAP-0417).
+			facts.UPN = lsaUPN
 		} else if adUPN != nil && account != "" {
 			facts.UPN = NormalizeUPN(adUPN(domain + `\` + account))
 		}
@@ -157,6 +162,20 @@ func resolveWindowsDirectoryFacts(
 		facts.Domain = strings.ToLower(facts.UPN[strings.LastIndexByte(facts.UPN, '@')+1:])
 	}
 	return facts
+}
+
+// SplitLSAAccount splits the account name LookupAccountSid returns. The LSA
+// lookup cache can answer with the name a user signed in with, so an AD
+// account that signed in by UPN comes back as DOMAIN\alice@corp.example.com
+// instead of DOMAIN\alice (GAP-0417). name is the part before the "@" (an
+// account name cannot contain one); upn is the UPN-form answer, or "" when
+// the LSA reported the plain account name.
+func SplitLSAAccount(account string) (name, upn string) {
+	account = strings.TrimSpace(account)
+	if at := strings.IndexByte(account, '@'); at > 0 {
+		return account[:at], NormalizeUPN(account)
+	}
+	return account, ""
 }
 
 // validTenantID accepts the GUID-shaped tenant ids the join state records.
