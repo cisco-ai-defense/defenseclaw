@@ -1299,11 +1299,16 @@ defenseclaw_extract_trace_context() {
 # guardrail hook under errexit, where a nonzero return would convert a missing
 # telemetry field into a blocked or allowed tool call.
 defenseclaw_user_identity_args() {
-  local facts
-  facts="$(defenseclaw_session_facts_value)"
-  if [ -n "$facts" ]; then
-    printf '%s\n' "-H"
-    printf '%s\n' "X-DefenseClaw-Session-Facts: $facts"
+  local facts secure_client=0
+  # A Secure Client hook keeps its earlier headers: no session facts and the
+  # account name as id reports it (issue #1092).
+  defenseclaw_secure_client_hook && secure_client=1
+  if [ "$secure_client" = 0 ]; then
+    facts="$(defenseclaw_session_facts_value)"
+    if [ -n "$facts" ]; then
+      printf '%s\n' "-H"
+      printf '%s\n' "X-DefenseClaw-Session-Facts: $facts"
+    fi
   fi
 
   command -v id >/dev/null 2>&1 || return 0
@@ -1320,13 +1325,26 @@ defenseclaw_user_identity_args() {
 
   name="$(id -un 2>/dev/null)" || name=""
   # SSSD fully qualified names (alice@realm) report the bare account.
-  name="${name%%@*}"
+  [ "$secure_client" = 1 ] || name="${name%%@*}"
   case "$name" in
     '' | *[!A-Za-z0-9._-]*) return 0 ;;
   esac
   printf '%s\n' "-H"
   printf '%s\n' "X-DefenseClaw-User-Name: $name"
   return 0
+}
+
+# defenseclaw_secure_client_hook reports a hook of the Secure Client profile:
+# an administrator-managed hook installed in the Secure Client layout.
+defenseclaw_secure_client_hook() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) ;;
+    *) return 1 ;;
+  esac
+  case "${DEFENSECLAW_HOME:-}" in
+    /opt/cisco/secureclient/*) return 0 ;;
+  esac
+  return 1
 }
 
 # defenseclaw_session_facts_value renders the X-DefenseClaw-Session-Facts

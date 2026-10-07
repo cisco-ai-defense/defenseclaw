@@ -244,16 +244,11 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             click.echo(f"(source: {source})", err=True)
             _echo_value(value, fmt)
             return
-    view = _show_data(app, source=False, effective=False, provenance=False)
-    if parts[:2] == ["observability", "destinations"]:
-        # config set indexes the destinations as written in config.yaml; the
-        # resolved plan also lists the generated ones, such as local-sqlite
-        # at index 0 (GAP-0008).
-        written = _show_data(app, source=True, effective=False, provenance=False)
-        if _lookup(written, parts)[0]:
-            view = written
+    view = _key_view(app, parts)
     found, value = _lookup(view, parts)
     if not found:
+        if _is_destination_key(parts):
+            raise click.ClickException(_destination_not_set(key, parts, view))
         sections = _v8_sections() or set(view)
         if parts[0] not in view and parts[0] not in sections:
             available = ", ".join(sorted(sections)) or "none"
@@ -273,6 +268,40 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         elif effective:
             click.echo(f"(source: {config_module.config_path()})", err=True)
     _echo_value(value, fmt)
+
+
+def _is_destination_key(parts: list) -> bool:
+    return parts[:2] == ["observability", "destinations"]
+
+
+def _key_view(app: AppContext, parts: list) -> dict:
+    """The document a key is read from: config.yaml as written for the
+    observability destinations, the resolved defaults for everything else.
+
+    config set indexes the destinations as written in config.yaml; the
+    resolved plan also lists the generated ones, such as local-sqlite at
+    index 0, so reading the plan would answer for indexes set cannot edit
+    (GAP-0008, GAP-0154).
+    """
+    return _show_data(app, source=_is_destination_key(parts), effective=False, provenance=False)
+
+
+def _destination_not_set(key: str, parts: list, written: dict) -> str:
+    listed = _lookup(written, parts[:2])[1]
+    count = len(listed) if isinstance(listed, list) else 0
+    if count == 0:
+        return (
+            f"{key} is not set: config.yaml lists no destinations. Add one with "
+            "'defenseclaw setup observability add'; 'defenseclaw config show --effective' "
+            "shows the generated ones."
+        )
+    if len(parts) > 2 and isinstance(parts[2], int) and parts[2] >= count:
+        noun = "destination" if count == 1 else "destinations"
+        return f"{key} is not set: the index is out of range (config.yaml lists {count} {noun})."
+    return (
+        f"{key} is not set in config.yaml. 'defenseclaw config show --effective' shows the "
+        "value the gateway resolves."
+    )
 
 
 def _written_in_source(app: AppContext, parts: list) -> bool:
@@ -352,7 +381,11 @@ def _update_view(cfg: object) -> tuple[dict, dict[str, str]]:
     check = getattr(written, "check", None)
     channel = str(getattr(written, "channel", "") or "")
     source = str(getattr(written, "source", "") or "")
-    data = {"check": True if check is None else bool(check), "channel": channel or "stable", "source": source or OFFICIAL_SOURCE}
+    data = {
+        "check": True if check is None else bool(check),
+        "channel": channel or "stable",
+        "source": source or OFFICIAL_SOURCE,
+    }
     sources = {
         name: f"config:update.{name}" if is_set else "builtin"
         for name, is_set in (("check", check is not None), ("channel", bool(channel)), ("source", bool(source)))
@@ -496,9 +529,11 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         return
     # Nothing was removed: a key with a default is already unset, anything
     # else is not a configuration key (a typo must not look like success).
-    view = _show_data(app, source=False, effective=False, provenance=False)
     for key, parts in parsed:
+        view = _key_view(app, parts)
         if not _lookup(view, parts)[0]:
+            if _is_destination_key(parts):
+                raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
     if len(keys) == 1:
         click.echo(f"{keys[0]} is not set in config.yaml; its default already applies.")
@@ -514,9 +549,9 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
     """Migrate config.yaml to config_version 9 (or acknowledge the migration).
 
     Moves the admission policy in policies/rego/data.json, the *_actions
-    keys, rule_pack_dir, the v8 scanner keys, update_check and the operator
-    block/allow entries of audit.db into config.yaml. Keeps
-    config.yaml.v8.bak and writes migration-v9.json.
+    keys, rule_pack_dir, the v8 scanner keys, update_check, a leftover
+    privacy section and the operator block/allow entries of audit.db into
+    config.yaml. Keeps config.yaml.v8.bak and writes migration-v9.json.
     """
     from defenseclaw.config_inspect import migrate_config_v9
 
@@ -604,19 +639,13 @@ def _v8_defaults(app: AppContext) -> dict:
         return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
 
     pruned = _prune(_config_to_masked_dict(cfg), schema)
-    _show_effective_scanner_settings(pruned, cfg)  # type: ignore[arg-type]
+    _show_effective_scanner_settings(pruned)  # type: ignore[arg-type]
     return pruned  # type: ignore[return-value]
 
 
-#: scanners.skill_scanner keys that config_version 9 no longer reads: they are
-#: migration input, so a v9 source does not list them as settings.
-_SKILL_SCANNER_V8_KEYS = ("binary", "use_virustotal", "use_aidefense", "virustotal_api_key", "virustotal_api_key_env")
-
-
-def _show_effective_scanner_settings(masked: dict, cfg: object) -> None:
+def _show_effective_scanner_settings(masked: dict) -> None:
     """Fill the scanner keys a blank value stands for with what the gateway
-    runs with (the severity gate and the judge source), and leave out the
-    migration-only keys of a v9 source."""
+    runs with (the severity gate and the judge source)."""
     from defenseclaw.enforce.admission import _DEFAULT_FAIL_ON_SEVERITY, _DEFAULT_REVIEW_QUEUE_MIN
 
     scanners = masked.get("scanners")
@@ -633,9 +662,6 @@ def _show_effective_scanner_settings(masked: dict, cfg: object) -> None:
     if isinstance(skill, dict):
         skill["fail_on_severity"] = skill.get("fail_on_severity") or _DEFAULT_FAIL_ON_SEVERITY
         skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
-        if getattr(cfg, "_source_config_version", 0) >= config_module.CONFIG_VERSION_V9:
-            for key in _SKILL_SCANNER_V8_KEYS:
-                skill.pop(key, None)
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
@@ -1082,7 +1108,7 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     detail = "; ".join(parts).rstrip(".") or "is not valid"
     # ``config reference`` (YAML) covers only observability; the JSON schema
     # lists every section and field (GAP-1661).
-    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code == "config_schema_invalid" else ""
+    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code in ("config_schema_invalid", "additionalProperties") else ""
     return f"{where}{field}: {detail}.{suffix}"
 
 

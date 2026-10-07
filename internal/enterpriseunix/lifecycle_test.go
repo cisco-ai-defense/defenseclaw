@@ -722,13 +722,10 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	if _, ok := h.accounts.accounts["defenseclaw"]; !ok {
 		t.Fatal("--keep-service-account removed the service account")
 	}
-	r = h.run(Options{Action: ActionUninstall, Purge: true, RemoveServiceAccount: true})
+	r = h.run(Options{Action: ActionUninstall, Purge: true})
 	requireOK(t, r)
 	if _, ok := h.accounts.accounts["defenseclaw"]; ok {
 		t.Fatal("purge kept the service account")
-	}
-	if !hasWarning(r, codeDeprecatedOption) {
-		t.Fatalf("--remove-service-account must warn that it is deprecated: %+v", r.Warnings)
 	}
 	if r := h.run(Options{Action: ActionUninstall, Purge: true, KeepState: true}); r.ExitCode == 0 {
 		t.Fatal("--keep-state with --purge must be refused")
@@ -1368,19 +1365,5 @@ func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
 	}
 	if got := h.mode(filepath.Join(l.VendorPolicyDir, "guardrail", "default", "rules", "secrets.yaml")); got != 0o644 {
 		t.Fatalf("vendor rule mode %04o under umask 077", got)
-	}
-}
-
-// GAP-1193: a connector that inherits the global rule pack is not checked
-// again, so a refusal names guardrail.rule_pack_dir.
-func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
-	got := rulePackCheckOrder(map[string]string{
-		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
-		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
-		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
-	})
-	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("order = %v, want %v", got, want)
 	}
 }

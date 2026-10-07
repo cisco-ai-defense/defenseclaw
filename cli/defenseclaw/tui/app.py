@@ -15761,7 +15761,7 @@ def _fetch_v8_operator_status(
         if isinstance(path, str) and isinstance(keyword, str) and path and keyword:
             safe_path = re.sub(r"[^A-Za-z0-9_.$\[\]-]", "?", path)[:256]
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
-            return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
+            return None, f"invalid configuration at {safe_path} ({safe_keyword})"
         return None, "telemetry status could not be loaded; run defenseclaw observability validate"
 
 
@@ -16290,12 +16290,6 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     )
 
 
-class _HandledAction:
-    def __init__(self, handled: bool, hint: str = "") -> None:
-        self.handled = handled
-        self.hint = hint
-
-
 def _menu_action(action: CatalogMenuAction) -> MenuAction:
     return MenuAction(
         action_id=action.key,
@@ -16536,14 +16530,6 @@ def _fit_section_value(value: str, width: int) -> str:
     if len(wrapped) <= _SECTION_VALUE_MAX_LINES:
         return "\n".join(wrapped)
     return "\n".join(_truncate_ellipsis(line, width) for line in lines)
-
-
-def _truncate_display(value: str, width: int) -> str:
-    if len(value) <= width:
-        return value
-    if width <= 3:
-        return value[:width]
-    return value[: width - 3] + "..."
 
 
 def _styled_cell(column: str, value: str) -> Text:

@@ -68,7 +68,6 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 			DebounceMs: 100,
 			AutoBlock:  true,
 		},
-		SkillActions: config.DefaultSkillActions(),
 	}
 
 	return cfg, store, logger, skillDir
@@ -102,8 +101,7 @@ func setupQuarantineProvenanceTestEnv(
 			SkillScanner: config.SkillScannerConfig{Binary: "skill-scanner"},
 			MCPScanner:   config.MCPScannerConfig{Binary: "mcp-scanner"},
 		},
-		Watch:        config.WatchConfig{DebounceMs: 100, AutoBlock: true},
-		SkillActions: config.DefaultSkillActions(),
+		Watch: config.WatchConfig{DebounceMs: 100, AutoBlock: true},
 	}
 	return cfg, store, logger, skillDir
 }

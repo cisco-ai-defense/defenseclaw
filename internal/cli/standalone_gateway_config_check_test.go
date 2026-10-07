@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -104,5 +105,21 @@ func TestStandaloneGatewayConfigCheckAsksTheServiceAccount(t *testing.T) {
 	}
 	if len(asked) != 1 || asked[0] != "guardrail.rule_pack_dir|"+pack+`|NT SERVICE\DefenseClawGateway` {
 		t.Fatalf("service read check calls = %q", asked)
+	}
+}
+
+// GAP-0039: a connector that inherits the selected custom pack is not the key
+// a refusal names, and a custom_packs entry nothing selects is not loaded.
+func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "acme"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
+		"acme":   {Path: "/packs/acme"},
+		"unused": {Path: "/packs/unused"},
+	}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}, "codex": {}}
+	got := standaloneGatewayRulePackDirs(cfg)
+	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != "/packs/acme" {
+		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack /packs/acme", got)
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -42,9 +43,7 @@ func init() {
 	policyCmd.AddCommand(policyTestCmd)
 	policyCmd.AddCommand(policyShowCmd)
 	policyCmd.AddCommand(policyEvaluateCmd)
-	policyCmd.AddCommand(policyEvaluateFirewallCmd)
 	policyCmd.AddCommand(policyReloadCmd)
-	policyCmd.AddCommand(policyDomainsCmd)
 
 	policyValidateCmd.Flags().String("rego-dir", "", "Rego directory to validate (default: the configured policy directory)")
 	policyTestCmd.Flags().String("rego-dir", "", "Rego directory to test (default: the configured policy directory)")
@@ -54,11 +53,6 @@ func init() {
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
 	policyEvaluateCmd.Flags().String("severity", "", "Max severity of scan result (empty = pre-scan)")
 	policyEvaluateCmd.Flags().Int("findings", 0, "Number of findings")
-
-	policyEvaluateFirewallCmd.Flags().String("destination", "", "Destination hostname or IP")
-	policyEvaluateFirewallCmd.Flags().Int("port", 443, "Destination port")
-	policyEvaluateFirewallCmd.Flags().String("protocol", "tcp", "Protocol (tcp/udp)")
-	policyEvaluateFirewallCmd.Flags().String("target-type", "skill", "Target type context")
 }
 
 var policyCmd = &cobra.Command{
@@ -284,49 +278,6 @@ var policyEvaluateCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// policy evaluate-firewall — dry-run firewall
-// ---------------------------------------------------------------------------
-
-var policyEvaluateFirewallCmd = &cobra.Command{
-	Use:   "evaluate-firewall",
-	Short: "Dry-run the firewall policy for a given destination",
-	RunE: func(cmd *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
-		}
-
-		destination, _ := cmd.Flags().GetString("destination")
-		port, _ := cmd.Flags().GetInt("port")
-		protocol, _ := cmd.Flags().GetString("protocol")
-		targetType, _ := cmd.Flags().GetString("target-type")
-
-		if destination == "" {
-			return fmt.Errorf("--destination is required")
-		}
-
-		input := policy.FirewallInput{
-			TargetType:  targetType,
-			Destination: destination,
-			Port:        port,
-			Protocol:    protocol,
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		out, err := policy.EvaluateFirewallExact(ctx, paths.regoDir, input)
-		if err != nil {
-			return fmt.Errorf("evaluation failed: %w", err)
-		}
-
-		result, _ := json.MarshalIndent(out, "", "  ")
-		fmt.Println(string(result))
-		return nil
-	},
-}
-
-// ---------------------------------------------------------------------------
 // policy reload — tell running daemon to hot-reload
 // ---------------------------------------------------------------------------
 
@@ -385,7 +336,7 @@ var policyReloadCmd = &cobra.Command{
 
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("reload failed (HTTP %d): %s", resp.StatusCode, string(body))
+			return policyReloadError(resp.StatusCode, body)
 		}
 
 		var result map[string]interface{}
@@ -399,55 +350,37 @@ var policyReloadCmd = &cobra.Command{
 	},
 }
 
-// ---------------------------------------------------------------------------
-// policy domains — list allowed/blocked domains from data-sandbox.json
-// ---------------------------------------------------------------------------
+// customPackPinMismatch matches the rebuild error for a custom rule pack whose
+// files no longer match its guardrail.custom_packs pin.
+var customPackPinMismatch = regexp.MustCompile(`rule pack "([^"]+)": digest (sha256:[0-9a-f]{64}) does not match guardrail\.custom_packs\.`)
 
-var policyDomainsCmd = &cobra.Command{
-	Use:   "domains",
-	Short: "List firewall domain allowlist and blocklist from active policy",
-	RunE: func(_ *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
-		}
-
-		effectiveData, err := policy.LoadSandboxData(paths.regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load firewall data: %w", err)
-		}
-		raw, err := json.Marshal(effectiveData)
-		if err != nil {
-			return fmt.Errorf("policy: encode effective data: %w", err)
-		}
-
-		var data struct {
-			Firewall struct {
-				DefaultAction       string   `json:"default_action"`
-				BlockedDestinations []string `json:"blocked_destinations"`
-				AllowedDomains      []string `json:"allowed_domains"`
-				AllowedPorts        []int    `json:"allowed_ports"`
-			} `json:"firewall"`
-		}
-		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("policy: parse %s: %w", policy.SandboxDataFile, err)
-		}
-
-		fmt.Printf("Default action: %s\n", data.Firewall.DefaultAction)
-		fmt.Printf("Allowed ports:  %v\n\n", data.Firewall.AllowedPorts)
-
-		fmt.Println("Blocked destinations:")
-		for _, d := range data.Firewall.BlockedDestinations {
-			fmt.Printf("  - %s\n", d)
-		}
-		fmt.Println()
-
-		fmt.Println("Allowed domains:")
-		for _, d := range data.Firewall.AllowedDomains {
-			fmt.Printf("  + %s\n", d)
-		}
-		return nil
-	},
+// policyReloadError says a refused /policy/reload in plain words: no HTTP
+// status, no JSON body and no internal stage names. A rebuild that fails leaves
+// the previous policy enforcing; a pin mismatch also names the command that
+// pins the pack as it is now.
+func policyReloadError(status int, body []byte) error {
+	var payload struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	reason := strings.TrimSpace(string(body))
+	if json.Unmarshal(body, &payload) == nil && payload.Error != "" {
+		reason = payload.Error
+	}
+	if reason == "" {
+		return fmt.Errorf("policy reload failed (HTTP %d)", status)
+	}
+	reason = strings.TrimPrefix(reason, "reload failed: ")
+	reason = strings.TrimPrefix(reason, "config reload rule pack preflight: ")
+	if m := customPackPinMismatch.FindStringSubmatch(reason); m != nil {
+		key := "guardrail.custom_packs." + m[1] + ".digest"
+		return fmt.Errorf("policy reload failed: rule pack %s no longer matches its pin (%s). The previous policy is still enforcing. "+
+			"Review the pack, then pin it with: defenseclaw config set %s %s", m[1], key, key, m[2])
+	}
+	if payload.Status == "failed" {
+		return fmt.Errorf("policy reload failed: %s. The previous policy is still enforcing", strings.TrimSuffix(reason, "."))
+	}
+	return fmt.Errorf("policy reload failed: %s", reason)
 }
 
 // ---------------------------------------------------------------------------
@@ -455,16 +388,14 @@ var policyDomainsCmd = &cobra.Command{
 // ---------------------------------------------------------------------------
 
 type resolvedPolicyPaths struct {
-	rootDir  string
-	regoDir  string
-	dataPath string
+	rootDir string
+	regoDir string
 }
 
 // resolvePolicyPaths resolves one immutable layout for every local policy
 // command. Current installations use <policy-root>/rego; releases through
-// 0.3.x used the flat policy root. Canonical evidence always wins, including a
-// data-sandbox.json without modules, so an incomplete or malformed canonical layout
-// cannot silently downgrade to stale flat policy data.
+// 0.3.x used the flat policy root. Canonical modules always win, so a stale
+// flat copy cannot shadow them.
 func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 	root, err := resolvePolicyRoot()
 	if err != nil {
@@ -475,42 +406,19 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 	if err != nil {
 		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical Rego directory: %w", err)
 	}
-	nestedData, err := resolveContainedPolicyPath(root, filepath.Join(nestedDir, policy.SandboxDataFile))
-	if err != nil {
-		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical policy data: %w", err)
-	}
 	nestedModules, err := policyDirectoryHasRego(root, nestedDir)
 	if err != nil {
 		return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical Rego directory: %w", err)
 	}
-	nestedDataExists, err := policyDataFileExists(nestedData)
-	if err != nil {
-		return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical policy data: %w", err)
-	}
 
-	paths := resolvedPolicyPaths{rootDir: root}
-	if nestedModules || nestedDataExists {
-		paths.regoDir = nestedDir
-		paths.dataPath = nestedData
-	} else {
-		flatData, err := resolveContainedPolicyPath(root, filepath.Join(root, policy.SandboxDataFile))
-		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("resolve legacy policy data: %w", err)
-		}
+	paths := resolvedPolicyPaths{rootDir: root, regoDir: nestedDir}
+	if !nestedModules {
 		flatModules, err := policyDirectoryHasRego(root, root)
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("inspect legacy Rego directory: %w", err)
 		}
-		flatDataExists, err := policyDataFileExists(flatData)
-		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("inspect legacy policy data: %w", err)
-		}
-		if flatModules || flatDataExists {
+		if flatModules {
 			paths.regoDir = root
-			paths.dataPath = flatData
-		} else {
-			paths.regoDir = nestedDir
-			paths.dataPath = nestedData
 		}
 	}
 
@@ -522,25 +430,13 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested Rego directory: %w", err)
 		}
-		deeperData, err := resolveContainedPolicyPath(root, filepath.Join(deeperDir, policy.SandboxDataFile))
-		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested policy data: %w", err)
-		}
 		deeperModules, err := policyDirectoryHasRego(root, deeperDir)
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("inspect nested Rego directory: %w", err)
 		}
-		deeperDataExists, err := policyDataFileExists(deeperData)
-		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("inspect nested policy data: %w", err)
-		}
-		if deeperModules || deeperDataExists {
+		if deeperModules {
 			return resolvedPolicyPaths{}, fmt.Errorf("policy root contains an unsupported nested rego/rego layout")
 		}
-	}
-
-	if err := validatePolicyEnginePaths(root, paths.regoDir); err != nil {
-		return resolvedPolicyPaths{}, err
 	}
 	return paths, nil
 }
@@ -681,31 +577,6 @@ func policyDirectoryHasRego(root, dir string) (bool, error) {
 		found = true
 	}
 	return found, nil
-}
-
-func policyDataFileExists(path string) (bool, error) {
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !info.Mode().IsRegular() {
-		return false, fmt.Errorf("policy data is not a regular file")
-	}
-	return true, nil
-}
-
-func validatePolicyEnginePaths(root, regoDir string) error {
-	supplemental, err := resolveContainedPolicyPath(root, filepath.Join(regoDir, "data-sandbox.json"))
-	if err != nil {
-		return fmt.Errorf("resolve supplemental policy data: %w", err)
-	}
-	if _, err := policyDataFileExists(supplemental); err != nil {
-		return fmt.Errorf("inspect supplemental policy data: %w", err)
-	}
-	return nil
 }
 
 func policyPathContained(root, candidate string) bool {

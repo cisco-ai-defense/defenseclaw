@@ -440,12 +440,20 @@ restart fails closed.
 | Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
 
 Restart the gateway after you edit a rule pack or policy file in place.
-Secrets and upgrades restart it on their own. On Linux and macOS, `ensure`
+Secrets and upgrades restart it on their own. On every OS, `ensure`
 applies a config change that only touches keys the gateway reloads in place
 (most of them) in the running gateway, without a restart, and waits until the
 gateway reports the new policy: the policy generation on `/health` and on
-decisions goes up by one. A change to a process-level key restarts it:
-`gateway.*`, `guardrail.connectors.*.enabled`, `guardrail.hook_fail_mode`,
+decisions goes up by one. On Windows the change is applied the same way when
+the installed release is current and the supplied config differs from the
+installed one only in such keys: `ensure` replaces `config.yaml` with its
+access control kept, waits up to 30 seconds for the gateway to report the new
+policy, and verifies the deployment. The result lists the change and the
+warning `ensure_config_applied`; no service stops and no agent fails closed.
+If the gateway does not report the policy in time, or the lifecycle lock is
+busy, `ensure` puts the previous config back and runs the full upgrade, as it
+did for every change before. A change to a process-level key restarts it:
+`gateway.*`, `guardrail.connectors.*.enabled`, `guardrail.hook_self_heal`,
 `enterprise.network` and the other keys that
 [Source of truth](/docs/reference/source-of-truth) lists.
 

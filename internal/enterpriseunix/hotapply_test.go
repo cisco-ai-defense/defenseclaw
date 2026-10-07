@@ -68,8 +68,8 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 	if touched || !strings.Contains(strings.Join(r.Changes, "\n"), "it was not restarted") || r.Policy == nil || !r.Policy.Applied {
 		t.Fatalf("hot change: gateway touched = %v, changes = %q, policy = %+v", touched, r.Changes, r.Policy)
 	}
-	if _, touched := ensure(strings.Replace(hot, "mode: action\n", "mode: action\n  hook_fail_mode: closed\n", 1)); !touched {
-		t.Fatal("a restart-required key (guardrail.hook_fail_mode) left the gateway running")
+	if _, touched := ensure(strings.Replace(hot, "mode: action\n", "mode: action\n  hook_self_heal: false\n", 1)); !touched {
+		t.Fatal("a restart-required key (guardrail.hook_self_heal) left the gateway running")
 	}
 	reloads = false
 	if _, touched := ensure(strings.Replace(hot, "mode: action\n", "mode: action\n  block_at: HIGH\n", 1)); !touched {

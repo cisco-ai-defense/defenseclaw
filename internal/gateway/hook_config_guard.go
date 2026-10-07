@@ -830,7 +830,9 @@ func (g *HookConfigGuard) refreshFailModeLocked(
 			err = errors.New("effective hook contract is inactive after the re-render")
 		}
 	}
-	if err == nil && connector.RequiresHookRuntimeRegistrationEvidence(conn) {
+	if err == nil {
+		// The re-render changed the script digests and the baked fail mode, so
+		// the hook contract lock follows for every connector, as at gateway boot.
 		err = publishFreshHookRegistrationEvidence(opts, conn)
 	}
 	if err != nil {

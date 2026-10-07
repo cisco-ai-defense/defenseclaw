@@ -71,7 +71,7 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		if !serviceHasAccess(parent, sids, serviceParentAccess) {
 			return fmt.Errorf(
 				"%s %s: the gateway service account %s cannot list or read the permissions of the parent folder %s; "+
-					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\", or keep the folder outside %s",
+					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\", or move the rule pack out of %s to a folder whose parents it can read",
 				label, root, serviceAccount, parent, parent, serviceAccount, parent)
 		}
 	}

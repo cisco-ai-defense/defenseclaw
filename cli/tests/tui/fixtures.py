@@ -73,7 +73,6 @@ def snapshot_config(tmp_path) -> SimpleNamespace:
         llm=SimpleNamespace(provider="openai", model="gpt-5-mini"),
         inspect_llm=SimpleNamespace(provider="", model=""),
         cisco_ai_defense=SimpleNamespace(endpoint=""),
-        privacy=SimpleNamespace(disable_redaction=False),
         active_connector=lambda: "openclaw",
     )
 

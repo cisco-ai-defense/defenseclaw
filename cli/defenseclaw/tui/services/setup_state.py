@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from defenseclaw import connector_paths
 from defenseclaw.tui.services.cli_choices import REGIONAL_PROVIDERS
 from defenseclaw.tui.services.sandbox_state import HARNESSES, resolve_harness
 
@@ -514,14 +515,7 @@ def build_readiness_checks(
             ReadinessCheck("Custom-provider Overlay", f"instance '{instance_name}' bound", "pass")
         )
 
-    if any(
-        str(_get_path(cfg, key, "") or "").strip()
-        for key in (
-            "scanners.skill_scanner.binary",
-            "scanners.mcp_scanner.binary",
-            "scanners.codeguard",
-        )
-    ):
+    if str(_get_path(cfg, "scanners.codeguard", "") or "").strip():
         checks.append(ReadinessCheck("Scanner Availability", "Scanner config present.", "pass"))
     else:
         checks.append(
@@ -814,17 +808,37 @@ def get_config_value(cfg: object | Mapping[str, Any] | None, key: str, default: 
 
 
 def guardrail_mode_overrides(cfg: object | Mapping[str, Any] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
-    """The global guardrail mode and the connectors whose own mode differs."""
+    """The mode the active connectors run in, and the ones that differ from it.
 
-    mode = str(_get_path(cfg, "guardrail.mode", "") or "").strip() or "observe"
-    overrides: list[tuple[str, str]] = []
+    One active connector (or several agreeing) runs in a single mode, the one
+    the status bar and ``defenseclaw status`` show, even when the global
+    ``guardrail.mode`` says otherwise (GAP-0166). Only a mix of modes is split
+    into a headline (the global mode when some connector runs it, else the
+    most common) plus the connectors that differ.
+    """
+
+    global_mode = str(_get_path(cfg, "guardrail.mode", "") or "").strip() or "observe"
+    own: dict[str, str] = {}
+    disabled: set[str] = set()  # a disabled connector enforces nothing
     connectors = _get_path(cfg, "guardrail.connectors", None)
     if isinstance(connectors, Mapping):
-        for name in sorted(connectors, key=lambda key: str(key).lower()):
-            own = str(_get_path(connectors[name], "mode", "") or "").strip()
-            if own and own != mode:
-                overrides.append((str(name), own))
-    return mode, tuple(overrides)
+        for name, entry in connectors.items():
+            key = connector_paths.normalize(str(name))
+            own[key] = str(_get_path(entry, "mode", "") or "").strip()
+            if _get_path(entry, "enabled", None) is False:
+                disabled.add(key)
+    modes = {
+        name: own.get(connector_paths.normalize(name)) or global_mode
+        for name in sorted(_active_connector_names(cfg), key=str.lower)
+        if connector_paths.normalize(name) not in disabled
+    }
+    counts: dict[str, int] = {}
+    for mode in modes.values():
+        counts[mode] = counts.get(mode, 0) + 1
+    if len(counts) <= 1:
+        return next(iter(counts), global_mode), ()
+    headline = global_mode if global_mode in counts else max(counts, key=counts.__getitem__)
+    return headline, tuple((name, mode) for name, mode in modes.items() if mode != headline)
 
 
 def guardrail_mode_label(cfg: object | Mapping[str, Any] | None) -> str:

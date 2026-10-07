@@ -3280,6 +3280,14 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
     return None
 
 
+def _registered_pack_names(gc: object) -> str:
+    """The guardrail.custom_packs names use-pack accepts, for the unknown-pack message."""
+    names = sorted(getattr(gc, "custom_packs", None) or {})
+    return f"not a registered guardrail.custom_packs name ({', '.join(names)})" if names else (
+        "not a registered guardrail.custom_packs name (none registered)"
+    )
+
+
 def _applied_note(app: AppContext, result: object) -> str:
     """How the change reaches the gateway, with the config generation."""
     generation = getattr(result, "generation", 0)
@@ -3312,20 +3320,6 @@ def _with_scope_options(fn):
     return fn
 
 
-def _legacy_restart_option(func):
-    """``--restart/--no-restart``, accepted for older scripts: these commands
-    no longer restart anything (the gateway applies the change on its next
-    reload), so the flag has no effect."""
-    return click.option(
-        "--restart/--no-restart",
-        "legacy_restart",
-        default=True,
-        hidden=True,
-        expose_value=False,
-        help="Accepted for older scripts; has no effect",
-    )(func)
-
-
 @guardrail.command("use-pack")
 @click.argument("pack", required=False)
 @click.option(
@@ -3346,7 +3340,6 @@ def _legacy_restart_option(func):
     help="Skip validating a built-in pack (a custom pack is always validated: its digest is pinned).",
 )
 @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
-@_legacy_restart_option
 @pass_ctx
 def use_pack_cmd(
     app: AppContext,
@@ -3504,8 +3497,8 @@ def use_pack_cmd(
                 pack_name=raw,
                 path=candidate,
                 message=(
-                    f"No rule pack {raw!r}: not a preset (default, strict, permissive) "
-                    "and not an existing directory. Nothing was changed."
+                    f"No rule pack {raw!r}: not a preset ({', '.join(policy_catalog.RULE_PACK_PRESETS)}), "
+                    f"{_registered_pack_names(gc)}, and not an existing directory. Nothing was changed."
                 ),
             )
         path = candidate
@@ -3681,9 +3674,6 @@ def protection_list_cmd(app: AppContext, json_out: bool) -> None:
 @click.argument("name")
 @_with_scope_options
 @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
-@click.option("--no-validate", is_flag=True, hidden=True, expose_value=False,
-              help="Accepted for older scripts; has no effect")
-@_legacy_restart_option
 @pass_ctx
 def protection_enable_cmd(
     app: AppContext, name: str, connector: str | None, profile: str | None, json_out: bool
@@ -3700,7 +3690,6 @@ def protection_enable_cmd(
 @click.argument("name")
 @_with_scope_options
 @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
-@_legacy_restart_option
 @pass_ctx
 def protection_disable_cmd(
     app: AppContext, name: str, connector: str | None, profile: str | None, json_out: bool
@@ -4530,7 +4519,6 @@ def _level_command(setting: str):
         help=f"Set only this connector's {words['noun']} level (writes its per-connector override).",
     )
     @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
-    @_legacy_restart_option
     @pass_ctx
     def command(app: AppContext, level: str, connector: str | None, json_out: bool) -> None:
         _set_tool_call_level(app, setting, level, connector, json_out=json_out)

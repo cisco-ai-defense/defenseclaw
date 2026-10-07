@@ -247,7 +247,7 @@ class SkillScannerWrapper:
         if api_key:
             judge["llm_api_key"] = api_key
         if llm.base_url:
-            judge["llm_base_url"] = llm.base_url
+            judge["llm_base_url"] = llm.request_base_url()
         return judge
 
     def _inject_env(self) -> None:

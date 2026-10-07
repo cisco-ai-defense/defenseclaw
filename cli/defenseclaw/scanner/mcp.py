@@ -1180,7 +1180,7 @@ class MCPScannerWrapper:
             endpoint_url=aid.endpoint,
             llm_provider_api_key=llm_api_key,
             llm_model=litellm_model(llm),
-            llm_base_url=llm.base_url,
+            llm_base_url=llm.request_base_url(),
             llm_timeout=llm.effective_timeout(),
             llm_max_retries=llm.effective_max_retries(),
             # The SDK otherwise uses AWS_REGION or us-east-1, not the

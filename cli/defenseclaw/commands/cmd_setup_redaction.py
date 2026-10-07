@@ -930,7 +930,6 @@ def _interactive_wizard(app: AppContext) -> None:
     raw, source = _load_source(app)
     click.echo("\nDefenseClaw redaction policy")
     click.echo(f"Config: {path}")
-    click.echo("Schema: v8")
     _render_status(_operator_status(app), compact=True)
     draft = _WizardDraft(raw, source, str(path))
 

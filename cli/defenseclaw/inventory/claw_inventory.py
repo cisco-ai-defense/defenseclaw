@@ -544,9 +544,6 @@ def enrich_with_policy(
             }
 
 
-# keep the old name as an alias for backward compatibility
-enrich_skills_with_policy = enrich_with_policy
-
 
 def _action_holds_off(action_entry: Any) -> bool:
     actions = getattr(action_entry, "actions", None)
@@ -3854,12 +3851,6 @@ def _amp_custom_agent_definitions(source: str, masked: str) -> list[tuple[str, s
             kind = "subagent"
         agents.append((name, kind))
     return agents
-
-
-def _amp_create_agent_names(source: str, masked: str) -> list[str]:
-    """Compatibility projection of statically discovered custom-agent names."""
-
-    return [name for name, _kind in _amp_custom_agent_definitions(source, masked)]
 
 
 def _amp_registered_agent_modes(source: str, masked: str) -> list[tuple[str, str]]:

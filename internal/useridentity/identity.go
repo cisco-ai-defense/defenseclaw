@@ -19,7 +19,27 @@
 // from this package to an authorization decision.
 package useridentity
 
-import "strings"
+import (
+	"strings"
+	"sync/atomic"
+)
+
+// keepQualifiedNames is set by KeepQualifiedNames.
+var keepQualifiedNames atomic.Bool
+
+// KeepQualifiedNames makes the Unix lookups report the passwd account name
+// as the system gives it (CORP\alice, alice@realm) instead of the bare
+// account. The Secure Client profile keeps its names that way (issue #1092).
+func KeepQualifiedNames(keep bool) { keepQualifiedNames.Store(keep) }
+
+// passwdAccountName is the bare account of a passwd name, or the name as the
+// system reports it under KeepQualifiedNames.
+func passwdAccountName(name string) string {
+	if keepQualifiedNames.Load() {
+		return strings.TrimSpace(name)
+	}
+	return BareAccountName(name)
+}
 
 const (
 	// KindWindowsSID and KindPOSIXUID are the two members of the v8

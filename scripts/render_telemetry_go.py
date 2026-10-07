@@ -1321,7 +1321,6 @@ def _render_resource_type(resource: Any, symbol: str, path: str) -> list[str]:
     return [
         f"type {symbol} struct {{",
         "\tentries familyFieldValues",
-        "\tcompatibilityAliases bool",
         "}",
         "",
         f"func (attributes {symbol}) Values() map[string]string {{",
@@ -1333,10 +1332,6 @@ def _render_resource_type(resource: Any, symbol: str, path: str) -> list[str]:
         "\t\t}",
         "\t}",
         "\treturn values",
-        "}",
-        "",
-        f"func (attributes {symbol}) CompatibilityAliasesEnabled() bool {{",
-        "\treturn attributes.compatibilityAliases",
         "}",
         "",
     ]
@@ -1352,7 +1347,7 @@ def _render_resource_constructor(resource: Any, symbol: str, path: str) -> list[
     if type(max_items) is not int or type(max_total) is not int:
         raise GoRenderError(f"{path}: invalid custom resource bounds")
     return [
-        f"func {symbol}(values map[string]string, compatibilityAliases bool) ({result_type}, error) {{",
+        f"func {symbol}(values map[string]string) ({result_type}, error) {{",
         f"\tif len(values) > {max_items} {{",
         f"\t\treturn {result_type}{{}}, familyBuildFailure(FamilyBuildConstraint)",
         "\t}",
@@ -1390,7 +1385,7 @@ def _render_resource_constructor(resource: Any, symbol: str, path: str) -> list[
         "\tfor _, key := range keys {",
         "\t\tentries = append(entries, familyFieldValue{key: key, value: cloned[key], present: true})",
         "\t}",
-        f"\treturn {result_type}{{entries: entries, compatibilityAliases: compatibilityAliases}}, nil",
+        f"\treturn {result_type}{{entries: entries}}, nil",
         "}",
         "",
     ]
@@ -1404,7 +1399,6 @@ def _render_resource_attach(resource: Any, symbol: str, path: str) -> list[str]:
     return [
         f"func {symbol}(resource TraceResourceInput, attributes {value_type}) TraceResourceInput {{",
         "\tresource.customValues = append(familyFieldValues(nil), attributes.entries...)",
-        "\tresource.compatibilityAliases = attributes.compatibilityAliases",
         "\treturn resource",
         "}",
         "",
@@ -1416,12 +1410,6 @@ def _render_resource_validator(resource: Any, symbol: str, path: str) -> list[st
     if symbol != expected:
         raise GoRenderError(f"{path}: resource validator symbol disagrees with the plan")
     fixed = _sequence(_read(resource, "fixed_descriptors", path), f"{path}.fixed_descriptors", maximum=64)
-    aliases = _sequence(_read(resource, "aliases", path), f"{path}.aliases", maximum=16)
-    alias_literals = tuple(
-        _go_string(_read(alias, "alias", f"{path}.aliases[{position}]"), f"{path}.aliases[{position}]")
-        for position, alias in enumerate(aliases)
-    )
-    alias_width = max((len(item) for item in alias_literals), default=0)
     lines = [
         f"func {symbol}(values map[string]any) error {{",
         "\tcontract := generatedTelemetryResourceContract()",
@@ -1437,33 +1425,11 @@ def _render_resource_validator(resource: Any, symbol: str, path: str) -> list[st
             "\tfor _, descriptor := range fixed {",
             "\t\tfixedByKey[descriptor.key] = descriptor",
             "\t}",
-            "\taliasCanonical := map[string]string{",
         )
     )
-    for position, alias in enumerate(aliases):
-        alias_path = f"{path}.aliases[{position}]"
-        literal = alias_literals[position]
-        lines.append(
-            f"\t\t{literal}:{' ' * (alias_width - len(literal) + 1)}"
-            f"{_go_string(_read(alias, 'canonical', alias_path), alias_path)},"
-        )
-    lines.extend(("\t}", "\taliasDescriptors := map[string]familyFieldDescriptor{"))
-    for position, alias in enumerate(aliases):
-        alias_path = f"{path}.aliases[{position}]"
-        literal = alias_literals[position]
-        lines.append(
-            f"\t\t{literal}:{' ' * (alias_width - len(literal) + 1)}"
-            f"{_field_descriptor_literal(_read(alias, 'descriptor', alias_path), f'{alias_path}.descriptor')},"
-        )
-    lines.extend(("\t}", "\taliasOrder := []string{"))
-    for position, alias in enumerate(aliases):
-        alias_path = f"{path}.aliases[{position}]"
-        lines.append(f"\t\t{_go_string(_read(alias, 'alias', alias_path), alias_path)},")
     lines.extend(
         (
-            "\t}",
             "\tseenFixed := make(map[string]struct{}, len(fixed))",
-            "\taliasValues := make(map[string]string, len(aliasCanonical))",
             "\tnormalizedCustom := make(map[string]struct{})",
             "\tcustomCount := 0",
             "\ttotalBytes := 0",
@@ -1481,11 +1447,6 @@ def _render_resource_validator(resource: Any, symbol: str, path: str) -> list[st
             "\t\tif descriptor, ok := fixedByKey[key]; ok {",
             "\t\t\tif err := validateFamilyFieldValue(descriptor, value); err != nil { return err }",
             "\t\t\tseenFixed[key] = struct{}{}",
-            "\t\t\tcontinue",
-            "\t\t}",
-            "\t\tif descriptor, ok := aliasDescriptors[key]; ok {",
-            "\t\t\tif err := validateFamilyFieldValue(descriptor, value); err != nil { return err }",
-            "\t\t\taliasValues[key] = value.(string)",
             "\t\t\tcontinue",
             "\t\t}",
             "\t\ttext, ok := value.(string)",
@@ -1508,15 +1469,6 @@ def _render_resource_validator(resource: Any, symbol: str, path: str) -> list[st
             "\t\t\treturn familyBuildFailure(FamilyBuildMissingRequired)",
             "\t\t}",
             "\t}",
-            "\tfor _, alias := range aliasOrder {",
-            "\t\taliasValue, aliasPresent := aliasValues[alias]",
-            "\t\tif !aliasPresent { continue }",
-            "\t\tcanonicalValue, present := values[aliasCanonical[alias]]",
-            "\t\tif !present { return familyBuildFailure(FamilyBuildMissingRequired) }",
-            "\t\tcanonicalText, ok := canonicalValue.(string)",
-            "\t\tif !ok { return familyBuildFailure(FamilyBuildInvalidType) }",
-            "\t\tif canonicalText != aliasValue { return familyBuildFailure(FamilyBuildConstraint) }",
-            "\t}",
             "\treturn nil",
             "}",
             "",
@@ -1528,8 +1480,6 @@ def _render_resource_validator(resource: Any, symbol: str, path: str) -> list[st
 def _render_resource_helpers(resource: Any, path: str) -> list[str]:
     fixed = tuple(_read(resource, "fixed_keys", path))
     reserved = tuple(_read(resource, "reserved_keys", path))
-    aliases = _sequence(_read(resource, "aliases", path), f"{path}.aliases", maximum=16)
-    alias_keys = tuple(_read(alias, "alias", path) for alias in aliases)
     forbidden_segments = tuple(_read(resource, "forbidden_key_segments", path))
     max_items = _read(resource, "max_items", path)
     max_key = _read(resource, "max_key_ascii_bytes", path)
@@ -1551,7 +1501,7 @@ def _render_resource_helpers(resource: Any, path: str) -> list[str]:
         or _read(resource, "prometheus_normalized_collision_policy", path) != "reject"
     ):
         raise GoRenderError(f"{path}: unsupported custom resource field class")
-    exact_forbidden = fixed + alias_keys + reserved
+    exact_forbidden = fixed + reserved
     normalized_forbidden = tuple(item.replace(".", "_").replace("-", "_") for item in exact_forbidden)
     lines = [
         "func generatedTelemetryResourceExactKeyForbidden(key string) bool {",
@@ -1718,23 +1668,9 @@ def _render_resource_helpers(resource: Any, path: str) -> list[str]:
         f"\t\tmaxValueUTF8Bytes: {max_value},",
         f"\t\tmaxAggregateUTF8Bytes: {max_total},",
         "\t\tfieldClass: FieldClassMetadata,",
-        "\t\taliases: []familyResourceCompatibilityAlias{",
     ]
-    for position, alias in enumerate(aliases):
-        alias_path = f"{path}.aliases[{position}]"
-        canonical = _read(alias, "canonical", alias_path)
-        descriptor = _field_descriptor_literal(_read(alias, "descriptor", alias_path), f"{alias_path}.descriptor")
-        lines.extend(
-            (
-                "\t\t\t{",
-                f"\t\t\t\tcanonical: {_go_string(canonical, alias_path)},",
-                f"\t\t\t\tdescriptor: {descriptor},",
-                "\t\t\t},",
-            )
-        )
     lines.extend(
         (
-            "\t\t},",
             "\t\tvalidate: generatedValidateTelemetryResourceAttribute,",
             "\t\tprometheusKey: generatedTelemetryResourcePrometheusKey,",
             "\t}",
