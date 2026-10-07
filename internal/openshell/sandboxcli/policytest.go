@@ -227,7 +227,7 @@ func (a *App) printPolicyTest(r *policyTestReport) {
 		if !d.Allowed {
 			decision = "blocked"
 			if d.Unblockable {
-				decision += " (unblockable)"
+				decision += " (`" + CommandName + " unblock` lifts it)"
 			}
 		}
 		rule := d.Rule
@@ -236,13 +236,16 @@ func (a *App) printPolicyTest(r *policyTestReport) {
 		}
 		row := []string{truncate(dest, 60), decision, truncate(rule, 40), truncate(d.Source, 70)}
 		if r.Expected > 0 {
-			mark := a.style("✓ "+r.Results[i].Expect, ansiGreen)
+			// Plain text: a.table makes every cell safe to print, which
+			// would turn colour codes into text, and a colour would throw
+			// the column widths off.
+			mark := "✓ " + r.Results[i].Expect
 			if !r.Results[i].Pass {
 				want := r.Results[i].Expect
 				if r.Results[i].Rule != "" {
 					want += " by " + r.Results[i].Rule
 				}
-				mark = a.style("✗ "+want, ansiRed)
+				mark = "✗ " + want
 			}
 			row = append(row, mark)
 		}
