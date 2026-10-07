@@ -74,3 +74,52 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 		t.Fatal("the Secure Client integration's /health or decision records carry the effective policy")
 	}
 }
+
+// TestConfigDigestNormalizesTetragonDefaults: an absent enterprise.tetragon
+// block and one that spells out the defaults are the same intent, so they
+// give the same config digest; any other value moves it, and digesting never
+// changes the config itself.
+func TestConfigDigestNormalizesTetragonDefaults(t *testing.T) {
+	digest := func(block config.EnterpriseTetragonConfig, profile string) string {
+		t.Helper()
+		cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: "/var/lib/defenseclaw"}
+		cfg.Enterprise.Profile = profile
+		cfg.Enterprise.Tetragon = block
+		got, err := configDigest(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Enterprise.Tetragon != block {
+			t.Fatalf("configDigest changed the config: %+v, want %+v", cfg.Enterprise.Tetragon, block)
+		}
+		return got
+	}
+	for _, profile := range []string{managed.ProfileStandalone, ""} {
+		absent := digest(config.EnterpriseTetragonConfig{}, profile)
+		for _, same := range []config.EnterpriseTetragonConfig{
+			{Mode: "consume", BurnIn: "168h"},
+			{Mode: "consume"},
+			{BurnIn: "168h"},
+			{Mode: "consume", BurnIn: "0168h", EnforceAck: " "},
+		} {
+			if got := digest(same, profile); got != absent {
+				t.Errorf("profile %q: %+v digests %s, the absent block %s", profile, same, got, absent)
+			}
+		}
+		seen := map[string]config.EnterpriseTetragonConfig{absent: {}}
+		for _, different := range []config.EnterpriseTetragonConfig{
+			{Mode: "off"},
+			{Mode: "observe"},
+			{Mode: "enforce"},
+			{Mode: "enforce", EnforceAck: "sha256:3f9c2a7d41b0"},
+			{BurnIn: "24h"},
+			{BurnIn: "0"},
+		} {
+			got := digest(different, profile)
+			if previous, dup := seen[got]; dup {
+				t.Errorf("profile %q: %+v and %+v digest the same", profile, different, previous)
+			}
+			seen[got] = different
+		}
+	}
+}

@@ -69,11 +69,47 @@ func configDigest(cfg *config.Config) (string, error) {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
+	dropTetragonDefaults(doc)
 	canonical, err := json.Marshal(canonicalConfigValue("", doc, dataDirOf(cfg)))
 	if err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
 	return sha256Digest(canonical), nil
+}
+
+// dropTetragonDefaults removes the enterprise.tetragon values equal to their
+// built-in defaults (mode consume, burn_in 168h, an empty enforce_ack) from
+// the marshalled config, and the block (and an enterprise block it leaves
+// empty) once nothing is left: an absent block and one that spells out the
+// defaults are the same intent and digest the same.
+func dropTetragonDefaults(doc any) {
+	root, _ := doc.(map[string]any)
+	enterprise, _ := root["enterprise"].(map[string]any)
+	tetragon, _ := enterprise["tetragon"].(map[string]any)
+	if tetragon == nil {
+		return
+	}
+	text := func(key string) string {
+		value, _ := tetragon[key].(string)
+		return value
+	}
+	written := config.EnterpriseTetragonConfig{Mode: text("mode"), BurnIn: text("burn_in"), EnforceAck: text("enforce_ack")}
+	effective, defaults := written.Effective(), config.EnterpriseTetragonConfig{}.Effective()
+	for key, isDefault := range map[string]bool{
+		"mode":        effective.Mode == defaults.Mode,
+		"burn_in":     effective.BurnIn == defaults.BurnIn,
+		"enforce_ack": effective.EnforceAck == defaults.EnforceAck,
+	} {
+		if _, isText := tetragon[key].(string); isDefault && isText {
+			delete(tetragon, key)
+		}
+	}
+	if len(tetragon) == 0 {
+		delete(enterprise, "tetragon")
+	}
+	if len(enterprise) == 0 {
+		delete(root, "enterprise")
+	}
 }
 
 func canonicalConfigValue(path string, value any, dataDir string) any {
