@@ -1030,6 +1030,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	if managed.IsManagedEnterprise(newCfg.DeploymentMode) {
 		hotReloadable["cisco_ai_defense"] = struct{}{}
 	}
+	// Secure Client keeps ai_discovery restart-required, as before the
+	// in-process discovery restart (issue #1092).
+	if oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration() {
+		delete(hotReloadable, "ai_discovery")
+	}
 	// standalone: inspectorNeedsRebuild covers the enterprise AI Defense
 	// settings, so they stay hot. enterprise.network is restart-required
 	// (see above).

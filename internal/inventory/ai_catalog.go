@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -183,6 +184,9 @@ type AISignatureLoadOptions struct {
 	WorkingDir               string
 	MaxPacks                 int
 	MaxPackBytes             int64
+	// SecureClient loads the embedded catalog as 1.0.0 shipped it
+	// (secureClientSignatures).
+	SecureClient bool
 }
 
 // LoadAISignaturesForConfig loads the embedded catalog plus any configured
@@ -202,7 +206,34 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 		DisabledSignatureIDs:     append([]string{}, cfg.AIDiscovery.DisabledSignatureIDs...),
 		HomeDir:                  home,
 		WorkingDir:               wd,
+		SecureClient:             cfg.SecureClientIntegration(),
 	})
+}
+
+// Signature data added to the embedded catalog after 1.0.0. The Secure Client
+// profile keeps the catalog of 1.0.0 (issue #1092), so secureClientSignatures
+// removes it there.
+var (
+	postReleaseSignatureIDs = map[string]bool{"jetbrains-ai": true}
+	postReleaseExtensionIDs = map[string]string{"codex": "openai.chatgpt", "claudecode": "anthropic.claude-code"}
+)
+
+// secureClientSignatures returns the embedded catalog as 1.0.0 shipped it:
+// without the signatures and VS Code extension ids added since, and without
+// the JetBrains, Zed and Vim plugin ids, which only the IDE inventory reads.
+func secureClientSignatures(base []AISignature) []AISignature {
+	out := make([]AISignature, 0, len(base))
+	for _, sig := range base {
+		if postReleaseSignatureIDs[sig.ID] {
+			continue
+		}
+		if added := postReleaseExtensionIDs[sig.ID]; added != "" {
+			sig.ExtensionIDs = slices.DeleteFunc(slices.Clone(sig.ExtensionIDs), func(id string) bool { return id == added })
+		}
+		sig.JetBrainsPluginIDs, sig.ZedExtensionIDs, sig.VimPlugins = nil, nil, nil
+		out = append(out, sig)
+	}
+	return out
 }
 
 // LoadAISignaturesWithOptions merges all configured catalog sources and
@@ -211,6 +242,9 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	base, err := LoadAISignatures()
 	if err != nil {
 		return nil, err
+	}
+	if opts.SecureClient {
+		base = secureClientSignatures(base)
 	}
 	disabled := normalizedSignatureIDSet(opts.DisabledSignatureIDs)
 	merged := make([]AISignature, 0, len(base))
