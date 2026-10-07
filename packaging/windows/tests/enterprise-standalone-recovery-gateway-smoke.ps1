@@ -518,9 +518,11 @@ $failures = & $module {
         # cleanup runs with that gateway, and the generic file rollback puts
         # <InstallRoot>\bin back to its preimage: the prior release's gateway
         # after a failed upgrade, no gateway after a failed first install.
-        # The Secure Client profile still stops at the staged gateway's
-        # failure. Service control, the recovery binding and the ACL steps
-        # are stubbed.
+        # The config generation record the rejected run wrote beside
+        # config.yaml goes back with it (GAP-0038): the prior record, with
+        # config-file access, or none. The Secure Client profile still stops
+        # at the staged gateway's failure. Service control, the recovery
+        # binding and the ACL steps are stubbed.
         function Assert-DefenseClawOwnedServiceOrAbsent {
         }
         function Test-DefenseClawServiceExists {
@@ -563,11 +565,16 @@ $failures = & $module {
         function Assert-DefenseClawRestoredTransactionReadyForActivation {
             return $false
         }
+        function Set-DefenseClawPathAcl {
+            param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)
+            $script:TestAcls.Add($Kind + ':' + [IO.Path]::GetFileName($Path))
+        }
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $stateRoot = [IO.Path]::Combine($root, 'state')
         $layout.StateRoot = $stateRoot
         $layout.ManifestPath = [IO.Path]::Combine($stateRoot, 'targets.yaml')
+        $layout.ConfigDirectory = [IO.Path]::Combine($stateRoot, 'etc')
         $layout.CertificationCodexHome = ''
         $layout.CoreHardeningCertification = $false
         $layout.ProviderLibraryPath = ''
@@ -581,6 +588,10 @@ $failures = & $module {
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($priorGateway))
         [IO.File]::WriteAllText($priorGateway, 'prior-gateway', $utf8)
         $snapshotPath = [IO.Path]::Combine($stateRoot, 'install', 'transaction.json')
+        $generationRecord = [IO.Path]::Combine($layout.ConfigDirectory, 'config.generation.json')
+        $priorGenerationRecord = [IO.Path]::Combine($stateRoot, 'install', 'backup', 'config.generation.json')
+        [void][IO.Directory]::CreateDirectory($layout.ConfigDirectory)
+        [IO.File]::WriteAllText($priorGenerationRecord, 'prior-generation', $utf8)
         foreach ($case in @(
             @{ Profile = 'Standalone'; Existed = $true; Label = 'rollback of a failed upgrade' },
             @{ Profile = 'Standalone'; Existed = $false; Label = 'rollback of a failed first install' },
@@ -591,6 +602,8 @@ $failures = & $module {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case.Profile
             Reset-TestHost
             [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}', $utf8)
+            [IO.File]::WriteAllText($generationRecord, 'rejected-generation', $utf8)
+            $script:TestAcls = [Collections.Generic.List[string]]::new()
             $snapshot = [ordered]@{
                 gateway_service = 'DefenseClawGateway'
                 guardian_service = 'DefenseClawHookGuardian'
@@ -606,6 +619,11 @@ $failures = & $module {
                         path = $layout.GatewayPath
                         existed = $existed
                         backup = $(if ($existed) { $priorGateway } else { '' })
+                    },
+                    [ordered]@{
+                        path = $generationRecord
+                        existed = $existed
+                        backup = $(if ($existed) { $priorGenerationRecord } else { '' })
                     }
                 )
             }
@@ -649,6 +667,14 @@ $failures = & $module {
             }
             if (-not $existed -and $present) {
                 $failures.Add("${label}: the recovery gateway was left at <InstallRoot>\bin")
+            }
+            $record = $(if ([IO.File]::Exists($generationRecord)) {
+                [IO.File]::ReadAllText($generationRecord).Trim()
+            } else { '' })
+            $acls = @($script:TestAcls) -join '|'
+            if (($existed -and ($record -cne 'prior-generation' -or $acls -cne 'ConfigFile:config.generation.json')) -or
+                (-not $existed -and ($record -cne '' -or $acls -cne ''))) {
+                $failures.Add("${label}: config.generation.json is '$record' with access $acls after the rollback")
             }
         }
     }

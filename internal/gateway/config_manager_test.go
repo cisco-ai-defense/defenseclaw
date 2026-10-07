@@ -1370,8 +1370,8 @@ func TestConfigManagerSecureClientReloadReadsNoDotEnv(t *testing.T) {
 
 // Secure Client keeps its reload classification (GAP-0141, GAP-0147, issue
 // #1092): hook_fail_mode reloads hot; the levels, llm, watch, ai_discovery
-// and the v8 action keys need a restart; and the watcher follows no policy
-// assets.
+// and admission (where the v8 action keys now land) need a restart; and the
+// watcher follows no policy assets.
 func TestDiffConfigsSecureClientKeepsItsReloadClassification(t *testing.T) {
 	base := &config.Config{DeploymentMode: "managed_enterprise"}
 	edit := func(change func(*config.Config)) ConfigDiff {
@@ -1383,11 +1383,13 @@ func TestDiffConfigsSecureClientKeepsItsReloadClassification(t *testing.T) {
 		t.Fatalf("hook_fail_mode needs a restart: %v", diff.RestartRequired)
 	}
 	for want, change := range map[string]func(*config.Config){
-		"guardrail":     func(c *config.Config) { c.Guardrail.BlockAt = "HIGH" },
-		"llm":           func(c *config.Config) { c.LLM.Model = "openai/gpt-4o" },
-		"watch":         func(c *config.Config) { c.Watch.DebounceMs = 900 },
-		"ai_discovery":  func(c *config.Config) { c.AIDiscovery.Enabled = true },
-		"skill_actions": func(c *config.Config) { c.SkillActions.High.Install = "block" },
+		"guardrail":    func(c *config.Config) { c.Guardrail.BlockAt = "HIGH" },
+		"llm":          func(c *config.Config) { c.LLM.Model = "openai/gpt-4o" },
+		"watch":        func(c *config.Config) { c.Watch.DebounceMs = 900 },
+		"ai_discovery": func(c *config.Config) { c.AIDiscovery.Enabled = true },
+		"admission": func(c *config.Config) {
+			c.Admission.Skill.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionBlock}
+		},
 	} {
 		if diff := edit(change); !slices.Contains(diff.RestartRequired, want) {
 			t.Fatalf("%s edit restart set = %v, want %s", want, diff.RestartRequired, want)
