@@ -176,6 +176,15 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn('"fail_mode": "open"', result.output)
         self.assertNotIn('"fail_mode": "closed"', result.output)
 
+    def test_status_flags_action_connector_on_fail_open(self):
+        # GAP-0415: an upgrade keeps the fail mode an older setup chose.
+        app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+        app.cfg.guardrail.mode = "action"
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("action mode with fail mode open", result.output)
+        self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
+
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block
         # layout as a fan-out install: one connector roster table, no

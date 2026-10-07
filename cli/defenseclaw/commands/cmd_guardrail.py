@@ -787,6 +787,17 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
                     f"to a hook the agent cannot run; repair with {setup_command(name)}"
                 )
+            elif (cmode or "") == "action" and cfm == "open" and normalize_connector(name) not in (
+                _UPSTREAM_FAIL_OPEN_CONNECTORS
+            ):
+                # An upgrade keeps the fail mode an older setup chose, while a
+                # new setup gives an action connector closed (GAP-0415).
+                scope = f" --connector {name}" if getattr(gc, "connectors", None) else ""
+                posture_rows.append(
+                    f"{_connector_label(name)} ({name}) is in action mode with fail mode open: while the gateway "
+                    f"is down its hooks allow calls that policy blocks; set closed with "
+                    f"defenseclaw guardrail fail-mode closed{scope}"
+                )
         fail_raw = cfm
         cfm_display = _style_fail_mode(cfm)
         if not (gc.enabled and c_enabled) and not as_json:
