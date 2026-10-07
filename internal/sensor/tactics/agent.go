@@ -152,9 +152,112 @@ func AgentCmdlineReason(cmdline string) string {
 // one. Checked in order of confidence: a name we recognise beats a command
 // line we merely find suggestive.
 func AgentIdentity(exeName, cmdline string) string {
+	return IdentifyAgent(exeName, "", cmdline).Name
+}
+
+// AgentBasis is how an agent process was recognised.
+type AgentBasis string
+
+const (
+	// BasisExecutable is an executable whose own name is an agent's.
+	BasisExecutable AgentBasis = "executable"
+	// BasisInstallPath is an executable inside an agent's install directory
+	// (a native Claude Code install runs as .../claude/versions/2.1.292).
+	BasisInstallPath AgentBasis = "install_path"
+	// BasisScript is an interpreter running a script whose name or install
+	// directory is an agent's (npm installs run as node .../bin/claude).
+	BasisScript AgentBasis = "script"
+	// BasisCmdline is a process only its arguments make look like an agent:
+	// a framework module, an MCP server, a provider SDK CLI.
+	BasisCmdline AgentBasis = "cmdline"
+)
+
+// Reasons an agent root is observed but can never be in the kernel
+// controls' enforcing scope. Enforcement anchors come only from enrolled CLI
+// connectors resolved to their real installs (the sensor helper decides
+// those); everything the patterns here recognise beyond that attributes
+// activity and nothing more.
+const (
+	// RootIDEHosted is an IDE or IDE-hosted surface (the Cursor IDE, VS Code
+	// extensions, copilot-language-server).
+	RootIDEHosted = "ide_hosted"
+	// RootHeuristic is an agent recognised by a name pattern or by argv
+	// rather than as an installed CLI connector.
+	RootHeuristic = "heuristic_root"
+)
+
+// AgentRoot is an agent recognised from one process.
+type AgentRoot struct {
+	// Name is AgentIdentity's label.
+	Name  string
+	Basis AgentBasis
+	// Connector is the CLI connector the agent is ("claudecode" for claude),
+	// set only when the executable, its install directory or its script
+	// named it. Arguments alone never name a connector.
+	Connector string
+	// ObserveOnly is RootIDEHosted or RootHeuristic for a root no kernel
+	// control may anchor, and "" for a CLI connector, whose enforcing scope
+	// the sensor helper decides from enrollment.
+	ObserveOnly string
+}
+
+// cliConnectors maps an agent label to the CLI connector it is: the
+// enrollable command-line agents of the enterprise hook enumerator
+// (enterprisehooks.unixAgentProbes). Only these can be enforcement roots.
+var cliConnectors = map[string]string{
+	"claude": "claudecode", "codex": "codex", "cursor-agent": "cursor",
+	"copilot": "copilot", "opencode": "opencode", "amp": "amp", "devin": "devin",
+	"hermes": "hermes", "openhands": "openhands", "omnigent": "omnigent",
+	"kiro-cli": "kiro",
+}
+
+// ideHostedAgents are labels of IDEs and the agents that live inside one.
+// Their children are the user's integrated terminal as much as the agent's,
+// so they are never anchors.
+var ideHostedAgents = map[string]bool{
+	"cursor": true, "copilot-language-server": true, "continue": true, "cline": true,
+	"code": true, "kiro": true, "antigravity": true, "windsurf": true,
+}
+
+// IdentifyAgent recognises an agent from a process's resolved executable
+// path, its name and its command line. The executable path is preferred: a
+// basename can be a version number, while the path names the install. The
+// name is the fallback for a backend that reports no path.
+func IdentifyAgent(exe, name, cmdline string) AgentRoot {
+	root := identifyByExecutable(exe, cmdline)
+	if root.Name == "" && name != "" && name != exe {
+		root = identifyByExecutable(name, cmdline)
+	}
+	if root.Name == "" && AgentCmdlineReason(cmdline) != "" {
+		label := strings.ToLower(BaseName(firstNonEmpty(exe, name)))
+		if label == "" {
+			label = "agent"
+		}
+		root = AgentRoot{Name: label, Basis: BasisCmdline}
+	}
+	if root.Name == "" {
+		return AgentRoot{}
+	}
+	label := strings.TrimSuffix(root.Name, extensionOf(root.Name))
+	switch {
+	case root.Basis == BasisCmdline:
+		root.ObserveOnly = RootHeuristic
+	case ideHostedAgents[label]:
+		root.ObserveOnly = RootIDEHosted
+	case cliConnectors[label] != "":
+		root.Connector = cliConnectors[label]
+	default:
+		root.ObserveOnly = RootHeuristic
+	}
+	return root
+}
+
+// identifyByExecutable is the part of the identity an executable path or
+// name, and the script an interpreter runs, can establish.
+func identifyByExecutable(exeName, cmdline string) AgentRoot {
 	name := BaseName(exeName)
 	if IsAgentProcess(name) {
-		return strings.ToLower(name)
+		return AgentRoot{Name: strings.ToLower(name), Basis: BasisExecutable}
 	}
 	// An agent whose executable does not carry the agent's name still lives
 	// inside a directory that does. Claude Code's native macOS install is
@@ -164,21 +267,31 @@ func AgentIdentity(exeName, cmdline string) string {
 	// unambiguous. Missing it means every child of that agent fails the
 	// lineage gate and the host plane reports a quiet machine.
 	if agent := agentFromInstallPath(exeName); agent != "" {
-		return agent
+		return AgentRoot{Name: agent, Basis: BasisInstallPath}
 	}
 	if script := interpretedScriptOf(exeName, cmdline); script != "" {
 		if base := BaseName(script); IsAgentProcess(base) {
-			return strings.ToLower(base)
+			return AgentRoot{Name: strings.ToLower(base), Basis: BasisScript}
 		}
 		if agent := agentFromInstallPath(script); agent != "" {
-			return agent
+			return AgentRoot{Name: agent, Basis: BasisScript}
 		}
 	}
-	if AgentCmdlineReason(cmdline) != "" {
-		if lowered := strings.ToLower(name); lowered != "" {
-			return lowered
+	return AgentRoot{}
+}
+
+// ConnectorForAgent is the CLI connector an agent label names, or "".
+func ConnectorForAgent(label string) string {
+	label = strings.ToLower(strings.TrimSpace(label))
+	return cliConnectors[strings.TrimSuffix(label, extensionOf(label))]
+}
+
+// extensionOf is the Windows executable extension a label ends with, if any.
+func extensionOf(label string) string {
+	for _, extension := range []string{".exe", ".cmd", ".bat", ".com", ".ps1"} {
+		if strings.HasSuffix(label, extension) {
+			return extension
 		}
-		return "agent"
 	}
 	return ""
 }

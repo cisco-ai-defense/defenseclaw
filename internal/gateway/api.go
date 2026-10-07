@@ -1421,7 +1421,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	body["provenance"] = version.Current()
 	if policy, ok := CurrentPolicyHealth(); ok {
-		body["policy"] = policy
+		body["policy"] = a.policyHealthBody(policy)
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
 		body["acp"] = map[string]interface{}{

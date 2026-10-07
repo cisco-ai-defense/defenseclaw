@@ -758,6 +758,13 @@ func (a *APIServer) finalizeAgentHook(
 	safeSection("sandbox", func() {
 		a.observeSandboxHookDecision(ctx, req, resp)
 	})
+	if !panicked {
+		// Before the response is written, so the decision is in the
+		// runtime planes' join ring when the tool's process starts.
+		safeSection("hook_join", func() {
+			a.recordManagedHookDecision(ctx, connectorName, req, resp)
+		})
+	}
 
 	// A hook whose correlation ledger write failed (disk full) still exports
 	// its decision, without the cross-call join IDs: otherwise every allow
