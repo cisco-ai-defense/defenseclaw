@@ -2688,13 +2688,20 @@ func putBoundedPromptID(m map[string]string, order *[]string, key, value string,
 	m[key] = value
 }
 
-// The prompt-ID caches key on sandboxSessionStateKey, so a sandbox cannot
-// stamp its prompt onto another domain's session or read that session's.
+// Prompt correlation is scoped to the bound agent identity and sandbox.
+// An empty identity keeps Secure Client's existing cache behavior.
+func hookPromptSessionKey(ctx context.Context, sessionID string) string {
+	key := sandboxSessionStateKey(ctx, sessionID)
+	if id := AgentIdentityFromContext(ctx).IdentityID; id != "" {
+		key += "\x00" + id
+	}
+	return key
+}
 func (a *APIServer) rememberHookPromptID(ctx context.Context, source, sessionID, turnID, promptID string) {
 	if a == nil || source == "" || sessionID == "" || promptID == "" {
 		return
 	}
-	sessionID = sandboxSessionStateKey(ctx, sessionID)
+	sessionID = hookPromptSessionKey(ctx, sessionID)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 	if a.llmPromptBySourceSession == nil {
@@ -2715,7 +2722,7 @@ func (a *APIServer) lastHookPromptID(ctx context.Context, source, sessionID stri
 	if a == nil || source == "" || sessionID == "" {
 		return ""
 	}
-	sessionID = sandboxSessionStateKey(ctx, sessionID)
+	sessionID = hookPromptSessionKey(ctx, sessionID)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 	return a.llmPromptBySourceSession[source+"\x00"+sessionID]
@@ -2725,7 +2732,7 @@ func (a *APIServer) lastHookPromptIDForTurn(ctx context.Context, source, session
 	if a == nil || source == "" || sessionID == "" || turnID == "" {
 		return ""
 	}
-	sessionID = sandboxSessionStateKey(ctx, sessionID)
+	sessionID = hookPromptSessionKey(ctx, sessionID)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 	return a.llmPromptBySourceSessionTurn[source+"\x00"+sessionID+"\x00"+turnID]

@@ -608,3 +608,30 @@ func TestHookSpawnFirstEventEmitterSynthesizesOneStartConcurrently(t *testing.T)
 		t.Fatalf("concurrent inferred lifecycle transitions=%d want=1", transitions)
 	}
 }
+
+func TestSpawnIntentDoesNotCrossAgentIdentity(t *testing.T) {
+	api := &APIServer{}
+	now := time.Now().UTC()
+	parent := hookSpawnTestParent("claudecode", "shared-session", "agent-a", "agent-a", 0, "tool-a")
+	parent.AgentIdentityID, parent.UserID = "agt-a", "1001"
+	child := hookSpawnTestChild("claudecode", "shared-session", "agent-b-child")
+	child.AgentIdentityID, child.UserID = "agt-b", "1002"
+	api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentCompleted, now)
+	got := api.applyHookSpawnIntentLineageAt(child, nil, now)
+	if got.ParentAgentID == parent.AgentID || got.RootAgentID == parent.AgentID || hookSpawnIntentCount(api) != 1 {
+		t.Fatalf("another identity consumed spawn intent: %+v", got)
+	}
+	parent.AgentIdentityID, parent.UserID = "agt-b", "1002"
+	parent.AgentID, parent.RootAgentID, parent.ToolID = "agent-b", "agent-b", "tool-b"
+	api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentCompleted, now)
+	got = api.applyHookSpawnIntentLineageAt(child, nil, now)
+	if got.ParentAgentID != "agent-b" || hookSpawnIntentCount(api) != 1 {
+		t.Fatalf("same identity failed to take its intent: %+v", got)
+	}
+	ctxA := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-a"})
+	ctxB := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-b"})
+	api.rememberHookPromptID(ctxA, "claudecode", "shared-session", "", "prompt-a")
+	if prompt := api.lastHookPromptID(ctxB, "claudecode", "shared-session"); prompt != "" {
+		t.Fatalf("another identity inherited prompt %q", prompt)
+	}
+}
