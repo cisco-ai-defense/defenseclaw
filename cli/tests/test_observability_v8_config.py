@@ -38,6 +38,7 @@ from defenseclaw.observability.v8_config import (
     V8ConfigError,
     _go_schema_pattern,
     _parse_source,
+    _schema_validator,
     _shape,
     load_validate_v8,
     observability_v8_parity_contract,
@@ -449,6 +450,13 @@ def test_yaml11_boolean_words_are_strings_like_go(spelling: str) -> None:
 def test_yaml_core_booleans_stay_booleans(spelling: str) -> None:
     source = load_validate_v8(f"config_version: 8\nopenshell:\n  yolo: {spelling}\n").source
     assert source["openshell"]["yolo"] is (spelling.lower() == "true")
+
+
+def test_packaged_v8_schema_is_a_valid_draft_2020_12_schema() -> None:
+    # _schema_validator no longer self-checks the static schema on every run (GAP-0199).
+    from jsonschema import Draft202012Validator
+
+    Draft202012Validator.check_schema(_schema_validator().schema)
 
 
 def test_schema_patterns_anchor_at_the_end_of_text_like_go() -> None:

@@ -491,8 +491,11 @@ else
     esac
     [ -f "$lifecycle_dir/last-package-result.json" ] || die "the postinstall left no lifecycle result (package manager exited $install_rc)"
     cp "$lifecycle_dir/last-package-result.json" "$results/01-package-install.json"
+    # Without an administrator config the package enables no connector, so a
+    # host with eligible users is honestly security-incomplete (GAP-0266); the
+    # step after this one applies the config and requires --complete.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --complete
+        --coverage-complete --allow-warning no_connectors_enabled
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"

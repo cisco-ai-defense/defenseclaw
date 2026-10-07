@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -75,6 +76,26 @@ func TestGuardrailFallbackActionForSeverity(t *testing.T) {
 					tc.severity, got, tc.want, tc.note)
 			}
 		})
+	}
+}
+
+// The evaluate route without a policy_dir applies the thresholds the request
+// carries, as the inspector fallback does; Secure Client keeps the default
+// posture of main.
+func TestEvaluateGuardrailPolicyWithoutPolicyDirUsesTheRequestThresholds(t *testing.T) {
+	input := policy.GuardrailInput{
+		Mode:        "action",
+		LocalResult: &policy.GuardrailScanResult{Severity: "HIGH"},
+		Thresholds:  &policy.ThresholdsInput{Block: severityHigh, Alert: severityMedium, CiscoTrustLevel: "full"},
+	}
+	api := &APIServer{scannerCfg: &config.Config{}}
+	out, err := api.evaluateGuardrailPolicy(context.Background(), input)
+	if err != nil || out.Action != "block" {
+		t.Fatalf("block_at HIGH: action = %v, err = %v; want block", out, err)
+	}
+	api.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
+	if out, err = api.evaluateGuardrailPolicy(context.Background(), input); err != nil || out.Action != "alert" {
+		t.Fatalf("Secure Client: action = %v, err = %v; want the default-posture alert", out, err)
 	}
 }
 

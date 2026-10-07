@@ -392,15 +392,12 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
-	managedOptions, err := config.ResolveObservabilityV8ManagedAIDOptionsForInspection(absPath, raw)
-	if err != nil {
-		return nil, err
-	}
-	compiled.Plan, err = config.WithObservabilityV8ManagedAIDDestination(compiled.Plan, managedOptions)
-	if err != nil {
-		return nil, err
-	}
 	runtimeCandidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	if err != nil {
+		return nil, err
+	}
+	compiled.Plan, err = config.WithObservabilityV8ManagedAIDDestination(
+		compiled.Plan, config.ObservabilityV8ManagedAIDOptionsFromConfig(runtimeCandidate, raw))
 	if err != nil {
 		return nil, err
 	}

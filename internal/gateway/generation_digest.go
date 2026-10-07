@@ -30,6 +30,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -238,15 +239,28 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	return out
 }
 
-// signaturePackDigests digests each ai_discovery.signature_packs file, keyed
-// "signature_pack:<path>".
+// signaturePackDigests digests each ai_discovery.signature_packs entry, keyed
+// "signature_pack:<entry>". An entry that is a directory or a glob is digested
+// over the pack files it names now, so adding, removing or editing one changes
+// the digest.
 func signaturePackDigests(cfg *config.Config) map[string]string {
 	out := map[string]string{}
 	dataDir := dataDirOf(cfg)
-	for _, path := range cfg.AIDiscovery.SignaturePacks {
-		if path = strings.TrimSpace(path); path != "" {
-			out["signature_pack:"+rewriteDataDir(path, dataDir)] = fileDigest(path)
+	for _, entry := range cfg.AIDiscovery.SignaturePacks {
+		if entry = strings.TrimSpace(entry); entry == "" {
+			continue
 		}
+		files, _ := inventory.SignaturePackEntry(entry)
+		digest := "missing"
+		if len(files) > 0 {
+			parts := make([]string, 0, len(files))
+			for _, file := range files {
+				parts = append(parts, rewriteDataDir(file, dataDir)+"="+fileDigest(file))
+			}
+			sort.Strings(parts)
+			digest = sha256Digest([]byte(strings.Join(parts, "\n")))
+		}
+		out["signature_pack:"+rewriteDataDir(entry, dataDir)] = digest
 	}
 	return out
 }
@@ -328,7 +342,7 @@ func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectiveP
 	if err != nil {
 		return EffectivePolicy{}, err
 	}
-	profiles, err := newGuardrailProfileSet(cfg, false)
+	profiles, err := newGuardrailProfileSet(cfg, rulePacks.cache, false)
 	if err != nil {
 		profiles = nil
 	}
@@ -352,9 +366,9 @@ func generationRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) 
 	if candidate, err := preflightSidecarRulePacks(cfg); err == nil {
 		return candidate, nil
 	}
-	global, active, err := loadInitialSidecarRulePack(cfg)
+	global, active, cache, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &sidecarRulePackCandidate{global: global, active: active}, nil
+	return &sidecarRulePackCandidate{cache: cache, global: global, active: active}, nil
 }

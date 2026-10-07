@@ -18,6 +18,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -120,10 +122,51 @@ type V8YAMLDocument struct {
 	Plain    map[string]any
 }
 
+// v8YAMLParseCacheMaxBytes bounds the source whose parse is kept: a larger
+// tree would stay in memory for the life of the process.
+const v8YAMLParseCacheMaxBytes = 1 << 20
+
+// v8YAMLParseCache holds the last successful parse. One start or reload reads
+// the same source through the strict parser, the schema pass, the compiler and
+// the runtime decoder, and every one of them parsed it again: with 100
+// profiles and 2,000 assignments (154 KB) that was eight parses and a third of
+// the load, which made the gateway start 1.6 s slower (GAP-0264). The document
+// is never written to after the parse.
+var v8YAMLParseCache struct {
+	sync.Mutex
+	source string
+	sum    [sha256.Size]byte
+	doc    *V8YAMLDocument
+}
+
 // ParseV8YAML performs source-safety, exact-version, and targeted legacy-key
 // checks. It does not apply defaults, migrations, environment overrides, schema
-// validation, or observability compilation.
+// validation, or observability compilation. The result is shared between
+// callers that pass the same source and bytes: treat it as read-only.
 func ParseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
+	if len(data) > v8YAMLParseCacheMaxBytes {
+		return parseV8YAML(source, data)
+	}
+	sum := sha256.Sum256(data)
+	cache := &v8YAMLParseCache
+	cache.Lock()
+	if cache.doc != nil && cache.source == source && cache.sum == sum {
+		doc := cache.doc
+		cache.Unlock()
+		return doc, nil
+	}
+	cache.Unlock()
+	doc, err := parseV8YAML(source, data)
+	if err != nil {
+		return nil, err
+	}
+	cache.Lock()
+	cache.source, cache.sum, cache.doc = source, sum, doc
+	cache.Unlock()
+	return doc, nil
+}
+
+func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if len(data) > V8YAMLMaxSourceBytes {
 		return nil, v8Error(source, V8YAMLErrorSourceTooLarge, "$", nil,
 			"configuration source exceeds the 4 MiB limit", "reduce the source to 4 MiB or less")
@@ -324,6 +367,18 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 	var number int64
 	if version == nil || version.Decode(&number) != nil || number < ConfigVersionV9 {
 		return nil
+	}
+	for _, removed := range []struct{ key, target string }{
+		{"skill_actions", "admission.skill.actions"},
+		{"mcp_actions", "admission.mcp.actions"},
+		{"plugin_actions", "admission.plugin.actions"},
+	} {
+		if node := v8YAMLMapValue(root, removed.key); node != nil {
+			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
+		}
+	}
+	if node := v8YAMLMapValue(root, "privacy"); node != nil {
+		return v9RemovedKeyAction(source, "$.privacy", node, "remove it: config_version 9 has no privacy section")
 	}
 	if node := v8YAMLMapValue(v8YAMLMapValue(root, "watch"), "allow_list_bypass_scan"); node != nil {
 		return v9RemovedKeyError(source, "$.watch.allow_list_bypass_scan", node,

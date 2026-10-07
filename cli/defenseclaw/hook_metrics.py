@@ -183,31 +183,47 @@ def connector_hook_decision(
 def hook_decision_may_block_sql(details: str, structured: str, enforced: str) -> str:
     """SQL pre-check to put before ``dc_hook_decision(...) = 'block'``.
 
-    The classifier is a Python function SQLite calls once per row, so every row
-    it can skip is time saved: about 60 to 120 us each, which made the alert
+    The classifier is a Python function SQLite calls once per row, about 60 to
+    120 us each, so every row it can skip is time saved: it made the alert
     count of ``defenseclaw status`` spend its whole 3-second budget on 25,000
-    hook rows (GAP-0199). A row that says whether the call was enforced is
-    decided by that alone: the classifier returns ``block`` for it exactly when
-    the flag is true, and never for a false one. The gateway states it twice,
-    in the ``enforced`` column (NULL stands for false there) and as
-    ``"enforced"`` in the structured envelope, so the classifier is left to the
-    rows that were enforced and the legacy rows that carry neither. For those
-    a block needs a block/deny ``action`` value, or ``enforced`` somewhere in
-    the structured text. Checking for them in SQLite first keeps the
-    classifier off rows that can't block: on a 1.27 GB audit.db of legacy rows
-    it ran for minutes (GAP-1487), and legacy hook rows carry ``action=allow``
-    in their details, so a bare ``action`` test still let every one through
-    (GAP-1674). LIKE is case-insensitive, as the classifier is on values; a
-    quoted value is left to the classifier.
+    hook rows (GAP-0199), and ran for minutes on a 1.27 GB audit.db of legacy
+    rows (GAP-1487). The pre-check answers what the classifier would, only
+    cheaper, and may only err towards "maybe". It reads the same sources in
+    the same order:
+
+    * the ``enforced`` column, when set, decides alone;
+    * else, in a structured envelope that is a JSON object, an ``enforced``
+      key decides (false is never a block), and otherwise its ``action`` does:
+      a row blocks only with a block/deny action. The gateway writes NULL in
+      the column for a call it did not enforce and omits ``enforced`` from the
+      envelope, but always states the ``action``, so its allowed and alert rows
+      end here (a bare ``action`` test let every one of 30,180 through,
+      GAP-0199);
+    * else (no envelope, or one without an ``action``) the legacy ``key=value``
+      details decide: a block needs a block/deny ``action`` token. A quoted
+      value is left to the classifier, and so is a structured text that does
+      not parse as JSON, where the old tests still apply.
+
+    LIKE is case-insensitive, as the classifier is on values.
     """
 
+    tokens = (
+        f"({details} LIKE '%action=block%'"
+        f" OR {details} LIKE '%action=deny%'"
+        f" OR {details} LIKE '%action=\"%')"
+    )
     return (
         f"(CASE"
         f" WHEN {enforced} IS NOT NULL THEN CAST({enforced} AS TEXT) NOT IN ('0', '')"
-        f" WHEN json_valid({structured}) AND json_type({structured}, '$.enforced') = 'false' THEN 0"
-        f" ELSE ({details} LIKE '%action=block%'"
-        f" OR {details} LIKE '%action=deny%'"
-        f" OR {details} LIKE '%action=\"%'"
+        f" WHEN json_valid({structured}) THEN CASE"
+        f" WHEN json_type({structured}, '$.enforced') = 'false' THEN 0"
+        f" WHEN json_type({structured}, '$.enforced') <> 'null' THEN 1"
+        f" WHEN json_type({structured}, '$.action') = 'text'"
+        f" AND json_extract({structured}, '$.action') <> ''"
+        f" THEN (json_extract({structured}, '$.action') LIKE '%block%'"
+        f" OR json_extract({structured}, '$.action') LIKE '%deny%')"
+        f" ELSE {tokens} END"
+        f" ELSE ({tokens}"
         f" OR instr(COALESCE({structured}, ''), 'action') > 0"
         f" OR instr(COALESCE({structured}, ''), 'enforced') > 0) END)"
     )

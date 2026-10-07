@@ -233,6 +233,10 @@ type Store struct {
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
 
+	// plannerStatsRows is the history size at the last ANALYZE
+	// (RefreshPlannerStatistics).
+	plannerStatsRows atomic.Int64
+
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
 

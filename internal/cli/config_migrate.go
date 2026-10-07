@@ -74,7 +74,16 @@ var configMigrateCmd = &cobra.Command{
 			path = config.ConfigPath()
 		}
 		if raw, err := os.ReadFile(path); err == nil && config.SecureClientSource(raw) {
-			return fmt.Errorf("%s is a Secure Client config, which stays on config_version 8; nothing was changed", path)
+			// Nothing to do, not a failure: config_version 8 is current for this
+			// file, so an installer or `defenseclaw migrate` that runs this
+			// command keeps succeeding (issue #1092).
+			if configMigrateJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+					"migrated": false, "dry_run": configMigrateDryRun, "written": []string{}, "record": map[string]any{},
+				})
+			}
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "%s is a Secure Client config, which stays on config_version 8; nothing to migrate.\n", path)
+			return err
 		}
 		if configMigrateAck {
 			if err := config.AcknowledgeMigrationV9(path); err != nil {

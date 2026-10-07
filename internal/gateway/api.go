@@ -922,6 +922,12 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 
 // NewAPIServer creates the REST API server bound to the given address.
 func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
+	return newAPIServer(nil, addr, health, client, store, logger, cfg...)
+}
+
+// newAPIServer is NewAPIServer with the rule packs the sidecar already loaded
+// and validated for its guardrail profile set; nil loads them again.
+func newAPIServer(rulePacks *guardrail.RulePackCache, addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
 	s := &APIServer{
 		addr:   addr,
 		health: health,
@@ -931,7 +937,7 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	}
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
-		s.initGuardrailProfiles(s.scannerCfg)
+		s.initGuardrailProfiles(s.scannerCfg, rulePacks)
 	}
 	return s
 }
@@ -3357,6 +3363,20 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	}
 
 	action := guardrailFallbackActionForSeverity(sev)
+	if thresholds := input.Thresholds; thresholds != nil && a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() {
+		// The request carries the resolved thresholds (config levels, pack
+		// posture, Cisco trust level, HILT): apply them as the inspector
+		// fallback does, so both no-OPA paths decide alike. Secure Client
+		// keeps the default-posture answer of main (issue #1092).
+		var local, cisco *ScanVerdict
+		if input.LocalResult != nil {
+			local = &ScanVerdict{Severity: input.LocalResult.Severity}
+		}
+		if input.CiscoResult != nil {
+			cisco = &ScanVerdict{Severity: input.CiscoResult.Severity}
+		}
+		action = fallbackGuardrailVerdictForThresholds(local, cisco, *thresholds, input.Mode, input.HILT).Action
+	}
 	if input.Mode == "observe" && action == "block" {
 		action = "alert"
 	}

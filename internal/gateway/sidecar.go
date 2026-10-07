@@ -101,6 +101,10 @@ type Sidecar struct {
 	configMgr     *ConfigManager
 	modelRouter   ModelRouter
 
+	// startRulePacks holds the rule packs NewSidecar validated; the first
+	// runAPI hands it to the guardrail profile set and drops it.
+	startRulePacks *guardrail.RulePackCache
+
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
@@ -231,7 +235,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
 	// before creating a client or returning any runnable sidecar state.
-	globalPack, rp, err := loadInitialSidecarRulePack(cfg)
+	globalPack, rp, startRulePacks, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -248,14 +252,14 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// was: multi-connector packs stay isolated to their setup, a profile
 	// pack that fails scans with the base rules, and Rego that fails to
 	// load leaves the guardrail on the resolved thresholds.
-	bootProfiles, profileErr := newGuardrailProfileSet(cfg, false)
+	bootProfiles, profileErr := newGuardrailProfileSet(cfg, startRulePacks, false)
 	if profileErr != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", profileErr)
 	}
 	// The connector packs a reload would compose are digested too, so the
 	// boot digest equals the one a reload or `policy digest` computes.
-	bootPacks := &sidecarRulePackCandidate{global: globalPack, active: rp}
-	if preflight, preflightErr := preflightSidecarRulePacks(cfg); preflightErr == nil {
+	bootPacks := &sidecarRulePackCandidate{cache: startRulePacks, global: globalPack, active: rp}
+	if preflight, preflightErr := preflightSidecarRulePacksWithCache(startRulePacks, cfg); preflightErr == nil {
 		bootPacks.connectors = preflight.connectors
 	}
 	bootGen, err := buildGeneration(context.Background(), generationInputs{
@@ -506,6 +510,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		judgeBodyStore:          judgeBodyStore,
 		judgeBodiesReadyPending: judgeBodiesReadyPending,
 		judgeBodiesReadyDetails: judgeBodiesReadyDetails,
+		startRulePacks:          startRulePacks,
 	}
 	// Commit the already-validated cold-start policy candidate only after every
 	// fallible constructor has succeeded. A rejected candidate must leave the
@@ -1122,6 +1127,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.runAuditWALGuard(runCtx)
 	}()
 
+	// Query-planner statistics are taken as the audit history grows, so ledger
+	// lookups stay index seeks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditPlannerStats(runCtx)
+	}()
+
 	// Agent identities seen on the hook path are written to inventory.db in
 	// one batch per flush interval, never per hook.
 	agentIdentityStoreToken := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore {
@@ -1537,7 +1550,10 @@ type sidecarRulePackCandidate struct {
 	// global is the global scope's composed pack; active is the pack the
 	// shared scanners and judge use (the single enabled connector's, else
 	// global).
-	global         *guardrail.RulePack
+	global *guardrail.RulePack
+	// cache holds every pack of this candidate, for the profile set of the same
+	// transaction.
+	cache          *guardrail.RulePackCache
 	active         *guardrail.RulePack
 	activeRules    *compiledRulePackCategories
 	activePatterns *localPatternsActivation
@@ -1565,15 +1581,17 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 // loadInitialSidecarRulePack performs the cold-start contract. Multi-connector
 // packs remain isolated to their individual setup transactions, but the global
 // pack and an enabled single connector's effective pack must be valid before a
-// runnable Sidecar can be returned.
-func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.RulePack, err error) {
+// runnable Sidecar can be returned. The cache that holds them is returned for
+// the start-time guardrail profile set, which resolves to the same packs and
+// need not load and validate them again (GAP-0264).
+func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.RulePack, cache *guardrail.RulePackCache, err error) {
 	if cfg == nil {
-		return nil, nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
+		return nil, nil, nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
 	}
-	cache := guardrail.NewRulePackCache()
+	cache = guardrail.NewRulePackCache()
 	global, err = loadGlobalRulePack(cache, cfg, "global")
 	if err != nil {
-		return nil, nil, fmt.Errorf("sidecar: %w", err)
+		return nil, nil, nil, fmt.Errorf("sidecar: %w", err)
 	}
 	active = global
 	names := cfg.ActiveConnectors()
@@ -1582,12 +1600,12 @@ func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.R
 		if name != "" && cfg.Guardrail.EffectiveEnabled(name) {
 			active, err = loadConnectorRulePack(cache, cfg, name, "connector "+name)
 			if err != nil {
-				return nil, nil, fmt.Errorf("sidecar: %w", err)
+				return nil, nil, nil, fmt.Errorf("sidecar: %w", err)
 			}
 		}
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", active)
-	return global, active, nil
+	return global, active, cache, nil
 }
 
 // preflightSidecarRulePacks loads a reload candidate through a fresh cache.
@@ -1595,16 +1613,23 @@ func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.R
 // and all explicitly selectable application-protection packs, before any
 // runtime generation, restart helper, config snapshot, or scanner is changed.
 func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) {
+	return preflightSidecarRulePacksWithCache(guardrail.NewRulePackCache(), cfg)
+}
+
+// preflightSidecarRulePacksWithCache is preflightSidecarRulePacks over the
+// rule packs cache already holds: the boot generation shares the cache of the
+// cold-start load, which read the same files a moment before (GAP-0264).
+func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *config.Config) (*sidecarRulePackCandidate, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config reload rule pack candidate is unavailable")
 	}
-	cache := guardrail.NewRulePackCache()
 	global, err := loadGlobalRulePack(cache, cfg, "global")
 	if err != nil {
 		return nil, err
 	}
 	candidate := &sidecarRulePackCandidate{
 		global:         global,
+		cache:          cache,
 		active:         global,
 		connectors:     make(map[string]*guardrail.RulePack),
 		connectorRules: make(map[string]*compiledRulePackCategories),
@@ -1787,7 +1812,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	// Identity-based guardrail profiles are derived, digested and their rule
 	// packs preloaded in the same candidate transaction.
-	profileCandidate, err := newGuardrailProfileSet(newCfg, true)
+	profileCandidate, err := newGuardrailProfileSet(newCfg, rulePackCandidate.cache, true)
 	if err != nil {
 		return fmt.Errorf("config reload guardrail profiles: %w", err)
 	}
@@ -7059,7 +7084,8 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
-	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	api := newAPIServer(s.startRulePacks, addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	s.startRulePacks = nil
 	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)

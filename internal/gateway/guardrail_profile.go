@@ -158,7 +158,7 @@ type guardrailProfileSet struct {
 // pack that fails to load an error (reload); otherwise the profile scans with
 // the base rule set for that directory and the failure is logged (boot,
 // where the base configuration already loaded).
-func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailProfileSet, error) {
+func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, strictRules bool) (*guardrailProfileSet, error) {
 	if cfg == nil || cfg.SecureClientIntegration() || !cfg.Guardrail.HasProfiles() {
 		return nil, nil
 	}
@@ -175,7 +175,9 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 		packs:          make(map[string]*guardrail.RulePack),
 		matches:        newProfileMatchCache(),
 	}
-	cache := guardrail.NewRulePackCache()
+	if cache == nil {
+		cache = guardrail.NewRulePackCache()
+	}
 	names := make([]string, 0, len(derived))
 	for name := range derived {
 		names = append(names, name)
@@ -295,8 +297,8 @@ func (a *APIServer) guardrailProfileSet() *guardrailProfileSet {
 }
 
 // initGuardrailProfiles derives the profiles of the start-time config.
-func (a *APIServer) initGuardrailProfiles(cfg *config.Config) {
-	set, err := newGuardrailProfileSet(cfg, false)
+func (a *APIServer) initGuardrailProfiles(cfg *config.Config, cache *guardrail.RulePackCache) {
+	set, err := newGuardrailProfileSet(cfg, cache, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", err)
 		return

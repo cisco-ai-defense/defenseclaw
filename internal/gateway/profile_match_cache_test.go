@@ -11,7 +11,7 @@ import (
 // The memoised match returns what the uncached walk returns, for verified,
 // unverified and failed-lookup subjects, and the cache stays bounded.
 func TestProfileMatchMemoisationAgreesWithTheWalk(t *testing.T) {
-	set, err := newGuardrailProfileSet(profileSecurityConfig(), true)
+	set, err := newGuardrailProfileSet(profileSecurityConfig(), nil, true)
 	if err != nil || set == nil {
 		t.Fatalf("newGuardrailProfileSet: %v", err)
 	}

@@ -206,7 +206,7 @@ func TestColdStartDefersMultiConnectorRulePacksToIsolatedSetup(t *testing.T) {
 		"claudecode": {RulePackDir: invalidRulePackDir(t)},
 	}
 
-	_, rp, err := loadInitialSidecarRulePack(cfg)
+	_, rp, _, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		t.Fatalf("multi-connector cold-start global preflight: %v", err)
 	}
