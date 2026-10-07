@@ -4707,7 +4707,6 @@ function Get-AwaitedHookBridge([string]$Script) {
     return [pscustomobject]@{
         File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
         Arguments = $arguments
-        Invocation = $match.Groups['invocation'].Value
     }
 }
 
@@ -5117,8 +5116,11 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
         (@($bridge.Arguments)[0..2] -join ' ') -cne 'hook --connector codex') {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
+    # The form 0.8.x released: one non-waiting call of the launcher with no event.
+    # Setup repair must still replace it and Doctor must still refuse it.
+    $legacyFile = "'" + $bridge.File.Replace("'", "''") + "'"
     $legacyScript = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-        $bridge.Invocation + '; exit $LASTEXITCODE'
+        "& $legacyFile hook --connector codex; exit `$LASTEXITCODE"
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
