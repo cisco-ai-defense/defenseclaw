@@ -1,0 +1,328 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package cli
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"golang.org/x/sys/windows"
+	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+// The standalone payload's scanner runtime (cmd/defenseclaw-scanners) lives
+// in its own administrator-owned root, not under InstallRoot or StateRoot:
+// the installer module checks those trees file by file, and the runtime is
+// thousands of files. This lifecycle step owns it: after a successful
+// install, upgrade, repair or ensure it installs the staged executable and
+// unpacks the runtime; uninstall removes the root; status and verify report
+// it. A payload without the runtime (an older Setup) changes nothing.
+
+var (
+	windowsScannerRuntimeDir     = managed.StandaloneWindowsScannerRuntimeDir
+	windowsScannerGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
+	windowsScannerPrepareTimeout = 15 * time.Minute
+)
+
+// windowsScannerRuntimeSDDL: Administrators own the root; LocalSystem and
+// Administrators hold full control and the gateway service reads and runs
+// it, all inherited. No other account has access.
+func windowsScannerRuntimeSDDL(gateway *windows.SID) string {
+	return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + gateway.String() + ")"
+}
+
+func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	if result == nil {
+		return
+	}
+	switch result.Action {
+	case "install", "upgrade", "repair", "ensure":
+		if len(result.Errors) != 0 || opts == nil || strings.TrimSpace(opts.resolvedInstaller) == "" {
+			return
+		}
+		source := filepath.Join(filepath.Dir(opts.resolvedInstaller), managed.StandaloneWindowsScannerRuntimeName)
+		if info, err := os.Lstat(source); err != nil || !info.Mode().IsRegular() {
+			return
+		}
+		if err := installWindowsScannerRuntime(source); err != nil {
+			result.AddWarning("scanner_runtime_unavailable",
+				"the skill, MCP and plugin scanners could not be installed, so installs are blocked until they are: "+err.Error())
+		}
+		result.Scanners = readWindowsScannerRuntime()
+	case "uninstall":
+		if len(result.Errors) != 0 {
+			return
+		}
+		if err := removeWindowsScannerRuntime(); err != nil {
+			result.AddWarning("scanner_runtime_left", "the scanner runtime folder could not be removed: "+err.Error())
+		}
+	case "status", "verify":
+		if result.Installed {
+			result.Scanners = readWindowsScannerRuntime()
+			if result.Scanners != nil && result.Scanners.State != "missing" && result.Scanners.JudgeModel == "" {
+				result.AddWarning("scanner_judge_missing",
+					"the scanners run without an LLM judge (recommended: the quiet policy with the LLM judge); "+
+						"set llm.model in the admin config and store its key with `enterprise secret set`, named by enterprise.inspection.llm.credential")
+			}
+		}
+	}
+}
+
+// installWindowsScannerRuntime copies source into the protected root unless
+// the installed copy already matches, then unpacks and compiles the runtime.
+func installWindowsScannerRuntime(source string) error {
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return err
+	}
+	gateway, err := managed.WindowsServiceAccountSID(windowsScannerGatewayAccount)
+	if err != nil || gateway == nil {
+		return fmt.Errorf("resolve the gateway service SID: %v", err)
+	}
+	if info, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(root, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create %s: %w", root, err)
+		}
+	} else if err != nil {
+		return err
+	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a real folder", root)
+	}
+	if err := applyWindowsSDDL(root, windowsScannerRuntimeSDDL(gateway)); err != nil {
+		return fmt.Errorf("protect %s: %w", root, err)
+	}
+	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	want, err := windowsEnterpriseFileSHA256(source)
+	if err != nil {
+		return err
+	}
+	if got, err := windowsEnterpriseFileSHA256(target); err != nil || got != want {
+		if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
+			return err
+		}
+	}
+	if err := managed.ValidateTrustedFilePath(target, "scanner runtime"); err != nil {
+		return err
+	}
+	// prepare is a no-op once the runtime is unpacked; prune drops the
+	// runtimes earlier builds left.
+	for _, step := range []string{"prepare", "prune"} {
+		if err := runWindowsScannerRuntime(target, step); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runWindowsScannerRuntime(executable, step string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), windowsScannerPrepareTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, executable, step).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s the scanner runtime: %v: %s", step, err, windowsEnterpriseBoundedDiagnostic(strings.TrimSpace(string(out))))
+	}
+	return nil
+}
+
+// copyWindowsScannerRuntime copies source next to target, unpacks its
+// runtime from there, and only then swaps it into place, so the gateway's
+// scans never run an installed image whose runtime is not unpacked yet.
+func copyWindowsScannerRuntime(source, target, root, want string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return err
+	}
+	tmp := filepath.Join(root, ".scanners-"+hex.EncodeToString(suffix)+".tmp")
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	syncErr := out.Sync()
+	closeErr := out.Close()
+	if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if want != "" {
+		if got, err := windowsEnterpriseFileSHA256(tmp); err != nil || got != want {
+			_ = os.Remove(tmp)
+			return errors.New("the copied scanner runtime does not match the payload")
+		}
+		if err := runWindowsScannerRuntime(tmp, "prepare"); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	// A scan the gateway is running keeps the installed image mapped, and
+	// Windows refuses to replace a mapped image but lets it be renamed: move
+	// it aside first, and remove it once nothing runs it.
+	previous := ""
+	if _, err := os.Lstat(target); err == nil {
+		previous = filepath.Join(root, ".scanners-"+hex.EncodeToString(suffix)+".old")
+		if err := os.Rename(target, previous); err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("move the installed scanner runtime aside: %w", err)
+		}
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Remove(tmp)
+		if previous != "" {
+			_ = os.Rename(previous, target)
+		}
+		return fmt.Errorf("install the scanner runtime: %w", err)
+	}
+	removeStaleWindowsScannerCopies(root)
+	return nil
+}
+
+// removeStaleWindowsScannerCopies removes earlier runtimes moved aside and
+// interrupted copies. One a scan still runs stays until the next install.
+func removeStaleWindowsScannerCopies(root string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.Type().IsRegular() && strings.HasPrefix(name, ".scanners-") &&
+			(strings.HasSuffix(name, ".old") || strings.HasSuffix(name, ".tmp")) {
+			_ = os.Remove(filepath.Join(root, name))
+		}
+	}
+}
+
+// removeWindowsScannerRuntime removes the scanner runtime root. It refuses
+// a root that is a link, so it never follows one out of ProgramData.
+func removeWindowsScannerRuntime() error {
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a real folder", root)
+	}
+	if !strings.EqualFold(filepath.Base(root), "DefenseClaw-ScannerRuntime") {
+		return fmt.Errorf("refusing to remove %s", root)
+	}
+	return os.RemoveAll(root)
+}
+
+// readWindowsScannerRuntime reports the installed runtime, its versions and
+// the scanner policy and judge the admin config sets.
+func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
+	state := &enterprisestatus.ScannerRuntime{State: "missing"}
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return state
+	}
+	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	if info, err := os.Lstat(target); err != nil || !info.Mode().IsRegular() {
+		return state
+	}
+	state.State = "not_prepared"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, target, "versions").Output(); err == nil {
+		var report struct {
+			Versions map[string]string `json:"versions"`
+			Prepared bool              `json:"prepared"`
+		}
+		if json.Unmarshal(out, &report) == nil {
+			state.Versions = report.Versions
+			if report.Prepared {
+				state.State = "ready"
+			}
+		}
+	}
+	state.Policy, state.JudgeModel = readWindowsStandaloneScannerSettings()
+	return state
+}
+
+// readWindowsStandaloneScannerSettings reads the skill scanner policy and
+// its judge model from the installed admin config.
+func readWindowsStandaloneScannerSettings() (string, string) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return "", ""
+	}
+	body, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, 4<<20)
+	if err != nil {
+		return "", ""
+	}
+	var document struct {
+		LLM struct {
+			Model string `yaml:"model"`
+		} `yaml:"llm"`
+		Scanners struct {
+			SkillScanner struct {
+				Policy string `yaml:"policy"`
+				LLM    struct {
+					Model string `yaml:"model"`
+				} `yaml:"llm"`
+			} `yaml:"skill_scanner"`
+		} `yaml:"scanners"`
+	}
+	if yaml.Unmarshal(trimWindowsJSONBOM(body), &document) != nil {
+		return "", ""
+	}
+	model := strings.TrimSpace(document.Scanners.SkillScanner.LLM.Model)
+	if model == "" {
+		model = strings.TrimSpace(document.LLM.Model)
+	}
+	policy := strings.TrimSpace(document.Scanners.SkillScanner.Policy)
+	if policy == "" {
+		policy = config.DefaultSkillScannerPolicy
+	}
+	return policy, model
+}
+
+// writeWindowsEnterpriseScanners prints the scanners line of a status
+// summary: state, the pinned versions, the policy and the judge model.
+func writeWindowsEnterpriseScanners(output io.Writer, scanners *enterprisestatus.ScannerRuntime) {
+	if scanners == nil {
+		return
+	}
+	versions := make([]string, 0, len(scanners.Versions))
+	for _, name := range []string{"skill-scanner", "mcp-scanner", "litellm", "python"} {
+		if version := scanners.Versions[name]; version != "" {
+			versions = append(versions, name+" "+version)
+		}
+	}
+	judge := scanners.JudgeModel
+	if judge == "" {
+		judge = "none"
+	}
+	fmt.Fprintf(output, "  Scanners: %s (%s); policy %s; judge %s\n",
+		scanners.State, strings.Join(versions, ", "), scanners.Policy, judge)
+}

@@ -95,6 +95,8 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 		case <-timer.C:
 			w.runRescanCycle(ctx)
 			timer.Reset(interval)
+		case <-w.rescanNow:
+			w.runRescanCycle(ctx)
 		}
 	}
 }
@@ -287,7 +289,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				}
 				continue
 			}
-			if watcherConnectorName(w.cfg) == "claudecode" &&
+			if w.connectorForPath(path) == "claudecode" &&
 				isClaudeSkillsPlugin(path) {
 				continue
 			}
@@ -301,7 +303,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	for _, dir := range w.pluginDirs {
-		if watcherConnectorName(w.cfg) == "claudecode" {
+		if w.connectorForPath(dir) == "claudecode" {
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
 				if w.isOwnPlugin(plugin) {
 					continue
@@ -368,7 +370,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 	}
 
-	servers, err := w.cfg.ReadMCPServers()
+	servers, err := w.readMCPServers()
 	if err != nil {
 		// No agent config yet means no MCP servers to rescan.
 		if !errors.Is(err, os.ErrNotExist) {
@@ -384,6 +386,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			Type:      InstallMCP,
 			Name:      server.Name,
 			Path:      server.Name,
+			Connector: server.Connector,
 			Timestamp: time.Now().UTC(),
 		})
 	}
@@ -403,7 +406,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 // names them the same way (GAP-2439). The user plugin root (~/.hermes/plugins)
 // keeps category/name, as "plugin list" does.
 func (w *InstallWatcher) hermesBareCategory(dir, category string) bool {
-	if category != "platforms" || watcherConnectorName(w.cfg) != "hermes" {
+	if category != "platforms" || w.connectorForPath(dir) != "hermes" {
 		return false
 	}
 	dir = filepath.Clean(dir)
@@ -628,6 +631,17 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if evt.Type == InstallMCP && w.admitNewMCP && w.startupRescanDone {
+				// A server added to an enrolled user's agent after the
+				// watcher started: admit it as `mcp set` would (GAP-0132).
+				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
+				res := w.runAdmission(ctx, evt)
+				if w.onAdmit != nil {
+					w.onAdmit(res)
+				}
+				w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
+				return rescanScanned
+			}
 			if w.admitsAtStartup(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
@@ -1279,7 +1293,7 @@ func (w *InstallWatcher) snapshotMCPServer(name string) (*TargetSnapshot, error)
 }
 
 func (w *InstallWatcher) lookupMCPServer(name string) (*config.MCPServerEntry, error) {
-	servers, err := w.cfg.ReadMCPServers()
+	servers, err := w.readMCPServers()
 	if err != nil {
 		return nil, err
 	}

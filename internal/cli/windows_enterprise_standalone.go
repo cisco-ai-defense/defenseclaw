@@ -1281,6 +1281,7 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	applyWindowsStandaloneScannerRuntime(result, opts)
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
@@ -1340,6 +1341,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
 	}
+	writeWindowsEnterpriseScanners(output, result.Scanners)
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
 	}

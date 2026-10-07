@@ -46,6 +46,17 @@ type EnterpriseConfig struct {
 // standalone deployment. Secure Client deployments always use CMID.
 type EnterpriseInspectionConfig struct {
 	AIDefense EnterpriseAIDefenseConfig `mapstructure:"ai_defense" yaml:"ai_defense,omitempty"`
+	LLM       EnterpriseLLMConfig       `mapstructure:"llm"        yaml:"llm,omitempty"`
+}
+
+// EnterpriseLLMConfig names the protected credential that carries the API
+// key of the llm: block on a standalone deployment. The LLM judge and the
+// scanners' LLM analyzers read it, through ResolveLLM, instead of
+// llm.api_key, api_key_env or the data-dir .env: the gateway service account
+// has no user's environment, so this is how a managed gateway gets an LLM key
+// (for example a Bedrock API key). The key itself never appears in config.
+type EnterpriseLLMConfig struct {
+	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
 }
 
 // EnterpriseAIDefenseConfig names the protected credential that carries the
@@ -599,6 +610,32 @@ func standaloneLayoutDataDir(configFile string, document *yaml.Node) (string, bo
 	return layout.DataDir, true
 }
 
+// resolveStandaloneLLMCredential reads a protected credential; tests replace
+// it because a trusted credential file needs an administrator-owned path.
+var resolveStandaloneLLMCredential = func(name, secretsDir string) ([]byte, error) {
+	value, _, err := managed.ResolveServiceCredential(name, secretsDir)
+	return value, err
+}
+
+// standaloneLLMKey returns the llm: API key of a standalone deployment that
+// names enterprise.inspection.llm.credential. configured is true whenever the
+// credential is named: a missing or untrusted credential then yields no key,
+// never the environment or .env key.
+func (c *Config) standaloneLLMKey() (key string, configured bool) {
+	if c == nil || !c.StandaloneEnterprise() {
+		return "", false
+	}
+	name := strings.TrimSpace(c.Enterprise.Inspection.LLM.Credential)
+	if name == "" {
+		return "", false
+	}
+	value, err := resolveStandaloneLLMCredential(name, managed.StandaloneSecretsDirForConfig(runtime.GOOS, c.ConfigFilePath))
+	if err != nil {
+		return "", true
+	}
+	return string(value), true
+}
+
 // ObservabilityCredentialsDir is where the observability credential
 // references of a loaded standalone enterprise config resolve, the same
 // secrets directory as the AI Defense key. Other deployments resolve none.
@@ -660,6 +697,7 @@ func yamlScalarValue(node *yaml.Node) string {
 func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 	return strings.TrimSpace(e.Profile) == "" &&
 		!e.Inspection.AIDefense.Enabled && strings.TrimSpace(e.Inspection.AIDefense.Credential) == "" &&
+		strings.TrimSpace(e.Inspection.LLM.Credential) == "" &&
 		enrollmentEmpty(e.Enrollment) &&
 		machinePolicyEmpty(e.MachinePolicy) &&
 		strings.TrimSpace(e.Trust.Mode) == "" && len(e.Trust.AllowedSigners) == 0 &&
@@ -712,6 +750,9 @@ func validateEnterpriseConfig(cfg *Config) error {
 		}
 	} else if strings.TrimSpace(ai.Credential) != "" && !ValidEnterpriseCredentialName(ai.Credential) {
 		return fmt.Errorf("config: enterprise.inspection.ai_defense.credential %q is not a valid credential name", ai.Credential)
+	}
+	if name := strings.TrimSpace(e.Inspection.LLM.Credential); name != "" && !ValidEnterpriseCredentialName(name) {
+		return fmt.Errorf("config: enterprise.inspection.llm.credential %q must be a protected credential name (lowercase letters, digits and dashes)", name)
 	}
 	// The key never lives in config: the gateway reads it from the named
 	// protected credential and ignores cisco_ai_defense.api_key_env.
