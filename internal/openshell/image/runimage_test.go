@@ -797,8 +797,16 @@ func TestVMDisks(t *testing.T) {
 		}
 	}
 	disks := VMDisks(cache, "sha256:"+id)
-	if len(disks) != 2 || disks[0].UID != 501 || disks[0].GID != 20 || disks[1].UID != -1 || disks[0].Bytes < 8192 {
+	if len(disks) != 2 || disks[0].UID != 501 || disks[0].GID != 20 || disks[1].UID != -1 || disks[0].Bytes < 8192 || disks[0].OpenShell != "0.1.1" {
 		t.Fatalf("disks = %+v", disks)
+	}
+	// A driver of another release prepares its own disk: after an in-place
+	// upgrade the three 0.1.1 disks are stale, never the bootstrap rootfs.
+	if !disks[0].PreparedBy("0.1.1") || disks[0].PreparedBy("0.1.2") || !disks[0].PreparedBy("") || !(VMDisk{}).PreparedBy("0.1.2") {
+		t.Fatalf("PreparedBy of %+v", disks[0])
+	}
+	if stale := StaleVMDisks(cache, "0.1.2"); len(stale) != 3 || StaleVMDisks(cache, "0.1.1") != nil || StaleVMDisks(cache, "") != nil {
+		t.Fatalf("stale on 0.1.2 = %+v", stale)
 	}
 	if VMDisks(cache, id) != nil || VMDisks(filepath.Join(cache, "missing"), "sha256:"+id) != nil {
 		t.Fatal("a malformed ID or a missing cache found disks")

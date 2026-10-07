@@ -505,8 +505,24 @@ type VMDisk struct {
 	// gateway's sandbox_uid and sandbox_gid), -1 for the image's own
 	// account.
 	UID, GID int
+	// OpenShell is the release whose vm driver prepared it, from its name
+	// (...-openshell-0.1.1-...); "" when the name does not say. The driver
+	// of another release prepares its own disk from the image and never
+	// boots this one (PreparedBy).
+	OpenShell string
 	// Bytes is the space it takes on disk.
 	Bytes int64
+}
+
+// PreparedBy reports whether the vm driver of release boots d: true unless
+// both releases are known and differ.
+func (d VMDisk) PreparedBy(release string) bool {
+	was, err := openshell.ParseVersion(d.OpenShell)
+	if err != nil {
+		return true
+	}
+	now, err := openshell.ParseVersion(release)
+	return err != nil || was.Compare(now) == 0
 }
 
 // VMDisks lists the root disks under cacheDir the vm driver prepared from
@@ -518,26 +534,35 @@ func VMDisks(cacheDir, imageID string) []VMDisk {
 	if !ok || !hashRE.MatchString(id) || cacheDir == "" {
 		return nil
 	}
+	return listVMDisks(cacheDir, func(_ VMDisk, of string) bool { return of == id })
+}
+
+// StaleVMDisks lists the root disks under cacheDir that the vm driver of
+// another release than release prepared, which the driver of release never
+// boots: after an in-place upgrade those of the release before stay behind.
+// None when release is not known.
+func StaleVMDisks(cacheDir, release string) []VMDisk {
+	if _, err := openshell.ParseVersion(release); err != nil || cacheDir == "" {
+		return nil
+	}
+	return listVMDisks(cacheDir, func(d VMDisk, _ string) bool { return !d.PreparedBy(release) })
+}
+
+// listVMDisks lists the root disks under cacheDir that keep takes, with the
+// image ID (hex) each was prepared from.
+func listVMDisks(cacheDir string, keep func(d VMDisk, imageID string) bool) []VMDisk {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		return nil
 	}
-	suffix := "-sha256-" + id
 	var out []VMDisk
 	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !strings.HasSuffix(name, suffix) {
+		if !e.IsDir() {
 			continue
 		}
-		d := VMDisk{Path: filepath.Join(cacheDir, name), UID: -1, GID: -1}
-		rest := strings.TrimSuffix(name, suffix)
-		if i := strings.LastIndex(rest, "-configured-"); i >= 0 {
-			uid, gid, _ := strings.Cut(rest[i+len("-configured-"):], "-")
-			u, uerr := strconv.Atoi(uid)
-			g, gerr := strconv.Atoi(gid)
-			if uerr == nil && gerr == nil {
-				d.UID, d.GID = u, g
-			}
+		d, id, ok := vmDisk(cacheDir, e.Name())
+		if !ok || !keep(d, id) {
+			continue
 		}
 		d.Bytes = treeBytes(d.Path)
 		out = append(out, d)
@@ -545,14 +570,36 @@ func VMDisks(cacheDir, imageID string) []VMDisk {
 	return out
 }
 
+// vmDisk is the root disk in the directory name under cacheDir, and the
+// image ID (hex) it was prepared from; ok is false unless name is
+// openshell.PreparedDiskPrefix...-sha256-<an image ID>.
+func vmDisk(cacheDir, name string) (d VMDisk, imageID string, ok bool) {
+	i := strings.LastIndex(name, "-sha256-")
+	if i < 0 || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !hashRE.MatchString(name[i+len("-sha256-"):]) {
+		return VMDisk{}, "", false
+	}
+	d = VMDisk{Path: filepath.Join(cacheDir, name), UID: -1, GID: -1}
+	rest := name[:i]
+	if j := strings.LastIndex(rest, "-configured-"); j >= 0 {
+		uid, gid, _ := strings.Cut(rest[j+len("-configured-"):], "-")
+		u, uerr := strconv.Atoi(uid)
+		g, gerr := strconv.Atoi(gid)
+		if uerr == nil && gerr == nil {
+			d.UID, d.GID = u, g
+		}
+	}
+	if _, after, found := strings.Cut(rest, "-openshell-"); found {
+		d.OpenShell, _, _ = strings.Cut(after, "-")
+	}
+	return d, name[i+len("-sha256-"):], true
+}
+
 // RemoveVMDisk removes a root disk VMDisks listed, which must still be a
 // directory (not a link) named as the vm driver names its prepared disks.
 // The driver prepares it again from its image when a sandbox boots one
 // that has none. Nothing else of the driver's state is touched.
 func RemoveVMDisk(d VMDisk) error {
-	name := filepath.Base(d.Path)
-	i := strings.LastIndex(name, "-sha256-")
-	if i < 0 || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !hashRE.MatchString(name[i+len("-sha256-"):]) {
+	if _, _, ok := vmDisk(filepath.Dir(d.Path), filepath.Base(d.Path)); !ok {
 		return fmt.Errorf("openshell image: %s is not a MicroVM disk the vm driver prepared", d.Path)
 	}
 	info, err := os.Lstat(d.Path)

@@ -33,14 +33,24 @@ const (
 	// SupportedBelow is the first release outside the window.
 	SupportedBelow = "0.2.0"
 
-	// InstallerTag is the upstream release the setup flow installs.
-	InstallerTag = "v0.1.1"
+	// InstallerVersion is the release the setup flow installs, and the one
+	// it offers an older supported release an in-place upgrade to
+	// (Installer.Upgrade, DoctorReport.OpenShellUpgradeAvailable).
+	InstallerVersion = "0.1.2"
+	// InstallerTag is InstallerVersion's upstream release tag.
+	InstallerTag = "v" + InstallerVersion
 	// InstallerURL is the tag-pinned upstream installer. Fetching it from a
 	// tag rather than main keeps the bytes stable enough to pin a digest.
 	InstallerURL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/" + InstallerTag + "/install.sh"
 	// InstallerSHA256 is the digest of InstallerURL. Setup refuses to run a
-	// script that does not match it.
+	// script that does not match it. (The v0.1.1 and v0.1.2 scripts are
+	// byte-identical; the release comes from OPENSHELL_VERSION.)
 	InstallerSHA256 = "5c98a86a4b811c471b212219cb2a62d458244220ffa71ac8e3baf3700b17b871"
+
+	// installerUpgradeReason says why a host on an older supported release
+	// is offered InstallerVersion (the doctor's CLI check). Review it with
+	// InstallerVersion.
+	installerUpgradeReason = "fixes a supervisor bug that can stall a sandbox's first connection, and cuts the CPU an idle sandbox uses"
 
 	// DefaultBaseImage is the digest-pinned NVIDIA community sandbox image
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
@@ -173,9 +183,9 @@ func (e *ErrUnsupportedVersion) Error() string {
 	case e.Found.Compare(mustParse(breakingReleaseFloor)) < 0:
 		return fmt.Sprintf("OpenShell %s predates %s, and %s cannot use its gateway state or sandboxes: back up what you need, "+
 			"clean up with the old CLI (openshell sandbox delete --all && openshell gateway destroy), then install %s",
-			e.Found, breakingReleaseFloor, SupportedMin, SupportedMin)
+			e.Found, breakingReleaseFloor, InstallerVersion, InstallerVersion)
 	case e.Found.Compare(mustParse(SupportedMin)) < 0:
-		return fmt.Sprintf("OpenShell %s is older than %s; upgrade it in place to %s", e.Found, SupportedMin, SupportedMin)
+		return fmt.Sprintf("OpenShell %s is older than %s; upgrade it in place to %s", e.Found, SupportedMin, InstallerVersion)
 	}
 	return fmt.Sprintf("OpenShell %s is not supported; DefenseClaw drives >=%s <%s", e.Found, SupportedMin, SupportedBelow)
 }

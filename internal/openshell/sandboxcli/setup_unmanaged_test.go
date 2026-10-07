@@ -87,6 +87,33 @@ func unmanagedReportOn(mac, answers bool, driver openshell.ComputeDriver, more f
 	})
 }
 
+// TestSetupLeavesTheUpgradeOfAnUnmanagedOpenShell: an OpenShell 0.1.1
+// installed another way is its user's to upgrade (NVIDIA's installer would
+// install the release beside it): setup does not offer the upgrade, even
+// with --install-openshell, and says so with the doctor's fix.
+func TestSetupLeavesTheUpgradeOfAnUnmanagedOpenShell(t *testing.T) {
+	const fix = "upgrade OpenShell to " + openshell.InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"
+	ta := setupApp(t, "", "", true)
+	ta.IO.TTY = false
+	ta.HostDoctor = unmanagedReportOn(false, true, openshell.DriverDocker, func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDCLI)
+		c.Status, c.Detail = openshell.StatusWarn, "0.1.1 at "+linuxReleaseCLI+"; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug"
+		c.Fix = &openshell.Fix{Summary: fix}
+	})
+	_, _ = useGateway(ta)
+	inst := &fakeInstaller{}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true, NoWrappers: true}))
+	if inst.upgraded || inst.ran {
+		t.Fatalf("upgraded %v, installed %v", inst.upgraded, inst.ran)
+	}
+	has(t, ta.output(), "⚠ OpenShell 0.1.1 has no openshell-gateway user service", "→ "+fix+"\n")
+	lacks(t, ta.output(), "Upgrade OpenShell", "upgrading OpenShell")
+}
+
 // TestSetupUsesAGatewayRunAnotherWay (RT U1): on a Mac whose OpenShell
 // 0.1.1 came from the release binaries, its gateway started by hand, the
 // doctor said "✓ ready for sandboxes" with a ⚠ Gateway service, but setup
@@ -211,8 +238,8 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 		c = r.Get(openshell.CheckIDCLI)
 		c.Status, c.Detail = openshell.StatusFail, "openshell is not on PATH"
 	})
-	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-	has(t, ta.output(), "✗ OpenShell not installed", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell "+openshell.InstallerVersion+" is needed")
+	has(t, ta.output(), "✗ OpenShell not installed", "Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
 	lacks(t, ta.output(), "user service", "⚠ Gateway service")
 }
 

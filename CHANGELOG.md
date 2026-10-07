@@ -880,6 +880,39 @@ deleted.
   OmniGent have no post-tool context field, so there only the terminal's
   live notice reports the block. Both drivers.
 
+### OpenShell 0.1.2
+
+- `defenseclaw sandbox setup` installs OpenShell 0.1.2 (NVIDIA's installer
+  from the v0.1.2 tag; the script is byte-identical to v0.1.1's, so its
+  pinned SHA-256 is unchanged). 0.1.2 fixes a supervisor bug on the path
+  every sandbox connection takes: a sandbox's first request through the
+  egress proxy, or a hook call, could stall until the client's own timeout.
+  It also stops idle sandboxes from using about 2% of a CPU core each.
+  DefenseClaw still drives OpenShell `>=0.1.1 <0.2.0`; the Go SDK pin is
+  unchanged (its code is identical in 0.1.2).
+- On OpenShell 0.1.1 the doctor's **OpenShell CLI** check warns (the machine
+  stays ready) and setup offers the upgrade to 0.1.2 in place:
+  ``Upgrade OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer?``,
+  no by default, so `--yes` and `--non-interactive` keep 0.1.1;
+  `--install-openshell` upgrades. NVIDIA's installer restarts the gateway
+  once it has installed the release, and setup names the running sandboxes
+  first. On the docker driver they keep running and lose their connections,
+  and Docker first pulls the 0.1.2 supervisor images from `ghcr.io`, which
+  the restarted gateway needs to start: when it cannot, setup keeps 0.1.1
+  and changes nothing. On the MicroVM driver the restart would stop running
+  sandboxes without a flush, so setup keeps 0.1.1 while one runs and says to
+  stop them first. An OpenShell installed another way is not upgraded; the
+  check says to upgrade it the way you installed it. The TUI wizard shows the upgrade with **Install OpenShell** off.
+  `sandbox doctor --json` reports `openshell_upgrade` and
+  `openshell_install_version`.
+- The daemon reconnects when the gateway answers with another release, so
+  `sandbox status` and the doctor name the release after an upgrade.
+- On a Mac the first start of each harness image after the upgrade prepares
+  its MicroVM disk again (about a minute and 5 GB): the explain note and
+  the daemon's disk-room check count only disks the gateway's release
+  prepared. `sandbox image prune` removes the disks of another release,
+  which the gateway never boots.
+
 ### OpenShell sandboxes on macOS (MicroVM driver)
 
 - Apple-silicon Macs run sandboxes on OpenShell's MicroVM (`vm`) compute

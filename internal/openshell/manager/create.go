@@ -477,7 +477,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if ri := delivered.runImage; ri != nil {
 		rec.RunImage, rec.RunImageID = ri.Tag, ri.ImageID
 	}
-	if err := m.vmDiskRoom(ctx, gw.Driver, img, rec.RunImageID); err != nil {
+	if err := m.vmDiskRoom(ctx, gw.Driver, gw.Version, img, rec.RunImageID); err != nil {
 		return nil, err
 	}
 
@@ -599,13 +599,15 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 // vmDiskRoom refuses a create on a driver that prepares a disk from each
 // image it boots (the vm driver's ImageCache) when the image the sandbox
 // boots, id (its run image or alias; the overlay image img's own ID when
-// empty), has no disk prepared for img's workload identity yet and the
-// volume of the driver's image cache lacks the room for one
-// (openshell.VMDiskShortage): the preparation would fill the disk. The CLI
+// empty), has no disk prepared for img's workload identity by the
+// gateway's release yet (a disk of the release before an in-place upgrade
+// is not booted: image.VMDisk.PreparedBy) and the volume of the driver's
+// image cache lacks the room for one (openshell.VMDiskShortage): the
+// preparation would fill the disk. The CLI
 // refuses such a run before it stages a copy, and warns when the room is
 // short of the recommended; this covers every other client. Nothing is
 // refused when the space cannot be measured.
-func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.Record, id string) error {
+func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, release string, img image.Record, id string) error {
 	if d.ImageCache == "" || m.opts.VMDiskFree == nil {
 		return nil
 	}
@@ -617,7 +619,7 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.
 		return nil
 	}
 	for _, disk := range image.VMDisks(dir, id) {
-		if disk.UID == img.UID && disk.GID == img.GID {
+		if disk.UID == img.UID && disk.GID == img.GID && disk.PreparedBy(release) {
 			return nil
 		}
 	}

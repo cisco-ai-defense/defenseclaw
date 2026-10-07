@@ -655,6 +655,16 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 		t.Fatalf("Explain of a prepared posture = %+v, %v", ex, err)
 	}
 	e.create(sandboxapi.CreateRequest{Name: "vm-cached", Copy: true, Project: e.otherProject("other")})
+	// After an in-place upgrade the gateway prepares its own disk: the one
+	// OpenShell 0.1.1 prepared counts for neither.
+	e.fake.SetRelease(openshell.InstallerVersion)
+	e.gw.Version = openshell.InstallerVersion
+	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || !ex.VMFirstBoot {
+		t.Fatalf("Explain on the upgraded gateway = %+v, %v", ex, err)
+	}
+	if _, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-upgraded", Copy: true, Project: e.otherProject("upgraded")}); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		t.Fatalf("create on the upgraded gateway's full disk = %v", err)
+	}
 
 	d := newEnv(t, nil)
 	disk(d)

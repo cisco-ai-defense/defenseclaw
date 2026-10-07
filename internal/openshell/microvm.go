@@ -602,7 +602,7 @@ func (r *doctorRun) vmDiskCheck() Check {
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), dir)
 	if n, size := preparedDisks(filepath.Join(dir, "images")); n > 0 {
-		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes",
+		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes and those an earlier OpenShell release prepared",
 			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size), pruneCommand)
 	}
 	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
