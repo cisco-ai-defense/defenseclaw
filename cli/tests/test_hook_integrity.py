@@ -185,3 +185,18 @@ def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch)
     assert f"set up in {tmp_path / 'old'}" in problem
     assert "not guarding" in problem
 
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode 000 files")
+def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeypatch):
+    # GAP-0403: chmod 000 makes every hook a non-blocking error, so the
+    # connector is not guarded whatever its fail mode.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    script.chmod(0)
+    try:
+        problem = unrunnable_hook_problem(cfg, "codex")
+        problems = hook_runtime_problems(cfg, "codex")
+    finally:
+        script.chmod(0o700)
+    assert "cannot be read" in problem
+    assert "changed since setup" not in " ".join(problems)

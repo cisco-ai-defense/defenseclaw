@@ -155,6 +155,14 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
         if script in missing:
             continue
         expected = digests.get(script.name)
+        if expected and not os.access(script, os.R_OK):
+            # chmod 000 (an antivirus quarantine, a restored backup): the
+            # agent cannot run it, which is not an edit (GAP-0403).
+            problems.append(
+                f"hook script {script} cannot be read, so the agent cannot run it and DefenseClaw is not "
+                "guarding its tool calls"
+            )
+            break
         if expected and _sha256_regular_file(script) != expected:
             problems.append(
                 f"hook script {script} changed since setup (an edit, or a copy from another build; "
