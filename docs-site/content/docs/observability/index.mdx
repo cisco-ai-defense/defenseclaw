@@ -354,8 +354,14 @@ must preserve a longer local window. `retention_days: 0` retains indefinitely
 and produces a capacity warning.
 
 The reaper removes eligible event, evidence, judge-body, and correlation rows
-in dependency order. SQLite can reuse the freed pages, but the database file
-does not shrink automatically. Raw judge-body capture is
+in dependency order. It deletes in small batches and pauses after each, so the
+hooks that write to the same database keep most of their speed while a large
+backlog is pruned. A run that stops at its time budget with rows left (five
+minutes for the correlation ledger) is followed by another a minute later
+instead of six hours later. A new `audit.db` returns the pages a prune freed to
+the file system in steps, until a tenth of the file is left free for the next
+inserts; a file created by an earlier release keeps its size, and SQLite
+reuses the freed pages. Raw judge-body capture is
 controlled separately by `guardrail.retain_judge_bodies`. Redaction profiles
 do not apply to it: while it is `true` (the default), `judge_bodies.db` keeps
 the raw LLM-judge request and response text, which can quote secrets from
