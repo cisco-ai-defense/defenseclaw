@@ -48,6 +48,9 @@ func NewPluginScanner(binaryPath string) *PluginScanner {
 	if binaryPath == "" {
 		binaryPath = "defenseclaw"
 	}
+	if runtimeBinary := resolveScannerRuntime(binaryPath, "defenseclaw", "defenseclaw.exe"); usesScannerRuntime(runtimeBinary) {
+		return &PluginScanner{BinaryPath: runtimeBinary}
+	}
 	binaryPath = resolveDefaultPluginScanner(binaryPath)
 	return &PluginScanner{BinaryPath: binaryPath}
 }
@@ -65,6 +68,8 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 	switch filepath.Base(binaryPath) {
 	case "defenseclaw-plugin-scanner", "defenseclaw-plugin-scanner.exe":
 		args = []string{target}
+	case scannerRuntimeName, scannerRuntimeName + ".exe":
+		args = []string{"plugin-scan", target}
 	default:
 		args = []string{"plugin", "scan", "--json", target}
 	}

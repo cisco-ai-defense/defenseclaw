@@ -23,11 +23,16 @@ func TestWindowsLifecycleSnapshotsEveryFileTheConfigStepWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := strings.Index(string(module), "function Get-DefenseClawConfigSidecarPaths")
+	text := strings.ReplaceAll(string(module), "\r\n", "\n") // CRLF on a Windows checkout
+	start := strings.Index(text, "function Get-DefenseClawConfigSidecarPaths")
 	if start < 0 {
 		t.Fatal("DefenseClawEnterprise.psm1 has no Get-DefenseClawConfigSidecarPaths")
 	}
-	list := string(module)[start : start+strings.Index(string(module)[start:], "\n}\n")]
+	end := strings.Index(text[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("Get-DefenseClawConfigSidecarPaths has no closing brace")
+	}
+	list := text[start : start+end]
 	for _, name := range []string{
 		configwrite.GenerationFileName,
 		"config.yaml" + configwrite.LockSuffix,

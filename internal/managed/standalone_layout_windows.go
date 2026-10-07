@@ -17,6 +17,16 @@ import "github.com/defenseclaw/defenseclaw/internal/winpath"
 // StandaloneWindowsLayout resolves the standalone layout from the protected
 // HKLM Program Files and ProgramData registration, never from the caller's
 // ProgramFiles/ProgramData environment variables.
+// StandaloneWindowsScannerRuntimeDir resolves the scanner runtime root from
+// the trusted ProgramData registration.
+func StandaloneWindowsScannerRuntimeDir() (string, error) {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return "", err
+	}
+	return StandaloneWindowsScannerRuntimeDirForRoot(programData), nil
+}
+
 func StandaloneWindowsLayout() (StandaloneLayout, error) {
 	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil {

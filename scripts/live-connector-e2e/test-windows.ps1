@@ -3038,9 +3038,8 @@ threading.Event().wait()
         '(?s)function Set-WizardCodexLegacyNonWaitingHook\b.*?(?=\r?\nfunction )'
     ).Value
     Assert-True ($legacyLauncherFixture -match '\$bridge = Get-AwaitedHookBridge \$script' -and
-        $legacyLauncherFixture -match 'hook --connector codex; exit `\$LASTEXITCODE' -and
-        $legacyLauncherFixture -notmatch 'argumentLiterals' -and
-        $legacyLauncherFixture -notmatch 'Invocation') `
+        $legacyLauncherFixture -match '"& \$legacyFile hook --connector codex; exit `\$LASTEXITCODE"' -and
+        $legacyLauncherFixture -notmatch '--event|--hook-contract|argumentLiterals|Invocation') `
         'legacy Codex launcher fixture is the non-waiting call 0.8.x released, with no event or hook contract'
     $legacyWatchdogStop = $legacyLauncherAcceptance.IndexOf("@('watchdog', 'stop')", [StringComparison]::Ordinal)
     $legacyGatewayStop = $legacyLauncherAcceptance.IndexOf("@('stop')", [StringComparison]::Ordinal)
