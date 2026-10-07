@@ -1554,14 +1554,19 @@ pick_connector() {
         printf "    ${BOLD}%2d)${NC} %s\n" "${index}" "${name}"
         index=$((index + 1))
     done
-    printf "  Choice [default 1=codex]: " >&2
-    choice=$(read_tty_line) || choice=""
-    choice="${choice:-1}"
-    index=1
-    CONNECTOR=codex
-    for name in ${CONNECTOR_CHOICES}; do
-        [[ "${index}" == "${choice}" ]] && CONNECTOR="${name}"
-        index=$((index + 1))
+    while true; do
+        printf "  Choice [default 1=codex]: " >&2
+        choice=$(read_tty_line) || choice=""
+        choice="${choice:-1}"
+        index=1
+        for name in ${CONNECTOR_CHOICES}; do
+            if [[ "${choice}" == "${index}" || "${choice}" == "${name}" ]]; then
+                CONNECTOR="${name}"
+                break 2
+            fi
+            index=$((index + 1))
+        done
+        warn "Choose a listed number or connector name."
     done
     ok "Connector: ${CONNECTOR}"
 }
