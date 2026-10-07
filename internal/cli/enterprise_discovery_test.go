@@ -223,6 +223,23 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 		strings.Contains(err.Error(), "check the deployment") {
 		t.Fatalf("slow gateway error = %v, want the directory lookup blamed", err)
 	}
+	// Secure Client keeps the 5 s wait and the error of main (GAP-0303,
+	// issue #1092).
+	previousLoad, previousSecureClientWait := enterpriseDiscoveryLoadConfig, secureClientGatewayWait
+	t.Cleanup(func() {
+		enterpriseDiscoveryLoadConfig, secureClientGatewayWait = previousLoad, previousSecureClientWait
+	})
+	secureClientGatewayWait = 100 * time.Millisecond
+	enterpriseDiscoveryLoadConfig = func(*cobra.Command) error {
+		cfg = &config.Config{DeploymentMode: "managed_enterprise", Gateway: config.GatewayConfig{
+			APIBind: "127.0.0.1", APIPort: gateway.Listener.Addr().(*net.TCPAddr).Port,
+		}}
+		return nil
+	}
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "did not answer; check the deployment") {
+		t.Fatalf("Secure Client slow gateway error = %v, want the error of main", err)
+	}
+	enterpriseDiscoveryLoadConfig = previousLoad
 	gateway.Close()
 	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "check the deployment") {
 		t.Fatalf("stopped gateway error = %v, want the deployment status hint", err)
