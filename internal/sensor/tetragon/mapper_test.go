@@ -272,6 +272,10 @@ func TestCommandLineRedactsQuotedWords(t *testing.T) {
 			t.Fatalf("%s: %q, want it to contain %q", args, got, want)
 		}
 	}
+	quoted := commandLine(&pb.Process{Binary: "/usr/bin/bash", Arguments: `-c "--token=dccert-first dccert-second"`})
+	if strings.Contains(quoted, "dccert-first") || strings.Contains(quoted, "dccert-second") {
+		t.Fatalf("Tetragon command line leaked a quoted secret: %q", quoted)
+	}
 	long := commandLine(&pb.Process{Binary: "/usr/bin/bash", Arguments: strings.Repeat("é ", 2000)})
 	if len(long) > MaxCmdlineBytes || !utf8.ValidString(long) {
 		t.Fatalf("bound: %d bytes, valid %v", len(long), utf8.ValidString(long))

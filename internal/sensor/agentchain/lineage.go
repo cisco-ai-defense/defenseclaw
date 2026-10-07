@@ -241,7 +241,7 @@ func (t *Tracker) ObserveExecEvent(e ExecObservation) {
 	case !ok:
 		t.insertLocked(e, now, nil)
 	case existing.execID != "" && e.ExecID != "" && existing.exitedAt.IsZero() &&
-		startsAgree(existing.startNS, e.StartNS, reseedWindow):
+		startsAgree(existing.startNS, e.StartNS, reseedWindow) && sameReseedIdentity(existing, e):
 		// The live process re-announced under a new exec id (Tetragon
 		// restarted). Same process: it keeps its identity and its children.
 		t.aliasLocked(existing, e, now)
@@ -365,6 +365,24 @@ func (t *Tracker) updateLocked(existing *processRecord, e ExecObservation, now t
 	// name on a recycled pid turns ordinary developer activity -- in this
 	// process and in every descendant of it -- into scored findings.
 	t.identifyLocked(existing, recycled)
+}
+
+// sameReseedIdentity refuses a new image that merely received a reused PID
+// within the restart window. A real Tetragon re-seed should describe the same
+// executable, command, uid and parent; if a field changed, a fresh record is
+// safer than inheriting an old agent's lineage.
+func sameReseedIdentity(existing *processRecord, e ExecObservation) bool {
+	if existing.exe == "" || e.Exe == "" || existing.exe != e.Exe ||
+		existing.name != e.Name || existing.ppid != e.PPID {
+		return false
+	}
+	if existing.cmdline != e.Cmdline {
+		return false
+	}
+	if (existing.uid == nil) != (e.UID == nil) {
+		return false
+	}
+	return existing.uid == nil || *existing.uid == *e.UID
 }
 
 // aliasLocked records a further exec id for a live process.

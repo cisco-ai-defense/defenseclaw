@@ -76,6 +76,20 @@ func (t trustPolicy) checkInfoFile(path string) error {
 		}
 		return refuse(ReasonUnavailable, err, "resolve %s: %v", path, err)
 	}
+	// A writable discovery directory lets another account replace the
+	// root-owned file between validation and open. Resolve the stock /var/run
+	// link first, then require its actual directory to be root's and private
+	// to root for writes.
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		return refuse(ReasonUnavailable, err, "stat %s: %v", dir, err)
+	}
+	if uid, ok := ownerOf(dirInfo); !ok || uid != t.ownerUID {
+		return refuse(ReasonUntrusted, nil, "the info directory %s is owned by uid %d, not %d", dir, uid, t.ownerUID)
+	}
+	if dirInfo.Mode().Perm()&0o022 != 0 {
+		return refuse(ReasonUntrusted, nil, "the info directory %s is group- or world-writable", dir)
+	}
 	info, err := os.Lstat(filepath.Join(dir, name))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

@@ -88,7 +88,7 @@ func isNoPost(sel tpSelector) bool {
 //  1. no empty value list anywhere (Tetragon ignores an empty matchBinaries,
 //     which would leave a selector scoped only by path and uid);
 //  2. every Override selector carries a lineage anchor, a non-empty uid set
-//     and the host pid namespace;
+//     and the host pid namespace; an enforcing policy cannot use matchPIDs;
 //  3. actions are only Post, NoPost and Override -EPERM;
 //  4. no hook runtime, provider credential, agent state root or repository
 //     path in an Override selector;
@@ -123,7 +123,13 @@ func Lint(data []byte, opts LintOptions) []Violation {
 	if len(tp.Metadata.Name) > 63 || !dns1123.MatchString(tp.Metadata.Name) || !IsDefenseClawName(tp.Metadata.Name) {
 		add(7, -1, -1, "policy name %q is not a DefenseClaw DNS-1123 name", tp.Metadata.Name)
 	}
+	// Tetragon defaults a policy without policy-mode to enforcement. The
+	// explicit monitor option is the only state that permits PID selectors.
+	enforcing := true
 	for _, option := range tp.Spec.Options {
+		if option.Name == modeOption && option.Value == string(PolicyMonitor) {
+			enforcing = false
+		}
 		if option.Name != modeOption || (option.Value != string(PolicyMonitor) && option.Value != string(PolicyEnforce)) {
 			add(8, -1, -1, "option %q=%q is not allowed", option.Name, option.Value)
 		}
@@ -138,19 +144,19 @@ func Lint(data []byte, opts LintOptions) []Violation {
 		if hook.Hook != "file_open" {
 			add(5, h, -1, "LSM hook %q is not allowed", hook.Hook)
 		}
-		lintSelectors(h, hook.Args, hook.Selectors, true, opts, add)
+		lintSelectors(h, hook.Args, hook.Selectors, true, enforcing, opts, add)
 	}
 	for k, probe := range tp.Spec.Kprobes {
 		h := len(tp.Spec.LsmHooks) + k
 		if probe.Call != "tcp_connect" || probe.Syscall {
 			add(5, h, -1, "kprobe %q is not allowed", probe.Call)
 		}
-		lintSelectors(h, probe.Args, probe.Selectors, false, opts, add)
+		lintSelectors(h, probe.Args, probe.Selectors, false, enforcing, opts, add)
 	}
 	return out
 }
 
-func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm bool, opts LintOptions,
+func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing bool, opts LintOptions,
 	add func(rule, hook, selector int, format string, args ...any)) {
 	if len(selectors) == 0 {
 		add(7, h, -1, "hook has no selector")
@@ -205,6 +211,9 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm bool, opts L
 		}
 		if len(sel.MatchBinaries) > 1 {
 			add(7, h, s, "Tetragon accepts one matchBinaries entry per selector")
+		}
+		if enforcing && len(sel.MatchPIDs) > 0 {
+			add(2, h, s, "enforcing policy cannot use a reusable numeric pid anchor")
 		}
 		for _, pids := range sel.MatchPIDs {
 			if len(pids.Values) == 0 {

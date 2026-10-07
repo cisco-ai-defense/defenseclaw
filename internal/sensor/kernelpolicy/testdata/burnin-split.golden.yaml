@@ -204,7 +204,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-965be496
+  name: defenseclaw-controls-be71bd4b
 spec:
   options:
     - name: policy-mode
@@ -266,70 +266,12 @@ spec:
             - action: Override
               argError: -1
             - action: Post
-        - matchPIDs:
-            - operator: In
-              followForks: true
-              isNamespacePID: false
-              values:
-                - 4001
-          matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - index: 0
-              operator: Equal
-              values:
-                - /home/alice/.ssh/id_dsa
-                - /home/alice/.ssh/id_ecdsa
-                - /home/alice/.ssh/id_ed25519
-                - /home/alice/.ssh/id_rsa
-            - index: 2
-              operator: Equal
-              values:
-                - "1001"
-          matchActions:
-            - action: Override
-              argError: -1
-            - action: Post
         - matchBinaries:
             - operator: In
               values:
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true
-          matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - index: 0
-              operator: Equal
-              values:
-                - /home/alice/.bash_profile
-                - /home/alice/.bashrc
-                - /home/alice/.profile
-                - /home/alice/.zshrc
-            - index: 1
-              operator: Mask
-              values:
-                - "2"
-            - index: 2
-              operator: Equal
-              values:
-                - "1001"
-          matchActions:
-            - action: Override
-              argError: -1
-            - action: Post
-        - matchPIDs:
-            - operator: In
-              followForks: true
-              isNamespacePID: false
-              values:
-                - 4001
           matchNamespaces:
             - namespace: Pid
               operator: In
@@ -374,35 +316,6 @@ spec:
                 - /home/alice/.local/share/claude/versions/2.1.100
                 - /home/alice/.local/share/claude/versions/2.1.101
               followChildren: true
-          matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - index: 0
-              operator: Prefix
-              values:
-                - /home/alice/.config/autostart/
-                - /home/alice/.config/systemd/user/
-            - index: 1
-              operator: Mask
-              values:
-                - "2"
-            - index: 2
-              operator: Equal
-              values:
-                - "1001"
-          matchActions:
-            - action: Override
-              argError: -1
-            - action: Post
-        - matchPIDs:
-            - operator: In
-              followForks: true
-              isNamespacePID: false
-              values:
-                - 4001
           matchNamespaces:
             - namespace: Pid
               operator: In
@@ -567,3 +480,4 @@ spec:
             - action: Override
               argError: -1
             - action: Post
+# note: kernel_pid_anchor_monitor_only

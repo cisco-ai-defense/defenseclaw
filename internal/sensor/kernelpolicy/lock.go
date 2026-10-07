@@ -26,6 +26,5 @@ var ErrReconcilerRunning = errors.New("a sensor helper is reconciling its Tetrag
 // LockForCleanup takes the reconciler lock for a one-shot cleanup, without
 // waiting. It returns ErrReconcilerRunning while a helper that loads
 // policies runs: the policies are that helper's to manage. Any other error
-// means the lock could not be taken at all (the caller decides whether to go
-// on without it).
+// means the lock could not be taken; cleanup must leave the record intact.
 func LockForCleanup(dirs Dirs) (func(), error) { return tryLock(dirs) }

@@ -52,8 +52,11 @@ type Input struct {
 	Observe bool
 	Connect bool
 	// Controls and Burnin select the controls families; nil omits the family.
-	Controls *Scope
-	Burnin   *Scope
+	// Compile also adds ready users without a safe enforcing anchor to Burnin,
+	// unless an operator deleted that family.
+	Controls      *Scope
+	Burnin        *Scope
+	BurninDeleted bool
 }
 
 // Compiled is the result of a Compile.
@@ -110,28 +113,105 @@ func Compile(in Input) (Compiled, error) {
 			return Compiled{}, err
 		}
 	}
-	for _, item := range []struct {
-		family Family
-		scope  *Scope
-	}{{FamilyControls, in.Controls}, {FamilyBurnin, in.Burnin}} {
-		if item.scope == nil {
-			continue
+	compileFamily := func(family Family, scope *Scope) error {
+		if scope == nil {
+			return nil
 		}
-		tp, meta, notes, over := compileControls(fsys, set, in, *item.scope, homes)
+		tp, meta, notes, over := compileControls(fsys, set, in, *scope, homes)
 		out.Notes = append(out.Notes, notes...)
 		out.OverLimit += over
 		if len(tp.Spec.LsmHooks) == 0 {
-			continue
+			return nil
 		}
-		if err := add(item.family, item.scope.Mode, tp, meta, lintOpts); err != nil {
-			return Compiled{}, err
+		return add(family, scope.Mode, tp, meta, lintOpts)
+	}
+	if err := compileFamily(FamilyControls, in.Controls); err != nil {
+		return Compiled{}, err
+	}
+	burnin := in.Burnin
+	if in.BurninDeleted {
+		burnin = nil
+	}
+	if in.Controls != nil && in.Controls.Mode == PolicyEnforce && !in.BurninDeleted {
+		// The enforcing policy has at most one binary uid. Ready users it
+		// cannot safely deny stay measured by the monitor-only family.
+		enforced := map[int]bool{}
+		for _, policy := range out.Policies {
+			if policy.Family == FamilyControls && policy.Mode == PolicyEnforce {
+				for _, uid := range policy.UIDs {
+					enforced[uid] = true
+				}
+			}
 		}
+		potential := map[int]bool{}
+		for _, root := range in.Roots {
+			if in.Controls.allows(root.Connector) {
+				potential[root.UID] = true
+			}
+		}
+		for _, install := range in.Installs {
+			if in.Controls.allows(install.Connector) && len(install.Native) > 0 {
+				potential[install.UID] = true
+			}
+		}
+		var monitorUIDs []int
+		for _, uid := range in.Controls.UIDs {
+			if !enforced[uid] && potential[uid] {
+				monitorUIDs = append(monitorUIDs, uid)
+			}
+		}
+		if len(monitorUIDs) > 0 {
+			if burnin == nil {
+				copyScope := *in.Controls
+				copyScope.Mode, copyScope.UIDs = PolicyMonitor, monitorUIDs
+				burnin = &copyScope
+			} else {
+				copyScope := *burnin
+				copyScope.UIDs = dedupeInts(append(append([]int(nil), burnin.UIDs...), monitorUIDs...))
+				copyScope.Connectors = unionConnectors(burnin.Connectors, in.Controls.Connectors)
+				burnin = &copyScope
+			}
+		}
+	}
+	if err := compileFamily(FamilyBurnin, burnin); err != nil {
+		return Compiled{}, err
 	}
 	countAnchored(&out, in)
 	sort.SliceStable(out.Policies, func(i, j int) bool {
 		return familyRank(out.Policies[i].Family) < familyRank(out.Policies[j].Family)
 	})
 	return out, nil
+}
+
+func dedupeInts(values []int) []int {
+	seen := map[int]bool{}
+	for _, value := range values {
+		seen[value] = true
+	}
+	out := make([]int, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func unionConnectors(a, b map[string]bool) map[string]bool {
+	if a == nil || b == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(a)+len(b))
+	for connector, enabled := range a {
+		if enabled {
+			out[connector] = true
+		}
+	}
+	for connector, enabled := range b {
+		if enabled {
+			out[connector] = true
+		}
+	}
+	return out
 }
 
 func familyRank(f Family) int {
@@ -397,19 +477,25 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	if len(uids) == 0 {
 		return tp, Policy{}, append(notes, "controls: no enrolled user"), 0
 	}
-	var homeDirs []string
-	for _, uid := range uids {
-		homeDirs = append(homeDirs, homes[uid])
+	// A binary selector can carry only one uid set. Keep its binaries from
+	// one uid: taking the union of both would deny one enrolled user's
+	// ordinary process when it runs the other user's agent binary. The PID
+	// selector covers verified roots only in monitor mode: a numeric PID can
+	// be recycled between reconciles, so it must never cause an Override.
+	binsByUID := map[int]map[string]bool{}
+	addBin := func(uid int, native string) {
+		if !validBinary(native) {
+			return
+		}
+		if binsByUID[uid] == nil {
+			binsByUID[uid] = map[string]bool{}
+		}
+		binsByUID[uid][native] = true
 	}
-
-	// Anchors.
-	bins := map[string]bool{}
 	for _, install := range in.Installs {
 		if uidSet[install.UID] && scope.allows(install.Connector) {
 			for _, native := range install.Native {
-				if validBinary(native) {
-					bins[native] = true
-				}
+				addBin(install.UID, native)
 			}
 		}
 	}
@@ -419,19 +505,45 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		if !uidSet[root.UID] || !scope.allows(root.Connector) {
 			continue
 		}
+		if root.Native {
+			addBin(root.UID, root.Exe)
+		}
+		if scope.Mode == PolicyEnforce {
+			continue
+		}
 		if len(pids) >= MaxPIDs {
 			over++
 			continue
 		}
 		pids = append(pids, root.PID)
-		if root.Native && validBinary(root.Exe) {
-			bins[root.Exe] = true
-		}
 	}
 	sort.Ints(pids)
-	binList := sortedKeys(bins)
+	binaryUID := 0
+	for _, uid := range uids {
+		if len(binsByUID[uid]) > 0 {
+			binaryUID = uid
+			break
+		}
+	}
+	if len(binsByUID) > 1 {
+		notes = append(notes, "binary_anchor_scope_limited")
+	}
+	binList := sortedKeys(binsByUID[binaryUID])
 	if over > 0 {
 		notes = append(notes, fmt.Sprintf("%s:%d", WarnRootsOverLimit, over))
+	}
+	if scope.Mode == PolicyEnforce && len(in.Roots) > 0 {
+		notes = append(notes, WarnPIDMonitorOnly)
+	}
+	var homeDirs []string
+	if scope.Mode == PolicyEnforce {
+		if len(binList) > 0 {
+			homeDirs = append(homeDirs, homes[binaryUID])
+		}
+	} else {
+		for _, uid := range uids {
+			homeDirs = append(homeDirs, homes[uid])
+		}
 	}
 
 	ssh, _ := set.Control(kernel.ControlSSHPrivateKeyRead)
@@ -457,7 +569,11 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		if write {
 			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 1, Operator: "Mask", Values: []string{writeMask}})
 		}
-		sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 2, Operator: "Equal", Values: uidValues})
+		selectorUIDs := uidValues
+		if anchor == "binaries" {
+			selectorUIDs = []string{strconv.Itoa(binaryUID)}
+		}
+		sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 2, Operator: "Equal", Values: selectorUIDs})
 		eperm := eperm
 		sel.MatchActions = []tpAction{{Action: "Override", ArgError: &eperm}, {Action: "Post"}}
 		return sel
@@ -501,7 +617,11 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	if len(tp.Spec.LsmHooks) == 0 {
 		return tp, Policy{}, append(notes, ReasonNoAnchors), over
 	}
-	meta := Policy{UIDs: uids, PIDs: pids, Binaries: binList, Paths: PathIndex{Exact: map[string]string{}, Prefixes: map[string]string{}}}
+	policyUIDs := uids
+	if scope.Mode == PolicyEnforce {
+		policyUIDs = []int{binaryUID}
+	}
+	meta := Policy{UIDs: policyUIDs, PIDs: pids, BinaryUID: binaryUID, Binaries: binList, Paths: PathIndex{Exact: map[string]string{}, Prefixes: map[string]string{}}}
 	for _, p := range sshFiles {
 		meta.Paths.Exact[p] = kernel.ControlSSHPrivateKeyRead
 	}

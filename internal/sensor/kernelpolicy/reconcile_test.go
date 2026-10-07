@@ -205,39 +205,37 @@ func TestReadyUsersEnforceAndTheRestBurnIn(t *testing.T) {
 	}
 }
 
-func TestPromotionFlipsInPlaceAndScopeChangesAddBeforeDelete(t *testing.T) {
+func TestPromotionReplacesPIDMonitorPolicyBeforeDeletingIt(t *testing.T) {
 	h := newHarness(t, enforceIntent(Digest()), baseTargets)
 	h.procs = twoUserProcs()
 	h.pass()
 	first, _ := h.tg.find(FamilyControls)
 	h.tg.take()
 
-	// Everyone finishes burn-in: the same scope, so the same name, flipped.
+	// The PID monitor policy cannot be flipped into enforcing mode. The
+	// binary-only replacement is added before the monitor policy is retired.
 	h.burnedIn(1001, 24*time.Hour)
 	h.burnedIn(1002, 24*time.Hour)
 	h.pass()
 	calls := h.tg.take()
-	if countCalls(calls, "configure:"+first.Name+":enforce") != 1 || countCalls(calls, "add:") != 0 || countCalls(calls, "delete:") != 0 {
-		t.Fatalf("calls = %v, want one in-place flip", calls)
-	}
-
-	// A new session changes the pid anchor: a new name, added before the old
-	// one is deleted, so the overlap is briefly stricter and never looser.
-	h.procs = append(h.procs, codexProc(4100, 1, 200, 1001))
-	h.pass()
-	calls = h.tg.take()
-	add, del := indexOf(calls, "add:defenseclaw-controls-"), indexOf(calls, "delete:"+first.Name)
-	if add < 0 || del < 0 || add > del {
-		t.Fatalf("calls = %v, want add before delete", calls)
-	}
-	if !strings.HasSuffix(calls[add], ":enforce") {
-		t.Fatalf("the replacement must load enforcing: %v", calls)
+	enforcingPolicy, _ := h.tg.find(FamilyControls)
+	add, del := indexOf(calls, "add:"+enforcingPolicy.Name), indexOf(calls, "delete:"+first.Name)
+	if add < 0 || del < 0 || add > del || !strings.HasSuffix(calls[add], ":enforce") {
+		t.Fatalf("calls = %v, want enforcing add before monitor delete", calls)
 	}
 	if countCalls(calls, "configure:") != 0 {
-		t.Fatalf("no policy may be demoted during a scope change: %v", calls)
+		t.Fatalf("a PID monitor policy was promoted: %v", calls)
 	}
-	if len(h.tg.names()) != 3 {
-		t.Fatalf("loaded %v, want observe, connect and one controls", h.tg.names())
+
+	// A new script-hosted PID can refresh the monitor family but must not
+	// replace or reconfigure the enforcing native-binary policy.
+	h.procs = append(h.procs, codexProc(4100, 1, 200, 1001))
+	h.pass()
+	for _, call := range h.tg.take() {
+		if strings.Contains(call, enforcingPolicy.Name) &&
+			(strings.HasPrefix(call, "add:") || strings.HasPrefix(call, "delete:") || strings.HasPrefix(call, "configure:")) {
+			t.Fatalf("a numeric pid changed an enforcing policy: %s", call)
+		}
 	}
 }
 
@@ -246,8 +244,8 @@ func TestTetragonRestartIsReAddedAndIsNotAnOverride(t *testing.T) {
 	h.tg.restart()
 	h.pass()
 	calls := h.tg.take()
-	if countCalls(calls, "add:") != 3 {
-		t.Fatalf("calls = %v, want observe, connect and controls re-added", calls)
+	if countCalls(calls, "add:") != 4 {
+		t.Fatalf("calls = %v, want observe, connect, controls and monitor re-added", calls)
 	}
 	controls, ok := h.tg.find(FamilyControls)
 	if !ok || !controls.Mode.Enforcing() {
@@ -589,7 +587,7 @@ func TestUnsupportedTetragonAndMissingLSM(t *testing.T) {
 func TestFailedAddLeavesEnforcingPoliciesInMonitor(t *testing.T) {
 	h := enforcing(t)
 	h.tg.failAll = true
-	h.procs = append(h.procs, codexProc(4100, 1, 200, 1001)) // a new pid anchor -> new name
+	h.w.fs.elf("/home/alice/.local/share/claude/versions/2.1.102") // a new native anchor -> new name
 	h.pass()
 	if p, ok := h.tg.find(FamilyControls); !ok || p.Mode.Enforcing() {
 		t.Fatalf("controls = %+v; a failed reconcile must leave monitor", p)
@@ -605,9 +603,13 @@ func TestFailedAddLeavesEnforcingPoliciesInMonitor(t *testing.T) {
 			t.Fatalf("call %s after a failed add; the old policy stays", call)
 		}
 	}
-	// The name that failed to load is not recorded as loaded.
-	if len(h.loadedFile()) != len(h.tg.names()) {
-		t.Fatalf("recorded %v, loaded %v", h.loadedFile(), h.tg.names())
+	// A failed response can still mean Tetragon loaded the name. Keep it in
+	// the cleanup record until the next List resolves the pending call.
+	recorded := h.loadedFile()
+	for _, name := range h.tg.names() {
+		if !contains(recorded, name) {
+			t.Fatalf("loaded name %s absent from the cleanup record %v", name, recorded)
+		}
 	}
 	// And a later pass does not mistake the missing name for an operator.
 	h.tg.failAll = false
@@ -850,7 +852,14 @@ func TestPolicyModeFollowsTheHelpersOwnCalls(t *testing.T) {
 	h.now = h.now.Add(time.Minute)
 	h.pause(time.Hour)
 	h.pass()
-	mode, demoted, ok := h.ctl.PolicyMode(controls.Name)
+	if _, _, ok := h.ctl.PolicyMode(controls.Name); ok {
+		t.Fatal("paused enforcement left the old enforcing name loaded")
+	}
+	paused, found := h.tg.find(FamilyControls)
+	if !found || paused.Mode != LoadedMonitor {
+		t.Fatalf("paused policy: %+v", paused)
+	}
+	mode, demoted, ok := h.ctl.PolicyMode(paused.Name)
 	if !ok || mode != "monitor" || !demoted.After(at) {
 		t.Fatalf("after a pause: %q at %v (before %v) %v", mode, demoted, at, ok)
 	}

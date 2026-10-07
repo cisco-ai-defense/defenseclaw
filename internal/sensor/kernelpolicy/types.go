@@ -209,6 +209,7 @@ const (
 	WarnForeignName         = "tetragon_foreign_defenseclaw_name"
 	WarnReconcileFailed     = "kernel_reconcile_failed"
 	WarnRootsOverLimit      = "kernel_roots_over_limit"
+	WarnPIDMonitorOnly      = "kernel_pid_anchor_monitor_only"
 	WarnGuardrailObserve    = "kernel_enforce_guardrail_observe"
 	WarnPolicyLoadError     = "kernel_policy_load_error"
 	WarnLSMUnavailable      = "kernel_lsm_unavailable"

@@ -117,6 +117,7 @@ func (c *Controller) pass(ctx context.Context, trigger string) {
 	compiled, err := Compile(Input{
 		Enrollment: c.enrollment, Installs: c.installs, Roots: c.roots.Roots, FS: c.cfg.FS,
 		Observe: plan.Observe, Connect: plan.Connect, Controls: plan.Controls, Burnin: plan.Burnin,
+		BurninDeleted: c.st.Overrides[FamilyBurnin].Kind == OverrideDeleted,
 	})
 	if err != nil {
 		c.cfg.Logger.Error("kernel policy did not compile", "error", err)
@@ -308,11 +309,9 @@ func (c *Controller) load(ctx context.Context, g guardedClient, agent Agent, p P
 	c.setIndex(p.Name, p.Paths)
 	c.persist()
 	if err := g.AddTracingPolicy(ctx, p.YAML); err != nil {
-		// Not loaded: forget it, so its absence is never read as an
-		// operator's deletion.
-		delete(c.st.Applied, p.Name)
-		c.forgetLoaded(p.Name)
-		c.persist()
+		// A lost response does not prove Tetragon rejected the Add. Keep the
+		// write-ahead name and pending call so the next List can resolve it,
+		// and so cleanup can always retire a policy that did load.
 		c.cfg.Logger.Warn("add tracing policy failed", "policy", p.Name, "error", err)
 		return err
 	}
@@ -612,14 +611,28 @@ func (c *Controller) rescanFromPolicies() {
 	c.alive = alive
 }
 
-// hasAnchor reports whether uid has anything to anchor an enforcing control
-// to: a resolved native install of an anchored connector or a live root.
+// hasAnchor reports whether uid has a native binary anchor in an enforcing
+// control. Numeric PID anchors remain monitor-only because PIDs can be reused.
 func (c *Controller) hasAnchor(uid int, plan Plan, compiled Compiled) bool {
-	if plan.Controls == nil || c.alive[uid] > 0 {
-		return c.alive[uid] > 0
+	if plan.Controls == nil {
+		return false
 	}
-	for _, install := range c.installs {
-		if install.UID == uid && plan.Controls.allows(install.Connector) && len(install.Native) > 0 {
+	for _, policy := range compiled.Policies {
+		if policy.Family == FamilyControls && policy.BinaryUID == uid && len(policy.Binaries) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMonitorAnchor reports a ready user's still-active monitor coverage when
+// no safe native binary anchor exists for enforcement.
+func hasMonitorAnchor(uid int, compiled Compiled) bool {
+	if compiled.Anchored[uid] > 0 {
+		return true
+	}
+	for _, policy := range compiled.Policies {
+		if policy.Family == FamilyBurnin && policy.BinaryUID == uid && len(policy.Binaries) > 0 {
 			return true
 		}
 	}
@@ -644,9 +657,13 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 		}
 		status.AnchoredRoots = c.alive[uid]
 		if status.State == UIDEnforcing && !c.hasAnchor(uid, plan, compiled) {
-			// Ready, but no install and no live session: nothing is
-			// enforced for this user until one appears.
-			status.State, status.Reason = UIDInactive, ReasonNoAnchors
+			// A verified live root can still be measured in monitor mode;
+			// numeric PID reuse keeps it out of an enforcing policy.
+			if hasMonitorAnchor(uid, compiled) {
+				status.State, status.Reason = UIDMonitor, WarnPIDMonitorOnly
+			} else {
+				status.State, status.Reason = UIDInactive, ReasonNoAnchors
+			}
 		}
 		status.CoveredSeconds = int64(c.burn.Covered(uid) / time.Second)
 		status.NeededSeconds = int64(c.cfg.Intent.BurnIn / time.Second)

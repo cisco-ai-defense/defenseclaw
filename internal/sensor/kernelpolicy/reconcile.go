@@ -558,9 +558,8 @@ func (c *Controller) reloadRecord() {
 // lockReconciler holds the reconciler lock for as long as Run reconciles, so
 // a one-shot --tetragon-cleanup never removes policies under a helper that
 // manages them. It waits out a cleanup in progress and then reads the record
-// again; a lock that cannot be taken for another reason is logged, and the
-// reconciler runs without it.
-func (c *Controller) lockReconciler(ctx context.Context) func() {
+// again. A lock error is fatal: reconciling without it could race cleanup.
+func (c *Controller) lockReconciler(ctx context.Context) (func(), error) {
 	waiting := false
 	for {
 		unlock, err := tryLock(c.cfg.Dirs)
@@ -570,17 +569,16 @@ func (c *Controller) lockReconciler(ctx context.Context) func() {
 				c.reloadRecord()
 				c.syncTally()
 			}
-			return unlock
+			return unlock, nil
 		case !errors.Is(err, ErrReconcilerRunning):
-			c.cfg.Logger.Warn("kernel policy lock unavailable; reconciling without it", "error", err)
-			return func() {}
+			return nil, err
 		case !waiting:
 			waiting = true
 			c.cfg.Logger.Info("waiting for a tetragon cleanup to finish")
 		}
 		select {
 		case <-ctx.Done():
-			return func() {}
+			return nil, ctx.Err()
 		case <-time.After(c.cfg.Intervals.Lock):
 		}
 	}
@@ -590,9 +588,13 @@ func (c *Controller) recordLoaded(name string) error {
 	if c.recorded[name] {
 		return nil
 	}
+	names := append(sortedKeys(c.recorded), name)
+	if err := writeLoaded(c.cfg.Dirs, names); err != nil {
+		return err
+	}
 	c.recorded[name] = true
 	c.noteRecorded()
-	return writeLoaded(c.cfg.Dirs, sortedKeys(c.recorded))
+	return nil
 }
 
 func (c *Controller) forgetLoaded(name string) {
@@ -615,7 +617,13 @@ func (c *Controller) Run(ctx context.Context) error {
 	if !c.cfg.Intent.Mode.LoadsPolicies() {
 		return c.runRetire(ctx)
 	}
-	unlock := c.lockReconciler(ctx)
+	unlock, err := c.lockReconciler(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("kernel policy reconciler lock: %w", err)
+	}
 	defer unlock()
 	if ctx.Err() != nil {
 		return nil

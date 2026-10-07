@@ -220,6 +220,11 @@ func TestTetragonSourceFallsBackInStreamAndRecovers(t *testing.T) {
 	if event.Source != SourceCNProc || strings.Contains(event.Cmdline, "dccertvalue") {
 		t.Fatalf("native event %+v", event)
 	}
+	h.lastProc().events <- Event{Kind: KindExec, PID: 78, Name: "bash",
+		Cmdline: `bash -c "--token=dccert-first dccert-second"`}
+	if event := next(t, source); strings.Contains(event.Cmdline, "dccert-first") || strings.Contains(event.Cmdline, "dccert-second") {
+		t.Fatalf("native fallback leaked a quoted secret: %q", event.Cmdline)
+	}
 	// A Codex notify program's turn payload is withheld on the fallback too.
 	h.lastProc().events <- Event{Kind: KindExec, PID: 77, Name: "bash",
 		Cmdline: `/usr/bin/bash /home/u/.defenseclaw/notify-bridge.sh {"input-messages":["dccert-block-marker"]}`}

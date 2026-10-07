@@ -229,7 +229,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-b569c0d1
+  name: defenseclaw-controls-cbe1c6df
 spec:
   options:
     - name: policy-mode
@@ -295,7 +295,6 @@ spec:
               operator: Equal
               values:
                 - "1001"
-                - "1002"
           matchActions:
             - action: Override
               argError: -1
@@ -365,7 +364,6 @@ spec:
               operator: Equal
               values:
                 - "1001"
-                - "1002"
           matchActions:
             - action: Override
               argError: -1
@@ -448,7 +446,6 @@ spec:
               operator: Equal
               values:
                 - "1001"
-                - "1002"
           matchActions:
             - action: Override
               argError: -1

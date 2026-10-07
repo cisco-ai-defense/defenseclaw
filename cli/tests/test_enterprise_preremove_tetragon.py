@@ -129,8 +129,10 @@ def test_rpm_downgrade_deletes_only_recorded_names_with_tetra(tmp_path: Path) ->
     host = _Host(tmp_path, helper_supports_cleanup=False)
     result = host.run("1")
     assert result.returncode == 0, result.stderr
-    deletes = [call for call in host.calls() if call.startswith("tetra ")]
+    calls = host.calls()
+    deletes = [call for call in calls if call.startswith("tetra ")]
     assert deletes == [f"tetra tracingpolicy delete {name}" for name in RECORDED]
+    assert calls.index("systemctl stop defenseclaw-sensor-helper.service") < calls.index(deletes[0])
     for name in RECORDED:
         assert f"removed the Tetragon policy {name}" in result.stdout
     assert host.recorded() == []
@@ -192,3 +194,23 @@ def test_nothing_recorded_touches_nothing(tmp_path: Path, args: tuple[str, ...])
     assert result.returncode == 0
     assert result.stdout == result.stderr == ""
     assert host.calls() == []
+
+
+def test_rpm_downgrade_keeps_policies_when_helper_cannot_stop(tmp_path: Path) -> None:
+    host = _Host(tmp_path, helper_supports_cleanup=False)
+    host._tool(host.path / "systemctl", 'exit 1')
+    result = host.run("1")
+    assert result.returncode == 0
+    assert not any(call.startswith("tetra ") for call in host.calls())
+    assert host.recorded() == RECORDED + FOREIGN
+    assert "could not stop the sensor helper" in result.stderr
+
+
+def test_deb_downgrade_keeps_policies_when_helper_cannot_stop(tmp_path: Path) -> None:
+    host = _Host(tmp_path, installed_version="1.1.0")
+    host._tool(host.path / "systemctl", 'exit 1')
+    result = host.run("upgrade", "1.0.0")
+    assert result.returncode == 0
+    assert "defenseclaw-sensor-helper --tetragon-cleanup" not in host.calls()
+    assert host.recorded() == RECORDED + FOREIGN
+    assert "could not stop the sensor helper" in result.stderr

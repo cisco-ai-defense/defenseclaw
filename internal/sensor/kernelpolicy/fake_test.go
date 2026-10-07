@@ -34,12 +34,13 @@ func init() {
 // uses: a duplicate name is refused, the mode comes from the policy YAML,
 // and a restart drops every policy added over gRPC.
 type fakeTetragon struct {
-	mu       sync.Mutex
-	agent    Agent
-	policies map[string]*LoadedPolicy
-	calls    []string
-	failAdd  map[string]bool
-	failAll  bool
+	mu           sync.Mutex
+	agent        Agent
+	policies     map[string]*LoadedPolicy
+	calls        []string
+	failAdd      map[string]bool
+	failAll      bool
+	failAfterAdd bool
 	// onList runs at the start of ListTracingPolicies.
 	onList func()
 	// allowed, when set, makes any other call a test failure.
@@ -119,6 +120,9 @@ func (f *fakeTetragon) AddTracingPolicy(_ context.Context, yaml []byte) error {
 	}
 	f.policies[name] = &LoadedPolicy{Name: name, Mode: mode, State: StateEnabled}
 	f.calls[len(f.calls)-1] += ":" + string(mode)
+	if f.failAfterAdd {
+		return errors.New("response lost after add")
+	}
 	return nil
 }
 

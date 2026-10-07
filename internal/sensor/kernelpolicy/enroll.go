@@ -259,6 +259,9 @@ func ParseEligibleAccounts(data []byte) ([]EligibleAccount, error) {
 // run for every eligible account; without these rows its agents are never
 // anchored. A row anchors only an installed command-line agent, so an account
 // without the agent gets nothing but the observe policy's view of its home.
+// Desktop and IDE surfaces stay observe-only (IsCLIConnector), and an account
+// whose manifest rows name another home is left to the manifest: a second home
+// for one uid would anchor binaries the manifest never named.
 func (e Enrollment) WithMachinePolicy(accounts []EligibleAccount, connectors []string) Enrollment {
 	if len(accounts) == 0 || len(connectors) == 0 {
 		return e
@@ -269,7 +272,13 @@ func (e Enrollment) WithMachinePolicy(accounts []EligibleAccount, connectors []s
 		seen[[2]any{row.UID, row.Connector}] = true
 	}
 	for _, account := range accounts {
+		if home := e.HomeOf(account.UID); home != "" && home != account.Home {
+			continue
+		}
 		for _, connector := range connectors {
+			if !IsCLIConnector(connector) {
+				continue
+			}
 			key := [2]any{account.UID, connector}
 			if seen[key] || e.named[userKey(account.User, connector)] || e.named[uidKey(account.UID, connector)] {
 				continue

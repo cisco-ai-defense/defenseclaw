@@ -115,8 +115,8 @@ func TestAutoUpdateKeepsRunningOldVersionAnchored(t *testing.T) {
 	if !hasBinary(p, aliceClaudeOld) || !hasBinary(p, aliceClaudeNew) {
 		t.Fatalf("binaries = %v, want old and new", p.Binaries)
 	}
-	if fmt.Sprint(p.PIDs) != "[4001 4010]" {
-		t.Fatalf("pids = %v", p.PIDs)
+	if len(p.PIDs) != 0 {
+		t.Fatalf("enforcing policy has reusable pid anchors: %v", p.PIDs)
 	}
 	golden(t, "auto-update", c)
 
@@ -124,7 +124,7 @@ func TestAutoUpdateKeepsRunningOldVersionAnchored(t *testing.T) {
 	roots = w.roots(nativeProc(4010, 1, 300, 1001, aliceClaudeNew))
 	c = w.compile(Input{Controls: scope, Roots: roots.Roots})
 	p = policyOf(t, c, FamilyControls)
-	if hasBinary(p, aliceClaudeOld) || fmt.Sprint(p.PIDs) != "[4010]" {
+	if hasBinary(p, aliceClaudeOld) || len(p.PIDs) != 0 {
 		t.Fatalf("binaries %v pids %v after the old session exited", p.Binaries, p.PIDs)
 	}
 }
@@ -186,7 +186,7 @@ func TestBurnInUserNextToReadyUser(t *testing.T) {
 		t.Fatal("the mode must travel in the YAML, so a policy is never loaded enforcing and flipped")
 	}
 	// The users' anchors never mix.
-	if hasBinary(burnin, aliceClaudeNew) || fmt.Sprint(burnin.PIDs) != "[5001]" || fmt.Sprint(controls.PIDs) != "[4001]" {
+	if hasBinary(burnin, aliceClaudeNew) || fmt.Sprint(burnin.PIDs) != "[5001]" || len(controls.PIDs) != 0 {
 		t.Fatalf("anchors leaked: burnin %v %v controls %v %v", burnin.Binaries, burnin.PIDs, controls.Binaries, controls.PIDs)
 	}
 	if controls.Name == burnin.Name {
@@ -294,7 +294,7 @@ func TestSSHExemptionNeedsTheBinariesToExist(t *testing.T) {
 	}
 }
 
-func TestNameIsStableAcrossModeAndChangesWithScope(t *testing.T) {
+func TestEnforceScopeGetsASeparateNameFromPIDMonitorScope(t *testing.T) {
 	w := newWorld(t, baseTargets)
 	roots := w.roots(nativeProc(4001, 1, 100, 1001, aliceClaudeNew))
 	build := func(mode PolicyMode, extra ...Root) Policy {
@@ -302,22 +302,26 @@ func TestNameIsStableAcrossModeAndChangesWithScope(t *testing.T) {
 		return policyOf(t, c, FamilyControls)
 	}
 	monitor, enforce := build(PolicyMonitor), build(PolicyEnforce)
-	if monitor.Name != enforce.Name {
-		t.Fatalf("mode changed the name: %s vs %s (Tetragon flips the mode in place)", monitor.Name, enforce.Name)
-	}
-	if string(monitor.YAML) == string(enforce.YAML) {
-		t.Fatal("mode missing from the YAML")
+	if monitor.Name == enforce.Name {
+		t.Fatal("a PID monitor policy must not be promoted in place to enforcement")
 	}
 	more := build(PolicyMonitor, Root{UID: 1001, PID: 4999, StartTicks: 999, Connector: "codex"})
 	if more.Name == monitor.Name {
-		t.Fatal("a new pid anchor must be a new name (add before delete)")
+		t.Fatal("a new monitored pid anchor must change the name")
 	}
-	if !IsDefenseClawName(monitor.Name) {
-		t.Fatalf("name %q", monitor.Name)
+	moreEnforce := build(PolicyEnforce, Root{UID: 1001, PID: 4999, StartTicks: 999, Connector: "codex"})
+	if moreEnforce.Name != enforce.Name {
+		t.Fatal("a script pid must not change an enforcing policy")
 	}
-	back, err := monitor.withMode(PolicyEnforce)
-	if err != nil || string(back.YAML) != string(enforce.YAML) || back.Name != monitor.Name {
-		t.Fatalf("withMode differs from a fresh render: %v", err)
+	if !IsDefenseClawName(monitor.Name) || !IsDefenseClawName(enforce.Name) {
+		t.Fatalf("names %q %q", monitor.Name, enforce.Name)
+	}
+	if _, err := monitor.withMode(PolicyEnforce); err == nil {
+		t.Fatal("a monitor policy with PID selectors must not be promoted in place")
+	}
+	back, err := enforce.withMode(PolicyMonitor)
+	if err != nil || back.Name != enforce.Name {
+		t.Fatalf("safe demotion failed: %v", err)
 	}
 }
 
@@ -333,7 +337,7 @@ func TestHostileLinksDropOnlyTheirOwnPath(t *testing.T) {
 	w.fs.file("/home/alice/bad\nname", 0o600)
 	w.fs.symlink("/home/alice/.ssh/id_dsa", "/home/alice/bad\nname")
 	roots := w.roots(nativeProc(4001, 1, 100, 1001, aliceClaudeNew), codexProc(5001, 1, 120, 1002))
-	c := w.compile(Input{Controls: &Scope{Mode: PolicyEnforce, UIDs: []int{1001, 1002}}, Roots: roots.Roots})
+	c := w.compile(Input{Controls: &Scope{Mode: PolicyMonitor, UIDs: []int{1001, 1002}}, Roots: roots.Roots})
 	p := policyOf(t, c, FamilyControls)
 	text := string(p.YAML)
 	for _, want := range []string{"/home/alice/.ssh/id_ed25519", "/home/bob/.ssh/id_rsa", "/home/bob/.ssh/id_ecdsa", "/home/bob/.ssh/id_dsa", "/home/alice/.bashrc"} {
