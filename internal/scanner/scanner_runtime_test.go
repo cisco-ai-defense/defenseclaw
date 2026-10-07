@@ -5,6 +5,7 @@
 package scanner
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -28,13 +29,39 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 
 	t.Setenv("DEFENSECLAW_SCANNER_LLM_MODEL", "from-shell")
 	t.Setenv("SKILL_SCANNER_LLM_MODEL", "from-shell")
+	// GAP-0274: the runtime gets the whole scanners.mcp_scanner block, so
+	// the pinned extra YARA rules reach the scan.
+	includeBundled := false
+	rule := config.AssetFileRef{Path: `C:\ProgramData\Acme\mcp-marker.yar`, Digest: "sha256:" + strings.Repeat("ab", 32)}
 	mcp := &MCPScanner{
-		Config: config.MCPScannerConfig{Binary: runtimeBinary, Analyzers: []string{"yara", "llm"}},
-		LLM:    config.LLMConfig{Model: "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", APIKey: "k", Region: "us-east-1"},
+		Config: config.MCPScannerConfig{
+			Binary: runtimeBinary, Analyzers: []string{"yara", "llm"},
+			YARA: config.MCPScannerYARAConfig{IncludeBundled: &includeBundled, ExtraRules: []config.AssetFileRef{rule}},
+		},
+		LLM: config.LLMConfig{Model: "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", APIKey: "k", Region: "us-east-1"},
 	}
-	want := []string{"mcp-scan", "--json", "--analyzers", "yara,llm", "https://mcp.example.test/mcp"}
-	if got := mcp.commandArgs("https://mcp.example.test/mcp"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("mcp args = %v, want %v", got, want)
+	args, err := mcp.commandArgs("https://mcp.example.test/mcp")
+	if err != nil || len(args) != 4 || args[0] != "mcp-scan" || args[1] != "--settings" || args[3] != "https://mcp.example.test/mcp" {
+		t.Fatalf("mcp args = %v (%v)", args, err)
+	}
+	var settings struct {
+		Analyzers []string `json:"analyzers"`
+		Binary    *string  `json:"binary"`
+		YARA      struct {
+			IncludeBundled *bool `json:"include_bundled"`
+			ExtraRules     []struct {
+				Path   string `json:"path"`
+				Digest string `json:"digest"`
+			} `json:"extra_rules"`
+		} `json:"yara"`
+	}
+	if err := json.Unmarshal([]byte(args[2]), &settings); err != nil {
+		t.Fatalf("settings %q: %v", args[2], err)
+	}
+	if !reflect.DeepEqual(settings.Analyzers, []string{"yara", "llm"}) || settings.Binary != nil ||
+		settings.YARA.IncludeBundled == nil || *settings.YARA.IncludeBundled ||
+		len(settings.YARA.ExtraRules) != 1 || settings.YARA.ExtraRules[0].Path != rule.Path || settings.YARA.ExtraRules[0].Digest != rule.Digest {
+		t.Fatalf("runtime settings = %s", args[2])
 	}
 	env := strings.Join(mcp.runtimeEnv(), "\n")
 	for _, wantLine := range []string{
