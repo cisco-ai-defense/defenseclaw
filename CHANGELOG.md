@@ -58,6 +58,17 @@ stopped`. Nothing is changed; use the install command above.
   Sigstore signature on `checksums.txt` is verified when `cosign` 2.x is
   installed. Releases no longer download a pinned cosign.
 - The OpenClaw gateway is restarted only when the OpenClaw connector is active.
+- `guardrail.block_at` and `guardrail.alert_at` now decide every guardrail
+  verdict that carries a severity: hook tool calls, hook prompts, tool
+  responses and message content, and the LLM proxy's prompts, completions and
+  tool calls. In 0.8.x they applied only to hook tool calls; hook prompts took
+  the rule pack's posture and the proxy took `block_threshold` and
+  `alert_threshold` from `policies/rego/data.json`. A `block_at: HIGH` you set
+  for tool calls now also blocks HIGH prompts and proxy traffic. The config
+  migration carries a `data.json` threshold that is stricter than the rule
+  pack's default into `block_at` or `alert_at`, and adds a note to
+  `migration-v9.json` whenever either was set. See
+  [Thresholds](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/thresholds/).
 
 ### Added
 
@@ -69,8 +80,9 @@ stopped`. Nothing is changed; use the install command above.
 1.0.0 is not released yet, so these are intentional breaking changes. Items
 marked **0.8.x** were visible in 0.8.x; the others only ever existed in
 pre-release builds. An upgrade from a released 0.8.x install still starts and
-works with the leftover files, and nothing you configured is dropped without a
-line in `migration-v9.json`.
+works with the leftover files, and nothing you set in `config.yaml` is dropped
+without a line in `migration-v9.json`. Environment variables and command-line
+options are not migrated: the entries below say what replaces each.
 
 - **0.8.x: command-line options that did nothing.** `setup observability add
   --url-path`, `policy delete --force`, `registry add|edit --auto-sync` and
@@ -126,6 +138,58 @@ line in `migration-v9.json`.
   observability add ... --environment` removes a retired
   `deployment.environment`. The local observability stack collector defaults
   `deployment.environment.name` to `local-dev` when the sender supplies none.
+- **0.8.x: `policy edit guardrail --add-pattern`, `--remove-pattern` and
+  `--set-severity-mapping`.** Guardrail patterns and severities come from the
+  rule pack now: add rules in a pack listed under `guardrail.custom_packs`, and
+  change one rule's severity with `guardrail.rules.severity_overrides`. A
+  script that still passes one of the options fails with `No such option`.
+  `--block-threshold`, `--alert-threshold` and `--cisco-trust-level` stay.
+- **0.8.x: `policies/rego/data.json` as a policy input.** Nothing outside
+  Secure Client reads it any more: the admission actions, the first-party allow
+  list and the guardrail thresholds live in `config.yaml` (`admission`,
+  `guardrail.block_at`, `guardrail.alert_at`, `guardrail.cisco_trust_level`).
+  The config migration reads the file once, renames it to
+  `data.json.migrated-v9`, and lists the keys it drops (`patterns`,
+  `severity_mappings` and others) under `removed` in `migration-v9.json`. A
+  `data.json` you edit afterwards changes nothing, and `defenseclaw doctor`
+  reports a leftover one as **Retired policy data**.
+- **0.8.x: operator block and allow entries in `audit.db`.** `defenseclaw skill`,
+  `mcp` and `plugin` `block` and `allow` now write `asset_policy.<type>.denied`
+  and `allowed` in `config.yaml`, and the gateway hot-applies them. The config
+  migration copies the operator rows of the `actions` table into those lists
+  (an allow entry is pinned to the path it was recorded for) and clears the
+  moved state from `audit.db` once `config.yaml` is saved. Blocks written by a
+  scan verdict, and quarantine and runtime-disable state, stay in the table. A
+  managed standalone host keeps its rows where they are, because the
+  administrator's config is the policy.
+- **0.8.x: gateway routes.** `PATCH /v1/guardrail/config` now answers `405`
+  (`GET` is unchanged), and `POST /config/patch`, `POST
+  /policy/evaluate/firewall`, `/policy/evaluate/audit` and
+  `/policy/evaluate/skill-actions`, and the proxy's `/health/liveliness` alias
+  (use `/health/liveness`) are no longer served. Change guardrail settings with
+  `defenseclaw config set`. Secure Client keeps `/config/patch`,
+  `/health/liveliness` and the managed refusal of `PATCH /v1/guardrail/config`.
+- **0.8.x: two environment variables.** `DEFENSECLAW_JUDGE_TRACE` has no effect
+  outside Secure Client: set `guardrail.judge.trace: true` in `config.yaml` (a
+  managed device refuses the key). `DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE` is
+  gone: set `guardrail.judge_persist_queue_depth` (default 1024). When
+  `DEFENSECLAW_JUDGE_TRACE` is set in your shell, `defenseclaw doctor` lists it
+  under **Ignored environment overrides**; the other variable is ignored
+  silently.
+- **0.8.x: config keys that a `config_version` 9 file rejects.**
+  `guardrail.rule_pack_dir` (also under `guardrail.connectors.<name>` and
+  `guardrail.profiles.<name>`) is replaced by `rule_pack` and `custom_packs`.
+  `watch.allow_list_bypass_scan` is replaced by
+  `admission.defaults.allow_list_bypass_scan`. The scanner keys
+  `scanners.skill_scanner.binary`, `scanners.mcp_scanner.binary`,
+  `scanners.skill_scanner.use_virustotal`, `scanners.skill_scanner.use_aidefense`,
+  `scanners.skill_scanner.virustotal_api_key` and
+  `scanners.skill_scanner.virustotal_api_key_env` are replaced by
+  `scanners.skill_scanner.analyzers.*` (DefenseClaw runs the scanners it ships,
+  so the `binary` keys have no replacement). The config migration moves each
+  value, records a disagreement in `migration-v9.json`, and moves an inline
+  VirusTotal key to `.env`. A `config_version` 9 file that still holds one of
+  them is refused with an error that names the key and what replaces it.
 - The enterprise Unix uninstall option `--remove-service-account`. Uninstall
   already deletes the gateway service account by default;
   `--keep-service-account` keeps it.

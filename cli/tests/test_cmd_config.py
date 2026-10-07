@@ -382,6 +382,28 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             key = ".".join(parts)
             self.assertFalse(f"`{key}: " in release, f"the 1.0.0 notes tell users to set {key}; use {replacement}")
 
+    def test_changelog_names_what_a_0_8_operator_loses(self):
+        from defenseclaw.observability.v8_config import _V9_REMOVED_KEYS
+
+        changelog = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+        release = changelog.split("\n## [1.0.0]", 1)[1].split("\n## [", 1)[0]
+        keys = [".".join(parts) for parts, _ in _V9_REMOVED_KEYS] + ["guardrail.rule_pack_dir"]
+        # Removals with no key table behind them: CLI options, environment variables and routes of 0.8.10,
+        # and the threshold change that has no removed name.
+        others = (
+            "--add-pattern",
+            "DEFENSECLAW_JUDGE_TRACE",
+            "DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE",
+            "/config/patch",
+            "/v1/guardrail/config",
+            "/policy/evaluate/skill-actions",
+            "/health/liveliness",
+            "data.json.migrated-v9",
+            "asset_policy",
+            "block_at",
+        )
+        self.assertEqual([name for name in keys + list(others) if name not in release], [])
+
     def test_a_newer_config_version_is_not_sent_to_migrate(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.yaml")
