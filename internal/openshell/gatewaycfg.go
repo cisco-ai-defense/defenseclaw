@@ -117,6 +117,10 @@ var (
 	// on a change (Write). Rollback returns it once it has restored the
 	// files.
 	ErrNoGatewayService = errors.New("openshell: no gateway service runs the gateway")
+	// ErrBrewNeedsTerminal means Homebrew refused `brew services` because
+	// the shell runs under tmux: it answers nothing about the gateway
+	// service there (GAP-0274).
+	ErrBrewNeedsTerminal = errors.New("openshell: brew services needs a normal terminal: Homebrew refuses to run it under tmux")
 )
 
 // What the MicroVM (vm) driver gives every sandbox when
@@ -224,6 +228,44 @@ func gatewayExecutable(lookPath func(string) (string, error), cli string) string
 	return GatewayBinary
 }
 
+// brewPrefixOfCLI is the Homebrew prefix that holds the OpenShell CLI cli
+// (openshell.binary): a per-user Homebrew whose brew is not on PATH is still
+// the one the CLI was installed by (GAP-0286). "" when cli is not a formula
+// link of a prefix.
+func brewPrefixOfCLI(lookPath func(string) (string, error), cli string) string {
+	found, err := lookPath(cli)
+	if err != nil || !filepath.IsAbs(found) {
+		return ""
+	}
+	candidates := []string{found}
+	if real, err := filepath.EvalSymlinks(found); err == nil {
+		candidates = append(candidates, real)
+	}
+	for _, c := range candidates {
+		if prefix := filepath.Dir(filepath.Dir(c)); formulaKegInstalled(prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// BrewCommand is the brew to run: its bare name where it is on PATH, else
+// the brew of the prefix OpenShell was installed by (a per-user Homebrew
+// the shell has not loaded).
+func (g *GatewayConfigurator) BrewCommand() string {
+	if g.LookPath == nil {
+		g.LookPath = exec.LookPath
+	}
+	if _, err := g.LookPath("brew"); err == nil || g.BrewPrefix == "" {
+		return "brew"
+	}
+	own := filepath.Join(g.BrewPrefix, "bin", "brew")
+	if info, err := os.Stat(own); err == nil && info.Mode().IsRegular() {
+		return own
+	}
+	return "brew"
+}
+
 func (g *GatewayConfigurator) defaults() error {
 	dir := g.Dir
 	if dir == "" {
@@ -267,11 +309,15 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.Now == nil {
 		g.Now = time.Now
 	}
-	if g.BrewFormulaInstalled == nil {
-		g.BrewFormulaInstalled = brewFormulaInstalled
-	}
 	if g.BrewPrefix == "" && g.GOOS == "darwin" {
-		g.BrewPrefix = homebrewPrefix()
+		if g.BrewPrefix = brewPrefixOfCLI(g.LookPath, g.CLI); g.BrewPrefix == "" {
+			g.BrewPrefix = homebrewPrefix()
+		}
+	}
+	if g.BrewFormulaInstalled == nil {
+		g.BrewFormulaInstalled = func() bool {
+			return brewFormulaInstalled() || (g.BrewPrefix != "" && formulaKegInstalled(g.BrewPrefix))
+		}
 	}
 	if g.RunningDriver == nil {
 		g.RunningDriver = func(ctx context.Context) (Driver, error) { return runningDriver(ctx, g.Discover) }
@@ -1431,7 +1477,7 @@ func (c serviceCommand) argv() []string { return append([]string{c.name}, c.args
 
 func (g *GatewayConfigurator) restartCommand() serviceCommand {
 	if g.GOOS == "darwin" {
-		return serviceCommand{"brew", []string{"services", "restart", GatewayFormula}}
+		return serviceCommand{g.BrewCommand(), []string{"services", "restart", GatewayFormula}}
 	}
 	return serviceCommand{"systemctl", []string{"--user", "restart", GatewayService}}
 }
@@ -1826,9 +1872,12 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	if !g.BrewFormulaInstalled() {
 		return st, nil
 	}
-	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
+	out, err := g.Runner.Output(ctx, Command{Name: g.BrewCommand(), Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
-		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, strings.TrimSpace(string(out)))
+		if bytes.Contains(out, []byte("cannot run under tmux")) {
+			return nil, ErrBrewNeedsTerminal
+		}
+		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, brewErrorLine(out))
 	}
 	var infos []struct {
 		Running    bool   `json:"running"`
@@ -1844,6 +1893,18 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	st.Installed = i.File != "" || i.Loaded || i.Registered
 	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
 	return st, nil
+}
+
+// brewErrorLine is the error brew printed, without the usage text it
+// prints after an error: its first "Error:" line, else its first line.
+func brewErrorLine(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "Error:") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return strings.TrimSpace(lines[0])
 }
 
 // brewQuietEnv turns off the warning Homebrew prints before the JSON of

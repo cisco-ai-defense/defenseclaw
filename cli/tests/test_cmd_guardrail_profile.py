@@ -177,6 +177,22 @@ def test_explain_names_a_failed_lookup_instead_of_a_group_count(monkeypatch):
     assert "0 group(s)" not in result.output
 
 
+def test_explain_match_line_names_default_lookup_failed(monkeypatch):
+    """GAP-0275: "match: default" while requests get default_lookup_failed."""
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "",
+            "match": "default",
+            "subject": {"user_name": "alice@corp.example.com", "group_count": 1},
+            "cache": {"match": "default_lookup_failed", "profile": "", "age_seconds": 0, "refresh_after_seconds": 0},
+        },
+    )
+    match_line = next(line for line in result.output.splitlines() if line.strip().startswith("match:"))
+    assert "default_lookup_failed" in match_line
+
+
 def test_explain_blames_a_slow_directory_not_a_stopped_gateway(monkeypatch):
     """GAP-0140: a read timeout is a running gateway still resolving the user."""
     import requests

@@ -538,7 +538,7 @@ live request does. With no `user`, no subject is resolved, so only
 failed, the answer adds `lookup_error`. `profiles` lists every configured
 profile with its digest. With no profiles configured the answer is
 `"profiles_configured": false` with an empty `profile` and the global
-settings under `effective`.
+settings under `effective`; `subject` is still resolved when `user` is given.
 
 ```json title="GET /api/v1/agents/identities?user=alice (trimmed)"
 {

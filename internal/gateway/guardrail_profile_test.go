@@ -694,6 +694,34 @@ func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
 	}
 }
 
+// TestProfileExplainShowsTheSubjectWithoutProfiles pins GAP-0280: the
+// documented identity check (`profile explain --user U --json | jq .subject`)
+// printed null on an install with no guardrail profiles, because the handler
+// answered before any directory lookup.
+func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
+	prev := profileExplainSubjectLookup
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubject{UserID: "1201", UserName: "alice", Principal: "alice@CORP.EXAMPLE.COM", Groups: []string{"dc-devs@corp.example.com"}}, nil
+	}
+	t.Cleanup(func() { profileExplainSubjectLookup = prev; liveGuardrailProfiles.Store(nil) })
+	liveGuardrailProfiles.Store(nil)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=alice", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var out struct {
+		Configured bool           `json:"profiles_configured"`
+		Subject    map[string]any `json:"subject"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body.String())
+	}
+	if out.Configured || out.Subject["principal"] != "alice@CORP.EXAMPLE.COM" || out.Subject["group_count"] != float64(1) {
+		t.Fatalf("explain = %s", rec.Body.String())
+	}
+}
+
 // TestProfileExplainSaysWhyTheLookupFailed: explain --user for an account the
 // OS names but cannot resolve (an Entra user the aad module has not cached)
 // reported default_lookup_failed with no lookup_error and no user id.
