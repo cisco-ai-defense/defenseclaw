@@ -994,6 +994,11 @@ class IDEPluginsTests(unittest.TestCase):
             self.assertLess(result.output.index("alice"), result.output.index("bob"))
             self.assertIn("2 plugin(s) shown; 2 in total, 1 AI, 1 disabled, 2 user(s)", result.output)
 
+            calls.clear()
+            alias = runner.invoke(cmd_agent.agent, ["ide-plugins", "--ide", "windsurf"], obj=_make_ctx())
+            self.assertEqual(alias.exit_code, 0, msg=alias.output)
+            self.assertEqual(calls[0]["ide"], "devin-desktop")
+
             pages[""] = {"enabled": True, "scope": "off", "plugins": []}
             result = runner.invoke(cmd_agent.agent, ["ide-plugins"], obj=_make_ctx())
             self.assertEqual(result.exit_code, 0, msg=result.output)
