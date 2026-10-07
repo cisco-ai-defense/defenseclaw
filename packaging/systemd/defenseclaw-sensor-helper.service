@@ -44,6 +44,10 @@ Restart=always
 RestartSec=5s
 RuntimeDirectory=defenseclaw-sensor
 RuntimeDirectoryMode=0750
+# The until-reboot break-glass pause lives in the runtime directory: it must
+# outlive helper restarts and stops (ensure, repair, upgrades) and go only
+# with a reboot. The helper replaces a stale socket itself.
+RuntimeDirectoryPreserve=yes
 StateDirectory=defenseclaw-sensor
 StateDirectoryMode=0700
 WorkingDirectory=/

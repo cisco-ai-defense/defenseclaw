@@ -4295,6 +4295,128 @@
       "since": "1.0.0"
     },
     {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_BURN_IN",
+      "category": "discovery",
+      "purpose": "Covered agent time each enrolled user needs, with no would-block hit, before the managed Linux sensor helper lets DefenseClaw's kernel controls deny for that user's agents. Rendered by the enterprise lifecycle from enterprise.tetragon.burn_in into the helper's systemd drop-in 30-defenseclaw-tetragon.conf; read only by defenseclaw-sensor-helper --managed-enterprise. Never set it by hand: ensure rewrites the drop-in from config.yaml.",
+      "default": "unset (168h)",
+      "accepted_values": [
+        "0",
+        "whole hours from 24h to 2160h",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders it from enterprise.tetragon.burn_in (the only writer)"
+        },
+        {
+          "location": "cmd/defenseclaw-sensor-helper/main.go",
+          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler; a malformed value falls back to 168h"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only, so only root or the lifecycle can set it. A malformed value falls back to the default 168h, never to a shorter burn-in. 0 skips the burn-in and enterprise status warns kernel_burn_in_skipped for as long as enforcement runs."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_ACK",
+      "category": "discovery",
+      "purpose": "The kernel_policy digest the administrator approved (enterprise.tetragon.enforce_ack). With mode enforce, the managed Linux sensor helper lets its kernel controls deny only while this equals the digest of the control set it ships. Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (no approval: enforce runs in monitor mode)",
+      "accepted_values": [
+        "sha256: and 12 lowercase hex digits",
+        "empty",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders it from enterprise.tetragon.enforce_ack (the only writer)"
+        },
+        {
+          "location": "cmd/defenseclaw-sensor-helper/main.go",
+          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler; a malformed value is no approval"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only. It approves one control-set digest, never a scope: a build with a changed control set reports a new digest and every user drops to monitor mode (kernel_enforce_ack_stale) until the new one is approved."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_CONNECTORS",
+      "category": "discovery",
+      "purpose": "Comma-separated enrolled connectors whose effective guardrail mode is action. In enforce mode only their agents can be anchored for a kernel deny; the others stay observe-only (guardrail_observe). Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf when the effective mode is enforce; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (no connector can be anchored for a deny)",
+      "accepted_values": [
+        "comma-separated connector names",
+        "empty",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders it from the enrolled connectors' effective guardrail mode (the only writer)"
+        },
+        {
+          "location": "cmd/defenseclaw-sensor-helper/main.go",
+          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only. It can only narrow the enforcing scope: anchors still come from enrolled connectors in the guardian manifest resolved to their real install files."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_MODE",
+      "category": "discovery",
+      "purpose": "How the managed Linux sensor helper uses the host's Tetragon (enterprise.tetragon.mode, with the Plane C cap applied): off (cn_proc and fanotify only), consume (read Tetragon's process events), observe (also load DefenseClaw's kernel controls in monitor mode) or enforce (let them deny once enforce_ack matches). Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf only when enterprise.tetragon differs from the default; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (consume)",
+      "accepted_values": [
+        "off",
+        "consume",
+        "observe",
+        "enforce",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders the effective mode from enterprise.tetragon (the only writer)"
+        },
+        {
+          "location": "cmd/defenseclaw-sensor-helper/main.go",
+          "description": "The managed helper reads the drop-in intent for its Tetragon backend"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler; a malformed value falls back to consume"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only; the helper never reads config.yaml, so a root process with kernel-policy power acts only on what ensure accepted. A malformed value falls back to consume (read only)."
+    },
+    {
       "name": "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the parent-cancellation native Setup helper subprocess.",

@@ -38,6 +38,8 @@ const (
 	dropinNetwork     = "70-defenseclaw-network.conf"
 	dropinPaths       = "50-defenseclaw-paths.conf"
 	dropinAgents      = "40-defenseclaw-agent-prefixes.conf"
+	// dropinTetragon carries enterprise.tetragon to the sensor helper.
+	dropinTetragon = "30-defenseclaw-tetragon.conf"
 )
 
 // renderInputs are the host-specific values rendering needs.
@@ -181,6 +183,14 @@ func (e *Env) renderDropins(in renderInputs) []renderedDropin {
 			renderedDropin{Path: dropinPath(unitGuardian, dropinPaths), Data: data},
 			renderedDropin{Path: dropinPath(unitGuardianOneshot, dropinPaths), Data: data},
 		)
+	}
+	// enterprise.tetragon reaches the sensor helper only through this
+	// drop-in; the helper never reads config.yaml. None is rendered while the
+	// helper's defaults (consume) already say the same.
+	if in.Config != nil {
+		if data := in.Config.Tetragon.dropin(); data != nil {
+			out = append(out, renderedDropin{Path: dropinPath(unitSensorHelper, dropinTetragon), Data: data})
+		}
 	}
 	return out
 }

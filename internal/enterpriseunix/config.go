@@ -77,6 +77,9 @@ type validatedConfig struct {
 	// Loaded is the runtime config the checks loaded; machine policy is
 	// published from it.
 	Loaded *config.Config
+	// Tetragon is enterprise.tetragon as the sensor helper's drop-in renders
+	// it, with the caps config alone decides (the OS, Plane C) applied.
+	Tetragon tetragonIntent
 	// Migration is set when the administrator config was config_version 8:
 	// Raw is then the migrated config_version 9 document, and the apply
 	// keeps the v8 bytes and the migration record next to config.yaml.
@@ -295,6 +298,7 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	sort.Strings(v.Connectors)
 	sort.Strings(v.HomeRoots)
 	sort.Strings(v.AgentPrefixes)
+	v.Tetragon = tetragonIntentOf(cfg, e.GOOS, v.Connectors)
 	return v, nil
 }
 

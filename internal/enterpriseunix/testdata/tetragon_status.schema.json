@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cisco-ai-defense.github.io/defenseclaw/schemas/tetragon-status.schema.json",
+  "title": "defenseclaw-gateway enterprise linux tetragon status|pause|resume --json",
+  "description": "What the managed Linux sensor helper does with the host's Tetragon: the intent the deployment renders, the helper's published state, the break-glass pause, operator overrides and orphaned policies. Read from the helper's state files; the command never connects to Tetragon. Additive changes keep schema_version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "action", "ok", "exit_code", "kernel_policy", "approve_with", "intent", "helper", "tetragon",
+    "policies", "users", "roots", "overrides", "recorded", "orphaned", "foreign", "warnings", "errors"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "action": { "enum": ["status", "pause", "resume"] },
+    "ok": { "type": "boolean" },
+    "exit_code": { "type": "integer" },
+    "kernel_policy": { "$ref": "#/$defs/digest", "description": "The control-set digest this build ships: the value enforce_ack approves." },
+    "approve_with": { "type": "string", "pattern": "^enforce_ack: sha256:[0-9a-f]{12}$" },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprise.tetragon as the deployment renders it into the helper's drop-in.",
+      "required": ["valid", "configured_mode", "mode", "burn_in", "enforce_ack", "approval", "enforce_connectors", "guardrail_observe", "dropin"],
+      "properties": {
+        "valid": { "type": "boolean", "description": "False when the installed config could not be read or does not validate; the other fields are then the defaults." },
+        "configured_mode": { "$ref": "#/$defs/mode" },
+        "mode": { "$ref": "#/$defs/mode", "description": "The mode the helper runs with, after the caps config alone decides." },
+        "cap_reason": { "type": "string" },
+        "burn_in": { "type": "string", "pattern": "^(0|[0-9]{1,4}h)$" },
+        "enforce_ack": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{12})$" },
+        "approval": { "enum": ["not_needed", "missing", "stale", "approved"] },
+        "enforce_connectors": { "$ref": "#/$defs/strings" },
+        "guardrail_observe": { "$ref": "#/$defs/strings" },
+        "dropin": { "type": "boolean", "description": "Whether 30-defenseclaw-tetragon.conf is rendered (only for a non-default block)." }
+      }
+    },
+    "helper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "running"],
+      "properties": {
+        "unit": { "type": "string" },
+        "running": { "type": "boolean" },
+        "state_updated_at": { "$ref": "#/$defs/time" },
+        "pid": { "type": "integer" },
+        "mode": { "type": "string" },
+        "effective_mode": { "type": "string" },
+        "kernel_policy": { "type": "string" }
+      }
+    },
+    "tetragon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["installed", "socket", "reachable"],
+      "properties": {
+        "installed": { "type": "boolean" },
+        "server_address": { "type": "string" },
+        "socket": { "type": "string", "description": "The socket check from Tetragon's info file: trusted, refused (TCP API, owner or mode), unavailable or not installed." },
+        "reachable": { "type": "boolean" },
+        "version": { "type": "string" },
+        "pid": { "type": "integer" },
+        "lsm": { "type": "boolean" },
+        "keep_sensors_on_exit": { "type": "boolean" },
+        "seen_at": { "$ref": "#/$defs/time" },
+        "reason": { "type": "string" }
+      }
+    },
+    "policies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "family"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$" },
+          "family": { "enum": ["observe", "connect", "controls", "controls-burnin"] },
+          "desired_mode": { "type": "string" },
+          "mode": { "type": "string" },
+          "state": { "type": "string" },
+          "error": { "type": "string" },
+          "changed_at": { "$ref": "#/$defs/time" }
+        }
+      }
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["uid", "connectors", "state", "anchored_roots", "covered_hours", "needed_hours", "would_block", "blocked"],
+        "properties": {
+          "uid": { "type": "integer" },
+          "user": { "type": "string" },
+          "connectors": { "$ref": "#/$defs/strings" },
+          "state": { "type": "string" },
+          "reason": { "type": "string" },
+          "anchored_roots": { "type": "integer" },
+          "covered_hours": { "type": "number" },
+          "needed_hours": { "type": "number" },
+          "would_block": { "$ref": "#/$defs/hits" },
+          "blocked": { "$ref": "#/$defs/hits" }
+        }
+      }
+    },
+    "roots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchored", "over_limit", "observed_only"],
+      "properties": {
+        "anchored": { "type": "integer" },
+        "over_limit": { "type": "integer" },
+        "observed_only": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["uid", "reason", "count"],
+            "properties": {
+              "uid": { "type": "integer" },
+              "reason": { "type": "string" },
+              "identity": { "type": "string" },
+              "connector": { "type": "string" },
+              "count": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    "pause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["until_reboot", "set_by_uid"],
+      "properties": {
+        "until": { "$ref": "#/$defs/time" },
+        "until_reboot": { "type": "boolean" },
+        "set_by_uid": { "type": "integer" },
+        "set_at": { "$ref": "#/$defs/time" },
+        "reason": { "type": "string" },
+        "invalid": { "type": "string" }
+      }
+    },
+    "overrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["family", "kind"],
+        "properties": {
+          "family": { "enum": ["observe", "connect", "controls", "controls-burnin"] },
+          "kind": { "enum": ["monitor", "deleted"] },
+          "at": { "$ref": "#/$defs/time" }
+        }
+      }
+    },
+    "recorded": { "$ref": "#/$defs/policyNames" },
+    "orphaned": { "$ref": "#/$defs/policyNames" },
+    "foreign": { "$ref": "#/$defs/strings" },
+    "changes": { "$ref": "#/$defs/strings" },
+    "warnings": { "$ref": "#/$defs/messages" },
+    "errors": { "$ref": "#/$defs/messages" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{12}$" },
+    "mode": { "enum": ["off", "consume", "observe", "enforce"] },
+    "time": { "type": "string", "format": "date-time" },
+    "strings": { "type": "array", "items": { "type": "string" } },
+    "policyNames": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^defenseclaw-(observe|connect|controls|controls-burnin)-[0-9a-f]{8}$" }
+    },
+    "hits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["control", "count", "paths", "binaries"],
+        "properties": {
+          "control": { "type": "string" },
+          "count": { "type": "integer" },
+          "first": { "$ref": "#/$defs/time" },
+          "last": { "$ref": "#/$defs/time" },
+          "paths": { "$ref": "#/$defs/counts" },
+          "binaries": { "$ref": "#/$defs/counts" }
+        }
+      }
+    },
+    "counts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value", "count"],
+        "properties": { "value": { "type": "string" }, "count": { "type": "integer" } }
+      }
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message"],
+        "properties": { "code": { "type": "string" }, "message": { "type": "string" } }
+      }
+    }
+  }
+}

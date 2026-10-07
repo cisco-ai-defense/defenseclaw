@@ -144,6 +144,9 @@ type lifecycle struct {
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
+	// kernelRemoved are the Tetragon policies an uninstall removed, for its
+	// summary.
+	kernelRemoved []string
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1570,7 +1573,17 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 			}
 		}
 	}
+	// The Tetragon policies the transaction's helper loaded go with that
+	// helper, before the snapshot puts the previous one back (once).
+	retired := false
+	retire := func() {
+		if !retired {
+			retired = true
+			l.retireRolledBackKernelPolicies(ctx)
+		}
+	}
 	if restoreFirst {
+		retire()
 		if err := env.restoreFiles(snap); err != nil {
 			return false, errors.Join(append(disableErrs, err)...)
 		}
@@ -1590,6 +1603,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 		_ = env.Services.Stop(ctx, unit)
 	}
+	// The helper is stopped now; the restored helper loads its own policies
+	// again if it manages any.
+	retire()
 	restoreErr := env.restore(snap)
 	if beforeStart != nil {
 		beforeStart()
@@ -1882,7 +1898,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			stopUnit(unit)
 		}
 	}
+	// The sensor helper is stopped. The Tetragon policies it loaded outlive
+	// it and would keep enforcing with frozen anchors: remove them with the
+	// binary that loaded them, before any binary or state goes.
+	l.kernelRemoved = l.retireKernelPolicies(ctx)
 	if perUserLeft {
+		if len(l.kernelRemoved) > 0 {
+			r.Changes = append(r.Changes, kernelPolicyChange(l.kernelRemoved))
+		}
 		disableKeptDefinitions()
 		// Some users' agents still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
@@ -2013,6 +2036,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				errs = append(errs, err)
 			}
 		}
+		// The sensor helper's Tetragon state (burn-in, pause, the record of
+		// loaded policies), unless it still names policies that may be
+		// loaded: a helper installed later retires them from that record.
+		if err := env.removeSensorState(); err != nil {
+			errs = append(errs, err)
+		}
 		if !packageManaged {
 			if err := os.RemoveAll(env.P(env.Layout.InstallRoot)); err != nil {
 				errs = append(errs, err)
@@ -2066,6 +2095,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
 	}
 	lines := []string{removed}
+	if len(l.kernelRemoved) > 0 {
+		lines = append(lines, kernelPolicyChange(l.kernelRemoved))
+	}
 	if l.perUserRemoved > 0 {
 		lines = append(lines, fmt.Sprintf("removed %d DefenseClaw per-user hook registrations from the enrolled accounts", l.perUserRemoved))
 	}
