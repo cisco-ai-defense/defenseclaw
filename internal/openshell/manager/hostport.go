@@ -302,9 +302,7 @@ func (m *Manager) hostPortApplied(ctx context.Context, a *approval, res *openshe
 	if res != nil {
 		ev.PolicyHash = res.PolicyHash
 	}
-	if perr := m.tel.RecordSandboxPolicy(ctx, ev); perr != nil {
-		m.logf("policy telemetry for approval %s: %v", a.id, perr)
-	}
+	m.tel.RecordSandboxPolicy(ctx, ev)
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 		Host: openshellHostAlias, Port: port, Reason: a.actor,
 		Message: fmt.Sprintf("approved port %d on your machine (%s:%d)", port, openshellHostAlias, port)})

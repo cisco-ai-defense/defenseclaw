@@ -25,7 +25,6 @@ import (
 	"net/url"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,12 +388,10 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	if ident.Name == "" {
 		ident = audit.SandboxIdentity{Name: "all", Runtime: audit.SandboxRuntimeOpenShell}
 	}
-	if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+	m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
 		Sandbox: ident, Operation: audit.SandboxEgressUnblock, Actor: "operator", Origin: "api", Target: host,
 		Reason: policyReasonUnblock, ChangeCount: 1, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("policy telemetry for the unblock of %s: %v", host, err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: req.Sandbox, Host: host,
 		Reason: resp.Scope, Message: resp.Message})
 	return resp, nil
@@ -709,11 +706,8 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: blocked,
 			DecisionCode: decisionCode(e), Reason: truncate(reason, 512),
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
-			UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 		}
-		if err := m.tel.RecordSandboxEgress(ctx, ev); err != nil {
-			m.logf("egress telemetry: %v", err)
-		}
+		m.tel.RecordSandboxEgress(ctx, ev)
 		m.observeDestination(ctx, b, destinationSighting{host: e.Host, port: e.Port, at: e.Time, proxy: true, denied: blocked,
 			category: string(e.Category)})
 		if blocked || e.FirstSeen {
@@ -795,9 +789,7 @@ func (m *Manager) egressEnded(ctx context.Context, ident audit.SandboxIdentity, 
 		ev.DecisionCode = "SANDBOX_EGRESS_UPSTREAM_FAILED"
 		ev.Reason = truncate(firstNonEmpty(e.Error, e.Reason), 512)
 	}
-	if err := m.tel.RecordSandboxEgress(ctx, ev); err != nil {
-		m.logf("egress telemetry: %v", err)
-	}
+	m.tel.RecordSandboxEgress(ctx, ev)
 	// The counter counted it: the destinations view keeps its totals.
 	m.touchDestinations(e.SandboxName)
 }
@@ -897,15 +889,12 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 			e.SandboxName, threshold, e.Host, e.BytesUp),
 		Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation, Timestamp: e.Time,
 	})
-	if err := m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
 		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port,
 		Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: true,
 		DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
 		PolicyOutcome: policyOutcome(e), Severity: "HIGH", Timestamp: e.Time,
-		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
-	}); err != nil {
-		m.logf("egress telemetry: %v", err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: e.SandboxName,
 		Host: e.Host, Port: e.Port, Method: e.Method, Source: sandboxapi.SourceProxy, Category: sandboxapi.CategoryLargeUpload,
 		Unblockable: e.Unblockable, BytesUp: e.BytesUp, Severity: "HIGH", Reason: truncate(e.Reason, 300),
