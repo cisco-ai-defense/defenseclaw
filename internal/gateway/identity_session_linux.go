@@ -229,16 +229,14 @@ func utmpSessionFactsFrom(path, tty, name string) (useridentity.SessionFacts, er
 		if entry.Line != tty || entry.User != name {
 			continue
 		}
-		facts := useridentity.SessionFacts{TTY: tty, Assurance: useridentity.AssuranceVerified}
-		if entry.Host != "" {
+		facts := useridentity.SessionFacts{TTY: tty, Assurance: useridentity.AssuranceClaimed}
+		if entry.Addr != nil && !entry.Addr.IsUnspecified() {
 			facts.Kind = useridentity.SessionSSH
-			if entry.Addr != nil && !entry.Addr.IsUnspecified() {
-				facts.ClientAddr = entry.Addr.String()
-			} else if ip := net.ParseIP(entry.Host); ip != nil {
-				facts.ClientAddr = ip.String()
-			}
-		} else if strings.HasPrefix(tty, "tty") {
+			facts.Assurance = useridentity.AssuranceVerified
+			facts.ClientAddr = entry.Addr.String()
+		} else if entry.Host == "" && strings.HasPrefix(tty, "tty") {
 			facts.Kind = useridentity.SessionConsole
+			facts.Assurance = useridentity.AssuranceVerified
 		}
 		return facts, nil
 	}
