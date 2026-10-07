@@ -11,6 +11,7 @@
 package connector
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -83,14 +84,16 @@ func shellHookSocketTransport(socket string, serviceUID int, factsBinary string)
 
 // managedSessionFactsBinary is the administrator-owned hook binary a managed
 // standalone shell hook runs for the session facts, or "" when the install
-// has none. It is the foreign-hook guard's binary: root-owned, and it serves
-// `hook session-facts` like the per-user gateway binary does (GAP-0194).
+// has none. It is the install's hook binary, whatever the connector: it is
+// root-owned and serves `hook session-facts` like the per-user gateway
+// binary does (GAP-0194). It does not depend on the foreign-hook guard,
+// which only some connectors run.
 func managedSessionFactsBinary(opts SetupOpts) string {
-	binary := managedPluginForeignHookGuard(opts)
-	if strings.ContainsAny(binary, "\x00\r\n") {
+	binary := strings.TrimSpace(opts.ManagedHookBinary)
+	if !opts.ManagedEnterprise || binary == "" || !filepath.IsAbs(binary) || strings.ContainsAny(binary, "\x00\r\n") {
 		return ""
 	}
-	return binary
+	return filepath.Clean(binary)
 }
 
 // shellHookSocketTrust renders shellHookSocketTrustFunctions for scripts

@@ -710,6 +710,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			ManagedServiceUID:                  serviceUID,
 			HookCredentialIdentity:             identity,
 			ForeignHookGuardBinary:             standaloneForeignHookGuardBinary(target.Connector),
+			ManagedHookBinary:                  standaloneManagedHookBinary(),
 		}
 		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 			for _, dir := range dirs {
