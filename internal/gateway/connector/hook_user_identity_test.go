@@ -321,3 +321,37 @@ func TestSecureClientShellHookSendsNoSessionFacts(t *testing.T) {
 		t.Fatalf("per-user hook sent no session facts:\n%s", out)
 	}
 }
+
+// A standalone managed shell hook has no per-user gateway binary, so it takes
+// the whole session facts, Kerberos principal included, from the
+// administrator-owned hook binary its rendered transport names; without that
+// binary (Secure Client) it sends the SSH variables alone (GAP-0194).
+func TestManagedShellHookTakesSessionFactsFromTheAdministratorBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks report identity from hookexec, not from the shell helper")
+	}
+	shell := systemBashForTest(t)
+	helperPath := materializeHookAssetForTest(t, "hooks/_hardening.sh")
+	binary := filepath.Join(t.TempDir(), "defenseclaw-hook")
+	script := "#!/bin/sh\n[ \"$1 $2\" = \"hook session-facts\" ] || exit 1\nprintf 'v1;k=ssh;ca=192.0.2.10;krb=carol@EXAMPLE.TEST'\n"
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(extra ...string) string {
+		command := exec.Command(shell, "-c", `set -e; source "$0"; defenseclaw_user_identity_args`, helperPath)
+		command.Env = append(withoutSessionFactsEnv(os.Environ()),
+			"SSH_CONNECTION=192.0.2.10 50000 192.0.2.20 22", "KRB5CCNAME=FILE:/nonexistent", "HOME="+t.TempDir(), "DEFENSECLAW_MANAGED_HOOK=1")
+		command.Env = append(command.Env, extra...)
+		out, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	if out := run("DEFENSECLAW_SESSION_FACTS_BIN=" + binary); !strings.Contains(out, "X-DefenseClaw-Session-Facts: v1;k=ssh;ca=192.0.2.10;krb=carol@EXAMPLE.TEST") {
+		t.Fatalf("managed hook did not send the Kerberos principal:\n%s", out)
+	}
+	if out := run(); strings.Contains(out, "krb=") {
+		t.Fatalf("managed hook without the binary sent a principal:\n%s", out)
+	}
+}
