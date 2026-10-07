@@ -167,6 +167,10 @@ stopped`. Nothing is changed; use the install command above.
   `--profile` and `--harness` resolve locally, with no daemon, for CI.
   `--fixture FILE` checks a YAML or JSON list of `{host, port, binary,
   expect, rule}` and exits 1 on a mismatch.
+- `defenseclaw sandbox policy block --remove HOST` (and `policy allow
+  --remove`) takes an entry off `openshell.egress.block` (or `allow`); only
+  `config unset` could, for the whole list. An unblock refused by your own
+  block list names the command.
 
 ## [Unreleased] — Enterprise hardening
 

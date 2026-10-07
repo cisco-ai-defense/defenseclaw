@@ -652,7 +652,12 @@ func newSandboxUnblockCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unblock <host>",
 		Short: "Lift an egress block for one sandbox or for every sandbox",
-		Args:  cobra.ExactArgs(1),
+		Long: `Lifts a block of the blocklist feed or of the profile's default (IP addresses under
+open, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for
+every sandbox (--always). It cannot lift a block-list entry: remove your own with
+` + "`defenseclaw sandbox policy block --remove HOST`" + `; a pack's, the repository
+policy's (.defenseclaw/sandbox.yaml) and your organization's stay.`,
+		Args: cobra.ExactArgs(1),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			o.Host = args[0]
 			return app.Unblock(ctx, o)
@@ -800,14 +805,20 @@ is applied.`,
 		if list == "block" {
 			short = "Add hosts to openshell.egress.block"
 		}
-		cmd.AddCommand(&cobra.Command{
+		var remove bool
+		edit := &cobra.Command{
 			Use:   list + " <host>...",
 			Short: short,
 			Args:  cobra.MinimumNArgs(1),
 			RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
+				if remove {
+					return app.PolicyRemove(ctx, list, args)
+				}
 				return app.PolicyEdit(ctx, list, args)
 			}),
-		})
+		}
+		edit.Flags().BoolVar(&remove, "remove", false, "remove the hosts from openshell.egress."+list+" instead")
+		cmd.AddCommand(edit)
 	}
 	return cmd
 }

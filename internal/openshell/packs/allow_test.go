@@ -534,10 +534,12 @@ func TestBlockListIsNotUnblockable(t *testing.T) {
 		o.Pack, o.PackDir, o.Egress.Block = "team", root, []string{"drop.example"}
 	}), Flags{})
 	for _, tc := range []struct {
-		host, constraint, message string
+		host, constraint, message, detail string
 	}{
-		{"a.paste.example", "pack team", "not allowed by the team sandbox pack: "},
-		{"drop.example", "openshell.egress.block", "blocked by your own openshell.egress.block list: "},
+		{"a.paste.example", "pack team", "not allowed by the team sandbox pack: ", "on the pack's block list"},
+		// GAP-0151: the user's own entry names the command that removes it.
+		{"drop.example", "openshell.egress.block", "blocked by your own openshell.egress.block list: ",
+			"remove the entry to reach it: defenseclaw sandbox policy block --remove drop.example"},
 	} {
 		if d := eff.DecideEgress(tc.host, 443); d.Allowed || d.Rule != RuleBlock || d.Unblockable {
 			t.Fatalf("DecideEgress(%s) = %+v", tc.host, d)
@@ -546,7 +548,7 @@ func TestBlockListIsNotUnblockable(t *testing.T) {
 			err := eff.Allow(Action{Kind: kind, Host: tc.host, Port: 443})
 			var v *Violation
 			if !errors.As(err, &v) || v.Constraint != tc.constraint || !strings.HasPrefix(v.Message, tc.message) ||
-				v.Admin() || !strings.Contains(v.Detail, tc.host) {
+				v.Admin() || !strings.Contains(v.Detail, tc.host) || !strings.Contains(v.Detail, tc.detail) {
 				t.Fatalf("Allow(%s %s) = %#v", kind, tc.host, err)
 			}
 		}

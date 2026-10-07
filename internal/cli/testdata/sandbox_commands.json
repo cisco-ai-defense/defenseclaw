@@ -403,12 +403,26 @@
   {
     "path": "sandbox policy allow",
     "use": "allow \u003chost\u003e...",
-    "short": "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)"
+    "short": "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)",
+    "flags": [
+      {
+        "name": "remove",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
   },
   {
     "path": "sandbox policy block",
     "use": "block \u003chost\u003e...",
-    "short": "Add hosts to openshell.egress.block"
+    "short": "Add hosts to openshell.egress.block",
+    "flags": [
+      {
+        "name": "remove",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
   },
   {
     "path": "sandbox policy explain",

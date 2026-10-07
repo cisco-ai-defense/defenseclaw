@@ -1266,6 +1266,17 @@ func TestPolicyEdit(t *testing.T) {
 		!slices.Equal(c.OpenShell.Egress.Block, []string{"paste.example"}) {
 		t.Fatalf("egress = %+v", c.OpenShell.Egress)
 	}
+	// GAP-0151: no command took one entry off a list; `config unset` emptied
+	// the whole list. (Each command loads config.yaml as it starts.)
+	ta.Cfg = loadConfig(t, ta)
+	ta.ok(t, ta.fresh().PolicyRemove(bg, "allow", []string{"*.PyPI.org", "other.example"}))
+	has(t, ta.output(), "removed *.pypi.org from openshell.egress.allow", "other.example is not in openshell.egress.allow")
+	ta.ok(t, ta.PolicyRemove(bg, "block", []string{"paste.example"}))
+	ta.Cfg = loadConfig(t, ta)
+	if !slices.Equal(ta.Cfg.OpenShell.Egress.Allow, []string{"registry.npmjs.org"}) || len(ta.Cfg.OpenShell.Egress.Block) != 0 {
+		t.Fatalf("egress after the removals = %+v", ta.Cfg.OpenShell.Egress)
+	}
+	wantErr(t, ta.PolicyRemove(bg, "block", []string{"paste.example"}), "paste.example is not in openshell.egress.block")
 	off := false
 	for _, c := range []struct {
 		name  string

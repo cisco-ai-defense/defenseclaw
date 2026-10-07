@@ -309,8 +309,17 @@ func (e *Effective) blockVerdict(key, host string) *Violation {
 	return &Violation{
 		Key: key, Source: SourceUser, Attempted: host, Constraint: "openshell.egress.block",
 		Message: "blocked by your own openshell.egress.block list: " + key,
-		Detail:  host + " matches " + glob + "; remove the entry to reach it",
+		Detail:  host + " matches " + glob + "; remove the entry to reach it: defenseclaw sandbox policy block --remove " + shellWord(glob),
 	}
+}
+
+// shellWord quotes a block pattern for a command line when a shell would
+// expand it (a wildcard).
+func shellWord(s string) string {
+	if strings.ContainsAny(s, "*?[") {
+		return "'" + s + "'"
+	}
+	return s
 }
 
 // allowApproval gates an OpenShell draft proposal. An approval opens a

@@ -436,6 +436,57 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 	return nil
 }
 
+// PolicyRemove removes hosts from openshell.egress.allow or
+// openshell.egress.block (`sandbox policy allow|block --remove`), entries
+// matched as written, letter case aside: before it, only `config unset`
+// emptied a whole list, and a block entry stays a block no unblock lifts
+// (GAP-0151).
+func (a *App) PolicyRemove(ctx context.Context, list string, hosts []string) error {
+	if len(hosts) == 0 {
+		return errors.New("name at least one host")
+	}
+	key := "openshell.egress." + list
+	var current []string
+	if a.Cfg != nil {
+		switch list {
+		case "allow":
+			current = a.Cfg.OpenShell.Egress.Allow
+		case "block":
+			current = a.Cfg.OpenShell.Egress.Block
+		default:
+			return fmt.Errorf("unknown egress list %q", list)
+		}
+	}
+	var next, removed, missing []string
+	for _, have := range current {
+		if slices.ContainsFunc(hosts, func(h string) bool { return strings.EqualFold(config.NormalizeOpenShellEgressPattern(h), have) }) {
+			removed = append(removed, have)
+		} else {
+			next = append(next, have)
+		}
+	}
+	for _, h := range hosts {
+		if !slices.ContainsFunc(removed, func(r string) bool { return strings.EqualFold(r, config.NormalizeOpenShellEgressPattern(h)) }) {
+			missing = append(missing, h)
+		}
+	}
+	if len(removed) == 0 {
+		return fmt.Errorf("%s is not in %s; `%s policy explain` shows where a block comes from", strings.Join(hosts, ", "), key, CommandName)
+	}
+	if next == nil {
+		next = []string{}
+	}
+	if err := a.patchConfig(map[string]any{key: next}); err != nil {
+		return err
+	}
+	a.ok("removed " + strings.Join(removed, ", ") + " from " + key)
+	if len(missing) > 0 {
+		a.warn(strings.Join(missing, ", ") + " is not in " + key)
+	}
+	a.note("the daemon applies it to running sandboxes within a few seconds")
+	return nil
+}
+
 // adminAllows refuses an allow entry the organization's policy would make
 // dead: allow entries are ignored under allow_unblock: false, and nothing
 // on egress_block or outside egress_allow_only is reachable whatever the

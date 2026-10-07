@@ -567,7 +567,8 @@ use **Unblock** in the notification, the menu bar, or the Sandboxes panel.
 Unblocking lifts blocklist-feed blocks, IP-address blocks and, in the
 `balanced` profile, sites outside the allowlist. It never opens private
 networks, metadata addresses or this machine, and never overrides your own
-`openshell.egress.block` entries or your organization's. If your
+`openshell.egress.block` entries (take one off with
+`defenseclaw sandbox policy block --remove HOST`) or your organization's. If your
 organization sets `openshell.admin.allow_unblock: false`, unblocking is
 refused with "blocked by your organization's DefenseClaw policy".
 
