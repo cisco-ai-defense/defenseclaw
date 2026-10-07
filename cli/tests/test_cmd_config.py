@@ -348,6 +348,15 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             "update_check was replaced by update.check in config_version 9; run: defenseclaw migrate",
         )
 
+    def test_changelog_does_not_tell_users_to_set_a_retired_key(self):
+        from defenseclaw.observability.v8_config import _V9_REMOVED_KEYS
+
+        changelog = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+        release = changelog.split("\n## [1.0.0]", 1)[1].split("\n## [", 1)[0]
+        for parts, replacement in _V9_REMOVED_KEYS:
+            key = ".".join(parts)
+            self.assertFalse(f"`{key}: " in release, f"the 1.0.0 notes tell users to set {key}; use {replacement}")
+
     def test_a_newer_config_version_is_not_sent_to_migrate(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.yaml")
