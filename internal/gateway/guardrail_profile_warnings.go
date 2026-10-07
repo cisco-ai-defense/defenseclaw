@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -23,6 +24,7 @@ import (
 // does not show.
 func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) []string {
 	var warnings []string
+	warnings = append(warnings, set.unknownConnectorWarnings()...)
 	if subject == nil || !subject.LookupFailed {
 		warnings = append(warnings, set.unknownGroupWarnings(profileGroupCheckWait)...)
 	}
@@ -38,6 +40,53 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if runtime.GOOS == "windows" && subject != nil {
 		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
 			warnings = append(warnings, note)
+		}
+	}
+	return warnings
+}
+
+// unknownConnectorWarnings points out profile selectors and overrides that
+// cannot match any built-in connector. Config is a leaf package, so it cannot
+// consult the runtime registry; plugin names remain valid, with a warning
+// unless the plugin is also in the configured connector roster.
+func (set *guardrailProfileSet) unknownConnectorWarnings() []string {
+	if set == nil || set.base == nil {
+		return nil
+	}
+	known := func(name string) bool {
+		norm := strings.ToLower(strings.TrimSpace(name))
+		switch norm {
+		case "claude-code", "claude_code":
+			norm = "claudecode"
+		case "open-hands", "open_hands":
+			norm = "openhands"
+		}
+		return connector.IsKnownBuiltinConnector(norm) || set.base.Guardrail.HasConnector(norm)
+	}
+	var warnings []string
+	for i, assignment := range set.assignments {
+		for _, name := range assignment.Match.Connectors {
+			if !known(name) {
+				warnings = append(warnings, fmt.Sprintf("guardrail.profile_assignments[%d].match.connectors: %q is not a built-in or configured connector; check its spelling or plugin", i, name))
+			}
+		}
+	}
+	profiles := make([]string, 0, len(set.base.Guardrail.Profiles))
+	for name := range set.base.Guardrail.Profiles {
+		profiles = append(profiles, name)
+	}
+	slices.Sort(profiles)
+	for _, profileName := range profiles {
+		profile := set.base.Guardrail.Profiles[profileName]
+		connectors := make([]string, 0, len(profile.Connectors))
+		for name := range profile.Connectors {
+			connectors = append(connectors, name)
+		}
+		slices.Sort(connectors)
+		for _, name := range connectors {
+			if !known(name) {
+				warnings = append(warnings, fmt.Sprintf("guardrail.profiles[%q].connectors: %q is not a built-in or configured connector; check its spelling or plugin", profileName, name))
+			}
 		}
 	}
 	return warnings
@@ -191,9 +240,12 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 	return append([]string(nil), check.warnings...)
 }
 
-// logUnknownGroups writes the unknown-group warnings to the gateway log in the
+// logProfileWarnings writes connector warnings and unknown-group warnings to the gateway log in the
 // background; the gateway calls it for a new set at start and at each reload.
-func (set *guardrailProfileSet) logUnknownGroups() {
+func (set *guardrailProfileSet) logProfileWarnings() {
+	for _, warning := range set.unknownConnectorWarnings() {
+		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
+	}
 	exists, qualify, health := profileGroupExists, profileGroupQualifiedName, directoryCacheHealth
 	go func() {
 		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, health, profileGroupCheckBudget+time.Second) {
