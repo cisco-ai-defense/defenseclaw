@@ -275,12 +275,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		a.dispatchClaudeCodeHookNotification(ctx, req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	// A configured block message (the request's guardrail profile, then the
-	// global guardrail) replaces the agent-facing reason on blocks, as on
-	// the generic hook path.
-	reason, policy := resolveHookBlockReasonForConfig(
-		a.decisionConfig(ctx), "claudecode", action, verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled),
-	)
+	// A configured block message (the guardrail profile of the request, then
+	// the global guardrail) replaces the agent-facing reason on blocks, as on
+	// the generic hook path. Secure Client keeps the verdict reason (issue
+	// #1092).
+	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
+	if !a.managedAIDOnly() {
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", action, reason, policy)
+	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
 	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
