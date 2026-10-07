@@ -141,6 +141,29 @@ func TestProcessCmdlineRedactsSecrets(t *testing.T) {
 	if long := processCmdline([]string{strings.Repeat("a ", 2000)}); len(long) > maxCmdlineBytes {
 		t.Fatalf("cmdline of %d bytes", len(long))
 	}
+	// Passwords in URLs, in user:password arguments and attached to a
+	// MySQL client's -p.
+	for _, argv := range [][]string{
+		{"curl", "-u", "dccertuser:dccertpass", "https://example.invalid/"},
+		{"curl", "--user=dccertuser:dccertpass", "https://example.invalid/"},
+		{"git", "clone", "https://dccertuser:dccertpass@example.invalid/r.git"},
+		{"psql", "postgresql://dccert:dccertpass@db.invalid/x"},
+		{"/usr/bin/mysql", "-udccert", "-pdccertpass"},
+	} {
+		got := processCmdline(argv)
+		if strings.Contains(got, "dccertpass") || !strings.Contains(got, "dccert") || !strings.Contains(got, "<redacted") {
+			t.Fatalf("cmdline %q of %q keeps the password", got, argv)
+		}
+	}
+	// Look-alikes stay as they are.
+	for _, argv := range [][]string{
+		{"python3", "-u", "main.py"}, {"ssh", "-p", "2222", "host"}, {"tar", "-pxf", "a.tar"},
+		{"curl", "https://example.invalid:8443/path"}, {"psql", "-U", "dccert"},
+	} {
+		if got := processCmdline(argv); got != strings.Join(argv, " ") {
+			t.Fatalf("cmdline %q of %q", got, argv)
+		}
+	}
 }
 
 // treeEnv is a running manager with one ready sandbox whose process tree is
