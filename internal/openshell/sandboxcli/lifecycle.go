@@ -474,8 +474,13 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
 		hint := a.diskFullHint(err)
-		if errors.Is(err, workspace.ErrUploadNotArrived) {
+		switch {
+		case errors.Is(err, workspace.ErrUploadNotArrived):
 			hint = strayUploadHint
+		case errors.Is(err, workspace.ErrUnappliedPull), errors.Is(err, workspace.ErrUnpulledChanges):
+			// connect and run take no flag that discards it.
+			hint = "bring the work back first (`" + CommandName + " pull " + s.sb.Name + " --apply`, --branch or --patch-out FILE), " +
+				"or connect without --refresh to go on with the copy as it is"
 		}
 		return workspaceFailure("refresh the copy", err, hint)
 	}

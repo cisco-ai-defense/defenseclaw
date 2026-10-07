@@ -1455,6 +1455,19 @@ func TestRunWithAChangedRepoPolicy(t *testing.T) {
 	}
 }
 
+// TestRefreshNamesAWayOn (GAP-0106): `connect NAME --refresh` over a pull
+// that was not applied said "apply it, or refresh with --force to discard
+// it", and connect has no --force. The refusal names the pull commands.
+func TestRefreshNamesAWayOn(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.refreshErr = fmt.Errorf("%w, and a refresh would discard it (sandbox copybox)", workspace.ErrUnappliedPull)
+	err := ta.Connect(bg, ConnectOptions{Name: "copybox", Refresh: true})
+	if err == nil || !strings.Contains(err.Error(), "bring the work back first (`defenseclaw sandbox pull copybox --apply`, --branch or --patch-out FILE)") ||
+		strings.Contains(err.Error(), "--force") {
+		t.Fatalf("Connect = %v", err)
+	}
+}
+
 // Manual R2-101: a stopped sandbox the policy would not start is not
 // offered for resume; status and connect say to delete it and run again.
 func TestOutOfPolicySandboxIsNotOfferedForResume(t *testing.T) {
