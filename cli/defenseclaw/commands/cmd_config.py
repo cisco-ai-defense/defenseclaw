@@ -239,7 +239,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     asset_policy.skill.denied[0].name. A key config.yaml leaves out prints
     its default, with a note on stderr. With --effective, guardrail levels
     (guardrail.block_at, guardrail.connectors.<c>.alert_at) and admission[.<type>]
-    print what the gateway resolves them to; admission keys config.yaml leaves
+    print what the gateway resolves them to, and enterprise.tetragon[.<key>]
+    what the managed Linux sensor helper runs; admission keys config.yaml leaves
     out always print that resolved value. Exits 1 when the key has no value
     and no default, and 2 for an unknown section.
     """
@@ -342,7 +343,29 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if not found:
             return None
         return value, source
+    if parts[:2] == ["enterprise", "tetragon"] and len(parts) <= 3:
+        return _tetragon_effective_value(app, cfg, parts[2:])
     return None
+
+
+def _tetragon_effective_value(app: AppContext, cfg: object, rest: list) -> tuple[object, str] | None:
+    """enterprise.tetragon[.<key>] as the managed Linux sensor helper runs it."""
+    from defenseclaw.config import effective_tetragon
+    from defenseclaw.platform_support import host_os
+
+    written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
+    view = effective_tetragon(
+        written,
+        deployment_mode=str(getattr(cfg, "deployment_mode", "") or ""),
+        runtime=getattr(getattr(cfg, "ai_discovery", None), "runtime", None),
+        os_name=host_os(),
+    )
+    if not rest:
+        return (
+            {key: value for key, (value, _) in view.items()},
+            ", ".join(f"{key}={source}" for key, (_, source) in view.items()),
+        )
+    return view.get(str(rest[0]))
 
 
 def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:

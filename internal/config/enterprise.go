@@ -20,7 +20,9 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -40,6 +42,7 @@ type EnterpriseConfig struct {
 	Trust         EnterpriseTrustConfig         `mapstructure:"trust"          yaml:"trust,omitempty"`
 	Coexistence   EnterpriseCoexistenceConfig   `mapstructure:"coexistence"    yaml:"coexistence,omitempty"`
 	Network       EnterpriseNetworkConfig       `mapstructure:"network"        yaml:"network,omitempty"`
+	Tetragon      EnterpriseTetragonConfig      `mapstructure:"tetragon"       yaml:"tetragon,omitempty"`
 }
 
 // EnterpriseInspectionConfig chooses the optional remote inspection of a
@@ -316,6 +319,201 @@ type EnterpriseCoexistenceConfig struct {
 type EnterpriseNetworkConfig struct {
 	HTTPSProxy string `mapstructure:"https_proxy" yaml:"https_proxy,omitempty"`
 	NoProxy    string `mapstructure:"no_proxy"    yaml:"no_proxy,omitempty"`
+}
+
+// Tetragon modes (enterprise.tetragon.mode).
+const (
+	// TetragonModeOff: the sensor helper never connects to Tetragon (after
+	// retiring the policies its own state recorded) and uses cn_proc.
+	TetragonModeOff = "off"
+	// TetragonModeConsume (default): the helper reads Tetragon's process
+	// events and loads no policy.
+	TetragonModeConsume = "consume"
+	// TetragonModeObserve: the helper also loads DefenseClaw's built-in
+	// kernel controls in monitor mode.
+	TetragonModeObserve = "observe"
+	// TetragonModeEnforce: the controls deny for burned-in users once
+	// enforce_ack equals the helper's kernel_policy digest.
+	TetragonModeEnforce = "enforce"
+)
+
+// enterprise.tetragon.burn_in: 0 (skip the burn-in, with a status warning for
+// as long as enforcement runs) or whole hours from MinTetragonBurnIn to
+// MaxTetragonBurnIn.
+const (
+	DefaultTetragonBurnIn = 168 * time.Hour
+	MinTetragonBurnIn     = 24 * time.Hour
+	MaxTetragonBurnIn     = 2160 * time.Hour
+)
+
+// Status reasons of the Tetragon caps TetragonMode applies. The helper adds
+// the caps that need its own state (a missing or stale enforce_ack, the
+// Tetragon version, keep-sensors-on-exit).
+const (
+	TetragonReasonPlaneCOff     = "tetragon_plane_c_off"
+	TetragonReasonNotApplicable = "tetragon_not_applicable"
+)
+
+var (
+	tetragonBurnInPattern     = regexp.MustCompile(`^[0-9]{1,4}h$`)
+	tetragonEnforceAckPattern = regexp.MustCompile(`^sha256:[0-9a-f]{12}$`)
+)
+
+// EnterpriseTetragonConfig is enterprise.tetragon: how the managed Linux
+// sensor helper uses the Tetragon the host already runs. It applies to the
+// Linux standalone profile only: macOS and Windows accept and ignore it, and
+// the enterprise-block rule refuses it in every unmanaged or Secure Client
+// config. The lifecycle renders the effective values into the helper's
+// systemd drop-in; the helper never reads config.yaml.
+//
+// Validation checks only the format. Every semantic condition (Plane C off,
+// a missing or stale enforce_ack, a connector whose guardrail is not in
+// action mode) caps the mode at run time with a status reason instead: a
+// rejected push reverts the whole config on a managed host and blocks
+// unrelated changes.
+type EnterpriseTetragonConfig struct {
+	// Mode is off, consume (the default), observe or enforce.
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+	// BurnIn is the covered agent time each enrolled user needs before its
+	// uid is enforced: "0" or whole hours from 24h to 2160h (default 168h).
+	BurnIn string `mapstructure:"burn_in" yaml:"burn_in,omitempty"`
+	// EnforceAck is the kernel_policy digest the administrator approved:
+	// "sha256:" and 12 lowercase hex digits, the prefix `enterprise linux
+	// tetragon status` prints. Only mode enforce reads it; with any other
+	// mode it is kept but inert.
+	EnforceAck string `mapstructure:"enforce_ack" yaml:"enforce_ack,omitempty"`
+}
+
+// Effective returns the block with the defaults filled in and every value in
+// canonical form: mode lowercased (consume when unset, or for a value that is
+// not a mode), burn_in as whole hours ("168h" when unset or malformed, "0"
+// for no burn-in) and enforce_ack trimmed. Two blocks with the same
+// Effective value configure the helper identically, so an absent block and
+// one that spells out the defaults are the same intent.
+func (t EnterpriseTetragonConfig) Effective() EnterpriseTetragonConfig {
+	mode := strings.ToLower(strings.TrimSpace(t.Mode))
+	switch mode {
+	case TetragonModeOff, TetragonModeConsume, TetragonModeObserve, TetragonModeEnforce:
+	default:
+		mode = TetragonModeConsume
+	}
+	return EnterpriseTetragonConfig{
+		Mode:       mode,
+		BurnIn:     formatTetragonBurnIn(t.BurnInDuration()),
+		EnforceAck: strings.TrimSpace(t.EnforceAck),
+	}
+}
+
+// BurnInDuration is the effective burn_in: DefaultTetragonBurnIn when unset
+// or malformed, 0 when the burn-in is skipped.
+func (t EnterpriseTetragonConfig) BurnInDuration() time.Duration {
+	burnIn, err := parseTetragonBurnIn(t.BurnIn)
+	if err != nil {
+		return DefaultTetragonBurnIn
+	}
+	return burnIn
+}
+
+// IsDefault reports whether the block configures the helper exactly as an
+// absent block does.
+func (t EnterpriseTetragonConfig) IsDefault() bool {
+	return t.Effective() == EnterpriseTetragonConfig{}.Effective()
+}
+
+func parseTetragonBurnIn(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	switch {
+	case value == "":
+		return DefaultTetragonBurnIn, nil
+	case value == "0":
+		return 0, nil
+	case !tetragonBurnInPattern.MatchString(value):
+		return 0, fmt.Errorf("not 0 or whole hours")
+	}
+	hours, err := strconv.Atoi(strings.TrimSuffix(value, "h"))
+	if err != nil {
+		return 0, err
+	}
+	burnIn := time.Duration(hours) * time.Hour
+	if burnIn != 0 && (burnIn < MinTetragonBurnIn || burnIn > MaxTetragonBurnIn) {
+		return 0, fmt.Errorf("outside %s to %s", formatTetragonBurnIn(MinTetragonBurnIn), formatTetragonBurnIn(MaxTetragonBurnIn))
+	}
+	return burnIn, nil
+}
+
+func formatTetragonBurnIn(burnIn time.Duration) string {
+	if burnIn <= 0 {
+		return "0"
+	}
+	return strconv.FormatInt(int64(burnIn/time.Hour), 10) + "h"
+}
+
+func tetragonEmpty(t EnterpriseTetragonConfig) bool {
+	return strings.TrimSpace(t.Mode) == "" && strings.TrimSpace(t.BurnIn) == "" &&
+		strings.TrimSpace(t.EnforceAck) == ""
+}
+
+// TetragonMode is the Tetragon mode the managed sensor helper runs with on
+// goos: enterprise.tetragon.mode (consume by default), capped at off where the
+// helper does not use Tetragon. reason is the status code of a cap that
+// overrides what the administrator wrote, "" otherwise:
+//
+//   - not Linux: tetragon_not_applicable whenever the block is set (macOS and
+//     Windows accept and ignore it);
+//   - not a managed standalone deployment: off with no reason (no helper reads
+//     Tetragon there, and the enterprise-block rule refuses the block);
+//   - Plane C not selected (the runtime planes disabled, or EffectivePlanes
+//     without c): tetragon_plane_c_off for a written mode other than off,
+//     because kernel controls whose events nobody records are pointless.
+func (c *Config) TetragonMode(goos string) (mode, reason string) {
+	if c == nil {
+		return TetragonModeOff, ""
+	}
+	written := !tetragonEmpty(c.Enterprise.Tetragon)
+	configured := c.Enterprise.Tetragon.Effective().Mode
+	if goos != "linux" {
+		if written {
+			return TetragonModeOff, TetragonReasonNotApplicable
+		}
+		return TetragonModeOff, ""
+	}
+	if !c.StandaloneEnterprise() {
+		return TetragonModeOff, ""
+	}
+	if !c.AIDiscovery.Runtime.Enabled || !planeCSelected(c.AIDiscovery.Runtime) {
+		if written && configured != TetragonModeOff {
+			return TetragonModeOff, TetragonReasonPlaneCOff
+		}
+		return TetragonModeOff, ""
+	}
+	return configured, ""
+}
+
+func planeCSelected(runtime AIRuntimeConfig) bool {
+	for _, plane := range runtime.EffectivePlanes() {
+		if plane == "c" {
+			return true
+		}
+	}
+	return false
+}
+
+// validateEnterpriseTetragon checks enterprise.tetragon's format on every OS
+// (one config may serve Linux, macOS and Windows hosts).
+func validateEnterpriseTetragon(t EnterpriseTetragonConfig) error {
+	if err := oneOf("enterprise.tetragon.mode", t.Mode,
+		TetragonModeOff, TetragonModeConsume, TetragonModeObserve, TetragonModeEnforce); err != nil {
+		return err
+	}
+	if strings.TrimSpace(t.BurnIn) != "" {
+		if _, err := parseTetragonBurnIn(t.BurnIn); err != nil {
+			return fmt.Errorf("config: enterprise.tetragon.burn_in %q must be 0 or whole hours from 24h to 2160h", t.BurnIn)
+		}
+	}
+	if ack := strings.TrimSpace(t.EnforceAck); ack != "" && !tetragonEnforceAckPattern.MatchString(ack) {
+		return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `defenseclaw-gateway enterprise linux tetragon status` prints", t.EnforceAck)
+	}
+	return nil
 }
 
 // ResolvedConnectorPolicy is a connector's effective machine policy.
@@ -672,7 +870,8 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		machinePolicyEmpty(e.MachinePolicy) &&
 		strings.TrimSpace(e.Trust.Mode) == "" && len(e.Trust.AllowedSigners) == 0 &&
 		strings.TrimSpace(e.Coexistence.PerUserInstall) == "" && e.Coexistence.DisableSelfUpdate == nil &&
-		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == ""
+		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == "" &&
+		tetragonEmpty(e.Tetragon)
 }
 
 func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
@@ -831,7 +1030,7 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return fmt.Errorf("config: enterprise.network.https_proxy: %w", err)
 		}
 	}
-	return nil
+	return validateEnterpriseTetragon(e.Tetragon)
 }
 
 // EgressProxy returns the administrator's outbound proxy for this managed

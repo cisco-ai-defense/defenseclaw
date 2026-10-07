@@ -2191,6 +2191,63 @@ def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
             ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
         else:
             ux.warn(f"{name}: unavailable -- {plane.get('reason') or 'no reason given'}", indent=indent)
+        _render_kernel_backend(plane.get("backend"), indent=indent + "  ")
+
+
+def kernel_sensor_summary(backend: dict) -> str:
+    """``Tetragon 1.7.1, observe, 0 events lost`` for a Tetragon backend.
+
+    Loss is "unknown" unless the helper knows it: a count it cannot vouch for
+    would read as a clean stream.
+    """
+    parts = [" ".join(part for part in ("Tetragon", str(backend.get("version") or "").strip()) if part)]
+    if backend.get("mode"):
+        parts.append(str(backend["mode"]))
+    if backend.get("loss_known") is False or "events_lost" not in backend:
+        parts.append("events lost unknown")
+    else:
+        parts.append(f"{int(backend.get('events_lost') or 0)} events lost")
+    return ", ".join(parts)
+
+
+def _kernel_floor_line(floor: dict) -> str:
+    """``enforce for 2 of 3 users (1 in burn-in); paused until 14:05``."""
+    mode = str(floor.get("mode") or "").strip() or "monitor"
+    enrolled = int(floor.get("enrolled_users") or 0)
+    if mode == "enforce":
+        text = f"enforce for {int(floor.get('enforced_users') or 0)} of {enrolled} users"
+        burning = int(floor.get("burn_in_users") or 0)
+        if burning:
+            text += f" ({burning} in burn-in)"
+    else:
+        text = f"{mode} for {enrolled} users"
+    paused = str(floor.get("paused_until") or "").strip()
+    if paused:
+        text += f"; paused until {paused}"
+    return text
+
+
+def _render_kernel_backend(backend: object, *, indent: str) -> None:
+    """The Plane C backend line under the plane strip, when the gateway reports one.
+
+    Only the managed Linux sensor helper reports a backend; every other
+    gateway omits the field and this prints nothing.
+    """
+    from defenseclaw import ux
+
+    if not isinstance(backend, dict):
+        return
+    kind = str(backend.get("kind") or "").strip().lower()
+    if kind == "tetragon":
+        ux.subhead(f"kernel sensor: {kernel_sensor_summary(backend)}", indent=indent)
+    elif backend.get("fallback_reason"):
+        ux.subhead(
+            f"kernel sensor: cn_proc and fanotify (Tetragon not used: {backend['fallback_reason']})",
+            indent=indent,
+        )
+    floor = backend.get("kernel_floor")
+    if isinstance(floor, dict) and floor:
+        ux.subhead(f"kernel floor: {_kernel_floor_line(floor)}", indent=indent)
 
 
 def _render_coverage(payload: dict, *, indent: str = "  ") -> None:
@@ -2469,6 +2526,7 @@ def _probe_linux_capability(name: str) -> bool | None:
 # ask for, because an incomplete map is better than a stale copy of a header.
 _LINUX_CAPABILITY_BITS = {
     "CAP_DAC_READ_SEARCH": 2,
+    "CAP_NET_ADMIN": 12,
     "CAP_NET_RAW": 13,
     "CAP_SYS_ADMIN": 21,
 }
@@ -2604,12 +2662,14 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         },
         {
             "plane": "agent actions (C), process events",
-            "needs": "nothing",
+            "needs": "CAP_NET_ADMIN",
+            "probe": "cap_net_admin",
             "why": (
-                "the cn_proc netlink connector is readable unprivileged on most "
-                "kernels; a sandbox that blocks AF_NETLINK is the exception"
+                "the cn_proc netlink connector refuses a subscriber without it "
+                "(the bind fails with EPERM), so Plane C sees no exec or exit "
+                "events, including the short-lived processes the /proc poll misses"
             ),
-            "how": None,
+            "how": "run the gateway as root, or grant CAP_NET_ADMIN",
         },
         {
             "plane": "agent actions (C), file events",
@@ -2620,6 +2680,17 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
                 "argv instead of observed, which sees the command but not the read"
             ),
             "how": "run the gateway as root, or grant CAP_SYS_ADMIN",
+        },
+        {
+            "plane": "agent actions (C), Tetragon",
+            "needs": "nothing",
+            "info": True,
+            "why": (
+                "per-user installs do not connect to Tetragon: its socket is root-only "
+                "and grants kernel policy control. The enterprise sensor helper uses it "
+                "on managed Linux hosts"
+            ),
+            "how": None,
         },
     ],
     "windows": [
@@ -2693,6 +2764,8 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
         return bool(granted and _probe_root())
     if probe == "cap_dac":
         return _probe_linux_capability("CAP_DAC_READ_SEARCH")
+    if probe == "cap_net_admin":
+        return _probe_linux_capability("CAP_NET_ADMIN")
     if probe == "cap_net_raw":
         return _probe_linux_capability("CAP_NET_RAW")
     if probe == "cap_sys_admin":
@@ -2716,7 +2789,7 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
 # TCC does not let any process grant to itself or to another, at any
 # privilege level. The command opens the exact settings pane instead and
 # waits for the operator, which is the whole of what is achievable.
-_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep"
+_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_admin,cap_net_raw,cap_sys_admin+ep"
 
 _WINDOWS_AUDIT_SUBCATEGORIES = (
     "Process Creation",
@@ -2887,6 +2960,12 @@ def runtime_permissions(
         # shadowing it left the loop's last dict bound to the name, so the
         # command believed --grant had been passed on every invocation.
         state = entry["granted"]
+        if entry.get("info"):
+            # Nothing to grant and nothing missing: a fact about this
+            # platform an operator would otherwise go looking for.
+            ux.subhead(f"[info] {entry['plane']}", indent="  ")
+            ux.subhead(str(entry["why"]), indent="    ")
+            continue
         if entry.get("off"):
             ux.subhead(f"[off] {entry['plane']}", indent="  ")
             ux.subhead(
