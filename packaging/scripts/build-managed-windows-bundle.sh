@@ -313,6 +313,31 @@ echo "==> stamping defenseclaw-cmid-broker.exe VERSIONINFO / icon"
     -target windows_amd64 -executable "${BROKER_EXE}" \
     -component cmid-broker -version "${VERSION}" -icon "${ICON_PATH}" )
 
+# ---- verify the cmid overlay actually linked into each binary ---------
+#
+# If the overlay cp (line 265) silently no-op'd, the overlay source was
+# itself a stub, or `go build` picked up a stale cache without the
+# Register() init, the resulting binary ships with `cloudreg.Registered()`
+# returning false. On AVC CI the broker then exits with service-specific
+# error 1 ("Incorrect function"), the install fails, and the only
+# diagnostic is a `stage=provider-registration success=false` line in the
+# broker log. The 06102026 handoff kit shipped exactly this failure mode.
+#
+# The real overlay imports github.com/cisco-aispg/ai-common/cmid; Go
+# embeds that module path in the binary (reflection / panic traces) even
+# with -trimpath. Zero occurrences = overlay did not link, which fails
+# fast here instead of surviving to AVC's signing pipeline.
+for binary_path in "${GATEWAY_EXE}" "${HOOK_EXE}" "${BROKER_EXE}"; do
+    overlay_hits=$(grep -ao 'cisco-aispg' "${binary_path}" 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${overlay_hits}" -eq 0 ]]; then
+        echo "build-managed-windows-bundle: ${binary_path} has 0 cisco-aispg symbols; cmid overlay did not link" >&2
+        echo "    expected the private overlay from ${OVERLAY_PATH} to compile in via -tags cmid" >&2
+        echo "    a stub-linked broker fails on AVC CI with provider-registration success=false" >&2
+        exit 1
+    fi
+    echo "==> ${binary_path}: ${overlay_hits} cisco-aispg symbols (cmid overlay linked)"
+done
+
 # ---- cross-build the prebuilt outer Setup EXE + assembler EXE ----------
 #
 # DefenseClaw prebuilds BOTH the unsigned outer Setup EXE (with NO

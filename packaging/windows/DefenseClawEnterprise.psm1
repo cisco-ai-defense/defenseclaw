@@ -23618,16 +23618,23 @@ function Invoke-DefenseClawNuclearUninstall {
     #     in practice; Remove-Item still retries up to 3 times below.
     Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
 
-    # 2. Nuke InstallRoot + StateRoot. Each path must pass the safe-root
-    #    scope guard before any takeown/icacls/delete runs. The two bases
-    #    are HARDCODED here so a caller cannot subvert the hammer by
-    #    passing an attacker-chosen Layout.
+    # 2. Nuke InstallRoot + StateRoot + the protected lifecycle receipt
+    #    directory. Each path must pass the safe-root scope guard before
+    #    any takeown/icacls/delete runs. The three bases are HARDCODED
+    #    here so a caller cannot subvert the hammer by passing an
+    #    attacker-chosen Layout. The -Lifecycle sibling is a separate
+    #    tree outside StateRoot (install-rollback journal, purge intent,
+    #    self-uninstall receipt, managed-hook cleanup receipt) and
+    #    survived earlier nuclear sweeps - leaving install-rollback-
+    #    <scope>.json orphaned there made the next install trip on
+    #    "open managed receipt metadata failed".
     $safeRootPattern =
         '^[A-Z]:\\(Program Files|ProgramData)\\Cisco\\' +
-        'Cisco Secure Client\\DefenseClaw(-Cert)?(\\|$)'
+        'Cisco Secure Client\\DefenseClaw(-Cert|-Lifecycle)?(\\|$)'
     foreach ($pathEntry in @(
-        @{ Role = 'InstallRoot'; Path = [string]$Layout.InstallRoot },
-        @{ Role = 'StateRoot';   Path = [string]$Layout.StateRoot }
+        @{ Role = 'InstallRoot';  Path = [string]$Layout.InstallRoot },
+        @{ Role = 'StateRoot';    Path = [string]$Layout.StateRoot },
+        @{ Role = 'LifecycleDir'; Path = [string]$Layout.LifecycleLockDirectory }
     )) {
         $path = $pathEntry.Path
         $role = $pathEntry.Role
