@@ -620,7 +620,11 @@ func policyReloadCut(r ocsf.Record) bool {
 // `sandbox exec` commands) is no sign that hooks are overdue, and neither
 // is a record from before the session (replayed after a watch resumed).
 func (m *Manager) markWork(b *box, at time.Time, ofHarness bool, req modelRequest) {
-	if ofHarness {
+	// A layer-7 record names no binary: one on the harness's own model
+	// connection (harnessRequest) is the harness at work too. A harness
+	// keeps that connection open for many turns, so its NET records alone
+	// are a handful a session, and hooks switched off went unnoticed.
+	if ofHarness || req != noModelCall {
 		m.markActive(b, at)
 	}
 	if req != modelTurn && req != modelConnection {

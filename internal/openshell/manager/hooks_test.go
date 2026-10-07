@@ -786,6 +786,30 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	}
 }
 
+// TestHookSilenceSeesTurnsOnAKeptConnection (GAP-0094): a harness with its
+// hooks switched off kept one model connection open and made 28 model
+// calls in 9 minutes; only its NET records name its binary, so the check
+// saw a handful of events and never fired. Its model calls on the
+// connection it opened count as its work.
+func TestHookSilenceSeesTurnsOnAKeptConnection(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "keptbox"})
+	b := e.boxOf("keptbox")
+	advance(harnessStartupGrace)
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443,
+		Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	for range 11 {
+		advance(time.Minute)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassHTTP, Host: "api.anthropic.com", Port: 443, Method: "POST", Path: "/v1/messages",
+			Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 1 {
+		t.Fatalf("hook_silence findings = %d, want 1", n)
+	}
+}
+
 // Under hooks.on_silence: stop (balanced, strict) a user-tier harness that
 // works for the pack's hooks.silence_after without one hook is stopped, as a
 // tampered one is, and its next session is watched again; under alert (open)
