@@ -465,7 +465,7 @@ wait_online() {
   for ((i = 0; i < 25; i++)); do
     if sssctl domain-status "$DOMAIN" -o 2> /dev/null | grep -q 'Online status: Online'; then
       # SSSD can report Online before its first LDAP connection attempt.
-      sleep 15
+      sleep 25
       if sssctl domain-status "$DOMAIN" -o 2> /dev/null | grep -q 'Online status: Online'; then
         return 0
       fi

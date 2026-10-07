@@ -512,6 +512,17 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
             if any(saved.get("profile", {}).get(key) != value for key, value in update.items()):
                 report.problem(f"{login}: POSIX values did not match after writing")
                 continue
+            if "uidNumber" in update:
+                duplicate = [
+                    other for other in client.get_all("/api/v1/users?limit=200")
+                    if other["id"] != user["id"]
+                    and other.get("profile", {}).get("uidNumber") == update["uidNumber"]
+                ]
+                if duplicate:
+                    report.problem(
+                        f"{login}: uidNumber {update['uidNumber']} is now shared; serialize assign-posix runs"
+                    )
+                    continue
         if update:
             report.change(f"{login}: " + ", ".join(f"{key}={value}" for key, value in update.items()))
         else:

@@ -359,6 +359,11 @@ Other notes from the live test: a VM without a TPM uses a software HSM;
 `debug = true` is very verbose; the test VM (`Standard_B2als_v2`) cost about
 US$0.04 an hour while running.
 
+A `configure --apply` run writes the keys above and removes any other
+`himmelblau.conf` settings. Its preview names the unmanaged keys, and each
+apply keeps a timestamped backup. Review the backup for site-specific settings
+before running it again.
+
 ### Remove Himmelblau
 
 Before removing a host, use Entra admin center to find and delete that host's
