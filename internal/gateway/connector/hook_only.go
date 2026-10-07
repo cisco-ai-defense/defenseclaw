@@ -5116,7 +5116,7 @@ func removeCopilotHookReferences(path, hookScript string) error {
 	if pruned == nil {
 		pruned = map[string]interface{}{}
 	}
-	if reflect.DeepEqual(pruned, cfg) {
+	if reflect.DeepEqual(pruned, cfg) && !(strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned)) {
 		return nil
 	}
 	if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
