@@ -27,6 +27,12 @@ from defenseclaw.config import locked_config_yaml
 from defenseclaw.config_writer import Change
 
 
+def _reference_page(name: str) -> str:
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with open(os.path.join(root, "docs-site", "content", "docs", "reference", name), encoding="utf-8") as stream:
+        return stream.read()
+
+
 def _config(tmp_path, body: str = "") -> str:
     path = tmp_path / "config.yaml"
     path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\n# operator note\n{body}observability: {{}}\n")
@@ -370,6 +376,10 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     )
     other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the configuration schema")
     assert "configuration schema" not in config_writer.plain_error(other)
+
+    # The CLI reference quotes this message for a rejected `config set`.
+    shown = f"Error: config.yaml was not changed: {config_writer.plain_error(block_at)}\n"
+    assert shown in _reference_page("cli.mdx")
 
 
 def test_a_refused_config_set_names_the_missing_and_the_unknown_field(tmp_path):
