@@ -36,6 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -1197,6 +1198,11 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 		if target, _ := payload[field].(string); strings.TrimSpace(target) != "" {
 			return target
 		}
+	}
+	// The OpenShell integration's own health (a gateway that does not
+	// answer) names no sandbox: its target is OpenShell (GAP-0169).
+	if subsystem, _ := payload["defenseclaw.health.subsystem"].(string); subsystem == string(gatewaylog.SubsystemOpenShell) {
+		return subsystem
 	}
 	return ""
 }

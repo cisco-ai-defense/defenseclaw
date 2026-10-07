@@ -299,6 +299,15 @@ does, or trimmed its event log) is MEDIUM, which is no alert; a cursor the
 gateway could not have issued (`cursor_rejected`) stays HIGH. A deleted
 sandbox reports none.
 
+A connection to the OpenShell gateway that fails is a `degraded` record of the
+integration (`openshell_unavailable`, at the first failure and whenever the
+error changes) whose summary says what happened: the gateway is not running
+(nothing listens on its port), the gateway on the port is not this account's
+(its certificate is not from this account's OpenShell CA, as when another
+account's gateway holds the port), or it does not answer. It names
+`defenseclaw sandbox doctor` and ends with the client's error in brackets. Its
+audit row's target is `openshell`.
+
 ### Findings
 
 `defenseclaw.finding.category` is `sandbox.<kind>`:
