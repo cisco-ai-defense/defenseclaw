@@ -46,7 +46,11 @@ func spoolRecordNote(id string, now time.Time) string {
 	if id == "" || currentIdentitySpoolDir() == "" {
 		return ""
 	}
-	if _, ok := readIdentitySpoolFacts(id, now); ok {
+	if record, ok := readIdentitySpoolFacts(id, now); ok {
+		if record.Facts.GroupsPartial {
+			return "the guardian identity record lists the groups of this account's last signed-in session (it has no active " +
+				"session now): a group it has gained since counts only after it signs in again, so the profile above is not final"
+		}
 		return ""
 	}
 	return "the guardian has no identity record for this account yet: its group membership is unknown until the enumerator " +
@@ -95,6 +99,7 @@ func mergeSpoolFacts(own, spool useridentity.DirectoryFacts) useridentity.Direct
 	}
 	if len(merged.Groups) == 0 {
 		merged.Groups = spool.Groups
+		merged.GroupsPartial = spool.GroupsPartial
 	}
 	if spool.Source != "" && (spool.UPN != "" || merged.Source == "") {
 		merged.Source = spool.Source
