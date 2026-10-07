@@ -264,20 +264,22 @@ func TestRetireWaitsForTetragonThenNeverConnectsAgain(t *testing.T) {
 	h.ctl.cfg.Intervals.Reconcile = 10 * time.Millisecond
 	done := make(chan error, 1)
 	go func() { done <- h.ctl.Run(context.Background()) }()
-	select {
-	case err := <-done:
-		t.Fatalf("Run returned %v with the record still holding names", err)
-	case <-time.After(60 * time.Millisecond):
-	}
-	orphaned := false
-	for _, ch := range h.status().Changes {
-		if ch.Event == EventOrphaned {
-			orphaned = true
+	// A helper that cannot retire its policies must say so, and keep trying.
+	// Wait for it rather than for a fixed time: a loaded host runs the first
+	// attempt late.
+	waitUntil(t, "the orphaned change and the tetragon_unavailable warning", func() bool {
+		select {
+		case err := <-done:
+			t.Fatalf("Run returned %v with the record still holding names", err)
+		default:
 		}
-	}
-	if !orphaned || !h.has(WarnTetragonUnavailable) {
-		t.Fatalf("a helper that cannot retire its policies must say so: %+v %v", h.status().Changes, h.status().Warnings)
-	}
+		for _, ch := range h.status().Changes {
+			if ch.Event == EventOrphaned {
+				return h.has(WarnTetragonUnavailable)
+			}
+		}
+		return false
+	})
 	down.Store(false)
 	select {
 	case err := <-done:
