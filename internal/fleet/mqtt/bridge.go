@@ -265,6 +265,35 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		return
 	}
 
+	// P1-06 fix (HMAC): Verify the HMAC-SHA256 tag on signed heartbeats.
+	// An anonymous MQTT publisher can match topic and payload device_id, but
+	// cannot forge a valid HMAC without the per-device key. This prevents
+	// matching-ID heartbeat spoofing.
+	if b.keyProvider != nil {
+		fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+		deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
+
+		if hw.Signed {
+			// Signed heartbeat: verify HMAC-SHA256 over the first 32 bytes
+			mac := hmac.New(sha256.New, deviceKey)
+			mac.Write(msg.Payload[:32])
+			expected := mac.Sum(nil)
+
+			if !hmac.Equal(expected, hw.HMACTag) {
+				b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — HMAC verification failed for device %d (possible spoofing attempt)",
+					parts.DeviceID)
+				b.incErrors()
+				return
+			}
+		} else {
+			// Unsigned (legacy) heartbeat: log a warning but accept for backward
+			// compatibility. Operators should upgrade edge devices to send signed
+			// heartbeats.
+			b.logger.Printf("[mqtt-bridge] WARNING: device %d sent unsigned heartbeat (no HMAC) — upgrade edge-connector for signed heartbeats",
+				parts.DeviceID)
+		}
+	}
+
 	// Convert to the manager's Heartbeat type
 	hb := &manager.Heartbeat{
 		DeviceID:       hw.DeviceID,

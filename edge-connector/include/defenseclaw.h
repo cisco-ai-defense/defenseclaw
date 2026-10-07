@@ -306,6 +306,9 @@ typedef struct {
     uint16_t                next_request_id;
     bool                    online;
     bool                    initialized;
+    /* P2-19 fix: One-shot flag set by dclaw_policy_rollback() so the next
+     * heartbeat includes flag 0x08 (canary rollback). Cleared after send. */
+    bool                    rollback_pending;
 } dclaw_state_t;
 
 /* === Public API === */

@@ -375,6 +375,21 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
     return 0;
 }
 
+/* Public accessors for the device key — used by mqtt_client.c for heartbeat HMAC.
+ * These mirror get_device_key() / s_device_key_provisioned but are externally
+ * visible so the heartbeat publisher can sign heartbeats without duplicating the
+ * key-loading logic. */
+const uint8_t *dclaw_verdict_get_device_key(size_t *out_key_len) {
+    return get_device_key(out_key_len);
+}
+
+bool dclaw_verdict_is_key_provisioned(void) {
+    /* Ensure the key has been loaded at least once before checking the flag */
+    size_t dummy;
+    (void)get_device_key(&dummy);
+    return s_device_key_provisioned;
+}
+
 /* Compute HMAC for outbound use (e.g., for testing/verification) */
 void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t action,
                                          const uint8_t *tool_hash,

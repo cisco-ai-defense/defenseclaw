@@ -119,15 +119,29 @@ type HeartbeatWire struct {
 	AuditHeadHMAC  uint64
 	Flags          uint8
 	Capabilities   uint8
+
+	// HMACTag holds the 32-byte HMAC-SHA256 tag appended by signed heartbeats.
+	// Present only when the payload is 64 bytes (32-byte heartbeat + 32-byte HMAC).
+	// When the payload is the legacy 32-byte unsigned format, HMACTag is nil.
+	HMACTag []byte
+
+	// Signed indicates whether this heartbeat carried an HMAC signature.
+	Signed bool
 }
 
-// DecodeHeartbeat decodes a 32-byte heartbeat payload from an edge device.
+// DecodeHeartbeat decodes a heartbeat payload from an edge device.
+//
+// Accepted formats:
+//   - 32 bytes: legacy unsigned heartbeat (backward compatible)
+//   - 64 bytes: signed heartbeat (32-byte payload + 32-byte HMAC-SHA256 tag)
+//
+// Any other size is rejected.
 func DecodeHeartbeat(data []byte) (*HeartbeatWire, error) {
-	if len(data) != 32 {
-		return nil, fmt.Errorf("heartbeat must be exactly 32 bytes, got %d", len(data))
+	if len(data) != 32 && len(data) != 64 {
+		return nil, fmt.Errorf("heartbeat must be 32 or 64 bytes, got %d", len(data))
 	}
 
-	return &HeartbeatWire{
+	hw := &HeartbeatWire{
 		DeviceID:       binary.BigEndian.Uint32(data[0:4]),
 		UptimeSec:      binary.BigEndian.Uint32(data[4:8]),
 		PolicyVersion:  binary.BigEndian.Uint16(data[8:10]),
@@ -141,7 +155,15 @@ func DecodeHeartbeat(data []byte) (*HeartbeatWire, error) {
 		AuditHeadHMAC:  binary.BigEndian.Uint64(data[22:30]),
 		Flags:          data[30],
 		Capabilities:   data[31],
-	}, nil
+	}
+
+	if len(data) == 64 {
+		hw.HMACTag = make([]byte, 32)
+		copy(hw.HMACTag, data[32:64])
+		hw.Signed = true
+	}
+
+	return hw, nil
 }
 
 // VerdictRequest represents a decoded verdict request from an edge device.

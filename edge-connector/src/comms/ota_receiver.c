@@ -359,6 +359,10 @@ void dclaw_policy_rollback(void) {
     dclaw_state_t *s = dclaw_get_state();
     dclaw_config_switch_policy_partition();
     s->canary.canary_active = false;
+    /* P2-19 fix: Signal the next heartbeat to include flag 0x08 so the fleet
+     * manager knows a canary rollback occurred. Cleared after the heartbeat
+     * is encoded (one-shot notification). */
+    s->rollback_pending = true;
     dclaw_cache_flush_all();
 
     /* P1-07 fix: Reload policy tables from the rolled-back partition so the

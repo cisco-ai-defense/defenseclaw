@@ -1,5 +1,6 @@
 #include "defenseclaw.h"
 #include "platform.h"
+#include "hmac_sha256.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -984,7 +985,20 @@ const char *dclaw_mqtt_get_session_id(void) {
     return mqtt_ctx.session_id;
 }
 
-/* Heartbeat publish (called from event loop) */
+/* Forward declarations for device key access (defined in verdict_protocol.c) */
+extern const uint8_t *dclaw_verdict_get_device_key(size_t *out_key_len);
+extern bool dclaw_verdict_is_key_provisioned(void);
+
+/* Heartbeat publish (called from event loop).
+ *
+ * P1-06 fix: When a per-device key is provisioned, append an HMAC-SHA256 tag
+ * over the 32-byte heartbeat payload, making the total MQTT payload 64 bytes.
+ * The fleet manager (bridge.go) verifies this tag to reject spoofed heartbeats
+ * from anonymous MQTT publishers that match topic and payload device_id.
+ *
+ * When no key is provisioned (dev mode / zero-key fallback), the legacy 32-byte
+ * unsigned format is sent for backward compatibility.
+ */
 int dclaw_mqtt_send_heartbeat(void) {
     if (!dclaw_mqtt_is_connected()) return -1;
 
@@ -994,9 +1008,32 @@ int dclaw_mqtt_send_heartbeat(void) {
     }
     mqtt_ctx.last_heartbeat_tick = now;
 
-    uint8_t hb_buf[32];
+    uint8_t hb_buf[64]; /* 32 payload + 32 HMAC (if signed) */
     size_t hb_len;
     if (dclaw_cbor_encode_heartbeat(hb_buf, &hb_len, sizeof(hb_buf)) != 0) return -1;
+
+    /* Append HMAC-SHA256 tag if a real device key is provisioned */
+    size_t key_len = 0;
+    if (dclaw_verdict_is_key_provisioned()) {
+        const uint8_t *device_key = dclaw_verdict_get_device_key(&key_len);
+        if (device_key && key_len > 0) {
+            uint8_t hmac_tag[32];
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
+            mbedtls_md_context_t ctx;
+            const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+            mbedtls_md_init(&ctx);
+            mbedtls_md_setup(&ctx, md_info, 1);
+            mbedtls_md_hmac_starts(&ctx, device_key, key_len);
+            mbedtls_md_hmac_update(&ctx, hb_buf, 32);
+            mbedtls_md_hmac_finish(&ctx, hmac_tag);
+            mbedtls_md_free(&ctx);
+#else
+            dclaw_hmac_sha256(device_key, key_len, hb_buf, 32, hmac_tag);
+#endif
+            memcpy(hb_buf + 32, hmac_tag, 32);
+            hb_len = 64;
+        }
+    }
 
     char topic[128];
     if (build_topic(topic, sizeof(topic), "heartbeat") != 0) return -1;

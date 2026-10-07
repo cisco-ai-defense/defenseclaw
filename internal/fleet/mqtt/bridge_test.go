@@ -2,6 +2,8 @@ package mqtt
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -150,6 +152,24 @@ func makeHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16,
 	return data
 }
 
+// makeSignedHeartbeatPayload creates a 64-byte signed heartbeat: 32-byte payload + 32-byte HMAC-SHA256.
+func makeSignedHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16, flags uint8, key []byte) []byte {
+	payload := makeHeartbeatPayload(deviceID, policyVer, deniedCount, flags)
+	mac := hmac.New(sha256.New, key)
+	mac.Write(payload)
+	tag := mac.Sum(nil)
+	return append(payload, tag...)
+}
+
+// fixedKeyProvider is a test DeviceKeyProvider that returns a fixed key for all devices.
+type fixedKeyProvider struct {
+	key []byte
+}
+
+func (f *fixedKeyProvider) KeyForDevice(_ uint64) []byte {
+	return f.key
+}
+
 func makeVerdictRequestPayload(requestID uint16, toolName string) []byte {
 	vr := &VerdictRequest{
 		RequestID:    requestID,
@@ -240,9 +260,34 @@ func TestDecodeHeartbeat(t *testing.T) {
 }
 
 func TestDecodeHeartbeatBadSize(t *testing.T) {
+	// 16 bytes: too small — must be rejected
 	_, err := DecodeHeartbeat(make([]byte, 16))
 	if err == nil {
 		t.Fatal("expected error for 16-byte heartbeat")
+	}
+
+	// 48 bytes: neither 32 nor 64 — must be rejected
+	_, err = DecodeHeartbeat(make([]byte, 48))
+	if err == nil {
+		t.Fatal("expected error for 48-byte heartbeat")
+	}
+
+	// 32 bytes: legacy unsigned — must be accepted
+	_, err = DecodeHeartbeat(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("unexpected error for 32-byte heartbeat: %v", err)
+	}
+
+	// 64 bytes: signed — must be accepted
+	hw, err := DecodeHeartbeat(make([]byte, 64))
+	if err != nil {
+		t.Fatalf("unexpected error for 64-byte heartbeat: %v", err)
+	}
+	if !hw.Signed {
+		t.Error("64-byte heartbeat should have Signed=true")
+	}
+	if len(hw.HMACTag) != 32 {
+		t.Errorf("HMACTag length = %d, want 32", len(hw.HMACTag))
 	}
 }
 
@@ -552,6 +597,125 @@ func TestBridgeMultipleHeartbeats(t *testing.T) {
 	hb, _, errs := bridge.Stats()
 	if hb != 10 {
 		t.Errorf("heartbeats processed = %d, want 10", hb)
+	}
+	if errs != 0 {
+		t.Errorf("errors = %d, want 0", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeSignedHeartbeatAccepted(t *testing.T) {
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	deviceKey := []byte("test-device-key-32-bytes-long!!!")
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a signed heartbeat with a valid HMAC
+	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, deviceKey)
+	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 1 {
+		t.Errorf("heartbeats processed = %d, want 1", hb)
+	}
+	if errs != 0 {
+		t.Errorf("errors = %d, want 0", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeSignedHeartbeatBadHMAC(t *testing.T) {
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	realKey := []byte("test-device-key-32-bytes-long!!!")
+	wrongKey := []byte("wrong-key-that-attacker-uses!!!!")
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.SetKeyProvider(&fixedKeyProvider{key: realKey})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a signed heartbeat with the WRONG key — should be rejected
+	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, wrongKey)
+	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 0 {
+		t.Errorf("heartbeats processed = %d, want 0 (spoofed heartbeat should be rejected)", hb)
+	}
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeUnsignedHeartbeatStillAccepted(t *testing.T) {
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.SetKeyProvider(&fixedKeyProvider{key: []byte("any-key-doesnt-matter-for-legacy")})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a legacy unsigned 32-byte heartbeat — should be accepted with warning
+	payload := makeHeartbeatPayload(42, 7, 15, 0)
+	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 1 {
+		t.Errorf("heartbeats processed = %d, want 1 (legacy unsigned should still be accepted)", hb)
 	}
 	if errs != 0 {
 		t.Errorf("errors = %d, want 0", errs)
