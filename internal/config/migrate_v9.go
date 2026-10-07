@@ -33,7 +33,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
@@ -1887,7 +1889,7 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	if err != nil {
 		return "", nil, fmt.Errorf("load custom rule pack %s: %w", dir, err)
 	}
-	stem := strings.Trim(v9PackNameUnsafe.ReplaceAllString(base, "-"), "-_")
+	stem := strings.Trim(v9PackNameUnsafe.ReplaceAllString(v9PackNameASCII(base), "-"), "-_")
 	if stem == "" || v9BuiltinPacks[stem] {
 		stem = strings.TrimRight("custom-"+stem, "-")
 	}
@@ -1908,6 +1910,19 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 		m.moved("config", "rule_pack_dir", "guardrail.custom_packs."+name, map[string]string{"path": clean, "digest": "sha256:" + digest})
 	}
 	return name, nil, nil
+}
+
+// v9PackNameASCII folds a folder name to the letters a pack name keeps: an
+// accented letter becomes its base letter, so "équipe sécu" is equipe-secu,
+// where the name rule dropped it and left quipe-s-cu (GAP-0390).
+func v9PackNameASCII(name string) string {
+	var folded strings.Builder
+	for _, r := range norm.NFKD.String(name) {
+		if !unicode.Is(unicode.Mn, r) {
+			folded.WriteRune(r)
+		}
+	}
+	return folded.String()
 }
 
 // ---------------------------------------------------------------------------

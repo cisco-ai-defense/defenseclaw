@@ -399,6 +399,28 @@ func mustJSON(t *testing.T, value any) string {
 // shipped data.json thresholds alone, so they must not override the strict
 // posture the hook paths used; and a strict-named pack outside
 // <policy_dir>/guardrail is an edited copy, not the preset.
+func TestMigrateV9TransliteratesANonASCIIPackFolder(t *testing.T) {
+	// GAP-0390: "équipe sécu" became custom_packs.quipe-s-cu.
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " +
+		filepath.Join(dir, "policies", "guardrail", "Équipe sécu") + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: equipe-secu") {
+		t.Errorf("want the pack named equipe-secu:\n%s", got)
+	}
+}
+
 func TestMigrateV9KeepsThePackPosture(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
