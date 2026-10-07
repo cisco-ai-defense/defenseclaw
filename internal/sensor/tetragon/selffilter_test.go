@@ -132,11 +132,11 @@ func TestSelfFilterForwardsWrappersFromAToolShell(t *testing.T) {
 			return tr.exec("hook", "tool", hookScript, hookScript, 1001)
 		}},
 		{"environment-variable wrapper", func(tr *tree) []plane.Event {
-			tr.exec("wrapper", "claude", "/bin/sh", `-c "DEFENSECLAW_X=1 `+hookScript+`"`, 1001)
+			tr.exec("wrapper", "claude", "/bin/sh", `-c "HOOK_WRAPPER=1 `+hookScript+`"`, 1001)
 			return tr.exec("hook", "wrapper", hookScript, hookScript, 1001)
 		}},
 		{"env program wrapper", func(tr *tree) []plane.Event {
-			tr.exec("wrapper", "claude", "/bin/sh", `-c "env DEFENSECLAW_X=1 `+hookScript+`"`, 1001)
+			tr.exec("wrapper", "claude", "/bin/sh", `-c "env HOOK_WRAPPER=1 `+hookScript+`"`, 1001)
 			return tr.exec("hook", "wrapper", hookScript, hookScript, 1001)
 		}},
 		{"interpreter inside a tool call", func(tr *tree) []plane.Event {
