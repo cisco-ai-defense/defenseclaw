@@ -208,7 +208,10 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		return restoreACL(append(written, result.Written...)...)
 	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil && state.ConfigSHA256 == configwrite.SHA256Hex(raw) {
-		return nil
+		// Already recorded, but the record still takes the DACL of the
+		// config: an uninstall that keeps state leaves it administrator-only,
+		// and the gateway service reads it for its generation (GAP-0293).
+		return restoreACL(written...)
 	}
 	if _, err := configwrite.Locked(ctx, path, configwrite.Options{
 		Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure",
