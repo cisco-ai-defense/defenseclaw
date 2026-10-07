@@ -553,7 +553,14 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
                 "resources": [f"{client.org_url}/api/v1/users", f"{client.org_url}/api/v1/groups"],
             })
     else:
-        report.ok(f"resource set '{args.resource_set_label}' exists")
+        resources = client.get_all(f"/api/v1/iam/resource-sets/{rset['id']}/resources", key="resources")
+        covered = {((entry.get("_links") or {}).get("self") or {}).get("href") for entry in resources}
+        required = {f"{client.org_url}/api/v1/{kind}" for kind in ("users", "groups")}
+        if required <= covered:
+            report.ok(f"resource set '{args.resource_set_label}' covers all users and groups")
+        else:
+            report.problem(f"resource set '{args.resource_set_label}' does not cover all users and groups")
+            rset = None  # Do not assign a resource set with incomplete coverage.
 
     assigned = client.must("GET", f"/api/v1/users/{user['id']}/roles") or []
     if role and rset and any(

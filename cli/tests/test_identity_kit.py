@@ -187,8 +187,14 @@ def test_okta_bind_role_refuses_extra_permissions(monkeypatch: pytest.MonkeyPatc
     class Client:
         org_url = "https://example.okta.com"
         def get_all(self, path, key=None):
-            return ([{"id": "role1", "label": "reader"}] if key == "roles"
-                    else [{"id": "set1", "label": "all"}])
+            if key == "roles":
+                return [{"id": "role1", "label": "reader"}]
+            if key == "resource-sets":
+                return [{"id": "set1", "label": "all"}]
+            if key == "resources":
+                return [{"_links": {"self": {"href": self.org_url + "/api/v1/" + kind}}}
+                        for kind in ("users", "groups")]
+            raise AssertionError(path)
         def must(self, method, path, body=None):
             if path.endswith("/permissions"):
                 return {"permissions": [{"label": label} for label in
@@ -199,6 +205,32 @@ def test_okta_bind_role_refuses_extra_permissions(monkeypatch: pytest.MonkeyPatc
             if method == "GET":
                 return []
             raise AssertionError("an overbroad role must not be assigned")
+
+    args = type("Args", (), {"apply": True, "bind_login": "bind@example.com",
+                             "role_label": "reader", "resource_set_label": "all"})()
+    assert okta.cmd_bind_role(Client(), args) == 1
+
+
+def test_okta_bind_role_refuses_narrow_resource_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def get_all(self, path, key=None):
+            if key == "roles":
+                return [{"id": "role1", "label": "reader"}]
+            if key == "resource-sets":
+                return [{"id": "set1", "label": "all"}]
+            if key == "resources":
+                return [{"_links": {"self": {"href": self.org_url + "/api/v1/users/one"}}}]
+            raise AssertionError(path)
+        def must(self, method, path, body=None):
+            if path.endswith("/permissions"):
+                return {"permissions": [{"label": label} for label in okta.BIND_PERMISSIONS]}
+            if method == "GET":
+                return []
+            raise AssertionError("a narrow resource set must not be assigned")
 
     args = type("Args", (), {"apply": True, "bind_login": "bind@example.com",
                              "role_label": "reader", "resource_set_label": "all"})()
