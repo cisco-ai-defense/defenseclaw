@@ -534,8 +534,8 @@ def picker_level(stored: str) -> str:
 def policy_weakenings(old: object | None, new: object | None) -> tuple[str, ...]:
     """Ways ``new`` protects less than ``old`` (empty when it does not).
 
-    A threshold that catches fewer severities, a firewall that goes from deny
-    to allow by default, or human approval switched off.
+    A threshold that catches fewer severities, or human approval switched off.
+    A preset's firewall default is not compared: the gateway does not enforce it.
     """
     if old is None or new is None:
         return ()
@@ -548,8 +548,6 @@ def policy_weakenings(old: object | None, new: object | None) -> tuple[str, ...]
         before, after = str(_attr(old, field)), str(_attr(new, field))
         if threshold_weakens(before, after):
             reasons.append(f"{label} {after} instead of {before}")
-    if _attr(old, "firewall_default") == "deny" and _attr(new, "firewall_default") == "allow":
-        reasons.append("the firewall allows by default instead of denying")
     if _attr(old, "hilt", None) is True and _attr(new, "hilt", None) is False:
         reasons.append("human approval is turned off")
     return tuple(reasons)
@@ -561,12 +559,10 @@ def policy_comparison(old: object | None, new: object) -> tuple[tuple[str, str, 
     def values(policy: object | None) -> dict[str, str]:
         if policy is None:
             return {}
-        firewall = str(_attr(policy, "firewall_default")) or "unchanged"
         return {
             "Block at": str(_attr(policy, "block_at")) or "-",
             "Alert at": str(_attr(policy, "alert_at")) or "-",
             "Install block at": str(_attr(policy, "install_block_at")) or "-",
-            "Firewall default": firewall,
             "Human approval": _hilt_label(_attr(policy, "hilt", None)),
         }
 
@@ -1710,7 +1706,6 @@ class PoliciesPanelModel:
                         policy.block_at or "-",
                         policy.alert_at or "-",
                         policy.install_block_at or "-",
-                        policy.firewall_default or "-",
                         fit(policy.description or "-", 40),
                     )
                 )
@@ -1739,7 +1734,6 @@ class PoliciesPanelModel:
                 "Block",
                 "Alert",
                 "Install block",
-                "Firewall",
                 "Description",
             )
         elif width >= 62:
@@ -1903,8 +1897,7 @@ class PoliciesPanelModel:
         effects = " · ".join(policy_side_effects(policy))
         lines = [
             f"guardrail: block {policy.block_at} · alert {policy.alert_at}",
-            f"installs blocked at {policy.install_block_at} · firewall {policy.firewall_default or 'unchanged'} · "
-            f"approval {_hilt_label(policy.hilt)}",
+            f"installs blocked at {policy.install_block_at} · approval {_hilt_label(policy.hilt)}",
             policy.description or "-",
             policy.path + (f"  (activating it: {effects})" if effects else ""),
         ]

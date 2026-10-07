@@ -59,6 +59,43 @@ func TestMigrateManagedStandaloneConfig(t *testing.T) {
 	}
 }
 
+// A rollback records the config it restored as a new generation and never
+// takes a number back.
+func TestRecordRestoredManagedStandaloneConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 9\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordRestoredManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configwrite.GenerationPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("a restored config with no record got one: %v", err)
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	installed, _ := configwrite.ReadGenerationState(path)
+	if err := os.WriteFile(path, []byte("config_version: 9\nobservability:\n  enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordRestoredManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := configwrite.ReadGenerationState(path)
+	raw, _ := os.ReadFile(path)
+	if restored.Generation <= installed.Generation || restored.ConfigSHA256 != configwrite.SHA256Hex(raw) {
+		t.Fatalf("restored generation = %+v after %+v", restored, installed)
+	}
+	if err := recordRestoredManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := configwrite.ReadGenerationState(path); again.Generation != restored.Generation {
+		t.Fatalf("an unchanged restore advanced the generation to %d", again.Generation)
+	}
+}
+
 // A destination key kept only in the data directory's .env resolves while the
 // migrated document is validated (GAP-0035).
 func TestConfigMigrateResolvesCredentialsFromDotEnv(t *testing.T) {

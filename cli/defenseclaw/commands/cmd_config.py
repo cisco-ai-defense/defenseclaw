@@ -53,7 +53,13 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_config_value, load_validate_v8
+from defenseclaw.observability.v8_config import (
+    MAX_SOURCE_BYTES,
+    V8ConfigError,
+    load_config_value,
+    load_validate_v8,
+    retired_key_replacement,
+)
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -1113,6 +1119,21 @@ def _key_line(raw: bytes | None, field_path: str) -> int:
     return lines[0] if lines else 0
 
 
+def _config_version(raw: bytes | None) -> int:
+    """The root ``config_version`` of ``raw`` as an integer, or 0."""
+
+    try:
+        root = yaml.compose(raw or b"", Loader=config_module.YAML_LOADER)
+    except (yaml.YAMLError, RecursionError, OverflowError):
+        return 0
+    if isinstance(root, yaml.MappingNode):
+        for key_node, value_node in root.value:
+            if isinstance(key_node, yaml.ScalarNode) and key_node.value == "config_version":
+                if isinstance(value_node, yaml.ScalarNode) and value_node.value.strip().isdigit():
+                    return int(value_node.value)
+    return 0
+
+
 def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     path = field_path.split(" (line", 1)[0].strip()
     field = path[2:] if path.startswith("$.") else ("config.yaml" if path == "$" else path)
@@ -1159,6 +1180,15 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     if code == "config_schema_invalid" and text.startswith(_UNDECLARED_KEY_SUMMARY):
         # The gateway's words for an undeclared key, not the schema keyword
         # (GAP-2235): 'guardrail.mdoe: unknown field (did you mean "mode"?).'
+        replacement = retired_key_replacement(field)
+        if replacement:
+            # A key config_version 9 replaced: say so, not "unknown field".
+            fix = (
+                "run: defenseclaw migrate"
+                if _config_version(raw) == 8
+                else f"move it to {replacement}"
+            )
+            return f"{where}{field} was replaced by {replacement} in config_version 9; {fix}"
         suggestion = re.search(r"suggested field ([^;]+)", text)
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"

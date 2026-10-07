@@ -32,7 +32,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -339,19 +338,15 @@ func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 // never decodes an unconverted 0.8.x source; `defenseclaw migrate` converts a
 // released config once, and this runtime refuses what it has not converted.
 func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, error) {
-	loaded, err := loadConfigV8File(path, config.DefaultDataPath())
-	if err != nil {
-		return nil, nil, err
-	}
 	// An un-migrated config_version 8 file runs as the v9 migration would
 	// write it (read-only), so its data.json and audit.db policy still apply.
 	// A failed migration refuses the file: run as raw v8 it would drop the
 	// data.json admission policy and the audit.db block/allow entries.
-	raw, err := config.MigrateV8InMemory(loaded.source, loaded.raw, guardrail.RulePackDigest)
+	loaded, err := loadConfigV8Source(path, config.DefaultDataPath(), "", true)
 	if err != nil {
-		return nil, nil, config.InMemoryMigrationError(loaded.source, err)
+		return nil, nil, err
 	}
-	candidate, err := config.LoadRuntimeV8FromBytes(loaded.source, raw)
+	candidate, err := config.LoadRuntimeV8FromBytes(loaded.source, loaded.raw)
 	if err != nil {
 		return nil, nil, err
 	}

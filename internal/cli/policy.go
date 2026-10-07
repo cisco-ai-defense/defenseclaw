@@ -289,15 +289,12 @@ var policyEvaluateCmd = &cobra.Command{
 			return fmt.Errorf("--target-name is required")
 		}
 
-		if cfg != nil && cfg.SecureClientIntegration() {
+		secureClient := cfg != nil && cfg.SecureClientIntegration()
+		if secureClient {
 			// Secure Client keeps the data.json requirement of main (issue #1092).
 			if _, err := policy.LoadSecureClientData(paths.regoDir); err != nil {
 				return err
 			}
-		}
-		engine, err := policy.NewExact(paths.regoDir)
-		if err != nil {
-			return err
 		}
 
 		block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
@@ -322,9 +319,20 @@ var policyEvaluateCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		out, err := engine.Evaluate(ctx, input)
-		if err != nil {
-			return fmt.Errorf("evaluation failed: %w", err)
+		// The managed packages ship no Rego: the config-driven twin the
+		// gateway falls back to decides, as it does there. Secure Client
+		// keeps the engine error of main (issue #1092).
+		var out *policy.AdmissionOutput
+		engine, err := policy.NewExact(paths.regoDir)
+		switch {
+		case !secureClient && (errors.Is(err, policy.ErrNoModules) || errors.Is(err, fs.ErrNotExist)):
+			out = policy.EvaluateAdmissionFallback(input)
+		case err != nil:
+			return err
+		default:
+			if out, err = engine.Evaluate(ctx, input); err != nil {
+				return fmt.Errorf("evaluation failed: %w", err)
+			}
 		}
 
 		result, _ := json.MarshalIndent(out, "", "  ")
