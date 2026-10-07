@@ -24,7 +24,7 @@ from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_mcp import mcp
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_skill import skill
-from defenseclaw.tui.app import _no_connector_hint
+from defenseclaw.tui.app import _inventory_scan_args, _no_connector_hint
 from defenseclaw.tui.services.inventory_state import InventorySnapshot
 
 from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
@@ -75,3 +75,9 @@ def test_ide_only_scan_without_connector_returns_rows_or_error(monkeypatch: pyte
         assert error.exit_code != 0 and "gateway unavailable" in error.output
     finally:
         cleanup_app(app, db_path, tmp_dir)
+
+
+def test_tui_uses_ide_only_scan_only_for_an_empty_connector_roster() -> None:
+    full = ("aibom", "scan", "--json")
+    assert _inventory_scan_args(full, ()) == (*full, "--only", "ide_plugins")
+    assert _inventory_scan_args(full, (("codex", "observe"),)) == full

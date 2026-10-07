@@ -242,6 +242,13 @@ def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
         transport.close()
 
 
+def _inventory_scan_args(
+    base_args: tuple[str, ...], connector_modes: Sequence[object]
+) -> tuple[str, ...]:
+    """Only a truly empty connector roster uses the user-scoped IDE scan."""
+    return base_args if connector_modes else ("aibom", "scan", "--json", "--only", "ide_plugins")
+
+
 def _no_connector_hint(stderr: bytes) -> str:
     """The list commands' "no connector configured" hint from stderr (GAP-2073)."""
 
@@ -13881,12 +13888,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # _active_connector_names() is empty for both zero and one connector.
         # Only the zero-connector case needs the IDE-only AIBOM path.
         roster = getattr(self.overview_model.cfg, "connector_modes", ()) if self.overview_model.cfg else ()
-        if roster:
-            intent = self.inventory_model.load_intent()
-        else:
-            # IDE inventory is per user and remains useful before any agent is configured.
-            intent = self.inventory_model.load_intent()
-            intent = replace(intent, args=("aibom", "scan", "--json", "--only", "ide_plugins"))
+        intent = self.inventory_model.load_intent()
+        intent = replace(intent, args=_inventory_scan_args(intent.args, roster))
         loading = intent.hint or "Loading inventory..."
         if announce and self.active_panel == "inventory":
             self._set_status(loading)
