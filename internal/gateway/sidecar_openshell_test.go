@@ -4,8 +4,11 @@
 package gateway
 
 import (
+	"context"
+	"net"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -132,6 +135,7 @@ func TestLegacySandboxHealthIsDegradedWithCleanupRemediation(t *testing.T) {
 		t.Fatalf("host-mode install reported a sandbox subsystem: %#v", got)
 	}
 }
+
 // A custom provider edit must rebuild the judge that holds its endpoint.
 func TestJudgeNeedsRebuildForProviderEdit(t *testing.T) {
 	oldCfg := &config.Config{}
@@ -143,3 +147,62 @@ func TestJudgeNeedsRebuildForProviderEdit(t *testing.T) {
 	}
 }
 
+// Enabling OpenClaw beside Codex must activate its routes and wake the fleet loop.
+func TestOpenClawConnectorHotEnableActivatesAPIRoutesAndFleet(t *testing.T) {
+	oldCfg := &config.Config{DataDir: t.TempDir()}
+	oldCfg.Gateway.Host = "127.0.0.1"
+	oldCfg.Guardrail.Connector = "codex"
+	oldCfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.Connectors["openclaw"] = config.PerConnectorGuardrailConfig{}
+	if gatewayShouldConnectForConfiguredConnector(oldCfg) {
+		t.Fatal("Codex-only loopback install unexpectedly connects to fleet")
+	}
+	if !gatewayShouldConnectForConfiguredConnector(newCfg) {
+		t.Fatal("OpenClaw connector did not enable fleet uplink")
+	}
+	if !apiNeedsRestart(oldCfg, newCfg) {
+		t.Fatal("API listener did not restart to register OpenClaw routes")
+	}
+	api := &APIServer{scannerCfg: newCfg}
+	if !api.servesOpenClawRoutes() {
+		t.Fatal("OpenClaw routes remained absent after connector enable")
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCfg.Gateway.Port = listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	oldCfg.Gateway.ReconnectMs = 100
+	oldCfg.Gateway.MaxReconnectMs = 100
+	newCfg.Gateway = oldCfg.Gateway
+	s := &Sidecar{cfg: oldCfg, client: &Client{cfg: &oldCfg.Gateway}, health: NewSidecarHealth(), fleetReloadCh: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.runGatewayLoop(ctx) }()
+	deadline := time.After(500 * time.Millisecond)
+	for s.health.Snapshot().Gateway.State != StateDisabled {
+		select {
+		case <-deadline:
+			t.Fatal("fleet loop did not park before the config edit")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	s.publishConfig(newCfg)
+	signalRestart(s.fleetReloadCh)
+	deadline = time.After(500 * time.Millisecond)
+	for s.health.Snapshot().Gateway.State != StateReconnecting {
+		select {
+		case <-deadline:
+			t.Fatal("fleet loop stayed disabled after enabling OpenClaw")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("fleet loop shutdown: %v", err)
+	}
+}
