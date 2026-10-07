@@ -104,8 +104,9 @@ defaults off so a scripted password sign-in works; that is a test convenience,
 not a DefenseClaw requirement.
 
 Create an app registration with the application permissions `Group.ReadWrite.All`
-and `User.ReadWrite.All` (read-only use needs `Group.Read.All` and
-`User.Read.All`), grant admin consent, and give the script its credentials
+and `User.ReadWrite.All` (read-only `check` needs `Organization.Read.All`
+and `Policy.Read.All`; `sids` needs `Group.Read.All` and `User.Read.All`),
+grant admin consent, and give the script its credentials
 through the environment:
 
 ```bash
@@ -158,7 +159,11 @@ test), and a SID that starts with `S-1-12-1-`.
 ### See what the computer exposes
 
 Run the read-only diagnostic as the user you want to check. Run it again as
-SYSTEM to read the identity store, which the live test read as SYSTEM.
+SYSTEM to read the identity store, which the live test read as SYSTEM. If the
+script came from the Internet, run `Unblock-File .\Get-DefenseClawEntraIdentity.ps1`
+first, or launch a trusted copy with `powershell.exe -ExecutionPolicy Bypass -File
+.\Get-DefenseClawEntraIdentity.ps1`. An unattended run of an Internet-zone
+script can hang at a security prompt.
 
 ```powershell
 .\Get-DefenseClawEntraIdentity.ps1
@@ -182,7 +187,12 @@ limits are in
 For a fleet, use an Intune policy; see
 [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant#identity-through-intune).
 Delivery through Intune has not been tested. To make the membership on one
-computer, or from a platform script, run the script elevated:
+computer, run the script elevated. Unblock a downloaded copy with
+`Unblock-File .\Add-EntraGroupToLocalGroup.ps1` or launch it with
+`powershell.exe -ExecutionPolicy Bypass -File .\Add-EntraGroupToLocalGroup.ps1
+-GroupSid SID`. An unattended Internet-zone script can hang at a security
+prompt. Intune platform scripts receive no arguments; use Account protection
+for fleet delivery:
 
 ```powershell
 .\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1864145422-1280850733-3047453086-4192786374 -WhatIf
@@ -313,8 +323,9 @@ himmelblau-sshd-config`, from the signed repository at
 **What the host shows.** `id` names the Entra groups
 (`groups=1608906209(ml-team)` style ids and names), but `getent group ml-team`
 answers nothing: Himmelblau finds a group only by gid or object ID, by design.
-DefenseClaw matches the names `id` reports, so a `groups: [ml-team]`
-assignment works, and DefenseClaw does not warn that the group is unknown on a
+DefenseClaw matches the names `id` reports exactly, including case, spaces and
+accents. Quote a name with spaces in YAML, for example
+`groups: ["Research ML Team"]`. A `groups: [ml-team]` assignment works, and DefenseClaw does not warn that the group is unknown on a
 host whose group line lists Himmelblau. The records carry directory
 `entra_id`, source `himmelblau`, assurance `verified`, a `posix_uid`, the
 private group plus the Entra groups in `group_count`, and the SSH session.
@@ -347,6 +358,23 @@ starts them again; `configure` restarts the same way.
 Other notes from the live test: a VM without a TPM uses a software HSM;
 `debug = true` is very verbose; the test VM (`Standard_B2als_v2`) cost about
 US$0.04 an hour while running.
+
+### Remove Himmelblau
+
+Before removing a host, use Entra admin center to find and delete that host's
+Entra device object. Keep user homes until their owners have copied any needed
+data. On the host, stop the Himmelblau services and remove all five packages:
+
+```bash
+sudo systemctl stop himmelblaud.service himmelblaud-tasks.service
+sudo apt-get purge himmelblau nss-himmelblau pam-himmelblau himmelblau-sshd-config himmelblau-apparmor
+sudo rm /etc/apt/sources.list.d/himmelblau.list /etc/apt/keyrings/himmelblau.gpg
+sudo rm -r /etc/himmelblau /var/lib/himmelblaud
+sudo apt-get update
+```
+
+Review `/etc/nsswitch.conf` and PAM for any remaining Himmelblau entries before
+the next sign-in. Remove an Entra user's home only after checking its contents.
 
 ### Microsoft Entra Domain Services with SSSD
 
@@ -584,6 +612,7 @@ These are the fields the records carried for an Entra user (the complete table i
 | `group_count` is `0` and `groups` never match on a per-user Windows install | Expected: use `users`, or the standalone enterprise profile |
 | `getent group` finds no Entra group on the Linux VM | Expected: the `aad` module gives no Entra groups. Use `users`, Himmelblau or Entra Domain Services |
 | `getent group ml-team` finds nothing on a Himmelblau host, but `id` lists the group | Expected: Himmelblau finds groups only by gid or object ID. DefenseClaw matches the name `id` shows |
+| A user outside `pam_allow_groups` completes password, MFA and Hello PIN enrollment but SSH refuses them; the log says "User account has expired" | Check that the user belongs to an allowed Entra group before enrollment, then verify the group object ID in `pam_allow_groups`. |
 | SSH sign-in through Himmelblau asks for the password again; the log says "Remote session with unenrolled MFA user denied" | The user has no MFA method. Register one at Security info, then sign in: password, code, then a new PIN of six or more characters |
 | `himmelblaud` is `inactive (dead-resources-pinned)` after a restart, and no Entra account resolves | The 5.0.0 nightly restart issue. Run `setup-himmelblau.sh restart --apply` |
 | A `users` entry by UPN never matches on a Himmelblau host; `explain` says the account has no UPN | `cn_name_mapping` is `true` (the default). Set it to `false` (`setup-himmelblau.sh configure ... --apply`), or name the account by its short name |
