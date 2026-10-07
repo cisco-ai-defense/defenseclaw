@@ -547,7 +547,7 @@ var processOwnerProfileSubject = func() (profileSubject, bool) {
 			return profileSubjectFromVerified(VerifiedSubject{
 				UserID: id, IDKind: useridentity.KindForID(id), UserName: name,
 				Directory: facts, Source: subjectSourceProcessOwner,
-			}, true), true
+			}, identityLookupBlocking.Load()), true
 		}
 	}
 	return processOwnerAccountSubject()
