@@ -123,7 +123,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	// row of one session carries the same agent_id.
 	if req.SessionID != "" && req.AgentID == "" &&
 		(lifecycle == connector.CorrelationLifecycleSessionStart || lifecycle == connector.CorrelationLifecycleTurnStart) {
-		req.AgentID = stableLLMEventID("agent", req.ConnectorName, req.SessionID, "root")
+		req.AgentID = agentNodeID(req.AgentIdentityID, req.ConnectorName, req.SessionID, "root")
 		appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
 	}
 	if req.TurnID == "" && lifecycle == connector.CorrelationLifecycleTurnStart &&
@@ -491,6 +491,20 @@ func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationReposi
 	if req.AgentID != "" {
 		cursor, err = repo.GetCursor(ctx, instance, req.SessionID, req.AgentID)
 	} else {
+		// The ledger is keyed by connector, not by user. An agentless hook
+		// takes its own main agent's cursor, never the one another user's
+		// hooks left under the same session id (GAP-0232).
+		if req.AgentIdentityID != "" {
+			if spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) {
+				main := agentNodeID(req.AgentIdentityID, req.ConnectorName, req.SessionID, "root")
+				if own, getErr := repo.GetCursor(ctx, instance, req.SessionID, main); getErr == nil && own.Active {
+					return own, true
+				}
+			}
+			if SharedAgentRegistry().SessionSharedWithOtherIdentity(ctx, req.SessionID, req.AgentIdentityID) {
+				return audit.CorrelationCursor{}, false
+			}
+		}
 		cursor, err = repo.FindActiveCursor(ctx, instance, req.SessionID)
 		if errors.Is(err, audit.ErrCorrelationConflict) && spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) {
 			// A subagent's cursor is active next to the main agent's (a

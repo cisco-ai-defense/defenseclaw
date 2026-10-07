@@ -89,10 +89,12 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 	api := &APIServer{}
 	const parentSession = "01a112f0-847b-7161-9d89-41cd7dbafd82"
 	const childSession = "01a112f1-8bff-77b2-b8f8-a675ceccfdd2"
-	parentAgent := stableLLMEventID("agent", "codex", parentSession, "root")
-	childAgent := stableLLMEventID("agent", "codex", childSession, "root")
+	const identity = "agt-00000000000000d2"
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: identity})
+	parentAgent := agentNodeID(identity, "codex", parentSession, "root")
+	childAgent := agentNodeID(identity, "codex", childSession, "root")
 	emit := func(session, event, tool string, response any) {
-		api.emitCodexHookLLMEvent(t.Context(), codexHookRequest{
+		api.emitCodexHookLLMEvent(ctx, codexHookRequest{
 			HookEventName: event, SessionID: session, ToolName: tool, ToolUseID: "call-" + session + event,
 			ToolInput: map[string]any{"prompt": "run it"}, ToolResponse: response,
 			Payload: map[string]any{"source": "startup"},
@@ -116,7 +118,7 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 		t.Fatalf("parent lineage = %+v (retained %v), want depth 0", parent, ok)
 	}
 	other := "01a112f2-0000-7000-8000-000000000001"
-	stranger, ok := api.hookLifecycleSnapshot("codex", other, stableLLMEventID("agent", "codex", other, "root"))
+	stranger, ok := api.hookLifecycleSnapshot("codex", other, agentNodeID(identity, "codex", other, "root"))
 	if !ok || stranger.AgentDepth != 0 || stranger.ParentSessionID != "" {
 		t.Fatalf("a session nobody spawned = %+v (retained %v), want a root", stranger, ok)
 	}

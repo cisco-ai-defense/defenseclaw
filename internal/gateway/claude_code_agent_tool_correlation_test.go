@@ -124,3 +124,43 @@ func TestClaudeCodeAgentlessHooksKeepTheMainAgent(t *testing.T) {
 		}
 	}
 }
+
+// Two users who send the same Claude Code session id keep apart. The ledger is
+// keyed by connector, not by user, so an agentless hook takes its own user's
+// main agent and cursor, not the one the other user's hooks left under that
+// session id (GAP-0232).
+func TestClaudeCodeAgentlessHooksStayPerUser(t *testing.T) {
+	agentIdentityTestSetup(t)
+	installCorrelationHMACForTest()
+	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+	t.Cleanup(func() { _ = store.Close() })
+	profile := (&APIServer{}).hookProfileForConnector("claudecode")
+	events := readClaudeCodeAgentToolFixture(t)[:3] // SessionStart, UserPromptSubmit, PreToolUse
+	const session = "gap-0232-shared-session"
+	const alice, bob = "agt-0000000000000a11", "agt-0000000000000b22"
+	hook := func(identity string, payload map[string]interface{}) agentHookRequest {
+		payload["session_id"] = session
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := normalizeAgentHookRequestWithCorrelationEvent("claudecode", payload, profile.Correlation, "", identity)
+		_, req, err = server.correlateHookOccurrence(t.Context(), profile, req, raw)
+		if err != nil || req.SuppressCorrelationEmit {
+			t.Fatalf("%v: err %v, suppressed %t", payload["hook_event_name"], err, req.SuppressCorrelationEmit)
+		}
+		// The hook path registers the session under its agent identity after
+		// correlating it.
+		SharedAgentRegistry().ResolveForAgentIdentity(t.Context(), identity, session, "")
+		return req
+	}
+	wantAlice := agentNodeID(alice, "claudecode", session, "root")
+	wantBob := agentNodeID(bob, "claudecode", session, "root")
+	for _, payload := range events {
+		a, b := hook(alice, payload), hook(bob, payload)
+		if a.AgentID != wantAlice || b.AgentID != wantBob || wantAlice == wantBob {
+			t.Fatalf("%v: alice's main agent %q, bob's %q; want %q and %q",
+				payload["hook_event_name"], a.AgentID, b.AgentID, wantAlice, wantBob)
+		}
+	}
+}

@@ -980,7 +980,10 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	lifecycleEvent := canonicalHookLifecycleEvent(firstString(payload,
 		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName",
 	))
-	rootAgentID := stableLLMEventID("agent", source, sessionID, "root")
+	// The agent identity (agt-) scopes the agent ids below, so two users who
+	// send the same session id get different agents (GAP-0232).
+	agentIdentityID := agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx))
+	rootAgentID := agentNodeID(agentIdentityID, source, sessionID, "root")
 	lineageProvenance := "inferred"
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" && (lifecycleEvent == "subagent_start" || lifecycleEvent == "subagent_stop") {
@@ -990,7 +993,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 			firstString(objectAt(payload, "extra"), "child_role", "agent_name", "agent_type"),
 			"subagent",
 		)
-		agentID = stableLLMEventID("agent", source, sessionID, "subagent", childIdentity)
+		agentID = agentNodeID(agentIdentityID, source, sessionID, "subagent", childIdentity)
 		agentName = firstNonEmpty(agentName, childIdentity)
 	}
 	if agentID == "" {
@@ -1011,7 +1014,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	)
 	if parentAgentID == "" {
 		if parentSessionID != "" {
-			parentAgentID = stableLLMEventID("agent", source, parentSessionID, "root")
+			parentAgentID = agentNodeID(agentIdentityID, source, parentSessionID, "root")
 		}
 	}
 	// A connector-supplied agent ID is not, by itself, proof that this is a
@@ -1087,7 +1090,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		UserIDKind:          user.IDKind,
 		UserName:            user.Name,
 		UserEmail:           user.Email,
-		AgentIdentityID:     agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
+		AgentIdentityID:     agentIdentityID,
 		Identity:            user.Identity,
 		Profile:             guardrailProfileTelemetryFor(ctx),
 	}
@@ -1158,7 +1161,7 @@ func applyHookEventMeta(meta llmEventMeta, event string, payload map[string]inte
 	}
 	if (meta.LifecycleEvent == "subagent_start" || meta.LifecycleEvent == "subagent_stop") &&
 		meta.ParentAgentID == "" {
-		rootAgentID := stableLLMEventID("agent", meta.Source, meta.SessionID, "root")
+		rootAgentID := agentNodeID(meta.AgentIdentityID, meta.Source, meta.SessionID, "root")
 		if meta.AgentID != "" && meta.AgentID != rootAgentID {
 			meta.ParentAgentID = rootAgentID
 			meta.LineageProvenance = "inferred"
@@ -1690,7 +1693,7 @@ func hookSessionStateKey(meta llmEventMeta) string {
 	if source == "" || sessionID == "" {
 		return ""
 	}
-	agentID := firstNonEmpty(strings.TrimSpace(meta.AgentID), stableLLMEventID("agent", source, sessionID, "root"))
+	agentID := firstNonEmpty(strings.TrimSpace(meta.AgentID), agentNodeID(meta.AgentIdentityID, source, sessionID, "root"))
 	return strings.Join([]string{source, sessionID, agentID}, "\x00")
 }
 
@@ -2125,7 +2128,7 @@ func inferredDelegatedAgents(parent llmEventMeta, tool, arguments string) []llmE
 			parent.ToolID, parent.TurnID, tool, strconv.Itoa(i), name,
 		)
 		child := parent
-		child.AgentID = stableLLMEventID("agent", parent.Source, parent.SessionID, "delegated", identity, strconv.Itoa(i))
+		child.AgentID = agentNodeID(parent.AgentIdentityID, parent.Source, parent.SessionID, "delegated", identity, strconv.Itoa(i))
 		child.AgentName = name
 		child.AgentType = "subagent"
 		child.ParentAgentID = parent.AgentID
@@ -2405,7 +2408,7 @@ func hookLLMSpanPromptKeys(meta llmEventMeta) []string {
 	if source == "" || sessionID == "" {
 		return nil
 	}
-	agentID := firstNonEmpty(strings.TrimSpace(meta.AgentID), stableLLMEventID("agent", source, sessionID, "root"))
+	agentID := firstNonEmpty(strings.TrimSpace(meta.AgentID), agentNodeID(meta.AgentIdentityID, source, sessionID, "root"))
 	sessionKey := strings.Join([]string{
 		source, sessionID, agentID, strings.TrimSpace(meta.ExecutionID),
 	}, "\x00")
@@ -2747,6 +2750,16 @@ func stableLLMEventID(prefix string, parts ...string) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(clean, "\x00")))
 	return prefix + "-" + hex.EncodeToString(sum[:8])
+}
+
+// agentNodeID is the id of one agent in the agent graph: the main agent of a
+// session ("root") or one of its sub-agents. scope is the agent identity
+// (agt-) the session ran under, so two users who send the same connector
+// session id get different agents. It is empty for traffic with no agent
+// identity, such as the Secure Client integration, whose ids stay as they
+// were.
+func agentNodeID(scope, source, sessionID string, kind ...string) string {
+	return stableLLMEventID("agent", append([]string{scope, source, sessionID}, kind...)...)
 }
 
 func promptIDForTurn(source, sessionID, turnID string) string {
