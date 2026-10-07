@@ -14,7 +14,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -36,7 +35,7 @@ func (f *fakePeerHomeResolver) LookupUID(uid int) (unixidentity.Account, error) 
 	f.calls++
 	account, ok := f.accounts[uid]
 	if !ok {
-		return unixidentity.Account{}, errors.New("not found")
+		return unixidentity.Account{}, unixidentity.ErrNotFound
 	}
 	return account, nil
 }
@@ -143,6 +142,30 @@ func TestManagedHookPeerNameResolvesDirectoryUsers(t *testing.T) {
 	}, nil, func() (managedHookLedger, error) { return managedHookLedger{}, nil })
 	if decision := authorizer.decide(peer, "claudecode", ""); !decision.Allow || !decision.Exempt {
 		t.Fatalf("exempt directory user by name: %+v, want an exempt allow", decision)
+	}
+}
+
+// GAP-0256: a "no such account" for a caller's uid (an offline SSSD with a
+// cold cache) is asked again after the short retry, not after the 5 minute
+// lifetime of an answer, so the name returns soon after the directory does.
+func TestManagedHookPeerNameRetriesANotFoundAnswer(t *testing.T) {
+	const uid = 1_870_400_124
+	accounts := map[int]unixidentity.Account{}
+	resolver := unixidentity.NewCachingResolver(&fakePeerHomeResolver{accounts: accounts})
+	clock := time.Now()
+	previous := managedHookPeerHomes
+	managedHookPeerHomes = &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver { return resolver },
+		now:         func() time.Time { return clock },
+	}
+	t.Cleanup(func() { managedHookPeerHomes = previous })
+	if name := managedHookPeerName(uid); name != "" {
+		t.Fatalf("name during the outage = %q", name)
+	}
+	accounts[uid] = unixidentity.Account{Name: "dcad-ih12n", UID: uid, Home: "/home/dcad-ih12n"}
+	clock = clock.Add(managedHookPeerLookupRetry + time.Second)
+	if name := managedHookPeerName(uid); name != "dcad-ih12n" {
+		t.Fatalf("name after the directory returned = %q, want it within the retry interval", name)
 	}
 }
 

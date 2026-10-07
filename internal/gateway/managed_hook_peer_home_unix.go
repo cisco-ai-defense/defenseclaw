@@ -29,11 +29,12 @@ import (
 // moved or recreated account is picked up without restarting the gateway.
 const managedHookPeerHomeTTL = 5 * time.Minute
 
-// managedHookPeerLookupRetry is how long a failed account lookup (a
-// directory timeout or other transient error, not a definitive "no such
-// account") is reused before the next request from that uid asks again. A
-// slow or unreachable directory then costs one lookup per uid per interval
-// instead of one per connection.
+// managedHookPeerLookupRetry is how long a failed account lookup is reused
+// before the next request from that uid asks again. A slow or unreachable
+// directory then costs one lookup per uid per interval instead of one per
+// connection. "No such account" counts as failed: the uid is the kernel's,
+// so an account with a process exists, and an SSSD that is offline with a
+// cold cache answers it for directory accounts until it is back (GAP-0256).
 const managedHookPeerLookupRetry = 15 * time.Second
 
 var errManagedHookPeerNoResolver = errors.New("no account resolver")
@@ -130,11 +131,17 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	}
 	ok := err == nil && account.UID == uid
 	retain := managedHookPeerHomeTTL
-	if err != nil && !unixidentity.IsNotFound(err) {
-		retain = managedHookPeerLookupRetry
-	}
-	if !ok {
+	switch {
+	case ok:
+	case ManagedEnterpriseActive() && unixidentity.IsNotFound(err):
+		// Secure Client keeps main's lifetime for a "no such account" (#1092).
 		account = unixidentity.Account{}
+	default:
+		retain = managedHookPeerLookupRetry
+		account = unixidentity.Account{}
+		if forget, can := resolver.(interface{ ForgetUID(int) }); can {
+			forget.ForgetUID(uid)
+		}
 	}
 	c.mu.Lock()
 	entry.account, entry.ok, entry.expires = account, ok, c.now().Add(retain)
