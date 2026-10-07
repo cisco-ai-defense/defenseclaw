@@ -882,3 +882,29 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     fresh = row("2026-10-03T06:21:55Z")
     assert "last under a minute ago" in fresh["detail"]
     assert "0 min" not in fresh["detail"]
+
+
+
+def test_network_scanner_and_settings_errors_name_the_cause(tmp_path) -> None:
+    import socket
+    import urllib.error
+    from types import SimpleNamespace
+
+    from defenseclaw.webhooks import network_error_text
+
+    dns = urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
+    assert network_error_text(dns, "https://hooks.invalid.example/private-token") == (
+        "could not resolve host hooks.invalid.example"
+    )
+
+    launcher = tmp_path / "skill-scanner"
+    launcher.write_text("#!/missing/python\n")
+    assert cmd_doctor._missing_launcher_interpreter(str(launcher)) == "/missing/python"
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}\n{ broken")
+    result = _DoctorResult(passive=True, quiet=True)
+    cmd_doctor._check_claudecode_hooks(SimpleNamespace(), result, config_path=str(settings))
+    row = next(row for row in result.checks if row.get("label") == "Claude Code hooks")
+    assert "not valid JSON at line 2" in row["detail"]
+    assert "restore the settings.json backup" in row["remediation"]

@@ -147,7 +147,7 @@ from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
-from defenseclaw.webhooks import list_webhooks, validate_webhook_url
+from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
 # TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
@@ -962,7 +962,7 @@ def _http_probe_once(
         # instead of leaking the auth header to the redirect target.
         return 0, str(exc)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return 0, str(exc)
+        return 0, network_error_text(exc, url)
 
 
 # Upper bound for the accepted server socket to show up in the verified
@@ -2624,6 +2624,22 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Scanner settings", "recommended: quiet policy with the LLM judge", r=r)
 
 
+def _missing_launcher_interpreter(path: str) -> str:
+    """Return a missing absolute shebang interpreter for an existing launcher."""
+
+    try:
+        with open(path, "rb") as launcher:
+            first_line = launcher.readline(256)
+    except OSError:
+        return ""
+    if not first_line.startswith(b"#!"):
+        return ""
+    interpreter = first_line[2:].decode("utf-8", errors="replace").strip().split()
+    if not interpreter or not os.path.isabs(interpreter[0]) or os.path.exists(interpreter[0]):
+        return ""
+    return interpreter[0]
+
+
 def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> None:
     """The gateway runs the skill-scanner launcher; probe it and its version."""
     name = "skill-scanner"
@@ -2673,12 +2689,13 @@ def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> No
         )
         return
     except OSError as exc:
-        _emit(
-            "fail",
-            f"Scanner: {name}",
-            f"{probe_path} could not start: {exc}; {_scanner_repair_hint()}",
-            r=r,
+        interpreter = _missing_launcher_interpreter(probe_path) if exc.errno == errno.ENOENT else ""
+        detail = (
+            f"{probe_path} exists, but its launcher interpreter {interpreter} is missing"
+            if interpreter
+            else f"{probe_path} could not start: {exc}"
         )
+        _emit("fail", f"Scanner: {name}", f"{detail}; {_scanner_repair_hint()}", r=r)
         return
     output = " ".join(
         line.strip()
@@ -5088,7 +5105,16 @@ def _check_claudecode_hooks(
     try:
         with open(settings_path, encoding="utf-8") as fh:
             settings = json.load(fh)
-    except (json.JSONDecodeError, OSError) as exc:
+    except json.JSONDecodeError as exc:
+        _emit(
+            "fail",
+            "Claude Code hooks",
+            f"{settings_path} is not valid JSON at line {exc.lineno}, column {exc.colno}",
+            r=r,
+            remediation="fix the JSON or restore the settings.json backup, then rerun doctor",
+        )
+        return
+    except OSError as exc:
         _emit("fail", "Claude Code hooks", f"cannot read {settings_path}: {exc}", r=r)
         return
     hooks = settings.get("hooks", {})
