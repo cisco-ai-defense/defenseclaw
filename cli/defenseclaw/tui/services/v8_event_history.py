@@ -309,7 +309,8 @@ _V8_SELECT_COLUMNS_TEMPLATE = """
             {enforced}
         )
         ELSE ''
-    END
+    END,
+    {target}
 """
 
 
@@ -319,6 +320,7 @@ def _v8_select_columns(columns: frozenset[str]) -> str:
     return _V8_SELECT_COLUMNS_TEMPLATE.format(
         structured_json="structured_json" if "structured_json" in columns else "NULL",
         enforced="enforced" if "enforced" in columns else "NULL",
+        target="COALESCE(target,'')" if "target" in columns else "''",
     )
 
 
@@ -348,6 +350,8 @@ class V8EventHistoryRow:
     payload_truncated: bool = False
     finding_tags: tuple[str, ...] = ()
     hook_decision: str = ""
+    # The audit row's own target (the tool of a legacy tool-result-pii-alert).
+    target: str = ""
 
 
 # Activity -> Mutations rows (operator and config changes, enforcement actions).
@@ -805,6 +809,7 @@ def _decode_v8_event_history_rows(rows: list[tuple[Any, ...]]) -> tuple[V8EventH
                 payload_truncated=int(row[21] or 0) > _MAX_PAYLOAD_BYTES,
                 finding_tags=finding_tags,
                 hook_decision=str(row[24] or ""),
+                target=str(row[25] or "") if len(row) > 25 else "",
             )
         )
     return tuple(result)
