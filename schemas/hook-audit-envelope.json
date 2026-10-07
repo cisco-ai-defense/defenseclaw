@@ -105,6 +105,11 @@
       "type": "boolean",
       "description": "True when the decision was an enforced block (not an observe-mode would-block). Mirrors audit_events.enforced."
     },
+    "rule_pack_dir": {
+      "type": "string",
+      "maxLength": 4096,
+      "description": "Secure Client profile only: effective rule-pack directory the verdict used. Mirrors audit_events.rule_pack_dir. Other profiles carry it in its own path-class field instead."
+    },
     "user.id": {
       "type": "string",
       "maxLength": 256,
