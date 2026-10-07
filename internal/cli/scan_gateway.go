@@ -52,7 +52,7 @@ func init() {
 		// A managed computer has no per-user config for the bootstrap to
 		// load: the managed gateway's endpoint comes from its layout, and
 		// any other host loads its config in scanGatewayEndpoint.
-		command.Annotations = map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"}
+		command.Annotations = map[string]string{"defenseclaw.skip-daemon-bootstrap": "true", secureClientAbsentAnnotation: "true"}
 		scanCmd.AddCommand(command)
 	}
 }

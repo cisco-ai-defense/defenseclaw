@@ -157,6 +157,7 @@ gateway applied this configuration.`,
 	Args:              cobra.NoArgs,
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
+	Annotations:       map[string]string{secureClientAbsentAnnotation: "true"},
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if cfg != nil && cfg.SecureClientIntegration() {
 			// main has no policy digest: Secure Client answers as it did

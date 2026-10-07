@@ -73,26 +73,30 @@ var enterpriseIdentityViews = []enterpriseIdentityView{
 // enterpriseIdentityViewAnnotation marks the identity view commands.
 const enterpriseIdentityViewAnnotation = "defenseclaw.identity-view"
 
-// dropEnterpriseIdentityViewsOnSecureClient removes the identity views from
-// the `enterprise <platform>` groups on a Secure Client computer, whose
-// gateway serves none of their routes: its CLI keeps the groups it had
-// before them (issue #1092).
-func dropEnterpriseIdentityViewsOnSecureClient(root *cobra.Command) {
+// secureClientAbsentAnnotation marks a command main does not have, which a
+// Secure Client computer drops (issue #1092).
+const secureClientAbsentAnnotation = "defenseclaw.secure-client-absent"
+
+// dropCommandsMainLacksOnSecureClient removes, on a Secure Client computer,
+// the commands main does not have, so its CLI keeps the commands of main
+// (issue #1092): the identity views of the `enterprise <platform>` groups,
+// whose routes its gateway does not serve, and every command marked
+// secureClientAbsentAnnotation (policy digest, scan skill|mcp|plugin).
+func dropCommandsMainLacksOnSecureClient(root *cobra.Command) {
 	if !secureClientHost() {
 		return
 	}
-	for _, enterprise := range root.Commands() {
-		if enterprise.Name() != "enterprise" {
-			continue
-		}
-		for _, group := range enterprise.Commands() {
-			for _, cmd := range group.Commands() {
-				if cmd.Annotations[enterpriseIdentityViewAnnotation] != "" {
-					group.RemoveCommand(cmd)
-				}
+	var drop func(parent *cobra.Command)
+	drop = func(parent *cobra.Command) {
+		for _, cmd := range parent.Commands() {
+			if cmd.Annotations[enterpriseIdentityViewAnnotation] != "" || cmd.Annotations[secureClientAbsentAnnotation] != "" {
+				parent.RemoveCommand(cmd)
+				continue
 			}
+			drop(cmd)
 		}
 	}
+	drop(root)
 }
 
 // newEnterpriseIdentityViewCommands returns the identity views of
