@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,9 +94,12 @@ func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 	}
 
 	*recorded = nil
-	code, _ = enforceRequest(t, api.handleEnforceBlock, http.MethodDelete, `{"target_type":"skill","target_name":"s1"}`)
-	if code != http.StatusOK || !reflect.DeepEqual(*recorded, []configwrite.Change{{Path: "asset_policy.skill.denied", Value: []map[string]any{}}}) {
-		t.Fatalf("unblock = %d %#v", code, *recorded)
+	// A reload the gateway refused is reported, not the old digest.
+	api.configReloader = func(context.Context, string) error { return errors.New("requires gateway restart for: data_dir") }
+	code, out = enforceRequest(t, api.handleEnforceBlock, http.MethodDelete, `{"target_type":"skill","target_name":"s1"}`)
+	if code != http.StatusOK || !reflect.DeepEqual(*recorded, []configwrite.Change{{Path: "asset_policy.skill.denied", Value: []map[string]any{}}}) ||
+		out["applied"] != false || out["effective_policy_digest"] != nil {
+		t.Fatalf("unblock = %d %v %#v", code, out, *recorded)
 	}
 }
 

@@ -876,7 +876,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	result, err := s.Scan(scanCtx, evt.Path)
+	// An MCP event's Path is its watcher key; the scanner gets the server.
+	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))

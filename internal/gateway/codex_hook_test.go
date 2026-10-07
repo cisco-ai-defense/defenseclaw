@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -203,6 +204,17 @@ func TestCodexPromptForInspectionDropsOnlyTheTitleHelperInstruction(t *testing.T
 		if got := codexPromptForInspection(prompt); got != prompt {
 			t.Fatalf("prompt %q was changed to %q", prompt, got)
 		}
+	}
+	// Secure Client sends AI Defense the whole prompt, as main did (GAP-0278).
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	api.scannerCfg.Guardrail.Connector = "codex"
+	aid := &stubAIDInspector{verdict: &ScanVerdict{Action: "allow", Severity: "NONE", Scanner: "ai-defense"}}
+	api.SetCiscoInspector(aid)
+	full := preamble + "\nUser prompt:\n" + user
+	api.evaluateCodexHook(t.Context(), codexHookRequest{HookEventName: "UserPromptSubmit", Prompt: full})
+	if aid.calls != 1 || len(aid.messages) != 1 || !strings.Contains(aid.messages[0].Content, preamble) {
+		t.Fatalf("AI Defense calls=%d messages=%+v, want the whole prompt", aid.calls, aid.messages)
 	}
 }
 

@@ -909,13 +909,14 @@ func TestDiffConfigsV8ResourceIdentityRequiresRestart(t *testing.T) {
 	}
 }
 
-// TestHoldRestartRequiredAppliesTheRest: a hook_self_heal edit needs a
-// restart, so it keeps its running value while an admission edit in the
-// same (or a later) reload still applies hot. hook_fail_mode is hot: the
-// hook guard reads it from the live config (GAP-0045).
+// TestHoldRestartRequiredAppliesTheRest: a hook_self_heal or environment
+// edit needs a restart, so it keeps its running value while an admission edit
+// in the same (or a later) reload still applies hot (GAP-0275). hook_fail_mode
+// is hot: the hook guard reads it from the live config (GAP-0045).
 func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)
+	newCfg.Environment = oldCfg.Environment + "-next"
 	newCfg.Guardrail.HookSelfHeal = !oldCfg.Guardrail.HookSelfHeal
 	newCfg.Guardrail.HookFailMode = "closed"
 	newCfg.Guardrail.BlockAt = "HIGH"
@@ -928,10 +929,47 @@ func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 	}
 	heldDiff := diffConfigs(oldCfg, held)
 	if len(heldDiff.RestartRequired) != 0 || !slices.Contains(heldDiff.Changed, "admission") ||
-		held.Guardrail.HookSelfHeal != oldCfg.Guardrail.HookSelfHeal ||
+		held.Guardrail.HookSelfHeal != oldCfg.Guardrail.HookSelfHeal || held.Environment != oldCfg.Environment ||
 		held.Guardrail.HookFailMode != "closed" || held.Guardrail.BlockAt != "HIGH" {
 		t.Fatalf("held diff = %+v hook_self_heal=%v hook_fail_mode=%q block_at=%q",
 			heldDiff, held.Guardrail.HookSelfHeal, held.Guardrail.HookFailMode, held.Guardrail.BlockAt)
+	}
+}
+
+// TestDiffConfigsSecureClientV8ActionsRequireRestart: under Secure Client an
+// edit of a v8 action key is restart-required, as on main (GAP-0279).
+func TestDiffConfigsSecureClientV8ActionsRequireRestart(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	oldCfg.Enterprise.Profile = managed.ProfileSecureClient
+	oldCfg.SecureClientV8Actions = map[string][5]config.SeverityAction{"skill_actions": {}}
+	newCfg := cloneConfig(oldCfg)
+	newCfg.SecureClientV8Actions["skill_actions"] = [5]config.SeverityAction{1: {Install: config.InstallNone}}
+	if diff := diffConfigs(oldCfg, newCfg); !slices.Equal(diff.RestartRequired, []string{"skill_actions"}) {
+		t.Fatalf("diff = %+v", diff)
+	}
+	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); len(diff.Changed) != 0 {
+		t.Fatalf("unchanged diff = %+v", diff)
+	}
+}
+
+// TestDiffConfigsDirectoryKeys: a policy_dir or quarantine_dir edit applies
+// hot (the generation rebuilds, the watcher restarts) and a plugin_dir edit is
+// restart-required and held, instead of all three passing as no change
+// (GAP-0277).
+func TestDiffConfigsDirectoryKeys(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.PolicyDir = filepath.Join(t.TempDir(), "team-policies")
+	newCfg.QuarantineDir = filepath.Join(t.TempDir(), "quarantine")
+	newCfg.PluginDir = filepath.Join(t.TempDir(), "plugins")
+
+	diff := diffConfigs(oldCfg, newCfg)
+	held := holdRestartRequired(oldCfg, newCfg, diff.RestartRequired)
+	if !slices.Contains(diff.Changed, "policy_dir") || !slices.Contains(diff.Changed, "quarantine_dir") ||
+		strings.Join(diff.RestartRequired, ",") != "plugin_dir" || held == nil || held.PluginDir != oldCfg.PluginDir ||
+		!watcherNeedsRestart(oldCfg, newCfg) {
+		t.Fatalf("diff = %+v held = %v", diff, held != nil)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // GAP-0132: a managed gateway watches each enrolled user's connector
@@ -47,6 +48,10 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	mkdir(serviceHome, ".claude", "skills")
 	mkdir(bob, ".codex")
 	if err := os.WriteFile(filepath.Join(bob, ".codex", "config.toml"), []byte("[mcp_servers.p0-mcp]\ncommand = \"p0-server\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// alice has another server under the same name (GAP-0276).
+	if err := os.WriteFile(filepath.Join(alice, ".claude.json"), []byte(`{"mcpServers":{"p0-mcp":{"command":"other-server"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,8 +100,11 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	if set.roots[aliceSkills] != "claudecode" || set.roots[bobSkills] != "codex" {
 		t.Fatalf("root connectors = %v", set.roots)
 	}
+	// Each user's server is its own watcher target, even with the same name.
 	servers, _ := set.live.list()
-	if len(servers) != 1 || servers[0].Name != "p0-mcp" || servers[0].Connector != "codex" {
+	if len(servers) != 2 || servers[0].Connector != "claudecode" || servers[0].Home != alice ||
+		servers[1].Connector != "codex" || servers[1].Home != bob ||
+		watcher.MCPEventPath(servers[0]) == watcher.MCPEventPath(servers[1]) {
 		t.Fatalf("enrolled MCP servers = %+v", servers)
 	}
 }

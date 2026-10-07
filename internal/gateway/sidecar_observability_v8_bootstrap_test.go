@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1826,7 +1827,11 @@ func TestSidecarConfigManagerV8NonObservabilityHotChangeDoesNotReloadGraph(t *te
 	}
 }
 
-func TestSidecarConfigManagerV8ResourceIdentityChangeRequiresRestart(t *testing.T) {
+// TestSidecarConfigManagerV8ResourceIdentityChangeIsHeldForRestart: the
+// resource identity is captured at start, so an environment edit keeps its
+// running value and is reported as pending a restart, without failing the
+// reload and every later one (GAP-0275).
+func TestSidecarConfigManagerV8ResourceIdentityChangeIsHeldForRestart(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	initialRaw := []byte(fmt.Sprintf(
 		"config_version: 8\ndata_dir: %q\nenvironment: original\nobservability: {}\n",
@@ -1861,19 +1866,20 @@ func TestSidecarConfigManagerV8ResourceIdentityChangeRequiresRestart(t *testing.
 	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = mgr.Reload(t.Context(), "test")
-	if err == nil || !strings.Contains(err.Error(), "environment") {
+	t.Cleanup(func() { setPendingRestart(nil) })
+	if err := mgr.Reload(t.Context(), "test"); err != nil {
 		t.Fatalf("resource identity reload error = %v", err)
 	}
 	fixture.sidecar.observabilityV8Mu.Lock()
 	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
 	fixture.sidecar.observabilityV8Mu.Unlock()
+	pending, _ := livePendingRestart.Load().([]string)
 	if owner.runtime.Active().Generation() != 1 ||
 		fixture.sidecar.currentConfig().Environment != "original" ||
-		mgr.Current().Environment != "original" {
-		t.Fatalf("identity rollback generation/sidecar/manager = %d/%q/%q",
+		mgr.Current().Environment != "original" || !slices.Contains(pending, "environment") {
+		t.Fatalf("identity hold generation/sidecar/manager/pending = %d/%q/%q/%v",
 			owner.runtime.Active().Generation(), fixture.sidecar.currentConfig().Environment,
-			mgr.Current().Environment)
+			mgr.Current().Environment, pending)
 	}
 }
 

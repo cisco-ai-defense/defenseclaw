@@ -73,8 +73,10 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
             "gateway.watcher.enabled",
             "application_protection.connectors.codex.guardrail.block_at",
             "cisco_ai_defense.endpoint",
+            "policy_dir",
+            "plugin_dir",
         ]
-    ) == ["guardrail.hook_self_heal", "guardrail.connectors.codex.enabled"]
+    ) == ["guardrail.hook_self_heal", "guardrail.connectors.codex.enabled", "plugin_dir"]
 
 
 def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):

@@ -103,4 +103,10 @@ func TestScannerFailureTextCutsPythonTraceback(t *testing.T) {
 	if got := scannerFailureText(" Error: Directory does not exist: x\n"); got != "Error: Directory does not exist: x" {
 		t.Fatalf("plain stderr = %q", got)
 	}
+	// Secure Client keeps the stderr of main (GAP-0280).
+	KeepFullFailureText(true)
+	t.Cleanup(func() { KeepFullFailureText(false) })
+	if got := scannerFailureText(stderr); got != stderr {
+		t.Fatalf("Secure Client scannerFailureText = %q, want the stderr unchanged", got)
+	}
 }
