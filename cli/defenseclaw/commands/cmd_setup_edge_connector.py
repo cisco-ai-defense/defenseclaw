@@ -33,7 +33,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import ux
-from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.context import AppContext
 
 _TOKEN_ENV = "DCLAW_FLEET_API_TOKEN"
 _DEFAULT_FLEET_ENDPOINT = "http://127.0.0.1:13400/api/v1/fleet"
@@ -109,7 +109,7 @@ def edge_connector(
     if ctx.invoked_subcommand is not None:
         return
 
-    app = ctx.ensure_object(AppContext)
+    ctx.ensure_object(AppContext)
 
     if emit_policy:
         ux.echo(_SAMPLE_POLICY)

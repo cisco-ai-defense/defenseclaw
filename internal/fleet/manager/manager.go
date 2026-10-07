@@ -67,8 +67,8 @@ const (
 	AlertTamperDetect   AlertType = "tamper_detect"
 	AlertPolicyDrift    AlertType = "policy_drift"
 	AlertCanaryRollback AlertType = "canary_rollback"
-	AlertSEDegraded         AlertType = "se_degraded"
-	AlertDeviceAutoReg      AlertType = "device_auto_registered"
+	AlertSEDegraded     AlertType = "se_degraded"
+	AlertDeviceAutoReg  AlertType = "device_auto_registered"
 )
 
 // Alert represents a fleet alert to dispatch.

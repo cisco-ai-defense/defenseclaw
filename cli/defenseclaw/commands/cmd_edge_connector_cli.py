@@ -139,15 +139,18 @@ def devices(app: AppContext, as_json: bool) -> None:
     try:
         resp = c.get("/devices")
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     _check(resp, "Failed to list devices")
     raw = _body(resp)
     items = raw if isinstance(raw, list) else (raw.get("devices", []) if isinstance(raw, dict) else [])
     if as_json:
-        click.echo(json.dumps(items, indent=2)); return
+        click.echo(json.dumps(items, indent=2))
+        return
     if not items:
         ux.echo("  No devices registered.")
-        ux.echo(ux.dim("  Register a device: defenseclaw edge-connector register <device-id>")); return
+        ux.echo(ux.dim("  Register a device: defenseclaw edge-connector register <device-id>"))
+        return
     ux.echo(ux.bold(f"  {'DEVICE ID':<28s} {'STATUS':<12s} {'LAST SEEN'}"))
     ux.echo(f"  {'─' * 28} {'─' * 12} {'─' * 24}")
     for d in items:
@@ -168,13 +171,16 @@ def device_detail(app: AppContext, device_id: str, as_json: bool) -> None:
     try:
         resp = c.get(f"/devices/{device_id}")
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     if resp.status_code == 404:
-        ux.err(f"Device '{device_id}' not found."); raise SystemExit(1)
+        ux.err(f"Device '{device_id}' not found.")
+        raise SystemExit(1)
     _check(resp, f"Failed to get device '{device_id}'")
     data = _body(resp) or {}
     if as_json:
-        click.echo(json.dumps(data, indent=2)); return
+        click.echo(json.dumps(data, indent=2))
+        return
     ux.echo(ux.bold(f"  Device: {device_id}"))
     for key in ("status", "last_seen", "last_heartbeat", "firmware", "policy_version",
                 "ip_address", "hostname", "tags", "registered_at"):
@@ -197,10 +203,12 @@ def register(app: AppContext, device_id: str, tags: str, as_json: bool) -> None:
     try:
         resp = c.post("/devices", payload)
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     _check(resp, f"Failed to register device '{device_id}'")
     if as_json:
-        click.echo(json.dumps(_body(resp) or {"status": "registered"}, indent=2)); return
+        click.echo(json.dumps(_body(resp) or {"status": "registered"}, indent=2))
+        return
     ux.ok(f"Device '{device_id}' registered.")
 
 
@@ -211,14 +219,17 @@ def register(app: AppContext, device_id: str, tags: str, as_json: bool) -> None:
 def decommission(app: AppContext, device_id: str, assume_yes: bool) -> None:
     """Decommission a single device from the fleet."""
     if not assume_yes and not click.confirm(f"Decommission device '{device_id}'? This cannot be undone"):
-        ux.echo("Cancelled."); return
+        ux.echo("Cancelled.")
+        return
     c = _client(app)
     try:
         resp = c.delete(f"/devices/{device_id}")
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     if resp.status_code == 404:
-        ux.err(f"Device '{device_id}' not found."); raise SystemExit(1)
+        ux.err(f"Device '{device_id}' not found.")
+        raise SystemExit(1)
     _check(resp, f"Failed to decommission device '{device_id}'")
     ux.ok(f"Device '{device_id}' decommissioned.")
 
@@ -231,14 +242,17 @@ def decommission_batch(app: AppContext, ids: str, assume_yes: bool) -> None:
     """Decommission multiple devices at once."""
     device_ids = [d.strip() for d in ids.split(",") if d.strip()]
     if not device_ids:
-        ux.err("No device IDs provided."); raise SystemExit(1)
+        ux.err("No device IDs provided.")
+        raise SystemExit(1)
     if not assume_yes and not click.confirm(f"Decommission {len(device_ids)} device(s)? This cannot be undone"):
-        ux.echo("Cancelled."); return
+        ux.echo("Cancelled.")
+        return
     c = _client(app)
     try:
         resp = c.post("/devices/decommission-batch", {"device_ids": device_ids})
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     _check(resp, "Failed to decommission devices")
     data = _body(resp) or {}
     ux.ok(f"{data.get('removed', len(device_ids))} device(s) decommissioned.")
@@ -255,11 +269,13 @@ def health(app: AppContext, as_json: bool) -> None:
     try:
         resp = c.get("/fleet/health")
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     _check(resp, "Failed to fetch edge connector health")
     data = _body(resp) or {}
     if as_json:
-        click.echo(json.dumps(data, indent=2)); return
+        click.echo(json.dumps(data, indent=2))
+        return
     online, offline = int(data.get("online", 0)), int(data.get("offline", 0))
     ux.section("Edge Connector Health")
     ux.echo(f"  Total devices:   {online + offline}")
@@ -280,12 +296,15 @@ def send_command(app: AppContext, device_id: str, cmd: str, as_json: bool) -> No
     try:
         resp = c.post(f"/devices/{device_id}/command", {"command": cmd})
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     if resp.status_code == 404:
-        ux.err(f"Device '{device_id}' not found."); raise SystemExit(1)
+        ux.err(f"Device '{device_id}' not found.")
+        raise SystemExit(1)
     _check(resp, f"Failed to send '{cmd}' to '{device_id}'")
     if as_json:
-        click.echo(json.dumps(_body(resp) or {"status": "sent"}, indent=2)); return
+        click.echo(json.dumps(_body(resp) or {"status": "sent"}, indent=2))
+        return
     ux.ok(f"Command '{cmd}' sent to device '{device_id}'.")
 
 
@@ -310,7 +329,8 @@ def policy_push(app: AppContext, file: str, as_json: bool) -> None:
             raw_yaml = fh.read()
             data = yaml.safe_load(raw_yaml) or {}
     except Exception as exc:
-        ux.err(f"Failed to read policy file: {exc}"); raise SystemExit(1)
+        ux.err(f"Failed to read policy file: {exc}")
+        raise SystemExit(1)
     meta = data.get("metadata", {}) or {}
     payload = {"policy_yaml": raw_yaml,
                "profile": str(meta.get("profile", "standard")),
@@ -320,11 +340,13 @@ def policy_push(app: AppContext, file: str, as_json: bool) -> None:
     try:
         resp = c.post("/policy/push", payload)
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     _check(resp, "Failed to push edge connector policy")
     result = _body(resp) or {}
     if as_json:
-        click.echo(json.dumps(result, indent=2)); return
+        click.echo(json.dumps(result, indent=2))
+        return
     ux.ok(f"Edge Connector policy '{meta.get('name', os.path.basename(file))}' {result.get('status', 'distributed')}.")
 
 
@@ -337,14 +359,17 @@ def policy_versions(app: AppContext, as_json: bool) -> None:
     try:
         resp = c.get("/policy/versions?tenant_id=1&fleet_id=1")
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     _check(resp, "Failed to list policy versions")
     raw = _body(resp)
     items = raw if isinstance(raw, list) else (raw.get("versions", []) if isinstance(raw, dict) else [])
     if as_json:
-        click.echo(json.dumps(items, indent=2)); return
+        click.echo(json.dumps(items, indent=2))
+        return
     if not items:
-        ux.echo("  No policy versions found."); return
+        ux.echo("  No policy versions found.")
+        return
     ux.echo(ux.bold(f"  {'VERSION':<12s} {'STATUS':<12s} {'PUSHED AT'}"))
     ux.echo(f"  {'─' * 12} {'─' * 12} {'─' * 24}")
     for v in items:
@@ -360,14 +385,16 @@ def policy_versions(app: AppContext, as_json: bool) -> None:
 def policy_emergency(app: AppContext, cmd: str, assume_yes: bool) -> None:
     """Send an emergency fleet command (flush-cache, enter-lockdown, revoke-sessions)."""
     if not assume_yes and not click.confirm(f"Send emergency command '{cmd}' to the entire fleet?"):
-        ux.echo("Cancelled."); return
+        ux.echo("Cancelled.")
+        return
     # API expects uppercase underscore command names (e.g. FLUSH_CACHE)
     api_cmd = cmd.upper().replace("-", "_")
     c = _client(app)
     try:
         resp = c.post("/policy/emergency", {"command": api_cmd})
     except req_lib.ConnectionError:
-        ux.err(_CONN_ERR); raise SystemExit(1)
+        ux.err(_CONN_ERR)
+        raise SystemExit(1)
     _check(resp, f"Failed to send emergency command '{cmd}'")
     data = _body(resp) or {}
     ux.ok(f"Emergency command '{cmd}' {data.get('status', 'sent')} (affected: {data.get('affected_devices', 'all')}).")

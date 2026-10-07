@@ -63,8 +63,8 @@ from defenseclaw.commands.cmd_alerts import alerts
 from defenseclaw.commands.cmd_audit import audit
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.commands.cmd_config import config_cmd
-from defenseclaw.commands.cmd_edge_connector_cli import edge_connector_group
 from defenseclaw.commands.cmd_doctor import doctor
+from defenseclaw.commands.cmd_edge_connector_cli import edge_connector_group
 from defenseclaw.commands.cmd_guardrail import guardrail
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
