@@ -2212,6 +2212,21 @@ def _which(binary_name: str) -> str:
     return os.path.abspath(path)
 
 
+def binary_on_path(connector: str) -> str:
+    """The connector's agent executable on PATH now, or "" (a lookup, no run).
+
+    Doctor reads discovery evidence that is cached for a day and never runs
+    an agent itself, so this tells an agent installed after the last scan
+    from one that is missing (GAP-0052)."""
+    spec = _SPECS.get(_normalize_connector(connector))
+    if spec is None or not spec.binary_name:
+        return ""
+    names = spec.binary_names or (spec.binary_name,)
+    if _is_windows_host() and spec.windows_binary_names:
+        names = spec.windows_binary_names
+    return next((path for path in map(_which, dict.fromkeys(names)) if path), "")
+
+
 def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
     """Resolve PATH first, then narrow documented connector locations."""
 
