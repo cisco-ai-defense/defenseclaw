@@ -5790,7 +5790,7 @@
     {
       "name": "DEFENSECLAW_UPDATE_GOLDEN",
       "category": "test_fixture",
-      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, and the bounded chain catalog, instead of comparing against them.",
+      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, the bounded chain catalog and the kernel-control digest pin, instead of comparing against them.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -5803,6 +5803,10 @@
         {
           "location": "internal/gateway/connector/hook_render_golden_test.go",
           "description": "Rewrites the host hook byte manifest"
+        },
+        {
+          "location": "policies/kernel/kernel_test.go",
+          "description": "Rewrites policies/kernel/testdata/digest.golden, the pinned kernel-control digest"
         },
         {
           "location": "internal/gateway/connector/sandbox_artifacts_test.go",

@@ -11,6 +11,8 @@
 package kernel
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -69,6 +71,29 @@ func TestEmbeddedSetFailsWhenSSHControlNamesADirectory(t *testing.T) {
 	}
 	if err := validate(bad); err == nil {
 		t.Fatal("the ssh control must stay files-only: the exemption is keyed to exact names")
+	}
+}
+
+// TestDigestIsPinned pins the kernel-control digest an administrator
+// approves with enforce_ack. Every host of a build reports it, and a release
+// that changes it moves every enforcing user back to monitor until the new
+// value is approved, so a change must be deliberate and announced.
+// Regenerate with DEFENSECLAW_UPDATE_GOLDEN=1.
+func TestDigestIsPinned(t *testing.T) {
+	golden := filepath.Join("testdata", "digest.golden")
+	if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(golden, []byte(FullDigest()+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, got := strings.TrimSpace(string(data)), FullDigest(); got != want {
+		t.Fatalf("a kernel control changed: update the golden and the CHANGELOG digest line "+
+			"(\"Kernel controls digest: %s, changed since <previous release>\"; regenerate with DEFENSECLAW_UPDATE_GOLDEN=1)\n"+
+			"  %s: %s\n  this build: %s", Digest(), golden, want, got)
 	}
 }
 
