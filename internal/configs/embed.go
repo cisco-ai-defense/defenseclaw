@@ -172,11 +172,21 @@ type ProvidersConfig struct {
 //   - Overlay parse errors are logged to stderr (same surface as the
 //     gateway's runtime alerts) but do not fail the load.
 func LoadProviders() (*ProvidersConfig, error) {
+	cfg, err := LoadEmbeddedProviders()
+	if err != nil {
+		return nil, err
+	}
+	mergeCustomProviders(cfg)
+	return cfg, nil
+}
+
+// LoadEmbeddedProviders returns the built-in registry without reading a
+// legacy local overlay. Managed v9 generations use config.yaml for additions.
+func LoadEmbeddedProviders() (*ProvidersConfig, error) {
 	var cfg ProvidersConfig
 	if err := json.Unmarshal(providersJSON, &cfg); err != nil {
 		return nil, err
 	}
-	mergeCustomProviders(&cfg)
 	return &cfg, nil
 }
 

@@ -4187,3 +4187,29 @@ func TestGenerationProvidersFromConfig(t *testing.T) {
 		t.Fatal("a derived custom-providers.json was read back as input")
 	}
 }
+
+// A managed v9 generation takes provider additions only from config.yaml.
+func TestManagedGenerationIgnoresLegacyProviderOverlay(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom-providers.json")
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", path)
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"stale","domains":["llm.stale.example"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{ConfigVersion: config.ConfigVersionV9, DeploymentMode: "managed_enterprise",
+		Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	cfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "admin", Domains: []string{"llm.admin.example"}}}
+	got := buildGenerationProviders(cfg)
+	for _, provider := range got.Providers {
+		if provider.Name == "stale" {
+			t.Fatal("managed v9 generation included a legacy provider")
+		}
+	}
+	var found bool
+	for _, provider := range got.Providers {
+		found = found || provider.Name == "admin"
+	}
+	if !found {
+		t.Fatal("managed v9 generation lost the configured provider")
+	}
+}
