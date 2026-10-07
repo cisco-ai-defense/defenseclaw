@@ -1146,6 +1146,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 	l.describe(ctx, newRecord, false)
+	// The change that leaves the eligible users without a connector says so
+	// at once, as on Windows, not only at the next status (GAP-0266).
+	l.warnNoConnectorsEnabled(p.config)
 	return 0
 }
 
