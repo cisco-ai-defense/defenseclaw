@@ -55,10 +55,16 @@ const (
 	// number reused, or a later exec) is further apart than this.
 	reseedWindow = 100 * time.Millisecond
 
-	// pollStartTolerance is how far a process-table row's start (fork time,
-	// in clock ticks) may sit from the kernel exec record of the same process
-	// (exec time) before the row is taken to be another process.
-	pollStartTolerance = 2 * time.Second
+	// pollStartTolerance is how far a process-table row's start may sit from
+	// the kernel exec record of the same process before the row is taken to
+	// be another process. The two are derived independently -- the row from
+	// /proc/stat's boot time (whole seconds, recomputed from the current
+	// clock) plus clock ticks, the exec record from the backend's own
+	// boot-time conversion -- so a clock step since boot moves one and not
+	// the other. Wide on purpose: a row that wrongly replaced a kernel
+	// record would cost the process its exec-derived identity on every poll.
+	// It still catches a reused pid whose predecessor's exit was lost.
+	pollStartTolerance = 5 * time.Minute
 
 	// maxAliases bounds the exec ids one process can collect through
 	// repeated backend restarts.

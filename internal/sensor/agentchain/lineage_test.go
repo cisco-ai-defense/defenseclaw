@@ -247,6 +247,12 @@ func TestProcessTablePollDoesNotRenameAKernelRecord(t *testing.T) {
 	if attribution, ok := tracker.Attribute(300); !ok || attribution.AgentName != "claude" {
 		t.Fatalf("a same-process poll row renamed the agent: %+v ok=%v", attribution, ok)
 	}
+	// The row's start is derived from the current clock: a clock step since
+	// boot moves it by seconds or minutes, and that is still the process.
+	tracker.ObserveProcessTable([]ProcessRow{{PID: 300, PPID: 50, Name: "sh", StartNS: start + int64(90*time.Second)}})
+	if attribution, ok := tracker.Attribute(300); !ok || attribution.AgentName != "claude" {
+		t.Fatalf("a clock step replaced the kernel record: %+v ok=%v", attribution, ok)
+	}
 	tracker.ObserveProcessTable([]ProcessRow{{PID: 300, PPID: 50, Name: "sh", StartNS: start + int64(time.Hour)}})
 	if _, ok := tracker.Attribute(300); ok {
 		t.Fatal("a poll row of another process at the pid kept the agent identity")
