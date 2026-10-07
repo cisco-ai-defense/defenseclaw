@@ -1083,7 +1083,8 @@ def test_splunk_hec_http_endpoint_is_one_plain_sentence() -> None:
         build()
     assert str(refused.value).startswith("The Splunk HEC endpoint is http://")
     assert "$." not in str(refused.value) and "config_semantic_invalid" not in str(refused.value)
-    assert "tls" not in build(verify_tls="true")
+    # A caller that chose the TLS setting itself (the local Splunk bridge) gets plain http, no tls block.
+    assert "tls" not in build(verify_tls="true") and "tls" not in build(verify_tls="false")
 
 
 def test_splunk_verify_tls_rejects_non_boolean_input() -> None:
