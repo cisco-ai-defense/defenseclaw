@@ -873,6 +873,34 @@ func TestFeed(t *testing.T) {
 	}
 }
 
+// GAP-0189: after `sandbox delete NAME` and a new sandbox of that name, the
+// new one's activity starts at its creation; the old one's events stay in
+// the unfiltered feed, and an explicit since still reaches them.
+func TestFeedOfANameStartsAtItsLatestCreation(t *testing.T) {
+	f := NewFeed(16, nil)
+	creating := sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: "myapp", Phase: string(audit.SandboxPhaseCreating)}
+	f.Publish(creating)
+	f.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: "myapp", Phase: string(audit.SandboxPhaseDeleted)})
+	f.Publish(sandboxapi.ActivityEvent{Kind: "other", Sandbox: "elsewhere"})
+	again := f.Publish(creating)
+	f.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "myapp"})
+	if got := f.Since(0, "myapp"); len(got) != 2 || got[0].Seq != again.Seq {
+		t.Fatalf("myapp backlog = %+v; want its latest creation and after", got)
+	}
+	if backlog, _, cancel, _ := f.Subscribe(0, "myapp"); len(backlog) != 2 || backlog[0].Seq != again.Seq {
+		cancel()
+		t.Fatalf("myapp stream backlog = %+v", backlog)
+	} else {
+		cancel()
+	}
+	if got := f.Since(0, ""); len(got) != 5 {
+		t.Fatalf("whole feed = %+v", got)
+	}
+	if got := f.Since(1, "myapp"); len(got) != 3 {
+		t.Fatalf("myapp since 1 = %+v", got)
+	}
+}
+
 // A restarted daemon republishes every sandbox's phase to telemetry, but the
 // feed says what happened: a sandbox stopped before the restart gets no new
 // "stopped" line (GAP-0167).
