@@ -562,6 +562,28 @@ func TestHookCountsSurviveARestart(t *testing.T) {
 	}
 }
 
+// A stopped sandbox's verdict on its last session's hooks (unreachable,
+// silent) survives a daemon restart like its counts, so the list, the TUI
+// and the alerts agree (GAP-0186); its next session is judged afresh.
+func TestStoppedSandboxsHookVerdictSurvivesARestart(t *testing.T) {
+	e := liveEnv(t, "verdictbox", nil)
+	b := e.boxOf("verdictbox")
+	e.m.mu.Lock()
+	b.reach.since, b.reach.reason, b.silentSince = time.Now(), "the harness has been calling its model for 30s without a single hook request", time.Now()
+	e.m.mu.Unlock()
+	e.stopBox("verdictbox")
+	e.restartDaemon()
+	if h := e.get("verdictbox").Hooks; !h.Unreachable || !strings.Contains(h.UnreachableReason, "without a single hook") || !h.Silent {
+		t.Fatalf("hooks after a restart = %+v, want the stopped session's verdict", h)
+	}
+	if _, err := e.m.Start(t.Context(), "verdictbox", sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if h := e.get("verdictbox").Hooks; h.Unreachable || h.Silent {
+		t.Fatalf("hooks of a new session = %+v, want it judged afresh", h)
+	}
+}
+
 // Hook text is cut and stripped of control characters, and a redacted reason
 // never reaches the feed.
 func TestHookLabelAndDisplayReason(t *testing.T) {

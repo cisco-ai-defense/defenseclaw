@@ -57,6 +57,10 @@ func (m *Manager) loadRecords() error {
 		}
 		b := &box{rec: *r, seenChunks: map[string]struct{}{}, retained: r.Retained}
 		b.hooks.restore(r.HookCounts)
+		if c := r.HookCounts; c != nil {
+			b.reach.since, b.reach.reason, b.reach.noHookYet = c.UnreachableSince, c.UnreachableReason, c.NoHookYet
+			b.silentSince = c.SilentSince
+		}
 		m.boxes[r.Name] = b
 		for _, pattern := range r.Unblocks {
 			_ = m.unblocks.Add(egress.Unblock{Pattern: pattern, SandboxID: scopeID(r.ID, r.Name)})
