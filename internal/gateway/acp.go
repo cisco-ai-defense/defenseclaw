@@ -581,6 +581,39 @@ func acpEnterpriseCredentialFromContext(ctx context.Context) (acp.EnterpriseCred
 	return credential, ok
 }
 
+// attachACPSubject names the account behind a signed ACP request. A managed
+// request carries the credential the administrator minted for one principal
+// (uid:N or sid:S-...) and published only to that user, so presenting it
+// proves the account as a per-user hook credential does; without this a
+// managed ACP decision carried no user, agent identity or session. A
+// per-user gateway's caller is its own account.
+func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
+	ctx = PromoteSessionIfAuthenticated(ctx)
+	credential, enrolled := acpEnterpriseCredentialFromContext(ctx)
+	if !enrolled {
+		return a.attachProcessOwnerSubject(ctx)
+	}
+	identity := acpPrincipalIdentity(credential.Principal)
+	if identity == "" {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	return attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity,
+		sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
+}
+
+// acpPrincipalIdentity is the user id of an enrollment principal (uid:1001,
+// sid:S-1-5-21-...), or "" for the home-directory fallback, which names no
+// account.
+func acpPrincipalIdentity(principal string) string {
+	for _, prefix := range []string{"uid:", "sid:"} {
+		if id, ok := strings.CutPrefix(principal, prefix); ok && useridentity.KindForID(id) != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 // authenticateACPToken applies different custody models without widening the
 // bearer onto any non-ACP route. Unmanaged mode uses the single local sidecar;
 // managed enterprise mode requires one administrator-owned, per-principal and

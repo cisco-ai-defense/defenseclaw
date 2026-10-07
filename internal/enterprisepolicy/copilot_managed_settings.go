@@ -36,7 +36,12 @@ import (
 //
 // DefenseClaw adds, only where the administrator has not set them:
 //   - enabledPlugins["defenseclaw@defenseclaw"] = true while its per-user
-//     plugin is deployed (managed_hooks_only enforce, local_harness govern);
+//     plugin is deployed (managed_hooks_only enforce, local_harness govern)
+//     and every VS Code found is a version whose plugin store DefenseClaw
+//     writes (copilotVSCodePluginStoreGate). The Copilot CLI reads this file
+//     too and, from 1.0.92, waits forever on a plugin whose marketplace it
+//     does not know, so the key is never written for a host without a VS Code
+//     that reads it (GAP-0192);
 //   - allowManagedHooksOnly = true (VS Code Local only) once every enrolled
 //     user holds the plugin and every VS Code found is a version whose
 //     plugin store DefenseClaw writes (copilotLocalLockGate);
@@ -183,6 +188,14 @@ func copilotLocalLockGate(opts Options) (bool, string) {
 			return false, fmt.Sprintf("DefenseClaw's Copilot plugin is not yet in place under %s", home)
 		}
 	}
+	return copilotVSCodePluginStoreGate(opts)
+}
+
+// copilotVSCodePluginStoreGate reports whether VS Code is on this host and
+// every installation found is a version whose plugin store DefenseClaw
+// writes. The enabledPlugins key is read by VS Code and by the Copilot CLI
+// (the same file); without such a VS Code nothing needs it.
+func copilotVSCodePluginStoreGate(opts Options) (bool, string) {
 	installs := DiscoverVSCode(opts)
 	if len(installs) == 0 {
 		return false, "no VS Code installation was found to check its plugin store version"
@@ -205,6 +218,12 @@ func copilotWantedSettings(opts Options, state *State) []string {
 		return []string{copilotSettingSandbox}
 	}
 	if copilotPluginRoute(opts) {
+		if ok, reason := copilotVSCodePluginStoreGate(opts); !ok {
+			if state != nil {
+				state.detail("vscode: %s not set: %s; the Copilot CLI reads the same file and would wait on a plugin marketplace DefenseClaw does not write", copilotSettingPlugin, reason)
+			}
+			return wanted
+		}
 		wanted = append(wanted, copilotSettingPlugin)
 		if ok, reason := copilotLocalLockGate(opts); ok {
 			wanted = append(wanted, copilotSettingHooksOnly)
