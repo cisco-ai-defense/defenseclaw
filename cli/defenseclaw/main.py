@@ -719,6 +719,11 @@ def main() -> None:
             # GAP-2580: the TUI runs "python -m defenseclaw.main"; usage errors
             # must still name the command the user types.
             cli(prog_name="defenseclaw")
+    except KeyboardInterrupt:
+        # Ctrl+C outside Click's own handling (an import, the TUI handoff, the
+        # upgrade's migration step) printed a Python traceback (GAP-0408).
+        click.echo("\nInterrupted.", err=True)
+        sys.exit(130)
     except CanonicalObservabilityUnavailableError as exc:
         # The command's audit event needs the gateway (for example after
         # init --no-start-gateway): one line with the fix, no traceback

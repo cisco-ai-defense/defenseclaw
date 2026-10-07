@@ -90,6 +90,21 @@ def test_main_turns_an_unreachable_gateway_audit_into_one_line(capsys):
     assert "defenseclaw-gateway start" in err
 
 
+def test_ctrl_c_ends_the_cli_with_one_line_and_exit_130(capsys):
+    # GAP-0408: Ctrl+C during the upgrade's "Migrating config and data" step
+    # printed a KeyboardInterrupt traceback before the rollback message.
+    with (
+        patch.object(main_mod.ux, "configure_console_output"),
+        patch.object(main_mod, "_force_utf8_io"),
+        patch.object(main_mod, "_try_launch_tui", side_effect=KeyboardInterrupt),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main_mod.main()
+    assert exited.value.code == 130
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and err.strip() == "Interrupted."
+
+
 def test_main_turns_a_refused_config_change_into_one_line_and_exit_1(capsys):
     # GAP-0055: a value the schema rejects at write time used to end in a Python traceback.
     from defenseclaw.observability.v8_config import V8ConfigError
