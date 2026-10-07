@@ -91,6 +91,9 @@ const (
 	DefaultStateDBTimeout = 2 * time.Second
 
 	maxFieldLen = 256
+	// maxProductLen bounds an installation's product token, as the
+	// inventory's per-user report check does.
+	maxProductLen = 64
 )
 
 // Limits bounds one Scan. Zero values take the defaults.

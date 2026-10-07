@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,34 @@ func TestIDEInventoryAttributesPluginsToProfileOwners(t *testing.T) {
 	}
 	if got := svc.IDEInventory(); len(got.Plugins) != 1 || got.Plugins[0].PluginID != "github.copilot" {
 		t.Fatalf("ai_only = %+v", got.Plugins)
+	}
+}
+
+// A folder name far longer than any real one (an unknown JetBrains product
+// directory, a VS Code profile) is bounded by the scan, so the guardian
+// still accepts the user's report with every row in it.
+func TestUserScanBoundsOddIDEFolderNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-user scans run on Linux and macOS")
+	}
+	withoutMachineIDEs(t)
+	home := t.TempDir()
+	appData := filepath.Join(home, ".config")
+	if runtime.GOOS == "darwin" {
+		appData = filepath.Join(home, "Library", "Application Support")
+	}
+	if err := os.MkdirAll(filepath.Join(appData, "JetBrains", strings.Repeat("A", 60)+"2024.1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeVSCodeExtensions(t, home, "github.copilot")
+	mustWrite(t, filepath.Join(appData, "Code", "User", "profiles", strings.Repeat("p", 250), "extensions.json"),
+		`[{"identifier":{"id":"github.copilot"},"version":"1.0.0","relativeLocation":"github.copilot-1.0.0"}]`)
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), UserScanOptions{}, nil)
+	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+		t.Fatalf("SanitizeUserScanReport: %v", err)
+	}
+	if ide := report.IDEInventory; ide == nil || len(ide.Installations) != 2 || len(ide.Plugins) != 2 || ide.Partial {
+		t.Fatalf("IDE inventory = %+v, want the JetBrains and VS Code installations and both plugin rows", ide)
 	}
 }
 

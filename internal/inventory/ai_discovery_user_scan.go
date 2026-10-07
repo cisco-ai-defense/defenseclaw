@@ -296,12 +296,7 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 	if ide != nil {
 		// The gateway names the account from the guardian's record.
 		sanitizeUserScanIDE(ide)
-		if len(ide.Plugins) > MaxIDEPluginsPerUser {
-			ide.Plugins, ide.Partial = ide.Plugins[:MaxIDEPluginsPerUser], true
-		}
-		if len(ide.Installations) > maxIDEInstallationsPerUser {
-			ide.Installations, ide.Partial = ide.Installations[:maxIDEInstallationsPerUser], true
-		}
+		boundUserScanIDE(ide)
 	}
 	return AIDiscoveryReport{Summary: summary, Signals: out, IDEInventory: ide}
 }

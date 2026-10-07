@@ -557,29 +557,70 @@ func validateUserScanIDE(inv *IDEInventory) error {
 	}
 	installs := map[string]bool{}
 	for _, inst := range inv.Installations {
-		if !ideFamilies[inst.Family] || !ideTokenPattern.MatchString(inst.Product) || !isSHA256Hash(inst.PathHash) {
-			return errors.New("ide installation fields are invalid")
-		}
-		for _, value := range []string{inst.InstallID, inst.Channel, inst.RemoteKind, inst.Version} {
-			if !userScanText(value, maxUserScanField) {
-				return errors.New("ide installation fields must be short printable text")
-			}
+		if err := ideInstallationError(inst); err != nil {
+			return err
 		}
 		installs[inst.InstallID] = true
 	}
 	for _, p := range inv.Plugins {
-		if !installs[p.InstallID] || !ideFamilies[p.Family] || !ideTokenPattern.MatchString(p.Product) ||
-			!ideEnabledStates[p.Enabled] || strings.TrimSpace(p.PluginID) == "" ||
-			(p.PathHash != "" && !isSHA256Hash(p.PathHash)) {
-			return errors.New("ide plugin fields are invalid")
-		}
-		for _, value := range []string{p.PluginID, p.DisplayName, p.Publisher, p.Version, p.EnabledSource, p.Scope, p.AISignatureID} {
-			if !userScanText(value, maxUserScanField) {
-				return errors.New("ide plugin fields must be short printable text")
-			}
+		if err := idePluginError(p, installs); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func ideInstallationError(inst IDEInstallation) error {
+	if !ideFamilies[inst.Family] || !ideTokenPattern.MatchString(inst.Product) || !isSHA256Hash(inst.PathHash) {
+		return errors.New("ide installation fields are invalid")
+	}
+	for _, value := range []string{inst.InstallID, inst.Channel, inst.RemoteKind, inst.Version} {
+		if !userScanText(value, maxUserScanField) {
+			return errors.New("ide installation fields must be short printable text")
+		}
+	}
+	return nil
+}
+
+func idePluginError(p IDEPlugin, installs map[string]bool) error {
+	if !installs[p.InstallID] || !ideFamilies[p.Family] || !ideTokenPattern.MatchString(p.Product) ||
+		!ideEnabledStates[p.Enabled] || strings.TrimSpace(p.PluginID) == "" ||
+		(p.PathHash != "" && !isSHA256Hash(p.PathHash)) {
+		return errors.New("ide plugin fields are invalid")
+	}
+	for _, value := range []string{p.PluginID, p.DisplayName, p.Publisher, p.Version, p.EnabledSource, p.Scope, p.AISignatureID} {
+		if !userScanText(value, maxUserScanField) {
+			return errors.New("ide plugin fields must be short printable text")
+		}
+	}
+	return nil
+}
+
+// boundUserScanIDE keeps a worker's IDE inventory within
+// validateUserScanIDE. A row it would refuse, or one past the per-user
+// limits, is dropped and the inventory marked partial, so one odd folder in
+// a home costs that row, never the user's whole report.
+func boundUserScanIDE(inv *IDEInventory) {
+	installs := map[string]bool{}
+	kept := inv.Installations[:0]
+	for _, inst := range inv.Installations {
+		if len(kept) < maxIDEInstallationsPerUser && ideInstallationError(inst) == nil {
+			kept = append(kept, inst)
+			installs[inst.InstallID] = true
+		} else {
+			inv.Partial = true
+		}
+	}
+	inv.Installations = kept
+	plugins := inv.Plugins[:0]
+	for _, p := range inv.Plugins {
+		if len(plugins) < MaxIDEPluginsPerUser && idePluginError(p, installs) == nil {
+			plugins = append(plugins, p)
+		} else {
+			inv.Partial = true
+		}
+	}
+	inv.Plugins = plugins
 }
 
 // sanitizeUserScanIDE strips the account a worker may have stamped; the
