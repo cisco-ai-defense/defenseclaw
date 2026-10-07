@@ -570,13 +570,20 @@ func (c *Config) TetragonMode(goos string) (mode, reason string) {
 	if !c.StandaloneEnterprise() {
 		return TetragonModeOff, ""
 	}
-	if !c.AIDiscovery.Runtime.Enabled || !planeCSelected(c.AIDiscovery.Runtime) {
+	if !c.PlaneCSelected() {
 		if written && configured != TetragonModeOff {
 			return TetragonModeOff, TetragonReasonPlaneCOff
 		}
 		return TetragonModeOff, ""
 	}
 	return configured, ""
+}
+
+// PlaneCSelected reports whether AI Discovery Plane C runs: the runtime
+// planes are enabled and EffectivePlanes contains c. Without it the managed
+// sensor helper runs with Tetragon off.
+func (c *Config) PlaneCSelected() bool {
+	return c != nil && c.AIDiscovery.Runtime.Enabled && planeCSelected(c.AIDiscovery.Runtime)
 }
 
 func planeCSelected(runtime AIRuntimeConfig) bool {

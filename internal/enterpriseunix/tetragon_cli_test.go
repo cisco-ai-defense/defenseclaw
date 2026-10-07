@@ -579,6 +579,7 @@ func tetragonCLIHost(t *testing.T) *testHost {
 	old := tetragonLoginUID
 	tetragonLoginUID = func() int { return 1234 }
 	t.Cleanup(func() { tetragonLoginUID = old })
+	stubTetragonAccounts(t)
 	return h
 }
 
@@ -745,13 +746,14 @@ func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Tetragon:       v1.7.1, pid 777, reachable, keep-sensors-on-exit false, BPF LSM true",
-		"API socket:     trusted (root-owned unix socket) at unix:///var/run/tetragon/tetragon.sock",
-		"Kernel policy:  " + kernelpolicy.Digest() + " (approve with enforce_ack: " + kernelpolicy.Digest() + ")",
-		"Pause:          in force (untrusted pause file: ",
-		"Override:       connect deleted",
-		"defenseclaw-controls-0a1b2c3d", "dcr-std1 (1001)", "12.0h of 168.0h", "ssh_private_key_read 1 /home/dcr-std1/.ssh/id_ed25519 by /usr/bin/cat",
-		"Observed, not enforced: 1 session(s)", "heuristic_root",
+		"  Tetragon:        v1.7.1, pid 777, reachable, keep-sensors-on-exit false, BPF LSM true\n",
+		"  API socket:      trusted (root-owned unix socket) at unix:///var/run/tetragon/tetragon.sock\n",
+		"  Kernel controls: " + kernelpolicy.Digest() + ", in monitor mode; enforce_ack approves this digest\n",
+		"  Pause:           in force for every user on this host (untrusted pause file: ",
+		"  Override:        connect deleted by an operator at ",
+		"defenseclaw-controls-0a1b2c3d", "dcr-std1 (1001)", "reset by a hit", "12.0h of 168h (7%)",
+		"      dcr-std1 (1001): would block ssh_private_key_read 1x, last ", "        ~/.ssh/id_ed25519 by /usr/bin/cat\n",
+		"Observed, not enforced: 1 session(s)", "    dcr-std1 (uid 1001): 1, looks like an agent by name only (heuristic_root) (langchain)",
 		kernelpolicy.WarnOperatorOverride + ":connect",
 	} {
 		if !strings.Contains(text.String(), want) {
@@ -770,7 +772,7 @@ func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 	if err := WriteTetragonReport(&text, trusted, false); err != nil {
 		t.Fatal(err)
 	}
-	if want := "Pause:          until " + now.Add(time.Hour).Format(time.RFC3339) + ", set by uid 1234 at " + now.Format(time.RFC3339) + ": dccert maintenance"; !strings.Contains(text.String(), want) {
+	if want := "  Pause:           until " + now.Add(time.Hour).Format(time.RFC3339) + ", set by uid 1234 at " + now.Format(time.RFC3339) + ": dccert maintenance (every user on this host)\n"; !strings.Contains(text.String(), want) {
 		t.Fatalf("text view lacks %q:\n%s", want, text.String())
 	}
 	trusted.Warnings, trusted.Errors = []enterprisestatus.Message{}, []enterprisestatus.Message{}
@@ -809,6 +811,9 @@ func TestTetragonStatusSchemaDescribesEveryField(t *testing.T) {
 		var out []string
 		typ := reflect.TypeOf(value)
 		for i := 0; i < typ.NumField(); i++ {
+			if !typ.Field(i).IsExported() {
+				continue // text-view state, never marshalled
+			}
 			name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
 			out = append(out, name)
 		}
@@ -841,6 +846,7 @@ func TestTetragonStatusSchemaDescribesEveryField(t *testing.T) {
 		{item(props["roots"].(map[string]any)["properties"].(map[string]any)["observed_only"]), TetragonObserved{}},
 		{props["pause"].(map[string]any), TetragonPauseView{}},
 		{item(props["overrides"]), TetragonOverride{}},
+		{item(props["customer_policies"]), TetragonCustomerPolicy{}},
 		{item(defs["hits"]), TetragonHits{}},
 		{item(defs["counts"]), TetragonCount{}},
 	} {
@@ -983,5 +989,229 @@ func TestCleanupRemovedParsesOnlyDefenseClawNames(t *testing.T) {
 	out := cleanupRemoved([]byte("removed defenseclaw-observe-11112222\nalready gone defenseclaw-controls-0a1b2c3d\nremoved defenseclaw-foo\nremoved defenseclaw-connect-aaaaaaaa\n"))
 	if !reflect.DeepEqual(out, []string{"defenseclaw-connect-aaaaaaaa", "defenseclaw-observe-11112222"}) {
 		t.Fatalf("removed %v", out)
+	}
+}
+
+// statusHost is a host whose sensor helper published state at readinessNow
+// with Tetragon v1.7.1 reachable over a trusted socket; block is
+// enterprise.tetragon.
+func statusHost(t *testing.T, block string, state kernelpolicy.FileState, extra map[string]any) *testHost {
+	t.Helper()
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: tetragonTestConfig(t, h, block, true)}))
+	stubTetragonAccounts(t)
+	h.env.Now = func() time.Time { return readinessNow }
+	writeHostFile(t, h, tetragonInfoPath, `{"server_address":"unix:///var/run/tetragon/tetragon.sock","pid":912}`)
+	writeHostFile(t, h, "/var/run/tetragon/tetragon.sock", "")
+	h.owners[h.env.P("/var/run/tetragon/tetragon.sock")] = [2]int{0, 0}
+	h.owners[h.env.P("/var/run/tetragon")] = [2]int{0, 0}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range extra {
+		if key == "tetragon" {
+			for k, v := range value.(map[string]any) {
+				doc["tetragon"].(map[string]any)[k] = v
+			}
+			continue
+		}
+		doc[key] = value
+	}
+	data, _ = json.Marshal(doc)
+	writeHostFile(t, h, filepath.Join(kernelpolicy.DefaultStateDir, "tetragon-state.json"), string(data))
+	return h
+}
+
+func publishedState(mode kernelpolicy.Mode) kernelpolicy.FileState {
+	yes, no := true, false
+	return kernelpolicy.FileState{Version: 1, UpdatedAt: readinessNow.Add(-30 * time.Second), KernelPolicy: kernelpolicy.Digest(),
+		Effective: string(mode), InSync: true, Intent: kernelpolicy.IntentStatus{Mode: mode, BurnIn: "168h"},
+		Tetragon: kernelpolicy.TetragonStatus{Reachable: true, Version: "v1.7.1", PID: 912, LSM: &yes, KeepSensorsOnExit: &no}}
+}
+
+// writeBurnIn writes burnin.json for the promotion fixture users.
+func writeBurnIn(t *testing.T, h *testHost) {
+	t.Helper()
+	in := withUsers(readyInputs("observe"))
+	data, err := json.Marshal(kernelpolicy.BurnInFile{Version: 1, KernelPolicy: kernelpolicy.Digest(), UIDs: in.State.BurnIn.UIDs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, filepath.Join(kernelpolicy.DefaultStateDir, "burnin.json"), string(data))
+}
+
+func statusText(t *testing.T, rep *TetragonReport) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := WriteTetragonReport(&buf, rep, false); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func assertStatusColumns(t *testing.T, text string) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if len([]rune(line)) > 100 && !strings.HasPrefix(trimmed, "sudo ") && !strings.HasPrefix(line, "  ! ") && !strings.HasPrefix(line, "  ✗ ") {
+			t.Errorf("status line over 100 columns (%d): %q", len([]rune(line)), line)
+		}
+	}
+}
+
+// status in consume: no approve hint (nothing is loaded), and the Next:
+// footer from the readiness engine.
+func TestTetragonStatusTextInConsume(t *testing.T) {
+	h := statusHost(t, "", publishedState(kernelpolicy.ModeConsume), nil)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	if !rep.OK {
+		t.Fatalf("status: %+v", rep.Errors)
+	}
+	got := statusText(t, rep)
+	want := `Tetragon (managed Linux)
+  Tetragon:        v1.7.1, pid 912, reachable, keep-sensors-on-exit false, BPF LSM true
+  API socket:      trusted (root-owned unix socket) at unix:///var/run/tetragon/tetragon.sock
+  Sensor helper:   running, state updated 2026-10-07T11:59:30Z
+  Mode:            consume, burn-in 168h
+  Kernel controls: not loaded (mode consume)
+Next: this host is ready for observe. Check with:
+  sudo ` + adminBinDir + `/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe
+`
+	if got != want {
+		t.Fatalf("text:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// status in observe with a user reset by a hit: words for states, burn-in
+// with percent and ETA ("measuring" before a day), hit details with a
+// home-relative path, and the next step toward enforce.
+func TestTetragonStatusTextInObserveWithAResetUser(t *testing.T) {
+	state := publishedState(kernelpolicy.ModeObserve)
+	state.UIDs = withUsers(readyInputs("observe")).State.UIDs
+	h := statusHost(t, "    mode: observe\n", state, nil)
+	writeBurnIn(t, h)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	got := statusText(t, rep)
+	for _, want := range []string{
+		"  Kernel controls: " + kernelpolicy.Digest() + ", in monitor mode; enforce_ack approves this digest\n",
+		"    USER             STATE              CONNECTORS  BURN-IN                       HITS\n",
+		"    dcr-std1 (1001)  ready for enforce  claudecode  168.0h of 168h, ready         0\n",
+		"    dcr-std2 (1002)  in burn-in         claudecode  40.5h of 168h (24%), ~9 days  0\n",
+		"    dcr-std3 (1003)  reset by a hit     claudecode  0.0h of 168h (0%), measuring  1\n",
+		"      dcr-std3 (1003): would block ssh_private_key_read 1x, last 2026-10-07T09:12:00Z\n        ~/.ssh/id_ed25519 by /usr/bin/python3.11\n",
+		"Next: 1 of 3 users is ready; the next is ready in ~9 days of agent use. Check with:\n" +
+			"  sudo " + adminBinDir + "/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("text lacks %q:\n%s", want, got)
+		}
+	}
+	assertStatusColumns(t, got)
+
+	// --user narrows every list to one user, by name or uid; JSON keeps its shape.
+	schema := compileTetragonStatusSchema(t)
+	for _, who := range []string{"dcr-std3", "1003"} {
+		one := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus, User: who})
+		validateTetragonReport(t, schema, one)
+		if !one.OK || len(one.Users) != 1 || one.Users[0].UID != 1003 {
+			t.Fatalf("--user %s: %+v %+v", who, one.Users, one.Errors)
+		}
+		if text := statusText(t, one); strings.Contains(text, "dcr-std1") || !strings.Contains(text, "reset by a hit") {
+			t.Fatalf("--user %s text:\n%s", who, text)
+		}
+	}
+	none := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus, User: "nobody"})
+	if none.OK || none.ExitCode != 2 || !strings.Contains(none.Errors[0].Message, "enrolled: dcr-std1, dcr-std2, dcr-std3") {
+		t.Fatalf("--user nobody: %+v", none)
+	}
+}
+
+// status in enforce with a stale approval: the controls line says the
+// digest is not approved, and the next step is the approval.
+func TestTetragonStatusTextInEnforceWithAStaleApproval(t *testing.T) {
+	state := publishedState(kernelpolicy.ModeEnforce)
+	state.Effective = "observe"
+	state.UIDs = withUsers(readyInputs("observe")).State.UIDs
+	h := statusHost(t, "    mode: enforce\n    enforce_ack: sha256:000000000000\n", state, nil)
+	writeBurnIn(t, h)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	got := statusText(t, rep)
+	for _, want := range []string{
+		"  Mode:            enforce, running as observe, burn-in 168h\n",
+		"  Kernel controls: " + kernelpolicy.Digest() + ", enforce_ack is for another build (sha256:000000000000)\n",
+		"  ! " + kernelpolicy.WarnEnforceAckStale + ": enforce_ack sha256:000000000000 does not include this build's " + kernelpolicy.Digest(),
+		"or to `enterprise.tetragon.enforce_ack: [sha256:000000000000, " + kernelpolicy.Digest() + "]` while the ring upgrades",
+		"Next: approve this build's kernel controls (enforce_ack). See:\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("text lacks %q:\n%s", want, got)
+		}
+	}
+	assertStatusColumns(t, got)
+}
+
+// A paused host says the pause covers every user, and status still reads.
+func TestTetragonStatusTextWhenPaused(t *testing.T) {
+	h := statusHost(t, "    mode: enforce\n    enforce_ack: "+kernelpolicy.Digest()+"\n", publishedState(kernelpolicy.ModeEnforce), nil)
+	if rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionPause, For: time.Hour, Reason: "dccert"}); !rep.OK ||
+		!strings.Contains(rep.Changes[0], "for every user on this host") {
+		t.Fatalf("pause: %+v", rep)
+	}
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	got := statusText(t, rep)
+	for _, want := range []string{
+		"  Kernel controls: " + kernelpolicy.Digest() + ", approved\n",
+		"  Pause:           in force for every user on this host (untrusted pause file: ",
+		"(kernel enforcement stays paused for every user on this host); remove it with `sudo " + adminBinDir + "/defenseclaw-gateway enterprise linux tetragon resume`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("text lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// Your own Tetragon policies: listed under their own heading with
+// DefenseClaw's promise, counted from the helper's state, never touched.
+func TestTetragonStatusListsYourPolicies(t *testing.T) {
+	extra := map[string]any{
+		"customer_policies": []map[string]any{
+			{"name": "10-file-sensitive", "listed": true, "mode": "enforce", "state": "enabled", "seen": 120, "forwarded": 12, "dropped": 0,
+				"actions": map[string]any{"post": 118, "override": 2}, "last_event_at": "2026-10-07T11:58:00Z"},
+			{"name": "20-net-connect", "listed": true, "mode": "monitor", "state": "enabled", "seen": 40, "forwarded": 3, "dropped": 9,
+				"capped_last_hour": 7, "actions": map[string]any{"post": 40, "monitor_override": 5}},
+		},
+		"tetragon": map[string]any{"metrics_address": "127.0.0.1:2112", "health_address": ":6789"},
+	}
+	state := publishedState(kernelpolicy.ModeConsume)
+	state.Warnings = []string{codeCustomerEventsCapped + ":20-net-connect"}
+	h := statusHost(t, "", state, extra)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	validateTetragonReport(t, compileTetragonStatusSchema(t), rep)
+	if len(rep.CustomerPolicies) != 2 || rep.CustomerPolicies[0].Blocked != 2 || rep.CustomerPolicies[1].Blocked != 0 || rep.CustomerPolicies[1].Dropped != 9 {
+		t.Fatalf("customer policies %+v", rep.CustomerPolicies)
+	}
+	got := statusText(t, rep)
+	for _, want := range []string{
+		"  Your Tetragon policies (DefenseClaw reads their events and never changes them):\n",
+		"    NAME               MODE     STATE    EVENTS  FORWARDED  BLOCKED  LAST\n",
+		"    10-file-sensitive  enforce  enabled  120     12         2        2026-10-07T11:58:00Z\n",
+		"    20-net-connect     monitor  enabled  40      3          0        -\n",
+		"  ! " + codeCustomerEventsCapped + ":20-net-connect: 7 events of your Tetragon policy 20-net-connect from AI agents were not forwarded",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("text lacks %q:\n%s", want, got)
+		}
+	}
+	verify := RunTetragonVerify(context.Background(), h.env, "consume")
+	if check := checkOf(t, verify, checkTetragonYourPolicy); !strings.Contains(check.Message, "2 of your Tetragon policies are loaded (1 enforcing)") {
+		t.Fatalf("your policies check %+v", check)
+	}
+	if check := checkOf(t, verify, checkHealthLoopback); check.Status != checkWarn {
+		t.Fatalf("health on every interface: %+v", check)
 	}
 }

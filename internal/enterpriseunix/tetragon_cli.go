@@ -77,9 +77,15 @@ type tetragonIntent struct {
 	CustomerEvents string
 	// EnforceConnectors are the enrolled connectors whose effective
 	// guardrail mode is action; GuardrailObserve the other enrolled ones.
-	// Both are set only in enforce mode.
+	// Both are set only in enforce mode (the drop-in carries them).
 	EnforceConnectors []string
 	GuardrailObserve  []string
+	// ActionCLI and ObserveCLI split the enrolled command-line connectors
+	// (the only ones a kernel control can anchor) by guardrail mode in every
+	// mode, for the readiness checks of a mode the host does not run yet.
+	ActionCLI, ObserveCLI []string
+	// PlaneC is whether AI Discovery Plane C runs.
+	PlaneC bool
 }
 
 // tetragonIntentOf reads the intent from a validated config. connectors are
@@ -96,19 +102,31 @@ func tetragonIntentOf(cfg *config.Config, goos string, connectors []string) tetr
 	intent := tetragonIntent{
 		Written: !block.IsDefault(), Configured: effective.Mode, Mode: mode, Reason: reason,
 		BurnIn: effective.BurnIn, EnforceAck: effective.EnforceAck, CustomerEvents: effective.CustomerEvents,
+		PlaneC: cfg.PlaneCSelected(),
 	}
-	if mode != config.TetragonModeEnforce {
-		return intent
-	}
+	var action, observe []string
 	for _, connector := range connectors {
 		if cfg.Guardrail.Enabled && strings.EqualFold(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(connector)), guardrailActionMode) {
-			intent.EnforceConnectors = append(intent.EnforceConnectors, connector)
+			action = append(action, connector)
 		} else {
-			intent.GuardrailObserve = append(intent.GuardrailObserve, connector)
+			observe = append(observe, connector)
 		}
 	}
-	sort.Strings(intent.EnforceConnectors)
-	sort.Strings(intent.GuardrailObserve)
+	sort.Strings(action)
+	sort.Strings(observe)
+	for _, connector := range action {
+		if kernelpolicy.IsCLIConnector(connector) {
+			intent.ActionCLI = append(intent.ActionCLI, connector)
+		}
+	}
+	for _, connector := range observe {
+		if kernelpolicy.IsCLIConnector(connector) {
+			intent.ObserveCLI = append(intent.ObserveCLI, connector)
+		}
+	}
+	if mode == config.TetragonModeEnforce {
+		intent.EnforceConnectors, intent.GuardrailObserve = action, observe
+	}
 	return intent
 }
 
@@ -596,6 +614,8 @@ type TetragonOptions struct {
 	For         time.Duration
 	UntilReboot bool
 	Reason      string
+	// User narrows status to one enrolled user, by name or uid.
+	User string
 }
 
 // TetragonReport is the result of `enterprise linux tetragon <action>`, and
@@ -620,12 +640,37 @@ type TetragonReport struct {
 	// Recorded are the names the helper recorded loading; Orphaned those of
 	// them that may be loaded with nothing reconciling them; Foreign loaded
 	// names in DefenseClaw's pattern that the helper never loaded.
-	Recorded []string                   `json:"recorded"`
-	Orphaned []string                   `json:"orphaned"`
-	Foreign  []string                   `json:"foreign"`
-	Changes  []string                   `json:"changes,omitempty"`
-	Warnings []enterprisestatus.Message `json:"warnings"`
-	Errors   []enterprisestatus.Message `json:"errors"`
+	Recorded []string `json:"recorded"`
+	Orphaned []string `json:"orphaned"`
+	Foreign  []string `json:"foreign"`
+	// CustomerPolicies are your own Tetragon policies: DefenseClaw reads
+	// their events and never changes them.
+	CustomerPolicies []TetragonCustomerPolicy   `json:"customer_policies"`
+	Changes          []string                   `json:"changes,omitempty"`
+	Warnings         []enterprisestatus.Message `json:"warnings"`
+	Errors           []enterprisestatus.Message `json:"errors"`
+
+	// progress is each user's burn-in and next the Next: footer, for the
+	// text view only.
+	progress map[int]burnInProgress
+	next     []string
+}
+
+// TetragonCustomerPolicy is one of the customer's own Tetragon policies as
+// the sensor helper last listed it.
+type TetragonCustomerPolicy struct {
+	Name  string `json:"name"`
+	Mode  string `json:"mode,omitempty"`
+	State string `json:"state,omitempty"`
+	Error string `json:"error,omitempty"`
+	// Events, Forwarded and Dropped count what the helper saw of the
+	// policy, forwarded (from AI agents) and did not forward (over the
+	// budget); Blocked is how often Tetragon denied or killed for it.
+	Events    uint64 `json:"events"`
+	Forwarded uint64 `json:"forwarded"`
+	Dropped   uint64 `json:"dropped"`
+	Blocked   uint64 `json:"blocked"`
+	LastEvent string `json:"last_event_at,omitempty"`
 }
 
 // TetragonIntentView is enterprise.tetragon as the deployment renders it.
@@ -776,7 +821,7 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 		SchemaVersion: TetragonStatusSchemaVersion, Action: opts.Action,
 		KernelPolicy: kernelpolicy.Digest(), ApproveWith: "enforce_ack: " + kernelpolicy.Digest(),
 		Policies: []TetragonPolicy{}, Users: []TetragonUser{}, Overrides: []TetragonOverride{},
-		Recorded: []string{}, Orphaned: []string{}, Foreign: []string{},
+		Recorded: []string{}, Orphaned: []string{}, Foreign: []string{}, CustomerPolicies: []TetragonCustomerPolicy{},
 		Roots:    TetragonRoots{ObservedOnly: []TetragonObserved{}},
 		Warnings: []enterprisestatus.Message{}, Errors: []enterprisestatus.Message{},
 	}
@@ -842,8 +887,25 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 	intent, haveIntent := env.installedTetragonIntent()
 	running := l.helperRunning(ctx)
 	host := env.tetragonHost()
+	extra := env.readHelperExtras()
 	rep.fill(env, intent, haveIntent, state, running, host)
-	in := tetragonInputs{GOOS: env.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: running, Host: host, Extra: env.readHelperExtras()}
+	rep.fillCustomer(extra)
+	in := tetragonInputs{GOOS: env.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: running, Host: host, Extra: extra}
+	if !haveIntent {
+		in.Intent = tetragonIntentOf(nil, env.GOOS, nil)
+	}
+	now := env.Now()
+	rep.progress = map[int]burnInProgress{}
+	for _, user := range state.UIDs {
+		rep.progress[user.UID] = progressOf(user, state.BurnIn.UIDs[strconv.Itoa(user.UID)], now)
+	}
+	if opts.Action == TetragonActionStatus {
+		rep.next = statusNext(in, env.tetragonProbes(ctx), now)
+		if opts.User != "" && !rep.onlyUser(opts.User) {
+			rep.addError(codeInvalidArguments, "--user "+opts.User+" matches no enrolled user on this host"+parenthesized(enrolledNames(rep.Users)))
+			return finish(enterprisestatus.UnixExitInvalidArgs)
+		}
+	}
 	for _, finding := range tetragonFindings(in) {
 		if finding.Problem {
 			rep.addError(finding.Code, finding.Message)
@@ -865,6 +927,9 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool, state kernelpolicy.State, running bool, host tetragonHost) {
 	if !haveIntent {
 		intent = tetragonIntentOf(nil, env.GOOS, nil)
+	}
+	if rep.CustomerPolicies == nil {
+		rep.CustomerPolicies = []TetragonCustomerPolicy{}
 	}
 	rep.Intent = TetragonIntentView{
 		Valid: haveIntent, Configured: intent.Configured, Mode: intent.helperMode(), CapReason: intent.Reason,
@@ -1022,15 +1087,17 @@ type customerPolicyStatus struct {
 	State   string   `json:"state,omitempty"`
 	Sensors []string `json:"sensors,omitempty"`
 	Error   string   `json:"error,omitempty"`
-	// Counters are Tetragon's own action counters of the policy (post,
+	// Actions are Tetragon's own action counters of the policy (post,
 	// override, monitor_override, signal, ...): exact, for every process.
-	Counters map[string]uint64 `json:"counters,omitempty"`
+	Actions map[string]uint64 `json:"actions,omitempty"`
 	// Seen, Forwarded and Dropped count the policy's events the helper saw,
-	// forwarded (from AI agents) and did not forward (over the budget).
-	Seen      uint64    `json:"seen"`
-	Forwarded uint64    `json:"forwarded"`
-	Dropped   uint64    `json:"dropped"`
-	LastEvent time.Time `json:"last_event_at,omitempty"`
+	// forwarded and did not forward (over the budget); CappedLastHour those
+	// it did not forward in the last hour.
+	Seen           uint64    `json:"seen"`
+	Forwarded      uint64    `json:"forwarded"`
+	Dropped        uint64    `json:"dropped"`
+	CappedLastHour uint64    `json:"capped_last_hour"`
+	LastEvent      time.Time `json:"last_event_at,omitempty"`
 }
 
 // customerEventCounts are the helper's totals over the customer's policies.
@@ -1044,18 +1111,18 @@ type customerEventCounts struct {
 // blocked is how often Tetragon denied or killed for the policy: its
 // override, signal and notify_enforcer counters.
 func (p customerPolicyStatus) blocked() uint64 {
-	return p.Counters["override"] + p.Counters["signal"] + p.Counters["notify_enforcer"]
+	return p.Actions["override"] + p.Actions["signal"] + p.Actions["notify_enforcer"]
 }
 
 // enforcing reports whether the policy runs in Tetragon's enforce mode.
 func (p customerPolicyStatus) enforcing() bool { return strings.EqualFold(p.Mode, "enforce") }
 
 // dropped is how many events of the customer policy name the helper did not
-// forward, when it publishes the count.
+// forward in the last hour, when it publishes the count.
 func (x helperExtras) dropped(name string) int {
 	for _, policy := range x.CustomerPolicies {
 		if policy.Name == name {
-			return int(policy.Dropped)
+			return int(policy.CappedLastHour)
 		}
 	}
 	return 0
@@ -1066,7 +1133,7 @@ func (x helperExtras) dropped(name string) int {
 // helper that does not publish them gives none.
 func (e *Env) readHelperExtras() helperExtras {
 	var out helperExtras
-	data, err := readBounded(e.P(e.sensorDirs().StateFile()), 4<<20)
+	data, err := readBounded(e.sensorDirs().StateFile(), 4<<20)
 	if err != nil || json.Unmarshal(data, &out) != nil {
 		return helperExtras{}
 	}
@@ -1126,6 +1193,13 @@ type tetragonHost struct {
 	// the ownership check, its owner and its mode.
 	Path                                         string
 	UntrustedPath, UntrustedOwner, UntrustedPerm string
+	// MetricsAddress is the info file's metrics_address; MetricsKnown is
+	// false when the file does not carry it (Tetragon 1.6).
+	MetricsAddress string
+	MetricsKnown   bool
+	// HealthAddress is the health-server-address Tetragon's drop-in
+	// directory sets, when it sets one.
+	HealthAddress string
 }
 
 // tetragonHost reads Tetragon's info file (never its socket) and says
@@ -1140,12 +1214,19 @@ func (e *Env) tetragonHost() tetragonHost {
 		return tetragonHost{Installed: true, Verdict: "unreadable: " + err.Error()}
 	}
 	var info struct {
-		ServerAddress string `json:"server_address"`
+		ServerAddress  string  `json:"server_address"`
+		MetricsAddress *string `json:"metrics_address"`
 	}
 	if err := json.Unmarshal(data, &info); err != nil {
 		return tetragonHost{Installed: true, Verdict: "unreadable: " + err.Error()}
 	}
 	host := tetragonHost{Installed: true, Address: strings.TrimSpace(info.ServerAddress)}
+	if info.MetricsAddress != nil {
+		host.MetricsAddress, host.MetricsKnown = strings.TrimSpace(*info.MetricsAddress), true
+	}
+	if setting, err := readBounded(e.P(tetragonConfDir+"/health-server-address"), 4096); err == nil {
+		host.HealthAddress = strings.TrimSpace(string(setting))
+	}
 	path, ok := strings.CutPrefix(host.Address, "unix://")
 	switch {
 	case host.Address == "":
@@ -1177,7 +1258,185 @@ func (e *Env) tetragonHost() tetragonHost {
 	return host
 }
 
-// WriteTetragonReport prints a report: JSON, or the text summary.
+// fillCustomer copies the customer's own Tetragon policies into the report.
+func (rep *TetragonReport) fillCustomer(extra helperExtras) {
+	for _, policy := range extra.CustomerPolicies {
+		rep.CustomerPolicies = append(rep.CustomerPolicies, TetragonCustomerPolicy{
+			Name: policy.Name, Mode: policy.Mode, State: policy.State, Error: policy.Error, Events: policy.Seen,
+			Forwarded: policy.Forwarded, Dropped: policy.Dropped, Blocked: policy.blocked(), LastEvent: formatTime(policy.LastEvent),
+		})
+	}
+}
+
+// onlyUser narrows the report to one enrolled user, by name or uid: its
+// row, its observed sessions and its burn-in. It reports whether one
+// matched.
+func (rep *TetragonReport) onlyUser(who string) bool {
+	who = strings.TrimSpace(who)
+	uid, err := strconv.Atoi(who)
+	match := func(u TetragonUser) bool { return u.User == who || (err == nil && u.UID == uid) }
+	var kept []TetragonUser
+	for _, user := range rep.Users {
+		if match(user) {
+			kept = append(kept, user)
+		}
+	}
+	if len(kept) == 0 {
+		return false
+	}
+	rep.Users = kept
+	observed := []TetragonObserved{}
+	for _, o := range rep.Roots.ObservedOnly {
+		if o.UID == kept[0].UID {
+			observed = append(observed, o)
+		}
+	}
+	rep.Roots.ObservedOnly = observed
+	return true
+}
+
+// enrolledNames lists the enrolled users for a refusal.
+func enrolledNames(users []TetragonUser) string {
+	if len(users) == 0 {
+		return "no user is enrolled"
+	}
+	names := make([]string, 0, len(users))
+	for _, user := range users {
+		names = append(names, defaultStr(user.User, strconv.Itoa(user.UID)))
+	}
+	return "enrolled: " + strings.Join(names, ", ")
+}
+
+// statusNext is the Next: footer of status, from the readiness engine: what
+// fails for the mode this host runs, or how far it is from the next mode.
+func statusNext(in tetragonInputs, probes tetragonProbes, now time.Time) []string {
+	mode := in.Intent.helperMode()
+	if in.Intent.Reason == config.TetragonReasonPlaneCOff {
+		mode = in.Intent.Configured
+	}
+	if modeRank(mode) == 0 {
+		return nil
+	}
+	verify := func(args ...string) string {
+		return "  " + adminCommand(append([]string{"enterprise", "linux", "tetragon", "verify"}, args...)...)
+	}
+	current := tetragonReadiness(in, mode, probes, now)
+	if !current.Ready {
+		failed := 0
+		for _, check := range current.Checks {
+			if check.Status == checkFail {
+				failed++
+			}
+		}
+		return []string{fmt.Sprintf("Next: %d %s for %s. See:", failed, plural(failed, "check fails", "checks fail"), mode), verify()}
+	}
+	switch mode {
+	case config.TetragonModeConsume:
+		target := tetragonReadiness(in, config.TetragonModeObserve, probes, now)
+		if target.Ready {
+			return []string{"Next: this host is ready for observe. Check with:", verify("--ready-for", "observe")}
+		}
+		return []string{"Next: observe needs fixes first. See:", verify("--ready-for", "observe")}
+	case config.TetragonModeObserve, config.TetragonModeEnforce:
+		target := tetragonReadiness(in, config.TetragonModeEnforce, probes, now)
+		a := target.Approve
+		switch {
+		case !target.Ready:
+			return []string{"Next: enforce needs fixes first. See:", verify("--ready-for", "enforce")}
+		case mode == config.TetragonModeEnforce && a.State != "approved":
+			return []string{"Next: approve this build's kernel controls (enforce_ack). See:", verify("--ready-for", "enforce")}
+		case a.Users == 0:
+			return []string{"Next: no user is enrolled for the kernel controls yet. See:", verify("--ready-for", "enforce")}
+		}
+		sentence := fmt.Sprintf("Next: %d of %d %s %s ready", a.ReadyUsers, a.Users, plural(a.Users, "user", "users"), plural(a.ReadyUsers, "is", "are"))
+		if a.ReadyUsers < a.Users {
+			if eta, ok := nextReady(in.State, now); ok {
+				sentence += "; the next is ready in " + humanDuration(eta) + " of agent use"
+			}
+		}
+		return []string{sentence + ". Check with:", verify("--ready-for", "enforce")}
+	}
+	return nil
+}
+
+// userStateWords is a user's place in the rollout in words.
+func userStateWords(user TetragonUser, progress burnInProgress) string {
+	switch user.State {
+	case kernelpolicy.UIDEnforcing:
+		return "enforcing"
+	case kernelpolicy.UIDBurnIn:
+		if progress.Reset {
+			return "reset by a hit"
+		}
+		return "in burn-in"
+	case kernelpolicy.UIDInactive:
+		if user.Reason == kernelpolicy.ReasonNoAnchors {
+			return "no agent installed"
+		}
+	case kernelpolicy.UIDMonitor:
+		// In observe every user's burn-in accrues toward enforce.
+		if user.Reason == "observe mode" {
+			switch {
+			case progress.Ready:
+				return "ready for enforce"
+			case progress.Reset:
+				return "reset by a hit"
+			}
+			return "in burn-in"
+		}
+	}
+	reason := user.Reason
+	if words, ok := monitorReasonWords[reason]; ok {
+		reason = words
+	} else if words, ok := observedReasonWords[reason]; ok {
+		reason = words
+	}
+	if reason == "" {
+		return "monitor only"
+	}
+	return "monitor only: " + reason
+}
+
+// burnInWords is "40.5h of 168h (24%), ~9 days".
+func burnInWords(user TetragonUser, progress burnInProgress) string {
+	text := fmt.Sprintf("%.1fh of %sh", user.CoveredHours, trimHours(user.NeededHours))
+	switch {
+	case progress.Ready:
+		return text + ", ready"
+	case progress.NoAgent:
+		return text
+	}
+	text += fmt.Sprintf(" (%d%%)", progress.Percent)
+	switch {
+	case progress.Measuring:
+		text += ", measuring"
+	case progress.HasETA:
+		text += ", " + humanDuration(progress.ETA)
+	}
+	return text
+}
+
+// kernelControlsLine says where the approval of this build's controls
+// stands; it names the approval only in observe and enforce.
+func kernelControlsLine(rep *TetragonReport) string {
+	mode := rep.Intent.Mode
+	switch {
+	case mode != config.TetragonModeObserve && mode != config.TetragonModeEnforce:
+		return "not loaded (mode " + defaultStr(mode, config.TetragonModeConsume) + ")"
+	case mode == config.TetragonModeObserve:
+		return rep.KernelPolicy + ", in monitor mode; enforce_ack approves this digest"
+	}
+	switch rep.Intent.Approval {
+	case "approved":
+		return rep.KernelPolicy + ", approved"
+	case "stale":
+		return rep.KernelPolicy + ", enforce_ack is for another build (" + rep.Intent.EnforceAck + ")"
+	}
+	return rep.KernelPolicy + ", not approved yet (set enterprise.tetragon.enforce_ack to it)"
+}
+
+// WriteTetragonReport prints a report: JSON, or the text summary (lines
+// within 100 columns, except a copy-paste command).
 func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 	if asJSON {
 		encoder := json.NewEncoder(w)
@@ -1194,6 +1453,7 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 		}
 		return nil
 	}
+	label := func(name, value string) { fmt.Fprintf(w, "  %-17s%s\n", name+":", value) }
 	fmt.Fprintln(w, "Tetragon (managed Linux)")
 	agent := rep.Tetragon
 	tetragon := "not installed"
@@ -1214,8 +1474,8 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 			tetragon += fmt.Sprintf(", BPF LSM %t", *agent.LSM)
 		}
 	}
-	fmt.Fprintf(w, "  Tetragon:       %s\n", tetragon)
-	fmt.Fprintf(w, "  API socket:     %s%s\n", agent.Socket, prefixed(" at ", agent.ServerAddress))
+	label("Tetragon", tetragon)
+	label("API socket", agent.Socket+prefixed(" at ", agent.ServerAddress))
 	helper := "not running"
 	if rep.Helper.Running {
 		helper = "running"
@@ -1225,7 +1485,7 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 	} else {
 		helper += ", no state published yet"
 	}
-	fmt.Fprintf(w, "  Sensor helper:  %s\n", helper)
+	label("Sensor helper", helper)
 	mode := rep.Intent.Mode
 	if rep.Intent.CapReason != "" {
 		mode += fmt.Sprintf(" (configured %s, capped: %s)", rep.Intent.Configured, rep.Intent.CapReason)
@@ -1233,32 +1493,27 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 	if rep.Helper.EffectiveMode != "" && rep.Helper.EffectiveMode != rep.Intent.Mode {
 		mode += ", running as " + rep.Helper.EffectiveMode
 	}
-	fmt.Fprintf(w, "  Mode:           %s, burn-in %s\n", mode, rep.Intent.BurnIn)
-	fmt.Fprintf(w, "  Kernel policy:  %s (approve with %s)", rep.KernelPolicy, rep.ApproveWith)
-	switch rep.Intent.Approval {
-	case "approved":
-		fmt.Fprint(w, ", approved")
-	case "stale":
-		fmt.Fprintf(w, ", enforce_ack %s is stale", rep.Intent.EnforceAck)
-	case "missing":
-		fmt.Fprint(w, ", not approved yet")
+	mode += ", burn-in " + rep.Intent.BurnIn
+	if rep.Intent.CustomerEvents == config.TetragonCustomerEventsOff {
+		mode += ", your policies' events: off"
 	}
-	fmt.Fprintln(w)
+	label("Mode", mode)
+	label("Kernel controls", kernelControlsLine(rep))
 	if rep.Helper.KernelPolicy != "" && rep.Helper.KernelPolicy != rep.KernelPolicy {
-		fmt.Fprintf(w, "  Helper applies: %s\n", rep.Helper.KernelPolicy)
+		label("Helper applies", rep.Helper.KernelPolicy)
 	}
-	if rep.Pause != nil {
+	if p := rep.Pause; p != nil {
 		switch {
-		case rep.Pause.Invalid != "":
-			fmt.Fprintf(w, "  Pause:          in force (untrusted pause file: %s)\n", rep.Pause.Invalid)
-		case rep.Pause.UntilReboot:
-			fmt.Fprintf(w, "  Pause:          until the next reboot, set by uid %d at %s%s\n", rep.Pause.SetByUID, rep.Pause.SetAt, prefixed(": ", rep.Pause.Reason))
+		case p.Invalid != "":
+			label("Pause", "in force for every user on this host (untrusted pause file: "+p.Invalid+")")
+		case p.UntilReboot:
+			label("Pause", "until the next reboot, set by "+userLabel(p.SetByUID)+" at "+p.SetAt+prefixed(": ", p.Reason)+" (every user on this host)")
 		default:
-			fmt.Fprintf(w, "  Pause:          until %s, set by uid %d at %s%s\n", rep.Pause.Until, rep.Pause.SetByUID, rep.Pause.SetAt, prefixed(": ", rep.Pause.Reason))
+			label("Pause", "until "+p.Until+", set by "+userLabel(p.SetByUID)+" at "+p.SetAt+prefixed(": ", p.Reason)+" (every user on this host)")
 		}
 	}
 	for _, override := range rep.Overrides {
-		fmt.Fprintf(w, "  Override:       %s %s by an operator at %s\n", override.Family, override.Kind, override.At)
+		label("Override", override.Family+" "+override.Kind+" by an operator at "+override.At)
 	}
 	if len(rep.Policies) > 0 {
 		fmt.Fprintln(w, "  Policies:")
@@ -1271,22 +1526,7 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 		_ = table.Flush()
 	}
 	if len(rep.Users) > 0 {
-		fmt.Fprintln(w, "  Users:")
-		table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(table, "    USER\tSTATE\tCONNECTORS\tBURN-IN\tWOULD-BLOCK\tBLOCKED")
-		for _, user := range rep.Users {
-			name := fmt.Sprintf("uid %d", user.UID)
-			if user.User != "" {
-				name = fmt.Sprintf("%s (%d)", user.User, user.UID)
-			}
-			state := user.State
-			if user.Reason != "" {
-				state += " (" + user.Reason + ")"
-			}
-			fmt.Fprintf(table, "    %s\t%s\t%s\t%.1fh of %.1fh\t%s\t%s\n", name, state, defaultStr(strings.Join(user.Connectors, ","), "-"),
-				user.CoveredHours, user.NeededHours, hitsSummary(user.WouldBlock), hitsSummary(user.Blocked))
-		}
-		_ = table.Flush()
+		writeStatusUsers(w, rep)
 	}
 	if len(rep.Roots.ObservedOnly) > 0 {
 		count := 0
@@ -1295,12 +1535,22 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 		}
 		fmt.Fprintf(w, "  Observed, not enforced: %d session(s)\n", count)
 		for _, observed := range rep.Roots.ObservedOnly {
-			fmt.Fprintf(w, "    uid %d: %d %s%s\n", observed.UID, observed.Count, observed.Reason,
+			fmt.Fprintf(w, "    %s: %d, %s%s\n", userLabel(observed.UID), observed.Count, observedReason(observed.Reason),
 				parenthesized(strings.TrimSpace(observed.Connector+" "+observed.Identity)))
 		}
 	}
 	if rep.Roots.OverLimit > 0 {
 		fmt.Fprintf(w, "  Over the pid limit: %d live root(s) observed only\n", rep.Roots.OverLimit)
+	}
+	if len(rep.CustomerPolicies) > 0 {
+		fmt.Fprintln(w, "  Your Tetragon policies (DefenseClaw reads their events and never changes them):")
+		table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(table, "    NAME\tMODE\tSTATE\tEVENTS\tFORWARDED\tBLOCKED\tLAST")
+		for _, policy := range rep.CustomerPolicies {
+			fmt.Fprintf(table, "    %s\t%s\t%s\t%d\t%d\t%d\t%s\n", policy.Name, defaultStr(policy.Mode, "-"), defaultStr(policy.State, "-"),
+				policy.Events, policy.Forwarded, policy.Blocked, defaultStr(policy.LastEvent, "-"))
+		}
+		_ = table.Flush()
 	}
 	for _, warning := range rep.Warnings {
 		fmt.Fprintf(w, "  ! %s: %s\n", warning.Code, warning.Message)
@@ -1308,25 +1558,70 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 	for _, e := range rep.Errors {
 		fmt.Fprintf(w, "  ✗ %s: %s\n", e.Code, e.Message)
 	}
+	for _, line := range rep.next {
+		fmt.Fprintln(w, line)
+	}
 	return nil
 }
 
-func hitsSummary(hits []TetragonHits) string {
-	if len(hits) == 0 {
-		return "0"
+// writeStatusUsers prints the users table and up to three hit details per
+// user under it (the JSON keeps all).
+func writeStatusUsers(w io.Writer, rep *TetragonReport) {
+	fmt.Fprintln(w, "  Users:")
+	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "    USER\tSTATE\tCONNECTORS\tBURN-IN\tHITS")
+	for _, user := range rep.Users {
+		hits := 0
+		for _, hit := range append(append([]TetragonHits{}, user.WouldBlock...), user.Blocked...) {
+			hits += hit.Count
+		}
+		progress := rep.progress[user.UID]
+		fmt.Fprintf(table, "    %s\t%s\t%s\t%s\t%d\n", statusUserLabel(user), userStateWords(user, progress),
+			defaultStr(strings.Join(user.Connectors, ","), "-"), burnInWords(user, progress), hits)
 	}
-	parts := make([]string, 0, len(hits))
+	_ = table.Flush()
+	for _, user := range rep.Users {
+		details := append(hitLines("would block", user.WouldBlock, user.UID), hitLines("blocked", user.Blocked, user.UID)...)
+		for i, lines := range details {
+			if i == 3 {
+				fmt.Fprintf(w, "      %s: and %d more (see --json)\n", statusUserLabel(user), len(details)-3)
+				break
+			}
+			fmt.Fprintf(w, "      %s: %s\n", statusUserLabel(user), lines[0])
+			if lines[1] != "" {
+				fmt.Fprintf(w, "        %s\n", lines[1])
+			}
+		}
+	}
+}
+
+func statusUserLabel(user TetragonUser) string {
+	if user.User != "" {
+		return fmt.Sprintf("%s (%d)", user.User, user.UID)
+	}
+	return fmt.Sprintf("uid %d", user.UID)
+}
+
+// hitLines are, per control, "would block ssh_private_key_read 1x, last <t>"
+// and "~/.ssh/id_ed25519 by /usr/bin/cat" (the most frequent path and
+// binary).
+func hitLines(kind string, hits []TetragonHits, uid int) [][2]string {
+	var out [][2]string
 	for _, hit := range hits {
-		part := fmt.Sprintf("%s %d", strings.TrimPrefix(hit.Control, "kernel."), hit.Count)
+		line := fmt.Sprintf("%s %s %dx", kind, strings.TrimPrefix(hit.Control, "kernel."), hit.Count)
+		if hit.Last != "" {
+			line += ", last " + hit.Last
+		}
+		where := ""
 		if len(hit.Paths) > 0 {
-			part += " " + hit.Paths[0].Value
+			where = homeRelative(hit.Paths[0].Value, uid)
 		}
 		if len(hit.Binaries) > 0 {
-			part += " by " + hit.Binaries[0].Value
+			where = strings.TrimSpace(where + " by " + hit.Binaries[0].Value)
 		}
-		parts = append(parts, part)
+		out = append(out, [2]string{line, where})
 	}
-	return strings.Join(parts, "; ")
+	return out
 }
 
 func defaultStr(value, fallback string) string {

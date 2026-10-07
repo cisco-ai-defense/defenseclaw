@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cisco-ai-defense.github.io/defenseclaw/schemas/tetragon-verify.schema.json",
+  "title": "defenseclaw-gateway enterprise linux tetragon verify [--ready-for MODE] --json",
+  "description": "Whether this host is ready for a Tetragon mode: the mode its config asks for, or the one --ready-for names. Read from the installed config, the sensor helper's published state, Tetragon's info file, /sys/kernel/security/lsm and the unit states; the command changes nothing and never connects to Tetragon. ok and exit_code 0 mean no check failed; warn and info checks never fail it. Additive changes keep schema_version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "action", "ok", "exit_code", "mode", "ready_for", "ready", "kernel_policy", "checks", "users", "next", "errors"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "action": { "const": "verify" },
+    "ok": { "type": "boolean" },
+    "exit_code": { "type": "integer" },
+    "mode": { "description": "The mode this host runs as its config renders it (empty when the command stopped before it read the config).", "enum": ["", "off", "consume", "observe", "enforce"] },
+    "ready_for": { "enum": ["", "off", "consume", "observe", "enforce"] },
+    "ready": { "type": "boolean", "description": "No check failed." },
+    "kernel_policy": { "$ref": "#/$defs/digest", "description": "The kernel-control digest this build ships: the value enforce_ack approves, the same on every host of the build." },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "message", "fix"],
+        "properties": {
+          "id": {
+            "enum": [
+              "tetragon.installed", "tetragon.running", "tetragon.api", "tetragon.socket", "tetragon.version", "tetragon.stream",
+              "tetragon.keep_sensors_on_exit", "kernel.bpf_lsm", "tetragon.metrics_loopback", "tetragon.health_loopback",
+              "defenseclaw.plane_c", "defenseclaw.agents", "defenseclaw.connectors_action", "defenseclaw.approval",
+              "defenseclaw.burn_in", "defenseclaw.pause", "defenseclaw.overrides", "defenseclaw.orphans", "tetragon.your_policies"
+            ]
+          },
+          "status": { "enum": ["pass", "fail", "warn", "info", "skip"] },
+          "message": { "type": "string" },
+          "fix": { "$ref": "#/$defs/strings", "description": "Copy-paste lines: commands as root runs them, or YAML for the admin config." }
+        }
+      }
+    },
+    "users": {
+      "type": "array",
+      "description": "With ready_for enforce: each enrolled user's burn-in on this host.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["uid", "state", "covered_hours", "needed_hours", "percent", "ready", "reset", "measuring", "hits"],
+        "properties": {
+          "uid": { "type": "integer" },
+          "user": { "type": "string" },
+          "state": { "type": "string", "description": "The sensor helper's state of the user: enforcing, burn_in, monitor or inactive." },
+          "covered_hours": { "type": "number" },
+          "needed_hours": { "type": "number" },
+          "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "ready": { "type": "boolean" },
+          "reset": { "type": "boolean", "description": "A would-block hit restarted the burn-in window." },
+          "measuring": { "type": "boolean", "description": "The window is younger than 24h, so there is no ETA yet." },
+          "eta_hours": { "type": "number", "description": "Calendar hours until ready at the user's rate of agent use so far." },
+          "hits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["control", "count"],
+              "properties": {
+                "control": { "type": "string" },
+                "count": { "type": "integer" },
+                "path": { "type": "string", "description": "The most frequent path, home-relative (~/...) for the user's own files." },
+                "binary": { "type": "string" },
+                "last": { "$ref": "#/$defs/time" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "approve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "digest", "enforce_ack", "ready_users", "users"],
+      "properties": {
+        "state": { "enum": ["not_needed", "missing", "stale", "approved"] },
+        "digest": { "$ref": "#/$defs/digest" },
+        "enforce_ack": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{12}(,sha256:[0-9a-f]{12}){0,3})$" },
+        "ready_users": { "type": "integer" },
+        "users": { "type": "integer" }
+      }
+    },
+    "next": { "$ref": "#/$defs/strings" },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message"],
+        "properties": { "code": { "type": "string" }, "message": { "type": "string" } }
+      }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{12}$" },
+    "time": { "type": "string", "format": "date-time" },
+    "strings": { "type": "array", "items": { "type": "string" } }
+  }
+}

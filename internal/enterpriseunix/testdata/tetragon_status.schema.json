@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "action", "ok", "exit_code", "kernel_policy", "approve_with", "intent", "helper", "tetragon",
-    "policies", "users", "roots", "overrides", "recorded", "orphaned", "foreign", "warnings", "errors"
+    "policies", "users", "roots", "overrides", "recorded", "orphaned", "foreign", "customer_policies", "warnings", "errors"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -156,6 +156,27 @@
     "recorded": { "$ref": "#/$defs/policyNames" },
     "orphaned": { "$ref": "#/$defs/policyNames" },
     "foreign": { "$ref": "#/$defs/strings" },
+    "customer_policies": {
+      "type": "array",
+      "description": "Your own Tetragon policies as the sensor helper last listed them (at most 64). DefenseClaw reads their events and never changes them.",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "events", "forwarded", "dropped", "blocked"],
+        "properties": {
+          "name": { "type": "string" },
+          "mode": { "type": "string" },
+          "state": { "type": "string" },
+          "error": { "type": "string" },
+          "events": { "type": "integer", "minimum": 0, "description": "Events of the policy the sensor helper saw." },
+          "forwarded": { "type": "integer", "minimum": 0, "description": "Events from AI agents it forwarded, attributed to the agent, the user and the hook decision." },
+          "dropped": { "type": "integer", "minimum": 0, "description": "Events from AI agents it did not forward (over the per-policy budget)." },
+          "blocked": { "type": "integer", "minimum": 0, "description": "How often Tetragon denied or killed for the policy (its override, signal and notify_enforcer counters)." },
+          "last_event_at": { "$ref": "#/$defs/time" }
+        }
+      }
+    },
     "changes": { "$ref": "#/$defs/strings" },
     "warnings": { "$ref": "#/$defs/messages" },
     "errors": { "$ref": "#/$defs/messages" }

@@ -25,7 +25,7 @@ import (
 // the lifecycle's invalid-arguments exit code.
 func TestUnixTetragonCommandTree(t *testing.T) {
 	want := enterprisestatus.InvalidArgsExitCode(runtime.GOOS)
-	for _, action := range []string{"status", "pause", "resume"} {
+	for _, action := range []string{"verify", "status", "pause", "resume"} {
 		cmd, _, err := rootCmd.Find([]string{"enterprise", "linux", "tetragon", action})
 		if err != nil || cmd == nil || cmd.Name() != action || cmd.Flags().Lookup("json") == nil {
 			t.Fatalf("enterprise linux tetragon %s: %v", action, err)
@@ -70,5 +70,23 @@ func TestUnixTetragonCommandTree(t *testing.T) {
 	}
 	if usage := pause.Flags().Lookup("for").Usage; !strings.Contains(usage, "default 4h, at most 7d") {
 		t.Fatalf("--for usage %q", usage)
+	}
+
+	verify, _, _ := rootCmd.Find([]string{"enterprise", "linux", "tetragon", "verify"})
+	if verify.Flags().Lookup("ready-for") == nil || verify.Flags().Lookup("user") != nil {
+		t.Fatal("tetragon verify takes --ready-for only")
+	}
+	for _, mode := range []string{"consume", "observe", "Enforce"} {
+		var got string
+		if err := (&readyForValue{mode: &got}).Set(mode); err != nil || got != strings.ToLower(mode) {
+			t.Fatalf("--ready-for %s = %q, %v", mode, got, err)
+		}
+	}
+	if !strings.Contains(plainFlagValueError(verify.ParseFlags([]string{"--ready-for=off"})), "--ready-for takes consume, observe or enforce") {
+		t.Fatal("--ready-for=off has no plain message")
+	}
+	status, _, _ := rootCmd.Find([]string{"enterprise", "linux", "tetragon", "status"})
+	if status.Flags().Lookup("user") == nil || status.Flags().Lookup("ready-for") != nil {
+		t.Fatal("tetragon status takes --user")
 	}
 }
