@@ -102,9 +102,13 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 			facts.Directory, facts.Source = known.directory, known.source
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
 			if domain != "" && known.directory == useridentity.DirectoryEntraID {
-				// The aad and himmelblau modules name an Entra ID account by
-				// its UPN. It has no Kerberos realm, and the UPN is the
-				// principal Windows reports for the same user.
+				// The aad module, and Himmelblau with cn_name_mapping =
+				// false, name an Entra ID account by its UPN. It has no
+				// Kerberos realm, and the UPN is the principal Windows
+				// reports for the same user. Himmelblau's default
+				// (cn_name_mapping = true) names it by the short name, which
+				// carries no domain: such an account has no UPN here
+				// (GAP-0328).
 				facts.Domain = strings.ToLower(domain)
 				facts.UPN = useridentity.NormalizeUPN(account.Name)
 				facts.Principal = facts.UPN

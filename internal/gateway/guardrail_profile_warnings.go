@@ -29,6 +29,9 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
+	if note := entraShortNameNote(set, subject); note != "" {
+		warnings = append(warnings, note)
+	}
 	if note := unnamedGroupsNote(subject); note != "" {
 		warnings = append(warnings, note)
 	}
@@ -254,6 +257,28 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 		qualified := firstNonEmpty(subject.UPN, subject.Principal, subject.UserID)
 		return fmt.Sprintf("assignment %d selects this account by the short name %q, so it selects a local account of that name too; "+
 			"write %s (or the uid) to select only this account", decision.Assignment, entry, qualified)
+	}
+	return ""
+}
+
+// entraShortNameNote says when the host names an Entra ID account by its
+// short name and reports no UPN for it (Himmelblau's default
+// cn_name_mapping = true) while an assignment lists users by UPN: no such
+// entry can select an account of this host (GAP-0328).
+func entraShortNameNote(set *guardrailProfileSet, subject *profileSubject) string {
+	if set == nil || subject == nil || subject.LookupFailed || subject.Directory != useridentity.DirectoryEntraID ||
+		subject.UPN != "" || strings.Contains(subject.UserName, "@") {
+		return ""
+	}
+	for i, assignment := range set.assignments {
+		for _, entry := range assignment.Match.Users {
+			if entry = strings.TrimSpace(entry); strings.Contains(entry, "@") {
+				return fmt.Sprintf("this host names the Entra ID account %q by its short name and reports no UPN for it, so a users entry "+
+					"written as a UPN (assignment %d: %q) cannot select it; with Himmelblau, set cn_name_mapping = false in "+
+					"/etc/himmelblau/himmelblau.conf to name accounts by their UPN, or name the account by its short name or uid",
+					subject.UserName, i+1, entry)
+			}
+		}
 	}
 	return ""
 }
