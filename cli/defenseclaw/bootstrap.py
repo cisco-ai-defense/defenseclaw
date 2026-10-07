@@ -55,6 +55,7 @@ from defenseclaw.connector_paths import (
     opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config, PerConnectorGuardrailConfig
@@ -112,15 +113,6 @@ class StepResult:
         }
 
 
-# ``init --sandbox`` is accepted so existing automation keeps working; the
-# legacy openshell-sandbox (0.0.x) standalone mode it drove was removed.
-SANDBOX_FLAG_DEPRECATION = (
-    "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
-    "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
-    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
-)
-
-
 @dataclass
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
@@ -134,7 +126,6 @@ class FirstRunOptions:
     with_judge: bool = False
     judge_hook_connectors: list[str] | None = None
     skip_install: bool = False
-    sandbox: bool = False
     start_gateway: bool = False
     verify: bool = True
     force: bool = False
@@ -654,8 +645,8 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 StepResult(
                     "Config",
                     "fail",
-                    "configuration schema v8 is required",
-                    "defenseclaw upgrade",
+                    "the configuration was written by an older DefenseClaw",
+                    "defenseclaw migrate",
                 )
             )
             return FirstRunReport(
@@ -665,7 +656,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 connector=connector,
                 profile=profile,
                 setup=setup,
-                next_commands=["defenseclaw upgrade"],
+                next_commands=["defenseclaw migrate"],
                 connector_mode_warnings=connector_mode_warnings,
             )
     try:
@@ -946,16 +937,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
         rollback_first_run_transaction = any(step.status == "fail" for step in setup)
         setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
-
-        if options.sandbox:
-            setup.append(
-                StepResult(
-                    "Sandbox",
-                    "warn",
-                    SANDBOX_FLAG_DEPRECATION,
-                    "defenseclaw sandbox legacy-cleanup --dry-run",
-                )
-            )
 
         if options.start_gateway:
             gateway_step = _start_gateway_structured(
@@ -1612,8 +1593,8 @@ def _valid_env_name(value: str) -> bool:
 
 def _scanner_availability(cfg: Config) -> list[StepResult]:
     scanners = [
-        ("Skill scanner", cfg.scanners.skill_scanner.binary, "defenseclaw setup skill-scanner"),
-        ("MCP scanner", cfg.scanners.mcp_scanner.binary, "defenseclaw setup mcp-scanner"),
+        ("Skill scanner", SKILL_SCANNER_BINARY, "defenseclaw setup skill-scanner"),
+        ("MCP scanner", MCP_SCANNER_BINARY, "defenseclaw setup mcp-scanner"),
     ]
     out: list[StepResult] = []
     for label, binary, next_command in scanners:

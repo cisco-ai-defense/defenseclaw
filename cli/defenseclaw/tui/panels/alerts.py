@@ -235,6 +235,13 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
 
     severity = (row.severity or "INFO").strip().upper()
     if row.bucket == "security.finding":
+        if row.event_name.startswith("legacy.audit."):
+            # A legacy finding action a current gateway files as a compat row
+            # (tool-result-pii-alert, connector-hook-tampered, ...).
+            return (
+                (row.action or "").strip().lower() in ALERT_LEGACY_FINDING_ACTIONS
+                and severity in _V8_FINDING_SEVERITIES
+            )
         return (
             row.event_name == "finding.observed"
             and severity in _V8_FINDING_SEVERITIES

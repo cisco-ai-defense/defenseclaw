@@ -25,13 +25,15 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
 // The config writers (configwrite.Apply and `config-v8 validate`, which the
 // Python writer runs) check a candidate's rule-pack references with the
 // loader a generation build uses, so a rule_pack that resolves to no pack, a
 // custom pack whose digest does not match, or an unknown rule ID or
-// protection in guardrail.rules is refused before it is written.
+// protection in guardrail.rules is refused before it is written. On a managed
+// standalone host so is a signature pack that does not match its pin.
 func init() { config.RegisterCandidateAssetCheck(checkCandidateAssets) }
 
 func checkCandidateAssets(cfg *config.Config) error {
@@ -68,6 +70,9 @@ func checkCandidateAssets(cfg *config.Config) error {
 				return err
 			}
 		}
+	}
+	if err := inventory.CheckSignaturePackPins(cfg); err != nil {
+		return err
 	}
 	return checkCandidateWebhooks(cfg)
 }

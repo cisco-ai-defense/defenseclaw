@@ -85,7 +85,7 @@ def test_observability_plan_skips_after_config_validation_failed(tmp_path: Path)
     r = _DoctorResult()
     r.record("fail", "Config validation", "line 2: ...", check_id="doctor.config.canonical-v8")
     _check_observability(SimpleNamespace(data_dir=str(tmp_path)), r)
-    row = next(c for c in r.checks if c["label"] == "Observability v8 effective plan")
+    row = next(c for c in r.checks if c["label"] == "Observability plan")
     assert row["status"] == "skip"
     assert "Config validation row" in row["detail"]
     assert r.failed == 1

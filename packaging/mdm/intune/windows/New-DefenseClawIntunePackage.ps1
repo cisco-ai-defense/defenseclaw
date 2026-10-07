@@ -16,7 +16,7 @@
     given, wraps the folder into a .intunewin.
 
     Never put credentials in config.yaml: the Win32 app content is not secret
-    storage. Deliver the AI Defense key separately (see intune/windows.md).
+    storage. Deliver the AI Defense key separately (see the Intune on Windows page in the docs).
 
 .EXAMPLE
     ./New-DefenseClawIntunePackage.ps1 -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe -Sha256 <pin> `

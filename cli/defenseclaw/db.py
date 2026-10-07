@@ -265,15 +265,6 @@ _ACTIONABLE_EVENT_WHERE = """(
         )
     )
 )"""
-_ALERT_EVENT_ELIGIBILITY_SQL = """(
-    bucket IS NULL
-    OR (bucket = 'security.finding' AND event_name = 'finding.observed')
-    OR (
-        action = 'connector-hook'
-        AND COALESCE(enforced, 0) = 1
-        AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
-    )
-)"""
 
 
 def _validate(field: str, value: str) -> None:
@@ -1132,9 +1123,18 @@ class Store:
                 bucket IS NULL
                 AND ({legacy_finding} OR {legacy_explicit})
             )"""
+            # A current gateway files the legacy finding actions (for example
+            # tool-result-pii-alert) under security.finding with a
+            # legacy.audit.* event name, so they are alerts like the
+            # bucket-less rows older gateways wrote.
+            compat_finding = f"""(
+                bucket = 'security.finding'
+                AND event_name LIKE 'legacy.audit.%'
+                AND {legacy_finding}
+            )"""
             eligible = (
                 f"({finding} OR {canonical_action} OR {connector_hook} "
-                f"OR {health_failure} OR {legacy})"
+                f"OR {health_failure} OR {legacy} OR {compat_finding})"
             )
         else:
             eligible = f"({legacy_finding} OR {legacy_explicit})"

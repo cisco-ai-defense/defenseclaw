@@ -89,7 +89,7 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --connector 
 | Key | Meaning |
 | --- | --- |
 | `description` | Free text for operators. |
-| `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. |
+| `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. The hooks of a sandboxed agent always enforce, whatever `mode` says. |
 | `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. When unset, the rule pack's level applies. |
 | `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, stored in upper case) for [human approval](/docs/hitl). |
 | `rule_pack` | A rule pack for this profile: `default`, `strict`, `permissive` or a `guardrail.custom_packs` name. |
@@ -116,7 +116,7 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 
 | Key | Matches | Spell it as |
 | --- | --- | --- |
-| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. macOS: the group name `id -Gn` prints. |
+| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: the group name `id -Gn` prints. |
 | `users` | The verified user | A uid or SID, the account name, or the principal or UPN (`alice@CORP.EXAMPLE.COM`). |
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
@@ -184,11 +184,17 @@ than one key, the reason names the most specific key, in the order
 
 ## Only verified facts select a profile
 
-The subject of a profile decision is the user the kernel or a per-user
-credential proved, with the directory facts the gateway resolved for that
-user from the operating system. An agent in a sandbox counts as the user who
-started the sandbox, with the same facts and refresh as that user's other
-agents. **Identity headers, hook payloads and claimed
+The subject of a profile decision is the user the gateway authenticated the
+request as, with the directory facts it resolved for that user from the
+operating system: the hook socket's peer, a per-user credential or, for
+ACP, the user's enterprise ACP credential on standalone enterprise, and the
+account the gateway runs as on a per-user install (see
+[how the gateway learns who called](/docs/enterprise/identity-sources#how-the-gateway-learns-who-called)).
+An agent in a sandbox counts as the user who started the sandbox, with the
+same facts and refresh as that user's other agents, and its hooks always
+enforce (see
+[sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents)).
+**Identity headers, hook payloads and claimed
 facts never reach the matcher.** A user who forges a header, sets
 `KRB5CCNAME`, edits a local file or overrides a config directory cannot move
 to a weaker profile.
@@ -319,13 +325,24 @@ connector it serves and to that connector's install for the user the gateway
 runs as, so an OpenClaw or ZeptoClaw install appears in
 `defenseclaw agent identities` after its first proxied request.
 
+A pin names one install, so keep three things in mind:
+
+- Sub-agents share the agent's `agt-`, so one pin covers the agent and its
+  sub-agents.
+- If the connector's config root moves, the install gets a new `agt-` and the
+  old pin matches nothing. List the identities again.
+- A sandboxed agent has its own `agt-` per sandbox, so pinning the host
+  install does not pin a sandboxed run. See
+  [sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents).
+
 ## Try it and read the result
 
 ### Ask the gateway
 
 `explain` asks the running gateway, which resolves the user through the OS
 the way it does for a live request. With no `--user` it explains the account
-that runs the command.
+that runs the command. On Windows, name an Entra ID user by SID or as
+`AzureAD\<name>`: the computer cannot look up a UPN.
 
 ```bash
 defenseclaw guardrail profile show contractors
@@ -347,7 +364,7 @@ with the subject and the effective settings. `guardrail status`, `status` and
 
 ### Read the decision record
 
-Every hook and LLM proxy decision carries the profile and the reason:
+Every hook, ACP and LLM proxy decision carries the profile and the reason:
 
 | Attribute | Meaning |
 | --- | --- |

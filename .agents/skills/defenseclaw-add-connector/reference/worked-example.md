@@ -81,7 +81,7 @@ Record these, with the source for each, in the contract `Notes` and in the corre
    - `copilot_agent_dirs`;
    - `copilot_mcp_config_files`, `_copilot_mcp_servers`;
    - `copilot_instruction_paths`, `_copilot_workspace_ancestors`;
-   - plus the `KNOWN_CONNECTORS` and `HOOK_ONLY_CONNECTORS` entries.
+   - plus the `KNOWN_CONNECTORS` entry.
 3. **Python inventory and skills.** `cli/defenseclaw/inventory/claw_inventory.py` has the Copilot MCP filter in `_collect_mcp_config_files`. `cli/defenseclaw/skill_discovery.py` handles Copilot commands. `cli/defenseclaw/codeguard_skill.py` handles the CodeGuard install target.
 4. **Plugins.** `cli/defenseclaw/commands/cmd_plugin.py`: `_list_copilot_plugins` runs the trusted Copilot binary (`_trusted_copilot_binary`) instead of reading directories.
 

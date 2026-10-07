@@ -254,7 +254,8 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
         load_validate_v8(f"config_version: 8\n{legacy}\n")
 
     assert captured.value.keyword in {"additionalProperties", "oneOf"}
-    assert "run defenseclaw upgrade" in str(captured.value)
+    # An upgrade cannot fix a released key left in a current file.
+    assert "run defenseclaw upgrade" not in str(captured.value)
 
 
 def test_v9_schema_refusals_say_v9() -> None:
@@ -293,7 +294,7 @@ def test_v9_names_the_replacement_of_a_removed_v8_key(removed: str, path: str, t
     assert captured.value.keyword == "legacy-key-forbidden"
     message = str(captured.value)
     assert f"use {target}" in message
-    assert "invalid v9 configuration" in message
+    assert "invalid configuration" in message and "invalid v9" not in message
     assert "defenseclaw upgrade" not in message
 
 
@@ -586,11 +587,11 @@ def test_resource_attribute_aggregate_boundary() -> None:
 @pytest.mark.parametrize(
     ("attributes", "message"),
     [
-        ({"custom.label": ""}, "canonical v8 schema"),
+        ({"custom.label": ""}, "configuration schema"),
         ({"custom.label": " \u00a0 "}, "nonblank"),
         ({"custom.label": "line\nvalue"}, "control characters"),
         ({"custom.label": "\ud800"}, "valid UTF-8"),
-        ({"custom/label": "value"}, "canonical v8 schema"),
+        ({"custom/label": "value"}, "configuration schema"),
         ({"defenseclaw.instance.id": "value"}, "process-owned"),
         ({"defenseclaw.preset": "generic-otlp"}, "process-owned"),
         (
@@ -880,7 +881,16 @@ observability:
 """
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8(wrong_kind)
-    assert captured.value.keyword == "oneOf"
+    # GAP-0186: the problem inside the chosen shape, not every shape's key list.
+    assert captured.value.keyword == "additionalProperties"
+    assert captured.value.path.endswith("destinations[0].logger_name")
+
+    unknown_kind = wrong_kind.replace("http_jsonl", "carrier_pigeon")
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(unknown_kind)
+    assert captured.value.path.endswith("destinations[0].kind")
+    assert captured.value.corrective_action == "use one of jsonl, console, prometheus, splunk_hec, http_jsonl, otlp"
+    assert len(str(captured.value)) < 200
 
 
 def test_compatibility_adapter_fields_enforce_utf8_byte_bounds() -> None:

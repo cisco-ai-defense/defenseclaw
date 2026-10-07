@@ -333,8 +333,8 @@ func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 
 // loadGatewayConfigV8 strict-parses and compiles the exact source snapshot
 // before the general Config decoder sees it. The target gateway therefore
-// never decodes a pre-v8 source; `defenseclaw migrate` converts a released
-// 0.8.x config once, and this runtime refuses what it has not converted.
+// never decodes an unconverted 0.8.x source; `defenseclaw migrate` converts a
+// released config once, and this runtime refuses what it has not converted.
 func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, error) {
 	loaded, err := loadConfigV8File(path, config.DefaultDataPath())
 	if err != nil {
@@ -353,7 +353,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 		return nil, nil, err
 	}
 	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
-		return nil, nil, fmt.Errorf("schema v8 is required; run 'defenseclaw migrate' first")
+		return nil, nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	// The managed-mode environment policy (envvars.Lookup) follows the
 	// loaded config: on a standalone enterprise host ignore-listed variables
@@ -371,7 +371,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 // loadGatewayConfigV8 so strict parsing always precedes Config decoding.
 func prepareObservabilityV8Startup(c *config.Config) (*observabilityV8Startup, error) {
 	if c == nil || !config.CurrentSchemaVersion(c.ConfigVersion) {
-		return nil, fmt.Errorf("schema version 8 is required")
+		return nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	sourceName := strings.TrimSpace(c.ConfigFilePath)
 	if sourceName == "" {
@@ -458,6 +458,7 @@ func ExecuteContext(ctx context.Context) int {
 	}
 	addManagedWindowsSetupAnswer(rootCmd)
 	addManagedHostHelp(rootCmd)
+	dropEnterpriseIdentityViewsOnSecureClient(rootCmd)
 	installUsageArgChecks(rootCmd)
 	pendingUnknownSubcommand = nil
 	err := rootCmd.ExecuteContext(ctx)
@@ -583,9 +584,10 @@ func dotEnvKeyIsProcessControl(key string) bool {
 		"CURL_CA_BUNDLE",
 		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
 		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
-		// The profile pin comes only from the service definition; a
-		// writable .env must not move a service onto another profile.
-		managed.EnterpriseProfileEnv,
+		// The deployment mode and profile pins come only from the service
+		// definition; a writable .env must not make an unmanaged host
+		// invalid or move a service onto another mode or profile.
+		managed.DeploymentModeEnv, managed.EnterpriseProfileEnv,
 		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
 		"DEFENSE" + "CLAW_DISABLE_REDACTION", "DEFENSECLAW_DUMP_RAW_SECRETS",
 		"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",

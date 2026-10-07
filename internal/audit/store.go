@@ -1803,80 +1803,12 @@ var migrations = []migration{
 		apply:       migrateFindingLifecycleState,
 	},
 	{
-		description: "guardrails: bind bounded chain enforcement to opaque resource lineage",
-		apply:       migrateToolChainLineageState,
-	},
-	{
-		description: "guardrails: bind transformed artifact chains to opaque derived lineage",
-		apply:       migrateToolChainDerivedLineageState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to nine result slots",
-		apply:       migrateToolChainExpandedCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to ten result slots",
-		apply:       migrateToolChainTenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to eleven result slots",
-		apply:       migrateToolChainElevenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to twelve result slots",
-		apply:       migrateToolChainTwelveSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to thirteen result slots",
-		apply:       migrateToolChainThirteenSlotCatalogState,
-	},
-	{
-		description: "guardrails: widen bounded chain masks and add result slots fourteen through seventeen",
-		apply:       migrateToolChainFourteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
-		apply:       migrateToolChainEighteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add result slots nineteen and twenty with bounded exact-value lineage",
-		apply:       migrateToolChainTwentySlotValueLineageState,
-	},
-	{
-		description: "guardrails: reserve append-only bounded chain mask capacity",
-		apply:       migrateToolChainAppendOnlyMaskCapacity,
-	},
-	{
 		description: "guardrails: bind pending SQL value sources to authoritative results",
 		apply:       migrateToolChainSQLValueSourceState,
 	},
 	{
-		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
-		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-two for compromised credential authentication",
-		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
-	},
-	{
 		description: "guardrails: bind pending credential sources to authoritative results",
 		apply:       migrateToolChainReturnedCredentialSourceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
-		apply:       migrateToolChainTwentyThreeSlotADCSState,
-	},
-	{
-		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
-		apply:       migrateToolChainTwentyFourSlotS4UState,
-	},
-	{
-		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
-		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
-	},
-	{
-		description: "guardrails: add result slot twenty-six for exact file-email lineage",
-		apply:       migrateToolChainTwentySixSlotFileEmailState,
 	},
 }
 
@@ -3571,6 +3503,10 @@ func connectorEnforcedAlertSQL() string {
 	)`
 }
 
+// alertEligibilitySQL is the one alert-queue predicate. The legacy finding
+// actions are alerts when their severity is real, whether an older gateway
+// wrote them without a bucket or a current one files them under
+// security.finding with a legacy.audit.* event name (GAP-0187).
 func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	findingTagsPath := `$."defenseclaw.finding.tags"`
 	canonicalOutcome := canonicalAlertOutcomeSQL()
@@ -3618,15 +3554,20 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
 		)
 		OR (
-			event.bucket IS NULL
+			event.action IN (` + legacyActionPlaceholders + `)
+			AND UPPER(COALESCE(event.severity,'')) IN
+				('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
 			AND (
-				(
-					event.action IN (` + legacyActionPlaceholders + `)
-					AND UPPER(COALESCE(event.severity,'')) IN
-						('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+				event.bucket IS NULL
+				OR (
+					event.bucket = 'security.finding'
+					AND event.event_name LIKE 'legacy.audit.%'
 				)
-				OR ` + legacyExplicit + `
 			)
+		)
+		OR (
+			event.bucket IS NULL
+			AND ` + legacyExplicit + `
 		)
 	)`
 }

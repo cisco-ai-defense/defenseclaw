@@ -173,7 +173,7 @@ def test_unmodeled_key_edit_is_dropped_by_save_which_is_why_it_is_read_only(tmp_
 
 
 def test_guardrail_rule_pack_keeps_a_custom_pack_untouched() -> None:
-    cfg = {"guardrail": {"enabled": True, "rule_pack_dir": "/packs/MyPack"}}
+    cfg = {"guardrail": {"enabled": True, "rule_pack": "MyPack"}}
     fields = list(guardrail_wizard_fields(cfg))
     assert wizard_field_value(fields, "Rule Pack") == "custom (MyPack)"
     args = build_wizard_args(SetupWizard.GUARDRAIL, fields, cfg)
@@ -186,7 +186,7 @@ def test_guardrail_rule_pack_keeps_a_custom_pack_untouched() -> None:
 
 
 def test_guardrail_rule_pack_preset_is_shown_as_is() -> None:
-    cfg = {"guardrail": {"enabled": True, "rule_pack_dir": "/packs/strict"}}
+    cfg = {"guardrail": {"enabled": True, "rule_pack": "strict"}}
     fields = guardrail_wizard_fields(cfg)
     assert wizard_field_value(fields, "Rule Pack") == "strict"
 

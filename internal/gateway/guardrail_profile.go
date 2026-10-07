@@ -519,7 +519,12 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
 			return local, nil
 		}
-		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true}, nil
+		if err == nil {
+			err = fmt.Errorf("the operating system returned no directory facts for %s", id)
+		}
+		// The account is named, so explain shows it with the reason, not a
+		// bare default_lookup_failed.
+		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true}, err
 	}
 	return profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
@@ -553,26 +558,27 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	if strings.ContainsAny(account.Username, `\@`) {
 		subject.Principal = account.Username
 	}
-	subject.Groups = localAccountGroups(account)
+	groups, err := accountGroups(account)
+	subject.Groups = groups
+	if err != nil {
+		// Groups that could not be listed are unknown, not empty: the subject
+		// selects as a failed lookup does for a request (default_lookup_failed)
+		// and explain names the reason.
+		subject.LookupFailed, subject.LookupError = true, err.Error()
+	}
 	return subject
 }
 
-// localAccountGroups lists an OS account's groups from the OS account
-// database. On Linux and macOS each group is its name, or its gid when no
-// group answers for it, one entry per group as the NSS directory facts list
-// them (unixidentity), so counts and matching agree with a hook's verified
+// accountGroups lists an OS account's groups from the OS account database.
+// On Linux and macOS each group is its name, or its gid when no group answers
+// for it, one entry per group as the NSS directory facts list them
+// (unixidentity), so counts and matching agree with a hook's verified
 // subject. On Windows each group is its SID followed by its name, as the
-// Windows directory facts list them; identityGroupCount counts the SIDs.
-func localAccountGroups(account *osuser.User) []string {
-	groups, _ := accountGroups(account)
-	return groups
-}
-
-// accountGroups is localAccountGroups with the error when the OS account
-// database cannot list the account's groups: facts a lookup resolves for
-// the hook path must not be cached as resolved without them.
+// Windows directory facts list them; identityGroupCount counts the SIDs. The
+// error says the database could not list the account's groups: facts a lookup
+// resolves for the hook path must not be cached as resolved without them.
 func accountGroups(account *osuser.User) ([]string, error) {
-	gids, err := account.GroupIds()
+	gids, err := accountGroupIDs(account)
 	if err != nil {
 		return nil, err
 	}
@@ -780,7 +786,9 @@ func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 		return nil
 	}
 	base := a.scannerCfg
-	if g := a.generation(); g != nil && g.Config != nil {
+	// Secure Client keeps deciding with the start-time configuration
+	// (issue #1092).
+	if g := a.generation(); g != nil && g.Config != nil && !base.SecureClientIntegration() {
 		base = g.Config
 	}
 	return a.decisionConfigFrom(ctx, base)
@@ -1023,7 +1031,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
 		if err != nil {
-			found = profileSubject{UserName: user, LookupFailed: true}
+			if found.UserID == "" {
+				found = profileSubject{UserName: user}
+			}
+			found.LookupFailed = true
 			out["lookup_error"] = err.Error()
 		} else if found.LookupError != "" {
 			out["lookup_error"] = found.LookupError

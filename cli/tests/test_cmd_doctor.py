@@ -106,7 +106,7 @@ class DoctorRetiredPolicyDataTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as policy_dir:
             os.makedirs(os.path.join(policy_dir, "rego"))
-            for name in ("data.json", "data-sandbox.json"):
+            for name in ("data.json", "data-sandbox.json", "firewall.rego", "audit.rego"):
                 with open(os.path.join(policy_dir, "rego", name), "w", encoding="utf-8") as f:
                     f.write("{}")
             result = _DoctorResult()
@@ -115,16 +115,19 @@ class DoctorRetiredPolicyDataTests(unittest.TestCase):
             cmd_doctor._check_policy_evidence_files(cfg, result)
         detail = result.checks[0]["detail"]
         self.assertIn("data.json", detail)
-        self.assertNotIn("data-sandbox.json", detail)
+        for leftover in ("data-sandbox.json", "firewall.rego", "audit.rego"):
+            self.assertNotIn(leftover, detail)
 
 
 class DoctorVirusTotalTests(unittest.TestCase):
     """GAP-1936: the VirusTotal row agrees with the credential row."""
 
     def _cfg(self, use_virustotal: bool, key_env: str = ""):
-        from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.config import SkillScannerAnalyzers, SkillScannerConfig, SkillScannerVirusTotal
 
-        sc = SkillScannerConfig(use_virustotal=use_virustotal, virustotal_api_key_env=key_env)
+        sc = SkillScannerConfig(
+            analyzers=SkillScannerAnalyzers(virustotal=SkillScannerVirusTotal(enabled=use_virustotal, api_key_env=key_env))
+        )
         return SimpleNamespace(scanners=SimpleNamespace(skill_scanner=sc))
 
     def test_disabled_is_skipped(self):
@@ -3420,3 +3423,28 @@ def test_a_stopped_local_observability_stack_is_not_a_failure():
     with patch.object(cmd_doctor.socket, "create_connection", return_value=contextlib.nullcontext()):
         # The stack is up, so its collector failing is a real failure.
         assert not cmd_doctor._local_observability_stack_stopped(local, live, "fail")
+
+
+def test_a_signature_pack_that_fails_its_pin_is_a_doctor_warning(tmp_path):
+    """GAP-0177: the refusal is a WARN naming the pack and both digests, not a gateway.log line."""
+    from defenseclaw.commands import cmd_doctor
+
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps({"version": 1, "signatures": [{
+        "id": "pinned-ai", "name": "Pinned", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}))
+    pinned = "sha256:" + "0" * 64
+    discovery = SimpleNamespace(
+        enabled=True, signature_packs=[str(pack)], signature_pack_digests={str(pack): pinned},
+        allow_workspace_signatures=False, scan_roots=[],
+    )
+    cfg = SimpleNamespace(ai_discovery=discovery, data_dir=str(tmp_path))
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    [check] = result.checks
+    assert check["status"] == "warn" and check["reason_code"] == "signature-pack-refused"
+    assert str(pack.resolve()) in check["detail"] and pinned in check["detail"]
+
+    discovery.signature_pack_digests = {}
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    assert [c["status"] for c in result.checks] == ["pass"]

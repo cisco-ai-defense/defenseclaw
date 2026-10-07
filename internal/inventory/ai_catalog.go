@@ -177,6 +177,9 @@ func LoadAISignatures() ([]AISignature, error) {
 // globs (ai_discovery.signature_packs, the only operator source since
 // config_version 9) and optional workspace-local packs.
 type AISignatureLoadOptions struct {
+	// DataDir is the data directory whose signature-packs/*.json the Secure
+	// Client profile still loads (issue #1092).
+	DataDir        string
 	SignaturePacks []string
 	// PackDigests pins pack files by path (ai_discovery.signature_pack_digests).
 	PackDigests map[string]string
@@ -200,7 +203,12 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 	}
 	home, _ := platformDiscoveryHomeDir()
 	wd, _ := os.Getwd()
+	dataDir := ""
+	if cfg.SecureClientIntegration() {
+		dataDir = cfg.DataDir
+	}
 	return LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		DataDir:                  dataDir,
 		SignaturePacks:           append([]string{}, cfg.AIDiscovery.SignaturePacks...),
 		PackDigests:              cfg.AIDiscovery.SignaturePackDigests,
 		RequireDigests:           cfg.StandaloneEnterprise(),
@@ -210,6 +218,38 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 		HomeDir:                  home,
 		WorkingDir:               wd,
 	})
+}
+
+// CheckSignaturePackPins refuses, on a managed standalone host, a configured
+// signature pack file that the loader would skip: it does not match its pin in
+// ai_discovery.signature_pack_digests, or it has none. The loader only logs
+// the skip, so without this check an apply accepts a config whose pack never
+// loads (GAP-0173). A pack file that is not there yet is not a pin problem.
+func CheckSignaturePackPins(cfg *config.Config) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	home, _ := platformDiscoveryHomeDir()
+	packs, err := signaturePackPaths(AISignatureLoadOptions{SignaturePacks: cfg.AIDiscovery.SignaturePacks, HomeDir: home})
+	if err != nil {
+		return nil // reported when the catalog loads
+	}
+	pins := pinnedDigests(cfg.AIDiscovery.SignaturePackDigests, home)
+	for _, pack := range packs {
+		raw, err := readAISignaturePackBytes(pack, defaultMaxSignatureBytes)
+		if err != nil {
+			continue
+		}
+		if refusal := pinRefusal(pins[filepath.Clean(pack)], raw, true); refusal != "" {
+			return &config.V8SemanticError{
+				Path:     "$.ai_discovery.signature_pack_digests",
+				Summary:  "signature pack " + pack + " would not load: " + refusal,
+				Expected: "a sha256:<hex> digest of the pack file, keyed by its path",
+				Action:   "pin the file's current digest (sha256sum), or restore the pack the pin was taken from",
+			}
+		}
+	}
+	return nil
 }
 
 // LoadAISignaturesWithOptions merges all configured catalog sources and
@@ -362,6 +402,11 @@ func WorkspaceSignaturesAllowed(cfg *config.Config) bool {
 
 func signaturePackPaths(opts AISignatureLoadOptions) ([]string, error) {
 	var candidates []signaturePackCandidate
+	if opts.DataDir != "" {
+		candidates = append(candidates, signaturePackCandidate{
+			path: filepath.Join(opts.DataDir, "signature-packs", "*.json"),
+		})
+	}
 	for _, p := range opts.SignaturePacks {
 		candidates = append(candidates, signaturePackCandidate{path: p, required: true})
 	}

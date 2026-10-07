@@ -84,6 +84,13 @@ MANAGED_REFUSAL = (
     "(MDM or management plane), not on the device"
 )
 
+#: Shown instead of "run defenseclaw init" on a managed (standalone) device.
+MANAGED_NOT_INITIALIZED = (
+    "This device is managed: DefenseClaw is configured by your administrator (MDM or management "
+    "plane), so there is no per-user config to create and 'defenseclaw init' does not apply. "
+    "Nothing was changed."
+)
+
 # Keys a running gateway applies only after a restart: the process-level
 # keys, plus what its reload still treats as restart-required (claw, agent
 # and routing, read once at start; the guardrail listener and enablement;
@@ -303,16 +310,7 @@ def write_with(
     if not str(actor or "").strip():
         raise ConfigWriteError("a config writer actor is required")
     target = _resolve(path)
-    # Refuse a managed host before the lock opens: taking it narrows the
-    # config directory to 0700, which would lock the gateway service account
-    # out of a root-owned managed directory. _transact checks again under the
-    # lock.
-    try:
-        unlocked = Path(target).read_bytes()
-    except OSError:
-        unlocked = b""
-    if managed_refuses(unlocked, actor):
-        raise ManagedConfigWriteError(MANAGED_REFUSAL)
+    refuse_when_managed(target, actor)
     with hold_lock(target, timeout_s=timeout_s):
         return _transact(target, mutate, actor, reason, expect_sha256, verify)
 
@@ -620,6 +618,19 @@ def managed_refuses(current: bytes, actor: str) -> bool:
     return standalone_managed(current)
 
 
+def refuse_when_managed(path: str | os.PathLike[str], actor: str | None = None) -> None:
+    """Raise :class:`ManagedConfigWriteError` when the managed gate would refuse
+    this writer, before it takes ``config.yaml.lock`` or touches the folder: a
+    refused writer leaves nothing behind (an empty lock file in a service-owned
+    folder). The locked transaction checks the same gate again."""
+    try:
+        current, _mode, _exists = _read_current(_resolve(path))
+    except (ConfigWriteError, OSError):
+        return  # the locked transaction reports it
+    if managed_refuses(current, actor or current_actor(ACTOR_PREFIX_CLI)):
+        raise ManagedConfigWriteError(MANAGED_REFUSAL)
+
+
 # ---------------------------------------------------------------------------
 # Validation
 
@@ -675,8 +686,8 @@ def validate_candidate(target: str, candidate: bytes) -> None:
 _REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
 _RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
 _SCHEMA_WORDS = (
-    ("correct the field using the canonical v8 schema and reference", "check the value and its documented format"),
-    ("use the value type documented by the canonical v8 schema", "use the value type the reference documents"),
+    ("correct the field using the configuration schema and reference", "check the value and its documented format"),
+    ("use the value type documented by the configuration schema", "use the value type the reference documents"),
 )
 
 
@@ -712,7 +723,9 @@ def plain_error(exc: BaseException) -> str:
         return sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
     if code == "pattern":
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
-        return f"{name} is not in the expected format{hint}."
+        # A pattern of plain words (block_at) names them in the corrective action.
+        allowed = text if text.startswith("use one of ") else ""
+        return f"{name} is not in the expected format{hint}." + (f" {allowed[:1].upper()}{allowed[1:]}." if allowed else "")
     from defenseclaw.commands.cmd_config import _plain_v8_issue
 
     return _plain_v8_issue(None, path, reason)
@@ -795,6 +808,25 @@ def _lookup(document: Any, parts: tuple[str | int, ...]) -> Any:
     return current
 
 
+def _check_destination_index(document: Any, path: str, parts: tuple[str | int, ...]) -> None:
+    """Refuse a field of a destination config.yaml does not list.
+
+    Writing it would append a half-written entry that the schema then rejects
+    with a oneOf message, so say what config get says: the index is out of
+    range (GAP-0154). A whole new destination is written at index len().
+    """
+    if len(parts) < 4 or parts[:2] != ("observability", "destinations") or not isinstance(parts[2], int):
+        return
+    listed = _lookup(document, parts[:2])
+    count = len(listed) if isinstance(listed, list) else 0
+    if parts[2] >= count:
+        noun = "destination" if count == 1 else "destinations"
+        raise ConfigWriteError(
+            f"{path}: the index is out of range (config.yaml lists {count} {noun}); "
+            "add a destination with 'defenseclaw setup observability add'"
+        )
+
+
 def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -811,6 +843,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
         else:
             if before is not _MISSING and before == change.value:
                 continue
+            _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
         changed.append(change.path)
     if not mutations:

@@ -33,6 +33,7 @@ generated artifacts rather than copied into a second implementation.
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import ipaddress
 import json
@@ -228,11 +229,10 @@ CONFIGURABLE_CORE_RESOURCE_ATTRIBUTE_KEYS = frozenset(
         "workspace.id",
     }
 )
-_RESOURCE_ALIAS_PAIRS = (
-    ("deployment.environment.name", "deployment.environment"),
-    ("defenseclaw.deployment.mode", "deployment.mode"),
-    ("defenseclaw.device.public_key_fingerprint", "defenseclaw.device.id"),
-)
+# A config_version 8 source may still spell the environment deployment.environment
+# (read as deployment.environment.name); config_version 9 refuses it. The
+# deployment.mode and defenseclaw.device.id spellings were never configurable.
+_RESOURCE_ALIAS_PAIRS = (("deployment.environment.name", "deployment.environment"),)
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ENDPOINT_HOST_PUBLIC = "public"
 ENDPOINT_HOST_LOCALHOST = "localhost"
@@ -301,13 +301,13 @@ def yaml_error_mark(exc: BaseException) -> Any:
 class V8ConfigError(ValueError):
     """A source-validation error whose message never contains source values."""
 
-    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str, *, label: str = "v8") -> None:
+    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str) -> None:
         self.source_name = source_name
         self.path = path or "$"
         self.keyword = keyword
         self.corrective_action = corrective_action
         super().__init__(
-            f"{source_name}: invalid {label} configuration at {self.path} ({keyword}); {corrective_action}"
+            f"{source_name}: invalid configuration at {self.path} ({keyword}); {corrective_action}"
         )
 
 
@@ -914,8 +914,7 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
             source_name,
             _json_path(parts),
             "legacy-key-forbidden",
-            f"a v8 configuration key is not accepted in config_version 9; use {target}",
-            label="v9",
+            f"a retired configuration key is not accepted in config_version 9; use {target}",
         )
 
     for parts, target in _V9_REMOVED_KEYS:
@@ -949,7 +948,7 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     )
     if not errors:
         return
-    error = errors[0]
+    error = _narrow_one_of(errors[0], source_name)
     keyword = str(error.validator or "schema")
     parts = tuple(error.absolute_path)
     if keyword == "additionalProperties":
@@ -959,21 +958,89 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     path = _json_path(parts)
     label = "v9" if v9 else "v8"
     action = {
-        "additionalProperties": (
-            "remove unsupported fields; see the configuration reference"
-            if v9
-            else "remove unsupported or legacy fields and run defenseclaw upgrade"
-        ),
-        "required": f"add the required field shown by the {label} reference",
-        "const": f"use the exact {label} value from the canonical reference",
-        "enum": f"choose a value from the canonical {label} vocabulary",
-        "oneOf": f"use exactly one supported {label} source shape",
-        "type": f"use the value type documented by the canonical {label} schema",
-    }.get(keyword, f"correct the field using the canonical {label} schema and reference")
-    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action, label=label)
+        "additionalProperties": "remove unsupported fields; see the configuration reference",
+        "const": "use the exact value from the configuration reference",
+        "enum": "choose a value from the documented vocabulary",
+        "oneOf": "use exactly one supported source shape",
+        "type": "use the value type documented by the configuration schema",
+    }.get(keyword, "correct the field using the configuration schema and reference")
+    if keyword == "required":
+        action = _required_field_action(error)
+    elif keyword == "additionalProperties" and v9:
+        action = _unknown_field_action(error, parts)
+    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
+
+
+def _narrow_one_of(error: Any, source_name: str) -> Any:
+    """Narrow a ``oneOf`` over ``kind``-pinned shapes to the shape the source chose.
+
+    Without this the reader gets every shape's key list in one line. A ``kind``
+    no shape declares is named with the kinds that exist; a declared ``kind``
+    reports the first problem inside its own shape.
+    """
+
+    while error.validator == "oneOf" and isinstance(error.instance, Mapping):
+        kinds: dict[str, int] = {}
+        for index, branch in enumerate(error.validator_value if isinstance(error.validator_value, list) else []):
+            const = ((_resolve_branch(branch).get("properties") or {}).get("kind") or {}).get("const")
+            if not isinstance(const, str):
+                return error
+            kinds[const] = index
+        if not kinds:
+            return error
+        kind = error.instance.get("kind")
+        chosen = kinds.get(kind) if isinstance(kind, str) else None
+        if chosen is None:
+            raise V8ConfigError(
+                source_name,
+                _json_path((*error.absolute_path, "kind")),
+                "enum",
+                "use one of " + ", ".join(kinds),
+            )
+        inner = sorted(
+            (item for item in error.context or () if item.relative_schema_path[0] == chosen),
+            key=lambda item: tuple(str(part) for part in item.absolute_path),
+        )
+        if not inner:
+            return error
+        error = inner[0]
+    return error
+
+
+def _resolve_branch(branch: Any) -> Mapping[str, Any]:
+    """A oneOf branch with a local $ref followed; {} when it is not a mapping."""
+
+    if isinstance(branch, Mapping) and str(branch.get("$ref", "")).startswith("#/$defs/"):
+        branch = _schema_validator().schema.get("$defs", {}).get(str(branch["$ref"])[len("#/$defs/"):], {})
+    return branch if isinstance(branch, Mapping) else {}
 
 
 _PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _required_field_action(error: Any) -> str:
+    """Name the field a required-property error is missing."""
+
+    required = error.validator_value if isinstance(error.validator_value, list) else []
+    present = error.instance if isinstance(error.instance, Mapping) else {}
+    missing = [str(name) for name in required if name not in present and _PLAIN_KEY.match(str(name))]
+    if not missing:
+        return "add the required field"
+    return "add the required " + ("field " if len(missing) == 1 else "fields ") + ", ".join(missing)
+
+
+def _unknown_field_action(error: Any, parts: tuple[str, ...]) -> str:
+    """Say a v9 key is unknown, with the closest known key when there is one.
+
+    ``parts`` already names the key when it is a plain name; otherwise the
+    object holding it is all the path can say.
+    """
+
+    schema = error.schema if isinstance(error.schema, Mapping) else {}
+    if len(parts) == len(tuple(error.absolute_path)):
+        return "remove the unsupported fields"
+    close = difflib.get_close_matches(parts[-1], [str(name) for name in schema.get("properties") or {}], n=1)
+    return "unknown field" + (f' (did you mean "{close[0]}"?)' if close else "")
 
 
 def _first_unexpected_key(error: Any) -> tuple[str, ...]:
@@ -1009,7 +1076,11 @@ def _declared_action(keyword: str, error: Any) -> str:
             and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
             and all(isinstance(value, str) for value in values)
         ):
-            return "use one of " + ", ".join(values)
+            # An empty value is how a field inherits; list the words only.
+            words = [value for value in values if value]
+            if not words:
+                return ""
+            return "use one of " + ", ".join(words) + (" (empty inherits)" if len(words) < len(values) else "")
         return ""
     if keyword == "pattern":
         return _pattern_action(error.validator_value)
@@ -1069,13 +1140,8 @@ def _one_of_action(branches: Any) -> str:
 
     if not isinstance(branches, list) or not branches:
         return ""
-    definitions = _schema_validator().schema.get("$defs", {})
     parts: list[str] = []
-    for branch in branches:
-        if isinstance(branch, Mapping) and str(branch.get("$ref", "")).startswith("#/$defs/"):
-            branch = definitions.get(str(branch["$ref"])[len("#/$defs/"):], {})
-        if not isinstance(branch, Mapping):
-            return ""
+    for branch in map(_resolve_branch, branches):
         values = branch.get("enum")
         if isinstance(values, list) and values and all(isinstance(value, str) for value in values):
             parts.append("one of " + ", ".join(values))

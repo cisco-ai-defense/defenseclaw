@@ -29,11 +29,17 @@ Mirrors internal/config/asset_policy_lists.go and internal/gateway/enforce_confi
 from __future__ import annotations
 
 import contextlib
+import functools
+import http.client
+import json
+import os
+import socket
 from typing import Any
 
 import click
 
 from defenseclaw import connector_paths
+from defenseclaw.audit_actions import ACTION_ACTION
 
 LIST_DENY = "deny"
 LIST_ALLOW = "allow"
@@ -92,16 +98,109 @@ def refuse_if_managed(cfg: Any, *, target_type: str = "", op: str = "", name: st
     """Raise ManagedDeviceError on a managed standalone device, after
     auditing the refused attempt."""
     if is_managed_standalone(cfg):
-        action = _REFUSAL_ACTIONS.get((target_type, OP_UNBLOCK if op == OP_CLEAR else op), "config-update")
+        action = _REFUSAL_ACTIONS.get((target_type, OP_UNBLOCK if op == OP_CLEAR else op), ACTION_ACTION)
         audit_managed_refusal(action, name or target_type or "config", f"type={target_type}" if target_type else "")
         raise ManagedDeviceError()
+
+
+def refuse_on_managed_device(target_type: str, op: str, name_arg: str = "name"):
+    """Decorator for a block, allow or unblock command (under ``@pass_ctx``).
+
+    A managed device refuses, audited and with exit 3, before the command
+    checks its connector, its arguments or the stored state. Without this the
+    command answered first, telling a standard user to run ``defenseclaw setup
+    <connector>`` (a per-user setup the managed install forbids) or that there
+    was nothing to clear."""
+
+    def decorate(command):
+        @functools.wraps(command)
+        def wrapper(app, *args, **kwargs):
+            refuse_if_managed(
+                getattr(app, "cfg", None), target_type=target_type, op=op, name=str(kwargs.get(name_arg) or "")
+            )
+            return command(app, *args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
+def audit_managed_config_refusal(target: str, command: str) -> None:
+    """Record a refused config writer (``config set``/``unset`` and the
+    guardrail writers) as the generic ``action`` row. ``config-update`` would
+    not do: the gateway turns every one into a config.change.applied event
+    and drops the details, so a refused write would read as an applied one."""
+    audit_managed_refusal(ACTION_ACTION, target, f"command={command}")
+
+
+MANAGED_REFUSAL_PATH = "/api/v1/managed/refusal"
+
+
+class _HookSocketConnection(http.client.HTTPConnection):
+    """HTTP over the managed gateway unix hook socket."""
+
+    def __init__(self, path: str, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._socket_path)
+        self.sock = sock
+
+
+def _managed_hook_socket() -> str:
+    """The hook socket of this host managed gateway, from the runtime
+    descriptor the enterprise lifecycle publishes ("" on Windows, which has
+    none, and on an unmanaged host)."""
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    descriptor = managed_descriptor()
+    if not descriptor:
+        return ""
+    try:
+        with open(descriptor, encoding="utf-8") as stream:
+            path = str(json.load(stream).get("hook_socket") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return path if os.path.isabs(path) else ""
+
+
+def _clip(text: str, limit: int) -> str:
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def _report_refusal_to_managed_gateway(action: str, target: str, details: str) -> bool:
+    """Hand a refusal to the managed gateway over its hook socket, which
+    names the caller from the kernel: a standard user has no gateway token,
+    so the token-authenticated audit path never records its refusals."""
+    socket_path = _managed_hook_socket()
+    if not socket_path:
+        return False
+    body = json.dumps({"action": action, "target": _clip(target, 256), "details": _clip(details, 512)})
+    connection = _HookSocketConnection(socket_path, timeout=3)
+    try:
+        connection.request(
+            "POST", MANAGED_REFUSAL_PATH, body,
+            {"Content-Type": "application/json", "X-DefenseClaw-Client": "defenseclaw-cli"},
+        )
+        return 200 <= connection.getresponse().status < 300
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 def audit_managed_refusal(action: str, target: str, details: str = "") -> None:
     """Record a refused local policy write on a managed device in the audit
     trail (best effort: the refusal stands even when the gateway that
-    records CLI events is down)."""
+    records CLI events is down). The managed gateway hook socket takes it
+    for every account, a standard user included; the token-authenticated
+    CLI path is the fallback."""
     try:
+        if _report_refusal_to_managed_gateway(action, target, details):
+            return
         ctx = click.get_current_context(silent=True)
         app = getattr(ctx, "obj", None) if ctx is not None else None
         logger = getattr(app, "logger", None)

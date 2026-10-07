@@ -18,14 +18,14 @@ import (
 
 func TestGeneratedCustomResourceAttributesAreSealedAndCopied(t *testing.T) {
 	input := map[string]string{"operator.profile": "soc"}
-	attributes, err := NewTelemetryCustomResourceAttributes(input, true)
+	attributes, err := NewTelemetryCustomResourceAttributes(input)
 	if err != nil {
 		t.Fatalf("constructor: %v", err)
 	}
 	input["operator.profile"] = "mutated"
 	first := attributes.Values()
-	if first["operator.profile"] != "soc" || !attributes.CompatibilityAliasesEnabled() {
-		t.Fatalf("sealed attributes = %#v, aliases=%v", first, attributes.CompatibilityAliasesEnabled())
+	if first["operator.profile"] != "soc" {
+		t.Fatalf("sealed attributes = %#v", first)
 	}
 	first["operator.profile"] = "mutated again"
 	if attributes.Values()["operator.profile"] != "soc" {
@@ -33,8 +33,8 @@ func TestGeneratedCustomResourceAttributesAreSealedAndCopied(t *testing.T) {
 	}
 
 	var zero TelemetryCustomResourceAttributes
-	if len(zero.Values()) != 0 || zero.CompatibilityAliasesEnabled() {
-		t.Fatalf("zero value = %#v, aliases=%v", zero.Values(), zero.CompatibilityAliasesEnabled())
+	if len(zero.Values()) != 0 {
+		t.Fatalf("zero value = %#v", zero.Values())
 	}
 }
 
@@ -45,7 +45,7 @@ func TestGeneratedCustomResourceAttributesRejectUnsafeAndCollidingInputs(t *test
 		code   FamilyBuildErrorCode
 	}{
 		{name: "fixed", values: map[string]string{"service.name": "other"}, code: FamilyBuildForbiddenField},
-		{name: "alias", values: map[string]string{"deployment.mode": "edge"}, code: FamilyBuildForbiddenField},
+		{name: "retired alias", values: map[string]string{"deployment.mode": "edge"}, code: FamilyBuildForbiddenField},
 		{name: "process owned", values: map[string]string{"discovery.source": "runtime"}, code: FamilyBuildForbiddenField},
 		{name: "normalized fixed", values: map[string]string{"service-name": "other"}, code: FamilyBuildForbiddenField},
 		{name: "secret segment", values: map[string]string{"operator.token.kind": "opaque"}, code: FamilyBuildConstraint},
@@ -60,7 +60,7 @@ func TestGeneratedCustomResourceAttributesRejectUnsafeAndCollidingInputs(t *test
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewTelemetryCustomResourceAttributes(test.values, false)
+			_, err := NewTelemetryCustomResourceAttributes(test.values)
 			if !IsFamilyBuildError(err, test.code) {
 				t.Fatalf("error = %v, want %s", err, test.code)
 			}
@@ -78,20 +78,20 @@ func TestGeneratedCustomResourceAttributesEnforceBounds(t *testing.T) {
 	for index := 0; index < 64; index++ {
 		atLimit["operator.profile"+string(rune('A'+index%26))+string(rune('a'+index/26))] = "x"
 	}
-	if _, err := NewTelemetryCustomResourceAttributes(atLimit, false); err != nil {
+	if _, err := NewTelemetryCustomResourceAttributes(atLimit); err != nil {
 		t.Fatalf("64 attributes: %v", err)
 	}
 	atLimit["operator.overflow"] = "x"
-	if _, err := NewTelemetryCustomResourceAttributes(atLimit, false); !IsFamilyBuildError(err, FamilyBuildConstraint) {
+	if _, err := NewTelemetryCustomResourceAttributes(atLimit); !IsFamilyBuildError(err, FamilyBuildConstraint) {
 		t.Fatalf("65 attributes error = %v", err)
 	}
 	if _, err := NewTelemetryCustomResourceAttributes(
-		map[string]string{"operator.profile": strings.Repeat("x", 1024)}, false,
+		map[string]string{"operator.profile": strings.Repeat("x", 1024)},
 	); err != nil {
 		t.Fatalf("1024-byte value: %v", err)
 	}
 	if _, err := NewTelemetryCustomResourceAttributes(
-		map[string]string{"operator.profile": strings.Repeat("x", 1025)}, false,
+		map[string]string{"operator.profile": strings.Repeat("x", 1025)},
 	); !IsFamilyBuildError(err, FamilyBuildConstraint) {
 		t.Fatalf("1025-byte value error = %v", err)
 	}
@@ -107,7 +107,7 @@ func TestGeneratedCustomResourceValidationErrorsAreDeterministic(t *testing.T) {
 			values["a.secret"] = "opaque"
 			values["z.profile"] = "/private/location"
 		}
-		_, err := NewTelemetryCustomResourceAttributes(values, false)
+		_, err := NewTelemetryCustomResourceAttributes(values)
 		if !IsFamilyBuildError(err, FamilyBuildConstraint) {
 			t.Fatalf("iteration %d constructor error = %v, want %s", iteration, err, FamilyBuildConstraint)
 		}
@@ -129,8 +129,8 @@ func TestGeneratedCustomResourceValidationErrorsAreDeterministic(t *testing.T) {
 	}
 }
 
-func TestGeneratedCustomResourceAttributesAndAliasesReachCanonicalRecord(t *testing.T) {
-	custom, err := NewTelemetryCustomResourceAttributes(map[string]string{"operator.profile": "soc"}, true)
+func TestGeneratedCustomResourceAttributesReachCanonicalRecord(t *testing.T) {
+	custom, err := NewTelemetryCustomResourceAttributes(map[string]string{"operator.profile": "soc"})
 	if err != nil {
 		t.Fatalf("custom resource: %v", err)
 	}
@@ -160,10 +160,15 @@ func TestGeneratedCustomResourceAttributesAndAliasesReachCanonicalRecord(t *test
 	resource := object["resource"].(map[string]any)
 	values := resource["attributes"].(map[string]any)
 	want := map[string]string{
-		"operator.profile":       "soc",
-		"deployment.environment": "test",
-		"deployment.mode":        "edge",
-		"defenseclaw.device.id":  "sha256:device",
+		"operator.profile":                          "soc",
+		"deployment.environment.name":               "test",
+		"defenseclaw.deployment.mode":               "edge",
+		"defenseclaw.device.public_key_fingerprint": "sha256:device",
+	}
+	for _, retired := range []string{"deployment.environment", "deployment.mode", "defenseclaw.device.id"} {
+		if _, present := values[retired]; present {
+			t.Fatalf("resource carries the retired alias %s", retired)
+		}
 	}
 	for key, value := range want {
 		if values[key] != value {
@@ -175,13 +180,13 @@ func TestGeneratedCustomResourceAttributesAndAliasesReachCanonicalRecord(t *test
 	}
 	classes := record.FieldClasses()
 	if classes["/resource/attributes/operator.profile"] != FieldClassMetadata ||
-		classes["/resource/attributes/defenseclaw.device.id"] != FieldClassIdentifier {
+		classes["/resource/attributes/defenseclaw.device.public_key_fingerprint"] != FieldClassIdentifier {
 		t.Fatalf("resource classes = %#v", classes)
 	}
 }
 
 func TestGeneratedCompleteResourceValidationRejectsForgedMaps(t *testing.T) {
-	custom, err := NewTelemetryCustomResourceAttributes(map[string]string{"operator.profile": "soc"}, true)
+	custom, err := NewTelemetryCustomResourceAttributes(map[string]string{"operator.profile": "soc"})
 	if err != nil {
 		t.Fatalf("custom resource: %v", err)
 	}
@@ -227,9 +232,9 @@ func TestGeneratedCompleteResourceValidationRejectsForgedMaps(t *testing.T) {
 		{name: "missing required fixed field", mutate: func(values map[string]any) {
 			delete(values, "service.name")
 		}, code: FamilyBuildMissingRequired},
-		{name: "alias differs from canonical", mutate: func(values map[string]any) {
-			values["deployment.mode"] = "other"
-		}, code: FamilyBuildConstraint},
+		{name: "retired alias key", mutate: func(values map[string]any) {
+			values["deployment.mode"] = "edge"
+		}, code: FamilyBuildForbiddenField},
 		{name: "normalized custom collision", mutate: func(values map[string]any) {
 			values["operator.profile-name"] = "one"
 			values["operator.profile.name"] = "two"

@@ -535,7 +535,8 @@ def _virustotal_env(cfg: Config) -> str:
     if sc is None:
         return ""
     ss = getattr(sc, "skill_scanner", None)
-    return getattr(ss, "virustotal_api_key_env", "") or ""
+    vt = getattr(getattr(ss, "analyzers", None), "virustotal", None)
+    return getattr(vt, "api_key_env", "") or ""
 
 
 def _splunk_env(cfg: Config) -> str:

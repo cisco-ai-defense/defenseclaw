@@ -1570,12 +1570,6 @@ jobs:
               shared_key_env = os.environ.get('DEFAULT_LLM_API_KEY_ENV', os.environ.get('API_KEY_ENV', ''))
               if shared_key_env:
                   cfg['default_llm_api_key_env'] = shared_key_env
-              cfg['skill_actions'] = {
-                  'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-                  'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-                  'medium':   {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-                  'low':      {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-              }
 
           with open(cfg_path, 'w') as f:
               yaml.dump(cfg, f, default_flow_style=False)

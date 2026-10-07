@@ -17,24 +17,19 @@
 package enterprisepolicy
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // TestCopilotVSCodeLocalAndManagedSettings covers the per-user Local hook
 // file and plugin (written, recognized as DefenseClaw's by the guard) and
-// the managed-settings keys (plugin enabled,
-// the managed-only lock only once its gate passes, removal keeping the
-// administrator's keys).
+// the managed-settings keys (plugin enabled and the managed-only lock only
+// while a VS Code in the plugin store window is installed, removal keeping
+// the administrator's keys).
 func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 	home := t.TempDir()
 	ensure := func(hookFile, plugin bool) CopilotVSCodeUserResult {
@@ -74,13 +69,21 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 		}
 		return readFile(t, settings)
 	}
-	if got := reconcile(); !strings.Contains(got, CopilotPluginKey) || strings.Contains(got, copilotSettingHooksOnly) {
-		t.Fatalf("without a VS Code in the lock window: %s", got)
+	// No VS Code reads the plugin, and the Copilot CLI reads this file too
+	// and waits on a marketplace it does not know (GAP-0192): no keys.
+	if got := reconcile(); strings.Contains(got, CopilotPluginKey) || strings.Contains(got, copilotSettingHooksOnly) {
+		t.Fatalf("without a VS Code in the plugin store window: %s", got)
 	}
 	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
-	if got := reconcile(); !strings.Contains(got, copilotSettingHooksOnly) || !strings.Contains(got, `"admin"`) {
-		t.Fatalf("lock not set once the gate passed: %s", got)
+	if got := reconcile(); !strings.Contains(got, CopilotPluginKey) || !strings.Contains(got, copilotSettingHooksOnly) || !strings.Contains(got, `"admin"`) {
+		t.Fatalf("keys not set once the gate passed: %s", got)
 	}
+	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.141.0"}`)
+	if got := reconcile(); strings.Contains(got, CopilotPluginKey) || strings.Contains(got, copilotSettingHooksOnly) || !strings.Contains(got, `"admin"`) {
+		t.Fatalf("keys left after VS Code left the window: %s", got)
+	}
+	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
+	reconcile()
 	if err := removeCopilotManagedSettings(opts, &State{}); err != nil {
 		t.Fatal(err)
 	}
@@ -150,77 +153,6 @@ func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	}
 	if _, err := os.Stat(hookFile); !os.IsNotExist(err) {
 		t.Fatalf("hook file left behind: %v", err)
-	}
-}
-
-// An earlier build's plugin (GAP-1098): managed Windows 1.0.2 kept the
-// Copilot plugin a previous managed build wrote, whose commands still use
-// the Start-Process bridge, and the foreign-hook guard then blocked every
-// Copilot CLI tool call. That render is DefenseClaw's own: the guard owns
-// it, setup rewrites it and uninstall removes it.
-func TestCopilotVSCodeOwnsAnEarlierBuildsWindowsPlugin(t *testing.T) {
-	const binary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
-	current, err := RenderCopilotVSCodeLocalHooks("windows", binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The exact handler an earlier build wrote (captured on dc-win), with
-	// this host's PowerShell path.
-	exe := strings.SplitN(connector.CopilotVSCodeLocalManagedHookCommand("windows", binary, "PreToolUse"), " -NoLogo", 2)[0]
-	encode := func(script string) string {
-		units := utf16.Encode([]rune(script))
-		raw := make([]byte, 0, 2*len(units))
-		for _, unit := range units {
-			raw = append(raw, byte(unit), byte(unit>>8))
-		}
-		return base64.StdEncoding.EncodeToString(raw)
-	}
-	hooks := map[string]any{}
-	for _, event := range connector.CopilotVSCodeLocalHookEvents {
-		script := `$ErrorActionPreference='Stop'; $env:NoDefaultCurrentDirectoryInExePath='1'; ` +
-			`$hookProcess=Microsoft.PowerShell.Management\Start-Process -FilePath '` + binary + `' -ArgumentList @('hook','--connector','copilot','--event','` +
-			event + `','--enterprise-managed','--hook-surface','vscode-local') -NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode`
-		hooks[event] = []any{map[string]any{
-			"type": "command", "timeout": 30,
-			"command": exe + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + encode(script),
-		}}
-	}
-	earlier, err := json.Marshal(map[string]any{"hooks": hooks})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Equal(earlier, current) {
-		t.Fatal("the fixture must differ from the current render")
-	}
-	if !(GuardRequest{GOOS: "windows", HookBinary: binary}).ownedHooksDocument(earlier) {
-		t.Fatal("the guard treats an earlier build's plugin as a foreign hook")
-	}
-	if (GuardRequest{GOOS: "windows", HookBinary: `C:\other\defenseclaw-hook.exe`}).ownedHooksDocument(earlier) {
-		t.Fatal("an earlier render for another binary must stay foreign")
-	}
-
-	home := t.TempDir()
-	pluginHooks := filepath.Join(CopilotPluginDir(home), "hooks", "hooks.json")
-	ensure := func(plugin bool) CopilotVSCodeUserResult {
-		t.Helper()
-		writeFile(t, pluginHooks, string(earlier))
-		result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
-			Home: home, GOOS: "windows", HookBinary: binary, HookFile: plugin, Plugin: plugin,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(result.Kept) != 0 {
-			t.Fatalf("an earlier build's plugin was kept as the user's: %+v", result)
-		}
-		return result
-	}
-	if result := ensure(true); !result.PluginOK || readFile(t, pluginHooks) != string(current) {
-		t.Fatalf("setup did not rewrite the earlier plugin: %+v", result)
-	}
-	ensure(false)
-	if _, err := os.Stat(pluginHooks); !os.IsNotExist(err) {
-		t.Fatalf("uninstall left the earlier plugin: %v", err)
 	}
 }
 

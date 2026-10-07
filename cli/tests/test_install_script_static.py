@@ -125,8 +125,8 @@ def test_both_installers_refresh_agent_discovery_after_the_migration() -> None:
     windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     posix_refresh = posix.index("agent discover --refresh --no-emit-otel")
     windows_refresh = windows.index('@("agent", "discover", "--refresh", "--no-emit-otel")')
-    assert posix.rindex("migrate --yes", 0, posix_refresh) > 0
-    assert windows.rindex('@("migrate", "--yes")', 0, windows_refresh) > 0
+    assert posix.rindex("args=(migrate)", 0, posix_refresh) > 0
+    assert windows.rindex('@("migrate")', 0, windows_refresh) > 0
     # GAP-1294: the upgraded ACP guard is re-pinned in locks that pinned the
     # guard it replaced, so configured editor entries keep working.
     assert posix.index('acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")"') > posix_refresh
@@ -213,6 +213,30 @@ def test_openclaw_restart_reports_what_happened(tmp_path: Path, output: str, rc:
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert completed.stdout.strip().startswith(expected), completed.stdout
     assert len(completed.stdout.strip().splitlines()) == 1
+
+
+def test_install_makes_the_owned_bin_folders_private(tmp_path: Path) -> None:
+    # A user-private-group umask (002) left ~/.local and ~/.local/bin
+    # group-writable when another installer created them; the CLI then
+    # refused the gateway in them after install and init had succeeded.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("private_bin_dir() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    for folder in (bin_dir.parent, bin_dir):
+        folder.chmod(0o775)
+    script = tmp_path / "private.sh"
+    script.write_text(
+        f"set -euo pipefail\nBIN_DIR=\"{bin_dir}\"\ninfo() {{ echo \"INFO $*\"; }}\n" + func + "private_bin_dir\nprivate_bin_dir\n",
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert [oct(folder.stat().st_mode & 0o777) for folder in (bin_dir.parent, bin_dir)] == ["0o755", "0o755"]
+    assert completed.stdout.count("INFO ") == 2, completed.stdout
 
 
 def _release(tmp_path: Path, script: str) -> Path:
@@ -366,7 +390,7 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     completed = _run([str(script)], tmp_path)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    rerun = "defenseclaw quickstart --non-interactive --yes --connector codex --mode action"
+    rerun = "defenseclaw quickstart --connector codex --mode action"
     assert completed.stdout.strip() == f"7|{rerun}"
     summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")

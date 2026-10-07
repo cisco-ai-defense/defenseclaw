@@ -78,6 +78,7 @@ def test_v8_setup_writes_trace_destination_and_secret_outside_yaml(tmp_path, mon
 
     assert result.exit_code == 0, result.output
     assert "Action:      ADD" in result.output
+    assert "Config:      config.yaml (changed)" in result.output  # GAP-0155: no retired version label
     assert "not saved" not in result.output
     source = (tmp_path / "config.yaml").read_text(encoding="utf-8")
     assert "must-never-print" not in source + result.output
@@ -265,9 +266,9 @@ def test_v8_status_text_is_readable_and_names_next_step_when_failing(tmp_path, m
 @pytest.mark.parametrize(
     ("arguments", "helper", "expected"),
     [
-        (["enable"], "_set_v8_destination_enabled", ("galileo", True, "")),
-        (["disable"], "_set_v8_destination_enabled", ("galileo", False, "")),
-        (["remove", "--yes"], "_remove_v8_destination", ("galileo", "")),
+        (["enable"], "_set_v8_destination_enabled", ("galileo", True)),
+        (["disable"], "_set_v8_destination_enabled", ("galileo", False)),
+        (["remove", "--yes"], "_remove_v8_destination", ("galileo",)),
     ],
 )
 def test_management_dispatches_to_canonical_mutators(

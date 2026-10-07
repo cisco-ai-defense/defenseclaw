@@ -45,7 +45,6 @@ from defenseclaw.paths import (
 from defenseclaw.process_liveness import _process_image_path_windows, _process_parent_id_windows
 from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
 
-_stdout_is_tty = terminal_checkbox.stdout_is_tty
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
 _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
@@ -56,6 +55,16 @@ _WINDOWS_SETUP_EXECUTABLE = "DefenseClawSetup-x64.exe"
 _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 
 
+def refuse_first_run_when_managed() -> None:
+    """Exit 3 before init or quickstart prompts or writes on a managed device:
+    the admin config rules there, so a per-user config would be ignored."""
+    from defenseclaw.config_writer import MANAGED_NOT_INITIALIZED, machine_managed_standalone
+
+    if machine_managed_standalone():
+        click.echo(f"error: {MANAGED_NOT_INITIALIZED}", err=True)
+        raise SystemExit(3)
+
+
 @click.command("init")
 @click.option(
     "--skip-install",
@@ -63,12 +72,6 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
     help="Skip scanner and built-in guardrail availability checks (legacy option name).",
 )
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
-@click.option(
-    "--sandbox",
-    is_flag=True,
-    hidden=True,
-    help="Deprecated and ignored: the legacy openshell-sandbox mode was removed.",
-)
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
@@ -211,7 +214,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     app: AppContext,
     skip_install: bool,
     enable_guardrail: bool,
-    sandbox: bool,
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
@@ -255,6 +257,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     """
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
+    refuse_first_run_when_managed()
+
     # Refuse a pasted key before anything is written (GAP-2589).
     cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
     # GAP-2593: the LLM key's env var name too.
@@ -269,7 +273,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         skip_install=skip_install,
         non_interactive=non_interactive,
         yes=yes,
-        sandbox=sandbox,
         observe_all=observe_all,
         action_connectors=action_connectors,
         start_gateway=start_gateway,
@@ -289,7 +292,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         skip_install=skip_install,
         non_interactive=non_interactive,
         yes=yes,
-        sandbox=sandbox,
         observe_all=observe_all,
         action_connectors=action_connectors,
         start_gateway=start_gateway,
@@ -338,7 +340,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             _run_first_run_cmd(
                 skip_install=skip_install,
                 enable_guardrail=enable_guardrail,
-                sandbox=sandbox,
                 non_interactive=non_interactive,
                 yes=yes,
                 rescan_agents=rescan_agents,
@@ -366,7 +367,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             )
         return
 
-    from defenseclaw.bootstrap import SANDBOX_FLAG_DEPRECATION
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -377,9 +377,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     )
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
-
-    if sandbox:
-        click.echo(f"  warning: {SANDBOX_FLAG_DEPRECATION}", err=True)
 
     ux.banner("Environment")
 
@@ -412,7 +409,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     else:
         cfg = load()
         if not is_current_schema(getattr(cfg, "_source_config_version", None)):
-            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw migrate' first")
+            raise click.ClickException(
+                "this configuration was written by an older DefenseClaw"
+                "; run 'defenseclaw migrate' first"
+            )
         click.echo("  Config:        " + ux.dim("preserved existing"))
 
     cfg.environment = env
@@ -583,7 +583,6 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     *,
     skip_install: bool,
     enable_guardrail: bool,
-    sandbox: bool,
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
@@ -741,7 +740,6 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         with_judge=with_judge,
         judge_hook_connectors=judge_hook_connectors,
         skip_install=skip_install,
-        sandbox=sandbox,
         start_gateway=(False if defer_gateway else start_gateway),
         verify=verify,
         verbose=verbose,
@@ -2406,7 +2404,7 @@ def _activate_additional_connectors(
 
 
 # Per-connector guardrail settings init never prompts for (GAP-1713).
-_KEPT_CONNECTOR_FIELDS = ("rule_pack_dir", "rule_pack", "block_at", "alert_at", "block_message")
+_KEPT_CONNECTOR_FIELDS = ("rule_pack", "block_at", "alert_at", "block_message")
 
 
 def _saved_connector_overrides() -> dict[str, object]:
@@ -2461,7 +2459,6 @@ def _native_setup_copilot_invocation_allowed(
     skip_install: bool,
     non_interactive: bool,
     yes: bool,
-    sandbox: bool,
     observe_all: bool,
     action_connectors: str,
     start_gateway: bool | None,
@@ -2476,7 +2473,6 @@ def _native_setup_copilot_invocation_allowed(
         and skip_install
         and non_interactive
         and yes
-        and not sandbox
         and not observe_all
         and not action_connectors.strip()
         and start_gateway is False
@@ -2491,7 +2487,6 @@ def _native_setup_antigravity_invocation_allowed(
     skip_install: bool,
     non_interactive: bool,
     yes: bool,
-    sandbox: bool,
     observe_all: bool,
     action_connectors: str,
     start_gateway: bool | None,
@@ -2507,7 +2502,6 @@ def _native_setup_antigravity_invocation_allowed(
         and skip_install
         and non_interactive
         and yes
-        and not sandbox
         and not observe_all
         and not action_connectors.strip()
         and start_gateway is False
@@ -2770,7 +2764,7 @@ def _seed_rego_policies(policy_dir: str) -> None:
     os.makedirs(dest_rego, exist_ok=True)
 
     for src in bundled_rego.iterdir():
-        if src.suffix in (".rego", ".json") and not src.name.startswith("."):
+        if src.suffix == ".rego" and not src.name.startswith("."):
             dst = os.path.join(dest_rego, src.name)
             if not os.path.exists(dst):
                 shutil.copy2(str(src), dst)
@@ -3422,56 +3416,6 @@ def _install_guardrail(cfg, logger, skip: bool) -> None:
 
     click.echo("  Guardrail:     built into Go binary (no external dependencies)")
     logger.log_action("install-dep", "guardrail", "builtin")
-
-
-def _ensure_uv() -> None:
-    if shutil.which("uv"):
-        return
-
-    click.echo("  uv: not found, installing...", nl=False)
-    try:
-        subprocess.run(
-            ["sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-            capture_output=True,
-            check=True,
-        )
-        _add_uv_to_path()
-        click.echo(" done")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        click.echo(" failed")
-        click.echo("    install uv manually: curl -LsSf https://astral.sh/uv/install.sh | sh")
-        click.echo("    then re-run: defenseclaw init")
-
-
-def _add_uv_to_path() -> None:
-    home = os.path.expanduser("~")
-    for extra in [f"{home}/.local/bin", f"{home}/.cargo/bin"]:
-        if extra not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = extra + ":" + os.environ.get("PATH", "")
-
-
-def _install_with_uv(pkg: str) -> bool:
-    uv = shutil.which("uv")
-    if not uv:
-        return False
-    try:
-        result = subprocess.run(
-            [uv, "tool", "install", "--python", "3.13", pkg],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 or "already installed" in result.stderr:
-            return True
-        return False
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
-def _install_codeguard_skill(cfg, logger) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = cfg
-    _ = logger
-    click.echo("  CodeGuard:     skipped (explicit opt-in required)")
 
 
 def _onboard_notifications(

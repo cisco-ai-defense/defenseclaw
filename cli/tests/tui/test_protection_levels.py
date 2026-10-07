@@ -44,11 +44,11 @@ def levels_model(*, multi: bool = True, global_block: str = "HIGH") -> PoliciesP
     """global blocks HIGH; codex: strict pack, alerts LOW; claudecode: blocks MEDIUM."""
     cfg = default_config()
     cfg.data_dir = cfg.policy_dir = "/nonexistent/dc"
-    cfg.guardrail.rule_pack_dir = "/p/guardrail/default"
+    cfg.guardrail.rule_pack = "default"
     cfg.guardrail.block_at = global_block
     if multi:
         cfg.guardrail.connectors = {
-            "codex": PerConnectorGuardrailConfig(rule_pack_dir="/p/guardrail/strict", alert_at="LOW"),
+            "codex": PerConnectorGuardrailConfig(rule_pack="strict", alert_at="LOW"),
             "claudecode": PerConnectorGuardrailConfig(block_at="MEDIUM"),
         }
     else:

@@ -1,0 +1,57 @@
+# Standalone enterprise config for Entra-joined Windows computers, with guardrail
+# profiles chosen by Entra group and by user.
+#
+# Deliver it like any machine config: Setup /ensure CONFIG=<path>, or the Intune Win32
+# app in packaging/mdm/intune/windows. See README.md in this folder.
+#
+# Guardrail profiles apply to the standalone enterprise profile and to per-user
+# installs. The Secure Client profile rejects them, so this file is not for Secure
+# Client computers.
+#
+# Before an Entra group can match (groups: below):
+#   1. Read the group's SID:   entra_setup.py sids --group defenseclaw-ml-team
+#   2. Make a built-in local group list it on every computer, for example with the
+#      Intune Account protection policy (Local user group membership, group Users,
+#      action Add (Update)) or Add-EntraGroupToLocalGroup.ps1. Windows puts an Entra
+#      group SID in a sign-in token only then.
+#   3. Users sign out and back in.
+# A users: assignment by UPN needs none of that.
+config_version: 9
+deployment_mode: managed_enterprise
+# Leave data_dir unset: the services use C:\ProgramData\Cisco\DefenseClaw\runtime.
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+ai_discovery:
+  include_user_principal: true   # put the UPN in records; off by default
+guardrail:
+  enabled: true
+  mode: observe                  # the posture when no profile applies
+  connectors:
+    # Give every connector at least one key. An empty entry such as
+    # `claudecode: {}` is dropped when the config loads, and then the
+    # enumerator enrolls nobody for that connector.
+    claudecode: {enabled: true}
+    codex: {enabled: true}
+
+  profiles:
+    strict:
+      description: Everyone who matches nothing else, and a failed directory lookup
+      mode: action
+      block_at: MEDIUM
+    ml-team:
+      description: The ML team stays in observe mode
+      mode: observe
+
+  # Ordered: the first match wins, so list the narrowest first.
+  profile_assignments:
+    - profile: ml-team
+      match:
+        users: ["alice@contoso.onmicrosoft.com"]           # the UPN, as Entra shows it
+    - profile: ml-team
+      match:
+        groups: ["S-1-12-1-1111111111-2222222222-3333333333-4444444444"]   # Entra group defenseclaw-ml-team
+
+  default_profile: strict

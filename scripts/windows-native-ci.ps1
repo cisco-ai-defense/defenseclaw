@@ -4707,7 +4707,6 @@ function Get-AwaitedHookBridge([string]$Script) {
     return [pscustomobject]@{
         File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
         Arguments = $arguments
-        Invocation = $match.Groups['invocation'].Value
     }
 }
 
@@ -5117,8 +5116,11 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
         (@($bridge.Arguments)[0..2] -join ' ') -cne 'hook --connector codex') {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
+    # The form 0.8.x released: one non-waiting call of the launcher with no event.
+    # Setup repair must still replace it and Doctor must still refuse it.
+    $legacyFile = "'" + $bridge.File.Replace("'", "''") + "'"
     $legacyScript = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-        $bridge.Invocation + '; exit $LASTEXITCODE'
+        "& $legacyFile hook --connector codex; exit `$LASTEXITCODE"
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
@@ -5907,7 +5909,7 @@ with open(os.path.join(sys.argv[1], ".migration_state.json"), "w", encoding="utf
 import sys
 import yaml
 document = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
-assert document.get("config_version") == 8
+assert document.get("config_version") == 9
 observability = document.get("observability") or {}
 assert (observability.get("metric_policy") or {}).get("temporality") == "delta"
 otlp = next(
@@ -5926,8 +5928,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
 '@
         Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath, $setupOtlpPort) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
-        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*8\s*$') {
-            throw 'seeded setup upgrade did not activate configuration schema v8'
+        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*9\s*$') {
+            throw 'seeded setup upgrade did not activate configuration schema v9'
         }
         $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
         $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot

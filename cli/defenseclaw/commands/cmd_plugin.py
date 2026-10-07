@@ -2549,21 +2549,6 @@ def _plugin_list_json_items(
     return items
 
 
-def _print_plugin_list_json(
-    plugins: list[dict[str, Any]],
-    scan_map: dict[str, dict[str, Any]],
-    actions_map: dict[str, Any],
-    connector: str = "",
-) -> None:
-    click.echo(
-        json.dumps(
-            _plugin_list_json_items(plugins, scan_map, actions_map, connector=connector),
-            indent=2,
-            default=str,
-        )
-    )
-
-
 def _print_plugin_list_table(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
@@ -3415,17 +3400,6 @@ def _parse_plugin_list_json(text: str) -> list[dict[str, Any]]:
     return [p for p in plugins if isinstance(p, dict)]
 
 
-def _parse_plugin_list_text(text: str) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith(("name", "plugin")):
-            continue
-        name = line.split()[0]
-        out.append({"id": name, "name": name})
-    return out
-
-
 def _list_openclaw_plugins(connector: str = "") -> list[dict]:
     """Query plugins from the requested connector.
 
@@ -3903,6 +3877,7 @@ def _plugin_copies_disabled(app: AppContext, plugin_name: str, connector: str) -
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install block list.
 
@@ -4034,6 +4009,7 @@ def _plugin_unblock_followup(plugin_name: str, connector: str, all_only_allow: b
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove plugin enforcement state without adding an allow entry."""
     from defenseclaw.enforce import PolicyEngine
@@ -4133,6 +4109,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install allow list.
 

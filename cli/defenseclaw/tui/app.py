@@ -15761,7 +15761,7 @@ def _fetch_v8_operator_status(
         if isinstance(path, str) and isinstance(keyword, str) and path and keyword:
             safe_path = re.sub(r"[^A-Za-z0-9_.$\[\]-]", "?", path)[:256]
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
-            return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
+            return None, f"invalid configuration at {safe_path} ({safe_keyword})"
         return None, "telemetry status could not be loaded; run defenseclaw observability validate"
 
 
@@ -16166,12 +16166,12 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     # while the TUI keeps rendering the inherited global observe/defaults.
     effective_guardrail_enabled = bool(getattr(guardrail, "enabled", False))
     effective_guardrail_mode = str(getattr(guardrail, "mode", "") or "observe")
-    effective_rule_pack_dir = str(getattr(guardrail, "rule_pack_dir", "") or "")
+    effective_rule_pack_dir = ""
     if hasattr(guardrail, "effective_rule_pack_dir"):
         try:
-            # The global pack: config_version 9 rule_pack, else the v8 dir.
+            # The global pack: its config_version 9 rule_pack.
             effective_rule_pack_dir = str(guardrail.effective_rule_pack_dir() or "")
-        except Exception:  # noqa: BLE001 - retain the raw v8 value.
+        except Exception:  # noqa: BLE001 - leave the pack unset.
             pass
     effective_hilt = hilt
     if len(actives) == 1 and guardrail is not None:
@@ -16228,8 +16228,8 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
                         mode = (guardrail.effective_mode(conn) or "").strip()
                     except Exception:
                         mode = ""
-                # Effective rule-pack label = basename of the per-connector
-                # rule_pack_dir (falling back to the global one), so the
+                # Effective rule-pack label = basename of the connector's
+                # pack directory (falling back to the global one), so the
                 # roster shows "strict"/"permissive"/"default" per connector.
                 pack = ""
                 if guardrail is not None and hasattr(guardrail, "effective_rule_pack_dir"):
@@ -16288,12 +16288,6 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # policy that changes one asset type's enforcement.
         scanner_overrides=admission_action_overrides(config),
     )
-
-
-class _HandledAction:
-    def __init__(self, handled: bool, hint: str = "") -> None:
-        self.handled = handled
-        self.hint = hint
 
 
 def _menu_action(action: CatalogMenuAction) -> MenuAction:
@@ -16536,14 +16530,6 @@ def _fit_section_value(value: str, width: int) -> str:
     if len(wrapped) <= _SECTION_VALUE_MAX_LINES:
         return "\n".join(wrapped)
     return "\n".join(_truncate_ellipsis(line, width) for line in lines)
-
-
-def _truncate_display(value: str, width: int) -> str:
-    if len(value) <= width:
-        return value
-    if width <= 3:
-        return value[:width]
-    return value[: width - 3] + "..."
 
 
 def _styled_cell(column: str, value: str) -> Text:

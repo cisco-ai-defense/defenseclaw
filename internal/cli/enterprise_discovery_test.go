@@ -24,8 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/spf13/cobra"
 )
 
 // GAP-1144: an administrator had no command to read the AI Discovery
@@ -312,5 +314,44 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	if commandExitCode(err) != 5 || json.Unmarshal(refused.Bytes(), &refusal) != nil || refusal.OK || refusal.ExitCode != 5 ||
 		len(refusal.Errors) != 1 || refusal.Errors[0].Code != "elevation_required" || refusal.Errors[0].Message != "ask your administrator" {
 		t.Fatalf("--json refusal = %q (%v)", refused.String(), err)
+	}
+}
+
+// A Secure Client computer keeps the enterprise groups and the discovery
+// --user match it had before the identity views (GAP-0138, issue #1092).
+func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
+	previousHost, previousCfg, previousReport := secureClientHost, cfg, enterpriseDiscoveryGatewayReport
+	t.Cleanup(func() {
+		secureClientHost, cfg, enterpriseDiscoveryGatewayReport = previousHost, previousCfg, previousReport
+	})
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	enterprise := &cobra.Command{Use: "enterprise"}
+	group := &cobra.Command{Use: "windows"}
+	group.AddCommand(&cobra.Command{Use: "discovery"})
+	group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
+	enterprise.AddCommand(group)
+	root.AddCommand(enterprise)
+	secureClientHost = func() bool { return false }
+	dropEnterpriseIdentityViewsOnSecureClient(root)
+	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) {
+		t.Fatalf("standalone group has %d commands, want the identity views too", got)
+	}
+	secureClientHost = func() bool { return true }
+	dropEnterpriseIdentityViewsOnSecureClient(root)
+	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" {
+		t.Fatalf("Secure Client group = %v, want discovery only", got)
+	}
+
+	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Codex CLI", Category: "supported_connector", UserName: "alice", UserID: "S-1-5-21-7"},
+		}}, "127.0.0.1:18970", nil
+	}
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	user := `DCLAB\alice`
+	want := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
+	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, user, false); err == nil || err.Error() != want {
+		t.Fatalf("Secure Client --user %s = %v, want %q", user, err, want)
 	}
 }

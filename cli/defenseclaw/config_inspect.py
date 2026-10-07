@@ -212,7 +212,7 @@ def _helper_argv(
         raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     if not binary:
         raise ConfigInspectError(
-            "defenseclaw-gateway is required for canonical v8 configuration inspection; run defenseclaw upgrade"
+            "defenseclaw-gateway is required for configuration inspection; run defenseclaw upgrade"
         )
     argv = [binary, "config-v8", operation]
     if config_path:

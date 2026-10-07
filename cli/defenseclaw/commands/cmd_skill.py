@@ -279,8 +279,6 @@ def _external_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
     return detail
 
 
-
-
 @click.group()
 def skill() -> None:
     """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore.
@@ -1492,20 +1490,6 @@ def _skill_list_json_items(
     return items
 
 
-def _print_skill_list_json(
-    skills: list[dict[str, Any]],
-    scan_map: dict[str, dict[str, Any]],
-    actions_map: dict[str, Any],
-    *,
-    connector: str = "",
-) -> None:
-    click.echo(json.dumps(
-        _skill_list_json_items(skills, scan_map, actions_map, connector=connector),
-        indent=2,
-        default=str,
-    ))
-
-
 def _print_skill_list_table(
     skills: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
@@ -1657,14 +1641,15 @@ def _build_skill_scanner(
         app.cfg.cisco_ai_defense,
         llm=llm,
     )
-    # R4: overlay the configured guardrail rule pack (and guardrail.rules) so
-    # `skill scan` flags what the gateway's rule lanes would catch, and what the
-    # install watcher flags. No-op when neither is set.
+    # R4: overlay the guardrail rule pack (and guardrail.rules) so `skill scan`
+    # flags what the gateway's rule lanes would catch, and what the install
+    # watcher flags: the default pack when the scope selects none (GAP-0164).
     return maybe_wrap(
         scanner,
         app.cfg,
         connector,
         pack_cache=pack_cache,
+        default_pack=True,
     )
 
 
@@ -4185,6 +4170,7 @@ def _refuse_bundled_skill_policy_action(
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install block list.
 
@@ -4308,6 +4294,7 @@ def _report_inherited_skill_state(
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove a skill's logical enforcement state.
 
@@ -4466,6 +4453,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install allow list.
 
@@ -5719,32 +5707,3 @@ def _run_clawhub_install(skill_name: str, force: bool, cwd: str | None = None) -
         )
         raise SystemExit(1)
 
-
-def _run_clawhub_uninstall(skill_name: str, cwd: str | None = None) -> None:
-    """Best-effort rollback for a partial install.
-
-    Runs `clawhub uninstall <skill>` with a short timeout. We
-    intentionally do not raise on rollback failures — the caller is
-    already exiting non-zero — but we surface the error to the
-    operator so they can manually remediate.
-    """
-    try:
-        args = _clawhub_args("uninstall", skill_name)
-        result = _run_clawhub_process(args, timeout=120, cwd=cwd, input_text="y\n")
-    except subprocess.TimeoutExpired:
-        ux.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — manual cleanup may be required",
-            err=True,
-        )
-    except (OSError, ValueError) as exc:
-        ux.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — manual cleanup may be required",
-            err=True,
-        )
-    else:
-        if result.returncode != 0:
-            ux.echo(
-                f"[install] warning: clawhub uninstall of {skill_name!r} failed: "
-                f"{_external_failure_detail(result)} — manual cleanup may be required",
-                err=True,
-            )

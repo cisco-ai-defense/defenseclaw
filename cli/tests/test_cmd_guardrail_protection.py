@@ -48,7 +48,7 @@ def env(tmp_path, monkeypatch):
     cfg.claw.mode = "codex"
     cfg.guardrail.connector = "codex"
     cfg.guardrail.enabled = True
-    cfg.guardrail.rule_pack_dir = str(root / "default")
+    cfg.guardrail.rule_pack = "default"
     cfg.save = MagicMock()
     app = AppContext()
     app.cfg = cfg
@@ -125,13 +125,11 @@ def test_rule_and_suppress_wrappers(env) -> None:
 
 def test_use_pack_writes_rule_pack_and_pins_custom_digest(env, tmp_path) -> None:
     app, root, writes = env
-    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack_dir=str(root / "strict"))}
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="strict")}
     assert _run(app, "use-pack", "permissive").exit_code == 0
     assert writes[-1][0] == [
         config_writer.Change("guardrail.rule_pack", "permissive"),
-        config_writer.Change("guardrail.rule_pack_dir", unset=True),
         config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
-        config_writer.Change("guardrail.connectors.codex.rule_pack_dir", unset=True),
     ]
     custom = tmp_path / "Acme Pack"
     shutil.copytree(root / "default", custom)
@@ -140,6 +138,18 @@ def test_use_pack_writes_rule_pack_and_pins_custom_digest(env, tmp_path) -> None
         config_writer.Change("guardrail.custom_packs.acme-pack", {"path": str(custom), "digest": "sha256:" + "a" * 64}),
         config_writer.Change("guardrail.connectors.codex.rule_pack", "acme-pack"),
     ]
+
+
+def test_managed_device_refuses_before_the_scope_is_checked(env, monkeypatch) -> None:
+    # GAP-0168: a scope problem or "already on" must not be the answer.
+    from defenseclaw.enforce import asset_lists
+
+    app, _root, writes = env
+    monkeypatch.setattr(asset_lists, "is_managed_standalone", lambda _cfg: True)
+    result = _run(app, "protection", "enable", DB, "--connector", "nosuch")
+    assert result.exit_code == 3
+    assert "This device is managed" in result.output
+    assert not writes
 
 
 def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
@@ -153,7 +163,7 @@ def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
     assert result.exit_code == 3
     assert "managed" in result.output
     app.logger.log_action.assert_called_once_with(
-        "guardrail-config",
+        "action",
         "guardrail.rules.protections",
         f"outcome=refused reason=managed_device command=guardrail protection enable {DB}",
     )

@@ -96,7 +96,6 @@ type TraceResourceInput struct {
 	DroppedAttributesCount Optional[uint32]
 	values                 familyFieldValues
 	customValues           familyFieldValues
-	compatibilityAliases   bool
 }
 
 // TraceScopeInput carries only the structural dropped count. Scope name, version,
@@ -265,17 +264,11 @@ type familyFieldValue struct {
 
 type familyFieldValues []familyFieldValue
 
-type familyResourceCompatibilityAlias struct {
-	canonical  string
-	descriptor familyFieldDescriptor
-}
-
 type familyResourceDynamicContract struct {
 	maxItems              int
 	maxValueUTF8Bytes     int
 	maxAggregateUTF8Bytes int
 	fieldClass            FieldClass
-	aliases               []familyResourceCompatibilityAlias
 	validate              func(string, string) error
 	prometheusKey         func(string) string
 }

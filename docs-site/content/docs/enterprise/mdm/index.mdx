@@ -30,8 +30,12 @@ to enterprise deployment? Start with
 | Anything else: start at [What you deliver](#what-you-deliver) | Windows, Linux, macOS | The release file and the kit wrapper, run as SYSTEM or root |
 
 The recipes are templates, checked by simulating each MDM's execution context
-(see [Simulate your MDM](#simulate-your-mdm)). They have not been run in a live
-tenant.
+(see [Simulate your MDM](#simulate-your-mdm)). They have not delivered DefenseClaw
+in a live tenant yet. For Intune, the tenant setup, Windows and Linux enrollment
+and compliance they depend on were run on a test tenant: see
+[Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant), which also has a Graph
+helper that checks the tenant. Its create and assign commands have not run on a live
+tenant yet.
 
 ## The contract every recipe follows
 

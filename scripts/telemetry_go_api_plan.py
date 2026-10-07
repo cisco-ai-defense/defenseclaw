@@ -428,13 +428,6 @@ class GoTraceContractPlanIR:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class GoResourceCompatibilityAliasPlanIR:
-    alias: str
-    canonical: str
-    descriptor: GoKernelFieldDescriptorIR
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
 class GoResourceAttributesPlanIR:
     owner_id: str
     type_symbol: str
@@ -464,7 +457,6 @@ class GoResourceAttributesPlanIR:
     forbidden_key_segments: tuple[str, ...]
     reserved_keys: tuple[str, ...]
     forbidden_value_classes: tuple[str, ...]
-    aliases: tuple[GoResourceCompatibilityAliasPlanIR, ...]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -3668,7 +3660,6 @@ def _compile_resource_attributes(
                     sorted(field.semantic_source_id for field in fields.values() if field.component == "resource")
                 ),
                 "resource_dynamic_members": None,
-                "resource_compatibility_aliases": None,
             }
         }
     elif not isinstance(groups, Mapping):
@@ -3678,8 +3669,7 @@ def _compile_resource_attributes(
     if group is None:
         raise GoAPIPlanError("candidate.groups: resource.core is missing")
     dynamic = _read(group, "resource_dynamic_members", owner_id)
-    raw_aliases = _read(group, "resource_compatibility_aliases", owner_id)
-    if dynamic is None and raw_aliases is None:
+    if dynamic is None:
         dynamic = {
             "ordering": "bytewise_key_ascending",
             "field_class": "metadata",
@@ -3720,10 +3710,13 @@ def _compile_resource_attributes(
             ),
             "reserved_keys": (
                 "defenseclaw.claw.home_dir",
+                "defenseclaw.device.id",
                 "defenseclaw.gateway.host",
                 "defenseclaw.gateway.port",
                 "defenseclaw.preset",
                 "defenseclaw.preset_name",
+                "deployment.environment",
+                "deployment.mode",
                 "discovery.source",
                 "telemetry.sdk.language",
                 "telemetry.sdk.name",
@@ -3731,8 +3724,7 @@ def _compile_resource_attributes(
             ),
             "forbidden_value_classes": ("filesystem_path", "credential_material"),
         }
-        raw_aliases = ()
-    if dynamic is None or not isinstance(raw_aliases, Sequence) or isinstance(raw_aliases, (str, bytes, bytearray)):
+    if dynamic is None:
         raise GoAPIPlanError("resource.core: custom-resource ownership contract is incomplete")
 
     fixed_keys = tuple(
@@ -3776,59 +3768,6 @@ def _compile_resource_attributes(
                 order=position,
             )
         )
-
-    aliases: list[GoResourceCompatibilityAliasPlanIR] = []
-    for position, raw_alias in enumerate(raw_aliases):
-        path = f"resource.core.resource_compatibility_aliases[{position}]"
-        alias = _string(_read(raw_alias, "alias", path), f"{path}.alias")
-        canonical = _string(_read(raw_alias, "canonical", path), f"{path}.canonical")
-        matches = [
-            field
-            for field in fields.values()
-            if field.component == "resource" and field.semantic_source_id == canonical
-        ]
-        if not matches:
-            raise GoAPIPlanError(f"{path}.canonical: no generated resource descriptor owns the source")
-        source = matches[0]
-        if source.primitive_type != "string" or source.structured_type is not None:
-            raise GoAPIPlanError(f"{path}.canonical: alias source must be a scalar string")
-        source_contract = _kernel_field(source)
-        for candidate in matches[1:]:
-            candidate_contract = _kernel_field(candidate)
-            if (
-                candidate_contract.field_type,
-                candidate_contract.field_class,
-                candidate_contract.typed_constraints,
-            ) != (
-                source_contract.field_type,
-                source_contract.field_class,
-                source_contract.typed_constraints,
-            ):
-                raise GoAPIPlanError(f"{path}.canonical: source descriptors disagree across span families")
-        descriptor = dataclasses.replace(
-            source_contract,
-            descriptor_id=f"resource_alias:{alias}",
-            key=alias,
-            requirement="recommended",
-            condition_id=None,
-            condition_fact=None,
-            false_requirement=None,
-            value_source="input",
-            target_slot="resource",
-            order=len(fixed_keys) + position,
-            requirement_ref=_typed_symbol("familyRequirement", "familyRequirementRecommended"),
-            false_requirement_ref=None,
-            source_ref=_typed_symbol("familyValueSource", "familyValueInput"),
-        )
-        aliases.append(GoResourceCompatibilityAliasPlanIR(alias, canonical, descriptor))
-
-    expected_aliases = (
-        ("deployment.environment", "deployment.environment.name"),
-        ("deployment.mode", "defenseclaw.deployment.mode"),
-        ("defenseclaw.device.id", "defenseclaw.device.public_key_fingerprint"),
-    )
-    if aliases and tuple((item.alias, item.canonical) for item in aliases) != expected_aliases:
-        raise GoAPIPlanError("resource.core: compatibility alias inventory differs from the canonical contract")
 
     resource_symbol_keys = (
         ("resource_attributes_type", owner_id),
@@ -3906,7 +3845,6 @@ def _compile_resource_attributes(
                 _read(dynamic, "forbidden_value_classes", owner_id), "resource forbidden value classes"
             )
         ),
-        aliases=tuple(aliases),
     )
     if (
         plan.ordering != "bytewise_key_ascending"

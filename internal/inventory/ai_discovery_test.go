@@ -483,6 +483,29 @@ func TestLoadAISignaturesPinnedByDigest(t *testing.T) {
 	if seen := load("sha256:"+strings.Repeat("0", 64), false); seen["pinned-ai"] || !seen["dropped-ai"] {
 		t.Fatalf("mismatched pin = %v, want the pinned pack refused", seen)
 	}
+
+	// An apply refuses what the loader would skip, instead of accepting it
+	// with only a log line (GAP-0173); a host that is not managed standalone
+	// is left alone.
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.AIDiscovery.SignaturePacks = []string{pack}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + hex.EncodeToString(sum[:])}
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("matching pin refused: %v", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + strings.Repeat("0", 64)}
+	if err := CheckSignaturePackPins(cfg); err == nil || !strings.Contains(err.Error(), "does not match the pinned") {
+		t.Fatalf("mismatched pin: err = %v, want a refusal naming the mismatch", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = nil
+	if err := CheckSignaturePackPins(cfg); err == nil {
+		t.Fatal("an unpinned pack on a managed standalone host was accepted")
+	}
+	cfg.DeploymentMode = ""
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("an unmanaged host was refused: %v", err)
+	}
 }
 
 func TestConfidencePolicyPinnedByDigest(t *testing.T) {
@@ -2739,5 +2762,27 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 					opts.ProcessInterval, tc.want, tc.managed, tc.input)
 			}
 		})
+	}
+}
+
+// A Secure Client host still loads the packs in <data_dir>/signature-packs
+// (GAP-0146, issue #1092); every other profile loads only the packs that
+// ai_discovery.signature_packs lists.
+func TestSecureClientLoadsTheDataDirSignaturePacks(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite(t, filepath.Join(tmp, "signature-packs", "custom.json"),
+		`{"version": 1, "signatures": [{"id": "custom-data-dir-ai", "name": "Custom", "vendor": "Example", "category": "ai_cli", "confidence": 0.8}]}`)
+	loaded := func(cfg *config.Config) bool {
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "custom-data-dir-ai" })
+	}
+	if !loaded(&config.Config{DeploymentMode: "managed_enterprise", DataDir: tmp}) {
+		t.Fatal("Secure Client did not load the data directory pack")
+	}
+	if loaded(&config.Config{DataDir: tmp}) {
+		t.Fatal("a per-user host loaded an unlisted data directory pack")
 	}
 }

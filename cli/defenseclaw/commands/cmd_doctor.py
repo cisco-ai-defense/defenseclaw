@@ -147,7 +147,7 @@ from defenseclaw.openclaw_presence import (
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
-from defenseclaw.scanner_binary import resolve_scanner_binary
+from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -1337,7 +1337,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         _emit(
             "fail",
             "Config validation",
-            "canonical v8 validator returned no validity decision",
+            "the configuration validator returned no validity decision",
             r=r,
             check_id="doctor.config.canonical-v8",
             reason_code="canonical-validation-unavailable",
@@ -1476,19 +1476,19 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
                 f"configuration check failed: {exc}; "
                 "run `defenseclaw config validate` before applying repairs"
             )
-        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
+        return RepairDecision("blocked", reason, blockers=("configuration validation failed",))
     except (OSError, ValueError):
         reason = (
-            "canonical-v8 configuration preflight failed; "
+            "configuration preflight failed; "
             "run `defenseclaw config validate` before applying repairs"
         )
-        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
+        return RepairDecision("blocked", reason, blockers=("configuration validation failed",))
     if validation.valid is not True:
         reason = (
-            "canonical-v8 validator returned no positive validity decision; "
+            "the configuration validator returned no positive validity decision; "
             "run `defenseclaw config validate` before applying repairs"
         )
-        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation unavailable",))
+        return RepairDecision("blocked", reason, blockers=("configuration validation unavailable",))
     return RepairDecision("noop", f"{config_path}; canonical schema valid")
 
 
@@ -2595,7 +2595,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
 def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> None:
     """The gateway runs the skill-scanner launcher; probe it and its version."""
     name = "skill-scanner"
-    binary = getattr(cfg.scanners.skill_scanner, "binary", "") or "skill-scanner"
+    binary = SKILL_SCANNER_BINARY
     path = resolve_scanner_binary(binary)
     if not path:
         _emit(
@@ -2606,7 +2606,7 @@ def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> No
         )
         return
     probe_path = path
-    if os.name != "nt" and str(binary or "").strip() == "skill-scanner":
+    if os.name != "nt":
         installed_launcher = os.path.abspath(os.path.expanduser("~/.local/bin/skill-scanner"))
         if os.path.lexists(installed_launcher):
             # Scanner resolution intentionally prefers the managed venv so
@@ -4861,21 +4861,6 @@ def _managed_gateway_listener_evidence(
     return _lsof_gateway_listener_evidence(port, host=host)
 
 
-def _managed_gateway_listener_pid(
-    port: int,
-    *,
-    host: str = "",
-    platform_name: str | None = None,
-) -> int:
-    """Return a listener PID through the native platform evidence path."""
-    listener = _managed_gateway_listener_evidence(
-        port,
-        host=host,
-        platform_name=platform_name,
-    )
-    return listener.pid if listener.status == "ok" else 0
-
-
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     """Report home ownership only from the same strong trust chain as auth."""
     code, _ = _http_probe(
@@ -5873,28 +5858,6 @@ def _opencode_managed_plugin_drift(cfg, path: str) -> str:
     return ""
 
 
-def _split_configured_hook_command(command: str, *, platform_name: str | None = None) -> list[str]:
-    """Split the narrow command shape DefenseClaw writes into hooks.json."""
-    is_windows = (platform_name or os.name) == "nt"
-    try:
-        parts = shlex.split(command, posix=not is_windows)
-    except ValueError:
-        return []
-    if is_windows:
-        if parts and parts[0] == "&":
-            parts = parts[1:]
-        normalized = []
-        for part in parts:
-            if len(part) >= 2 and part[0] == part[-1] and part[0] in {"'", '"'}:
-                quote = part[0]
-                part = part[1:-1]
-                if quote == "'":
-                    part = part.replace("''", "'")
-            normalized.append(part)
-        parts = normalized
-    return parts
-
-
 def _powershell_literal(value: str) -> str:
     """Return one inert single-quoted PowerShell string literal."""
     return "'" + value.replace("'", "''") + "'"
@@ -5917,7 +5880,6 @@ def _connector_health_row(document: str, connector: str) -> dict[str, object] | 
 
 def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
-
 
 
 def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
@@ -9099,6 +9061,36 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     _emit("pass", label, f"{applied} (applied by the gateway)", r=r)
 
 
+def _check_signature_packs(cfg, r: _DoctorResult) -> None:
+    """A signature pack that fails its pin is not loaded, and discovery is
+    blind to the agents it describes: name it with both digests."""
+    discovery = getattr(cfg, "ai_discovery", None)
+    if not getattr(discovery, "enabled", False) or not getattr(discovery, "signature_packs", None):
+        return
+    from defenseclaw.inventory import ai_signatures
+
+    total, refused = ai_signatures.refused_packs(cfg)
+    if not refused:
+        _emit("pass", "Signature packs", f"{total} loaded", r=r)
+        return
+    detail = "; ".join(
+        f"{pack.path}: " + (f"digest {pack.digest} is not the pinned {pack.pinned}" if pack.pinned else pack.reason)
+        for pack in refused
+    )
+    _emit(
+        "warn",
+        "Signature packs",
+        f"{len(refused)} of {total} not loaded ({detail})",
+        r=r,
+        check_id="doctor.discovery.signature-pack-refused",
+        reason_code="signature-pack-refused",
+        remediation=(
+            "Restore the pinned pack, or pin the file you trust in ai_discovery.signature_pack_digests "
+            "with `defenseclaw config set`"
+        ),
+    )
+
+
 def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     """Retired policy inputs and the config_version 9 migration record."""
     from defenseclaw.config import CONFIG_VERSION_V9, config_path_for_data_dir
@@ -9107,8 +9099,9 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     if getattr(cfg, "_source_config_version", 0) >= CONFIG_VERSION_V9:
         policy_dir = getattr(cfg, "policy_dir", "") or ""
         stale = []
-        # data-sandbox.json stays: `defenseclaw-gateway policy domains` and
-        # `policy evaluate-firewall` still read it.
+        # The 0.8 firewall.rego, audit.rego and data-sandbox.json are not
+        # reported: nothing reads them, and the migration removes the
+        # unmodified copies.
         for base in (os.path.join(policy_dir, "rego"), policy_dir):
             candidate = os.path.join(base, "data.json")
             if policy_dir and os.path.isfile(candidate) and candidate not in stale:
@@ -9725,7 +9718,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         status = inspect_v8_operator_status(config_path)
     except ConfigInspectTimeoutError as exc:
         # A busy host, not a bad config (GAP-1621).
-        _emit("warn", "Observability v8 effective plan", f"{exc}; re-run defenseclaw doctor", r=r)
+        _emit("warn", "Observability plan", f"{exc}; re-run defenseclaw doctor", r=r)
         return
     except (ConfigInspectError, V8ConfigError, ValueError) as exc:
         if _config_validation_failed(r):
@@ -9733,17 +9726,17 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
             # one bad value is one failure (GAP-1662).
             _emit(
                 "skip",
-                "Observability v8 effective plan",
+                "Observability plan",
                 "not evaluated until config.yaml validates (see the Config validation row above)",
                 r=r,
             )
             return
-        _emit("fail", "Observability v8 effective plan", str(exc), r=r)
+        _emit("fail", "Observability plan", str(exc), r=r)
         return
     except OSError as exc:
         # A config or snapshot the account cannot read or protect is a
         # finding, not a crash of the whole report.
-        _emit("fail", "Observability v8 effective plan", f"cannot inspect the configuration: {exc}", r=r)
+        _emit("fail", "Observability plan", f"cannot inspect the configuration: {exc}", r=r)
         return
     _check_observability_v8_status(
         status, r, live_health=live_health, audit_db=str(getattr(cfg, "audit_db", "") or "")
@@ -9973,7 +9966,6 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             f"of the last {report.observation_window_hours} h; nothing to do",
             r=r,
         )
-
 
 
 def _short_age(seconds: float) -> str:
@@ -10899,6 +10891,7 @@ def doctor(
         _check_guardrail_profile(cfg, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
+    _check_signature_packs(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
@@ -13791,21 +13784,6 @@ def _verified_listener_gateway_evidence(
     )
 
 
-def _verified_listener_gateway_pid(
-    cfg,
-    *,
-    evidence: GatewayEvidence | None = None,
-    platform_name: str | None = None,
-) -> int:
-    """Backward-compatible PID view over structured endpoint evidence."""
-    listener = _verified_listener_gateway_evidence(
-        cfg,
-        evidence=evidence,
-        platform_name=platform_name,
-    )
-    return listener.pid if listener.status == "ok" else 0
-
-
 def _remove_stale_pid_if_unchanged(
     pid_file: str,
     inspected_fingerprint: tuple[int, int, int, int, bytes],
@@ -14844,12 +14822,6 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
     return ("healthy", "gateway health matches the current configuration")
 
 
-def _gateway_service_health_repair_reason(cfg, health: dict) -> str:
-    """Compatibility view returning only deterministic repairable drift."""
-    kind, detail = _gateway_service_health_assessment(cfg, health)
-    return detail if kind == "repairable" else ""
-
-
 def _gateway_restart_cooldown_remaining(
     trust: _GatewayTrust,
     *,
@@ -15447,7 +15419,10 @@ def _fix_hook_script_drift(
         return ("skip", "declined by user")
     trust = _trusted_gateway_listener_for_lifecycle(cfg)
     if not trust.trusted:
-        return ("fail", f"{trust.detail}; start the gateway with `defenseclaw-gateway start`, then run doctor --fix again")
+        return (
+            "fail",
+            f"{trust.detail}; start the gateway with `defenseclaw-gateway start`, then run doctor --fix again",
+        )
     repaired, detail = _repair_gateway_lifecycle(cfg, start_if_stopped=False)
     if not repaired:
         return ("fail", f"could not restart the gateway ({detail}); run `defenseclaw-gateway restart`")
@@ -15456,7 +15431,10 @@ def _fix_hook_script_drift(
         from defenseclaw.hook_integrity import setup_command
 
         commands = ", ".join(f"`{setup_command(c)}`" for c in left)
-        return ("fail", f"the gateway restarted but {', '.join(left)} still differs from setup's render; run {commands}")
+        return (
+            "fail",
+            f"the gateway restarted but {', '.join(left)} still differs from setup's render; run {commands}",
+        )
     return ("pass", f"rendered the {names} hook script(s) again")
 
 

@@ -722,13 +722,10 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	if _, ok := h.accounts.accounts["defenseclaw"]; !ok {
 		t.Fatal("--keep-service-account removed the service account")
 	}
-	r = h.run(Options{Action: ActionUninstall, Purge: true, RemoveServiceAccount: true})
+	r = h.run(Options{Action: ActionUninstall, Purge: true})
 	requireOK(t, r)
 	if _, ok := h.accounts.accounts["defenseclaw"]; ok {
 		t.Fatal("purge kept the service account")
-	}
-	if !hasWarning(r, codeDeprecatedOption) {
-		t.Fatalf("--remove-service-account must warn that it is deprecated: %+v", r.Warnings)
 	}
 	if r := h.run(Options{Action: ActionUninstall, Purge: true, KeepState: true}); r.ExitCode == 0 {
 		t.Fatal("--keep-state with --purge must be refused")

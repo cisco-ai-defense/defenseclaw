@@ -407,36 +407,100 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
-// alertSensitiveToolResult raises tool-result-pii-alert when the rule pack the
-// request's connector enforces lists the tool in sensitive_tools with
-// result_inspection and the tool's output matched at least
-// min_entities_for_alert findings. The event router does the same for
-// OpenClaw tool_result frames; this is the hook connectors' path, so
-// guardrail.rules.sensitive_tools is live on every connector. Findings are
-// only counted: the row never carries the matched text.
+// alertSensitiveToolResult raises tool-result-pii-alert for a tool result on
+// the generic inspect endpoint; see sensitiveToolResultAlert.
 func (a *APIServer) alertSensitiveToolResult(r *http.Request, tool string, verdict *ToolInspectVerdict) {
-	g := a.generation()
-	if g == nil || verdict == nil || a.logger == nil {
+	if verdict == nil || a.logger == nil {
 		return
 	}
-	pack := g.RulePacks["conn:"+profileRequestConnector(r.Context())]
+	details, ok := a.sensitiveToolResultAlert(profileRequestConnector(r.Context()), tool, verdict.Severity, len(verdict.Findings))
+	if !ok {
+		return
+	}
+	event := a.inspectAuditEvent(
+		r, "/api/v1/inspect/tool-response", string(audit.ActionToolResultPIIAlert), tool, details)
+	a.raiseToolResultAlert(r.Context(), event, verdict.Severity)
+}
+
+// alertSensitiveHookToolResult is the same alert for the connector hook
+// endpoints (Claude Code, Codex and every other agent hook), which finalize
+// their tool results through finalizeAgentHook instead of the inspect route.
+func (a *APIServer) alertSensitiveHookToolResult(ctx context.Context, connectorName string, req agentHookRequest, resp agentHookResponse) {
+	if a.logger == nil || a.managedAIDOnly() || req.ToolName == "" || !isResultLikeEvent(req.HookEventName) {
+		return
+	}
+	details, ok := a.sensitiveToolResultAlert(connectorName, req.ToolName, resp.Severity, len(resp.Findings))
+	if !ok {
+		return
+	}
+	structured := map[string]any{"route": "hook:" + req.HookEventName, "connector": connectorName}
+	auditCallerIdentity(ctx).addTo(structured)
+	a.raiseToolResultAlert(ctx, audit.Event{
+		Action:     string(audit.ActionToolResultPIIAlert),
+		Target:     req.ToolName,
+		Details:    details,
+		Connector:  connectorName,
+		Structured: structured,
+	}, resp.Severity)
+}
+
+// raiseToolResultAlert files a tool-result-pii-alert with the severity of the
+// result's findings and sends it to the configured webhooks. The row used to
+// carry INFO, which the alert views leave out, so the alert was an audit row
+// no operator saw (GAP-0187). The details only count the findings.
+func (a *APIServer) raiseToolResultAlert(ctx context.Context, event audit.Event, findingSeverity string) {
+	event.Severity = toolResultAlertSeverity(findingSeverity)
+	_ = a.logger.LogEventCtx(ctx, event)
+	if a.webhookSource == nil {
+		return
+	}
+	if webhooks := a.webhookSource(); webhooks != nil {
+		event.Timestamp = time.Now().UTC()
+		event.Actor = "defenseclaw-hook"
+		event.Structured = nil
+		webhooks.Dispatch(event)
+	}
+}
+
+// toolResultAlertSeverity maps a findings severity to the outer severity of
+// the alert row: one the alert views list (never INFO or NONE).
+func toolResultAlertSeverity(severity string) string {
+	switch s := strings.ToUpper(strings.TrimSpace(severity)); s {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW":
+		return s
+	default:
+		return "MEDIUM"
+	}
+}
+
+// sensitiveToolResultAlert returns the audit details of a
+// tool-result-pii-alert when the rule pack the connector enforces lists the
+// tool in sensitive_tools with result_inspection and the tool's output matched
+// at least min_entities_for_alert findings. The event router does the same for
+// OpenClaw tool_result frames; the inspect endpoint and the connector hooks
+// share this decision, so guardrail.rules.sensitive_tools is live on every
+// connector. Findings are only counted: the row never carries the matched text.
+func (a *APIServer) sensitiveToolResultAlert(connectorName, tool, severity string, findings int) (string, bool) {
+	g := a.generation()
+	if g == nil {
+		return "", false
+	}
+	pack := g.RulePacks["conn:"+connectorName]
 	if pack == nil {
 		pack = g.RulePacks["global"]
 	}
 	entry := pack.LookupSensitiveTool(tool)
 	if entry == nil || !entry.ResultInspection {
-		return
+		return "", false
 	}
 	minEntities := entry.MinEntitiesAlert
 	if minEntities <= 0 {
 		minEntities = 1
 	}
-	if len(verdict.Findings) < minEntities {
-		return
+	if findings < minEntities {
+		return "", false
 	}
-	details := fmt.Sprintf("tool=%s severity=%s entities=%d", tool, verdict.Severity, len(verdict.Findings))
-	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(
-		r, "/api/v1/inspect/tool-response", string(audit.ActionToolResultPIIAlert), tool, details))
+	return fmt.Sprintf("tool=%s severity=%s entities=%d", tool, severity, findings), true
 }
 
 // buildVerdict converts rule findings into a ToolInspectVerdict.

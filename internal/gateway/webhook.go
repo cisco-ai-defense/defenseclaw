@@ -1064,7 +1064,8 @@ func categorizeAction(action string) string {
 		strings.Contains(action, "gateway-recovered"),
 		strings.Contains(action, "guardrail-degraded"):
 		return "health"
-	case strings.Contains(action, "guardrail"):
+	case strings.Contains(action, "guardrail"),
+		action == string(audit.ActionToolResultPIIAlert):
 		return "guardrail"
 	case strings.Contains(action, "drift"),
 		strings.Contains(action, "rescan"):

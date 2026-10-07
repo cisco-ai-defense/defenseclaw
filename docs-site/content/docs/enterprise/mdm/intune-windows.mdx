@@ -10,7 +10,7 @@ keywords:
   - PowerShell 7 dependency
 ---
 
-<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not delivered DefenseClaw in a live tenant yet. The tenant setup and Windows enrollment it depends on were run on a test tenant: see [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant).</Callout>
 
 <Callout title="At a glance">
 - **You upload:** a Win32 app, `Install-DefenseClawIntune.intunewin`, that
@@ -41,6 +41,8 @@ in the trusted PowerShell 7, never inside the Intune host.
 
 ## Before you start
 
+- **Tenant**: licences, automatic enrollment and device groups are in place; see
+  [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant).
 - **Devices**: Windows x64 enrolled in Intune. The lifecycle refuses ARM64 and
   32-bit Windows. Intune cannot enroll Windows Server, so test on Windows 10 or
   11 clients.

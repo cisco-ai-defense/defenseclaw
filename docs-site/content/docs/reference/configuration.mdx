@@ -102,9 +102,6 @@ before locating or editing Windows state.
       <Folder name="rego">
         <File name="admission.rego" />
         <File name="guardrail.rego" />
-        <File name="firewall.rego" />
-        <File name="audit.rego" />
-        <File name="data-sandbox.json" />
         <File name="data.json.migrated-v9 (after the v9 migration)" />
       </Folder>
     </Folder>
@@ -319,7 +316,7 @@ llm:
   provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
   model: claude-sonnet-4-6
   api_key_env: DEFENSECLAW_LLM_KEY
-  base_url: ""                 # optional override; LiteLLM picks a default per provider. An OpenAI-compatible endpoint takes the /v1 form (https://host/v1); the judge and the scanners read it the same way
+  base_url: ""                 # optional override; LiteLLM picks a default per provider. For an OpenAI-style provider (openai, openai-compatible, vllm, lm_studio) a bare host such as https://host gets /v1 added, so the judge, doctor and the scanners all call https://host/v1/chat/completions; a URL with a path is used as written
   role: unified                # unified | agent | judge
   instance_name: ""            # binds to an llm_providers.custom entry; required with provider: custom
   region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
@@ -550,7 +547,7 @@ The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 | `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). |
 | `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity (hook decisions, tool activity, agent, model and tool spans, `identity.observed`). Off, records keep the domain, directory, assurance, session kind and client address but no principal. |
 | `ai_discovery.signature_packs` | `[]` | Signature pack files to load. Since `config_version: 9` only listed packs load; the migration lists the packs it finds in `<data_dir>/signature-packs/`. |
-| `ai_discovery.signature_pack_digests` | `{}` | The sha256 of each pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load. |
+| `ai_discovery.signature_pack_digests` | `{}` | The sha256 of each pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load, and an apply (`ensure`) refuses a config whose pack file does not match its digest or has none. |
 
 Within a profile, the precedence for one connector is the profile's
 `connectors.<connector>` entry, then the profile field, then
@@ -1199,7 +1196,7 @@ and examples, see the [enterprise settings reference](/docs/enterprise/configura
 | `enterprise.enrollment.mode` | `auto` \| `manifest` (`auto`) | all | With `manifest` you publish `targets.yaml` and the enumerator does nothing. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`) |
 | `enterprise.enrollment.include_users` | list | all | Linux and macOS: also enrolls these accounts, bypassing the uid range and the login-shell check. Windows: accepted, but every profile is already a candidate, so it changes nothing |
 | `enterprise.enrollment.exclude_users` | list | all | Never enrolled; wins over every include. Linux and macOS also match a numeric uid |
-| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local, Active Directory and Microsoft Entra ID groups by name or SID, decided from session tokens (cached for signed-out users) and the local account database |
+| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local and Active Directory groups by name or SID, and the Microsoft Entra ID groups that a built-in local group lists, by SID ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)); decided from session tokens (cached for signed-out users) and the local account database |
 | `enterprise.enrollment.exempt_users` | list | all | Linux and macOS: inspected but not enrolled. Windows: machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows |
 | `enterprise.enrollment.unenrolled_users` | `inspect` \| `deny` (`inspect`) | Linux, macOS | How machine-policy connectors treat users who are not enrolled. On Windows an unenrolled user always fails closed |
 | `enterprise.enrollment.root` | `inspect` \| `deny` \| `exempt` (`inspect`) | Linux, macOS | root is never enrolled. `deny` refuses root's hook calls. `exempt` currently behaves like `inspect` |

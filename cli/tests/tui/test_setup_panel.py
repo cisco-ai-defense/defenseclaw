@@ -127,7 +127,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
 
 
 def test_exact_v8_setup_replaces_legacy_observability_editors_with_effective_plan() -> None:
-    model = SetupPanelModel({"config_version": 8, "privacy": {"disable_redaction": True}})
+    model = SetupPanelModel({"config_version": 8})
     names = tuple(section.name for section in model.sections)
 
     assert "Privacy" not in names
@@ -2651,11 +2651,11 @@ def test_per_connector_guardrail_field_creates_missing_entry() -> None:
     from defenseclaw.tui.services.setup_state import apply_config_field
 
     cfg = Config(guardrail=GuardrailConfig(enabled=True, mode="observe", connector="codex"))
-    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack_dir", "/codex/pack")
+    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack", "strict")
 
     entry = cfg.guardrail.connectors["codex"]
     assert isinstance(entry, PerConnectorGuardrailConfig)
-    assert entry.rule_pack_dir == "/codex/pack"
+    assert entry.rule_pack == "strict"
 
 
 def test_guardrail_section_single_connector_omits_per_connector_groups() -> None:

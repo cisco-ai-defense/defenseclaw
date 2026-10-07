@@ -32,7 +32,7 @@ from defenseclaw import ux
 from defenseclaw.config import config_path, legacy_standalone_configured
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
-from defenseclaw.scanner_binary import resolve_scanner_binary
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
 
 # ---------------------------------------------------------------------------
 # Color conventions for `defenseclaw status`
@@ -374,8 +374,8 @@ def status(app: AppContext, as_json: bool) -> None:
     # Scanners
     ux.section("Scanners")
     scanner_bins = [
-        ("skill-scanner", cfg.scanners.skill_scanner.binary),
-        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
+        ("skill-scanner", SKILL_SCANNER_BINARY),
+        ("mcp-scanner", MCP_SCANNER_BINARY),
         ("codeguard", "built-in"),
     ]
     for name, binary in scanner_bins:
@@ -829,20 +829,6 @@ def _print_agents(
                 # A drifted or removed hook registration shows with the
                 # gateway stopped too (GAP-1230).
                 _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
-
-
-def _canonical_data_dir(value) -> str | None:
-    """Return the platform-canonical absolute form of a configured data dir."""
-    try:
-        raw = os.fspath(value)
-    except TypeError:
-        return None
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
-    except (OSError, ValueError):
-        return None
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
@@ -1531,8 +1517,8 @@ def _scanner_status_map(cfg) -> dict[str, str]:
     section): ``installed`` / ``not_found`` / ``built-in``."""
     out: dict[str, str] = {}
     for name, binary in (
-        ("skill-scanner", cfg.scanners.skill_scanner.binary),
-        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
+        ("skill-scanner", SKILL_SCANNER_BINARY),
+        ("mcp-scanner", MCP_SCANNER_BINARY),
         ("codeguard", "built-in"),
     ):
         if binary == "built-in":

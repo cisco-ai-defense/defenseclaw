@@ -189,11 +189,16 @@ version 9 file and fails with a config error.
   release. Run the two steps back to back: until the second one runs, the
   older release cannot read a version 9 config, so a restart of its services
   fails.
-- **Debian and Ubuntu.** The installed package refuses an older `.deb` before
-  any file changes unless the rollback marker
+- **Debian and Ubuntu.** An apt hook shipped with the package
+  (`/etc/apt/apt.conf.d/50defenseclaw-enterprise`) refuses an older `.deb`
+  before dpkg replaces any file, unless the rollback marker
   `/var/lib/defenseclaw-enterprise/allow-downgrade` exists. `apt` shows the
   refusal and the running deployment is untouched. The marker is used up by
-  the downgrade it allows, so each rollback needs a new one.
+  the downgrade it allows, so each rollback needs a new one. The hook runs
+  only for `apt` and `apt-get`: `dpkg -i` of an older package is
+  not refused, so do not use it to go back. The hook comes with the package
+  that is installed now, so a release from before it was added does not
+  refuse.
 - **RHEL.** `dnf` and `rpm` run the installed package's scripts after the
   older files are in place, so they cannot refuse the downgrade; use the
   rollback only on purpose.
@@ -453,7 +458,7 @@ warning `ensure_config_applied`; no service stops and no agent fails closed.
 If the gateway does not report the policy in time, or the lifecycle lock is
 busy, `ensure` puts the previous config back and runs the full upgrade, as it
 did for every change before. A change to a process-level key restarts it:
-`gateway.*`, `guardrail.connectors.*.enabled`, `guardrail.hook_fail_mode`,
+`gateway.*`, `guardrail.connectors.*.enabled`, `guardrail.hook_self_heal`,
 `enterprise.network` and the other keys that
 [Source of truth](/docs/reference/source-of-truth) lists.
 

@@ -53,13 +53,6 @@ var directoryServices = map[string]directoryService{
 	"aad":        {directory: useridentity.DirectoryEntraID, source: "nss_aad"},
 }
 
-// maxDirectoryGroups bounds how many group ids are named per account. An
-// Active Directory token holds about a thousand groups at most; an account
-// past the bound has no facts (the lookup fails, and the default profile
-// applies as default_lookup_failed) instead of facts with some of its
-// groups missing, which would select a profile on part of its membership.
-const maxDirectoryGroups = 2048
-
 // A cold SSSD answers every group id with a directory query of its own
 // (about 30 ms), so one getent call for a few hundred ids outlasts the
 // seconds a single command gets, and its failure used to leave the ids as
@@ -106,7 +99,14 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 			}
 			facts.Directory, facts.Source = known.directory, known.source
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
-			if domain != "" {
+			if domain != "" && known.directory == useridentity.DirectoryEntraID {
+				// The aad and himmelblau modules name an Entra ID account by
+				// its UPN. It has no Kerberos realm, and the UPN is the
+				// principal Windows reports for the same user.
+				facts.Domain = strings.ToLower(domain)
+				facts.UPN = useridentity.NormalizeUPN(account.Name)
+				facts.Principal = facts.UPN
+			} else if domain != "" {
 				facts.Domain = domain
 				if strings.Contains(domain, ".") {
 					facts.Realm = strings.ToUpper(domain)

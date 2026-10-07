@@ -14,8 +14,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Generic, Literal, TypeVar
@@ -29,8 +28,6 @@ from defenseclaw.connector_paths import (
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
-
-CatalogKind = Literal["skill", "mcp", "plugin", "tool"]
 
 
 @dataclass(frozen=True)
@@ -2017,25 +2014,6 @@ def connector_source_label(connector: str, category: str) -> str:
 
 def normalized_connector(connector: str) -> str:
     return (connector or "").strip().lower()
-
-
-def load_rows_from_command(
-    args: Sequence[str],
-    parser: Callable[[str], tuple[RowT, ...]],
-    *,
-    timeout: float = 15,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> tuple[RowT, ...]:
-    """Run a Go-parity list command and parse its JSON output."""
-
-    result = runner(
-        ("defenseclaw", *args),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=True,
-    )
-    return parser(result.stdout)
 
 
 def _verdict_before_source(cells: tuple[str, ...]) -> tuple[str, ...]:

@@ -119,7 +119,7 @@ from defenseclaw.file_permissions import (
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
-from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
+from defenseclaw.paths import bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
@@ -429,6 +429,29 @@ def _only_hot_config_changes(ctx: click.Context, cfg_path: str | None) -> bool:
         return False
 
 
+def _echo_saved_without_restart(*, plural: bool = False) -> None:
+    """Closing line of a connector setup run with ``--no-restart`` (GAP-0199).
+
+    A running gateway applies a hot key (a rule pack, a mode) from its next
+    config generation on its own; anything else waits for a restart.
+    """
+    ctx = click.get_current_context(silent=True)
+    app = ctx.find_object(AppContext) if ctx is not None else None
+    if (
+        ctx is not None
+        and app is not None
+        and app.cfg is not None
+        and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx))
+    ):
+        ux.echo("  ℹ Saved. The running gateway applies it on its own, without a restart.")
+        return
+    ux.echo(
+        "  ℹ Saved. It takes effect once the gateway restarts and confirms the "
+        f"{'connectors' if plural else 'connector'} (defenseclaw-gateway restart)."
+    )
+
+
 @click.group(cls=_SetupGroup, invoke_without_command=True)
 @click.option(
     "--connector",
@@ -526,11 +549,7 @@ def setup(
         and app.preinit_setup_bootstrap
         and ctx.invoked_subcommand != "trusted-paths"
     ):
-        ux.echo(
-            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
-            err=True,
-        )
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
     if (
         ctx.invoked_subcommand != "trusted-paths"
@@ -574,6 +593,16 @@ def setup(
     )
 
 
+def _exit_not_initialized(ctx: click.Context) -> None:
+    """Stop with the missing-config message: run init, or on a managed
+    device that it is managed (exit 3)."""
+    from defenseclaw.config import not_initialized_error
+
+    error = not_initialized_error()
+    ux.echo(str(error), err=True)
+    ctx.exit(error.exit_code)
+
+
 def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> None:
     """Validate and initialize every setup path except trusted-paths.
 
@@ -584,8 +613,7 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     """
 
     if app is None or app.cfg is None:
-        ux.echo("DefenseClaw is not initialized — run 'defenseclaw init' first.", err=True)
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
     from defenseclaw.commands.cmd_config import validate_config
 
@@ -1421,7 +1449,6 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     data_dir = cfg.data_dir
     click.echo()
     ux.section("Skill Scanner Configuration")
-    click.echo(f"  {ux.dim('Binary:')} {sc.binary}")
     click.echo()
 
     sc.use_llm = click.confirm("  Use the LLM judge (recommended)?", default=sc.use_llm)
@@ -1456,8 +1483,7 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
         sc, click.confirm("  Enable VirusTotal binary scanner?", default=scanner_settings.virustotal_enabled(sc))
     )
     if sc.analyzers.virustotal.enabled:
-        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", sc.virustotal_api_key, data_dir)
-        sc.virustotal_api_key = ""
+        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", "", data_dir)
     _set_skill_aidefense(
         sc, click.confirm("  Enable Cisco AI Defense analyzer?", default=scanner_settings.aidefense_enabled(sc))
     )
@@ -1515,7 +1541,6 @@ def _role_to_target_path(role: str) -> str:
     :func:`_target_llm_block` / :meth:`Config.resolve_llm`.
     """
     return _LLM_ROLE_TO_TARGET_PATH.get(role, "")
-
 
 
 def _interactive_llm_missing_key_env(cfg, target_path: str) -> str:
@@ -2536,11 +2561,7 @@ def trusted_paths(ctx: click.Context) -> None:
         and app.preinit_setup_bootstrap
         and ctx.invoked_subcommand not in {"add", "list", "remove"}
     ):
-        ux.echo(
-            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
-            err=True,
-        )
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
 
 @trusted_paths.command("list")
@@ -2791,20 +2812,16 @@ def _apply_scanner_llm_flags(llm, provider: str | None, model: str | None, base_
 
 
 def _set_skill_virustotal(sc, enabled: bool) -> None:
-    """analyzers.virustotal; the v8 use_virustotal/key fields are cleared."""
+    """analyzers.virustotal.enabled and the variable that holds its key."""
     sc.analyzers.virustotal.enabled = enabled
     if enabled and not sc.analyzers.virustotal.api_key_env:
-        sc.analyzers.virustotal.api_key_env = sc.virustotal_api_key_env or "VIRUSTOTAL_API_KEY"
+        sc.analyzers.virustotal.api_key_env = "VIRUSTOTAL_API_KEY"
     if not enabled:
         sc.analyzers.virustotal.api_key_env = ""
-    sc.use_virustotal = False
-    sc.virustotal_api_key_env = ""
 
 
 def _set_skill_aidefense(sc, enabled: bool) -> None:
-    """analyzers.aidefense; the v8 use_aidefense field is cleared."""
     sc.analyzers.aidefense.enabled = enabled
-    sc.use_aidefense = False
 
 
 # ---------------------------------------------------------------------------
@@ -4449,11 +4466,6 @@ def _refuse_rotate_token_on_managed_host() -> None:
     ),
 )
 @click.option(
-    "--no-restart",
-    is_flag=True,
-    help="Deprecated unsafe mode; retained only to return a fail-closed migration error.",
-)
-@click.option(
     "--yes",
     "--non-interactive",
     "--accept-defaults",
@@ -4462,7 +4474,7 @@ def _refuse_rotate_token_on_managed_host() -> None:
     help="Skip the confirmation prompt and rotate immediately (--non-interactive and --accept-defaults are aliases).",
 )
 @pass_ctx
-def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
+def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     """Rotate the gateway token and connector-scoped hook credentials.
 
     Generates distinct 32-byte CSPRNG values, verifies and stops gateway A,
@@ -4481,10 +4493,6 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     _refuse_rotate_token_on_managed_host()
     dotenv_path = _rotate_token_dotenv_path(app)
-    if no_restart:
-        raise click.ClickException(
-            "--no-restart is not safe for token rotation; the daemon must cross the verified A/B lifecycle boundary."
-        )
     token_env = str(getattr(app.cfg.gateway, "token_env", "") or "").strip()
     canonical_token_env = (
         token_env.casefold() == _GATEWAY_TOKEN_ENV.casefold() if os.name == "nt" else token_env == _GATEWAY_TOKEN_ENV
@@ -4909,32 +4917,6 @@ _CONNECTOR_NAMES_FALLBACK = [
     "omnigent",
     "kiro",
 ]
-
-
-def _fetch_connector_names(cfg=None) -> list[str]:
-    """Query the sidecar /v1/connectors endpoint for available connectors.
-
-    Falls back to the hardcoded list if the sidecar is unreachable.
-    """
-    import urllib.request
-
-    host = "127.0.0.1"
-    port = 0
-    if cfg and hasattr(cfg, "guardrail"):
-        host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
-        port = getattr(cfg.guardrail, "port", 0) or 0
-    if not port:
-        return platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
-    try:
-        url = f"http://{host}:{port}/v1/connectors"
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = _json.loads(resp.read())
-            names = [c.get("name") or c.get("id") for c in data.get("connectors", [])]
-            resolved = [n for n in names if n] or list(_CONNECTOR_NAMES_FALLBACK)
-            return platform_support.supported_connectors(resolved)
-    except Exception:
-        return platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
 
 
 _CONNECTOR_NAMES = platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
@@ -6098,96 +6080,29 @@ def _configure_hilt_interactive(
     ).upper()
 
 
-def _resolve_rule_pack_dir(
-    app: AppContext,
-    *,
-    rule_pack: str | None,
-    rule_pack_dir: str | None,
-) -> str | None:
-    """Resolve a rule-pack selection to a concrete directory path.
-
-    ``--rule-pack`` names a bundled preset (default/strict/permissive),
-    resolved under ``<policy_root>/guardrail/<preset>``. ``--rule-pack-dir``
-    (R1) points at an arbitrary directory verbatim, giving the CLI parity
-    with the TUI's free-text ``rule_pack_dir`` field. The two are mutually
-    exclusive — naming a single pack two different ways in one invocation is
-    exactly the one-input-two-meanings ambiguity R3 exists to remove, so we
-    reject it loudly rather than silently picking a winner.
-
-    Returns:
-      * ``None`` — neither flag supplied; the caller leaves the existing
-        ``rule_pack_dir`` untouched.
-      * ``""`` — ``--rule-pack-dir ""`` was passed explicitly; clears the
-        override back to the inherited/global default (three-state parity
-        with the YAML semantics the gateway loader honors).
-      * an absolute path — the resolved preset or operator-supplied dir.
-    """
-    if rule_pack is not None and rule_pack_dir is not None:
-        raise click.UsageError(
-            "--rule-pack and --rule-pack-dir are mutually exclusive: pass a "
-            "built-in preset name OR a custom directory path, not both."
-        )
-    if rule_pack is not None:
-        policy_root = app.cfg.policy_dir or os.path.join(app.cfg.data_dir, "policies")
-        return os.path.join(policy_root, "guardrail", rule_pack)
-    if rule_pack_dir is not None:
-        raw = rule_pack_dir.strip()
-        # Empty string is an explicit "clear the override"; a real path is
-        # anchored to an absolute location so the gateway's LoadRulePack
-        # reads exactly where the operator pointed regardless of the
-        # sidecar's working directory at boot.
-        if not raw:
-            return ""
-        resolved = os.path.abspath(os.path.expanduser(raw))
-        # R5: validate the pack dir on set. Setup is a local authoring command;
-        # saving a path that does not exist makes the summary look successful
-        # while the gateway cannot load the intended rules at boot.
-        if not os.path.isdir(resolved):
-            raise click.UsageError(
-                f"--rule-pack-dir {resolved!r} does not exist or is not a directory. "
-                "Create the directory first, or use --rule-pack default|strict|permissive."
-            )
-        return resolved
-    return None
-
-
-def _apply_rule_pack_selection(gc, pack_dir: str, *, connector: str | None) -> bool:
-    """Write *pack_dir* with per-connector scoping (R3).
+def _apply_rule_pack_selection(gc, name: str, *, connector: str | None) -> bool:
+    """Select the built-in rule pack *name* with per-connector scoping (R3).
 
     When *connector* already owns an override block in ``gc.connectors``, the
     pack is written there and peers keep their current rule pack. Without an
-    explicit connector, this is a global/all-connectors write: update
-    ``gc.rule_pack_dir`` and clear every per-connector rule-pack override so
-    all active connectors inherit the same pack. Returns True when the write
-    was per-connector.
+    explicit connector, this is a global/all-connectors write: set
+    ``gc.rule_pack`` and clear every per-connector rule-pack override so all
+    active connectors inherit the same pack. Returns True when the write was
+    per-connector. A custom pack is registered with ``guardrail use-pack``.
     """
     if connector and getattr(gc, "connectors", None) and connector in gc.connectors:
-        _set_scope_rule_pack_dir(gc.connectors[connector], pack_dir)
+        gc.connectors[connector].rule_pack = name
         return True
-    _set_scope_rule_pack_dir(gc, pack_dir)
+    gc.rule_pack = name
     for block in (getattr(gc, "connectors", None) or {}).values():
-        _set_scope_rule_pack_dir(block, "")
+        block.rule_pack = ""
     return False
 
 
-def _set_scope_rule_pack_dir(block, pack_dir: str) -> None:
-    """Select *pack_dir* at one guardrail scope ("" clears the scope's pack).
-
-    The config_version 9 key is ``rule_pack``; the save maps a non-empty v8
-    ``rule_pack_dir`` onto it, so the scope's ``rule_pack`` is cleared here or
-    an existing selection would survive a clear.
-    """
-    block.rule_pack_dir = pack_dir
-    if hasattr(block, "rule_pack"):
-        block.rule_pack = ""
-
-
 def _apply_guardrail_extra_options(
-    app: AppContext,
     gc,
     *,
     rule_pack: str | None,
-    rule_pack_dir: str | None = None,
     connector: str | None = None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
@@ -6199,9 +6114,8 @@ def _apply_guardrail_extra_options(
     R3 consistency fix so ``setup guardrail --connector X`` matches ``setup X``.
     """
 
-    pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
-    if pack_dir is not None:
-        _apply_rule_pack_selection(gc, pack_dir, connector=connector)
+    if rule_pack is not None:
+        _apply_rule_pack_selection(gc, rule_pack, connector=connector)
     per_connector = bool(connector and getattr(gc, "connectors", None) and connector in gc.connectors)
     _apply_hilt_setup(
         gc,
@@ -6351,17 +6265,6 @@ def _resolve_judge_hook_gate(
     type=click.Choice(["default", "strict", "permissive"]),
     default=None,
     help="Guardrail rule-pack profile",
-)
-@click.option(
-    "--rule-pack-dir",
-    default=None,
-    help=(
-        "Path to a custom rule-pack directory. Use instead of --rule-pack "
-        "to point at a pack "
-        "outside the built-in default/strict/permissive presets. Scoped "
-        "per-connector when --connector names a multi-install peer, else "
-        'global. Mutually exclusive with --rule-pack; pass "" to clear.'
-    ),
 )
 @click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
 @click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
@@ -6554,7 +6457,6 @@ def setup_guardrail(
     detection_strategy_completion: str | None,
     detection_strategy_tool_call: str | None,
     rule_pack,
-    rule_pack_dir,
     judge_model,
     judge_api_base,
     judge_api_key_env,
@@ -6860,10 +6762,8 @@ def setup_guardrail(
         if detection_strategy is not None:
             gc.detection_strategy = detection_strategy
         _apply_guardrail_extra_options(
-            app,
             gc,
             rule_pack=rule_pack,
-            rule_pack_dir=rule_pack_dir,
             connector=explicit_connector,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
@@ -7064,10 +6964,8 @@ def setup_guardrail(
                 click.echo("  Guardrail not enabled. Run again without declining to configure.")
                 return
             _apply_guardrail_extra_options(
-                app,
                 gc,
                 rule_pack=rule_pack,
-                rule_pack_dir=rule_pack_dir,
                 connector=explicit_connector,
                 human_approval=human_approval,
                 hilt_min_severity=hilt_min_severity,
@@ -7242,10 +7140,8 @@ def setup_guardrail(
         ]
         for c in _actives:
             hilt_c = gc.effective_hilt(c)
-            # Empty rule-pack dir = the built-in default pack — render it the
-            # same way `guardrail status` does (basename, or "default").
-            _rp = gc.effective_rule_pack_dir(c)
-            rp_label = os.path.basename(_rp.rstrip("/")) if _rp.strip() else "default"
+            # An unset rule_pack is the built-in default pack.
+            rp_label = gc.effective_rule_pack(c) or "default"
             rows.append((f"  [{c}] mode", gc.effective_mode(c)))
             rows.append((f"  [{c}] rule_pack", rp_label))
             rows.append((f"  [{c}] hook_fail_mode", gc.effective_hook_fail_mode(c) or "open"))
@@ -7268,7 +7164,7 @@ def setup_guardrail(
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", gc.detection_strategy),
-            ("guardrail.rule_pack_dir", gc.effective_rule_pack_dir()),
+            ("guardrail.rule_pack", gc.effective_rule_pack() or "default"),
         ]
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
@@ -9686,7 +9582,6 @@ def _apply_hook_connector_setup(
     write_mode: str = "replace",
     preserve_global_settings: bool = False,
     rule_pack: str | None = None,
-    rule_pack_dir: str | None = None,
     block_message: str | None = None,
     fail_mode: str | None = None,
     hilt: bool | None = None,
@@ -9782,7 +9677,6 @@ def _apply_hook_connector_setup(
 
     cfg = app.cfg
     gc = cfg.guardrail
-    pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except _SetupGatewayNoAnswerError as exc:
@@ -9879,24 +9773,17 @@ def _apply_hook_connector_setup(
     #     gets seeded into the map on the first add keeps an empty block and
     #     therefore inherits the global pack — unchanged.
     #   * sole connector (replace / first-ever single): there is no
-    #     per-connector block, so it sets the global rule_pack_dir exactly
+    #     per-connector block, so it sets the global rule_pack exactly
     #     like `setup guardrail --rule-pack` does for a single-connector
     #     install. "Set this connector's pack" thus means the same thing in
     #     both shapes.
-    #
-    # R1: --rule-pack-dir accepts a free-text directory verbatim (parity with
-    # the TUI's free-text field); ``pack_dir`` was resolved above. The scoping
-    # branch below is unchanged.
-    if pack_dir is not None:
-        # Operator-facing label: the preset name, the dir path, or an explicit
-        # "(cleared)" when --rule-pack-dir "" reset the override.
-        pack_label = rule_pack if rule_pack is not None else (pack_dir or "(cleared — inherits global)")
+    if rule_pack is not None:
         if write_mode == "add" and connector in gc.connectors:
-            _set_scope_rule_pack_dir(gc.connectors[connector], pack_dir)
-            ux.echo(f"  ✓ {connector} rule pack: {pack_label} (per-connector override)")
+            gc.connectors[connector].rule_pack = rule_pack
+            ux.echo(f"  ✓ {connector} rule pack: {rule_pack} (per-connector override)")
         else:
-            _set_scope_rule_pack_dir(gc, pack_dir)
-            ux.echo(f"  ✓ rule pack: {pack_label} (global)")
+            gc.rule_pack = rule_pack
+            ux.echo(f"  ✓ rule pack: {rule_pack} (global)")
     gc.enabled = True
     # SU-01/G1: write the guardrail mode PER-CONNECTOR when this connector owns
     # an override block (the multi/add shape), so flipping one connector to
@@ -10137,10 +10024,7 @@ def _apply_hook_connector_setup(
         else:
             ux.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
     elif _batch_summary is None:
-        ux.echo(
-            "  ℹ Saved. It takes effect once the gateway restarts and confirms the connector "
-            "(defenseclaw-gateway restart)."
-        )
+        _echo_saved_without_restart()
 
     if not defer_audit:
         _log_setup_action(
@@ -10174,29 +10058,7 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
             "defenseclaw guardrail fail-mode closed"
         )
     if not restart:
-        ux.echo(
-            "  ℹ Saved. It takes effect once the gateway restarts and confirms the connectors "
-            "(defenseclaw-gateway restart)."
-        )
-
-
-# Backwards-compat alias for any out-of-tree callers; new code must
-# use ``_apply_hook_connector_setup`` directly. Forces observe mode
-# so the legacy contract is preserved bit-for-bit.
-def _apply_connector_observability_only(
-    app: AppContext,
-    *,
-    connector: str,
-    restart: bool,
-) -> bool:
-    return _apply_hook_connector_setup(
-        app,
-        connector=connector,
-        mode="observe",
-        restart=restart,
-        allow_offline_audit=not restart,
-        workspace_dir=None,
-    )
+        _echo_saved_without_restart(plural=True)
 
 
 def _print_connector_observability_banner(connector: str, *, mode: str = "observe") -> None:
@@ -10630,7 +10492,6 @@ def _setup_observability_alias(
     workspace_dir: str | None = None,
     replace: bool = False,
     rule_pack: str | None = None,
-    rule_pack_dir: str | None = None,
     block_message: str | None = None,
     fail_mode: str | None = None,
     human_approval: bool | None = None,
@@ -10821,7 +10682,6 @@ def _setup_observability_alias(
         workspace_dir=workspace_dir,
         write_mode=write_mode,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         block_message=block_message,
         fail_mode=fail_mode,
         hilt=human_approval,
@@ -11837,16 +11697,6 @@ def _hook_guardrail_options(fn):
         "(inherits the global pack)."
     ),
 )
-@click.option(
-    "--rule-pack-dir",
-    default=None,
-    help=(
-        "Path to a custom rule-pack directory for this connector. Use "
-        "instead of --rule-pack to point at a pack "
-        "outside the built-in presets; same per-connector scoping. Mutually "
-        'exclusive with --rule-pack; pass "" to clear an override.'
-    ),
-)
 @_hook_guardrail_options
 @pass_ctx
 def setup_codex(
@@ -11858,7 +11708,6 @@ def setup_codex(
     workspace_dir: str | None,
     replace: bool,
     rule_pack: str | None,
-    rule_pack_dir: str | None,
     enable_judge: bool | None,
     judge_hook_connectors: str | None,
     human_approval: bool | None,
@@ -11903,7 +11752,6 @@ def setup_codex(
         workspace_dir=workspace_dir,
         replace=replace,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         block_message=block_message,
         fail_mode=fail_mode,
         human_approval=human_approval,
@@ -11991,16 +11839,6 @@ def setup_codex(
         "unchanged (inherits the global pack)."
     ),
 )
-@click.option(
-    "--rule-pack-dir",
-    default=None,
-    help=(
-        "Path to a custom rule-pack directory for this connector. Use "
-        "instead of --rule-pack to point at a pack "
-        "outside the built-in presets; same per-connector scoping. Mutually "
-        'exclusive with --rule-pack; pass "" to clear an override.'
-    ),
-)
 @_hook_guardrail_options
 @pass_ctx
 def setup_claude_code(
@@ -12012,7 +11850,6 @@ def setup_claude_code(
     workspace_dir: str | None,
     replace: bool,
     rule_pack: str | None,
-    rule_pack_dir: str | None,
     enable_judge: bool | None,
     judge_hook_connectors: str | None,
     human_approval: bool | None,
@@ -12054,7 +11891,6 @@ def setup_claude_code(
         workspace_dir=workspace_dir,
         replace=replace,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         block_message=block_message,
         fail_mode=fail_mode,
         human_approval=human_approval,
@@ -12449,16 +12285,6 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             "leave unchanged (inherits the global pack)."
         ),
     )
-    @click.option(
-        "--rule-pack-dir",
-        default=None,
-        help=(
-            "Path to a custom rule-pack directory for this connector. Use "
-            "instead of --rule-pack to point at "
-            "a pack outside the built-in presets; same per-connector scoping. "
-            'Mutually exclusive with --rule-pack; pass "" to clear an override.'
-        ),
-    )
     @_hook_guardrail_options
     @pass_ctx
     def _cmd(
@@ -12470,7 +12296,6 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         workspace_dir: str | None,
         replace: bool,
         rule_pack: str | None,
-        rule_pack_dir: str | None,
         enable_judge: bool | None,
         judge_hook_connectors: str | None,
         human_approval: bool | None,
@@ -12488,7 +12313,6 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             workspace_dir=workspace_dir,
             replace=replace,
             rule_pack=rule_pack,
-            rule_pack_dir=rule_pack_dir,
             block_message=block_message,
             fail_mode=fail_mode,
             human_approval=human_approval,
@@ -12562,11 +12386,6 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
     }
 )
 
-# Legacy alias retained as a backstop for any out-of-tree code that
-# imported the old name. New call sites must use one of the two named
-# sets above. Slated for deletion once internal docs catch up.
-_OBSERVABILITY_ONLY_CONNECTORS = _HOOK_ENFORCED_CONNECTORS
-
 # Kept as separate name for legibility at call sites that mean
 # "supports the proxy enforcement surface".
 _GUARDRAIL_SUPPORTING_CONNECTORS = _PROXY_BACKED_CONNECTORS
@@ -12638,7 +12457,6 @@ def _setup_guardrail_connector_alias(
     block_message: str | None,
     detection_strategy: str | None,
     rule_pack: str | None,
-    rule_pack_dir: str | None,
     judge_model: str | None,
     judge_api_base: str | None,
     judge_api_key_env: str | None,
@@ -12724,7 +12542,6 @@ def _setup_guardrail_connector_alias(
         block_message=block_message,
         detection_strategy=detection_strategy,
         rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
         judge_model=judge_model,
         judge_api_base=judge_api_base,
         judge_api_key_env=judge_api_key_env,
@@ -12851,7 +12668,6 @@ def _refuse_hook_switch_over_configured_proxy(connector: str | None) -> None:
     proxy = _configured_sole_guarded_proxy_connector()
     if proxy:
         _refuse_hook_setup_over_proxy_connector(wanted, proxy)
-
 
 
 def _refuse_hook_set_over_configured_proxy(connectors) -> None:
@@ -13043,14 +12859,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         default=None,
         help="Guardrail rule-pack profile.",
     )
-    @click.option(
-        "--rule-pack-dir",
-        default=None,
-        help=(
-            "Path to a custom rule-pack directory. Mutually exclusive with "
-            '--rule-pack; pass "" to clear.'
-        ),
-    )
     @click.option("--judge-model", default=None, help="LLM judge model.")
     @click.option("--judge-api-base", default=None, help="LLM judge API base URL.")
     @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key.")
@@ -13085,7 +12893,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         block_message: str | None,
         detection_strategy: str | None,
         rule_pack: str | None,
-        rule_pack_dir: str | None,
         judge_model: str | None,
         judge_api_base: str | None,
         judge_api_key_env: str | None,
@@ -13116,7 +12923,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             block_message=block_message,
             detection_strategy=detection_strategy,
             rule_pack=rule_pack,
-            rule_pack_dir=rule_pack_dir,
             judge_model=judge_model,
             judge_api_base=judge_api_base,
             judge_api_key_env=judge_api_key_env,
@@ -14140,41 +13946,6 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
     if app.logger:
         app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")
-
-
-def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = False) -> None:
-    click.echo()
-    ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
-    ux.echo("  ✓ Guardrail proxy configured (built into Go binary)")
-    ux.echo(f"  ✓ OpenClaw config patched: {openclaw_config_file}")
-    if gc.original_model:
-        ux.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
-    click.echo()
-
-    rows = [
-        ("mode", gc.mode),
-        ("scanner_mode", gc.scanner_mode),
-        ("port", str(gc.port)),
-        ("model", gc.model),
-        ("model_name", gc.model_name),
-        ("api_key_env", gc.api_key_env),
-    ]
-    for key, val in rows:
-        click.echo(f"    guardrail.{key + ':':<16s} {val}")
-    click.echo()
-
-
-def _find_plugin_source() -> str | None:
-    """Locate the built OpenClaw plugin.
-
-    Checks ~/.defenseclaw/extensions/defenseclaw first (production install),
-    then the repo source tree (dev).
-    """
-    d = bundled_extensions_dir()
-    resolved = str(d.resolve())
-    if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "package.json")):
-        return resolved
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -16108,19 +15879,6 @@ def _echo_native_command_diagnostics(result: Any) -> None:
         click.echo(f"    {line}")
 
 
-def _native_gateway_lifecycle_status(runner, executable: str) -> bool:
-    from defenseclaw.observability.local_stack import LocalStackError
-
-    try:
-        result = runner.run(
-            [str(Path(executable).resolve()), "status"],
-            timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
-        )
-    except LocalStackError:
-        return False
-    return result.returncode == 0
-
-
 def _native_gateway_lifecycle_stop(runner, executable: str) -> bool:
     from defenseclaw.observability.local_stack import LocalStackError
 
@@ -16448,17 +16206,6 @@ def _looks_like_secret(value: str) -> bool:
     return False
 
 
-def _prompt_env_var_name(default: str) -> str:
-    """Prompt for an env var name, rejecting values that look like actual secrets."""
-    while True:
-        val = click.prompt("  Env var name (e.g. ANTHROPIC_API_KEY)", default=default)
-        if _looks_like_secret(val):
-            click.echo("  That looks like an actual API key, not an env var name.")
-            click.echo("  Enter the NAME of the environment variable (e.g. ANTHROPIC_API_KEY).")
-            continue
-        return val
-
-
 def _print_gateway_summary(gw, *, openclaw: bool = True) -> None:
     click.echo()
     ux.ok("Saved to ~/.defenseclaw/config.yaml")
@@ -16490,7 +16237,6 @@ def _print_gateway_summary(gw, *, openclaw: bool = True) -> None:
 # setup splunk
 # ---------------------------------------------------------------------------
 
-_SPLUNK_O11Y_INGEST_TEMPLATE = "ingest.{realm}.observability.splunkcloud.com"
 _SPLUNK_GENERAL_TERMS_URL = "https://www.splunk.com/en_us/legal/splunk-general-terms.html"
 
 _SPLUNK_LOCAL_HEC_DEFAULTS = {
@@ -18359,7 +18105,7 @@ def _disable_splunk(
                 if destination.kind != "otlp" or not _splunk_o11y_realm(destination.endpoint):
                     continue
                 try:
-                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False, "")
+                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False)
                 except click.ClickException:
                     pass
             click.echo("    Splunk O11y (OTLP): disabled")
@@ -18383,7 +18129,7 @@ def _disable_splunk(
                     if enterprise_only and is_local:
                         continue
                 try:
-                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False, "")
+                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False)
                     if is_local:
                         disabled_local = True
                     else:

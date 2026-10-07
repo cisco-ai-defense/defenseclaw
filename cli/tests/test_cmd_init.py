@@ -1103,41 +1103,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ):
             self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
 
-    def test_sandbox_flag_is_a_deprecated_no_op(self):
-        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
-            result = self._invoke([
-                "--non-interactive",
-                "--yes",
-                "--connector",
-                "openclaw",
-                "--profile",
-                "observe",
-                "--scanner-mode",
-                "local",
-                "--skip-install",
-                "--sandbox",
-                "--no-start-gateway",
-                "--no-verify",
-                "--json-summary",
-            ])
-        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-
-        summary = json.loads(result.output)
-        sandbox_steps = [s for s in summary["setup"] if s["name"] == "Sandbox"]
-        self.assertEqual(len(sandbox_steps), 1, summary["setup"])
-        self.assertEqual(sandbox_steps[0]["status"], "warn")
-        self.assertIn("deprecated and ignored", sandbox_steps[0]["detail"])
-        self.assertIn("defenseclaw sandbox legacy-cleanup", sandbox_steps[0]["detail"])
-        # OpenShell 0.1 sandboxes ship: the notice points at their setup.
-        self.assertIn("run 'defenseclaw sandbox setup'", sandbox_steps[0]["detail"])
-        self.assertNotIn("being rebuilt", sandbox_steps[0]["detail"])
-        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox legacy-cleanup --dry-run")
-
-    def test_sandbox_flag_is_hidden_from_help(self):
-        result = self._invoke(["--help"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("--sandbox", result.output)
-
     def test_with_judge_defaults_hook_coverage_to_all(self):
         result = self._invoke([
             "--non-interactive",
@@ -1311,10 +1276,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
-        self.assertEqual(summary["next_commands"], ["defenseclaw upgrade"])
+        self.assertEqual(summary["next_commands"], ["defenseclaw migrate"])
         config_step = next(step for step in summary["setup"] if step["name"] == "Config")
         self.assertEqual(config_step["status"], "fail")
-        self.assertEqual(config_step["next_command"], "defenseclaw upgrade")
+        self.assertEqual(config_step["next_command"], "defenseclaw migrate")
 
         persisted = Path(self.tmp_dir, "config.yaml").read_text(encoding="utf-8")
         self.assertNotIn("config_version: 8", persisted)
@@ -1334,7 +1299,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
-        self.assertEqual(summary["next_commands"], ["defenseclaw upgrade"])
+        self.assertEqual(summary["next_commands"], ["defenseclaw migrate"])
         activate.assert_not_called()
         self.assertEqual(Path(self.tmp_dir, "config.yaml").read_text(encoding="utf-8"), source)
 
@@ -2867,7 +2832,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         self.assertIn("enable llm traffic inspection", result.output.lower())
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
@@ -2877,7 +2841,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_calls_interactive_setup(
         self, mock_path, _mock_env, mock_exec, mock_interactive,
-        _mock_scanners, _mock_which, _mock_guardrail, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_guardrail, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
@@ -2898,7 +2862,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         mock_exec.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
     @patch("defenseclaw.commands.cmd_setup._interactive_guardrail_setup")
@@ -2906,7 +2869,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_declined_shows_hint(
         self, mock_path, _mock_env, mock_interactive,
-        _mock_scanners, _mock_which, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
@@ -2923,7 +2886,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         self.assertIn("defenseclaw setup guardrail", result.output)
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
@@ -2933,7 +2895,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_shows_warnings(
         self, mock_path, _mock_env, mock_exec, mock_interactive,
-        _mock_scanners, _mock_which, _mock_guardrail, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_guardrail, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)

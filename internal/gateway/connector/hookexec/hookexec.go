@@ -752,7 +752,7 @@ func sendHookRequest(
 	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
 		req.Header.Set("tracestate", v)
 	}
-	setUserIdentityHeaders(req)
+	setUserIdentityHeaders(req, opts)
 
 	return opts.HTTPClient.Do(req)
 }
@@ -772,7 +772,12 @@ func sendHookRequest(
 // A value that is not a safe header field is dropped rather than sanitized,
 // so a hostile account name cannot smuggle a second header into every hook
 // call the endpoint makes.
-func setUserIdentityHeaders(req *http.Request) {
+func setUserIdentityHeaders(req *http.Request, opts Options) {
+	// A Secure Client hook keeps its earlier requests: the account name as
+	// the system reports it and no session facts, so it runs no klist and
+	// writes nothing in the home of the user (issue #1092).
+	secureClient := secureClientHook(opts)
+	useridentity.KeepQualifiedNames(secureClient)
 	identity := useridentity.Current()
 	if v := identity.ID; safeIdentityHeaderValue(v) {
 		req.Header.Set("X-DefenseClaw-User-Id", v)
@@ -783,9 +788,19 @@ func setUserIdentityHeaders(req *http.Request) {
 	// The session the hook runs in (SSH, logind, the Kerberos default
 	// principal): claimed facts the gateway uses for attribution only.
 	// useridentity renders it from an allowlisted charset and bounds it.
+	if secureClient {
+		return
+	}
 	if v := useridentity.CurrentSessionFactsHeader(); v != "" {
 		req.Header.Set(useridentity.SessionFactsHeader, v)
 	}
+}
+
+// secureClientHook reports a hook of the Secure Client profile: an
+// administrator-managed hook that is neither the Unix standalone hook nor
+// the Windows standalone binary.
+func secureClientHook(opts Options) bool {
+	return opts.ManagedEnterprise && !managedStandaloneHook(opts) && !opts.ExplainUnenrolledAccount
 }
 
 // safeIdentityHeaderValue accepts only printable US-ASCII without the

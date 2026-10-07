@@ -101,7 +101,7 @@ that inventory path to install, enable, disable, or remove Copilot plugins.
 
 The table highlights convenience options rather than the complete alias
 surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
-approval, block-message, add/replace, and rule-pack-directory options. See the
+approval, block-message, and add/replace options. See the
 [quick-alias reference](/docs/guardrail/aliases); use
 [full guardrail setup](/docs/guardrail) for scanner, detection-strategy,
 and judge-provider configuration.
@@ -321,7 +321,11 @@ every enrolled user. It binds `SessionStart`, `UserPromptSubmit`,
 places the same hooks as a plugin under
 `~/.copilot/installed-plugins/defenseclaw/defenseclaw/`, enables
 `ChatPluginsEnabled`, and adds `enabledPlugins["defenseclaw@defenseclaw"]` to
-Copilot's managed settings. DefenseClaw writes these files as the user.
+Copilot's managed settings, but only while every VS Code found on the host is
+1.139.x, the version whose plugin store DefenseClaw writes. Copilot CLI reads
+the same settings file, and from 1.0.92 it keeps waiting on an enabled plugin
+whose marketplace it does not know, so a host without such a VS Code never
+gets the key (status says why). DefenseClaw writes the files as the user.
 The Local hook file is DefenseClaw's own: the hook guardian rewrites it when a
 user deletes or edits it (a directory or link at that name is replaced too),
 status and verify fail while it is missing or modified, and uninstall removes

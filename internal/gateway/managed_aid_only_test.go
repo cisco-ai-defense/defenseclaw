@@ -16,6 +16,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2158,5 +2160,112 @@ func TestManagedPrimitivesActiveWhenNonManaged(t *testing.T) {
 	}
 	if f := ScanAllRules(maliciousPrompt, "shell"); f == nil {
 		t.Fatalf("non-managed ScanAllRules should detect %q", maliciousPrompt)
+	}
+}
+
+// A configured block message on Secure Client (GAP-0139, issue #1092): the
+// generic hook records keep the block message as their reason, and Claude
+// Code shows the verdict reason, as before the identity round.
+func TestHookManagedAIDOnly_BlockMessageKeepsTheSecureClientReasons(t *testing.T) {
+	const message = "blocked by your organization"
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	api.scannerCfg.Guardrail.BlockMessage = message
+	api.SetCiscoInspector(&stubAIDInspector{verdict: blockVerdict()})
+
+	api.scannerCfg.Guardrail.Connector = "hermes"
+	generic := api.evaluateAgentHook(t.Context(), agentHookRequest{
+		ConnectorName: "hermes", HookEventName: "pre_tool_call",
+		ToolName: "terminal", ToolArgs: json.RawMessage(`{"command":"ls"}`),
+	})
+	if generic.Action != "block" || hookSourceReason(generic) != message {
+		t.Fatalf("generic hook action=%q record reason=%q, want block with the block message", generic.Action, hookSourceReason(generic))
+	}
+	api.scannerCfg.Guardrail.Connector = "claudecode"
+	claude := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Bash",
+		ToolInput: map[string]interface{}{"command": "ls"},
+	})
+	if claude.Action != "block" || claude.Reason == message {
+		t.Fatalf("Claude Code action=%q reason=%q, want block with the verdict reason", claude.Action, claude.Reason)
+	}
+}
+
+// A Secure Client gateway serves none of the identity routes (GAP-0143,
+// issue #1092): they answer 404 as before, and GET /api/v1/ai-usage has no
+// ide_plugins counts.
+func TestManagedAIDOnly_ServesNoIdentityRoutes(t *testing.T) {
+	restore := inheritedAPIListener
+	t.Cleanup(func() { inheritedAPIListener = restore })
+	inheritedAPIListener = func() (net.Listener, bool, error) { return nil, false, nil }
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	store, logger := testStoreAndV8Logger(t)
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: t.TempDir()}
+	cfg.Gateway.Token = "sc-route-token"
+	api := NewAPIServer(addr, NewSidecarHealth(), nil, store, logger, cfg)
+	api.SetConnectorRegistry(connector.NewDefaultRegistry())
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() { _ = api.Run(ctx) }()
+	client := &http.Client{Timeout: 5 * time.Second}
+	get := func(path string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
+		req.Header.Set("Authorization", "Bearer sc-route-token")
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, err.Error()
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, strings.TrimSpace(string(body))
+	}
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if status, _ := get("/health"); status != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the API did not come up")
+		}
+	}
+	for _, path := range []string{"/api/v1/ai-usage/ide-plugins", "/api/v1/agents/identities", "/api/v1/guardrail/profiles/resolve"} {
+		if status, body := get(path); status != http.StatusNotFound || body != "404 page not found" {
+			t.Fatalf("%s = %d %q, want the mux 404", path, status, body)
+		}
+	}
+	if status, body := get("/api/v1/ai-usage"); status != http.StatusOK || strings.Contains(body, "ide_plugins") {
+		t.Fatalf("/api/v1/ai-usage = %d %s, want a body without ide_plugins", status, body)
+	}
+	// It still serves POST /config/patch (GAP-0144): with no OpenClaw
+	// gateway the bridge answers 503.
+	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/config/patch", strings.NewReader(`{"path":"a.b","value":true}`))
+	req.Header.Set("Authorization", "Bearer sc-route-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", "secure-client-test")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("POST /config/patch = %d, want the bridge 503", resp.StatusCode)
+	}
+	// PATCH /v1/guardrail/config keeps the managed 403 (GAP-0089).
+	req, _ = http.NewRequest(http.MethodPatch, "http://"+addr+"/v1/guardrail/config", strings.NewReader(`{"mode":"observe"}`))
+	req.Header.Set("Authorization", "Bearer sc-route-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", "secure-client-test")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("PATCH /v1/guardrail/config = %d, want the managed 403", resp.StatusCode)
 	}
 }

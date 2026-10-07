@@ -5419,5 +5419,7 @@ def test_only_the_lifecycle_transaction_records_the_installed_config() -> None:
     start = module.index("function Assert-DefenseClawEnterpriseDeployment {")
     deployment = module[start : module.index("\nfunction ", start + 1)]
     after_snapshot = install_like[install_like.index("$snapshot = New-DefenseClawTransaction `") :]
-    assert "-GatewayServiceName $GatewayServiceName -RecordLifecycle" in after_snapshot
+    assert "-GatewayServiceName $GatewayServiceName `" in after_snapshot
+    # Secure Client keeps its validate-only check (GAP-0136, issue #1092).
+    assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in after_snapshot
     assert "Assert-DefenseClawInstalledConfig" in deployment and "-RecordLifecycle" not in deployment

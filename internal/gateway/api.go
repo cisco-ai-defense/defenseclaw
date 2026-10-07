@@ -1060,6 +1060,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 		mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 		mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
 		mux.HandleFunc("/plugin/enable", a.handlePluginEnable)
+		// Secure Client keeps the config.patch bridge (issue #1092).
+		if a.managedAIDOnly() {
+			mux.HandleFunc("/config/patch", a.handleConfigPatch)
+		}
 		mux.HandleFunc("/skills", a.handleSkills)
 		mux.HandleFunc("/mcps", a.handleMCPs)
 		mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
@@ -1080,7 +1084,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
-	mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+	// Secure Client serves none of the identity routes (issue #1092).
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
 	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
@@ -1121,12 +1128,16 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
 	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
 	mux.HandleFunc("/api/v1/agents/discovery", a.handleAgentDiscovery)
-	mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
+	}
 	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
-	mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
+	}
 	// Runtime planes. Registered under the ai-usage prefix so the whole of AI
 	// discovery -- presence and behaviour -- reads as one surface.
 	mux.HandleFunc("/api/v1/ai-usage/runtime", a.handleAIRuntime)
@@ -2052,6 +2063,47 @@ type policyEvaluateScanResult struct {
 	// would yield. Mirrors policy.ScanResultInput.
 	ExitCode  int    `json:"exit_code,omitempty"`
 	ScanError string `json:"scan_error,omitempty"`
+}
+
+type configPatchRequest struct {
+	Path  string      `json:"path"`
+	Value interface{} `json:"value"`
+}
+
+// handleConfigPatch is POST /config/patch, served on Secure Client only.
+func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req configPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Path == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
+	}
+
+	if a.client == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if err := a.client.PatchConfig(ctx, req.Path, req.Value); err != nil {
+		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if a.logger != nil {
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIConfigPatch), req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
+	}
+	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
 }
 
 func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
@@ -3187,6 +3239,11 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	default:
+		if r.Method == http.MethodPatch && a.managedAIDOnly() {
+			// Secure Client keeps the managed refusal of main (issue #1092).
+			a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian"})
+			return
+		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -3380,12 +3437,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-			// Only the gateway's account can read the ACP token that signed the
-			// request, so it is the verified subject; identity headers the
+			// The ACP credential that signed the request names who sent it:
+			// the principal it was enrolled for on a managed gateway, the
+			// gateway's own account on a per-user one. Identity headers the
 			// caller sent stay claims.
-			authenticated = authenticated.WithContext(
-				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(authenticated.Context())),
-			)
+			authenticated = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
 			return
 		}
@@ -3513,7 +3569,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
 			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(authenticated.Context())))
+				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -64,15 +64,33 @@ const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `if ! defe
   fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account"
 fi
 API_TOKEN=
-
+@FACTS@
 `
 
 // shellHookSocketTransport renders shellHookSocketTransportBlock for the
 // socket path and the gateway service uid trusted beside root. The path is
 // emitted as one single-quoted shell word, so no character in it can end
-// the assignment.
-func shellHookSocketTransport(socket string, serviceUID int) string {
-	return renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID)
+// the assignment. factsBinary, when set, is the administrator-owned hook
+// binary the hook runs (hook session-facts) to read the user's Kerberos
+// credential cache, which a shell cannot read; see managedSessionFactsBinary.
+func shellHookSocketTransport(socket string, serviceUID int, factsBinary string) string {
+	facts := ""
+	if factsBinary != "" {
+		facts = "DEFENSECLAW_SESSION_FACTS_BIN=" + shellSingleQuote(factsBinary) + "\nexport DEFENSECLAW_SESSION_FACTS_BIN\n"
+	}
+	return strings.Replace(renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID), "@FACTS@", facts, 1)
+}
+
+// managedSessionFactsBinary is the administrator-owned hook binary a managed
+// standalone shell hook runs for the session facts, or "" when the install
+// has none. It is the foreign-hook guard's binary: root-owned, and it serves
+// `hook session-facts` like the per-user gateway binary does (GAP-0194).
+func managedSessionFactsBinary(opts SetupOpts) string {
+	binary := managedPluginForeignHookGuard(opts)
+	if strings.ContainsAny(binary, "\x00\r\n") {
+		return ""
+	}
+	return binary
 }
 
 // shellHookSocketTrust renders shellHookSocketTrustFunctions for scripts

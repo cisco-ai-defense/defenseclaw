@@ -141,7 +141,7 @@ func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) fu
 		}
 		groups := []uint32{}
 		if account, err := user.LookupId(strconv.Itoa(target.UID)); err == nil {
-			if ids, err := account.GroupIds(); err == nil {
+			if ids, err := unixidentity.AccountGroupIDs(context.Background(), account); err == nil {
 				for _, id := range ids {
 					if value, err := strconv.ParseUint(id, 10, 32); err == nil {
 						groups = append(groups, uint32(value))

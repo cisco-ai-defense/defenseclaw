@@ -1,6 +1,7 @@
 {
   "title": "Install with an MDM",
   "pages": [
+    "intune-tenant",
     "intune-windows",
     "intune-macos",
     "intune-linux",

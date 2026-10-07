@@ -83,10 +83,10 @@ _MAX_VERSION_PROBE_BYTES = 4 * 1024 * 1024 + 1
 def config_cmd(ctx: click.Context) -> None:
     """Inspect and validate DefenseClaw configuration."""
 
-    # The root command lets this group run while a pre-v8 source still exists,
-    # so ``validate`` can explain a file the root preflight would only refuse,
-    # and ``reference`` reads no file. Every other subcommand needs a
-    # current-schema source and stops with the one instruction.
+    # The root command lets this group run while an unconverted 0.8.x source
+    # still exists, so ``validate`` can explain a file the root preflight would
+    # only refuse, and ``reference`` reads no file. Every other subcommand needs
+    # a current-schema source and stops with the one instruction.
     subcommand = ctx.invoked_subcommand
     path = config_module.config_path()
     if (
@@ -95,7 +95,10 @@ def config_cmd(ctx: click.Context) -> None:
         and path.exists()
         and not _looks_like_v8_config(str(path))
     ):
-        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+        raise click.ClickException(
+            "This configuration was written by an older DefenseClaw"
+            " — run 'defenseclaw migrate' first."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +119,7 @@ def config_validate(quiet: bool) -> None:
     if result.exists:
         ux.ok("file exists", indent="  ")
     else:
-        ux.warn("file does not exist yet — run 'defenseclaw init' or 'defenseclaw quickstart'")
+        ux.warn(f"file does not exist yet — {config_module.first_run_hint()}")
 
     if result.parse_error:
         ux.err(f"parse error: {result.parse_error}", indent="  ")
@@ -249,16 +252,11 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             click.echo(f"(source: {source})", err=True)
             _echo_value(value, fmt)
             return
-    view = _show_data(app, source=False, effective=False, provenance=False)
-    if parts[:2] == ["observability", "destinations"]:
-        # config set indexes the destinations as written in config.yaml; the
-        # resolved plan also lists the generated ones, such as local-sqlite
-        # at index 0 (GAP-0008).
-        written = _show_data(app, source=True, effective=False, provenance=False)
-        if _lookup(written, parts)[0]:
-            view = written
+    view = _key_view(app, parts)
     found, value = _lookup(view, parts)
     if not found:
+        if _is_destination_key(parts):
+            raise click.ClickException(_destination_not_set(key, parts, view))
         sections = _v8_sections() or set(view)
         if parts[0] not in view and parts[0] not in sections:
             available = ", ".join(sorted(sections)) or "none"
@@ -278,6 +276,40 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         elif effective:
             click.echo(f"(source: {config_module.config_path()})", err=True)
     _echo_value(value, fmt)
+
+
+def _is_destination_key(parts: list) -> bool:
+    return parts[:2] == ["observability", "destinations"]
+
+
+def _key_view(app: AppContext, parts: list) -> dict:
+    """The document a key is read from: config.yaml as written for the
+    observability destinations, the resolved defaults for everything else.
+
+    config set indexes the destinations as written in config.yaml; the
+    resolved plan also lists the generated ones, such as local-sqlite at
+    index 0, so reading the plan would answer for indexes set cannot edit
+    (GAP-0008, GAP-0154).
+    """
+    return _show_data(app, source=_is_destination_key(parts), effective=False, provenance=False)
+
+
+def _destination_not_set(key: str, parts: list, written: dict) -> str:
+    listed = _lookup(written, parts[:2])[1]
+    count = len(listed) if isinstance(listed, list) else 0
+    if count == 0:
+        return (
+            f"{key} is not set: config.yaml lists no destinations. Add one with "
+            "'defenseclaw setup observability add'; 'defenseclaw config show --effective' "
+            "shows the generated ones."
+        )
+    if len(parts) > 2 and isinstance(parts[2], int) and parts[2] >= count:
+        noun = "destination" if count == 1 else "destinations"
+        return f"{key} is not set: the index is out of range (config.yaml lists {count} {noun})."
+    return (
+        f"{key} is not set in config.yaml. 'defenseclaw config show --effective' shows the "
+        "value the gateway resolves."
+    )
 
 
 def _written_in_source(app: AppContext, parts: list) -> bool:
@@ -357,7 +389,11 @@ def _update_view(cfg: object) -> tuple[dict, dict[str, str]]:
     check = getattr(written, "check", None)
     channel = str(getattr(written, "channel", "") or "")
     source = str(getattr(written, "source", "") or "")
-    data = {"check": True if check is None else bool(check), "channel": channel or "stable", "source": source or OFFICIAL_SOURCE}
+    data = {
+        "check": True if check is None else bool(check),
+        "channel": channel or "stable",
+        "source": source or OFFICIAL_SOURCE,
+    }
     sources = {
         name: f"config:update.{name}" if is_set else "builtin"
         for name, is_set in (("check", check is not None), ("channel", bool(channel)), ("source", bool(source)))
@@ -439,9 +475,9 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
             path=path,
         )
     except config_writer.ManagedConfigWriteError as exc:
-        from defenseclaw.enforce.asset_lists import audit_managed_refusal
+        from defenseclaw.enforce.asset_lists import audit_managed_config_refusal
 
-        audit_managed_refusal("config-update", key or "config", f"verb={verb}")
+        audit_managed_config_refusal(key or "config", f"config {verb}")
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(MANAGED_EXIT_CODE) from exc
     except config_writer.ConfigConflictError as exc:
@@ -519,9 +555,11 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         return
     # Nothing was removed: a key with a default is already unset, anything
     # else is not a configuration key (a typo must not look like success).
-    view = _show_data(app, source=False, effective=False, provenance=False)
     for key, parts in parsed:
+        view = _key_view(app, parts)
         if not _admission_layer_key(parts) and not _lookup(view, parts)[0]:
+            if _is_destination_key(parts):
+                raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
     if len(keys) == 1:
         click.echo(f"{keys[0]} is not set in config.yaml; its default already applies.")
@@ -537,9 +575,9 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
     """Migrate config.yaml to config_version 9 (or acknowledge the migration).
 
     Moves the admission policy in policies/rego/data.json, the *_actions
-    keys, rule_pack_dir, the v8 scanner keys, update_check and the operator
-    block/allow entries of audit.db into config.yaml. Keeps
-    config.yaml.v8.bak and writes migration-v9.json.
+    keys, rule_pack_dir, the v8 scanner keys, update_check, a leftover
+    privacy section and the operator block/allow entries of audit.db into
+    config.yaml. Keeps config.yaml.v8.bak and writes migration-v9.json.
     """
     from defenseclaw.config_inspect import migrate_config_v9
 
@@ -627,19 +665,13 @@ def _v8_defaults(app: AppContext) -> dict:
         return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
 
     pruned = _prune(_config_to_masked_dict(cfg), schema)
-    _show_effective_scanner_settings(pruned, cfg)  # type: ignore[arg-type]
+    _show_effective_scanner_settings(pruned)  # type: ignore[arg-type]
     return pruned  # type: ignore[return-value]
 
 
-#: scanners.skill_scanner keys that config_version 9 no longer reads: they are
-#: migration input, so a v9 source does not list them as settings.
-_SKILL_SCANNER_V8_KEYS = ("binary", "use_virustotal", "use_aidefense", "virustotal_api_key", "virustotal_api_key_env")
-
-
-def _show_effective_scanner_settings(masked: dict, cfg: object) -> None:
+def _show_effective_scanner_settings(masked: dict) -> None:
     """Fill the scanner keys a blank value stands for with what the gateway
-    runs with (the severity gate and the judge source), and leave out the
-    migration-only keys of a v9 source."""
+    runs with (the severity gate and the judge source)."""
     from defenseclaw.enforce.admission import _DEFAULT_FAIL_ON_SEVERITY, _DEFAULT_REVIEW_QUEUE_MIN
 
     scanners = masked.get("scanners")
@@ -656,9 +688,6 @@ def _show_effective_scanner_settings(masked: dict, cfg: object) -> None:
     if isinstance(skill, dict):
         skill["fail_on_severity"] = skill.get("fail_on_severity") or _DEFAULT_FAIL_ON_SEVERITY
         skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
-        if getattr(cfg, "_source_config_version", 0) >= config_module.CONFIG_VERSION_V9:
-            for key in _SKILL_SCANNER_V8_KEYS:
-                skill.pop(key, None)
 
 
 def _resolve_defaults(app: AppContext, view: dict, written: dict) -> None:
@@ -705,9 +734,7 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
     if not os.path.isfile(cfg_path):
         # No config.yaml yet: show the defaults the CLI would run with.
         if source or effective or provenance:
-            raise click.ClickException(
-                "config.yaml does not exist yet; run 'defenseclaw init' or 'defenseclaw quickstart'"
-            )
+            raise click.ClickException(f"config.yaml does not exist yet; {config_module.first_run_hint()}")
         return _v8_defaults(app)
     resolved_only = effective or provenance
     masked: dict = {}
@@ -917,13 +944,13 @@ def validate_config() -> ValidationResult:
             res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res
         if inspected.valid is not True:
-            res.errors.append("canonical v8 validator returned no validity decision")
+            res.errors.append("the configuration validator returned no validity decision")
         return res
 
     if config_module.config_is_empty(cfg_path):
         res.errors.append(config_module.empty_config_message(cfg_path))
         return res
-    res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+    res.errors.append("This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first.")
     return res
 
 
@@ -1130,7 +1157,7 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     detail = "; ".join(parts).rstrip(".") or "is not valid"
     # ``config reference`` (YAML) covers only observability; the JSON schema
     # lists every section and field (GAP-1661).
-    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code == "config_schema_invalid" else ""
+    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code in ("config_schema_invalid", "additionalProperties") else ""
     return f"{where}{field}: {detail}.{suffix}"
 
 

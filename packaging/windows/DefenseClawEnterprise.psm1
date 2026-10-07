@@ -23054,7 +23054,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -Report $codexRemoval
         }
-        Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName -RecordLifecycle
+        # Secure Client keeps its validate-only config check (issue #1092).
+        Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName `
+            -RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))
 
         $deploymentGenerationID = $lifecycleTransactionID
         $managedHooksActivationState = if ($Action -eq 'Install') {
