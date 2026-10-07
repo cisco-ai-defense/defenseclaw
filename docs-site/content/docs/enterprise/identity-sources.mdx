@@ -307,7 +307,10 @@ exercised on a live tenant: per-user installs on an Entra-joined Windows 11
 computer and on Ubuntu 22.04 with Entra ID SSH sign-in (the `aad` module),
 with the fields [above](#entra-id-fields-as-seen-live), and Entra group SIDs in
 the Windows sign-in token with and without a built-in local group listing the
-group. Intune delivery of the local group membership was not tested.
+group. On standalone enterprise on that computer, a `groups` assignment that
+names the Entra group by SID selected its profile while Users listed the group,
+and the default profile after the group was taken out of Users and the user
+signed in again. Intune delivery of the local group membership was not tested.
 
 ## What a record carries
 
