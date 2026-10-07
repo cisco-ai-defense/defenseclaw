@@ -564,9 +564,6 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 	}
 	for _, module := range m.rego {
-		if m.leftOutsideRollbackCopy(module.path) {
-			continue
-		}
 		if err := m.refreshRegoModule(module); err != nil {
 			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
 			continue
@@ -604,7 +601,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	return written, nil
 }
 
-// leftOutsideRollbackCopy reports whether commit must leave path as it is. The
+// leftOutsideRollbackCopy reports whether the migration must leave path as it is. The
 // installer saves a rollback copy of the data home only (the directory holding
 // config.yaml, and DEFENSECLAW_HOME), so a failed upgrade or `defenseclaw
 // rollback` puts config.yaml back but not a data.json, Rego module,
@@ -724,9 +721,9 @@ func (m *v9Migrator) planRegoRefresh() error {
 		if err != nil || !v9LegacyRegoData.Match(raw) {
 			continue
 		}
-		if m.in.Managed {
+		if m.in.Managed || m.leftOutsideRollbackCopy(path) {
 			m.note("%s is a pre-9 module that reads data.json; the gateway refuses it and uses the config-driven "+
-				"admission and thresholds until the admin replaces it with the shipped module", path)
+				"admission and thresholds until it is replaced with the shipped module", path)
 			continue
 		}
 		m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
@@ -756,7 +753,8 @@ var v9RetiredPolicyFiles = []struct{ name, sha256 string }{
 // planRetiredPolicyFiles removes the unmodified 0.8 copies of the retired
 // policy files. An edited copy belongs to the operator: it stays, and the
 // report says so. On a managed host the admin owns policy_dir, so the files
-// are only reported.
+// are only reported. A copy outside the data home stays as well: the 0.8
+// gateway a rollback restores still loads it (leftOutsideRollbackCopy).
 func (m *v9Migrator) planRetiredPolicyFiles() {
 	dir := filepath.Join(m.policyDir(), "rego")
 	for _, file := range v9RetiredPolicyFiles {
@@ -776,6 +774,8 @@ func (m *v9Migrator) planRetiredPolicyFiles() {
 				"Rego policies are retired)", path)
 		case m.in.Managed:
 			m.note("%s is the unmodified 0.8 copy of a retired policy; nothing reads it, remove it", path)
+		case m.leftOutsideRollbackCopy(path):
+			// Kept, and noted there.
 		default:
 			m.retired = append(m.retired, path)
 			m.note("%s, the unmodified 0.8 copy of a retired policy, is removed", path)
@@ -1520,6 +1520,18 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		guardrail = v8YAMLMapValue(root, "guardrail")
 		m.pinStricterScopePostures(guardrail, item.key, *item.value)
 	}
+	for _, item := range []struct {
+		key     string
+		value   *int
+		shipped int
+	}{
+		{"block_at", data.Guardrail.BlockThreshold, shippedBlock},
+		{"alert_at", data.Guardrail.AlertThreshold, shippedAlert},
+	} {
+		if item.value != nil {
+			m.keepProxyConnectorLevel(root, item.key, *item.value, item.shipped)
+		}
+	}
 	if level := strings.TrimSpace(data.Guardrail.CiscoTrustLevel); level != "" && level != "full" {
 		v9Set(root, v9Scalar(level), "guardrail", "cisco_trust_level")
 		m.moved("data.json", "data.json:guardrail.cisco_trust_level", "guardrail.cisco_trust_level", level)
@@ -1532,6 +1544,86 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 			}
 		}
 	}
+}
+
+// keepProxyConnectorLevel keeps the data.json level the v8 LLM proxy enforced
+// for the connector it served. v8 guardrail.rego read only data.json, whatever
+// that connector's own pack or block_at said; v9 resolves the proxy's levels
+// for that connector (spec 2.2), so its guardrail.connectors entry would now
+// govern the proxy. Its own key still wins, as a recorded conflict. A pack
+// default looser than the data.json level is pinned at the connector, unless
+// the level is the shipped one, which was never a choice (as for the global
+// key). A connector that inherits the global key or pack is covered by the
+// global migration above.
+func (m *v9Migrator) keepProxyConnectorLevel(root *yaml.Node, key string, rank, shipped int) {
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	connector := v9ProxyConnector(root)
+	name, named := v9RankNames[rank]
+	if connector == "" || !named {
+		return
+	}
+	var scope v9NamedNode
+	for _, c := range v9ChildMappings(v8YAMLMapValue(guardrail, "connectors")) {
+		if normalizeConnectorKey(c.name) == connector {
+			scope = c
+			break
+		}
+	}
+	if scope.node == nil {
+		return
+	}
+	path := "guardrail.connectors." + scope.name
+	legacy := "data.json:guardrail." + strings.Replace(key, "_at", "_threshold", 1)
+	if set := strings.ToUpper(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, key)))); set != "" {
+		if rank < v9RankOf(set) {
+			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+				To: path + "." + key, Kept: "config:" + path + "." + key + ":" + set, Lost: legacy + ":" + name,
+				Reason: "the stricter data.json level applied to the " + connector + " LLM proxy; " + path + "." + key + " now applies to the proxy too",
+			})
+		}
+		return
+	}
+	posture := m.scopePackPosture(guardrail, scope.node)
+	if posture == "" || strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(guardrail, key))) != "" {
+		return
+	}
+	block, alert := v9PostureRanks(posture)
+	own := block
+	if key == "alert_at" {
+		own = alert
+	}
+	if own <= rank {
+		return
+	}
+	if rank == shipped {
+		m.note("data.json guardrail %s (%s) is the shipped value; the %s LLM proxy now follows the %s pack default of %s",
+			strings.Replace(key, "_at", "_threshold", 1), name, connector, posture, path)
+		return
+	}
+	v9Set(scope.node, v9Scalar(name), key)
+	m.moved("data.json", legacy, path+"."+key, name)
+	m.note("%s.%s is set to the data.json level (%s) the %s LLM proxy enforced, so the %s pack default (%s) does not loosen the proxy; it now applies to that connector's hook prompts and tool calls too",
+		path, key, name, connector, posture, v9RankNames[own])
+}
+
+// v9ProxyConnector is the connector the v8 LLM proxy served:
+// guardrail.connector, else claw.mode, else openclaw (the gateway's
+// configuredConnectorName and resolveActiveConnector), when it is a built-in
+// proxy connector (proxyShouldBindForConfiguredConnector). It is "" for a
+// hook connector, whose traffic never reached the proxy, so data.json never
+// applied to it (and for a plugin connector, which is not resolved here).
+func v9ProxyConnector(root *yaml.Node) string {
+	name := normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "connector")))
+	if name == "" {
+		name = normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "claw"), "mode")))
+	}
+	switch name {
+	case "", "openclaw":
+		return "openclaw"
+	case "zeptoclaw":
+		return name
+	}
+	return ""
 }
 
 // pinStricterScopePostures keeps a connector or profile pack posture that is
@@ -2246,8 +2338,6 @@ func v9AuditDBDamaged(err error) bool {
 		strings.Contains(message, "file is not a database")
 }
 
-// v9SecureClientDocument reports whether the document is a managed
-// deployment on the Secure Client profile (pinned or configured).
 // SecureClientSource reports whether config bytes describe a Secure Client
 // deployment (its deployment mode and profile, or their environment pins).
 // The Secure Client integration stays on config_version 8, so `config
@@ -2261,6 +2351,8 @@ func SecureClientSource(raw []byte) bool {
 	return root != nil && root.Kind == yaml.MappingNode && v9SecureClientDocument(root)
 }
 
+// v9SecureClientDocument reports whether the document is a managed
+// deployment on the Secure Client profile (pinned or configured).
 func v9SecureClientDocument(root *yaml.Node) bool {
 	mode := normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
 	if env := strings.TrimSpace(os.Getenv(managed.DeploymentModeEnv)); env != "" {

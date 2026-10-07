@@ -70,13 +70,29 @@ func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 		}
 	}
 	_ = db.Close()
+	// The 0.8 gateway a rollback restores still loads its Rego modules,
+	// including the retired firewall module and a pre-9 one.
+	firewall := filepath.Join(elsewhere, "policies", "rego", "firewall.rego")
+	module := filepath.Join(elsewhere, "policies", "rego", "guardrail.rego")
+	raw, err := os.ReadFile(filepath.Join("testdata", "rego_0_8_10", "firewall.rego"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firewall, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(module, []byte("package defenseclaw.guardrail\nblock := data.guardrail.block_threshold\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, AuditDBPath: auditDB})
 	if err != nil {
 		t.Fatalf("MigrateV9: %v", err)
 	}
-	if _, err := os.Stat(dataJSON); err != nil {
-		t.Errorf("data.json outside the data home was renamed: %v", err)
+	for _, path := range []string{dataJSON, firewall, module} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s outside the data home was moved: %v", path, err)
+		}
 	}
 	db, _ = sql.Open("sqlite", auditDB)
 	defer db.Close()
@@ -90,6 +106,9 @@ func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 	var noted bool
 	for _, note := range result.Record.Notes {
 		noted = noted || strings.Contains(note, "outside the data home")
+		if strings.Contains(note, "is removed") || strings.Contains(note, DataJSONMigratedSuffix) {
+			t.Errorf("a note claims a file left in place was changed: %s", note)
+		}
 	}
 	if !noted {
 		t.Errorf("no note says what was left in place: %v", result.Record.Notes)
@@ -719,6 +738,49 @@ func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
 	if !strings.Contains(string(result.Migrated), "block_at: HIGH") || len(result.Record.Conflicts) != 1 ||
 		result.Record.Conflicts[0].To != "guardrail.block_at" || !strings.HasSuffix(result.Record.Conflicts[0].Lost, ":MEDIUM") {
 		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+
+	// v8 guardrail.rego gave the OpenClaw proxy the data.json levels whatever
+	// openclaw's own pack or alert_at; v9 resolves the proxy for openclaw. Its
+	// looser permissive pack must not loosen the strict block level, and its
+	// own alert_at wins as a recorded conflict.
+	policyDir := filepath.Join(dir, "policies")
+	dataJSON = filepath.Join(policyDir, "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": 2, "alert_threshold": 1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  connector: openclaw\n  rule_pack_dir: " +
+		filepath.Join(policyDir, "guardrail", "strict") + "\n  connectors:\n    openclaw:\n      rule_pack_dir: " +
+		filepath.Join(policyDir, "guardrail", "permissive") + "\n      alert_at: HIGH\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, DryRun: true})
+	if err != nil {
+		t.Fatalf("MigrateV9 (proxy connector): %v", err)
+	}
+	var doc struct {
+		Guardrail struct {
+			BlockAt    string `yaml:"block_at"`
+			Connectors map[string]struct {
+				BlockAt string `yaml:"block_at"`
+				AlertAt string `yaml:"alert_at"`
+			} `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	openclaw := doc.Guardrail.Connectors["openclaw"]
+	if doc.Guardrail.BlockAt != "" || openclaw.BlockAt != "MEDIUM" || openclaw.AlertAt != "HIGH" {
+		t.Errorf("block_at global %q openclaw %q alert_at openclaw %q; want openclaw pinned to MEDIUM and its HIGH kept:\n%s",
+			doc.Guardrail.BlockAt, openclaw.BlockAt, openclaw.AlertAt, result.Migrated)
+	}
+	if c := result.Record.Conflicts; len(c) != 1 || c[0].To != "guardrail.connectors.openclaw.alert_at" || !strings.HasSuffix(c[0].Lost, ":LOW") {
+		t.Errorf("conflicts = %+v; want openclaw's alert_at over the data.json LOW", c)
 	}
 }
 
