@@ -31,8 +31,12 @@ defenseclaw setup copilot
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-DefenseClaw writes the global hook by default. Pass `--workspace` only when the
-repository should carry its own `.github/hooks/defenseclaw.json` file.
+DefenseClaw writes the global hook by default. `--workspace` pins the workspace
+for the whole install. Setup refuses it once another connector is configured,
+because it would move that connector's hooks. To scope all connectors together,
+run `defenseclaw setup guardrail --workspace /path/to/repo`. Use
+`setup copilot --workspace` only on a Copilot-only install whose repository
+should carry `.github/hooks/defenseclaw.json`.
 
   </Tab>
   <Tab value="Windows">
