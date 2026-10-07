@@ -619,6 +619,24 @@ def _blocked(seq: int, host: str, port: int, **fields: Any) -> dict[str, Any]:
     return {"seq": seq, "kind": "egress.blocked", "sandbox": "s", "host": host, "port": port, **fields}
 
 
+def test_an_approved_host_port_reads_like_the_cli_feed() -> None:
+    # GAP-0182: `sandbox activity` says "(port 8765 on this machine)" for the
+    # first connection to an approved --host-port; the panel showed the bare
+    # host:port, which reads like any other host.
+    model = _model()
+    model.add_events(
+        [
+            {"seq": 80, "kind": "egress.allowed", "sandbox": "s", "host": "host.openshell.internal", "port": 8765},
+            {"seq": 81, "kind": "egress.allowed", "sandbox": "s", "host": "pypi.org", "port": 443},
+        ]
+    )
+    model.view = "activity"
+    assert [row[3] for row in model.data_table_rows()] == [
+        "pypi.org",
+        "host.openshell.internal:8765 (port 8765 on this machine)",
+    ]
+
+
 def test_blocked_lines_read_like_the_cli_feed() -> None:
     # GAP-0155: the panel read "169.254.169.254:80 (this machine)" and
     # "github.com:22 (no OpenShell rule allows it)" where `sandbox activity`

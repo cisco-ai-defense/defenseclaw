@@ -186,6 +186,10 @@ def metadata_or_link_local(host: str) -> bool:
 # A refused port 22 is git over SSH or ssh, which OpenShell never opens.
 SSH_PORT = 22
 
+# packs.OpenShellHostAlias: the name a sandbox reaches this machine by (a
+# --host-port service, a local model endpoint).
+OPENSHELL_HOST_ALIAS = "host.openshell.internal"
+
 
 def ssh_blocked_text(host: str) -> str:
     """sandboxapi.SSHBlockedText: OpenShell opens no SSH out of a sandbox, which no unblock changes."""
@@ -781,6 +785,9 @@ class ActivityRow:
         if text[:1] in {"✓", "✗", "⚠", "?", "↺", "⊘"}:
             text = text[1:].strip()
         if self.kind == "egress.allowed":
+            if self.host == OPENSHELL_HOST_ALIAS and self.port > 0:
+                # As sandboxcli.activityLine words it (GAP-0154, GAP-0182).
+                return f"{host_port(self.host, self.port)} (port {self.port} on this machine)"
             return host_port(self.host, self.port) or text
         if self.kind == "egress.blocked":
             if not self.host:
@@ -935,7 +942,7 @@ _SHORT_ASK_REASONS: tuple[tuple[re.Pattern[str], str], ...] = (
 def _host_local(host: str) -> bool:
     """triage.IsHostLocal: this machine's names and loopback or unspecified addresses."""
     text = normalize_host(host)
-    if text in {"localhost", "host.openshell.internal", "host.docker.internal", "gateway.docker.internal"}:
+    if text in {"localhost", OPENSHELL_HOST_ALIAS, "host.docker.internal", "gateway.docker.internal"}:
         return True
     if text.endswith(".localhost"):
         return True
