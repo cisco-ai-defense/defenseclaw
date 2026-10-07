@@ -31,6 +31,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -1583,4 +1584,67 @@ func TestDiffConfigsSecureClientKeepsItsReloadClassification(t *testing.T) {
 	if sidecar.configMgr.assetDirs != nil || sidecar.configMgr.assetFiles != nil {
 		t.Fatal("the Secure Client watcher follows policy assets")
 	}
+}
+
+// An asset edited after bootstrap but before startup watches are attached
+// must be rebuilt before the gateway reports readiness.
+func TestConfigManagerStartupRebuildsAssetBeforeReady(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	pack := filepath.Join(dir, "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	asset := filepath.Join(pack, "rule.rego")
+	if err := os.WriteFile(asset, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeConfigForManagerTest(t, path, dir, "observe")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := make(chan string, 2)
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			contents, err := os.ReadFile(asset)
+			if err == nil {
+				applied <- string(contents)
+			}
+			return err
+		})
+	mgr.setStartupSource(path, raw)
+	mgr.assetDirs = func() []string { return []string{pack} }
+	mgr.afterWatchAdded = func() {
+		if err := os.WriteFile(asset, []byte("new"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ready := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not report readiness")
+	}
+	select {
+	case got := <-applied:
+		if got != "new" {
+			t.Fatalf("startup applied asset %q, want new", got)
+		}
+	default:
+		t.Fatal("startup reported readiness without rebuilding the edited asset")
+	}
+	cancel()
+	<-done
 }
