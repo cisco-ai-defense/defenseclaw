@@ -380,6 +380,7 @@ install_conf() {
     if ((DRY_RUN)); then
       log "  would replace $CONF; changes (password hidden):"
       diff -u <(mask "$CONF") <(mask "$rendered") | sed 's/^/    /' || true
+      CONF_CHANGED=1
       return 0
     fi
     local backup
@@ -388,6 +389,7 @@ install_conf() {
     log "  backup: $backup"
   elif ((DRY_RUN)); then
     log "  would create $CONF (mode 0600, root)"
+    CONF_CHANGED=1
     return 0
   fi
   [[ -d $(dirname "$CONF") ]] || install -d -m 0711 -o root -g root "$(dirname "$CONF")"

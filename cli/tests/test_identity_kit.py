@@ -305,3 +305,17 @@ pam_step
     result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
     assert result.returncode != 0
     assert "unexpected-profile-replacement" not in result.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_dry_run_discloses_sssd_restart(tmp_path: Path) -> None:
+    conf = tmp_path / "installed.conf"
+    rendered = tmp_path / "new.conf"
+    conf.write_text("# Managed by DefenseClaw packaging/identity/okta\nold\n")
+    rendered.write_text("# Managed by DefenseClaw packaging/identity/okta\nnew\n")
+    source = OKTA_INSTALL.read_text().rsplit('main "$@"', 1)[0]
+    script = tmp_path / "probe.sh"
+    script.write_text(source + f'\nCONF={conf}\nDRY_RUN=1\ninstall_conf {rendered}\nrestart_sssd\n')
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "would restart sssd" in result.stdout
