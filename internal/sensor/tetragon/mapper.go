@@ -260,10 +260,15 @@ func (m *Mapper) mapExit(exit *pb.ProcessExit, at time.Time) []plane.Event {
 
 // commandLine is the forwarded command line of a process: its binary and
 // arguments, redacted, or the program and the withheld marker for a Codex
-// notify program. Tetragon renders the arguments with spaces, quoting the
-// ones that contain spaces; they are split on white space here, as the
+// notify program.
+//
+// Tetragon renders the arguments with spaces, wrapping the ones that contain
+// a space in double quotes; they are split on white space here, as the
 // sandbox process tree splits OpenShell's command lines, so every word is
-// checked by the redaction rules.
+// checked by the redaction rules. The quotes a word starts or ends with
+// (Tetragon's, or the shell's inside `-c "... eval '...'"`) are set aside
+// while the word is checked and put back after, so a quoted secret
+// (`-c "--token=..."`) is caught and the line keeps its shape.
 func commandLine(process *pb.Process) string {
 	binary := process.GetBinary()
 	fields := strings.Fields(process.GetArguments())
@@ -274,7 +279,21 @@ func commandLine(process *pb.Process) string {
 	if binary != "" {
 		argv = append(argv, binary)
 	}
-	return redaction.CommandLine(append(argv, fields...), MaxCmdlineBytes)
+	offset := len(argv)
+	opening := make([]string, len(fields))
+	closing := make([]string, len(fields))
+	for i, field := range fields {
+		core := strings.TrimLeft(field, `"'`)
+		opening[i] = field[:len(field)-len(core)]
+		trimmed := strings.TrimRight(core, `"'`)
+		closing[i] = core[len(trimmed):]
+		argv = append(argv, trimmed)
+	}
+	words := redaction.CommandArgs(argv)
+	for i := range fields {
+		words[offset+i] = opening[i] + words[offset+i] + closing[i]
+	}
+	return redaction.TruncateUTF8(strings.Join(words, " "), MaxCmdlineBytes)
 }
 
 // notifyPrefix recognizes a Codex notify program (GAP-0045): the bridge

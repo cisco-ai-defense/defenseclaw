@@ -56,6 +56,15 @@ var (
 // before the line leaves the helper. Telemetry destinations redact the result
 // again by their own profile: it is content.
 func CommandLine(args []string, max int) string {
+	return truncateUTF8(strings.Join(CommandArgs(args), " "), max)
+}
+
+// CommandArgs is CommandLine's pass without the join: one output word per
+// argument, with the same rules. A caller that has to re-attach quoting
+// around each word (the sensor helper rendering Tetragon's arguments) uses
+// it; a placeholder can contain spaces, so a joined line cannot be split
+// back into words.
+func CommandArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	mysql := len(args) > 0 && mysqlClient(args[0])
 	hideNext, userNext := false, false
@@ -89,8 +98,12 @@ func CommandLine(args []string, max int) string {
 		})
 		out = append(out, a)
 	}
-	return truncateUTF8(strings.Join(out, " "), max)
+	return out
 }
+
+// TruncateUTF8 cuts s to at most n bytes without splitting a UTF-8
+// sequence; n <= 0 leaves s whole.
+func TruncateUTF8(s string, n int) string { return truncateUTF8(s, n) }
 
 // mysqlClient reports a MySQL or MariaDB client, which takes its password
 // attached to -p.

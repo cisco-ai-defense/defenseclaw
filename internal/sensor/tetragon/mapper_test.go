@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -243,6 +244,27 @@ func TestNotifyPrefix(t *testing.T) {
 		if got != tc.want || strings.Contains(got, "dccert-payload-marker") {
 			t.Fatalf("%s %s: %q, want %q", tc.binary, tc.args, got, tc.want)
 		}
+	}
+}
+
+// TestCommandLineRedactsQuotedWords: a secret at the edge of a quoted
+// argument is still redacted, and the quotes stay where they were.
+func TestCommandLineRedactsQuotedWords(t *testing.T) {
+	for args, want := range map[string]string{
+		`-c "--token=dccertvalue"`:                                         `/usr/bin/bash -c "--token=<redacted`,
+		`-c "source x && eval 'tool --api-key dccertvalue' < /dev/null"`:   `eval 'tool --api-key <redacted`,
+		`-c "curl -u dccert:dccertpass https://example.invalid/"`:          `-u dccert:<redacted`,
+		`-c "git clone 'https://dccert:dccertpass@example.invalid/r.git'"`: `'https://dccert:<redacted`,
+		`-c "cat /home/dcr-std1/tg2work/dccert-block-marker"`:              `-c "cat /home/dcr-std1/tg2work/dccert-block-marker"`,
+	} {
+		got := commandLine(&pb.Process{Binary: "/usr/bin/bash", Arguments: args})
+		if strings.Contains(got, "dccertvalue") || strings.Contains(got, "dccertpass") || !strings.Contains(got, want) {
+			t.Fatalf("%s: %q, want it to contain %q", args, got, want)
+		}
+	}
+	long := commandLine(&pb.Process{Binary: "/usr/bin/bash", Arguments: strings.Repeat("é ", 2000)})
+	if len(long) > MaxCmdlineBytes || !utf8.ValidString(long) {
+		t.Fatalf("bound: %d bytes, valid %v", len(long), utf8.ValidString(long))
 	}
 }
 
