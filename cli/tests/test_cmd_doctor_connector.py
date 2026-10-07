@@ -3783,3 +3783,14 @@ class TestConnectorSkippedAtStart(unittest.TestCase):
         self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
         self.assertIn("OpenHands was skipped", row["detail"])
         self.assertEqual(row["remediation"], "defenseclaw setup openhands")
+
+
+
+def test_omnigent_tmux_requirement_reports_old_managed_terminal_runtime() -> None:
+    from defenseclaw.commands import cmd_doctor
+    with (
+        patch.object(cmd_doctor.os, "name", "posix"),
+        patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/tmux"),
+        patch.object(cmd_doctor.subprocess, "run", return_value=SimpleNamespace(stdout="tmux 3.2a")),
+    ):
+        assert "tmux 3.3" in cmd_doctor._omnigent_tmux_requirement()
