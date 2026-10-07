@@ -577,7 +577,12 @@ def _echo_status_json(
         item = {"connector": row["key"][0], "label": row["label"][0]}
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
         connectors.append(item)
-    payload = {"enabled": bool(gc.enabled), "port": gc.port, "connectors": connectors, "warnings": warnings}
+    payload = {
+        "enabled": bool(gc.enabled and any(item["state"] == "enabled" for item in connectors)),
+        "port": gc.port,
+        "connectors": connectors,
+        "warnings": warnings,
+    }
     if profile is not None:
         payload["profile"] = profile
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -651,8 +656,16 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
-        enabled_txt = "yes" if gc.enabled else "no"
-        enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
+        # The summary describes actual hook coverage, including connector overrides.
+        summary_connectors = (
+            app.cfg.active_connectors() if hasattr(app.cfg, "active_connectors") else [connector]
+        )
+        all_enabled = gc.enabled and any(
+            gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
+            for name in summary_connectors
+        )
+        enabled_txt = "yes" if all_enabled else "no"
+        enabled_val = ux._style(enabled_txt, fg="green" if all_enabled else "yellow")
         ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     # Resolve the full active set and render exactly one coherent view: a
@@ -857,10 +870,13 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     if proxy_in_use:
         ux.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
-    if gc.enabled:
+    if gc.enabled and any(
+        gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
+        for name in actives
+    ):
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
     else:
-        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
+        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable --connector <name>")
     click.echo()
 
 
@@ -1176,9 +1192,19 @@ def _apply_scoped_fail_mode_transaction(
                 conns.pop(key, None)
             else:
                 old_entry.hook_fail_mode = old_mode
-            restore_fail_mode_transaction(snapshots)
-            ux.err(f"Failed to save config: {exc}", indent="  ")
-            raise click.Abort() from exc
+            try:
+                restore_fail_mode_transaction(snapshots)
+            except OSError as rollback_exc:
+                ux.err(
+                    f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                    f"rollback incomplete: {rollback_exc}", indent="  ",
+                )
+                raise SystemExit(1) from exc
+            ux.err(
+                f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                "previous config and runtime files restored.", indent="  ",
+            )
+            raise SystemExit(1) from exc
 
         if restart and gc.enabled:
             try:
@@ -1424,9 +1450,19 @@ def _apply_global_fail_mode_transaction(
                     gc.connectors.pop(name, None)
                 else:
                     old_entry.hook_fail_mode = old_mode
-            restore_fail_mode_transaction(snapshots)
-            ux.err(f"Failed to save config: {exc}", indent="  ")
-            raise click.Abort() from exc
+            try:
+                restore_fail_mode_transaction(snapshots)
+            except OSError as rollback_exc:
+                ux.err(
+                    f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                    f"rollback incomplete: {rollback_exc}", indent="  ",
+                )
+                raise SystemExit(1) from exc
+            ux.err(
+                f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                "previous config and runtime files restored.", indent="  ",
+            )
+            raise SystemExit(1) from exc
 
         if restart and gc.enabled:
             used_full_restart = False
@@ -2794,6 +2830,15 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
     if not path.strip():
         raise click.UsageError("PATH must not be empty.")
 
+    # A bare pack name has the same meaning here as in list-packs/use-pack.
+    if not any(sep in path for sep in (os.sep, os.altsep) if sep) and not path.startswith(("~", ".")):
+        from defenseclaw import policy_catalog
+
+        cfg = getattr(click.get_current_context().obj, "cfg", None)
+        if cfg is not None:
+            named = next((p.path for p in policy_catalog.discover_rule_packs(cfg) if p.name == path), None)
+            if named:
+                path = named
     try:
         result = rulepack_validation.validate_rule_pack(path)
     except rulepack_validation.RulePackValidationBridgeError as exc:
@@ -4065,7 +4110,12 @@ def mode_cmd(
         "open": "the action goes ahead if the hook can't reach the gateway",
     }
     notes = [
-        f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
+        (
+            f"Hook failures for {_connector_label(c)} remain fail-open (upstream limitation): "
+            "the action can go ahead if the hook cannot reach the gateway."
+            if normalize_connector(c) in _UPSTREAM_FAIL_OPEN_CONNECTORS
+            else f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
+        )
         for c, fm in fail_flips.items()
     ]
     notes.extend(

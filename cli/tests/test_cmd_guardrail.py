@@ -18,6 +18,7 @@ connector.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -781,6 +782,17 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertIn("claudecode", result.output)
         self.assertIn("disabled", result.output)
         self.assertIn("enabled", result.output)
+
+    def test_status_all_connectors_disabled_uses_enable_hint(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": False})
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("enabled:    no", result.output)
+        self.assertIn("Enable with", result.output)
+        self.assertNotIn("Disable with", result.output)
+        machine = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+        self.assertFalse(json.loads(machine.output)["enabled"])
 
     def test_status_roster_shows_per_connector_rule_pack_and_hilt(self):
         # Each connector can scan against its OWN rule pack AND HILT policy; the
