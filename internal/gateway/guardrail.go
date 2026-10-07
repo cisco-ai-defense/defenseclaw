@@ -150,6 +150,16 @@ func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds pol
 	return &out
 }
 
+// fallbackVerdict is the verdict without a Rego module. Secure Client keeps
+// the 1.0 threshold-only answer (issue #1092): no Cisco trust level, no HILT
+// confirm and no observe handling here.
+func (g *GuardrailInspector) fallbackVerdict(merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
+	if gen := currentGeneration(); gen != nil && gen.Config != nil && gen.Config.SecureClientIntegration() {
+		return fallbackGuardrailVerdictForThresholds(merged, nil, thresholds, "", nil)
+	}
+	return fallbackGuardrailVerdictForThresholds(merged, cisco, thresholds, mode, g.hiltInput())
+}
+
 func errorVerdict(scanner string) *ScanVerdict {
 	return &ScanVerdict{
 		Action:      "allow",
@@ -1297,7 +1307,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		prepared = gen.OPA
 	}
 	if prepared == nil {
-		return fallbackGuardrailVerdictForThresholds(merged, ciscoResult, thresholds, mode, g.hiltInput())
+		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
 	}
 
 	input := policy.GuardrailInput{
@@ -1335,7 +1345,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return fallbackGuardrailVerdictForThresholds(merged, ciscoResult, thresholds, mode, g.hiltInput())
+		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 

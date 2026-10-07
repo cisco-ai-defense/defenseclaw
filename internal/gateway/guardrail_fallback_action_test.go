@@ -19,6 +19,8 @@ package gateway
 import (
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -173,5 +175,27 @@ func TestFallbackGuardrailVerdict_FollowsRego(t *testing.T) {
 				t.Errorf("action = %q, want %q", got.Action, tc.want)
 			}
 		})
+	}
+}
+
+// Secure Client keeps the 1.0 threshold-only answer without Rego (issue #1092).
+func TestFallbackVerdict_SecureClientKeepsThresholdOnlyAnswer(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	previous := liveGeneration.Load()
+	liveGeneration.Store(&Generation{Config: cfg})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+
+	critical := &ScanVerdict{Action: "block", Severity: "CRITICAL"}
+	none := &ScanVerdict{Action: "allow", Severity: "NONE"}
+	inspector := NewGuardrailInspector("local", nil, nil)
+	inspector.SetHILTConfig(true, "HIGH")
+	thresholds := policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium, CiscoTrustLevel: "none"}
+	if got := inspector.fallbackVerdict(none, critical, thresholds, "action"); got.Action != "allow" {
+		t.Errorf("Cisco-only critical = %q, want the 1.0 answer allow", got.Action)
+	}
+	high := &ScanVerdict{Action: "alert", Severity: "HIGH"}
+	if got := inspector.fallbackVerdict(high, nil, thresholds, "action"); got.Action != "alert" {
+		t.Errorf("HIGH with HILT on = %q, want the 1.0 answer alert", got.Action)
 	}
 }
