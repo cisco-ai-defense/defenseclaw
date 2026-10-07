@@ -282,6 +282,15 @@ func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
 					t.Fatalf("verify passes with no connector enabled: %+v", r.Errors)
 				}
 			}
+			// ensure warns too, as on Windows (GAP-0266), and an explicit
+			// disable beats the singular guardrail.connector (GAP-0263).
+			disabled := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(disabled, append(DefaultConfig(h.env.Layout), "  connector: claudecode\n  connectors:\n    claudecode:\n      enabled: false\n"...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if r := h.run(Options{Action: ActionEnsure, ConfigFile: disabled}); !hasWarning(r, "no_connectors_enabled") || r.SecurityComplete {
+				t.Fatalf("ensure does not warn that no connector is enabled: %+v", r.Warnings)
+			}
 			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
 			if r := h.run(Options{Action: ActionStatus}); hasWarning(r, "no_connectors_enabled") {
 				t.Fatalf("the warning stays with a connector enabled: %+v", r.Warnings)
