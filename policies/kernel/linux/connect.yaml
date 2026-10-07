@@ -1,0 +1,8 @@
+# DefenseClaw connect policy for Tetragon (managed Linux only): post-only
+# tcp_connect events of every process to a non-loopback peer, rate limited per
+# process and peer. Plane B attributes them per binary. Nothing here denies.
+version: 1
+rate_limit: 1m
+exclude_destinations:
+  - 127.0.0.0/8
+  - "::1"
