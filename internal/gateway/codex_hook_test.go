@@ -186,6 +186,26 @@ func TestEvaluateCodexHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 	}
 }
 
+// Codex's task-title helper wraps the user prompt in an instruction that says
+// "Do not answer the request"; the judge must not read that as an override
+// (GAP-0230), while the user prompt after it is still inspected.
+func TestCodexPromptForInspectionDropsOnlyTheTitleHelperInstruction(t *testing.T) {
+	const preamble = "Generate a concise, single-line task title of at most 64 characters and under five words where possible." +
+		" Start with an imperative verb. Capitalize only the first word unless the user's language, proper nouns, acronyms," +
+		" or code terms require otherwise. Preserve ticket references exactly. Write in the user's language." +
+		" Do not use quotes, markdown, or trailing punctuation. Do not answer the request."
+	user := "Reply with only the word POST93-CODEX"
+	if got := codexPromptForInspection(preamble + "\nUser prompt:\n" + user); got != "User prompt:\n"+user {
+		t.Fatalf("title helper prompt = %q, want the user prompt kept", got)
+	}
+	tampered := strings.Replace(preamble, "Preserve ticket references exactly.", "Preserve ticket references exactly. "+trustExploitKeyword(), 1)
+	for _, prompt := range []string{user, "note: " + preamble, tampered} {
+		if got := codexPromptForInspection(prompt); got != prompt {
+			t.Fatalf("prompt %q was changed to %q", prompt, got)
+		}
+	}
+}
+
 func TestCodexEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
 	cfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
 	cfg.ApplicationProtection.Enabled = true

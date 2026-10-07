@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -38,6 +39,15 @@ observability: {}
 		"inspection-candidate": func() (*Config, error) {
 			return LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", raw)
 		},
+		// LoadFromFile, which the Windows guardian, enumerator and Setup
+		// use, dropped these entries on main (GAP-0221).
+		"file": func() (*Config, error) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				return nil, err
+			}
+			return LoadFromFile(path)
+		},
 	}
 	for name, load := range loaders {
 		t.Run(name, func(t *testing.T) {
@@ -50,6 +60,17 @@ observability: {}
 				t.Fatalf("target runtime connectors = %v, want %v", got, want)
 			}
 		})
+	}
+	// A Secure Client config keeps the file loader of main, which drops them.
+	if runtime.GOOS != "linux" {
+		secureClient := append([]byte("deployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"), raw...)
+		cfg, err := loadFileSource(filepath.Join(t.TempDir(), "config.yaml"), secureClient, false, false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Guardrail.Connectors) != 0 {
+			t.Fatalf("Secure Client file load kept the empty entries: %v", cfg.Guardrail.Connectors)
+		}
 	}
 }
 

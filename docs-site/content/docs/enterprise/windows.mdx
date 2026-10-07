@@ -169,8 +169,10 @@ guardrail:
     claudecode: {}
 ```
 
-Each key under `guardrail.connectors` turns on protection for that agent. A
-config with no connectors protects nothing. See
+Each key under `guardrail.connectors` turns on protection for that agent; an
+empty value (`{}`) enables it with the default settings. A config with no
+connectors protects nothing: `status` warns `no_connectors_enabled` and
+`verify` fails. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 

@@ -342,7 +342,8 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 }
 
 // A Secure Client computer keeps the enterprise groups and the discovery
-// --user match it had before the identity views (GAP-0138, issue #1092).
+// --user match it had before the identity views (GAP-0138), and drops the
+// other commands main does not have (issue #1092).
 func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	previousHost, previousCfg, previousReport := secureClientHost, cfg, enterpriseDiscoveryGatewayReport
 	t.Cleanup(func() {
@@ -355,15 +356,31 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
 	enterprise.AddCommand(group)
 	root.AddCommand(enterprise)
+	policyGroup := &cobra.Command{Use: "policy"}
+	policyGroup.AddCommand(&cobra.Command{Use: "show", Short: policyShowCmd.Short, Annotations: policyShowCmd.Annotations},
+		&cobra.Command{Use: "digest", Annotations: policyDigestCmd.Annotations})
+	scanGroup := &cobra.Command{Use: "scan"}
+	scanGroup.AddCommand(&cobra.Command{Use: "code"}, &cobra.Command{Use: "skill", Annotations: scanSkillCmd.Annotations},
+		&cobra.Command{Use: "mcp", Annotations: scanMCPCmd.Annotations}, &cobra.Command{Use: "plugin", Annotations: scanPluginCmd.Annotations})
+	root.AddCommand(policyGroup, scanGroup)
 	secureClientHost = func() bool { return false }
-	dropEnterpriseIdentityViewsOnSecureClient(root)
+	keepCommandTreeOfMainOnSecureClient(root)
 	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) {
 		t.Fatalf("standalone group has %d commands, want the identity views too", got)
 	}
+	if len(policyGroup.Commands()) != 2 || len(scanGroup.Commands()) != 4 {
+		t.Fatalf("standalone policy %v, scan %v: want policy digest and scan skill|mcp|plugin", policyGroup.Commands(), scanGroup.Commands())
+	}
 	secureClientHost = func() bool { return true }
-	dropEnterpriseIdentityViewsOnSecureClient(root)
+	keepCommandTreeOfMainOnSecureClient(root)
 	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" {
 		t.Fatalf("Secure Client group = %v, want discovery only", got)
+	}
+	if p, s := policyGroup.Commands(), scanGroup.Commands(); len(p) != 1 || p[0].Name() != "show" || len(s) != 1 || s[0].Name() != "code" {
+		t.Fatalf("Secure Client policy %v, scan %v: want the commands of main (policy show, scan code)", p, s)
+	}
+	if got := policyGroup.Commands()[0].Short; got != "Display the current OPA data.json policy configuration" {
+		t.Fatalf("Secure Client policy show help = %q, want the line of main", got)
 	}
 
 	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
