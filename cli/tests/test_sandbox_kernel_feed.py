@@ -20,12 +20,15 @@ release.
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
-from defenseclaw.commands import cmd_uninstall
+from defenseclaw.commands import cmd_doctor, cmd_uninstall
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,3 +75,69 @@ def test_the_helper_ships_and_is_removed_with_the_per_user_install() -> None:
     assert '[[ "${OS}" == linux ]] || rm -f "${STAGING}/bin/defenseclaw-sensor-helper"' in installer
     _root, targets = cmd_uninstall._owned_binary_targets("linux")
     assert any(target.endswith("/defenseclaw-sensor-helper") for target in targets)
+
+
+# ---------------------------------------------------------------------------
+# defenseclaw doctor: the "Sandbox kernel feed" row (spec 11.3)
+# ---------------------------------------------------------------------------
+
+_SANDBOXES_ON = SimpleNamespace(openshell=SimpleNamespace(enabled=True))
+_GATEWAY = "/home/u/.local/bin/defenseclaw-gateway"
+_INSTALL = f"sudo {_GATEWAY} sandbox kernel-feed install"
+
+
+def _feed_rows(tmp_path: Path, report: object, *, installed: bool = True, cfg=_SANDBOXES_ON, os_name: str = "linux"):
+    unit = tmp_path / "defenseclaw-sandbox-feed.service"
+    if installed:
+        unit.write_text("[Unit]\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        stdout = report if isinstance(report, str) else json.dumps(report)
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_sandbox_kernel_feed(cfg, result, unit_path=str(unit), os_name=os_name, binary=_GATEWAY, run=run)
+    for check in result.checks:
+        assert check["label"] == "Sandbox kernel feed"
+        assert check["check_id"] == "doctor.sandbox.kernel-feed"
+    return result.checks, calls
+
+
+def test_feed_row_only_when_the_feed_is_installed_on_linux(tmp_path: Path) -> None:
+    sandboxes_off = SimpleNamespace(openshell=SimpleNamespace(enabled=False))
+    for index, kwargs in enumerate(({"installed": False}, {"os_name": "darwin"}, {"cfg": sandboxes_off})):
+        workdir = tmp_path / str(index)
+        workdir.mkdir()
+        checks, calls = _feed_rows(workdir, {"reachable": True}, **kwargs)
+        assert checks == [] and calls == [], kwargs
+
+
+def test_feed_row_names_the_update_command(tmp_path: Path) -> None:
+    report = {
+        "installed": True,
+        "update_needed": True,
+        "build": "1.1.0",
+        "protocol": 1,
+        "gateway_version": "1.2.0",
+        "gateway_protocol": 2,
+        "install_command": _INSTALL,
+    }
+    checks, calls = _feed_rows(tmp_path, report)
+    assert calls == [[_GATEWAY, "sandbox", "kernel-feed", "status", "--json"]]
+    (row,) = checks
+    assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-update"
+    assert _INSTALL in row["remediation"] and "1.1.0" in row["detail"] and "1.2.0" in row["detail"]
+
+
+def test_feed_row_pass_skip_and_unavailable(tmp_path: Path) -> None:
+    reachable = {"installed": True, "reachable": True, "build": "1.2.0", "protocol": 2, "tetragon": "connected"}
+    (row,), _ = _feed_rows(tmp_path, reachable)
+    assert row["status"] == "pass" and "connected" in row["detail"] and "1.2.0" in row["detail"]
+    (row,), _ = _feed_rows(tmp_path, {"installed": True, "reason": "kernel_feed_not_permitted"})
+    assert row["status"] == "skip" and "docker group" in row["detail"]
+    (row,), _ = _feed_rows(tmp_path, {"installed": True, "active": "failed", "reason": "kernel_feed_unavailable"})
+    assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-unavailable"
+    (row,), _ = _feed_rows(tmp_path, "not json")
+    assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-status-unavailable"
