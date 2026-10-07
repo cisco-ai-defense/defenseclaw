@@ -481,7 +481,8 @@ func toolResultAlertSeverity(severity string) string {
 }
 
 // sensitiveToolResultAlert checks the same composed rule pack and entity rules
-// that scanned this request.
+// that scanned this request. Findings from a judge or another category do not
+// prove a sensitive value; only matched entity values count.
 func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
 	g := a.generation()
 	if g == nil {
@@ -518,8 +519,14 @@ func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName,
 		minEntities = 1
 	}
 	entities := countRuleEntitiesFor(ctx, connectorName, output)
-	if entities == 0 {
-		entities = len(findings)
+	if entities == 0 && output != "" {
+		// A judge can identify PII that has no deterministic pattern. Only
+		// its PII findings may stand in for matched values.
+		for _, finding := range findings {
+			if strings.HasPrefix(finding, "JUDGE-PII-") {
+				entities++
+			}
+		}
 	}
 	if entities < minEntities {
 		return "", false

@@ -684,7 +684,7 @@ func countRuleEntitiesFor(ctx context.Context, connector, text string) int {
 	seen := make(map[string]struct{})
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
-		if !options.allowsCategory(cat.Name) {
+		if cat.Name != "secret" && cat.Name != "enterprise-data" && cat.Name != "pii" {
 			continue
 		}
 		for ruleIndex := range cat.Rules {

@@ -523,6 +523,46 @@ rules:
 	t.Fatalf("profile-sensitive tool produced no two-entity alert: %+v", events)
 }
 
+// A finding from another inspection lane does not prove a sensitive value.
+func TestHookToolResultAlertIgnoresNonEntityFinding(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{
+			"global": {SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{
+				{Name: "crm_export", ResultInspection: true, MinEntitiesAlert: 1},
+			}}},
+		}}
+	})
+	req := agentHookRequest{ToolName: "crm_export", HookEventName: "PostToolUse",
+		Payload: map[string]interface{}{"tool_response": "ordinary output"}}
+	api.alertSensitiveHookToolResult(t.Context(), "codex", req,
+		agentHookResponse{Severity: "HIGH", Findings: []string{"PROMPT-INJECTION"}})
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			t.Fatalf("non-entity finding produced PII alert: %+v", event)
+		}
+	}
+
+	// The judge's typed PII finding still counts when regex has no match.
+	api.alertSensitiveHookToolResult(t.Context(), "codex", req,
+		agentHookResponse{Severity: "HIGH", Findings: []string{"JUDGE-PII-EMAIL"}})
+	events, err = store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			return
+		}
+	}
+	t.Fatal("judge PII finding produced no alert")
+}
+
 // TestHookToolResultRaisesSensitiveToolAlert pins GAP-0041 on the connector hook
 // endpoints: the Claude Code and Codex PostToolUse results finalize through
 // finalizeAgentHook, which raises the same alert as the inspect route, for a
@@ -569,7 +609,7 @@ func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 		{"claudecode", "PostToolUse", "other_tool", findings, nil},
 		{"claudecode", "PreToolUse", "listed_tool", findings, nil},
 		{"claudecode", "PostToolUse", "listed_tool", findings[:1], nil},
-		{"claudecode", "PostToolUse", "listed_tool", findings, nil},
+		{"claudecode", "PostToolUse", "listed_tool", findings, emails},
 		{"codex", "PostToolUse", "listed_tool", findings[1:], emails},
 	} {
 		req := agentHookRequest{ConnectorName: c.connector, HookEventName: c.event, ToolName: c.tool, Payload: c.payload}
