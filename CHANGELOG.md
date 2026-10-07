@@ -167,6 +167,10 @@ stopped`. Nothing is changed; use the install command above.
   `--profile` and `--harness` resolve locally, with no daemon, for CI.
   `--fixture FILE` checks a YAML or JSON list of `{host, port, binary,
   expect, rule}` and exits 1 on a mismatch.
+- `defenseclaw sandbox policy block --remove HOST` (and `policy allow
+  --remove`) takes an entry off `openshell.egress.block` (or `allow`); only
+  `config unset` could, for the whole list. An unblock refused by your own
+  block list names the command.
 
 ## [Unreleased] — Enterprise hardening
 
@@ -824,6 +828,9 @@ deleted.
   vendor account passes. Each image pins the harness at DefenseClaw's
   reviewed hook contract, installs root-owned hooks (managed or user tier, see
   the capability matrix) and must pass a hook-fire probe before use.
+- Hermes Agent on Bedrock runs `openai.gpt-oss-20b` unless `-- -m MODEL`
+  picks another, and the banner names it. The managed provider named no
+  model, so Hermes sent an empty one, which Mantle refuses.
 - Workspace: the project is mounted live by default, with secret files
   masked, `.git/hooks` and `.git/config` read-only, a pre-session snapshot and
   `sandbox undo`, an end-of-session review of changes that can run code on the
@@ -966,6 +973,15 @@ deleted.
   `openshell_install_version`.
 - The daemon reconnects when the gateway answers with another release, so
   `sandbox status` and the doctor name the release after an upgrade.
+- On Linux kernels older than 5.19 (RHEL 9 runs 5.14), OpenShell 0.1 won't
+  tell a sandboxed program whom its connection goes to (`getpeername` fails
+  with `EOPNOTSUPP`), and Python's `ssl` module asks before every handshake,
+  so every HTTPS request of a Python program failed with
+  `[Errno 95] Operation not supported`: Hermes Agent, OpenHands and OmniGent
+  never reached their model. Their images now carry a workaround in the
+  harness's own interpreter. Other Python programs in the sandbox, such as
+  `pip`, keep failing until an OpenShell release after 0.1.2
+  (NVIDIA/OpenShell #4058).
 - On a Mac the first start of each harness image after the upgrade prepares
   its MicroVM disk again (about a minute and 5 GB): the explain note and
   the daemon's disk-room check count only disks the gateway's release

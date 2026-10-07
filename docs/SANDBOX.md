@@ -1858,9 +1858,12 @@ verdict. The file and egress boundaries are enforced outside the sandbox and
 do not depend on the hooks. The manager watches for the two ways a
 compromised hook shows:
 
-- **Hook silence** (`hook_silence`): the harness is active (OCSF process or
-  network events of the harness's own binaries under its install root,
-  their connections to the egress proxy included, native OTLP) for the
+- **Hook silence** (`hook_silence`): the harness is active (OCSF network
+  events of the harness's own binaries under its install root, their
+  connections to the egress proxy included, native OTLP; OCSF process
+  events of those binaries count too, but OpenShell 0.1 reports only the
+  processes its supervisor starts, never the ones a harness runs, so work
+  without network traffic goes unseen) for the
   pack's `hooks.silence_after` (10 minutes in the built-in packs, 1 minute
   to 24 hours) without a single hook request: one run of activity since the
   last hook (or the session's start) that no idle stretch of `silence_after`
@@ -2279,7 +2282,7 @@ images stay unverified, so they are never selected for a sandbox.
 | Cursor Agent | 2026.07.23-e383d2b (release archive, sha256 measured by DefenseClaw) | Enterprise `/etc/cursor/hooks.json`, every event `failClosed` | managed | `--force` | Cursor API key (endpoints unverified), or `cursor-launch login` inside the sandbox (the session is readable by the workload) | unverified |
 | Kiro CLI | 2.24.1 (release archive, vendor sha256) | Root-owned agent `/usr/local/lib/defenseclaw/kiro/defenseclaw.json`, alone in the directory the launcher forces `KIRO_AGENT_CONFIG_DIR` to | user | `--trust-all-tools` | Kiro Pro API key (endpoints unverified), or `kiro-launch login --use-device-flow` inside the sandbox (the token is readable by the workload) | verified (hooks and blocking; no real model) |
 | Devin CLI | 3000.4.25 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start; workspace trust skipped | user | `--permission-mode dangerous` | `devin-launch auth login` inside the sandbox (the credential is readable by the workload) | unverified |
-| Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (the curated profiles carried no real model in a sandbox) | verified (mock model) |
+| Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (default model `openai.gpt-oss-20b`; the curated profiles carried no real model in a sandbox) | verified (mock model) |
 | OpenHands CLI | 1.16.0 (PyPI, root-owned uv tool on a private CPython) | User-owned `~/.openhands/hooks.json`, restored from a root-owned copy on every start; a project hooks file or a non-file hooks path is refused | user | `--always-approve` | OpenAI API key, Anthropic API key, Bedrock Mantle (the curated profiles carried no real model in a sandbox) | verified (mock model) |
 | Antigravity CLI (agy) | 1.2.12 (release tarball, SHA-512 pinned) | User-owned `~/.gemini/config/hooks.json`, restored from a root-owned copy on every start; a non-file hooks path is refused | user | `--dangerously-skip-permissions` | Gemini API key (unverified with a real key) | verified (mock model) |
 | OmniGent | 0.13.0 (PyPI, root-owned uv tool on a private CPython) | Server configuration `/etc/omnigent/config.yaml` through `OMNIGENT_CONFIG_HOME`; the launcher stops and stops reusing any recorded server or daemon started without it | managed | none (its policies decide) | Bedrock Mantle (default model `openai.gpt-oss-20b`), OpenAI API key (`--model` required), Anthropic API key (unverified) | verified (mock model) |

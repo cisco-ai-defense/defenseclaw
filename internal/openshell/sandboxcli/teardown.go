@@ -628,12 +628,17 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		case errors.Is(err, openshell.ErrNoGatewayService):
 			// A gateway run another way, which DefenseClaw cannot restart.
 			a.ok("restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
+		case errors.Is(err, openshell.ErrGatewayServiceStopped):
+			// Not started for it (GAP-0149): another account's gateway, say,
+			// holds the port, one gateway running per machine.
+			a.ok("restored the OpenShell gateway configuration; this account's " + openshell.GatewayService +
+				" service is not running, so it loads it when it starts")
 		case err != nil:
 			fail("restore the gateway configuration", err)
 		default:
 			a.ok("restored the OpenShell gateway configuration and restarted it")
 		}
-		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) {
+		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) || errors.Is(err, openshell.ErrGatewayServiceStopped) {
 			if r, err := a.loadReceipt(); err == nil {
 				r.GatewayFiles = nil
 				_ = a.saveReceipt(r)

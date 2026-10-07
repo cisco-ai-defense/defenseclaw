@@ -229,6 +229,7 @@ func (a *App) ask(question string, def bool, assumeDefault bool) (bool, error) {
 		case "n", "no":
 			return false, nil
 		}
+		fmt.Fprintln(a.IO.Out, terminalText(a.dim("answer y or n")))
 	}
 }
 
@@ -276,11 +277,14 @@ func (a *App) choose(question string, choices []choice, def string) (string, err
 		if ans == "" {
 			return def, nil
 		}
+		keys := make([]string, 0, len(choices))
 		for _, c := range choices {
 			if ans == c.Key || ans == strings.ToLower(c.Label) {
 				return c.Key, nil
 			}
+			keys = append(keys, c.Key)
 		}
+		fmt.Fprintln(a.IO.Out, terminalText(a.dim("answer "+strings.Join(keys, ", "))))
 	}
 }
 

@@ -487,7 +487,7 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 			text += " (" + clause + ")"
 		}
 	case why != "":
-		text += " (" + reasonText(why) + ")"
+		text += " (" + blockedText(why, ev.Host) + ")"
 	}
 	host := strings.ToLower(ev.Host)
 	n := sessionNotice{summary: text}
@@ -1470,6 +1470,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		}
 		opts.AcceptSensitive = yes
 		if !yes {
+			a.note(notBroughtBack(after.Name, pull.Kind))
 			s.keepUnpulled()
 			return s.finish(ctx, false)
 		}

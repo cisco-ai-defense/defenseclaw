@@ -486,8 +486,8 @@ func TestLaunchArgv(t *testing.T) {
 			[]string{DevinLauncherPath, "--permission-mode", "dangerous", "--model", "opus", "-p", "fix it"}},
 		{"devin-headless-safe", Devin, LaunchOptions{Mode: Headless, Prompt: "fix it"}, []string{DevinLauncherPath, "-p", "fix it"}},
 		{"hermes-interactive-yolo", Hermes, LaunchOptions{Mode: Interactive, Yolo: true}, []string{HermesLauncherPath, "--yolo"}},
-		{"hermes-headless-mantle", Hermes, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", CredentialProfile: profiles.BedrockMantleOpenAIID, Args: []string{"-m", "openai.gpt-oss-20b"}},
-			[]string{HermesLauncherPath, "chat", "-q", "fix it", "-Q", "--yolo", "--provider", "defenseclaw", "-m", "openai.gpt-oss-20b"}},
+		{"hermes-headless-mantle", Hermes, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "fix it", CredentialProfile: profiles.BedrockMantleOpenAIID},
+			[]string{HermesLauncherPath, "chat", "-q", "fix it", "-Q", "--yolo", "--provider", "defenseclaw", "-m", HermesMantleDefaultModel}},
 		{"hermes-safe-anthropic", Hermes, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.AnthropicID},
 			[]string{HermesLauncherPath, "--provider", "anthropic"}},
 		{"openhands-headless-yolo", OpenHands, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.OpenAIID},
@@ -820,16 +820,35 @@ func TestSpecModel(t *testing.T) {
 		{"claude anthropic has no default", ClaudeCode, profiles.AnthropicID, nil, "", false},
 		{"claude anthropic with --model", ClaudeCode, profiles.AnthropicID, []string{"--model", "opus"}, "opus", false},
 		{"harness without a model parser", OpenCode, "", []string{"-m", "anthropic/claude-haiku-4-5"}, "", false},
+		{"hermes mantle default", Hermes, profiles.BedrockMantleOpenAIID, nil, HermesMantleDefaultModel, true},
+		{"hermes -m", Hermes, profiles.BedrockMantleOpenAIID, []string{"chat", "-m", "openai.gpt-oss-120b"}, "openai.gpt-oss-120b", false},
+		{"hermes openai has no default", Hermes, profiles.OpenAIID, nil, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, isDefault, flag := tc.spec.Model(tc.profile, tc.args)
 			if got != tc.want || isDefault != tc.wantDefault {
 				t.Fatalf("Model = %q (default %t), want %q (default %t)", got, isDefault, tc.want, tc.wantDefault)
 			}
-			if tc.spec == Codex && flag != "-m" || tc.spec == ClaudeCode && flag != "--model" {
+			if (tc.spec == Codex || tc.spec == Hermes) && flag != "-m" || tc.spec == ClaudeCode && flag != "--model" {
 				t.Fatalf("flag = %q", flag)
 			}
 		})
+	}
+}
+
+// TestHermesMantleLaunchPinsModel: Hermes' managed provider names no model,
+// and Hermes sent an empty one that Mantle refuses (GAP-0098), so the
+// Mantle launch pins the default before the caller's arguments, whose own
+// -m comes later and wins in Hermes' parser.
+func TestHermesMantleLaunchPinsModel(t *testing.T) {
+	argv, err := Hermes.LaunchArgv(LaunchOptions{Mode: Headless, Prompt: "hello", CredentialProfile: profiles.BedrockMantleOpenAIID,
+		Args: []string{"-m", "openai.gpt-oss-120b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(argv, " ")
+	if want := "--provider " + connector.HermesSandboxProviderName + " -m " + HermesMantleDefaultModel + " -m openai.gpt-oss-120b"; !strings.HasSuffix(got, want) {
+		t.Fatalf("argv = %q, want it to end with %q", got, want)
 	}
 }
 

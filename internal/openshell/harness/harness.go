@@ -289,7 +289,8 @@ type CredentialProfile struct {
 	// DefaultModel is the model a sandbox with this profile runs because
 	// the provider does not serve the harness's own default. It travels
 	// with ModelProvider (Codex) or as ANTHROPIC_MODEL in Env (Claude Code)
-	// into the run's managed configuration, above user config and
+	// into the run's managed configuration, or as a model flag in
+	// LaunchArgs (Hermes) ahead of the caller's arguments, above user config and
 	// configuration overrides; only the harness's model flag picks another
 	// (Spec.Model).
 	DefaultModel string

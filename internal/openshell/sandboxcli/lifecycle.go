@@ -477,8 +477,11 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 		switch {
 		case errors.Is(err, workspace.ErrUploadNotArrived):
 			hint = strayUploadHint
-		case errors.Is(err, workspace.ErrUnappliedPull), errors.Is(err, workspace.ErrUnpulledChanges):
-			// connect and run take no flag that discards it.
+		case errors.Is(err, workspace.ErrUnpulledChanges):
+			// One sentence: connect and run take no flag that discards it.
+			return &wsError{msg: s.sb.Name + " has work that was not pulled: bring it back with `" + CommandName + " pull " + s.sb.Name +
+				" --apply` (or --branch, or --patch-out FILE), or connect without --refresh to go on with the copy as it is", err: err}
+		case errors.Is(err, workspace.ErrUnappliedPull):
 			hint = "bring the work back first (`" + CommandName + " pull " + s.sb.Name + " --apply`, --branch or --patch-out FILE), " +
 				"or connect without --refresh to go on with the copy as it is"
 		}

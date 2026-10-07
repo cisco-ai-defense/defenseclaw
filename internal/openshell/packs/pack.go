@@ -271,7 +271,7 @@ type HooksPolicy struct {
 	// balanced/strict), "alert" emits a finding and notifies (default in open).
 	OnTamper string `yaml:"on_tamper" json:"on_tamper"`
 	// OnSilence is the response when the harness of a user-tier sandbox
-	// works (model calls, its own processes) for SilenceAfter without one
+	// works (model calls, other connections) for SilenceAfter without one
 	// hook request reaching DefenseClaw, as a disabled hook registration
 	// looks: "stop" stops the sandbox (default in balanced/strict), "alert"
 	// emits a finding and notifies (default in open).

@@ -137,8 +137,12 @@ func TestSessionEnd(t *testing.T) {
 			want: []string{"its undo point is kept because nobody accepted the changes", "undo: defenseclaw sandbox undo " + sbName,
 				"drop it: defenseclaw sandbox delete " + sbName}},
 		{name: "headless --rm --yes", setup: headless, opts: RunOptions{Harness: "claude", Prompt: "fix it", Rm: true, Yes: true}, check: deleted(false)},
-		{name: "a secret from a copy, declined", input: "a\n\n", setup: secret, opts: copyRun, check: applied(false),
-			want: []string{"the sandbox wrote what looks like a secret: config/keys.txt", "Some changes hold what looks like a secret. Bring them back anyway?"}},
+		// GAP-0135: the no ended with "Sandbox kept" alone, and an answer
+		// other than y or n was asked again without a word.
+		{name: "a secret from a copy, declined", input: "a\nmaybe\n\n", setup: secret, opts: copyRun, check: applied(false),
+			want: []string{"the sandbox wrote what looks like a secret: config/keys.txt", "Some changes hold what looks like a secret. Bring them back anyway?",
+				"answer y or n", "not brought back; the changes stay in fix-tests: review them with `defenseclaw sandbox review fix-tests`, " +
+					"then pull with --accept-sensitive, or --branch or --patch-out FILE"}},
 		{name: "a secret from a copy, accepted", input: "a\ny\n", setup: secret, opts: copyRun, check: applied(true)},
 		{name: "a headless answer on a terminal", setup: answers(true), opts: RunOptions{Harness: "claude", Prompt: "fix it"}, check: stopped,
 			want: []string{"done �]0;DCMARK� \x1b[32mok\x1b[0m\n"}, not: []string{"\x1b]"}},
@@ -1465,6 +1469,17 @@ func TestRefreshNamesAWayOn(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "bring the work back first (`defenseclaw sandbox pull copybox --apply`, --branch or --patch-out FILE)") ||
 		strings.Contains(err.Error(), "--force") {
 		t.Fatalf("Connect = %v", err)
+	}
+	// GAP-0131: work never pulled read "refresh the copy: the sandbox has
+	// changes that were not pulled: pull or discard them first (sandbox
+	// copybox); bring the work back first (...)": twice, and a discard no
+	// command offers. It is one sentence now.
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.refreshErr = fmt.Errorf("%w, and a refresh would discard them (sandbox copybox)", workspace.ErrUnpulledChanges)
+	err = ta.Connect(bg, ConnectOptions{Name: "copybox", Refresh: true})
+	if want := "copybox has work that was not pulled: bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch, " +
+		"or --patch-out FILE), or connect without --refresh to go on with the copy as it is"; err == nil || err.Error() != want {
+		t.Fatalf("Connect = %v, want %q", err, want)
 	}
 }
 

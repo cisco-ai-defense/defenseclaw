@@ -322,6 +322,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		// The harness's name for the credential (a template ID); the
 		// provider's gateway profile may be a regional one.
 		rec.CredentialProfile, rec.BedrockRegion = llm.profile.Template, in.req.LLM.BedrockRegion
+		rec.LLMDigest = credentialDigest(llm.credentials)
 	}
 	for _, c := range creds {
 		rec.Credentials = append(rec.Credentials, sandboxapi.CredentialGrant{Name: c.binding.Name, Host: c.binding.Host, Port: c.binding.Port})

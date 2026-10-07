@@ -582,9 +582,12 @@ func (b *box) noteActiveLocked(at time.Time) {
 }
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
-// harness has been at work (OCSF process or network events of the harness's
-// own binaries, its connections to the egress proxy among them, native
-// OTLP) for the pack's hooks.silence_after, with no idle stretch that long,
+// harness has been at work (OCSF network events of the harness's own
+// binaries, its connections to the egress proxy among them, native OTLP;
+// OCSF process events of those binaries count too, but OpenShell 0.1
+// reports only the processes its supervisor starts, never the ones a
+// harness runs, so work without network traffic goes unseen) for the
+// pack's hooks.silence_after, with no idle stretch that long,
 // since its last hook request, or since it became ready when no hook ever
 // arrived (noteActiveLocked). A tampered or disabled hook registration
 // looks exactly like that. A user-tier harness under hooks.on_silence: stop

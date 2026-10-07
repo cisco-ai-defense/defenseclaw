@@ -583,15 +583,17 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "macOS skips Linux-only checks", setup: func(f *doctorFixture) { f.onBrew() },
 			want: []checkWant{{"landlock", pass, "ABI 6 in the Linux VM Docker runs in"}, {"linger", skip, ""},
 				{"gateway-service", pass, "nvidia/openshell/openshell"},
-				// The Homebrew service's wrapper sources gateway.env too (M8).
-				{"telemetry", pass, "OpenShell usage telemetry is on in /"}}},
+				// The Homebrew service's wrapper sources gateway.env too (M8);
+				// with no gateway.env (none yet, or a teardown removed it) the
+				// check names no file as holding the setting (GAP-0148).
+				{"telemetry", pass, "OpenShell usage telemetry is on, OpenShell's default (there is no /"}}},
 		// A mismatch on a Mac names that file; the fix writes it and
 		// restarts the Homebrew service.
 		{name: "macOS telemetry differs from config", setup: func(f *doctorFixture) {
 			f.onBrew()
 			off := false
 			f.doctor.WantTelemetry = &off
-		}, want: []checkWant{{"telemetry", warn, "gateway.env, which the Homebrew service reads but openshell.upstream_telemetry is false"}},
+		}, want: []checkWant{{"telemetry", warn, "gateway.env, which the Homebrew service would read) but openshell.upstream_telemetry is false"}},
 			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
 				applyFixes(t, r, openshell.CheckIDTelemetry)
 				st, err := f.doctor.Gateway.Read()
@@ -600,6 +602,10 @@ func TestDoctorChecks(t *testing.T) {
 				}
 				if data, err := os.ReadFile(st.EnvPath); err != nil || !strings.Contains(string(data), "OPENSHELL_TELEMETRY_ENABLED=false") {
 					t.Fatalf("%s = %q, %v", st.EnvPath, data, err)
+				}
+				// Now the file holds the setting, and the check names it.
+				if c := f.run().Get(openshell.CheckIDTelemetry); !strings.Contains(c.Detail, "is off in "+st.EnvPath+", which the Homebrew service reads") {
+					t.Fatalf("telemetry after the fix = %q", c.Detail)
 				}
 			}},
 		// No formula and no gateway answering (one that answers is
@@ -766,7 +772,7 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "restart pending", setup: func(f *doctorFixture) { f.writeTOML(enabledTOML, f.started.Add(time.Minute)) },
 			want: []checkWant{{"bind-mounts", warn, "has not been restarted"}}, fix: &fixWant{command: restart, auto: true}},
 		{name: "telemetry differs from config", setup: func(f *doctorFixture) { off := false; f.doctor.WantTelemetry = &off },
-			want: []checkWant{{"telemetry", warn, "telemetry is on but openshell.upstream_telemetry is false"}},
+			want: []checkWant{{"telemetry", warn, "gateway.env) but openshell.upstream_telemetry is false"}},
 			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
 				applyFixes(t, r, openshell.CheckIDTelemetry)
 				if st, _ := f.doctor.Gateway.Read(); st.TelemetryEnabled() {

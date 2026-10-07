@@ -249,6 +249,27 @@ func TestSetupIsNotDoneWhileSandboxesStayOff(t *testing.T) {
 	lacks(t, ta.output(), "Done →")
 }
 
+// TestSetupIsNotDoneWithoutTheDaemon (GAP-0145): an account that never
+// started the DefenseClaw daemon got setup's green "Done", then a run that
+// said the gateway was not set up. Setup now ends not ready and says to
+// start the daemon, whether it does not answer or never started (no token).
+func TestSetupIsNotDoneWithoutTheDaemon(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.TTY = false
+	useGateway(ta)
+	ta.daemon.errors["GET "+sandboxapi.PathStatus] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "the DefenseClaw daemon is not reachable"}
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	has(t, ta.output(), "not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, "+
+		"then `defenseclaw sandbox run claude`")
+	lacks(t, ta.output(), "Done →")
+	// A run before the first start says to start it, and to set the gateway
+	// up only where init did not.
+	msg := sandboxapi.ErrNoGatewayToken.Error()
+	if start, setup := strings.Index(msg, "start it with `defenseclaw-gateway start`"), strings.Index(msg, "if `defenseclaw init` did not set it up"); start < 0 || setup < start {
+		t.Fatalf("ErrNoGatewayToken = %q", msg)
+	}
+}
+
 // TestSetupShowsTheMachineCheckWhileItRuns pins that the machine check's
 // line is on screen while the checks run: on a Mac they took about 40 s
 // with nothing after the title (manual test M4).

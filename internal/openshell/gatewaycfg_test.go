@@ -402,6 +402,26 @@ func TestGatewayConfigRollback(t *testing.T) {
 			t.Fatalf("rollback did not restore and restart: %v", err)
 		}
 	})
+	// GAP-0149: teardown restarted a stopped service (another account's
+	// gateway held the port), which then restarted forever. A stopped
+	// service gets its files back and no start.
+	t.Run("rollback of a stopped service", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.write(t, "gateway.toml", operatorTOML)
+		res, err := f.apply(f.plan(t, bindMounts))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.unit = systemdUnit("inactive", "disabled", time.Time{}, filepath.Join(f.dir, "gateway.env"))
+		flushes := f.flushes
+		if err := f.cfg.Rollback(context.Background(), res); !errors.Is(err, openshell.ErrGatewayServiceStopped) || f.read(t, "gateway.toml") != operatorTOML ||
+			f.restarts() != 1 || f.flushes != flushes {
+			t.Fatalf("Rollback = %v; restarts %d, flushes %d", err, f.restarts(), f.flushes-flushes)
+		}
+		if st, err := f.cfg.Read(); err != nil || !st.RestartPendingSince.IsZero() {
+			t.Fatalf("Rollback left a pending-restart mark: %+v, %v", st, err)
+		}
+	})
 }
 
 var errProbe = errors.New("could not confirm the gateway requires a client certificate: i/o timeout")

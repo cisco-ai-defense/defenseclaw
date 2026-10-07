@@ -98,7 +98,8 @@ func (u uvTool) installSteps(displayName, version string) []InstallStep {
 		`py="$(readlink -f ` + shellQuote(u.interpreter()) + `)"; ` +
 		`case "$py" in "$root"/python/*) ;; *) echo "` + displayName + ` interpreter $py is not the private one under $root/python" >&2; exit 1 ;; esac; ` +
 		`got="$(cd /tmp && HOME=/tmp/defenseclaw-version-home ` + u.versionCheck + ` 2>/dev/null)"; rm -rf /tmp/defenseclaw-version-home; ` +
-		`[ "$got" = ` + shellQuote(version) + ` ] || { echo "` + displayName + ` '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+		`[ "$got" = ` + shellQuote(version) + ` ] || { echo "` + displayName + ` '$got' is not the pinned ` + version + `" >&2; exit 1; }; ` +
+		pyShimInstall(u.interpreter(), root, displayName, pyShim{name: pyPeerNameShimName, source: pyPeerNameShim})
 	if u.extra != "" {
 		run += "; " + u.extra
 	}
@@ -107,6 +108,54 @@ func (u uvTool) installSteps(displayName, version string) []InstallStep {
 		Run:     run,
 	}}
 }
+
+// pyPeerNameShimName is the root-owned module every Python harness's tool
+// environment imports at start (pyPeerNameShim).
+const pyPeerNameShimName = "defenseclaw_peername"
+
+// pyPeerNameShim keeps TLS working for a Python harness on Linux before
+// 5.19 (RHEL 9's 5.14 among them). There OpenShell 0.1 brokers the
+// workload's sockets in its legacy read-only mode and answers getpeername()
+// on a connected one with EOPNOTSUPP, as it cannot write into the
+// workload's memory safely on those kernels (NVIDIA/OpenShell #4058; main
+// stops brokering getpeername in #4150, after 0.1.2). CPython's ssl module
+// calls getpeername() before every handshake and treats any error but
+// ENOTCONN as fatal, so every HTTPS request of the harness failed with
+// "[Errno 95] Operation not supported": Hermes' model calls on Bedrock
+// ended in "Connection error.". The broker gives EOPNOTSUPP only for a
+// socket it holds as connected (it says ENOTCONN otherwise, and the kernel
+// never answers EOPNOTSUPP for an inet socket), so the shim answers that
+// one error with the unspecified address of the socket's family, the peer
+// being unknown; every other answer is the kernel's. Drop it with the
+// OpenShell pin that carries #4150.
+const pyPeerNameShim = `"""DefenseClaw: TLS for a sandboxed Python harness on Linux before 5.19.
+
+OpenShell 0.1 answers getpeername() on a connection it relays with
+EOPNOTSUPP on those kernels, and the ssl module asks for the peer before
+every handshake; answer that one refusal with the unspecified address.
+"""
+import errno as _errno
+import socket as _socket
+
+_getpeername = _socket.socket.getpeername
+
+
+def _defenseclaw_getpeername(self):
+    try:
+        return _getpeername(self)
+    except OSError as e:
+        if e.errno != _errno.EOPNOTSUPP:
+            raise
+        if self.family == _socket.AF_INET:
+            return ("0.0.0.0", 0)
+        if self.family == _socket.AF_INET6:
+            return ("::", 0, 0, 0)
+        raise
+
+
+_defenseclaw_getpeername.__wrapped__ = _getpeername
+_socket.socket.getpeername = _defenseclaw_getpeername
+`
 
 // pythonStartupScrub is the launcher fragment that drops every PYTHON*
 // variable before a Python harness starts. The uv tool entry points run the

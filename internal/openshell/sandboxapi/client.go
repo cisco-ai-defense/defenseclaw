@@ -53,9 +53,13 @@ func NewClient(baseURL, token string) *Client {
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token}
 }
 
-// ErrNoGatewayToken is returned by ClientForConfig before the gateway is set
-// up (no gateway token is configured yet).
-var ErrNoGatewayToken = errors.New("the DefenseClaw gateway is not set up yet; run `defenseclaw setup gateway`, then `defenseclaw-gateway start`")
+// ErrNoGatewayToken is returned by ClientForConfig while no gateway token
+// exists: the daemon writes one at its first start (EnsureGatewayToken), so
+// a configured daemon that never started has none, and starting it is the
+// fix (GAP-0145; it said to set the gateway up first, which init had done).
+// Setting it up stays the step for an account init did not set up (GAP-1918).
+var ErrNoGatewayToken = errors.New("the DefenseClaw gateway has not started on this account yet; start it with `defenseclaw-gateway start` " +
+	"(first `defenseclaw setup gateway` if `defenseclaw init` did not set it up)")
 
 // ClientForConfig returns a client for the daemon cfg describes: its API
 // bind host and port and the resolved gateway token.

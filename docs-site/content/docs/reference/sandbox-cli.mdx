@@ -1067,8 +1067,9 @@ Lifts an egress block for one sandbox (`--sandbox NAME`) or for every sandbox
 (`--always`, saved to `openshell.egress.unblocked`). Choose exactly one of
 the two. Only blocks from the blocklist feed or the profile's default can be
 lifted: IP addresses under `open`, and hosts off the allowlist under
-`balanced`. Your own block list, private networks, this machine, and your
-organization's lists can't be unblocked, and neither can anything under
+`balanced`. Your own block list (remove an entry with
+[`sandbox policy block --remove`](#sandbox-policy-block)), private networks,
+this machine, and your organization's lists can't be unblocked, and neither can anything under
 `strict`, which runs without the egress proxy. With
 `openshell.admin.allow_unblock: false`, nothing can be unblocked. The
 [decision order](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
@@ -1414,7 +1415,9 @@ a relative FILE is in the current folder) and checks it as `sandbox pack
 validate` would, removing it if it doesn't load. `--diff` prints what the pack
 changes against the effective policy (the sandbox's, or a run's in this
 folder): the settings that differ, and every reached destination the pack
-would block. Nothing is applied: lock a project to the pack with
+would block. Settings a `sandbox run` flag or the gateway decides (such as
+the copy a Mac always works on) are left out, since the pack doesn't change
+them. Nothing is applied: lock a project to the pack with
 `sandbox run --pack FILE`. See
 [Record, then lock](/docs/sandboxes/policy-packs#record-then-lock).
 
@@ -1495,20 +1498,27 @@ defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags policy allow */}
-This command has no flags.
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--remove` | switch |  | Remove the hosts from openshell.egress.allow instead. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox policy block`
 
 Adds host patterns to `openshell.egress.block` in `config.yaml`. A host on the
-block list can't be unblocked; remove the entry to reach it again.
+block list can't be unblocked; remove the entry to reach it again with
+`--remove`, which takes entries as written (`sandbox policy allow --remove`
+does the same for the allow list).
 
 ```bash
 defenseclaw sandbox policy block files.example.net
+defenseclaw sandbox policy block --remove files.example.net
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags policy block */}
-This command has no flags.
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--remove` | switch |  | Remove the hosts from openshell.egress.block instead. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 Both commands check each pattern and refuse a change that would make

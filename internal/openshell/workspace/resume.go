@@ -133,7 +133,7 @@ func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 		}
 		switch {
 		case work == CopyWorkUnpulled:
-			return nil, fmt.Errorf("%w: pull or discard them first (sandbox %s)", ErrUnpulledChanges, name)
+			return nil, fmt.Errorf("%w, and a refresh would discard them (sandbox %s)", ErrUnpulledChanges, name)
 		case work != CopyWorkUnapplied:
 		case last.Effective == "":
 			return nil, fmt.Errorf("%w: it was refused (%s), and a refresh would discard it (sandbox %s)", ErrUnappliedPull, strings.Join(last.Blocking, "; "), name)
