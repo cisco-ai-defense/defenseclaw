@@ -10633,9 +10633,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "changes are recorded here as they happen.[/]"
                 )
         elif not self.audit_model.filtered and not self.audit_model.filtering:
-            # A search with no matches showed an empty table and no text
-            # (GAP-1631).
-            lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
+            if not self.audit_model.filter_text and self.audit_model.hidden_routine_count():
+                lines.append(f"[{TOKENS.text_muted}]Only routine events exist. Press l to show them.[/]")
+            else:
+                # A search with no matches showed an empty table and no text
+                # (GAP-1631).
+                lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
