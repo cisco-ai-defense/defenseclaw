@@ -1024,6 +1024,27 @@ def test_a_failed_python_build_removes_the_uv_it_installed_and_names_the_kept_ca
     assert "nothing was changed" not in proc.stdout
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes any folder")
+def test_an_unwritable_install_folder_is_refused_before_anything_changes(tmp_path: Path) -> None:
+    # GAP-0381, GAP-0420: a read-only ~/.local(/bin) failed the swap after the
+    # gateway stopped, or a first install only said uv could not be installed,
+    # and left ~/.defenseclaw/logs behind.
+    empty = tmp_path / "assets"
+    empty.mkdir()
+    local = tmp_path / "home" / ".local"
+    local.mkdir(parents=True)
+    local.chmod(0o555)
+    try:
+        result = _run([str(_stamped(tmp_path)), "--local", str(empty), "--yes"], tmp_path)
+    finally:
+        local.chmod(0o755)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{local} is not writable by" in result.stderr
+    assert "then rerun; nothing was changed" in result.stderr
+    assert not (tmp_path / "home" / ".defenseclaw").exists()
+
+
 def test_an_upgrade_names_a_port_another_account_holds_before_building(tmp_path: Path) -> None:
     # GAP-0130: the upgrade of a second account on a host failed only at the
     # gateway restart, 2.5 minutes and 562 MB later, because the first

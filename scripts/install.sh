@@ -395,6 +395,7 @@ if [[ -n "${TARGET_VERSION}" && "${TARGET_VERSION}" != "${VERSION}" && "${ROLLBA
 fi
 
 [[ "${ROLLBACK}" == true ]] || require_free_space
+require_writable_dirs
 
 # ── Lock and log ─────────────────────────────────────────────────────────────
 
@@ -1006,6 +1007,25 @@ require_free_space() {
         err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the install needs about $((need_kb / 1024)) MB and $((free_kb / 1024)) MB is free"
     fi
     die "Free at least $(((need_kb - free_kb + 1023) / 1024)) MB on that filesystem (df -h ${dir}), then rerun; nothing was changed"
+}
+
+# require_writable_dirs refuses before anything is written, the gateway
+# stopped or the lock taken, when a folder the install replaces files in
+# cannot be written: an upgrade stopped the gateway, then failed to copy the
+# binaries and to put the old ones back (GAP-0381), and a first install only
+# said it could not install uv (GAP-0420). A folder that does not exist yet is
+# checked where it would be created.
+require_writable_dirs() {
+    local dir probe owner
+    for dir in "${BIN_DIR}" "${DEFENSECLAW_HOME}" "${VENV}" "${PREVIOUS}" "${INSTALLER_DIR}"; do
+        probe="${dir}"
+        while [[ ! -e "${probe}" && ! -L "${probe}" && "${probe}" == */* ]]; do probe="${probe%/*}"; done
+        [[ -n "${probe}" ]] || probe=/
+        [[ -d "${probe}" && -w "${probe}" && -x "${probe}" ]] && continue
+        owner="$(stat -c '%U, mode %a' "${probe}" 2>/dev/null || stat -f '%Su, mode %Lp' "${probe}" 2>/dev/null || true)"
+        err "${probe} is not writable by $(id -un)${owner:+ (owner ${owner})}, and the install replaces files there"
+        die "Make it writable (chmod u+w '${probe}', or sudo chown -R $(id -un) '${probe}' when another account owns it), then rerun; nothing was changed"
+    done
 }
 
 snapshot() {
