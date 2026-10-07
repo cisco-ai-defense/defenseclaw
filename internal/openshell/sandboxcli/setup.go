@@ -245,6 +245,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
 		}
+		if errors.Is(err, openshell.ErrHomebrewPrefix) {
+			a.bad("install OpenShell: " + strings.TrimPrefix(err.Error(), "openshell: "))
+			a.note("→ " + homebrewPrefixHint(err))
+			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
+		}
 		if errors.Is(err, openshell.ErrSudo) {
 			a.bad("install OpenShell: " + strings.TrimPrefix(err.Error(), "openshell: ") + "; nothing was installed")
 			a.note("→ an administrator installs the openshell package (`" + CommandName + " setup --install-openshell` from an account with sudo), then run `" +
@@ -809,6 +814,10 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		a.note("→ an administrator upgrades the machine's openshell package (`" + CommandName + " setup --install-openshell` from an account with sudo), then `" +
 			CommandName + " doctor --fix` here restarts your gateway on it")
 		return rep, nil
+	case errors.Is(err, openshell.ErrHomebrewPrefix):
+		a.warn("OpenShell " + rep.CLIVersion + " is kept, the upgrade did not run: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		a.note("→ " + homebrewPrefixHint(err))
+		return rep, nil
 	case errors.Is(err, openshell.ErrHomebrewInstall):
 		a.bad("upgrade OpenShell: Homebrew could not install the nvidia/openshell formula")
 		a.note("→ " + homebrewInstallHint(err))
@@ -847,6 +856,18 @@ func homebrewInstallHint(err error) string {
 	return fmt.Sprintf("Homebrew says why above. The Command Line Tools %s, which xcode-select selects, are current for macOS %s, "+
 		"but Homebrew checks Xcode %s at %s even so: update that Xcode (from the App Store) or delete it, as Homebrew says; "+
 		"updating the Command Line Tools does not help. Then %s", openshell.ShortVersion(t.CLT), t.MacOS, t.Xcode, t.XcodeApp, again)
+}
+
+// homebrewPrefixHint is the way on when this account cannot write to the
+// Homebrew prefix (openshell.HomebrewPrefixError).
+func homebrewPrefixHint(err error) string {
+	owner := "the account that owns it"
+	var pe *openshell.HomebrewPrefixError
+	if errors.As(err, &pe) && pe.Owner != "" {
+		owner = pe.Owner
+	}
+	return "Homebrew installs formulas only as the account that owns its prefix (" + owner + "): install OpenShell from that account (`" +
+		CommandName + " setup --install-openshell` there), or have it give this account the prefix, then run `" + CommandName + " setup` here"
 }
 
 // consentGatewayRestart decides whether setup restarts the OpenShell

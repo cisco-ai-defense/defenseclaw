@@ -119,8 +119,9 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 			}
 			return true, nil
 		},
-		VerifyGateway: func(context.Context) error { f.verified++; return nil },
-		Geteuid:       func() int { return 1000 },
+		VerifyGateway:         func(context.Context) error { f.verified++; return nil },
+		Geteuid:               func() int { return 1000 },
+		HomebrewPrefixProblem: func() error { return nil },
 	}
 	return f
 }

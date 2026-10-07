@@ -25,3 +25,7 @@ import "io/fs"
 func ownedByCaller(fs.FileInfo) bool { return false }
 
 func ownedByCallerOrRoot(fs.FileInfo) bool { return false }
+
+func ownerName(fs.FileInfo) string { return "" }
+
+func dirWritable(string) bool { return true }

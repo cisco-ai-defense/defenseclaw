@@ -69,6 +69,10 @@ var (
 	// release's supervisor images (Installer.PrepareUpgrade), without which
 	// the restarted gateway's docker driver does not start.
 	ErrRuntimeImages = errors.New("openshell: Docker could not pull the images the upgraded gateway starts with")
+	// ErrHomebrewPrefix means this account cannot write to the Homebrew
+	// prefix (HomebrewPrefixError): Homebrew installs formulas only as the
+	// account that owns it. Nothing was downloaded or run.
+	ErrHomebrewPrefix = errors.New("openshell: this account cannot install Homebrew formulas")
 	// ErrSudo means the install could not use sudo, which NVIDIA's
 	// installer needs on Linux to install the openshell package. Nothing
 	// was installed or downloaded by the script.
@@ -244,6 +248,46 @@ type Installer struct {
 	PrepareUpgrade func(ctx context.Context, release Version) error
 	// Geteuid is the caller's uid (default os.Geteuid): root needs no sudo.
 	Geteuid func() int
+	// HomebrewPrefixProblem says, on a Mac, why Homebrew cannot install a
+	// formula as this account (a HomebrewPrefixError), nil when it can
+	// (default: the folders Homebrew writes under homebrewPrefix).
+	HomebrewPrefixProblem func() error
+}
+
+// HomebrewPrefixError is ErrHomebrewPrefix: Path, a folder Homebrew writes
+// to tap and install a formula, is not writable by this account; Owner
+// owns it.
+type HomebrewPrefixError struct {
+	Prefix, Path, Owner string
+}
+
+func (e *HomebrewPrefixError) Error() string {
+	owner := ""
+	if e.Owner != "" {
+		owner = ", which " + e.Owner + " owns,"
+	}
+	return fmt.Sprintf("openshell: this account cannot write to %s%s so Homebrew at %s cannot install the nvidia/openshell formula as this account", e.Path, owner, e.Prefix)
+}
+
+func (e *HomebrewPrefixError) Is(target error) bool { return target == ErrHomebrewPrefix }
+
+// homebrewPrefixProblem checks the folders under prefix Homebrew writes to
+// when it taps a repository (Library/Taps, else Library) and installs a
+// formula (Cellar). One that does not exist is not judged.
+func homebrewPrefixProblem(prefix string, writable func(string) bool) error {
+	for _, candidates := range [][]string{{filepath.Join(prefix, "Library", "Taps"), filepath.Join(prefix, "Library")}, {filepath.Join(prefix, "Cellar")}} {
+		for _, dir := range candidates {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			if !writable(dir) {
+				return &HomebrewPrefixError{Prefix: prefix, Path: dir, Owner: ownerName(info)}
+			}
+			break
+		}
+	}
+	return nil
 }
 
 func (i *Installer) defaults() {
@@ -305,6 +349,9 @@ func (i *Installer) defaults() {
 	}
 	if i.Geteuid == nil {
 		i.Geteuid = os.Geteuid
+	}
+	if i.HomebrewPrefixProblem == nil {
+		i.HomebrewPrefixProblem = func() error { return homebrewPrefixProblem(homebrewPrefix(), dirWritable) }
 	}
 }
 
@@ -391,6 +438,12 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		}
 	}
 	plan.BreakingUpgrade = existing != nil && (existing.Version == (Version{}) || existing.Version.Compare(mustParse(breakingReleaseFloor)) < 0)
+	if i.GOOS == "darwin" {
+		// NVIDIA's script taps and installs with Homebrew as this account.
+		if err := i.HomebrewPrefixProblem(); err != nil {
+			return nil, err
+		}
+	}
 
 	script, err := i.download(ctx)
 	if err != nil {

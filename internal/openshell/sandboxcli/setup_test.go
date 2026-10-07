@@ -516,6 +516,30 @@ func TestSetupStartsAStoppedGatewayService(t *testing.T) {
 	lacks(t, ta.output(), "Gateway registration:")
 }
 
+// TestSetupSaysWhoOwnsHomebrew (GAP-0048): a Homebrew prefix this account
+// cannot write to stops the install before anything runs, naming its owner
+// and the way on, not Xcode.
+func TestSetupSaysWhoOwnsHomebrew(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	inst := &fakeInstaller{err: &openshell.HomebrewPrefixError{Prefix: "/opt/homebrew", Path: "/opt/homebrew/Library/Taps", Owner: "admin2"}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	if !errors.Is(err, openshell.ErrHomebrewPrefix) {
+		t.Fatalf("Setup = %v", err)
+	}
+	has(t, ta.output(), "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which admin2 owns,",
+		"Homebrew installs formulas only as the account that owns its prefix (admin2)")
+	lacks(t, ta.output(), "Xcode")
+}
+
 // TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when
 // Homebrew refuses the nvidia/openshell formula (an Xcode older than it
 // wants), and setup said only "install OpenShell: openshell: installer
