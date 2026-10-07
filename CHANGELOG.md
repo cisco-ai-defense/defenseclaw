@@ -71,6 +71,31 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Security: hooks keep the gateway token and the hook payload off process
+  command lines.** The Claude Code, Antigravity, Copilot, Cursor, Devin,
+  Hermes, Kiro and OpenHands shell hooks, the shared `inspect-*` hooks and
+  the OpenClaw and ZeptoClaw PATH shims gave curl the per-user gateway token
+  as `-H "Authorization: Bearer …"`, and the connector hooks also gave it the
+  whole hook payload (prompt or tool input, session id, transcript path, cwd)
+  as `-d`, on Linux and macOS. Other local accounts could read both from the
+  process list (`ps`, `/proc/<pid>/cmdline`), and exec monitors such as
+  auditd, Tetragon and EDR agents recorded them. The enterprise standalone hooks, which send
+  no token over the hook socket, still put the payload there. Every host hook
+  now sends its request through one helper, `defenseclaw_gateway_post` in
+  `hooks/_hardening.sh` (helper schema v8): curl reads the Authorization
+  header as a config line and the body from file descriptors that the
+  shell's built-in `printf` writes, as the Codex hook already did, so its
+  command line carries only the descriptor paths (this works with curl
+  releases older than 7.55). The PATH shims and the Hermes foreign-hook
+  guard's session report do the same, and `inspect-tool` and
+  `inspect-tool-response` give `jq` the tool input or output on standard
+  input instead of as an argument, so an input over 128 KiB no longer stops
+  `jq` from starting. A token that contains CR or LF is refused as
+  `invalid gateway token`. Fail modes, timeouts and the OpenShell sandbox
+  hooks (which already sent the token this way) are unchanged. The gateway
+  rewrites the hooks when it starts (on enterprise installs the guardian
+  does), so an upgrade applies the fix. Windows is not affected: its hooks
+  run natively and the PowerShell adapters pass only fixed arguments.
 - **Amp traces in a built-in mode reach Galileo.** Galileo needs a provider
   on an agent span, and Amp names no model in its built-in modes (such as
   `medium`), so those agent spans were left out of the Galileo export and

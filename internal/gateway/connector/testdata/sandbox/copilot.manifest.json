@@ -46,8 +46,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 60345,
-      "sha256": "c46c4c7458fe833050e60cdb577556a0c991f1fd2196dcd4ea6c8e10f32c8b4a"
+      "size": 63356,
+      "sha256": "605687fa148bdf27995e007372e366a1ce07f7428536621c0ae0ce4d95d6efa6"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -58,32 +58,32 @@
     "/usr/local/lib/defenseclaw/hooks/copilot-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7653,
-      "sha256": "a79e992d14851fe53cbbbc672df78baa2dc1d8f0c911a45e39cd3d2f6734e10a"
+      "size": 7900,
+      "sha256": "96596259a31e75a9babdb21a29d38b29c8d602387a6ecefdf667ccbc4f9f1683"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6078,
-      "sha256": "a929e5a48788d71c71c2b6f489234bcc3d9dae6f60bfb673c33794181872d717"
+      "size": 6325,
+      "sha256": "8285c1e34efd9997f74f459465f4d34d42a8a5182963614fcd2b218febf64e8f"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5346,
-      "sha256": "11c3bf359802dfec9ff5ba23700e90e3ba83efc67d2b1f56f55182b55553cc57"
+      "size": 5593,
+      "sha256": "fe8046b5e2e43c3b42122284aa9f77519a516e30d447af1e3a19a9502eeb28f3"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5596,
-      "sha256": "39bfa0ab2c8b08690b8c71ae6dd2764d0f2c856aab38554c69afda43f845af5a"
+      "size": 6111,
+      "sha256": "d992d92545d476152ede4d0d5d334fccabb57ab5e1102fa6cfe1b419089bdbca"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6035,
-      "sha256": "8a40f5f484c2aac9d7483fe99f4720443c67277d9b513635e66ec59d678ca163"
+      "size": 6495,
+      "sha256": "36628a8d00c46836dbe49235427086214c64815db8428cce2146e97800b26c53"
     }
   }
 }

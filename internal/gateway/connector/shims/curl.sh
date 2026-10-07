@@ -26,20 +26,38 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${SHIM_DIR}/.token" ]; then
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
-AUTH_HEADER_ARGS=()
+# The bearer and the request body reach curl on descriptors 8 and 9, never on
+# its command line, which every local account can read; printf is a shell
+# builtin. The descriptor-backed --config form works on curl releases older
+# than 7.55.0, which lack -H @file. The tool arguments are this shim's own.
+AUTH_CONFIG=""
+AUTH_CONFIG_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*)
+      echo "DefenseClaw: shim gateway token is malformed — refusing to exec curl" >&2
+      exit 1
+      ;;
+  esac
+  # The two characters a quoted curl config value escapes.
+  AUTH_CONFIG="${API_TOKEN//\\/\\\\}"
+  AUTH_CONFIG="${AUTH_CONFIG//\"/\\\"}"
+  AUTH_CONFIG="header = \"Authorization: Bearer ${AUTH_CONFIG}\""
+  AUTH_CONFIG_ARGS=(--config /dev/fd/8)
 fi
+INSPECT_BODY="$(jq -cn --arg tool "curl" --args \
+  '{tool: $tool, args: {argv: ([$tool] + $ARGS.positional)}}' \
+  -- "$@")" || INSPECT_BODY=""
 
 RESPONSE=$("$REAL_BINARY" -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: shim/curl/2.0" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${AUTH_CONFIG_ARGS[@]+"${AUTH_CONFIG_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \
-  -d "$(jq -cn --arg tool "curl" --args \
-    '{tool: $tool, args: {argv: ([$tool] + $ARGS.positional)}}' \
-    -- "$@")" 2>/dev/null) || {
+  --data-binary @/dev/fd/9 2>/dev/null \
+  8< <(printf '%s\n' "$AUTH_CONFIG") \
+  9< <(printf '%s' "$INSPECT_BODY")) || {
   # Transport failures fall back to the real binary (gateway down must
   # not brick the agent) — same posture as the connector hooks.
   exec "$REAL_BINARY" "$@"

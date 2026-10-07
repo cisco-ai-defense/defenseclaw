@@ -121,6 +121,11 @@ fail_unauthorized() {
 
 AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
+  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+  esac
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 CONNECTOR_HEADER_ARGS=()
@@ -128,9 +133,14 @@ if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-{{if .Sandbox}}INSPECT_BODY="$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
-  '{tool: $tool, output: $output}')"
-RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool-response" "$INSPECT_BODY" \
+# The tool output reaches jq on stdin and the gateway on a curl descriptor:
+# on a command line it would be readable by every local account, and an
+# output over the argument size limit would make jq fail to start.
+INSPECT_BODY="$(printf '%s' "$TOOL_OUTPUT" | jq -Rs --arg tool "$TOOL_NAME" \
+  '{tool: $tool, output: .}')" || {
+  fail_unreachable "failed to build inspect body"
+}
+{{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool-response" "$INSPECT_BODY" \
   "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
@@ -140,16 +150,11 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool-response" "$INSPECT_B
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
-  '{tool: $tool, output: $output}' | \
-  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool-response" \
+RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool-response" 5 "$INSPECT_BODY" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 5 \
-  --data-binary @- 2>/dev/null) || {
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
   fail_unreachable "gateway unreachable"
 }{{end}}
 

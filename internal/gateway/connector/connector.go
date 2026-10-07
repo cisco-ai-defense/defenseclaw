@@ -72,7 +72,7 @@ type SetupOpts struct {
 	CodexOtelEnvironment string // connector-local tag shared with the live sidecar
 	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken             string // gateway bearer token; baked into hook curl -H
+	APIToken             string // gateway bearer token; written to the hook token file, never into a script
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.

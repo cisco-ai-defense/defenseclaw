@@ -120,6 +120,11 @@ fail_unauthorized() {
 
 AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
+  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+  esac
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 CONNECTOR_HEADER_ARGS=()
@@ -137,14 +142,13 @@ fi
 }{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
   fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
 fi
-RESPONSE=$(printf '%s' "$CONTENT" | curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/response" \
+# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# content on descriptors, never on its command line.
+RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/response" 5 "$CONTENT" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 5 \
-  --data-binary @- 2>/dev/null) || {
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
   fail_unreachable "gateway unreachable"
 }{{end}}
 

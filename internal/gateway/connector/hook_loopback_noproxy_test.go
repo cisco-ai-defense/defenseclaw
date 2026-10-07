@@ -35,7 +35,9 @@ func TestHookAndShimGatewayCallsBypassProxy(t *testing.T) {
 					continue
 				}
 				calls++
-				if !strings.Contains(line, "--noproxy '*'") {
+				// defenseclaw_gateway_post (_hardening.sh, checked below)
+				// runs curl with --noproxy '*' for every hook request.
+				if !strings.Contains(line, "--noproxy '*'") && !strings.Contains(line, `defenseclaw_gateway_post "http://${API_ADDR}`) {
 					t.Errorf("%s/%s:%d sends a gateway request without --noproxy '*': %s", set.dir, entry.Name(), n+1, strings.TrimSpace(line))
 				}
 			}
@@ -43,5 +45,12 @@ func TestHookAndShimGatewayCallsBypassProxy(t *testing.T) {
 		if calls == 0 {
 			t.Fatalf("no gateway requests found under %s", set.dir)
 		}
+	}
+	hardening, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hardening), `curl -s --noproxy '*' -w '\n%{http_code}' -X POST "$_dc_post_url"`) {
+		t.Fatal("defenseclaw_gateway_post sends hook requests without --noproxy '*'")
 	}
 }
