@@ -218,11 +218,36 @@ class TestSkillAllow(SkillCommandTestBase):
         mock_cls.return_value.enable_skill.side_effect = Exception("timeout")
 
         result = self.invoke(["allow", "safe-skill", "--reason", "reviewed"])
-        self.assertEqual(result.exit_code, 0, result.output)
+        # GAP-0358: an error line with exit 0 read as success; the rule is
+        # written, but OpenClaw keeps the skill disabled, so the exit is 1.
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("gateway enable failed", result.output)
-        self.assertIn("runtime disable remains until the gateway is reachable", result.output)
+        self.assertIn("OpenClaw still has it disabled", result.output)
         self.assertTrue(pe.is_allowed("skill", "safe-skill"))
         self.assertTrue(self.app.store.has_action("skill", "safe-skill", "runtime", "disable"))
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_allow_quarantined_copy_pins_its_destination_without_the_gateway(self, mock_cls):
+        # GAP-0358/GAP-0359: Claude Code has no /skill/enable route (allow
+        # printed its 404), and a quarantined copy has no installed path, so
+        # allow wrote a global name-only rule and never said restore is needed.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        destination = os.path.join(self.tmp_dir, "claude-skills", "docx")
+        self.app.store.create_quarantine_record(
+            "skill", "docx", destination, os.path.join(self.tmp_dir, "q", "docx"), "h", "scan", "claudecode",
+            state="active",
+        )
+        PolicyEngine(self.app.store, self.app.cfg).disable("skill", "docx", "scan")
+
+        result = self.invoke(["allow", "docx", "--reason", "vetted"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_cls.return_value.enable_skill.assert_not_called()
+        rules = [(r.connector, r.source_path_contains) for r in self.app.cfg.asset_policy.skill.allowed]
+        self.assertEqual(rules, [("claudecode", [destination])])
+        self.assertIn(f"covers the copy at {destination} only", result.output)
+        self.assertIn("Restore them with: defenseclaw skill restore docx", result.output)
+        self.assertFalse(self.app.store.has_action("skill", "docx", "runtime", "disable"))
 
 
 class TestSkillUnblock(SkillCommandTestBase):

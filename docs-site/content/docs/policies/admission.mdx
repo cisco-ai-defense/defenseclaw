@@ -500,7 +500,10 @@ read_file    allow    global     vetted                                    2026-
 - Without `--connector`, a block or allow covers every connector. With
   `--connector`, it covers that one. `skill allow` and `plugin allow` on an
   installed copy write a rule scoped to the connector that has the copy and
-  pinned to its path.
+  pinned to its path. `skill allow` on a quarantined copy pins the rule to the
+  path the copy is restored to, and says the files stay in quarantine until
+  `defenseclaw skill restore <name>`. When there is no copy to pin to, the
+  command says the rule matches the name only.
 - `mcp allow` pins the rule to how the server starts: its `url`, or its
   `command` and `args_prefix` (and `transport` when the server sets one), read
   from the connector's MCP config. A different server added later under the
