@@ -221,8 +221,12 @@ def test_setup_v8_failed_add_takes_the_new_key_back_out_of_dotenv(
     monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
     monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN")
     app = _setup_app(tmp_path)
-    (tmp_path / ".env").write_text("OTHER_KEY=kept\n")
-    (tmp_path / ".env").chmod(0o600)
+    # Seed .env the way DefenseClaw writes it (private DACL on Windows). A hand-made file keeps
+    # inherited ACEs that the config-lock directory protection later invalidates, and the
+    # key-restore publish then fails on Windows.
+    v8_activation_module.update_private_file(
+        tmp_path / ".env", owner_directory=tmp_path, transform=lambda _payload: b"OTHER_KEY=kept\n"
+    )
     before = (tmp_path / "config.yaml").read_bytes()
 
     result = CliRunner().invoke(
