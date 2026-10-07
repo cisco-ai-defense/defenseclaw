@@ -112,6 +112,12 @@ type settingChange struct {
 // policy. Nothing is applied.
 func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 	a.defaults()
+	if o.PackOut != "" {
+		var err error
+		if o.PackOut, err = a.packOutPath(o.PackOut); err != nil {
+			return err
+		}
+	}
 	api, err := a.api()
 	if err != nil {
 		return err
@@ -137,11 +143,12 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 		}
 	}
 	if o.PackOut != "" {
-		if err := writeNewFile(o.PackOut, []byte(s.Pack)); err != nil {
+		undo, err := writeNewFile(o.PackOut, []byte(s.Pack))
+		if err != nil {
 			return err
 		}
 		if _, err := packs.Validate(o.PackOut, a.packDir()); err != nil {
-			_ = os.Remove(o.PackOut)
+			undo()
 			return fmt.Errorf("the written pack does not validate: %w", err)
 		}
 		s.Wrote = o.PackOut
@@ -413,25 +420,70 @@ func joinHosts(list []suggestedHost) string {
 	return listFit(strings.Join(names, ", "), 200)
 }
 
+// packOutPath is --pack-out as an absolute path, as `run --pack` and `pack
+// validate` take it: "~/" is the home folder (a shell leaves it as typed in
+// --pack-out=~/x or in quotes), and a relative path is in this folder.
+func (a *App) packOutPath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := a.Home()
+		if err != nil || home == "" {
+			return "", errors.New("--pack-out " + p + ": cannot resolve the home folder")
+		}
+		p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+	}
+	if !filepath.IsAbs(p) {
+		wd, err := a.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("--pack-out %s: %w", p, err)
+		}
+		p = filepath.Join(wd, p)
+	}
+	return filepath.Clean(p), nil
+}
+
 // writeNewFile creates path with data, never over an existing file, and
-// the folder it goes in (<pack_dir>/<name>/ for a pack named by name).
-func writeNewFile(path string, data []byte) error {
+// the folders it goes in (<pack_dir>/<name>/ for a pack named by name).
+// undo removes the file and the folders it created.
+func writeNewFile(path string, data []byte) (undo func(), err error) {
+	var made []string // innermost first
+	for d := filepath.Dir(path); filepath.Dir(d) != d; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); err == nil {
+			break
+		}
+		made = append(made, d)
+	}
+	removeMade := func() {
+		for _, d := range made {
+			_ = os.Remove(d) // empty folders only
+		}
+	}
+	undo = func() {
+		_ = os.Remove(path)
+		removeMade()
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		removeMade()
+		return nil, err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
+		removeMade()
 		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("%s exists; the suggestion never replaces a file", path)
+			return nil, fmt.Errorf("%s exists; the suggestion never replaces a file", path)
 		}
-		return err
+		return nil, err
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		_ = os.Remove(path)
-		return err
+		undo()
+		return nil, err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		undo()
+		return nil, err
+	}
+	return undo, nil
 }
 
 // suggestionDiff compares the suggested pack with the effective policy: the

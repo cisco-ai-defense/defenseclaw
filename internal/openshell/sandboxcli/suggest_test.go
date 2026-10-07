@@ -119,3 +119,40 @@ func TestPolicySuggestKeepsRecordedHostsInComments(t *testing.T) {
 	has(t, ta.output(), "#   x?network: {mode: open}")
 	lacks(t, ta.output(), ls, ps, nel, nonchar)
 }
+
+// --pack-out takes a path relative to this folder, and a "~/" the shell
+// left as typed, as `run --pack` would read them; a written pack that does
+// not validate is removed with the folders made for it.
+func TestPolicySuggestPackOutPaths(t *testing.T) {
+	ta := newTestApp(t, "", sandboxapi.Sandbox{Name: "web", Harness: "claudecode"})
+	ta.daemon.destinations = map[string]*sandboxapi.Destinations{"web": {Name: "web", Destinations: []sandboxapi.DestinationRow{
+		{Host: "artifacts.example.com", Kind: sandboxapi.DestinationOther, Tunnels: 1}}}}
+	ta.ok(t, ta.PolicySuggest(bg, SuggestOptions{PackOut: "rel/recorded.yaml"}))
+	rel := filepath.Join(ta.project, "rel", "recorded.yaml")
+	has(t, ta.output(), "wrote "+rel+": pack recorded", "run --pack "+rel)
+	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{PackOut: "~/team/pack.yaml"}))
+	if p, err := packs.Validate(filepath.Join(ta.home, "team", packs.PackFileName), ""); err != nil || p.Name != "team" {
+		t.Fatalf("~/team/pack.yaml: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(ta.project, "~")); err == nil {
+		t.Fatal("a folder named ~ was made")
+	}
+
+	// A folder every user can write to: the pack would not load from it.
+	shared := filepath.Join(ta.home, "shared")
+	if err := os.Mkdir(shared, 0o755); err != nil || os.Chmod(shared, 0o777) != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, ta.fresh().PolicySuggest(bg, SuggestOptions{PackOut: filepath.Join(shared, "pack.yaml")}), "the written pack does not validate", "writable by every user")
+	if _, err := os.Lstat(filepath.Join(shared, "pack.yaml")); err == nil {
+		t.Fatal("the pack that does not validate was kept")
+	}
+	undo, err := writeNewFile(filepath.Join(ta.home, "a", "b", "pack.yaml"), []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	undo()
+	if _, err := os.Lstat(filepath.Join(ta.home, "a")); err == nil {
+		t.Fatal("undo kept the folders it made")
+	}
+}

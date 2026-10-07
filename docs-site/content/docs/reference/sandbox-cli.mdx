@@ -1333,8 +1333,9 @@ reached it. Hosts that were only ever refused, shadow AI, hosts on the
 blocklist feed, and the sandbox's own model provider are listed apart as
 comments, not suggested. Without `--pack-out` it prints the pack.
 
-`--pack-out FILE` writes the pack to a new file (never over an existing one)
-and checks it as `sandbox pack validate` would. `--diff` prints what the pack
+`--pack-out FILE` writes the pack to a new file (never over an existing one;
+a relative FILE is in the current folder) and checks it as `sandbox pack
+validate` would, removing it if it doesn't load. `--diff` prints what the pack
 changes against the effective policy (the sandbox's, or a run's in this
 folder): the settings that differ, and every reached destination the pack
 would block. Nothing is applied: lock a project to the pack with
