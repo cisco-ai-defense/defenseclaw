@@ -725,25 +725,43 @@ func (r *destRow) view(info destinationInfo) sandboxapi.DestinationRow {
 	return v
 }
 
-// destinationSummary counts the AI destinations of a sandbox for its
-// Egress status line.
-func (m *Manager) destinationSummary(name, harnessName string, live map[string]egress.DestinationStats) (modelAPIs, shadow int) {
+// egressSummary is a sandbox's Egress status line, summed up from its
+// destinations, which are kept across daemon restarts (a summary of the
+// proxy counter and OpenShell refusals since the daemon started read 0
+// after a restart next to an AI summary that did not, GAP-0100): the hosts
+// the proxy reached, those either boundary refused at least once and the
+// refused requests, the bytes, and the AI destinations.
+func (m *Manager) egressSummary(name, harnessName string, live map[string]egress.DestinationStats) sandboxapi.EgressStats {
+	var s sandboxapi.EgressStats
 	m.destMu.Lock()
 	defer m.destMu.Unlock()
 	t := m.dests[name]
+	if t == nil && len(live) > 0 {
+		t = m.tableLocked(name)
+	}
 	if t == nil {
-		return 0, 0
+		return s
 	}
 	m.mergeLiveLocked(t, live, harnessName)
 	for _, r := range t.rows {
+		total := r.total()
+		if total.Tunnels > 0 {
+			s.Destinations++
+		}
+		if total.Blocked > 0 || r.Refused > 0 {
+			s.Blocked++
+		}
+		s.BlockedRequests += int(total.Blocked + r.Refused)
+		s.BytesUp += total.BytesUp
+		s.BytesDown += total.BytesDown
 		switch kind, _, _ := r.classify(harnessName); {
 		case kind == sandboxapi.DestinationModelProvider || kind == sandboxapi.DestinationHarnessVendor:
-			modelAPIs++
+			s.ModelAPIs++
 		case sandboxapi.ShadowAIKind(kind):
-			shadow++
+			s.ShadowAI++
 		}
 	}
-	return modelAPIs, shadow
+	return s
 }
 
 // destinationsPath is where a sandbox's destinations table is kept.

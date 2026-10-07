@@ -242,6 +242,7 @@ func TestDestinationsNameTheModelProviderAndItsBinary(t *testing.T) {
 func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	e := liveEnv(t, "keepbox", nil)
 	e.ocsf("keepbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> files.example.org:443/tcp [policy:allow_files engine:opa]", time.Now())
+	e.ocsf("keepbox", "NET:OPEN [MED] DENIED /usr/bin/curl(9) -> paste.example.net:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
 	e.stopBox("keepbox")
 	path := filepath.Join(e.dataDir, "sandboxes", "keepbox", destinationsFile)
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
@@ -251,6 +252,11 @@ func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	e.startBox("keepbox", sandboxapi.StartRequest{})
 	if rows := destinationKinds(t, e, "keepbox"); rows["files.example.org"].Connections != 1 {
 		t.Fatalf("after a restart = %+v", rows)
+	}
+	// The status Egress line sums up the kept destinations, so a restart
+	// does not zero it next to its AI summary (GAP-0100).
+	if eg := e.get("keepbox").Egress; eg.Blocked != 1 || eg.BlockedRequests != 1 {
+		t.Fatalf("egress after a restart = %+v", eg)
 	}
 	// A delete drops them before it forgets the sandbox: a sighting that
 	// arrives in between (a refusal the egress sink still held) and a
@@ -323,6 +329,9 @@ func TestDestinationsCountTheProxysTraffic(t *testing.T) {
 	e.startBox("upbox", sandboxapi.StartRequest{})
 	if kept := destinationKinds(t, e, "upbox")["example.org"]; kept.Tunnels != row.Tunnels || kept.BytesUp != row.BytesUp {
 		t.Fatalf("kept %+v, want the counts of %+v", kept, row)
+	}
+	if eg := e.get("upbox").Egress; eg.Destinations != 1 || eg.BytesUp != row.BytesUp {
+		t.Fatalf("egress after a restart = %+v, want the counts of %+v", eg, row)
 	}
 	upload(proxy)
 	eventually(t, "the cut in the new session", func() bool { return cuts() == 2 })

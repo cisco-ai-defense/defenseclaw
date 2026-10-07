@@ -82,7 +82,6 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 	}
 	name, id, eff := b.rec.Name, b.identity(), b.eff
 	declared := slices.Contains(b.rec.Flags.HostPorts, port)
-	b.blockedRequests++
 	explained := b.closedPorts[port]
 	m.mu.Unlock()
 	replayed := at.Before(m.startedAt)
@@ -100,10 +99,10 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 		m.hostPortAsk(ctx, b, port, r.Binary)
 		return
 	}
-	m.mu.Lock()
-	// The feed names it blocked (now, or when the port was first denied).
-	b.noteBlockedHost(openshellHostAlias)
-	m.mu.Unlock()
+	// The feed names it blocked (now, or when the port was first denied),
+	// and so do the sandbox's destinations and its egress counts.
+	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: port, at: at, denied: true,
+		binary: r.Binary, pid: ocsfPID(r)})
 	if explained {
 		return
 	}

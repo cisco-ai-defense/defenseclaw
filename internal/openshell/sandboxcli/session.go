@@ -1146,9 +1146,10 @@ const (
 // session announced blocked (its ✗ lines, which the summary repeats), or
 // the daemon's count of newly blocked ones when that is higher (a late
 // denial, or a flood the feed paced). A daemon restart during the session
-// starts its counters from zero (nothing keeps them): the session's then
-// count from zero too, and the line says they cover only the time since
-// the restart.
+// starts its hook counters from zero (nothing keeps them): the session's
+// then count from zero too, and the line says they cover only the time
+// since the restart. The site counts are the sandbox's destinations, which
+// a restart keeps; only a daemon whose counts went down restarted them.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
@@ -1160,8 +1161,10 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	since, sitesReset := "", false
 	switch {
 	case s.restartedDuring():
-		hooksBefore, egressBefore = sandboxapi.HookCoverage{}, sandboxapi.EgressStats{}
-		since, sitesReset = "since the daemon restarted at "+s.app.clock(s.daemonStarted), true
+		hooksBefore, since = sandboxapi.HookCoverage{}, "since the daemon restarted at "+s.app.clock(s.daemonStarted)
+		if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked {
+			egressBefore, sitesReset = sandboxapi.EgressStats{}, true
+		}
 	default:
 		// A daemon that does not say when it started: counters below the
 		// session's start mean it restarted.
