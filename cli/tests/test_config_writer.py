@@ -382,6 +382,18 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     assert shown in _reference_page("cli.mdx")
 
 
+def test_source_of_truth_page_lists_every_restart_required_key():
+    """The page names each key config set reports as restart-required, not a shorter list."""
+    page = _reference_page("source-of-truth.mdx")
+    section = page.split("Most keys apply with no restart.", 1)[1].split("`config set` says so", 1)[0]
+    missing = [
+        key
+        for key in config_writer.RESTART_KEYS
+        if not any(f"`{form}`" in section for form in (key, f"{key}.*", key.replace("*", "<c>")))
+    ]
+    assert not missing, f"source-of-truth.mdx leaves out restart-required keys: {missing}"
+
+
 def test_a_refused_config_set_names_the_missing_and_the_unknown_field(tmp_path):
     """GAP-0159: the key a typo or a missing field is about is in the sentence, with no v8 reference."""
     path = _config(tmp_path)

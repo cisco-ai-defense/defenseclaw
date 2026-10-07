@@ -44,8 +44,8 @@ Tables below tag each row with the binary that owns it.
 `policy activate`, the `setup` commands, the TUI) goes through the same config
 writer, which checks the change before it writes. A running gateway applies a
 valid change by itself and shows a new policy generation in `defenseclaw status`;
-only a short list of process-level keys needs `defenseclaw-gateway restart`
-(see [Restart-required keys](#restart-required-keys)). Files DefenseClaw
+only the keys listed under [Restart-required keys](#restart-required-keys) need
+`defenseclaw-gateway restart`. Files DefenseClaw
 derives from `config.yaml`, such as `custom-providers.json` and the generated
 hook scripts, are rewritten for you and never read back. See
 [Configuration: one source of truth](/docs/reference/source-of-truth).
