@@ -1409,9 +1409,12 @@ export function createFetchInterceptor(
         reason: layer === "host" ? "undici-host-dispatcher" : "undici-dispatcher",
       });
       if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+        // Either layer proves a probe was rewritten: OpenClaw swaps the global
+        // dispatcher for its own after the first agent run, and the host layer
+        // keeps intercepting.
         const destination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
+        lastUndiciProbeDestination = destination;
         if (layer === "host") lastHostProbeDestination = destination;
-        else lastUndiciProbeDestination = destination;
         return completeUndiciProbe(handler);
       }
     }
