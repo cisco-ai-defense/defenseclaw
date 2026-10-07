@@ -149,7 +149,7 @@ def observability() -> None:
 @click.option("--url", default=None, help="Webhook URL, https only (webhook)")
 @click.option("--method", default=None, help="Webhook HTTP method: POST, PUT or PATCH (webhook)")
 @click.option("--verify-tls/--no-verify-tls", "verify_tls", default=None,
-              help="Verify the Splunk HEC TLS certificate (default: off for splunk-hec, on for splunk-enterprise)")
+              help="Verify the Splunk HEC TLS certificate (default: on; --no-verify-tls for a self-signed collector)")
 @click.option(
     "--allow-private-networks",
     is_flag=True,

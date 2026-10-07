@@ -187,6 +187,27 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     assert source["observability"]["destinations"][0]["tls"] == {"insecure": True}
 
 
+def test_setup_v8_splunk_hec_verifies_tls_and_refuses_private_networks_unless_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0208: splunk-hec wrote insecure_skip_verify and allow_private_networks without either flag.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    args = ["add", "splunk-hec", "--non-interactive", "--name", "hec", "--token", "dummy-hec"]
+    args += ["--endpoint", "https://hec.example.com:8088/services/collector"]
+
+    for extra, tls, network in (
+        ([], None, None),
+        (["--no-verify-tls", "--allow-private-networks"], {"insecure_skip_verify": True}, {"allow_private_networks": True}),
+    ):
+        result = CliRunner().invoke(observability, [*args, *extra], obj=_setup_app(tmp_path), catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+        destination = source["observability"]["destinations"][0]
+        assert (destination.get("tls"), destination.get("network_safety")) == (tls, network)
+
+
 def test_setup_v8_interactive_loopback_otlp_asks_instead_of_failing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1142,7 +1163,7 @@ def test_v8_destination_list_exposes_signals_policy_and_unredacted_default(emit_
         (
             "splunk-hec",
             {
-                "host": "localhost",
+                "host": "hec.example.test",
                 "port": "8088",
                 "index": "defenseclaw",
                 "source": "defenseclaw",

@@ -93,14 +93,11 @@ def adapter_destination_fields(preset: Preset, inputs: dict[str, str]) -> dict[s
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
         }
-        insecure_default = preset.id != "splunk-enterprise"
-        insecure = insecure_default
-        if "verify_tls" in inputs:
-            insecure = not parse_bool(inputs["verify_tls"])
-        if insecure:
+        # GAP-0208: every HEC preset verifies TLS and stays off private
+        # networks unless the operator opts out (--no-verify-tls,
+        # --allow-private-networks), as splunk-enterprise and otlp do.
+        if "verify_tls" in inputs and not parse_bool(inputs["verify_tls"]):
             fields["tls"] = {"insecure_skip_verify": True}
-        if preset.id == "splunk-hec":
-            fields["network_safety"] = {"allow_private_networks": True}
         return fields
     if preset.adapter_kind == "http_jsonl":
         endpoint = inputs.get("url", "").strip()
