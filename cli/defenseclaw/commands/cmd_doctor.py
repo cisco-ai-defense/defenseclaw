@@ -7375,6 +7375,23 @@ def _omnigent_runtime_readiness(cfg, *, config_path: str | None = None) -> tuple
     return _omnigent_live_config_evidence(config_path)
 
 
+def _omnigent_tmux_requirement() -> str:
+    """Report the managed terminal prerequisite without inspecting user sessions."""
+    if os.name == "nt":
+        return ""
+    binary = shutil.which("tmux")
+    if not binary:
+        return "; managed terminals require tmux 3.3 or newer (tmux is missing)"
+    try:
+        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "; managed terminals require tmux 3.3 or newer (version unavailable)"
+    match = re.search(r"tmux (\d+)\.(\d+)", result.stdout)
+    if not match or tuple(map(int, match.groups())) < (3, 3):
+        return "; managed terminals require tmux 3.3 or newer (RHEL 9 ships 3.2a)"
+    return ""
+
+
 def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
     """Verify managed artifacts and bind them to the live server config."""
     locations, lock_detail = _omnigent_lock_locations(cfg)
@@ -7464,12 +7481,13 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
             _emit("fail", "OmniGent policy", drift, r=r)
             return
     live_status, live_detail = _omnigent_runtime_readiness(cfg, config_path=config_path)
+    tmux_requirement = _omnigent_tmux_requirement()
     # The module and .pth shim were verified above, so the row names only the
     # live-server state and what to do about it.
     _emit(
-        "warn" if live_status == "bound" else live_status,
+        "warn" if live_status == "bound" or tmux_requirement else live_status,
         "OmniGent policy",
-        f"native-degraded; {live_detail}",
+        f"native-degraded; {live_detail}{tmux_requirement}",
         r=r,
         remediation=(
             "start or restart the OmniGent server so it loads the DefenseClaw policy, then rerun "
