@@ -19,6 +19,7 @@ package sandboxcli
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -59,6 +60,21 @@ func (a *App) sandboxRepoPolicy(ctx context.Context, api API, name string) (*pac
 // keeps.
 func repoPolicyChanged(fresh, kept *sandboxapi.Explain) bool {
 	return fresh != nil && kept != nil && repoPolicyDigest(fresh.RepoPolicy) != repoPolicyDigest(kept.RepoPolicy)
+}
+
+// parentRepoPolicyNote says that the repository policy of a folder above
+// project, in its git repository, does not apply to a run started in
+// project, which has none of its own (rp nil); "" otherwise.
+func (a *App) parentRepoPolicyNote(project string, rp *sandboxapi.RepoPolicy) string {
+	if rp != nil || project == "" {
+		return ""
+	}
+	file := packs.ParentRepoPolicy(project)
+	if file == "" {
+		return ""
+	}
+	return a.tildePath(file) + " does not apply here: a repository policy applies to runs started in the folder that holds it (" +
+		a.tildePath(filepath.Dir(filepath.Dir(file))) + "), so run there for it, or copy it into this folder"
 }
 
 // repoPolicyDigest is CreateRequest.RepoPolicyDigest for the repository

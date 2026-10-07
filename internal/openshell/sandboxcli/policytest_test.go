@@ -107,6 +107,32 @@ func TestPolicyTestASandbox(t *testing.T) {
 	}
 }
 
+// A run in a subfolder of a repository does not get the repository policy
+// at the repository's root: run, policy show and policy explain say so.
+func TestParentRepoPolicyIsNamed(t *testing.T) {
+	ta := newTestApp(t, "")
+	noChanges(ta)
+	sub := filepath.Join(ta.project, "svc")
+	for _, d := range []string{filepath.Join(ta.project, ".git"), filepath.Join(ta.project, ".defenseclaw"), sub} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ta.project, packs.RepoPolicyPath), []byte("version: 1\nnetwork: {mode: deny}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ta.project = sub
+	note := "~/proj/.defenseclaw/sandbox.yaml does not apply here: a repository policy applies to runs started in the folder that holds it (~/proj)"
+	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{}))
+	has(t, ta.output(), "Repository", note)
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{}))
+	has(t, ta.output(), "repository: "+note)
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{Sandbox: "web"}))
+	lacks(t, ta.output(), "does not apply here")
+	ta.ok(t, ta.fresh().Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), note)
+}
+
 func TestRepoPolicyText(t *testing.T) {
 	if got := repoPolicyText(nil); got != "" {
 		t.Fatalf("no policy: %q", got)

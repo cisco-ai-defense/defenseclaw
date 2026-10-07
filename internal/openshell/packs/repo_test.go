@@ -228,3 +228,34 @@ func TestRepoPolicyHostileInput(t *testing.T) {
 		t.Fatalf("LoadRepoPolicy = %+v, %v", rp, err)
 	}
 }
+
+// A run in a subfolder of a repository does not get the repository policy
+// at its root: ParentRepoPolicy finds that file for the warning, never
+// above the repository's top (the folder holding .git).
+func TestParentRepoPolicy(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	sub, nested := filepath.Join(repo, "svc", "api"), filepath.Join(repo, "vendor", "lib")
+	for _, d := range []string{filepath.Join(repo, ".git"), filepath.Join(repo, ".defenseclaw"), sub, filepath.Join(nested, ".git"),
+		filepath.Join(root, ".defenseclaw")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join(repo, RepoPolicyPath), filepath.Join(root, RepoPolicyPath)} {
+		if err := os.WriteFile(f, []byte("version: 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for project, want := range map[string]string{
+		sub:                          filepath.Join(repo, RepoPolicyPath),
+		repo:                         "", // its own, which LoadRepoPolicy reads
+		nested:                       "", // another repository (a submodule) without one
+		filepath.Join(nested, "src"): "",
+		"relative/svc":               "",
+	} {
+		if got := ParentRepoPolicy(project); got != want {
+			t.Errorf("ParentRepoPolicy(%s) = %q, want %q", project, got, want)
+		}
+	}
+}

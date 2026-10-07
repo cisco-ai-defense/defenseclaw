@@ -71,6 +71,19 @@ func (a *App) explain(ctx context.Context, o PolicyOptions) (*sandboxapi.Explain
 	return ex, nil
 }
 
+// folderRepoPolicyNote is parentRepoPolicyNote for `policy show` and
+// `policy explain` of a run in this folder (no --sandbox).
+func (a *App) folderRepoPolicyNote(o PolicyOptions, ex *sandboxapi.Explain) string {
+	if o.Sandbox != "" {
+		return ""
+	}
+	project, err := a.project()
+	if err != nil {
+		return ""
+	}
+	return a.parentRepoPolicyNote(project, ex.RepoPolicy)
+}
+
 // PolicyShow prints the effective sandbox policy.
 func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 	ex, err := a.explain(ctx, o)
@@ -85,7 +98,7 @@ func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 		{"Profile", ex.Profile}, {"Network", ex.NetworkMode}, {"Approvals", ex.Approvals},
 		{"Organization", adminText(ex.Admin)},
 	}
-	if text := repoPolicyText(ex.RepoPolicy); text != "" {
+	if text := firstNonEmpty(repoPolicyText(ex.RepoPolicy), a.folderRepoPolicyNote(o, ex)); text != "" {
 		rows = append(rows, [2]string{"Repository", text})
 	}
 	for _, key := range []string{"yolo", "harness.allowed", "workdir.mode", "egress.feeds", "egress.block", "egress.admin_block",
@@ -250,6 +263,8 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	if rp := ex.RepoPolicy; rp != nil {
 		a.line(truncate("repository: "+rp.Path+" "+rp.Digest, explainWidth-2))
 		a.line(truncate("  "+repoPolicyText(rp)+"; settings it decided have the source repo", explainWidth-2))
+	} else if note := a.folderRepoPolicyNote(o, ex); note != "" {
+		a.line("repository: " + note)
 	}
 	// Every line fits explainWidth columns: the key, source and origin
 	// columns take what they need (the origin cut to explainOriginWidth),

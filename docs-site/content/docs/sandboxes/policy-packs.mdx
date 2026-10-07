@@ -724,6 +724,11 @@ A project can ask for a stricter sandbox than the one you run it with: a
 on your machine when the sandbox is created. It can only tighten the
 policy; a file that asks for anything looser refuses the run.
 
+It applies to runs started in the folder that holds `.defenseclaw/`, the
+folder the sandbox gets. A run started in a subfolder of the repository does
+not read the file at the repository's root; `sandbox run`, `policy show`,
+and `policy explain` then warn that it does not apply there.
+
 ```yaml
 version: 1
 network:

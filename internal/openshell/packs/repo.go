@@ -180,6 +180,40 @@ func LoadRepoPolicy(project string) (*RepoPolicy, error) {
 	return ParseRepoPolicy(data, file)
 }
 
+// maxRepoAncestors bounds how many folders ParentRepoPolicy looks up.
+const maxRepoAncestors = 64
+
+// ParentRepoPolicy is the nearest repository policy file in a folder above
+// project, inside the git repository project is in (up to the folder that
+// holds .git), or "" when there is none or project is in no git
+// repository. LoadRepoPolicy reads only project's own: a run started in a
+// subfolder does not get the policy at the repository's root, and the CLI
+// says so.
+func ParentRepoPolicy(project string) string {
+	project = strings.TrimSpace(project)
+	if !filepath.IsAbs(project) {
+		return ""
+	}
+	found := ""
+	d := filepath.Clean(project)
+	for range maxRepoAncestors {
+		if found == "" && d != filepath.Clean(project) {
+			if info, err := os.Lstat(filepath.Join(d, RepoPolicyPath)); err == nil && !info.IsDir() {
+				found = filepath.Join(d, RepoPolicyPath)
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
+			return found // the repository's top
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			break
+		}
+		d = parent
+	}
+	return ""
+}
+
 // ParseRepoPolicy strictly decodes and validates repository policy bytes.
 // Values that would loosen the policy are not errors: they are kept in
 // Refused (one per key), and Resolve refuses the run with them.

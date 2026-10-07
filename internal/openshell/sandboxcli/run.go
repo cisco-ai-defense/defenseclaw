@@ -186,6 +186,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	if note := a.parentRepoPolicyNote(project, ex.RepoPolicy); note != "" {
+		a.warn(note)
+	}
 	// The flags replace the configured limits a clamp of which the
 	// preflight reported. A driver without per-sandbox limits takes neither
 	// (driverFlagNotes says so).
