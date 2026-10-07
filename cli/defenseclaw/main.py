@@ -605,7 +605,7 @@ def _try_launch_tui() -> bool:
         return False
 
     if not ux.terminal_supports_tui():
-        ux.echo(ux.TUI_UNAVAILABLE_MESSAGE, err=True)
+        ux.echo(ux.tui_unavailable_message(), err=True)
         return True
 
     from defenseclaw.tui import run_textual_tui

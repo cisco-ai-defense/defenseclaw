@@ -24,3 +24,17 @@ def test_audit_empty_state_names_hidden_routine_events(monkeypatch) -> None:
     })()
     app.audit_model = model
     assert "Only routine events exist. Press l" in app._audit_body_text()
+
+
+def test_tui_unavailable_explains_dumb_term(monkeypatch) -> None:
+    from defenseclaw import ux
+
+    class TTY:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setenv("TERM", "dumb")
+    message = ux.tui_unavailable_message(stdin=TTY(), stdout=TTY())
+    assert "TERM=dumb" in message
+    assert "TERM=xterm-256color" in message
+    assert "Windows" not in message
