@@ -981,7 +981,8 @@ With the [process tree](/docs/sandboxes/policy-packs) on, the binary column
 shows that process and its parents instead (`curl ← bash ← claude`), and
 `--output json` adds them (`lineage`). OpenShell names no process id for a
 connection (on Linux and on the Mac), so the row finds the binary's process
-in the tree by its path and the time the host was last seen: a program that
+in the tree by its path (or its name: the sandbox seldom shows a process's
+executable) and the time the host was last seen: a program that
 ran for less than one sample (5 seconds, 15 on a slow Mac) or in two copies
 at once keeps only the binary. A second table lists the
 models OpenShell's inference route reported calls to. The view survives
