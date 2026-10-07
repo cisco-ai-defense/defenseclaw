@@ -5800,6 +5800,26 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_UPDATE_SECURE_CLIENT_EVALUATION",
+      "category": "test_fixture",
+      "purpose": "Regenerates the Secure Client admission and guardrail evaluation goldens instead of comparing against them. Use it only for an approved change to Secure Client behaviour.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/secure_client_evaluation_golden_test.go",
+          "description": "Rewrites testdata/secure_client_evaluation/*.golden.json for the current OS"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
       "category": "security_opt_out",
       "purpose": "Retired 0.x upgrade override with no effect in 1.x. Still refused from .env files so an old dotenv cannot carry it forward.",

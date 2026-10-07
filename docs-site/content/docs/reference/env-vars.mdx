@@ -318,7 +318,7 @@ read the raw environment, so the line does not apply to them.
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 129 test-only variables">
+<Accordion title="Show the 130 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -426,6 +426,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_TEST_WINDOWS_NOTIFICATION`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the attended native Windows notification delivery test.<br/>**Read by:** `internal/notify/notify_windows_test.go` |
 | `DEFENSECLAW_UNSIGNED_PE`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | Carries an unsigned portable-executable fixture path to the native Authenticode evidence regression.<br/>**Read by:** `cli/tests/test_windows_installer_artifacts.py` |
 | `DEFENSECLAW_UPDATE_GOLDEN`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, and the bounded chain catalog, instead of comparing against them.<br/>**Read by:** `internal/gateway/connector/hook_render_golden_test.go`, `internal/gateway/connector/sandbox_artifacts_test.go`, `internal/openshell/policy/policy_test.go`, `internal/openshell/profiles/profiles_test.go`, `internal/guardrail/tool_chain_catalog_json_test.go` |
+| `DEFENSECLAW_UPDATE_SECURE_CLIENT_EVALUATION`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Regenerates the Secure Client admission and guardrail evaluation goldens instead of comparing against them.<br/>**Read by:** `internal/gateway/secure_client_evaluation_golden_test.go` |
 | `DEFENSECLAW_UPGRADE_LOCAL_DIR`<br/>Default: `unset`<br/>Values: `any-absolute-path`<br/>Managed host: `ignore` | Tests only: `defenseclaw upgrade` and the 0.8.x handoff take the installer and release assets from this directory.<br/>**Read by:** `cli/defenseclaw/upgrade_shim.py`, `scripts/defenseclaw-upgrade.sh` |
 | `DEFENSECLAW_V2_1177_RECREATE_LIVE`<br/>Default: `unset`<br/>Values: `test payload`, `unset`<br/>Managed host: `ignore` | Recreates a live target during the CAS V2 1177 hard-exit regression fixture.<br/>**Read by:** `internal/gateway/connector/atomic_transform_v2_exit_windows_test.go` |
 | `DEFENSECLAW_V2_FORCE_SHORT_REPAIR`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Forces deterministic short-name repair paths in native CAS V2 tests.<br/>**Read by:** `internal/gateway/connector/atomic_transform_v2_exit_windows_test.go` |
