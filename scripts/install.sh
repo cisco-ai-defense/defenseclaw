@@ -26,8 +26,13 @@
 # installed. Config and data in ~/.defenseclaw are kept; the replaced install
 # is kept in ~/.defenseclaw/previous for `--rollback`.
 #
-# Permanent interface (never remove or change these; unknown flags are
-# ignored with a warning): --yes, --version X.Y.Z, --local DIR, --rollback.
+# Permanent interface (never remove or change these): --yes, --version X.Y.Z,
+# --local DIR, --rollback. An unknown option stops the installer with exit 2
+# before it changes anything, so a typo never installs something other than
+# what was asked (GAP-0361). Only the copy that defenseclaw upgrade or
+# rollback runs (from a defenseclaw-upgrade-* or defenseclaw-rollback-*
+# folder) ignores one with a warning, so an older release's installer
+# accepts the flags of a newer client.
 #
 set -euo pipefail
 umask 077
@@ -64,8 +69,9 @@ readonly LOCK_DIR="${DEFENSECLAW_HOME}/.install.lock"
 # temporary directory removes that directory when it finishes, but only when
 # the directory holds nothing else.
 SELF_TMP="$(dirname "${BASH_SOURCE[0]:-.}")"
+RUN_BY_UPGRADE=""
 case "$(basename "${SELF_TMP}")" in
-    defenseclaw-upgrade-*|defenseclaw-rollback-*) ;;
+    defenseclaw-upgrade-*|defenseclaw-rollback-*) RUN_BY_UPGRADE=1 ;;
     *) SELF_TMP="" ;;
 esac
 if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
@@ -99,6 +105,8 @@ warn() { printf "${YELLOW}  !${NC} %s\n" "$*"; }
 err()  { printf "${RED}  ✗${NC} %s\n" "$*" >&2; }
 step() { printf "\n${BOLD}${CYAN}─── %s${NC}\n" "$*"; }
 die()  { err "$@"; exit 1; }
+# A wrong option or value: exit 2, before anything changed.
+usage_error() { err "$*; nothing was changed"; printf "  Run with --help for the options.\n" >&2; exit 2; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
 # uname reports x86_64 for a shell running under Rosetta; ask the kernel.
@@ -199,6 +207,7 @@ Options:
 
 Exit codes:
   0  Installed        1  Not installed (a previous install is restored)
+  2  Not installed: an unknown option or value (nothing was changed)
   3  Installed; a connector needs attention before it is guarded again
   4  Installed; the first-run quickstart failed (re-run it as shown)
 
@@ -209,31 +218,39 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --version=*|--local=*|--connector=*|--quickstart-mode=*)
+            # --name=value is the same option as --name value (GAP-0361).
+            opt_name="${1%%=*}" opt_value="${1#*=}"
+            shift
+            set -- "${opt_name}" "${opt_value}" "$@" ;;
+    esac
+    case "$1" in
         --yes|-y) YES=true ;;
         --version)
-            [[ $# -ge 2 ]] || die "--version needs a value such as 1.2.3"
+            [[ $# -ge 2 ]] || usage_error "--version needs a value such as 1.2.3"
             TARGET_VERSION="${2#v}"; shift ;;
-        --version=*) TARGET_VERSION="${1#--version=}"; TARGET_VERSION="${TARGET_VERSION#v}" ;;
         --local)
-            [[ $# -ge 2 ]] || die "--local needs a directory"
-            LOCAL_DIR="$(cd "$2" 2>/dev/null && pwd)" || die "Directory not found: $2"
+            [[ $# -ge 2 ]] || usage_error "--local needs a directory"
+            LOCAL_DIR="$(cd "$2" 2>/dev/null && pwd)" || usage_error "--local: directory not found: $2"
             shift ;;
         --rollback) ROLLBACK=true ;;
         --connector)
-            [[ $# -ge 2 ]] || die "--connector needs a value (${CONNECTOR_CHOICES})"
+            [[ $# -ge 2 ]] || usage_error "--connector needs a value (${CONNECTOR_CHOICES// /, })"
             CONNECTOR="$2"; shift
-            is_valid_connector "${CONNECTOR}" || die "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES}"
+            is_valid_connector "${CONNECTOR}" || usage_error "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES// /, }"
             PASSTHROUGH+=(--connector "${CONNECTOR}") ;;
         --no-openclaw) NO_OPENCLAW=true; PASSTHROUGH+=(--no-openclaw) ;;
         --quickstart) RUN_QUICKSTART=true; PASSTHROUGH+=(--quickstart) ;;
         --quickstart-mode)
-            [[ $# -ge 2 ]] || die "--quickstart-mode needs observe or action"
+            [[ $# -ge 2 ]] || usage_error "--quickstart-mode needs observe or action"
             QUICKSTART_MODE="$2"; shift
-            case "${QUICKSTART_MODE}" in observe|action) ;; *) die "invalid --quickstart-mode: ${QUICKSTART_MODE}" ;; esac
+            case "${QUICKSTART_MODE}" in observe|action) ;; *) usage_error "Invalid --quickstart-mode '${QUICKSTART_MODE}': use observe or action" ;; esac
             RUN_QUICKSTART=true; PASSTHROUGH+=(--quickstart-mode "${QUICKSTART_MODE}") ;;
         --sandbox) die "--sandbox was removed with the legacy openshell-sandbox installer. Install without it; to run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' afterwards; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'." ;;
         --help|-h) usage; exit 0 ;;
-        *) warn "Ignoring unknown option: $1" ;;
+        *)
+            [[ -n "${RUN_BY_UPGRADE}" ]] || usage_error "Unknown option: $1"
+            warn "Ignoring unknown option: $1" ;;
     esac
     shift
 done

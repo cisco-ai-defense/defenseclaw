@@ -222,8 +222,12 @@ which hands off to the latest `install.sh`. It does not need to run again.
   `releases/latest/download/` and `releases/download/X.Y.Z/` URLs, and bare
   `X.Y.Z` tags. Every installed client downloads these.
 - The installer flags `--yes`, `--version`, `--local` and `--rollback`
-  (`-Yes`, `-Version`, `-Local`, `-Rollback`). Unknown flags must stay
-  warnings, not errors.
+  (`-Yes`, `-Version`, `-Local`, `-Rollback`). The copy that `defenseclaw
+  upgrade` and `rollback` run (from a `defenseclaw-upgrade-*` or
+  `defenseclaw-rollback-*` folder) must keep ignoring an unknown flag with a
+  warning, so an older release's installer accepts a newer client's flags.
+  Run any other way, an unknown flag stops the installer with exit 2 before
+  it changes anything.
 - `cli/defenseclaw/upgrade_shim.py` stays standard-library only.
 - The install paths: binaries are real files in `~/.local/bin` (hooks record
   those paths) and the Python environment is `~/.defenseclaw/.venv`.

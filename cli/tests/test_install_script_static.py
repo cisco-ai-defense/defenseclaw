@@ -86,14 +86,30 @@ def test_help_lists_the_permanent_flags(tmp_path: Path) -> None:
         assert flag in result.stdout
 
 
-def test_unknown_flags_are_ignored_not_fatal(tmp_path: Path) -> None:
+def test_an_unknown_option_stops_and_value_options_take_the_equals_form(tmp_path: Path) -> None:
+    # GAP-0361: a typo or the --name=value form was ignored with a warning,
+    # so an unattended install went on without the option and exited 0.
     empty = tmp_path / "assets"
     empty.mkdir()
+    script = _stamped(tmp_path)
 
-    result = _run([str(_stamped(tmp_path)), "--local", str(empty), "--from-the-future"], tmp_path)
+    typo = _run([str(script), "--local", str(empty), "--quickstrat"], tmp_path)
+    assert typo.returncode == 2
+    assert "Unknown option: --quickstrat; nothing was changed" in typo.stderr
+    assert "checksums.txt" not in typo.stdout + typo.stderr
 
-    assert "Ignoring unknown option: --from-the-future" in result.stdout + result.stderr
-    assert "checksums.txt" in result.stdout + result.stderr  # got past argument parsing
+    equals = _run([str(script), f"--local={empty}", "--connector=claudecode", "--quickstart-mode=action"], tmp_path)
+    assert "Unknown option" not in equals.stdout + equals.stderr
+    assert "checksums.txt" in equals.stdout + equals.stderr  # got past argument parsing
+
+    # The copy defenseclaw upgrade runs accepts a newer client's flags.
+    upgrade_copy = tmp_path / "defenseclaw-upgrade-x1"
+    upgrade_copy.mkdir()
+    shutil.copy(script, upgrade_copy / "install.sh")
+    newer = _run([str(upgrade_copy / "install.sh"), "--local", str(empty), "--from-the-future"], tmp_path)
+    assert "Ignoring unknown option: --from-the-future" in newer.stdout + newer.stderr
+    assert "checksums.txt" in newer.stdout + newer.stderr
+
 
 
 def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:

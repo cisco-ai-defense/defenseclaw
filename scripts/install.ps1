@@ -28,8 +28,12 @@
     %USERPROFILE%\.defenseclaw are kept; the replaced install is kept in
     %USERPROFILE%\.defenseclaw\previous for -Rollback.
 
-    Permanent interface (never remove or change these; unknown arguments are
-    ignored with a warning): -Yes, -Version X.Y.Z, -Local DIR, -Rollback.
+    Permanent interface (never remove or change these): -Yes, -Version X.Y.Z,
+    -Local DIR, -Rollback. An unknown argument stops the installer with exit 2
+    before it changes anything (GAP-0361). Only the copy that `defenseclaw
+    upgrade` or `rollback` runs (from a defenseclaw-upgrade-* or
+    defenseclaw-rollback-* folder) ignores one with a warning, so an older
+    release's installer accepts the flags of a newer client.
 
     Windows PowerShell 5.1 or later. Run it as the user who uses DefenseClaw;
     it does not need administrator rights.
@@ -125,7 +129,8 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     if ($modulePath -notcontains (Join-Path $PSHOME "Modules")) { $modulePath += Join-Path $PSHOME "Modules" }
     $env:PSModulePath = $modulePath -join ";"
 }
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false }
+$RunByUpgrade = $RunAsFile -and (Split-Path -Leaf (Split-Path -Parent $PSCommandPath)) -match '^defenseclaw-(upgrade|rollback)-'
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -135,6 +140,8 @@ function Get-UtcClock { return (Get-Date).ToUniversalTime().ToString("HH:mm:ss")
 # Step headers and gateway lines carry the UTC time, so the install log can time a run (GAP-1797).
 function Write-Step([string]$Message) { Write-Host ""; Write-Host "--- $Message  [$(Get-UtcClock)]" -ForegroundColor Cyan }
 function Die([string]$Message) { throw $Message }
+# A wrong option or value: exit 2, before anything changed.
+function Stop-Usage([string]$Message) { $Run.UsageError = $true; throw "$Message; nothing was changed. Run with -Help for the options." }
 
 function Test-Version([string]$Value) {
     return $Value -match '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -1607,6 +1614,7 @@ Options:
 
 Exit codes (run as a file):
   0  Installed        1  Not installed (a previous install is restored)
+  2  Not installed: an unknown option or value (nothing was changed)
   3  Installed; a connector needs attention before it is guarded again
   4  Installed; the first-run quickstart failed (re-run it as shown)
 
@@ -1706,19 +1714,28 @@ function Wait-UninstallCleanup([int]$Seconds = 300) {
 
 function Invoke-Install {
     if ($Help) { Show-Usage; return 0 }
-    foreach ($argument in $UnknownArguments) { Write-Warn "Ignoring unknown option: $argument" }
+    foreach ($argument in $UnknownArguments) {
+        if ($argument -match '^-(Version|Local|Connector|QuickstartMode|CosignPath)=(.*)$') {
+            # -Name=value is the same option as -Name value (GAP-0361).
+            Set-Variable -Name $Matches[1] -Value $Matches[2]
+        } elseif ($RunByUpgrade) {
+            Write-Warn "Ignoring unknown option: $argument"
+        } else {
+            Stop-Usage "Unknown option: $argument"
+        }
+    }
     $Connector = $Connector.Trim().ToLowerInvariant()
     if ($Connector -and $ConnectorChoices -notcontains $Connector) {
-        Die "Invalid -Connector '$Connector'. Choices on Windows: $($ConnectorChoices -join ' ')"
+        Stop-Usage "Invalid -Connector '$Connector'. Choices on Windows: $($ConnectorChoices -join ', ')"
     }
     if ($NoOpenclaw -and -not $Connector) { $Connector = "none" }
-    if ($QuickstartMode -and $QuickstartMode -notin @("observe", "action")) { Die "invalid -QuickstartMode: $QuickstartMode" }
+    if ($QuickstartMode -and $QuickstartMode -notin @("observe", "action")) { Stop-Usage "Invalid -QuickstartMode '$QuickstartMode': use observe or action" }
     if ($QuickstartMode) { $Quickstart = $true }
     $TargetVersion = $Version -replace '^v', ''
     if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Die "-Version must look like 1.2.3, got '$Version'" }
     $LocalDir = ""
     if ($Local) {
-        if (-not (Test-Path -LiteralPath $Local -PathType Container)) { Die "Directory not found: $Local" }
+        if (-not (Test-Path -LiteralPath $Local -PathType Container)) { Stop-Usage "-Local: directory not found: $Local" }
         $LocalDir = (Resolve-Path -LiteralPath $Local).ProviderPath
     }
 
@@ -2091,7 +2108,7 @@ try {
 } catch {
     Write-Err $_.Exception.Message
     if ($_.FullyQualifiedErrorId -ne $_.Exception.Message) { Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray }
-    $code = 1
+    $code = if ($Run.UsageError) { 2 } else { 1 }
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }

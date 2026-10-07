@@ -80,6 +80,7 @@ The installers exit with one of these codes (`install.ps1` when run as a file;
 | --- | --- |
 | `0` | DefenseClaw is installed. |
 | `1` | DefenseClaw was not installed. An upgrade puts the previous install back. |
+| `2` | Nothing was changed: an option or value the installer does not know, such as a misspelled flag or a connector name that is not on the list. Options that take a value also accept the `--name=value` form. |
 | `3` | DefenseClaw is installed, but a connector needs attention before it is guarded again. Run `defenseclaw doctor`. |
 | `4` | DefenseClaw is installed, but the first-run quickstart failed. The installer prints what failed and the `defenseclaw quickstart ...` command to run again once it is fixed. |
 
