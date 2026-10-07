@@ -687,6 +687,20 @@ func TestSessionSummary(t *testing.T) {
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},
+		// GAP-0202: the gateway was stopped (handed to another account)
+		// under the session: not a stop from another terminal.
+		{name: "the gateway went away", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			during := ta.term.during
+			ta.term.during = func() {
+				during()
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "unknown" })
+				ta.daemon.mu.Lock()
+				ta.daemon.status.Available, ta.daemon.status.Reason = false, "the OpenShell gateway is not available"
+				ta.daemon.mu.Unlock()
+			}
+		}, want: []string{"the OpenShell gateway is not available (it was stopped, or another account's gateway took its port; `defenseclaw sandbox doctor` says which), which ended Claude Code"},
+			not: []string{"was stopped from outside this session"}},
 		// GAP-0077: the OpenShell gateway restarted under the session (an
 		// upgrade), which closed the harness's exec relay: the sandbox read
 		// as unknown for a moment, then ready, and the session said it was

@@ -158,6 +158,9 @@ type session struct {
 	refused     map[string]string
 	otherBlocks map[string]bool
 	approved    map[string]bool
+	// gatewayDown is set when the daemon, at the end of the session, could
+	// not reach the OpenShell gateway.
+	gatewayDown bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -793,6 +796,7 @@ func (s *session) end(ctx context.Context) error {
 	a.println()
 	if st, err := s.api.Status(ctx); err == nil {
 		s.daemonStarted = st.StartedAt
+		s.gatewayDown = st.Enabled && !st.Available
 	}
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
@@ -978,6 +982,12 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 			// DefenseClaw's own stop (raiseSilence), not someone else's.
 			return "DefenseClaw stopped " + name + ": " + s.harnessName() + " worked for " + firstNonEmpty(h.SilenceAfter, "a while") +
 				" without a hook reaching DefenseClaw (hooks.on_silence: stop). Check its hook configuration in the sandbox before you start it again"
+		}
+		if s.gatewayDown {
+			// Not a stop of DefenseClaw's (GAP-0202): the gateway that runs
+			// the sandbox went away under it.
+			return "the OpenShell gateway is not available (it was stopped, or another account's gateway took its port; `" + CommandName +
+				" doctor` says which), which ended " + s.harnessName()
 		}
 		return name + " was stopped from outside this session (`" + CommandName + " stop` or the TUI), which ended " + s.harnessName()
 	}

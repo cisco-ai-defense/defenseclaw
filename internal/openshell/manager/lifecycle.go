@@ -132,8 +132,10 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 
 // List returns every sandbox, refreshed from OpenShell when it is reachable.
 func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
+	live := false
 	if gw, err := m.gateway(ctx); err == nil {
 		if sbs, err := m.listManaged(ctx, gw); err == nil {
+			live = true
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
@@ -152,7 +154,11 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	accepted := make([]*acceptedSnapshot, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
-			out = append(out, m.view(b))
+			v := m.view(b)
+			if !live {
+				unconfirmedPhase(&v)
+			}
+			out = append(out, v)
 			bindings = append(bindings, b.rec.BindingID)
 			shared = append(shared, sharedLimitsOf(b))
 			accepted = append(accepted, b.rec.Accepted)
@@ -177,6 +183,7 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	m.mu.Lock()
 	retained := b.retained
 	m.mu.Unlock()
+	live := retained
 	if gw, err := m.gateway(ctx); err == nil && !retained {
 		sb, err := gw.Client.GetSandbox(ctx, name)
 		m.mu.Lock()
@@ -188,12 +195,28 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 			b.missing = true
 		}
 		m.mu.Unlock()
-		if err != nil && !openshell.IsNotFound(err) {
+		live = err == nil || openshell.IsNotFound(err)
+		if !live {
 			m.dropGateway(gw, err)
 		}
 	}
 	v := m.viewOf(b)
+	if !live {
+		unconfirmedPhase(&v)
+	}
 	return &v, nil
+}
+
+// unconfirmedPhase is the phase of a sandbox the OpenShell gateway could not
+// be asked about: a running or starting phase last seen is not known to hold
+// any more (the gateway stopped, or another account's took its port), so it
+// reads unknown, not provisioning or ready for as long as the gateway is
+// down (GAP-0202). A stopped or missing sandbox stays so.
+func unconfirmedPhase(v *sandboxapi.Sandbox) {
+	switch v.Phase {
+	case "ready", "provisioning":
+		v.Phase = string(audit.SandboxPhaseUnknown)
+	}
 }
 
 // Stop stops a sandbox and keeps it (and its mounts and binding) for a
