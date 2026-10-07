@@ -366,3 +366,22 @@ func TestHookAgentIdentitySecureClientUnchanged(t *testing.T) {
 		t.Fatalf("Secure Client identities response = %q", rec.Body.String())
 	}
 }
+
+func TestPerUserAgentIdentityIgnoresGatewayEnvironmentOverrides(t *testing.T) {
+	agentIdentityTestSetup(t)
+	self := agentIdentityUser{ID: "1001", Home: t.TempDir(), Self: true, Verified: true}
+	for _, tc := range []struct{ connector, variable string }{
+		{"claudecode", "CLAUDE_CONFIG_DIR"}, {"codex", "CODEX_HOME"},
+		{"hermes", "HERMES_HOME"}, {"opencode", "OPENCODE_CONFIG_DIR"},
+		{"omnigent", "OMNIGENT_CONFIG_HOME"},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			t.Setenv(tc.variable, "")
+			baseline := agentIdentityInstallFP(tc.connector, self)
+			t.Setenv(tc.variable, t.TempDir())
+			if got := agentIdentityInstallFP(tc.connector, self); got != baseline {
+				t.Fatalf("gateway environment changed %s fingerprint: %q -> %q", tc.connector, baseline, got)
+			}
+		})
+	}
+}

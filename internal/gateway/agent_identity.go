@@ -9,6 +9,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,19 +181,21 @@ func gatewaySelfUser() agentIdentityUser {
 }
 
 // agentIdentityInstallFP is the connector's config root for user, as the
-// gateway resolves it. A per-user gateway resolves it exactly as its
-// connector setup does, honouring the overrides in its own environment. A
-// service-account gateway joins the connector's default root to the
-// verified user's home; the service's environment says nothing about the
-// user's. A sandbox's agents live in the sandbox, so the sandbox names the
-// install.
+// gateway resolves it. Both per-user and service-account gateways use a
+// stable root under the verified user's home; the gateway startup environment
+// says nothing reliable about the connector installation. Runtime overrides
+// are recorded only as install hints. A sandbox names its own install.
 func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string {
 	if user.Sandbox != "" {
 		return "openshell-sandbox:" + user.Sandbox
 	}
 	cfg := agentIdentityConfig.Load()
 	if user.Self {
-		return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
+		switch strings.ToLower(strings.TrimSpace(connectorName)) {
+		case "claudecode", "codex", "hermes", "opencode", "omnigent":
+		default:
+			return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
+		}
 	}
 	if user.Home == "" {
 		return ""
@@ -205,6 +208,23 @@ func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string
 // environment override, or "."+connector for a connector whose root lies
 // outside the home.
 func connectorConfigRootRelative(cfg *config.Config, connectorName string) string {
+	// These roots have runtime environment overrides in ConnectorHomeDir.
+	// They must not become part of a verified identity after a restart.
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "claudecode":
+		return ".claude"
+	case "codex":
+		return ".codex"
+	case "hermes":
+		if runtime.GOOS == "windows" {
+			return filepath.Join("AppData", "Local", "hermes")
+		}
+		return ".hermes"
+	case "opencode":
+		return filepath.Join(".config", "opencode")
+	case "omnigent":
+		return ".omnigent"
+	}
 	if cached, ok := connectorConfigRootRel.Load(connectorName); ok {
 		return cached.(string)
 	}
