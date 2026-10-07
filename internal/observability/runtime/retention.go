@@ -97,6 +97,9 @@ type RetentionController struct {
 	stopRequested chan struct{}
 	stopOnce      sync.Once
 	promptRun     bool
+	// backlog is set when the last run stopped at a time budget with work
+	// left; the next run then follows RetentionFollowUpInterval later.
+	backlog atomic.Bool
 
 	statusMu sync.Mutex
 	status   atomic.Pointer[RetentionControllerStatus]
@@ -353,8 +356,13 @@ func (controller *RetentionController) run(ctx context.Context) {
 			return
 		}
 		interval := audit.RetentionScheduleInterval
-		if controller.reaper.RetentionDays() == 0 {
+		switch {
+		case controller.reaper.RetentionDays() == 0:
 			interval = 0
+		case controller.backlog.Load():
+			// The last run stopped at a time budget with work left: rows to
+			// delete or free pages to return (GAP-0287).
+			interval = audit.RetentionFollowUpInterval
 		}
 		wake, err := controller.scheduler.Wait(ctx, interval, controller.policyWake)
 		if err != nil {
@@ -426,6 +434,7 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
+	controller.backlog.Store(err == nil && result.Backlog)
 	status := controller.Status()
 	status.LastAttemptAt = attemptedAt
 	status.RunCount = saturatingIncrement(status.RunCount)

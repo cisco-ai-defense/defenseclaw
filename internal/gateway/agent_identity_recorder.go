@@ -49,7 +49,11 @@ type agentIdentityRecorder struct {
 	storeGeneration uint64
 	storeSource     func() *inventory.InventoryStore
 	dataDir         func() string
+	retentionDays   func() int
 	ownStore        *inventory.InventoryStore
+	// ownSweep prunes the ledger in the store the recorder opened itself;
+	// discovery's own sweep prunes the store discovery opened.
+	ownSweep inventory.AgentLedgerSweeper
 }
 
 var sharedAgentIdentities = &agentIdentityRecorder{
@@ -206,13 +210,14 @@ func (r *agentIdentityRecorder) flush(ctx context.Context, store *inventory.Inve
 
 // setStoreSource wires where flushes go: source returns AI discovery's
 // inventory store when it runs, and dataDir locates inventory.db for the
-// store the recorder opens itself when discovery is off. The returned token
-// unwires it again.
-func (r *agentIdentityRecorder) setStoreSource(source func() *inventory.InventoryStore, dataDir func() string) uint64 {
+// store the recorder opens itself when discovery is off. retentionDays is
+// the window that store's ledger keeps. The returned token unwires it again.
+func (r *agentIdentityRecorder) setStoreSource(source func() *inventory.InventoryStore, dataDir func() string,
+	retentionDays func() int) uint64 {
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
 	r.storeGeneration++
-	r.storeSource, r.dataDir = source, dataDir
+	r.storeSource, r.dataDir, r.retentionDays = source, dataDir, retentionDays
 	return r.storeGeneration
 }
 
@@ -224,7 +229,7 @@ func (r *agentIdentityRecorder) clearStoreSource(token uint64) {
 	if r.storeGeneration != token {
 		return
 	}
-	r.storeSource, r.dataDir = nil, nil
+	r.storeSource, r.dataDir, r.retentionDays = nil, nil, nil
 	if r.ownStore != nil {
 		_ = r.ownStore.Close()
 		r.ownStore = nil
@@ -284,8 +289,41 @@ func (r *agentIdentityRecorder) runFlusher(ctx context.Context, interval time.Du
 			return
 		case <-ticker.C:
 			flush(ctx)
+			if !ManagedEnterpriseActive() {
+				r.sweepOwnStore(ctx)
+			}
 		}
 	}
+}
+
+// sweepOwnStore prunes agent identities and sessions past the retention
+// window from the inventory.db the recorder opens while AI discovery is
+// off, which no discovery sweep reaches (GAP-0289). A store discovery owns
+// is left to discovery's sweep, and an inventory.db that does not exist is
+// not created for it.
+func (r *agentIdentityRecorder) sweepOwnStore(ctx context.Context) {
+	r.storeMu.Lock()
+	source, dataDir, days, own := r.storeSource, r.dataDir, r.retentionDays, r.ownStore
+	r.storeMu.Unlock()
+	if days == nil || (source != nil && source() != nil) {
+		return
+	}
+	if own == nil {
+		dir := ""
+		if dataDir != nil {
+			dir = strings.TrimSpace(dataDir())
+		}
+		if dir == "" {
+			return
+		}
+		if _, err := os.Stat(filepath.Join(dir, "inventory.db")); err != nil {
+			return
+		}
+		if own = r.store(); own == nil {
+			return
+		}
+	}
+	r.ownSweep.SweepIfDue(ctx, own, days())
 }
 
 func (r *agentIdentityRecorder) pendingCount() int {
@@ -498,16 +536,30 @@ func mergeAgentIdentityRows(
 // like the rest (GAP-0103). A row whose account no longer resolves keeps its
 // name.
 func nameAgentIdentityRows(rows []agentIdentityRow) {
-	names := map[string]string{}
+	name := hostAccountNamer()
 	for i := range rows {
-		name, ok := names[rows[i].UserID]
+		if n := name(rows[i].UserID); n != "" {
+			rows[i].UserName = n
+		}
+	}
+}
+
+// hostAccountNamer names accounts by uid or SID as the host's account
+// database does (an SSSD account keeps its qualified name), looking each id
+// up once. The admin views that list accounts (agent identities, IDE
+// plugins) name a user the same way (GAP-0278).
+func hostAccountNamer() func(id string) string {
+	names := map[string]string{}
+	return func(id string) string {
+		if id == "" {
+			return ""
+		}
+		name, ok := names[id]
 		if !ok {
-			name = sanitizeLLMEventUser(userScopedIdentityName(rows[i].UserID))
-			names[rows[i].UserID] = name
+			name = sanitizeLLMEventUser(userScopedIdentityName(id))
+			names[id] = name
 		}
-		if name != "" {
-			rows[i].UserName = name
-		}
+		return name
 	}
 }
 

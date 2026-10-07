@@ -339,9 +339,13 @@ func bindUserScopedIdentity(r *http.Request, identity string) (*http.Request, bo
 }
 
 // userScopedNamesEqual compares an account name the way the platform does:
-// Windows account names are case-insensitive, POSIX names are not.
+// Windows account names are case-insensitive, POSIX names are not. Both
+// sides compare by their bare account, because the host may name a
+// directory account qualified (alice@realm, CORP\alice) while the caller
+// sends the bare name (GAP-0290).
 func userScopedNamesEqual(identity, presented, resolved string) bool {
 	presented = useridentity.BareAccountName(presented)
+	resolved = useridentity.BareAccountName(resolved)
 	if useridentity.KindForID(identity) == useridentity.KindWindowsSID {
 		return strings.EqualFold(presented, resolved)
 	}

@@ -101,12 +101,12 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	ad, sssd := useridentity.DirectoryActiveDirectory, useridentity.SourceSSSD
 	want := map[int]view{
-		70001: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "alice@CORP.EXAMPLE.COM"},
-		70002: {ad, sssd, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@EMEA.CORP.EXAMPLE.COM"},
-		70003: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "carol@CORP.EXAMPLE.COM"},
-		70004: {"", sssd, "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@LDAP.EXAMPLE.ORG"},
+		70001: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "alice@corp.example.com"},
+		70002: {ad, sssd, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@emea.corp.example.com"},
+		70003: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "carol@corp.example.com"},
+		70004: {"", sssd, "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@ldap.example.org"},
 		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
-		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@CORP.EXAMPLE.COM"},
+		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@corp.example.com"},
 		70006: {ad, useridentity.SourceWinbind, "emea", "", ""},
 	}
 	r := newFakeNSS(f)

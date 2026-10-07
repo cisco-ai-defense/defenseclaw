@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList pins GAP-0145: a
@@ -44,5 +46,25 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "94401104.json")); !os.IsNotExist(err) {
 		t.Errorf("a record older than IdentitySpoolMaxAge was kept (stat error %v)", err)
+	}
+}
+
+// GAP-0284: a record that resolved no UPN (a signed-out Windows user) keeps
+// the account's last known UPN and principal instead of account@REALM.
+func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {
+	const sid = "S-1-5-21-1111-2222-3333-1105"
+	previous := IdentitySpoolRecord{Key: sid, UPNSource: UPNSourceTranslateName, Facts: useridentity.DirectoryFacts{
+		Principal: "dcad-alice@dclab.test", UPN: "dcad-alice@dclab.test", Domain: "dclab.test", Realm: "DCLAB.TEST",
+	}}
+	signedOut := IdentitySpoolRecord{Key: sid, Facts: useridentity.DirectoryFacts{
+		Principal: useridentity.AccountPrincipal("dcad-alice", "DCLAB.TEST"), Realm: "DCLAB.TEST",
+	}}
+	got := KeepLastKnownUPN(signedOut, previous)
+	if got.Facts.UPN != "dcad-alice@dclab.test" || got.Facts.Principal != "dcad-alice@dclab.test" ||
+		got.UPNSource != UPNSourceTranslateName {
+		t.Fatalf("record = %+v, want the last known UPN", got)
+	}
+	if other := KeepLastKnownUPN(IdentitySpoolRecord{Key: "S-1-5-21-1111-2222-3333-1106"}, previous); other.Facts.UPN != "" {
+		t.Fatalf("another account took the UPN: %+v", other)
 	}
 }
