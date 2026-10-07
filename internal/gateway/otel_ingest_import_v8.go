@@ -494,8 +494,7 @@ func inboundConversationRootAgentV8(
 	if correlation.AgentID != "" || selected["gen_ai.agent.id"] {
 		return fields
 	}
-	correlation.AgentID = agentNodeID(
-		agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), correlation.SessionID),
+	correlation.AgentID = agentNodeID(nativeSessionAgentScopeV8(ctx, source, correlation.SessionID),
 		source, correlation.SessionID, "root")
 	if field, ok := inboundTargetFieldsByName(target)["gen_ai.agent.id"]; ok {
 		fields = append(fields, observability.NewInboundMappedString(field, correlation.AgentID))
@@ -504,6 +503,20 @@ func inboundConversationRootAgentV8(
 		}
 	}
 	return fields
+}
+
+// nativeSessionAgentScopeV8 is the agent identity (agt-) that scopes the
+// agent ids of a native record's session, as hookLLMEventMeta scopes those of
+// its hook rows (GAP-0232): the one on ctx or the one the session's hooks
+// registered, else the one the hook path derives for the record's connector
+// and the authenticated caller. A record that arrives before the session's
+// first hook has neither of the first two, and an unscoped id names an agent
+// no hook row carries (GAP-0082).
+func nativeSessionAgentScopeV8(ctx context.Context, connectorName, sessionID string) string {
+	if scope := agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID); scope != "" {
+		return scope
+	}
+	return resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}).ID
 }
 
 func selectedInboundLogTime(record *logspb.LogRecord, receipt time.Time) (time.Time, error) {

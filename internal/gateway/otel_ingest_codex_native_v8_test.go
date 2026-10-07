@@ -410,6 +410,7 @@ func TestOTLPInboundRealCodexTurnProjectsOnceAndJoinsHookRoot(t *testing.T) {
 // so it joins them (GAP-0082).
 func TestOTLPInboundCodexPromptBeforeHooksNamesConversationRootAgent(t *testing.T) {
 	const conversationID = "019f4f18-3c1c-7f00-80b2-8248d5894a11"
+	InstallSharedAgentRegistry("", "")
 	importPrompt := func(api *APIServer) string {
 		t.Helper()
 		fixture := newCodexNativeOTLPFixture(t)
@@ -449,7 +450,10 @@ func TestOTLPInboundCodexPromptBeforeHooksNamesConversationRootAgent(t *testing.
 		return agentID
 	}
 	agentID := importPrompt(&APIServer{})
-	want := hookLLMEventMeta(t.Context(), "codex", conversationID, "", "", "", "", "", "", map[string]interface{}{}).AgentID
+	// The root agent the session's hooks record, scoped by the agent
+	// identity the hook path derives (GAP-0232).
+	hookCtx := enrichAgentHookContext(t.Context(), agentHookRequest{ConnectorName: "codex", SessionID: conversationID})
+	want := hookLLMEventMeta(hookCtx, "codex", conversationID, "", "", "", "", "", "", map[string]interface{}{}).AgentID
 	if agentID != want {
 		t.Fatalf("model.request agent_id=%q, want the hook records' root agent %q", agentID, want)
 	}
