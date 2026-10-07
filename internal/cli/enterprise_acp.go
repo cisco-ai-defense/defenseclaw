@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -126,6 +127,19 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 			return enterpriseACPEnrollment{}, fmt.Errorf(
 				"central ACP policy does not explicitly authorize %s/%s in profile %s", client, agent, profile,
 			)
+		}
+	}
+	// The principal is the account RunAsTarget proves owns the home the
+	// bearer is published to: the uid on Linux and macOS, the SID on
+	// Windows. The gateway binds only that kind as the verified subject, so
+	// the other kind is refused, not recorded (GAP-0200). Secure Client
+	// binds no subject and keeps its selectors.
+	if !cfg.SecureClientIntegration() {
+		if runtime.GOOS == "windows" && (enterpriseACPUID >= 0 || enterpriseACPGID >= 0) {
+			return enterpriseACPEnrollment{}, errors.New("enterprise ACP enrollment: --uid and --gid apply only on Linux and macOS; use --user or --sid")
+		}
+		if runtime.GOOS != "windows" && strings.TrimSpace(enterpriseACPSID) != "" {
+			return enterpriseACPEnrollment{}, errors.New("enterprise ACP enrollment: --sid applies only on Windows; use --user or --uid")
 		}
 	}
 	target, err := resolveEnterpriseHookTargetValues(
