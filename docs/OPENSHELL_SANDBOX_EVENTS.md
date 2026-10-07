@@ -336,7 +336,10 @@ OpenShell does not report, has no record. An OpenShell launch makes both a
 lineage once a sample saw them).
 
 With the tree on, `sandbox destinations` and its API name the lineage of the
-process that made each connection (`lineage`, the process first).
+process that made each connection (`lineage`, the process first). OpenShell's
+NET records name the program but pid 0 (both drivers), so a row takes the
+one process of its last binary that ran when the host was last seen; none,
+or two copies at once, leave it without a lineage.
 
 ### AI discovery inside a sandbox
 

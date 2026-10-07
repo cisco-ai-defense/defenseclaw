@@ -248,6 +248,34 @@ func psAnswer(lines ...string) *string {
 	return &s
 }
 
+// TestDestinationLineageByProgram (GAP-0139, GAP-0133): OpenShell names pid 0
+// for every connection on both drivers, so a destination never had a
+// lineage although its program was in the tree. The one process of that
+// program running when the host was seen gives it; two copies give none.
+func TestDestinationLineageByProgram(t *testing.T) {
+	var sample atomic.Pointer[string]
+	tree := []string{"P 1 0 1000 10", "Pc 1 init", "P 124 1 1000 20", "Pc 124 claude", "P 521 124 1000 30", "Pc 521 bash",
+		"P 526 521 1000 40", "Pc 526 curl", "L /proc/526 exe /usr/bin/curl"}
+	sample.Store(psAnswer(tree...))
+	e := treeEnv(t, "linbox", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
+		t.Fatal("no sample")
+	}
+	e.ocsf("linbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> pypi.org:443/tcp [policy:allow_pypi engine:opa]", time.Now())
+	d, err := e.m.Destinations(context.Background(), "linbox")
+	if err != nil || len(d.Destinations) != 1 || len(d.Destinations[0].Lineage) != 4 || d.Destinations[0].Lineage[0].PID != 526 ||
+		d.Destinations[0].Lineage[1].Comm != "bash" || d.Destinations[0].Lineage[2].Comm != "claude" {
+		t.Fatalf("destinations = %+v, %v", d.Destinations, err)
+	}
+	sample.Store(psAnswer(append(tree, "P 530 521 1000 50", "Pc 530 curl", "L /proc/530 exe /usr/bin/curl")...))
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
+		t.Fatal("no sample")
+	}
+	if d, _ = e.m.Destinations(context.Background(), "linbox"); len(d.Destinations[0].Lineage) != 0 {
+		t.Fatalf("two copies of the program ran: lineage %+v", d.Destinations[0].Lineage)
+	}
+}
+
 func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	var sample atomic.Pointer[string]
 	sample.Store(psAnswer("P 1 0 0 10", "Pc 1 init", "P 42 1 1000 20", "Pc 42 claude", "Pa 42 claude", "Pa 42 --token=dccertvalue",

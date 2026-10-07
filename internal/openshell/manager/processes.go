@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"maps"
 	"path"
 	"regexp"
 	"slices"
@@ -399,6 +400,39 @@ func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
 		pid = node.PPID
 	}
 	return out
+}
+
+// PIDOf is the pid of the one process of sandbox sandboxName whose
+// executable is exe and that ran at at (started by then, not seen exiting
+// before), from the sandbox's process tree; 0 while the tree is off, or when
+// it holds no such process or several. A program shorter than a sample
+// interval is not in the tree. It implements ProcessLookup.
+func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
+	m.mu.Lock()
+	b := m.boxes[sandboxName]
+	var t *procTree
+	if b != nil {
+		t = b.procs
+	}
+	m.mu.Unlock()
+	if t == nil || exe == "" || at.IsZero() {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pid := 0
+	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), t.exited} {
+		for _, n := range nodes {
+			if n.Exe != exe || n.Start.After(at) || (!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) || n.PID == pid {
+				continue
+			}
+			if pid != 0 {
+				return 0
+			}
+			pid = n.PID
+		}
+	}
+	return pid
 }
 
 var _ ProcessLookup = (*Manager)(nil)

@@ -87,6 +87,9 @@ const (
 // tree is off has destinations without lineage.
 type ProcessLookup interface {
 	Lineage(sandboxName string, pid int) []ProcessRef
+	// PIDOf is the pid of the one process of the sandbox whose executable
+	// is exe and that ran at at; 0 for none or several.
+	PIDOf(sandboxName, exe string, at time.Time) int
 }
 
 // ProcessRef is one process of a lineage, as the process index saw it in
@@ -784,7 +787,16 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 		return cmp.Or(cmp.Compare(b.Calls, a.Calls), cmp.Compare(a.Provider, b.Provider), cmp.Compare(a.Model, b.Model))
 	})
 	for i := range out.Destinations {
-		out.Destinations[i].Lineage = m.lineage(info.name, out.Destinations[i].PID)
+		d := &out.Destinations[i]
+		pid := d.PID
+		if pid <= 0 && m.procs != nil && len(d.Binaries) > 0 {
+			// OpenShell names no pid for a connection (its NET records
+			// say 0 on both drivers): the program the row names, at the
+			// time it was last seen, finds its process in the tree, when
+			// exactly one copy of it ran then (GAP-0139).
+			pid = m.procs.PIDOf(info.name, d.Binaries[len(d.Binaries)-1], d.LastSeen)
+		}
+		d.Lineage = m.lineage(info.name, pid)
 	}
 	return out, nil
 }
