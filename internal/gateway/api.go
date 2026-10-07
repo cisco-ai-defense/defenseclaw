@@ -1387,6 +1387,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
+			if directory := directoryHealthSummary(directoryCacheHealth()); directory != nil {
+				body["directory"] = directory
+			}
 			// Non-secret fingerprints of the per-user credential keys that
 			// authenticate right now (a rotation's staged key included).
 			body["user_scoped_credentials"] = map[string]interface{}{

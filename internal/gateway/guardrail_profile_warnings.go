@@ -227,6 +227,17 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 // replace it.
 var directoryCacheHealth = func() identityCacheHealth { return peerDirectoryCache().health() }
 
+// directoryHealthSummary is the "directory" object of the unauthenticated
+// /health document on the standalone profile: how many accounts fail since
+// when, and no reason or account, because the reason can name one. The Linux
+// and macOS lifecycle turns it into a warning of status and verify (GAP-0216).
+func directoryHealthSummary(h identityCacheHealth) map[string]any {
+	if h.Failing == 0 {
+		return nil
+	}
+	return map[string]any{"failing": h.Failing, "since": h.Since.UTC().Format(time.RFC3339), "stale": h.Stale}
+}
+
 // directoryHealthView returns the "directory" object of the resolve answer
 // and its one-line message, or nil when no lookup failed recently.
 func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]any, message string) {
