@@ -60,6 +60,35 @@ func TestCommandLineRedactsSecrets(t *testing.T) {
 	}
 }
 
+// TestCommandLineRedactsQuotedWords: the quotes a word starts or ends with
+// are set aside while it is checked and kept after, so a quoted secret is
+// redacted on every path that splits a command line on white space
+// (Tetragon's arguments, the helper's cn_proc fallback, OpenShell's OCSF
+// lines, the hook join's command hash).
+func TestCommandLineRedactsQuotedWords(t *testing.T) {
+	line := `bash -c "--token=dccertvalue" '--password' "dccert-block-marker" "dccert0123456789dccert0123456789" "plain"`
+	got := CommandLine(strings.Fields(line), 1024)
+	for _, leak := range []string{"dccertvalue", "dccert-block-marker", "dccert0123456789dccert0123456789"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("cmdline %q keeps %q", got, leak)
+		}
+	}
+	for _, kept := range []string{`bash -c "--token=<redacted`, `'--password' "<redacted`, `" "plain"`} {
+		if !strings.Contains(got, kept) {
+			t.Fatalf("cmdline %q lacks %q", got, kept)
+		}
+	}
+	if !strings.HasSuffix(got, `"plain"`) {
+		t.Fatalf("cmdline %q lost the closing quote of its last word", got)
+	}
+	// Words that are only quotes, and quoted look-alikes, stay as they are.
+	for _, argv := range [][]string{{"echo", `""`, `''`}, {"python3", `"-u"`, `'main.py'`}} {
+		if got := CommandLine(argv, 1024); got != strings.Join(argv, " ") {
+			t.Fatalf("cmdline %q of %q", got, argv)
+		}
+	}
+}
+
 func TestCommandLineBound(t *testing.T) {
 	if long := CommandLine([]string{strings.Repeat("a ", 2000)}, 1024); len(long) > 1024 {
 		t.Fatalf("cmdline of %d bytes", len(long))

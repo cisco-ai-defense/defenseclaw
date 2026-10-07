@@ -60,15 +60,22 @@ func CommandLine(args []string, max int) string {
 }
 
 // CommandArgs is CommandLine's pass without the join: one output word per
-// argument, with the same rules. A caller that has to re-attach quoting
-// around each word (the sensor helper rendering Tetragon's arguments) uses
-// it; a placeholder can contain spaces, so a joined line cannot be split
-// back into words.
+// argument, with the same rules. A caller that needs the words (the hook
+// join's command hash) uses it; a placeholder can contain spaces, so a joined
+// line cannot be split back into words.
+//
+// The quotes a word starts or ends with are set aside while the word is
+// checked and put back after. A command line split on white space keeps the
+// quoting of its arguments (Tetragon wraps an argument with a space in double
+// quotes, a tool shell runs `-c "... eval '...'"`, /proc keeps a shell's
+// literal quotes), and the rules are anchored at the start of a word, so
+// without this `"--token=..."` would pass unredacted.
 func CommandArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	mysql := len(args) > 0 && mysqlClient(args[0])
 	hideNext, userNext := false, false
-	for _, a := range args {
+	for _, word := range args {
+		opening, a, closing := splitEdgeQuotes(word)
 		user := userNext
 		userNext = false
 		switch {
@@ -96,9 +103,18 @@ func CommandArgs(args []string) []string {
 			sub := cmdlineURLPassword.FindStringSubmatch(m)
 			return sub[1] + ForSinkEntity(sub[2]) + "@"
 		})
-		out = append(out, a)
+		out = append(out, opening+a+closing)
 	}
 	return out
+}
+
+// splitEdgeQuotes splits the quote characters a word starts and ends with
+// off its core.
+func splitEdgeQuotes(word string) (opening, core, closing string) {
+	core = strings.TrimLeft(word, `"'`)
+	opening = word[:len(word)-len(core)]
+	trimmed := strings.TrimRight(core, `"'`)
+	return opening, trimmed, core[len(trimmed):]
 }
 
 // TruncateUTF8 cuts s to at most n bytes without splitting a UTF-8

@@ -737,21 +737,8 @@ func HookCommandHash(command string) string {
 	}
 	// A leading shell word stands in for the program the helper saw first
 	// (bash -c ...), so argv[0]-dependent rules decide the same way.
-	argv := append(make([]string, 0, len(words)+1), "sh")
-	opening := make([]string, len(words))
-	closing := make([]string, len(words))
-	for index, word := range words {
-		core := strings.TrimLeft(word, `"'`)
-		opening[index] = word[:len(word)-len(core)]
-		trimmed := strings.TrimRight(core, `"'`)
-		closing[index] = core[len(trimmed):]
-		argv = append(argv, trimmed)
-	}
-	redacted := redaction.CommandArgs(argv)[1:]
-	for index := range redacted {
-		redacted[index] = opening[index] + redacted[index] + closing[index]
-	}
-	return commandDigest(strings.Join(redacted, " "))
+	argv := append(append(make([]string, 0, len(words)+1), "sh"), words...)
+	return commandDigest(strings.Join(redaction.CommandArgs(argv)[1:], " "))
 }
 
 // HookArgvCommand is the shell command an argv-shaped tool input runs: the
