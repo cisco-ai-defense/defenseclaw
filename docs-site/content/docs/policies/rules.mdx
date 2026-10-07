@@ -42,7 +42,7 @@ defenseclaw guardrail use-pack --clear --connector codex # back to the global pa
 defenseclaw guardrail list-packs                         # who enforces which
 ```
 
-A global `use-pack` removes the per-connector `rule_pack` entries and says which ones it removed. Profile scopes have no `use-pack` option; set them with `defenseclaw config set guardrail.profiles.contractors.rule_pack strict`. The most specific scope wins: profile connector, then profile, then connector, then global. Pack names are lower case letters, digits, `-` and `_`, at most 64 characters.
+A global `use-pack` removes the per-connector `rule_pack` entries and says which ones it removed. It also drops `enable`, `disable` and `severity_overrides` IDs that the new pack does not have (protection packs layered on it count), in the same save, and says which. That is the way out when a pack directory was deleted: `defenseclaw guardrail use-pack default` saves a valid config even though the rules the old pack defined are still named. Profile scopes have no `use-pack` option; set them with `defenseclaw config set guardrail.profiles.contractors.rule_pack strict`. The most specific scope wins: profile connector, then profile, then connector, then global. Pack names are lower case letters, digits, `-` and `_`, at most 64 characters.
 
 ## Add your own pack
 
@@ -197,8 +197,8 @@ Most keys have a command that edits them through the config writer (`sensitive_t
 
 | Command | Writes |
 | --- | --- |
-| `defenseclaw guardrail rule disable RULE_ID` | `guardrail.rules.disable` |
-| `defenseclaw guardrail rule enable RULE_ID` | `guardrail.rules.enable`, and removes the ID from `disable` in the same scope |
+| `defenseclaw guardrail rule disable RULE_ID` | `guardrail.rules.disable`, and removes the ID from `enable` in the same scope. When the pack already ships the rule off, it only removes the `enable` entry |
+| `defenseclaw guardrail rule enable RULE_ID` | `guardrail.rules.enable`, and removes the ID from `disable` in the same scope. When the pack ships the rule on, it only removes the `disable` entry, so a disable followed by an enable leaves the config as it was |
 | `defenseclaw guardrail rule severity RULE_ID high` | `guardrail.rules.severity_overrides` (`critical`, `high`, `medium`, `low`; `default` removes the override) |
 | `defenseclaw guardrail suppress add ID --finding PATTERN --entity PATTERN --reason TEXT` | `guardrail.rules.suppressions` (`--finding` and `--reason` are required) |
 | `defenseclaw guardrail suppress remove ID` | removes that suppression |
