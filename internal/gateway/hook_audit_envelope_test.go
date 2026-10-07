@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // TestRenderHookAuditEnvelope_RoundTrip locks the v1 schema field
@@ -241,6 +243,29 @@ func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
 	}
 	if _, repeated := got.Structured["rule_pack_dir"]; repeated || strings.Contains(got.Details, "alice@corp.example") {
 		t.Fatalf("rule-pack directory repeated in the envelope text: %#v / %q", got.Structured, got.Details)
+	}
+}
+
+// The Secure Client profile keeps the rule-pack directory inside the hook
+// envelope, as on main (issue #1092); other profiles carry it only in its own
+// path-class field (GAP-0131).
+func TestLogConnectorHookAuditEnvelopeSecureClientKeepsRulePackDir(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	dir := "/opt/cisco/secureclient/defenseclaw/runtime/policies/guardrail/default"
+	if err := api.logConnectorHookAuditEnvelope(context.Background(), HookAuditEnvelope{
+		Connector: "codex", Event: "PreToolUse", Action: "allow", RulePackDir: dir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ListEvents(10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("ListEvents = %d, %v", len(events), err)
+	}
+	if got := events[0]; got.Structured["rule_pack_dir"] != dir || got.RulePackDir != dir {
+		t.Fatalf("Secure Client rule_pack_dir: structured %#v, column %q", got.Structured["rule_pack_dir"], got.RulePackDir)
 	}
 }
 

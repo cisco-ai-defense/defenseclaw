@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -723,6 +724,21 @@ func TestDiffConfigsMarksACPChangedHotReloadable(t *testing.T) {
 	}
 	if slices.Contains(diff.RestartRequired, "acp") {
 		t.Fatalf("restart_required = %v, ACP must hot reload", diff.RestartRequired)
+	}
+}
+
+// GAP-0104: an ai_discovery edit reloads hot (GAP-0047) except under Secure
+// Client, which keeps the restart of main (issue #1092).
+func TestDiffConfigsAIDiscoveryRestartOnlyForSecureClient(t *testing.T) {
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		oldCfg := config.DefaultConfig()
+		oldCfg.DeploymentMode, oldCfg.Enterprise.Profile = managed.DeploymentModeManagedEnterprise, profile
+		newCfg := cloneConfig(oldCfg)
+		newCfg.AIDiscovery.Enabled = !oldCfg.AIDiscovery.Enabled
+		diff := diffConfigs(oldCfg, newCfg)
+		if got, want := slices.Contains(diff.RestartRequired, "ai_discovery"), profile == managed.ProfileSecureClient; got != want {
+			t.Fatalf("%s: restart_required = %v, ai_discovery restart %t, want %t", profile, diff.RestartRequired, got, want)
+		}
 	}
 }
 

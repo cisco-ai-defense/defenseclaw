@@ -635,7 +635,9 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		// The directory is a path-class field of the projection: the column keeps
 		// what the local profile kept, as target and details do, so a store that
 		// hashes or removes paths never holds the raw one.
-		if value, kept := keptCompatibilityValue(projected, "rule_pack_dir", strings.TrimSpace(legacy.RulePackDir)); kept {
+		if legacy.RulePackDirInEnvelope {
+			legacyRulePackDir = nullStr(legacy.RulePackDir)
+		} else if value, kept := keptCompatibilityValue(projected, "rule_pack_dir", strings.TrimSpace(legacy.RulePackDir)); kept {
 			legacyRulePackDir = nullStr(value)
 		}
 	}

@@ -201,7 +201,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
-	connectors := effectiveWindowsHookConnectors(cfg)
+	connectors := EffectiveWindowsHookConnectors(cfg)
 	if len(connectors) == 0 {
 		// No enabled hook-based connector → no per-user rows to
 		// emit. Return an empty (but valid) manifest so the atomic
@@ -1049,7 +1049,7 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 	return sid.SubAuthority(0) == securityNTNonUnique
 }
 
-// effectiveWindowsHookConnectors returns the connector names for
+// EffectiveWindowsHookConnectors returns the connector names for
 // which the enumerator emits per-user rows. Filters the operator-
 // configured connector list down to those the Windows per-user
 // installer actually supports (see `windowsHookConnectors`),
@@ -1073,7 +1073,7 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
 // authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
-func effectiveWindowsHookConnectors(cfg *config.Config) []string {
+func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
 	seen := make(map[string]struct{})
 	// disabledNames captures every name the operator explicitly
 	// disabled in cfg.Guardrail.Connectors. The scalar-connector

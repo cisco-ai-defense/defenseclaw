@@ -98,6 +98,9 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		caller := auditCallerIdentity(ctx)
 		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
 	}
+	if a.managedAIDOnly() {
+		env.SecureClientRulePackDir = env.RulePackDir
+	}
 	auditAction := string(audit.ActionConnectorHook)
 	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
 		auditAction = env.AuditActionOverride
@@ -122,6 +125,9 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		StepIdx:     env.StepIdx,
 		Enforced:    env.Enforced,
 		RulePackDir: env.RulePackDir,
+		// Secure Client keeps the directory in the envelope and the raw
+		// column, as on main (issue #1092).
+		RulePackDirInEnvelope: env.SecureClientRulePackDir != "",
 		// Carry the cloud-controlled per-inspection redaction directive
 		// (re-injected onto ctx before finalizeAgentHook) so the audit
 		// sanitize + webhook fan-out honor it on the Details surface.

@@ -190,7 +190,7 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := effectiveWindowsHookConnectors(tc.cfg)
+			got := EffectiveWindowsHookConnectors(tc.cfg)
 			if len(got) != len(tc.want) {
 				t.Fatalf("length mismatch: got %v (len=%d), want %v (len=%d)", got, len(got), tc.want, len(tc.want))
 			}
