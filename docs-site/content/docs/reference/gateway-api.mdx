@@ -565,6 +565,12 @@ settings under `effective`; `subject` is still resolved when `user` is given.
 Rows are most recently seen first. The gateway writes new rows to
 `inventory.db` in a batch every 30 seconds, and the route writes the rows it
 has not written yet before it lists them, so a new agent shows at once.
+While the gateway cannot write `inventory.db` (a read-only file or a full
+disk), `persisted` is `false` and `persist_error` says why: the rows are then
+held in memory only, and their counts and first-seen times reset at the next
+restart. `/health` reports the same under `agent_identities`, and
+`defenseclaw status` and `defenseclaw doctor` warn about it. The rows are
+saved on the next write that succeeds, without a restart.
 `sessions_seen` counts each chat once, however many are open and also when one
 resumes after a gateway restart. A sub-agent that runs in a session of its own,
 as a Codex 0.160 thread does, is not a chat and is not counted. `total` counts every matching identity; while

@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -338,6 +340,50 @@ func TestAgentIdentitiesRoutePages(t *testing.T) {
 	}
 	if code, _, _, _ = get("?limit=0"); code != http.StatusBadRequest {
 		t.Fatalf("limit=0 answered %d, want 400", code)
+	}
+}
+
+// GAP-0393: when inventory.db cannot be written, agent identities run from
+// memory. The route says persisted false with the reason, and /health carries
+// it for status and doctor.
+func TestAgentIdentityLedgerWriteFailureIsReported(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a file mode the test user cannot write through")
+	}
+	agentIdentityTestSetup(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "inventory.db")
+	store, err := inventory.NewInventoryStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755); _ = os.Chmod(path, 0o644) })
+	prev := sharedAgentIdentities
+	sharedAgentIdentities = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	token := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore { return nil },
+		func() string { return dir }, func() int { return 1 })
+	t.Cleanup(func() { sharedAgentIdentities.clearStoreSource(token); sharedAgentIdentities = prev })
+	sharedAgentIdentities.observe(agentIdentityFacts{ID: "agt-0000000000000393", UserID: "4393", Connector: "claudecode", MachineHash: "m"}, "s-1", true)
+
+	rec := httptest.NewRecorder()
+	(&APIServer{}).handleAgentIdentities(rec, httptest.NewRequest(http.MethodGet, "/api/v1/agents/identities", nil))
+	var body struct {
+		Persisted    bool   `json:"persisted"`
+		PersistError string `json:"persist_error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != http.StatusOK || body.Persisted ||
+		body.PersistError == "" {
+		t.Fatalf("route = %d %s, want persisted false with the reason", rec.Code, rec.Body.String())
+	}
+	if ledger := agentIdentityLedgerHealth(); ledger == nil || ledger["persisted"] != false || ledger["error"] == "" {
+		t.Fatalf("/health agent_identities = %v, want the write failure", ledger)
 	}
 }
 

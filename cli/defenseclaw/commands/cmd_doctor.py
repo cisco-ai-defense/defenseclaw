@@ -8296,6 +8296,31 @@ def _check_openclaw_transport_advisory(cfg, r: _DoctorResult) -> None:
     )
 
 
+def agent_identity_ledger_failure(health: dict | None) -> str:
+    """The gateway's report that agent identities are not saved, in plain words, or "" (GAP-0393)."""
+    ledger = health.get("agent_identities") if isinstance(health, dict) else None
+    if not isinstance(ledger, dict) or ledger.get("persisted") is not False:
+        return ""
+    reason = str(ledger.get("error") or "").strip()[:200]
+    detail = "not saved to inventory.db" + (f" ({reason})" if reason else "")
+    return detail + ": session counts and first-seen times reset at the next gateway restart"
+
+
+def _check_agent_identity_ledger(health: dict | None, r: _DoctorResult) -> None:
+    detail = agent_identity_ledger_failure(health)
+    if detail:
+        _emit(
+            "warn",
+            "Agent identity ledger",
+            detail,
+            r=r,
+            remediation=(
+                "make inventory.db in the data directory writable and free disk space; "
+                "the gateway saves the identities it holds on its next write, without a restart"
+            ),
+        )
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
@@ -10626,6 +10651,7 @@ def doctor(
     sidecar_health = _check_sidecar(cfg, r)
     if sidecar_health is not None:
         _check_guardrail_profile(cfg, r)
+        _check_agent_identity_ledger(sidecar_health, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):

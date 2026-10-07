@@ -68,4 +68,26 @@ def test_identities_forwards_filters_and_renders_rows(stub_client: _StubClient) 
     # GAP-0152: every page is listed, each identity once.
     as_json = CliRunner().invoke(cli, ["agent", "identities", "--json"])
     assert as_json.exit_code == 0, as_json.output
-    assert json.loads(as_json.output) == {"enabled": True, "identities": [_ROW, _ROW2], "total": 2, "next_cursor": ""}
+    assert json.loads(as_json.output) == {
+        "enabled": True, "persisted": True, "identities": [_ROW, _ROW2], "total": 2, "next_cursor": "",
+    }
+
+
+def test_identities_not_saved_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0393: a ledger the gateway cannot save keeps the API's flag in --json
+    # and warns in the table, status and doctor.
+    from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
+
+    class _Unsaved(_StubClient):
+        def agent_identities(self, **_: Any) -> dict[str, Any]:
+            return {"enabled": True, "persisted": False, "persist_error": "attempt to write a readonly database",
+                    "identities": [_ROW], "total": 1, "next_cursor": ""}
+
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: _Unsaved())
+    as_json = CliRunner().invoke(cli, ["agent", "identities", "--json"])
+    assert json.loads(as_json.output)["persisted"] is False
+    table = CliRunner().invoke(cli, ["agent", "identities"])
+    assert "not being saved" in table.output
+    health = {"agent_identities": {"persisted": False, "error": "attempt to write a readonly database"}}
+    assert "readonly database" in agent_identity_ledger_failure(health)
+    assert agent_identity_ledger_failure({"telemetry": {"state": "running"}}) == ""
