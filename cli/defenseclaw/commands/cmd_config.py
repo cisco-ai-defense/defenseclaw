@@ -663,7 +663,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
     # else is not a configuration key (a typo must not look like success).
     for key, parts in parsed:
         view = _key_view(app, parts)
-        if not _admission_layer_key(parts) and not _lookup(view, parts)[0]:
+        if not _admission_layer_key(parts) and not _lookup(view, parts)[0] and not _unlisted_entry_key(parts):
             if _is_destination_key(parts):
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
@@ -728,6 +728,50 @@ def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
         else:
             return False, None
     return True, value
+
+
+def _unlisted_entry_key(parts: list) -> bool:
+    """Whether *parts* is a config_version 9 key under a map entry config.yaml
+    does not list, such as guardrail.connectors.codex.block_at or
+    guardrail.custom_packs.foo: the resolved view has no entry for that name
+    to look the key up in, but the schema declares it."""
+    schema = _v8_schema()
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    def _names_ok(rule: object, name: str) -> bool:
+        rule = _resolve(rule)
+        if not isinstance(rule, dict):
+            return True
+        if "enum" in rule and name not in rule["enum"]:
+            return False
+        if not rule.get("minLength", 0) <= len(name) <= rule.get("maxLength", len(name)):
+            return False
+        return "pattern" not in rule or re.search(str(rule["pattern"]), name) is not None
+
+    node: object = schema
+    removed: object = defs.get("v9SourceConstraints") or {}
+    through_entry = False
+    for part in parts:
+        node = _resolve(node)
+        if not isinstance(node, dict) or not isinstance(part, str):
+            return False
+        removed = removed if isinstance(removed, dict) else {}
+        properties = node.get("properties") or {}
+        if part in properties:
+            node, removed = properties[part], (removed.get("properties") or {}).get(part, {})
+        elif isinstance(node.get("additionalProperties"), dict) and _names_ok(node.get("propertyNames"), part):
+            node, removed = node["additionalProperties"], removed.get("additionalProperties", {})
+            through_entry = True
+        else:
+            return False
+        if removed is False:
+            return False
+    return through_entry
 
 
 def _v8_schema() -> dict:

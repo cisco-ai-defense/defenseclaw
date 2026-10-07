@@ -192,6 +192,10 @@ def test_get_follows_writer_paths_and_unset_refuses_a_typo(tmp_path: Path, monke
     assert typo.exit_code == 1 and "not a configuration key" in typo.output
     default = run("unset", "guardrail.block_at")
     assert default.exit_code == 0 and "default already applies" in default.output
+    # GAP-0308: a key under a connector config.yaml does not list is a key whose default applies.
+    absent = run("unset", "guardrail.connectors.codex.block_at")
+    assert absent.exit_code == 0 and "default already applies" in absent.output, absent.output
+    assert run("unset", "guardrail.connectors.codex.blok_at").exit_code == 1
 
 
 def test_v8_provenance_view_exposes_only_canonical_go_annotations(tmp_path: Path) -> None:
