@@ -86,7 +86,7 @@ parse_args() {
     [[ $u =~ ^[A-Za-z0-9._@-]+$ ]] || die "unsafe user name: $u"
   done
   [[ $DOMAIN =~ ^[A-Za-z0-9_-]+$ ]] || die "unsafe --domain"
-  [[ -z $EXPECT_GROUP || $EXPECT_GROUP =~ ^[A-Za-z0-9._@-]+$ ]] || die "unsafe --expect-group"
+  [[ -z $EXPECT_GROUP || $EXPECT_GROUP =~ ^[A-Za-z0-9._@\ -]+$ ]] || die "unsafe --expect-group"
   [[ -z $EXPECT_PROFILE || $EXPECT_PROFILE =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "unsafe --expect-profile"
   [[ -z $CONNECTOR || $CONNECTOR =~ ^[A-Za-z0-9_-]+$ ]] || die "unsafe --connector"
   [[ -z $ALLOW_GROUP || $ALLOW_GROUP =~ ^[A-Za-z0-9._-]+$ ]] || die "unsafe --allow-group"
@@ -156,7 +156,7 @@ check_user() {
   if groups=$(id -Gn "$user" 2> /dev/null); then
     info "groups: $groups"
     if [[ -n $EXPECT_GROUP ]]; then
-      if [[ " $groups " == *" $EXPECT_GROUP "* ]]; then
+      if [[ $groups == "$EXPECT_GROUP" || $groups == "$EXPECT_GROUP "* || $groups == *" $EXPECT_GROUP" || $groups == *" $EXPECT_GROUP "* ]]; then
         pass "id -Gn lists $EXPECT_GROUP"
       else
         fail "id -Gn does not list $EXPECT_GROUP. The Okta group needs a gidNumber and the user must be a member; SSSD caches entries for entry_cache_timeout (sss_cache -E refreshes them)"
@@ -176,11 +176,11 @@ check_user() {
 check_upn() {
   local user=$1 out
   if ((EUID != 0)); then
-    skip "InfoPipe userPrincipalName needs root"
+    fail "InfoPipe userPrincipalName needs root"
     return
   fi
   if ! command -v dbus-send > /dev/null; then
-    skip "InfoPipe userPrincipalName: dbus-send is not installed"
+    fail "InfoPipe userPrincipalName: dbus-send is not installed"
     return
   fi
   out=$(dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe \
@@ -220,11 +220,15 @@ detect_defenseclaw() {
 check_profile() {
   local user=$1 out summary
   if [[ -z $DC_CMD ]]; then
-    skip "profile check: no DefenseClaw found (run as root on a managed host, or as the user on a per-user install)"
+    if [[ -n $EXPECT_PROFILE ]]; then
+      fail "profile check: no DefenseClaw found (run as root on a managed host, or as the user on a per-user install)"
+    else
+      skip "profile check: no DefenseClaw found"
+    fi
     return
   fi
   if ! command -v python3 > /dev/null; then
-    skip "profile check: python3 is needed to read the answer"
+    if [[ -n $EXPECT_PROFILE ]]; then fail "profile check: python3 is needed to read the answer"; else skip "profile check: python3 is needed"; fi
     return
   fi
   if ! out=$(explain_json "$user" 2>&1); then
@@ -258,7 +262,7 @@ print("|".join([
     return
   fi
   if [[ $configured != True ]]; then
-    skip "no guardrail profiles are configured, so guardrail.* applies to $user"
+    if [[ -n $EXPECT_PROFILE ]]; then fail "no guardrail profiles are configured for $user"; else skip "no guardrail profiles are configured, so guardrail.* applies to $user"; fi
     return
   fi
   info "DefenseClaw: profile ${profile:-none}, match ${match:-none}${matched:+ ($matched)}, $groups group(s) seen"
