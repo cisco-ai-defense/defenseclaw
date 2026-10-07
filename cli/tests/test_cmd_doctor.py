@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -96,6 +97,23 @@ class DoctorPolicyStateTests(unittest.TestCase):
             cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
         self.assertEqual(result.checks[0]["status"], "warn")
         self.assertIn("guardrail.connectors", result.checks[0]["detail"])
+
+        # With the gateway stopped, a hand edit is still found from
+        # config.generation.json next to config.yaml (GAP-0305).
+        from defenseclaw import config_writer
+
+        with tempfile.TemporaryDirectory() as data_dir, patch.dict(os.environ, {"DEFENSECLAW_CONFIG": ""}):
+            config = os.path.join(data_dir, "config.yaml")
+            with open(config, "w", encoding="utf-8") as f:
+                f.write("config_version: 9\n")
+            config_writer.record_generation(config, hashlib.sha256(b"config_version: 9\n").hexdigest(), "cli:t", "")
+            for edited, want in ((False, "skip"), (True, "warn")):
+                if edited:
+                    with open(config, "a", encoding="utf-8") as f:
+                        f.write("# hand edit\n")
+                result = _DoctorResult()
+                cmd_doctor._check_policy_state(SimpleNamespace(data_dir=data_dir), result, live_health=None)
+                self.assertEqual(result.checks[0]["status"], want, result.checks[0])
 
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):

@@ -9024,11 +9024,11 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     """
     label = "Policy"
     if not isinstance(live_health, dict):
-        _emit("skip", label, "the gateway is not running", r=r)
+        _emit_policy_without_gateway(cfg, r, label, "the gateway is not running")
         return
     policy = live_health.get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
-        _emit("skip", label, "the gateway does not report an effective policy", r=r)
+        _emit_policy_without_gateway(cfg, r, label, "the gateway does not report an effective policy")
         return
     digest = str(policy.get("effective_digest") or "")
     generation = policy.get("generation")
@@ -9090,6 +9090,42 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         )
         return
     _emit("pass", label, f"{applied} (applied by the gateway)", r=r)
+
+
+def _unrecorded_config_generation(cfg) -> int | None:
+    """The generation config.generation.json records when config.yaml no
+    longer holds the bytes it recorded (a hand edit), else None. A file the
+    writer never recorded (no generation file yet) is not a hand edit."""
+    from defenseclaw import config_writer
+    from defenseclaw.config import config_path_for_data_dir
+
+    path = config_path_for_data_dir(getattr(cfg, "data_dir", None))
+    try:
+        state = config_writer.read_generation_state(path)
+        current = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return None
+    recorded = state.config_sha256.strip().lower().removeprefix("sha256:")
+    return state.generation if recorded and recorded != current else None
+
+
+def _emit_policy_without_gateway(cfg, r: _DoctorResult, label: str, why: str) -> None:
+    """With no live policy to read, still WARN about a hand edit from the
+    generation file next to config.yaml; otherwise the row is a skip."""
+    generation = _unrecorded_config_generation(cfg)
+    if generation is None:
+        _emit("skip", label, why, r=r)
+        return
+    _emit(
+        "warn",
+        label,
+        f"config.yaml was edited outside the DefenseClaw writer (config generation {generation} "
+        f"does not record the current file); {why}",
+        r=r,
+        check_id="doctor.policy.hand-edit",
+        reason_code="config-hand-edit",
+        remediation="Make changes with `defenseclaw config set`, the TUI or `defenseclaw setup`",
+    )
 
 
 def _check_signature_packs(cfg, r: _DoctorResult) -> None:
