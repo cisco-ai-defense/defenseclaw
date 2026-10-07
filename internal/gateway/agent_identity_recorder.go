@@ -91,10 +91,11 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
 	}
-	if newSession {
+	if newSession && sessionID != "" {
+		// The last session is the newest one counted, not the one that
+		// hooked last: the previous chat can hook once more after a new one
+		// started, as Codex's does after /new (GAP-0395).
 		rec.NoteSession(sessionID)
-	}
-	if sessionID != "" {
 		rec.LastSessionID = sessionID
 	}
 	if facts.InstallHint != "" && (len(r.hints) < agentIdentityRecorderMaxPending || r.hints[facts.ID] != "") {

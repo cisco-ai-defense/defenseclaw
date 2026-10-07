@@ -203,6 +203,9 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	recorder.observe(facts, "sess-b", true)
 	recorder.observe(facts, "sess-a", false)
 	recorder.observe(facts, "sess-c", true)
+	// The previous chat hooks once more after the new one started, as Codex's
+	// does after /new: the last session stays the newest (GAP-0395).
+	recorder.observe(facts, "sess-b", false)
 	if err := recorder.flush(ctx, store); err != nil {
 		t.Fatal(err)
 	}
