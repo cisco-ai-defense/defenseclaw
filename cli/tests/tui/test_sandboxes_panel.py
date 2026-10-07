@@ -272,7 +272,13 @@ def test_hook_events_are_in_the_details() -> None:
 DESTINATIONS = {
     "name": "myapp-claude-7f3a",
     "destinations": [
-        {"host": "api.openai.com", "kind": "other_ai_api", "provider": "OpenAI", "tunnels": 3, "binaries": ["/usr/bin/curl"]},
+        {
+            "host": "api.openai.com",
+            "kind": "other_ai_api",
+            "provider": "OpenAI",
+            "tunnels": 3,
+            "binaries": ["/usr/bin/curl"],
+        },
         {"host": "api.anthropic.com", "kind": "model_provider", "provider": "Anthropic", "connections": 5},
         {"host": "pastebin.com", "kind": "blocked", "category": "paste_site", "blocked": 4},
     ],
@@ -282,7 +288,9 @@ DESTINATIONS = {
 
 def test_the_detail_lists_the_destinations() -> None:
     model = SandboxesPanelModel()
-    model.set_snapshot(STATUS, [{**RUNNING, "egress": {"destinations": 23, "blocked": 1, "model_apis": 1, "shadow_ai": 1}}], [])
+    model.set_snapshot(
+        STATUS, [{**RUNNING, "egress": {"destinations": 23, "blocked": 1, "model_apis": 1, "shadow_ai": 1}}], []
+    )
     title, pairs = model.detail_pairs(DESTINATIONS)
     assert dict(pairs)["Sites"] == "23 contacted, 1 blocked · AI: 1 model API, 1 shadow AI"
     rows = [value for label, value in pairs if label == "Destination"]
@@ -292,15 +300,23 @@ def test_the_detail_lists_the_destinations() -> None:
         "pastebin.com — blocked (paste site) · 0 requests, 4 refused",
     ]
     assert dict(pairs)["Model calls"] == "anthropic claude-haiku: 2 (1 failed)"
-    assert dict(model.detail_pairs("unavailable: the daemon is down")[1])["Destinations"] == "unavailable: the daemon is down"
+    assert (
+        dict(model.detail_pairs("unavailable: the daemon is down")[1])["Destinations"]
+        == "unavailable: the daemon is down"
+    )
     assert "Destinations" not in dict(model.detail_pairs()[1]) and "Destination" not in dict(model.detail_pairs()[1])
     many = {"destinations": [{"host": f"h{i}.example", "kind": "other"} for i in range(15)]}
-    assert dict(model.detail_pairs(many)[1])["Destinations"] == "+3 more: defenseclaw sandbox destinations myapp-claude-7f3a"
+    assert (
+        dict(model.detail_pairs(many)[1])["Destinations"]
+        == "+3 more: defenseclaw sandbox destinations myapp-claude-7f3a"
+    )
     assert dict(model.detail_pairs({})[1])["Destinations"] == "none reached yet"
 
 
 @pytest.mark.asyncio
 async def test_the_sandbox_detail_shows_its_destinations_at_80x24(fetch, monkeypatch) -> None:
+    from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
+
     app = DefenseClawTUI(config=_config())
     shown: list[Any] = []
 
@@ -309,14 +325,35 @@ async def test_the_sandbox_detail_shows_its_destinations_at_80x24(fetch, monkeyp
         return None
 
     monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
-    async with app.run_test(size=(80, 24)):
+    async with app.run_test(size=(80, 24)) as pilot:
         await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
         app.sandbox_model.view = "sandboxes"
         app.sandbox_model.cursor = 0
         app.sandbox_model.detail_open = True
         await app._open_sandbox_detail()  # noqa: SLF001
-    pairs = shown[0].model.pairs
-    assert ("Destination", "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl") in pairs
+        screen = shown[0]
+        assert isinstance(screen, SandboxDetailScreen)
+        # Show the detail the panel built: with the Destinations section its
+        # body scrolls, and Close stays on the 80x24 screen.
+        await app.push_screen(screen)
+        await pilot.pause()
+        close = screen.query_one("#sandbox-detail-close").region
+        assert close.height > 0 and close.y >= 0 and close.bottom <= 24
+    assert ("Destination", "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl") in screen.model.pairs
+
+
+@pytest.mark.asyncio
+async def test_a_detail_says_why_its_destinations_are_unavailable(monkeypatch) -> None:
+    from defenseclaw.gateway import SandboxAPIError
+
+    app = DefenseClawTUI(config=_config())
+
+    async def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise SandboxAPIError("unavailable", "the DefenseClaw daemon is not running", status=503)
+
+    monkeypatch.setattr(app, "_sandbox_call", refuse)
+    reply = await app._fetch_sandbox_destinations("docs")  # noqa: SLF001
+    assert reply == "unavailable: the DefenseClaw daemon is not running"
 
 
 def test_a_failed_refresh_keeps_the_last_good_snapshot() -> None:
