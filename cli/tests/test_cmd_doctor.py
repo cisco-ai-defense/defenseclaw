@@ -104,13 +104,15 @@ class DoctorPolicyStateTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as data_dir, patch.dict(os.environ, {"DEFENSECLAW_CONFIG": ""}):
             config = os.path.join(data_dir, "config.yaml")
-            with open(config, "w", encoding="utf-8") as f:
-                f.write("config_version: 9\n")
+            # Bytes, not text mode: Windows would write CRLF and the recorded
+            # digest of the LF bytes would not match the file.
+            with open(config, "wb") as f:
+                f.write(b"config_version: 9\n")
             config_writer.record_generation(config, hashlib.sha256(b"config_version: 9\n").hexdigest(), "cli:t", "")
             for edited, want in ((False, "skip"), (True, "warn")):
                 if edited:
-                    with open(config, "a", encoding="utf-8") as f:
-                        f.write("# hand edit\n")
+                    with open(config, "ab") as f:
+                        f.write(b"# hand edit\n")
                 result = _DoctorResult()
                 cmd_doctor._check_policy_state(SimpleNamespace(data_dir=data_dir), result, live_health=None)
                 self.assertEqual(result.checks[0]["status"], want, result.checks[0])
