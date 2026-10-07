@@ -315,8 +315,9 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 // the process-level keys of spec section 4, plus what its reload still
 // treats as restart-required (internal/gateway diffConfigs and
 // guardrailNeedsRestart): claw, agent and routing (paths, identity and the
-// model router process captured at start), the guardrail listener and
-// enablement, and the hook self-heal settings.
+// model router process captured at start), plugin_dir (the connector plugins
+// discovered at start), the guardrail listener and enablement, and the hook
+// self-heal settings.
 // "*" matches one segment. Everything else is hot; a
 // running gateway keeps a restart-required value at its running value and
 // applies the rest of the change.
@@ -329,7 +330,7 @@ var restartKeys = []string{
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
 	"guardrail.connectors.*.enabled",
-	"claw", "agent", "routing",
+	"claw", "agent", "routing", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
 }

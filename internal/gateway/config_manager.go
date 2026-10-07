@@ -1196,6 +1196,16 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	// plugin_actions) are read as admission, which the restart set covers.
 	secureClient := oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration()
 	standalone := oldCfg.StandaloneEnterprise() || newCfg.StandaloneEnterprise()
+	if !secureClient {
+		// The directory keys, which main did not compare (Secure Client keeps
+		// that). policy_dir is generation input (the Rego modules and their
+		// watch) and quarantine_dir restarts the install watcher in-process,
+		// so both are hot; plugin_dir is restart-required: the connector
+		// registry discovers its plugins when the guardrail starts.
+		add("policy_dir", oldCfg.PolicyDir, newCfg.PolicyDir)
+		add("quarantine_dir", oldCfg.QuarantineDir, newCfg.QuarantineDir)
+		add("plugin_dir", oldCfg.PluginDir, newCfg.PluginDir)
+	}
 	if standalone {
 		// The standalone profile keeps its runtime settings in the enterprise
 		// block. The AI Defense client (enterprise.inspection) is rebuilt in
@@ -1268,6 +1278,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// in applyConfigReload: the hook lane, and the proxy's) and the OTel
 		// log sink folds the endpoint (otelNeedsReload).
 		"cisco_ai_defense": {},
+		// The generation prepares the Rego modules from policy_dir; the
+		// install watcher restarts for quarantine_dir (watcherNeedsRestart).
+		"policy_dir":     {},
+		"quarantine_dir": {},
 	}
 	if secureClient {
 		hotReloadable = map[string]struct{}{
@@ -1371,6 +1385,8 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.Enterprise.Inspection = inspection
 		case "openshell.mode":
 			held.OpenShell.Mode = running.OpenShell.Mode
+		case "plugin_dir":
+			held.PluginDir = running.PluginDir
 		default:
 			return nil
 		}

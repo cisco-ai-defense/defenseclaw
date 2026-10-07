@@ -936,6 +936,26 @@ func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 	}
 }
 
+// TestDiffConfigsDirectoryKeys: a policy_dir or quarantine_dir edit applies
+// hot (the generation rebuilds, the watcher restarts) and a plugin_dir edit is
+// restart-required and held, instead of all three passing as no change
+// (GAP-0277).
+func TestDiffConfigsDirectoryKeys(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.PolicyDir = filepath.Join(t.TempDir(), "team-policies")
+	newCfg.QuarantineDir = filepath.Join(t.TempDir(), "quarantine")
+	newCfg.PluginDir = filepath.Join(t.TempDir(), "plugins")
+
+	diff := diffConfigs(oldCfg, newCfg)
+	held := holdRestartRequired(oldCfg, newCfg, diff.RestartRequired)
+	if !slices.Contains(diff.Changed, "policy_dir") || !slices.Contains(diff.Changed, "quarantine_dir") ||
+		strings.Join(diff.RestartRequired, ",") != "plugin_dir" || held == nil || held.PluginDir != oldCfg.PluginDir ||
+		!watcherNeedsRestart(oldCfg, newCfg) {
+		t.Fatalf("diff = %+v held = %v", diff, held != nil)
+	}
+}
+
 func TestDiffConfigsAllowsHotGuardrailPolicyFields(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)
