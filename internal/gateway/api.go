@@ -2751,7 +2751,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 // missing or not a directory is only logged: the scanner reports it.
 func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string) bool {
 	info, err := os.Stat(target)
-	if errors.Is(err, fs.ErrPermission) {
+	// Secure Client keeps the scan of main, which the scanner fails on
+	// (issue #1092).
+	if errors.Is(err, fs.ErrPermission) && !a.managedAIDOnly() {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": fmt.Sprintf("the gateway's service account cannot read %s: copy the folder somewhere it can read, or grant that account read access", target),
 		})
