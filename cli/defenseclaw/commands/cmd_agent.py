@@ -5800,6 +5800,15 @@ def identities(
     and gateway restarts. Each session of an agent has its own ais- id.
     Every identity is listed, most recently seen first.
     """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS
+
+    if connector_name and connector_name.lower() not in KNOWN_CONNECTORS:
+        raise click.BadParameter(
+            f"unknown connector {connector_name!r}; valid names: {', '.join(KNOWN_CONNECTORS)}",
+            param_hint="--connector",
+        )
+    if connector_name:
+        connector_name = connector_name.lower()
     if limit is not None and limit > 1000:
         raise click.BadParameter("limit too large (maximum 1000)", param_hint="--limit")
     client = _usage_client(
@@ -5835,7 +5844,12 @@ def identities(
         click.echo("Agent identities are not recorded on this deployment.")
         return
     if not rows:
-        click.echo("No agent identities seen yet. They appear after an agent's first hook, LLM proxy or ACP request.")
+        if user or connector_name:
+            existing = client.agent_identities(limit=1).get("total", 0)
+            label = f"--user {user}" if user else f"--connector {connector_name}"
+            click.echo(f"No agent identity matches {label} ({existing} identities exist; run without a filter to list them).")
+        else:
+            click.echo("No agent identities seen yet. They appear after an agent's first hook, LLM proxy or ACP request.")
         return
     click.echo(_render_agent_identities(rows))
 
