@@ -37,8 +37,11 @@ def test_the_cli_never_creates_an_audit_db_in_the_managed_config_folder(monkeypa
     descriptor.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: str(descriptor))
     assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(managed / "audit.db"))) == ":memory:"
+    (tmp_path / "home").mkdir()
     own = str(tmp_path / "home" / "audit.db")
     assert main_mod._cli_audit_db(SimpleNamespace(audit_db=own)) == own
+    # An administrator's shell has no data folder of its own (GAP-0168).
+    assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(tmp_path / "root" / "audit.db"))) == ":memory:"
     monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: None)
     assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(managed / "audit.db"))) == str(managed / "audit.db")
 

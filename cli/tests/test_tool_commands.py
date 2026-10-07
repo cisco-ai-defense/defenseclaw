@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -56,6 +57,16 @@ class ToolCommandTestBase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestToolBlock(ToolCommandTestBase):
+    def test_managed_device_refuses_before_the_connector_is_checked(self):
+        # GAP-0168: a connector that is not configured must not be the answer
+        # on a managed device (it sent users to "defenseclaw setup").
+        self.app.cfg.deployment_mode = "managed_enterprise"
+        with unittest.mock.patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}):
+            result = self.runner.invoke(tool, ["block", "x", "--connector", "nosuch"], obj=self.app)
+        self.assertEqual(result.exit_code, 3, result.output)
+        self.assertIn("This device is managed", result.output)
+        self.assertNotIn("setup", result.output)
+
     def test_block_adds_to_block_list(self):
         result = self.invoke(["block", "delete_file", "--reason", "destructive"])
 

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -75,6 +76,10 @@ def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     # status ask about the account running the command, and status names its
     # profile (GAP-0056).
     monkeypatch.setattr("getpass.getuser", lambda: "alice")
+    if os.name == "nt":
+        # Windows asks for the token SID instead of the login name
+        # (test_explain_on_windows_asks_for_the_token_sid).
+        monkeypatch.setattr("defenseclaw.gateway.current_profile_account", lambda: ("alice", "alice"))
     app.cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
     mine = runner.invoke(
         cmd_guardrail.guardrail, ["profile", "explain", "--connector", "codex"], obj=app, catch_exceptions=False
