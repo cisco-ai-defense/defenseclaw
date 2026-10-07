@@ -529,6 +529,51 @@ func TestMigrateV8InMemory(t *testing.T) {
 	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-test-value" {
 		t.Errorf("VIRUSTOTAL_API_KEY = %q after the in-memory load", got)
 	}
+
+	// config set, policy activate and the TUI write admission: into a v8
+	// file. Those values win over data.json, in memory and in the migration,
+	// and each data.json value they replace is a conflict. With the bypass
+	// kept on, a path-less first-party entry stays a name-only allow.
+	if err := os.WriteFile(dataJSON, []byte(`{"config": {"allow_list_bypass_scan": false},
+	  "actions": {"MEDIUM": {"install": "block", "file": "none", "runtime": "block"},
+	    "LOW": {"install": "none", "file": "none", "runtime": "allow"}},
+	  "first_party_allow_list": [{"target_type": "skill", "target_name": "helper"},
+	    {"target_type": "skill", "target_name": "acme", "source_path_contains": [".claude/skills/acme"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	written := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\nadmission:\n" +
+		"  defaults: {allow_list_bypass_scan: true}\n  skill: {actions: {low: block}, first_party_allow_list: []}\n")
+	migrated, err = MigrateV8InMemory(configPath, written, nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory(admission set): %v", err)
+	}
+	var got struct {
+		Admission   AdmissionConfig           `yaml:"admission"`
+		AssetPolicy map[string]map[string]any `yaml:"asset_policy"`
+	}
+	if err := yaml.Unmarshal(migrated, &got); err != nil {
+		t.Fatal(err)
+	}
+	skill := got.Admission.Skill
+	if skill.Actions.Low == nil || skill.Actions.Low.Shorthand != "block" || skill.Actions.Medium == nil ||
+		skill.Actions.Medium.Shorthand != "block" || got.Admission.Defaults.AllowListBypassScan == nil ||
+		!*got.Admission.Defaults.AllowListBypassScan || len(skill.FirstPartyAllowList) != 0 ||
+		mustJSON(t, got.AssetPolicy["skill"]["allowed"]) != `[{"name":"helper"}]` {
+		t.Errorf("the in-memory load overwrote what the v8 file set: %s", migrated)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, Source: written, DataJSONPath: dataJSON, DryRun: true})
+	if err != nil {
+		t.Fatalf("MigrateV9(admission set): %v", err)
+	}
+	var to []string
+	for _, conflict := range result.Record.Conflicts {
+		to = append(to, conflict.To)
+	}
+	if !slices.Equal(to, []string{"admission.defaults.allow_list_bypass_scan", "admission.skill.actions.low",
+		"admission.skill.first_party_allow_list"}) || result.Record.Conflicts[1].Kept != "config:admission.skill.actions.low:block" ||
+		result.Record.Conflicts[1].Lost != "data.json:actions.LOW:warn" {
+		t.Errorf("conflicts = %+v", result.Record.Conflicts)
+	}
 }
 
 // TestMigrateV9InlineKeyGoesToTheRuntimeDataDir: the inline VirusTotal key

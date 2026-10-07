@@ -956,7 +956,7 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			for _, severity := range v9Severities {
 				effective[severity] = v9BuiltinAdmissionAction(assetType, severity)
 			}
-			m.legacyActionConflicts(assetType, old, effective, source, read)
+			m.legacyActionConflicts(assetType, v9WithoutConfigured(old, v9ConfiguredActions(root, assetType)), effective, source, read)
 		}
 		return
 	}
@@ -990,38 +990,64 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			enforced = value == nil || *value
 		}
 		if !enforced {
+			if kept := v9ConfiguredBool(root, "defaults", key); kept != nil {
+				if *kept {
+					m.keptConfig("admission.defaults."+key, "admission.defaults."+key+":true", "data.json:config."+key+":false")
+				}
+				continue
+			}
 			v9Set(root, v9Scalar(false), "admission", "defaults", key)
 			m.moved("data.json", "data.json:config."+key, "admission.defaults."+key, false)
 		}
 	}
 
 	for _, assetType := range []string{AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin} {
+		configured := v9ConfiguredActions(root, assetType)
 		effective := map[string]SeverityAction{}
-		differs := false
+		from := map[string]string{}
+		// differs: data.json customised the type. pin: it did so at a
+		// severity the file does not set, so the severities the file leaves
+		// unset are written; otherwise they keep their v9 default. A
+		// severity the file sets is never overwritten.
+		differs, pin := false, false
 		for _, severity := range v9Severities {
 			action, ok := data.ScannerOverrides[assetType][severity]
+			from[severity] = "data.json:scanner_overrides." + assetType + "." + severity
 			if !ok {
 				action, ok = data.Actions[severity]
+				from[severity] = "data.json:actions." + severity
 			}
 			value := v9BuiltinAdmissionAction(assetType, severity)
 			if ok {
 				value = action.config()
+			} else {
+				from[severity] = "defaults:" + severity
 			}
 			effective[severity] = value
 			if value != v9BuiltinAdmissionAction(assetType, severity) {
-				differs = true
+				_, set := configured[severity]
+				differs, pin = true, pin || !set
 			}
 		}
 		if differs {
 			for _, severity := range v9Severities {
-				node, display := v9ActionNode(effective[severity])
 				lower := strings.ToLower(severity)
+				if kept, ok := configured[severity]; ok {
+					if lost := v9ActionLabel(effective[severity]); kept.label != lost {
+						m.keptConfig("admission."+assetType+".actions."+lower, kept.from+":"+kept.label, from[severity]+":"+lost)
+					}
+					continue
+				}
+				if !pin {
+					continue
+				}
+				node, display := v9ActionNode(effective[severity])
 				v9Set(root, node, "admission", assetType, "actions", lower)
 				m.moved("data.json", "data.json:actions."+severity, "admission."+assetType+".actions."+lower, display)
 			}
 		}
 		if old, ok := legacy[assetType]; ok {
-			m.legacyActionConflicts(assetType, old, effective, source, read)
+			m.legacyActionConflicts(assetType, v9WithoutConfigured(old, configured), effective, source, read)
 		}
 	}
 
@@ -1060,7 +1086,8 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			})
 		}
 		for _, assetType := range []string{AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin} {
-			if v9SameFirstParty(byType[assetType], v9BuiltinFirstParty[assetType]) {
+			if v9SameFirstParty(byType[assetType], v9BuiltinFirstParty[assetType]) ||
+				m.keepConfiguredFirstParty(root, assetType, byType[assetType]) {
 				continue
 			}
 			list := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
@@ -1083,6 +1110,9 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	} else {
 		// An older data.json without the list allowed nothing first party.
 		for _, assetType := range []string{AdmissionTypeSkill, AdmissionTypePlugin} {
+			if m.keepConfiguredFirstParty(root, assetType, nil) {
+				continue
+			}
 			v9Set(root, &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle},
 				"admission", assetType, "first_party_allow_list")
 			m.moved("data.json", "data.json:first_party_allow_list", "admission."+assetType+".first_party_allow_list", []string{})
@@ -1200,6 +1230,95 @@ func v9ConfiguredBool(root *yaml.Node, scope, key string) *bool {
 		return nil
 	}
 	return &value
+}
+
+// keptConfig records a value the config_version 8 file already sets under
+// admission: (config set, policy activate and the TUI write there before the
+// file is migrated). It wins over data.json, as guardrail block_at does, and
+// the data.json value is the loss.
+func (m *v9Migrator) keptConfig(to, kept, lost string) {
+	m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+		To: to, Kept: "config:" + kept, Lost: lost,
+		Reason: "the config_version 8 file already set it, and the config value wins",
+	})
+}
+
+// v9ConfiguredAction is an admission action the document already sets: its
+// key and its shorthand or triple.
+type v9ConfiguredAction struct{ from, label string }
+
+// v9ConfiguredActions are the severities of assetType whose action the
+// document already sets, resolved as CompileAdmission does:
+// admission.<type>.actions, then admission.defaults.actions except for skill,
+// where the scanner gate comes before the defaults.
+func v9ConfiguredActions(root *yaml.Node, assetType string) map[string]v9ConfiguredAction {
+	scopes := []string{assetType}
+	if assetType != AdmissionTypeSkill {
+		scopes = append(scopes, "defaults")
+	}
+	out := map[string]v9ConfiguredAction{}
+	for _, scope := range scopes {
+		actions := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "admission"), scope), "actions")
+		for _, severity := range v9Severities {
+			lower := strings.ToLower(severity)
+			node := v8YAMLMapValue(actions, lower)
+			var action AdmissionAction
+			if _, done := out[severity]; done || node == nil || node.ShortTag() == "!!null" || node.Decode(&action) != nil {
+				continue
+			}
+			label := action.Shorthand
+			if label == "" {
+				label = v9ActionLabel(v9NormalAction(action.Triple))
+			}
+			out[severity] = v9ConfiguredAction{from: "admission." + scope + ".actions." + lower, label: label}
+		}
+	}
+	return out
+}
+
+// v9WithoutConfigured drops from a *_actions map the severities the document
+// sets under admission: that later choice supersedes the never-read key.
+func v9WithoutConfigured(old map[string]SeverityAction, configured map[string]v9ConfiguredAction) map[string]SeverityAction {
+	for severity := range configured {
+		delete(old, strings.ToLower(severity))
+	}
+	return old
+}
+
+// v9ActionLabel is the shorthand an action matches, else its triple.
+func v9ActionLabel(action SeverityAction) string {
+	_, display := v9ActionNode(action)
+	if shorthand, ok := display.(string); ok {
+		return shorthand
+	}
+	return v9ActionString(action)
+}
+
+// keepConfiguredFirstParty reports whether the document already sets the
+// first-party list of assetType (admission.<type>, else admission.defaults,
+// as CompileAdmission resolves it). That list wins over the data.json list,
+// and a conflict is recorded when they differ.
+func (m *v9Migrator) keepConfiguredFirstParty(root *yaml.Node, assetType string, data []AdmissionFirstParty) bool {
+	names := func(list []AdmissionFirstParty) string {
+		out := make([]string, 0, len(list))
+		for _, entry := range list {
+			out = append(out, entry.Name)
+		}
+		return "[" + strings.Join(out, ",") + "]"
+	}
+	for _, scope := range []string{assetType, "defaults"} {
+		node := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "admission"), scope), "first_party_allow_list")
+		var kept []AdmissionFirstParty
+		if node == nil || node.ShortTag() == "!!null" || node.Decode(&kept) != nil {
+			continue
+		}
+		if !v9SameFirstParty(kept, data) {
+			m.keptConfig("admission."+assetType+".first_party_allow_list",
+				"admission."+scope+".first_party_allow_list:"+names(kept), "data.json:first_party_allow_list:"+names(data))
+		}
+		return true
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
