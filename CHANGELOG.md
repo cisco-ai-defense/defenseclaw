@@ -58,6 +58,9 @@ stopped`. Nothing is changed; use the install command above.
   Sigstore signature on `checksums.txt` is verified when `cosign` 2.x is
   installed. Releases no longer download a pinned cosign.
 - The OpenClaw gateway is restarted only when the OpenClaw connector is active.
+- Interactive `defenseclaw init` offers `closed` as the hook fail mode on a
+  new install (Enter used to pick `open`), the default `--non-interactive`,
+  `quickstart` and the config already used; a re-run offers the saved value.
 
 ### Added
 
