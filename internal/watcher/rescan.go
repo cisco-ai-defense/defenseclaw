@@ -230,6 +230,22 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 	return false
 }
 
+// hermesSkillsDiscover returns how to list dir's Hermes skills, or nil when
+// dir is not a Hermes skills root: this process's own root, or a user
+// profile's root that the managed gateway watches for every enrolled user.
+// IsRoot alone resolves only the service account's own Hermes home, so each
+// user's category folders (devops, software-development) were rescanned as
+// skills and logged a failed scan every cycle (GAP-0285).
+func hermesSkillsDiscover(dir string) func(string, int) ([]hermesskills.Entry, error) {
+	switch {
+	case hermesskills.IsRoot(dir):
+		return hermesskills.Discover
+	case hermesskills.IsProfileRoot(dir):
+		return hermesskills.DiscoverProfileRoot
+	}
+	return nil
+}
+
 // enumerateTargets lists all direct child directories under watched roots plus
 // configured MCP servers from openclaw.json.
 func (w *InstallWatcher) enumerateTargets() []InstallEvent {
@@ -241,8 +257,8 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if hermesskills.IsRoot(dir) {
-			entries, err := hermesskills.Discover(dir, hermesskills.DefaultDirectoryLimit)
+		if discover := hermesSkillsDiscover(dir); discover != nil {
+			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
 				for _, entry := range entries {
 					if entry.Bundled {
