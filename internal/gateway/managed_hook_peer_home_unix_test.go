@@ -168,7 +168,7 @@ func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
 	}
 	prevDirectory, prevAccount, prevFacts := managedHookPeerDirectory, profileExplainAccount, profileExplainDirectoryFacts
 	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return facts, true }
-	profileExplainAccount = func(string) (string, string, bool) { return "94401103", "dcad-alice@dclab.test", true }
+	profileExplainAccount = func(string) (string, string, error) { return "94401103", "dcad-alice@dclab.test", nil }
 	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) { return facts, nil }
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() {

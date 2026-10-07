@@ -566,7 +566,8 @@ Rows are most recently seen first. The gateway writes new rows to
 `inventory.db` in a batch every 30 seconds, and the route writes the rows it
 has not written yet before it lists them, so a new agent shows at once.
 `sessions_seen` counts each chat once, however many are open and also when one
-resumes after a gateway restart. `total` counts every matching identity; while
+resumes after a gateway restart. A sub-agent that runs in a session of its own,
+as a Codex 0.160 thread does, is not a chat and is not counted. `total` counts every matching identity; while
 `next_cursor` is not empty, pass it as `cursor` for the next page.
 `defenseclaw agent identities` reads every page.
 
