@@ -1409,7 +1409,7 @@ def _collect_skills_for_connector(
         # never leak a global/peer enforcement row into this connector.
         if connector != "openclaw" and not (
             _normalize_runtime_connector(ae.connector) == _normalize_runtime_connector(connector)
-            and ae.actions.file == "quarantine"
+            and (ae.actions.file == "quarantine" or str(ae.reason or "").startswith("link removed"))
         ):
             continue
         if name not in known_names:

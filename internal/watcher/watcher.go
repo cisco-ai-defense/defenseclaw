@@ -1179,7 +1179,8 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 				"file":        fileAction,
 			}
 
-			if fileAction == "quarantine" && !retainRestored {
+			secureClient := w.secureClientActive()
+			if fileAction == "quarantine" && !retainRestored && secureClient {
 				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "file", "quarantine", blockReason)
 			}
 			if runtimeAction == "block" {
@@ -1193,7 +1194,21 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 			// shorthand (install block, runtime disable, file none) leaves
 			// them where they are.
 			if fileAction == "quarantine" {
-				w.enforceBlockWith(ctx, evt, retainRestored, "")
+				err := w.enforceBlockWith(ctx, evt, retainRestored, "")
+				if !retainRestored && !secureClient {
+					// The journal says quarantined only once the files are
+					// in quarantine storage; a failed move says so, plainly,
+					// and the block and runtime disable stay (GAP-0394).
+					switch {
+					case err == nil:
+						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "file", "quarantine", blockReason)
+					case errors.Is(err, errLinkRemoved):
+						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", err.Error())
+					default:
+						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block",
+							quarantineFailedReason+err.Error())
+					}
+				}
 			}
 		}
 	case "warning":
@@ -1326,18 +1341,28 @@ func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	w.enforceBlockWith(ctx, evt, true, "")
 }
 
+// quarantineFailedReason and errLinkRemoved lead the journal reason of a
+// blocked asset the watcher could not move into quarantine storage, and of a
+// linked one it took out of the folder; skill list and skill info show them
+// (cli/defenseclaw/commands/__init__.py compute_verdict reads the prefixes).
+const quarantineFailedReason = "quarantine failed: "
+
+var errLinkRemoved = errors.New("link removed")
+
 // enforceBlockWith applies the block; honorRestore keeps the files of an
 // operator-restored asset whose earlier install block still stands. reason,
-// when set, is the quarantine record's reason (skill info shows it).
-func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) {
+// when set, is the quarantine record's reason (skill info shows it). The
+// error is a failed quarantine (already reported) or errLinkRemoved.
+func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) error {
 	switch evt.Type {
 	case InstallMCP:
 		// MCP servers have no filesystem artifact to quarantine. The sidecar's
 		// handleMCPAdmission applies the block verdict to the connector's MCP
 		// configuration from the admission result this watcher publishes.
 	case InstallSkill, InstallPlugin:
-		w.quarantineAssetWith(ctx, evt, honorRestore, reason)
+		return w.quarantineAssetWith(ctx, evt, honorRestore, reason)
 	}
+	return nil
 }
 
 // pluginCategoryQuarantineDir is the quarantine tree of plugins in a Hermes
@@ -1345,18 +1370,22 @@ func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent,
 const pluginCategoryQuarantineDir = "plugin-categories"
 
 func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
-	w.quarantineAssetWith(ctx, evt, true, "")
+	_ = w.quarantineAssetWith(ctx, evt, true, "")
 }
 
-func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) {
+func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) error {
 	if w == nil || w.cfg == nil || w.store == nil {
-		w.emitQuarantineFailure(ctx, evt, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
-		return
+		err := fmt.Errorf("watcher: quarantine provenance store is unavailable")
+		w.emitQuarantineFailure(ctx, evt, err)
+		return err
 	}
 	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
 		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
 			fmt.Sprintf("type=%s restored physical files retained while install block remains", evt.Type))
-		return
+		return nil
+	}
+	if !w.secureClientActive() && enforce.IsLinkedAsset(evt.Path) {
+		return w.removeLinkedAsset(ctx, evt)
 	}
 	connector := w.eventConnector(evt)
 	// The admission identity is connector-defined and may come from an asset
@@ -1371,7 +1400,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
-		return
+		return err
 	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
 		// A plugin in a category folder keeps its category in quarantine, so
@@ -1395,7 +1424,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	})
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
-		return
+		return err
 	}
 	if record.State == audit.QuarantineStateRestoring &&
 		sameWatcherPath(record.RestorePath, plan.SourcePath) {
@@ -1403,7 +1432,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		if hashErr == nil && matches {
 			_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
 				fmt.Sprintf("type=%s restore in progress; physical files retained", evt.Type))
-			return
+			return nil
 		}
 	}
 	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
@@ -1413,7 +1442,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
 		}
 		w.emitQuarantineFailure(ctx, evt, err)
-		return
+		return err
 	}
 	if err := w.store.UpdateQuarantineRecordState(
 		ctx, record.ID, audit.QuarantineStateActive, "",
@@ -1423,6 +1452,32 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		fmt.Fprintf(os.Stderr, "[watch] quarantine provenance remains pending for %s: %v\n", evt.Path, err)
 	}
 	w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, plan.QuarantinePath)
+	return nil
+}
+
+// removeLinkedAsset takes a skill or plugin that is a symlink or Windows
+// junction out of the watched folder: the link is removed and the folder it
+// points to is never touched (GAP-0394). Before, quarantine refused the link
+// and only gateway.log said so, while the skill read as quarantined.
+func (w *InstallWatcher) removeLinkedAsset(ctx context.Context, evt InstallEvent) error {
+	target, err := enforce.RemoveLinkedAsset(w.sourceRootsFor(evt.Type), evt.Type.String(), evt.Path)
+	if err != nil {
+		w.emitQuarantineFailure(ctx, evt, err)
+		return err
+	}
+	if target == "" {
+		target = "an unreadable target"
+	}
+	removed := fmt.Errorf("%w: it pointed to %s; that folder was not changed", errLinkRemoved, target)
+	_ = w.logger.LogEventCtx(ctx, audit.Event{
+		Action:   string(audit.ActionWatcherBlock),
+		Target:   evt.Path,
+		Actor:    "defenseclaw",
+		Details:  fmt.Sprintf("type=%s %v", evt.Type, removed),
+		Severity: "HIGH",
+	})
+	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, removed)
+	return removed
 }
 
 // RestoreQuarantined restores one connector-owned watcher quarantine. The

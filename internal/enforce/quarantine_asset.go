@@ -446,6 +446,47 @@ func pathWithin(path, root string, allowEqual bool) bool {
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
+// IsLinkedAsset reports whether path itself is a symlink or a Windows
+// reparse point (a junction), without following it.
+func IsLinkedAsset(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && fileInfoIsLinkOrReparse(info)
+}
+
+// RemoveLinkedAsset removes path, a symlink or Windows junction directly in
+// one of sourceRoots, and returns what it pointed to. A link cannot be moved
+// into quarantine storage like a folder, so the watcher takes it out of the
+// skills or plugins folder instead (GAP-0394): os.Remove deletes the link
+// entry only and never opens, follows or changes the folder it points to.
+// Anything that is not a link is refused.
+func RemoveLinkedAsset(sourceRoots []string, targetType, path string) (string, error) {
+	source, root, err := pathWithinRoots(path, sourceRoots, false)
+	if err != nil {
+		return "", fmt.Errorf("enforce: linked asset: %w", err)
+	}
+	if filepath.Dir(source) != root {
+		return "", fmt.Errorf("enforce: linked asset %s is not directly in a watched folder", source)
+	}
+	if strings.TrimSpace(targetType) == "skill" && IsBundledSkillPath(source) {
+		return "", ErrBundledSkill
+	}
+	if err := validateExistingAncestors(root); err != nil {
+		return "", fmt.Errorf("enforce: linked asset ancestry: %w", err)
+	}
+	info, err := os.Lstat(source)
+	if err != nil {
+		return "", fmt.Errorf("enforce: inspect linked asset %s: %w", source, err)
+	}
+	if !fileInfoIsLinkOrReparse(info) {
+		return "", fmt.Errorf("enforce: %s is not a link", source)
+	}
+	target, _ := os.Readlink(source)
+	if err := os.Remove(source); err != nil {
+		return target, fmt.Errorf("enforce: remove link %s: %w", source, err)
+	}
+	return target, nil
+}
+
 func safeAssetInfo(path string) (fs.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {

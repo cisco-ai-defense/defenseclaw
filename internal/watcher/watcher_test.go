@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1148,4 +1149,73 @@ func TestAutomaticEnforcementIsScopedToTheConnectorWithTheCopy(t *testing.T) {
 	if disabled, _ := pe.IsDisabledForConnector("skill", "skill-creator", "codex"); disabled {
 		t.Fatal("the claudecode verdict disabled codex's skill-creator too")
 	}
+}
+
+// GAP-0394: a skill folder that is a symlink was reported quarantined while
+// quarantine refused the link and left it in place, and a quarantine that
+// failed (an unwritable quarantine folder) also read as quarantined. The link
+// is now removed (its target untouched) and a failed move says so.
+func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows; junctions take the same path")
+	}
+	admit := func(t *testing.T, prepare func(cfg *config.Config, skillDir string) string) (*audit.ActionEntry, string) {
+		cfg, store, logger, skillDir := setupTestEnv(t)
+		cfg.Gateway.Watcher.Skill.TakeAction = true
+		w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+		w.scannerFactory = func(InstallEvent) scanner.Scanner {
+			return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+				{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
+			}}
+		}
+		path := prepare(cfg, skillDir)
+		w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: filepath.Base(path), Path: path, Timestamp: time.Now()})
+		entry, err := store.GetAction("skill", filepath.Base(path))
+		if err != nil || entry == nil {
+			t.Fatalf("no journal row (err %v)", err)
+		}
+		return entry, path
+	}
+	t.Run("link", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "linked-high-src")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		entry, path := admit(t, func(_ *config.Config, skillDir string) string {
+			link := filepath.Join(skillDir, "linked-high")
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		})
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("the link stayed in the skills folder (lstat err %v)", err)
+		}
+		if _, err := os.Stat(target); err != nil {
+			t.Fatalf("the link target was touched: %v", err)
+		}
+		if entry.Actions.File == "quarantine" || !strings.HasPrefix(entry.Reason, "link removed") {
+			t.Fatalf("journal %+v reason %q, want link removed and no file quarantine", entry.Actions, entry.Reason)
+		}
+	})
+	t.Run("unwritable quarantine", func(t *testing.T) {
+		entry, path := admit(t, func(cfg *config.Config, skillDir string) string {
+			if err := os.MkdirAll(cfg.QuarantineDir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+			dir := filepath.Join(skillDir, "aws-deploy")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		})
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("expected the skill to stay in place: %v", err)
+		}
+		if entry.Actions.File == "quarantine" || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" ||
+			!strings.HasPrefix(entry.Reason, "quarantine failed: ") {
+			t.Fatalf("journal %+v reason %q, want blocked, disabled, quarantine failed", entry.Actions, entry.Reason)
+		}
+	})
 }

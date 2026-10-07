@@ -2061,6 +2061,24 @@ class TestSkillList(SkillCommandTestBase):
         self.assertEqual(item["verdict"], "-")
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_says_quarantine_failed_when_the_move_failed(self, mock_list):
+        """GAP-0394: a blocked skill the watcher could not move read as quarantined."""
+        mock_list.return_value = {
+            "skills": [
+                {"name": "aws-deploy", "description": "", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "user", "bundled": False, "homepage": ""},
+            ]
+        }
+        self.app.store.set_action_field(
+            "skill", "aws-deploy", "install", "block", "quarantine failed: permission denied",
+        )
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertEqual(item["verdict"], "quarantine failed")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_table_title_shows_connector_in_scope(self, mock_list):
         # Mirror the MCP table's (connector=...) banner so the active
         # connector the list is scoped to is discoverable.
