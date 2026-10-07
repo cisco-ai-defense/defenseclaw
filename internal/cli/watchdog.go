@@ -454,6 +454,15 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					current = stateDown
 					saveWatchdogState(dataDir, current)
 				}
+				if downCount >= debounce {
+					// A crashed per-user gateway is started again (GAP-0386);
+					// the start keeps its own backoff after a failure.
+					if started, err := watchdogGatewayStarter(dataDir); started && err != nil {
+						fmt.Fprintf(os.Stderr, "[watchdog] the gateway is not running and could not be started: %v\n", err)
+					} else if started {
+						fmt.Fprintln(os.Stderr, "[watchdog] the gateway was not running; started it again")
+					}
+				}
 			}
 		}
 	}
