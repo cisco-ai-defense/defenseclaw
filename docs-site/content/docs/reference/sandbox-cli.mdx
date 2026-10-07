@@ -1266,7 +1266,9 @@ The daemon does the same on its own once the sandbox is ready and every
 sandbox stops (without its processes). The AI inventory shows the sandbox's
 components, marked with its name, after its next scan:
 `defenseclaw agent usage --sandbox NAME`. `ai_discovery.enabled: false` turns
-it off.
+it off. Each row lists the components it names (`NAMES`: MCP servers,
+skills, rules, plugins) apart from the files and folders they were found in
+(`EVIDENCE`: a config file, a skills folder, a binary).
 
 ```bash
 defenseclaw sandbox discover myapp-7f3a
@@ -1292,7 +1294,8 @@ starting and exiting, so a process that starts and ends between two samples,
 and that OpenShell does not report, is not seen. The agent chooses its
 processes' names and arguments: they are shown, never acted on. The same tree
 is in the TUI's sandbox detail and in the `sandbox.process_tree` telemetry
-records.
+records. A stopped sandbox lists no processes: `ps` says when it was last
+sampled, and `--json` lists the processes that ended.
 
 ```bash
 defenseclaw sandbox ps myapp-7f3a --tree

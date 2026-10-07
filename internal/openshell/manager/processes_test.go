@@ -194,9 +194,25 @@ func TestProcessCmdlineRedactsSecrets(t *testing.T) {
 			t.Fatalf("cmdline %q of %q keeps the password", got, argv)
 		}
 	}
+	// The words of a script argument (sh -c '…', eval '…') and of a header
+	// value are redacted the same way; the rest of the script stays
+	// (GAP-0107).
+	for _, tc := range []struct {
+		argv []string
+		kept string
+	}{
+		{[]string{"sh", "-c", `python3 -c "import time; time.sleep(90)" --token=dccertvalue`}, `"import time; time.sleep(90)" --token=<redacted`},
+		{[]string{"bash", "-c", `eval 'curl -H "Authorization: Bearer dccertvalue" https://example.invalid/'`}, `"Authorization: Bearer <redacted`},
+		{[]string{"curl", "-H", "X-Api-Key: dccertvalue", "https://example.invalid/"}, "X-Api-Key: <redacted"},
+	} {
+		if got := processCmdline(tc.argv); strings.Contains(got, "dccertvalue") || !strings.Contains(got, tc.kept) {
+			t.Fatalf("cmdline %q of %q, want %q kept", got, tc.argv, tc.kept)
+		}
+	}
 	// Look-alikes stay as they are.
 	for _, argv := range [][]string{
 		{"python3", "-u", "main.py"}, {"ssh", "-p", "2222", "host"}, {"tar", "-pxf", "a.tar"},
+		{"sh", "-c", `echo "the auth module" && make test`},
 		{"curl", "https://example.invalid:8443/path"}, {"psql", "-U", "dccert"},
 	} {
 		if got := processCmdline(argv); got != strings.Join(argv, " ") {

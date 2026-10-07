@@ -465,6 +465,34 @@ func collectPlan(plan inventory.SandboxCandidates, harnessName string) ([]string
 	return pairs, scope
 }
 
+// discoveryNames splits a signal's evidence into the components it names
+// (a skills folder's entries, an MCP config's servers) and the files and
+// folders it was found in, which `sandbox discover` listed as names too
+// (GAP-0116). A signal without evidence records keeps its basenames as
+// evidence.
+func discoveryNames(sig inventory.AISignal) (names, evidence []string) {
+	if len(sig.Evidence) == 0 {
+		return nil, sig.Basenames
+	}
+	for _, ev := range sig.Evidence {
+		switch {
+		case ev.Basename == "":
+		case ev.Type == "mcp_server" || strings.HasSuffix(ev.Type, "_entry"):
+			names = appendNew(names, ev.Basename)
+		default:
+			evidence = appendNew(evidence, ev.Basename)
+		}
+	}
+	return names, evidence
+}
+
+func appendNew(list []string, v string) []string {
+	if slices.Contains(list, v) {
+		return list
+	}
+	return append(list, v)
+}
+
 // discoveryResult is the API view of a sandbox scan's report.
 func discoveryResult(name string, report inventory.AIDiscoveryReport, entries int, took time.Duration) *sandboxapi.DiscoveryResult {
 	out := &sandboxapi.DiscoveryResult{
@@ -476,9 +504,11 @@ func discoveryResult(name string, report inventory.AIDiscoveryReport, entries in
 	}
 	sort.Strings(out.Problems)
 	for _, sig := range report.Signals {
+		names, evidence := discoveryNames(sig)
 		out.Signals = append(out.Signals, sandboxapi.DiscoverySignal{
 			Category: sig.Category, Product: sandboxapi.DisplayText(sig.Product), Vendor: sandboxapi.DisplayText(sig.Vendor),
-			Detector: sig.Detector, Names: sandboxapi.DisplayTexts(sig.Basenames), Confidence: sig.Confidence,
+			Detector: sig.Detector, Names: sandboxapi.DisplayTexts(names), Evidence: sandboxapi.DisplayTexts(evidence),
+			Confidence: sig.Confidence,
 		})
 	}
 	sort.SliceStable(out.Signals, func(i, j int) bool {

@@ -54,9 +54,10 @@ func (a *App) Discover(ctx context.Context, o DiscoverOptions) error {
 	} else {
 		rows := make([][]string, 0, len(res.Signals))
 		for _, sig := range res.Signals {
-			rows = append(rows, []string{sig.Category, firstNonEmpty(sig.Product, "-"), sig.Detector, discoveryNames(sig.Names)})
+			rows = append(rows, []string{sig.Category, firstNonEmpty(sig.Product, "-"), sig.Detector, discoveryNames(sig.Names),
+				discoveryNames(sig.Evidence)})
 		}
-		a.table([]string{"CATEGORY", "PRODUCT", "FOUND BY", "NAMES"}, rows)
+		a.table([]string{"CATEGORY", "PRODUCT", "FOUND BY", "NAMES", "EVIDENCE"}, rows)
 	}
 	if res.Result != "ok" {
 		a.warn("the scan was partial: " + strings.Join(res.Problems, "; "))
@@ -93,7 +94,18 @@ func (a *App) Ps(ctx context.Context, o PsOptions) error {
 		return nil
 	}
 	if len(list.Processes) == 0 {
-		a.note("no processes sampled yet in sandbox " + list.Name + " (it is sampled while it runs)")
+		if list.SampledAt.IsZero() {
+			a.note("no processes sampled yet in sandbox " + list.Name + " (it is sampled while it runs)")
+			return nil
+		}
+		// A stopped sandbox was sampled: its tree lists running processes
+		// only, so say so rather than "not sampled yet" (GAP-0115).
+		msg := fmt.Sprintf("no processes running in sandbox %s (last sampled at %s); the tree lists the processes that run, "+
+			"sampled while the sandbox runs", list.Name, a.clock(list.SampledAt))
+		if n := len(list.Exited); n > 0 {
+			msg += fmt.Sprintf("; %s ended, listed by `%s ps %s --output json`", plural(int64(n), "process", "processes"), CommandName, list.Name)
+		}
+		a.note(msg)
 		return nil
 	}
 	now := time.Now()
@@ -179,7 +191,8 @@ func psUptime(now, started time.Time) string {
 	return humanDuration(now.Sub(started))
 }
 
-// discoveryNames is a signal's names cell: the first few, and how many more.
+// discoveryNames is a signal's names or evidence cell: the first few, and
+// how many more.
 func discoveryNames(names []string) string {
 	const show = 3
 	switch {

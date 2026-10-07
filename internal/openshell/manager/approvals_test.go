@@ -847,9 +847,10 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	}
 	ask := asks[0]
 	requested := slices.DeleteFunc(e.events("hpbox", sandboxapi.ActivityApprovalRequested, ""), func(ev sandboxapi.ActivityEvent) bool { return ev.ApprovalID != ask.ID })
-	// Both denials are refused requests; an ask is no blocked destination.
-	if eg := e.get("hpbox").Egress; len(requested) != 1 || eg.BlockedRequests != 2 || eg.Blocked != 0 {
-		t.Fatalf("%d approval.requested events, egress %+v; want 1, both denials and no blocked destination", len(requested), eg)
+	// An ask is no blocked destination, and the denials that raised it are
+	// the ask's, not refused requests of the destinations.
+	if eg := e.get("hpbox").Egress; len(requested) != 1 || eg.BlockedRequests != 0 || eg.Blocked != 0 {
+		t.Fatalf("%d approval.requested events, egress %+v; want 1 and no blocked destination or request", len(requested), eg)
 	}
 	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)

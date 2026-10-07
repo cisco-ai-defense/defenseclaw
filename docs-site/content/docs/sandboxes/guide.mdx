@@ -747,12 +747,12 @@ sandbox later in the session is listed without the unblock command
 since``). An invalid destination (a
 host name without a dot, such as a mistyped `curl echo`) counts as blocked
 too. The counts cover everything in the sandbox while the session ran,
-`sandbox exec` commands from another terminal included. Nothing keeps them
-across a restart of the DefenseClaw daemon: after one during the session,
-the line says they cover only the time since (`0 tool calls since the
-daemon restarted at 11:05 · 0 new sites contacted since then`). `sandbox status NAME`
-shows the same two counts for the sandbox's life (since the daemon started):
-`Egress 9 destinations contacted, 2 blocked, …`.
+`sandbox exec` commands from another terminal included. The site counts come
+from the sandbox's destinations, which a restart of the DefenseClaw daemon
+keeps; the tool calls are not kept: after a restart during the session, the
+line says they cover only the time since (`0 tool calls since the daemon
+restarted at 11:05`). `sandbox status NAME` shows the same two counts for
+the sandbox's life: `Egress 9 destinations contacted, 2 blocked, …`.
 
 - **Enter** or `y` keeps the changes.
 - `u` restores the folder to its pre-session snapshot.

@@ -380,10 +380,8 @@
       "options": {
         "pieType": "donut",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+          "calcs": [],
+          "values": true
         },
         "legend": {
           "displayMode": "table",
@@ -439,10 +437,8 @@
       "options": {
         "pieType": "donut",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+          "calcs": [],
+          "values": true
         },
         "legend": {
           "displayMode": "table",

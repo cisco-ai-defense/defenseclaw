@@ -848,6 +848,20 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
                 "targets": [{"expr": "sum(increase(defenseclaw_agent_token_usage_total[1h])) or vector(0)", "instant": True}],
             },
             {
+                "type": "bargauge",
+                "title": "Top hosts",
+                "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+                "targets": [
+                    {
+                        "expr": (
+                            'topk(10, sum by (dest) (count_over_time({service_name="defenseclaw"} '
+                            '| json | __error__="" [$__range])))'
+                        ),
+                        "instant": True,
+                    }
+                ],
+            },
+            {
                 "type": "traces",
                 "title": "Selected trace",
                 "description": "Trace waterfall.",
@@ -880,6 +894,7 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
     assert any("latest-value discovery gauges" in error for error in errors)
     assert any("optional token/cost absence" in error for error in errors)
     assert any("blank trace selection" in error for error in errors)
+    assert any(error.startswith("semantic-fixture/Top hosts:") and "reduced by rows" in error for error in errors)
     assert any("scope_label must be defined before" in error for error in errors)
     assert any("agent variable must enumerate" in error for error in errors)
     assert any("persisted options must match" in error for error in errors)
@@ -988,6 +1003,15 @@ def test_low_risk_dashboard_labels_match_their_queries() -> None:
     vendors = _panel(identity, "Top vendors / products ($__range)")
     assert "$__range" in vendors["targets"][0]["expr"]
     assert vendors["transformations"][0]["options"]["renameByName"]["Value"] == "signals/$__range"
+
+
+def test_ai_discovery_dashboard_shows_sandbox_signals() -> None:
+    # GAP-0109, GAP-0114: what discovery found inside a sandbox is told apart
+    # from the host's signals, by the sandbox name the records carry.
+    board = _dashboard("defenseclaw-ai-discovery.json")
+    assert any(variable["name"] == "sandbox" for variable in board["templating"]["list"])
+    expr = _panel(board, "AI components inside sandboxes (records in range)")["targets"][0]["expr"]
+    assert 'defenseclaw_sandbox_name=~"$sandbox"' in expr and 'defenseclaw_sandbox_name!=""' in expr
 
 
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:

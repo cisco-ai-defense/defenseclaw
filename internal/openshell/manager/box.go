@@ -128,15 +128,13 @@ type box struct {
 	// closedPorts are the undeclared host ports whose denial the feed
 	// explained this session (hostPortDenied).
 	closedPorts map[int]bool
-	// blockedRequests counts the connections OpenShell refused (the
-	// DefenseClaw proxy counts its own refusals), and blockedHosts the
-	// destinations they were to, as the feed names them (noteBlocked).
-	blockedRequests int
-	blockedHosts    map[string]struct{}
 	// proxyOpens are OpenShell's records of the sandbox's connections to
 	// the egress proxy, which name the program that opened them, newest
 	// last (proxyActor).
 	proxyOpens []proxyOpen
+	// opens are OpenShell's allowed connections awaiting their first
+	// inspected request, by host:port (connectionRequest).
+	opens map[string]*openConns
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
 	// triageBusy is set while a triageNow poll runs; triageAgain asks it
@@ -308,7 +306,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// a session for silent hooks stops the next one too while they stay
 		// silent.
 		b.silentSince, b.silenceSent = time.Time{}, false
-		b.closedPorts = nil
+		b.closedPorts, b.opens = nil, nil
 		// The new session's hooks name its session.
 		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {
@@ -461,10 +459,9 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	proxy := m.proxy
 	bindingID := b.rec.BindingID
 	shared := sharedLimitsOf(b)
-	blocked := b.blockedHostList()
 	accepted := b.rec.Accepted
 	m.mu.Unlock()
-	m.decorate(&v, proxy, bindingID, blocked, accepted)
+	m.decorate(&v, proxy, bindingID, accepted)
 	views := []sandboxapi.Sandbox{v}
 	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
 	return views[0]
@@ -529,54 +526,12 @@ func (m *Manager) sharedLimitsWarning(d openshell.Driver, max config.OpenShellRe
 	return v.Message + ", so it cannot start until that is lowered (`defenseclaw sandbox doctor --fix`)"
 }
 
-// maxBlockedHosts bounds the destinations a box remembers OpenShell
-// refused.
-const maxBlockedHosts = 4096
-
-// noteBlocked counts a connection OpenShell refused, to host (the name the
-// feed shows it blocked). Callers hold Manager.mu.
-func (b *box) noteBlocked(host string) {
-	b.blockedRequests++
-	b.noteBlockedHost(host)
-}
-
-// noteBlockedHost counts host among the destinations OpenShell refused.
-// Callers hold Manager.mu.
-func (b *box) noteBlockedHost(host string) {
-	if host = strings.ToLower(host); host == "" {
-		return
-	}
-	if b.blockedHosts == nil {
-		b.blockedHosts = map[string]struct{}{}
-	}
-	if len(b.blockedHosts) < maxBlockedHosts {
-		b.blockedHosts[host] = struct{}{}
-	}
-}
-
-// blockedHostList is what decorate needs of noteBlocked's destinations.
-// Callers hold Manager.mu.
-func (b *box) blockedHostList() []string {
-	out := make([]string, 0, len(b.blockedHosts))
-	for h := range b.blockedHosts {
-		out = append(out, h)
-	}
-	return out
-}
-
 // decorate adds what view leaves out because it needs I/O or other locks:
-// the proxy's counts and the snapshot, with its acceptance (accepted, the
-// record's Accepted) when it applies. The egress counts are destinations:
-// Destinations those the sandbox reached, Blocked those refused at least
-// once (by the DefenseClaw proxy or by OpenShell, whose refused
-// destinations openshellBlocked lists), the way the feed and a session's
-// ✗ lines name them; BlockedRequests counts the refused requests. Callers
-// must not hold Manager.mu.
-func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string, accepted *acceptedSnapshot) {
-	blocked := make(map[string]struct{}, len(openshellBlocked))
-	for _, h := range openshellBlocked {
-		blocked[h] = struct{}{}
-	}
+// the egress counts and the snapshot, with its acceptance (accepted, the
+// record's Accepted) when it applies. The egress counts sum up the
+// sandbox's destinations (egressSummary), the proxy's live counts merged
+// in. Callers must not hold Manager.mu.
+func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, accepted *acceptedSnapshot) {
 	live := map[string]egress.DestinationStats{}
 	if proxy != nil && proxy.Counter() != nil && bindingID != "" {
 		for _, d := range proxy.Counter().DestinationsFor(bindingID) {
@@ -584,19 +539,9 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 				continue
 			}
 			live[strings.ToLower(d.Host)] = d
-			if d.Contacted {
-				v.Egress.Destinations++
-			}
-			v.Egress.BytesUp += d.BytesUp
-			v.Egress.BytesDown += d.BytesDown
-			v.Egress.BlockedRequests += int(d.Blocked)
-			if d.Blocked > 0 {
-				blocked[strings.ToLower(d.Host)] = struct{}{}
-			}
 		}
 	}
-	v.Egress.Blocked = len(blocked)
-	v.Egress.ModelAPIs, v.Egress.ShadowAI = m.destinationSummary(v.Name, v.Harness, live)
+	v.Egress = m.egressSummary(v.Name, v.Harness, live)
 	if snap, err := m.ws.LoadSnapshot(m.opts.DataDir, v.Name); err == nil && snap != nil {
 		info := &sandboxapi.SnapshotInfo{Kind: string(snap.Kind), CreatedAt: snap.CreatedAt}
 		if snap.Git != nil {
@@ -677,7 +622,6 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.PendingApprovals++
 		}
 	}
-	v.Egress.BlockedRequests = b.blockedRequests
 	// What silent hooks lead to, as checkHookSilence decides it: under a
 	// policy that is not resolved, the fail-closed response.
 	var after time.Duration

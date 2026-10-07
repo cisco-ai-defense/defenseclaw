@@ -48,8 +48,11 @@ type DiscoverySignal struct {
 	Product  string `json:"product"`
 	Vendor   string `json:"vendor,omitempty"`
 	Detector string `json:"detector"`
-	// Names are what the evidence names: MCP server, skill or file names.
+	// Names are the components the evidence names (MCP servers, skills,
+	// rules, plugins), Evidence the files and folders it was found in (a
+	// config file, a skills folder, a binary).
 	Names      []string `json:"names,omitempty"`
+	Evidence   []string `json:"evidence,omitempty"`
 	Confidence float64  `json:"confidence"`
 }
 

@@ -722,6 +722,10 @@
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
         "showUnfilled": true
       }
     },
@@ -772,6 +776,10 @@
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
         "showUnfilled": true
       }
     },
@@ -834,6 +842,10 @@
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
         "showUnfilled": true
       }
     },
@@ -884,6 +896,10 @@
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
         "showUnfilled": true
       }
     },
@@ -1223,6 +1239,10 @@
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
         "showUnfilled": true
       }
     },
@@ -1531,6 +1551,10 @@
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
         "showUnfilled": true
       }
     }

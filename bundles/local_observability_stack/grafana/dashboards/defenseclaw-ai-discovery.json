@@ -286,6 +286,44 @@
           }
         ],
         "hide": 0
+      },
+      {
+        "name": "sandbox",
+        "label": "Sandbox",
+        "description": "DefenseClaw sandbox name. Applies to the Loki panels: the sandbox signals table and the per-signal log. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox. All keeps the host's own records in the per-signal log. Sandbox identities are never metric labels, so the metric panels count the host and its sandboxes together.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+        "query": {
+          "query": "label_values({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
       }
     ]
   },
@@ -1902,7 +1940,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1942,6 +1980,90 @@
         "wrapLogMessage": true,
         "dedupStrategy": "none",
         "enableLogDetails": true
+      }
+    },
+    {
+      "type": "row",
+      "title": "Sandbox signals (AI components inside OpenShell sandboxes)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 168,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "AI components inside sandboxes (records in range)",
+      "description": "One row per sandbox and AI component from the `ai_component.*` records that name a sandbox (`defenseclaw.sandbox.name`): what AI discovery found inside each OpenShell sandbox, apart from the host's own signals. The Record column shows which record was seen; widen the range to include the first scan, or use `defenseclaw agent usage --sandbox NAME` for the current inventory. The metric panels above count these signals together with the host's (sandbox identities are never metric labels).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 169,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "sum by (sandbox, vendor, product, component, record) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | event_name=~\"ai_component[.](discovered|observed|changed|removed)\" | label_format sandbox=\"{{.defenseclaw_sandbox_name}}\", vendor=\"{{.body_defenseclaw_ai_component_vendor}}\", product=\"{{.body_defenseclaw_ai_component_product}}\", component=\"{{.body_defenseclaw_ai_component_type}}\", record=\"{{.event_name}}\" [$__range]))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value #A": true,
+              "Value": true
+            },
+            "indexByName": {
+              "sandbox": 0,
+              "vendor": 1,
+              "product": 2,
+              "component": 3,
+              "record": 4
+            },
+            "renameByName": {
+              "sandbox": "Sandbox",
+              "vendor": "Vendor",
+              "product": "Product",
+              "component": "Component",
+              "record": "Record"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No AI components found inside a sandbox in range",
+          "custom": {
+            "align": "auto"
+          }
+        }
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
       }
     }
   ],

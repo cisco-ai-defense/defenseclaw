@@ -616,7 +616,7 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
 			ta.daemon.mu.Unlock()
 		}, want: []string{"Session ended · 0 tool calls since the daemon restarted at " + time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04") +
-			" · 0 new sites contacted since then"}},
+			" · 0 new sites contacted"}, not: []string{"since then"}},
 		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
 			ta.daemon.mu.Lock()
 			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)

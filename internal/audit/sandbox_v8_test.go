@@ -1032,6 +1032,26 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	})
 }
 
+// GAP-0082: a sandbox egress row names its host as the target and the
+// sandbox, binary, code and reason as its details, not only egress.blocked.
+func TestSandboxEgressRowNamesTheHostAndTheSandbox(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+		Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "pastebin.com", Port: 443, Blocked: true,
+		DecisionCode: "SANDBOX_EGRESS_PASTE_SITE", Reason: "paste site", Executable: "/usr/bin/curl",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	want := "decision=block sandbox=" + testSandboxIdentity().Name + " binary=/usr/bin/curl code=SANDBOX_EGRESS_PASTE_SITE reason=paste site"
+	if rows[0].Target != "pastebin.com" || rows[0].Details != want {
+		t.Fatalf("row target=%q details=%q, want pastebin.com and %q", rows[0].Target, rows[0].Details, want)
+	}
+}
+
 // TestSandboxEgressEndsAndActivity pins the records the sandbox manager adds
 // on top of the egress decisions: the end of an allowed connection
 // (completed with its bytes and duration, failed or timed out) without a
