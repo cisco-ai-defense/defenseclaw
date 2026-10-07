@@ -133,9 +133,11 @@ fail_unauthorized() {
 AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
-  # would end the curl config line defenseclaw_gateway_post writes it to.
+  # would end the curl config line defenseclaw_gateway_post writes it to. Like
+  # a 401, a malformed bearer fails closed whatever the fail mode: otherwise a
+  # CR in an inherited DEFENSECLAW_GATEWAY_TOKEN would turn it into an allow.
   case "${API_TOKEN}" in
-    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+    *$'\n'*|*$'\r'*) fail_unauthorized "invalid gateway token" ;;
   esac
 {{end}}  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi

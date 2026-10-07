@@ -436,6 +436,121 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 	}
 }
 
+// hookArgvStatusGateway answers every request with status.
+func hookArgvStatusGateway(t *testing.T, status int) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"error":"unauthorized"}`)
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+// TestShellHooksRefuseAMalformedToken: a bearer with CR or LF would end the
+// curl config line. Every host hook refuses it before it starts curl and
+// handles it as a rejected credential, with the exit code and output it gives
+// when the gateway answers HTTP 401, in both fail modes (the inspect hooks
+// fail closed on both). The token comes from the connector-scoped file, the
+// legacy shared .token or the environment, whichever the hook reads.
+func TestShellHooksRefuseAMalformedToken(t *testing.T) {
+	const malformed = "dccert-fake\rtoken"
+	gateway, addr := newHookArgvGateway(t)
+	rejectAddr := hookArgvStatusGateway(t, http.StatusUnauthorized)
+	type layout struct {
+		name  string
+		cases []hookArgvCase
+		// write renders the hooks with a valid token, then makes the token
+		// the hook reads malformed when asked.
+		write func(t *testing.T, dir, addr string, malformedToken bool)
+		// env carries the token for the cases that read it from there.
+		env func(tc hookArgvCase) []string
+	}
+	var layouts []layout
+	for _, conn := range hookArgvShellConnectors {
+		conn := conn
+		cases := []hookArgvCase{hookArgvConnectorCase(t, conn.Name())}
+		if conn.Name() == "claudecode" {
+			cases = append(cases, hookArgvInspectCases()...)
+		}
+		layouts = append(layouts, layout{name: conn.Name(), cases: cases,
+			write: func(t *testing.T, dir, addr string, malformedToken bool) {
+				if err := WriteHookScriptsForConnectorObject(dir, addr, "dccert-fake-token", conn); err != nil {
+					t.Fatal(err)
+				}
+				if !malformedToken {
+					return
+				}
+				path, err := HookTokenFilePath(dir, conn.Name())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(malformed+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			// The inspect hooks strip CR and LF from the scoped file, and an
+			// inherited DEFENSECLAW_GATEWAY_TOKEN takes precedence there.
+			env: func(tc hookArgvCase) []string {
+				if strings.HasPrefix(tc.script, "inspect-") {
+					return []string{"DEFENSECLAW_GATEWAY_TOKEN=" + malformed}
+				}
+				return nil
+			}})
+	}
+	layouts = append(layouts, layout{name: "legacy-token-file",
+		cases: []hookArgvCase{hookArgvConnectorCase(t, "claudecode"), hookArgvInspectCases()[0]},
+		write: func(t *testing.T, dir, addr string, malformedToken bool) {
+			if err := WriteHookScriptsWithToken(dir, addr, "dccert-fake-token"); err != nil {
+				t.Fatal(err)
+			}
+			if malformedToken {
+				if err := os.WriteFile(filepath.Join(dir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\""+malformed+"\"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
+		env: func(hookArgvCase) []string { return nil }})
+	for _, l := range layouts {
+		t.Run(l.name, func(t *testing.T) {
+			hookDir, rejectDir := t.TempDir(), t.TempDir()
+			l.write(t, hookDir, addr, true)
+			l.write(t, rejectDir, rejectAddr, false)
+			rec := newHookArgvRecorder(t)
+			bakeHookPathForTest(t, filepath.Join(hookDir, "_hardening.sh"), rec.dir+":"+hookArgvSystemPATH)
+			for _, tc := range l.cases {
+				for _, mode := range []string{"open", "closed"} {
+					home := t.TempDir()
+					env := []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home, "DEFENSECLAW_FAIL_MODE=" + mode}
+					rec.reset(t)
+					gateway.take()
+					code, stdout, stderr := runHookArgvCase(t, hookDir, tc, append(env, l.env(tc)...))
+					if n := len(gateway.take()); n != 0 {
+						t.Fatalf("%s (%s): sent %d requests with a malformed token", tc.script, mode, n)
+					}
+					for _, call := range rec.records(t) {
+						if strings.HasPrefix(call, "curl") {
+							t.Fatalf("%s (%s): started curl with a malformed token: %s", tc.script, mode, call)
+						}
+					}
+					if !strings.Contains(stderr, "invalid gateway token") {
+						t.Fatalf("%s (%s): stderr = %q, want the invalid gateway token refusal", tc.script, mode, stderr)
+					}
+					wantCode, wantStdout, wantStderr := runHookArgvCase(t, rejectDir, tc, env)
+					if !strings.Contains(wantStderr, "401") {
+						t.Fatalf("%s (%s): the reference run was not refused with HTTP 401: %s", tc.script, mode, wantStderr)
+					}
+					if code != wantCode || stdout != wantStdout {
+						t.Fatalf("%s (%s): exit %d, stdout %q; a gateway 401 gives exit %d, stdout %q", tc.script, mode, code, stdout, wantCode, wantStdout)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestStandaloneSocketHooksKeepPayloadOffEveryCommandLine covers the
 // enterprise standalone hooks, which send no bearer over the hook socket but
 // used to put the whole payload on curl's command line, and the Hermes
@@ -676,6 +791,42 @@ func TestPathShimsLeaveTheRealToolsEnvironmentAlone(t *testing.T) {
 				}
 				if code != 0 || !ran {
 					t.Fatalf("shim exit %d, real tool started %v, want the real tool run\n%s", code, ran, out)
+				}
+			})
+		}
+	}
+}
+
+// TestPathShimsRefuseAMalformedToken: a bearer with CR or LF would end the
+// curl config line. Each shim exits 1 before any request and never starts
+// the real tool, whether the token comes from the environment or .token.
+func TestPathShimsRefuseAMalformedToken(t *testing.T) {
+	const malformed = "dccert-fake\rtoken"
+	gateway, addr := newHookArgvGateway(t)
+	for _, source := range []string{"environment", "token-file"} {
+		shimDir := t.TempDir()
+		if err := WriteShimScriptsWithToken(shimDir, addr, ""); err != nil {
+			t.Fatal(err)
+		}
+		var env []string
+		if source == "environment" {
+			env = []string{"DEFENSECLAW_GATEWAY_TOKEN=" + malformed}
+		} else if err := os.WriteFile(filepath.Join(shimDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\""+malformed+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range shimBinaries {
+			t.Run(source+"/"+name, func(t *testing.T) {
+				binDir, logDir := writeShimRealTools(t)
+				gateway.take()
+				code, out := runShimForTest(t, shimDir, name, binDir, env...)
+				if code != 1 || !strings.Contains(out, "DefenseClaw: shim gateway token is malformed — refusing to exec "+name) {
+					t.Fatalf("shim exit %d, output %q; want exit 1 and the malformed-token refusal", code, out)
+				}
+				if runs := readShimRealToolRuns(t, logDir); len(runs) != 0 {
+					t.Fatalf("the shim started %d tools with a malformed token, first %q", len(runs), runs[0].args)
+				}
+				if requests := gateway.take(); len(requests) != 0 {
+					t.Fatalf("the shim sent %d requests with a malformed token", len(requests))
 				}
 			})
 		}
