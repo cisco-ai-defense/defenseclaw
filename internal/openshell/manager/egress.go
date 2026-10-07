@@ -681,8 +681,9 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	b := m.boxes[e.SandboxName]
 	var ident audit.SandboxIdentity
 	var harnessName string
+	var eff *packs.Effective
 	if b != nil {
-		harnessName = b.rec.Harness
+		harnessName, eff = b.rec.Harness, b.eff
 		// The proxy's requests are no sign of the harness at work (hook
 		// silence): the proxy cannot tell the harness's from a tool's or a
 		// `sandbox exec` command's. OpenShell's record of the connection
@@ -722,13 +723,22 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			// the same host, which are refused one by one.
 			where := sandboxapi.HostPort(e.Host, e.Port)
 			msg := "✓ " + where
+			category, text := string(e.Category), categoryText(e)
+			if blocked && e.Category == egress.CategoryOperatorBlock && eff != nil {
+				// The block list merges the pack's, the repository
+				// policy's and the user's own: the line says whose entry
+				// it was, where it is removed.
+				if c, t := blockOriginText(eff.BlockOrigin(e.Host)); c != "" {
+					category, text = c, t
+				}
+			}
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
-				msg = "✗ " + where + " (" + categoryText(e) + ")" + more
+				msg = "✗ " + where + " (" + text + ")" + more
 			}
 			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
-				Source: sandboxapi.SourceProxy, Category: string(e.Category), Rule: e.Rule, Unblockable: blocked && e.Unblockable,
+				Source: sandboxapi.SourceProxy, Category: category, Rule: e.Rule, Unblockable: blocked && e.Unblockable,
 				Reason: truncate(e.Reason, 300), Message: msg,
 			})
 		}
@@ -948,6 +958,21 @@ func policyOutcome(e egress.Event) string {
 		out += " feed " + e.Feed + "@" + e.FeedVersion
 	}
 	return truncate(out, 256)
+}
+
+// blockOriginText is the feed category and text of a block-list refusal
+// whose entry came from origin (packs.Effective.BlockOrigin); "" for the
+// user's own list, which operator_block already names.
+func blockOriginText(origin string) (category, text string) {
+	switch origin {
+	case packs.BlockFromPack:
+		return sandboxapi.CategoryPackBlock, "on the pack's block list"
+	case packs.BlockFromRepoPolicy:
+		return sandboxapi.CategoryRepoPolicyBlock, "on the repository policy's block list, " + packs.RepoPolicyPath
+	case packs.BlockFromFirewall:
+		return sandboxapi.CategoryFirewallBlock, "a deny rule of the host egress firewall"
+	}
+	return "", ""
 }
 
 func categoryText(e egress.Event) string {

@@ -1011,6 +1011,16 @@ const (
 // which it refused. An unblock of the destination lifts the block.
 const CategoryLargeUpload = "large_upload"
 
+// The Category of a block-list refusal whose entry is the pack's, the
+// repository policy's (.defenseclaw/sandbox.yaml) or the host egress
+// firewall's deny rules; the user's own openshell.egress.block keeps the
+// proxy's operator_block.
+const (
+	CategoryPackBlock       = "pack_block"
+	CategoryRepoPolicyBlock = "repo_policy_block"
+	CategoryFirewallBlock   = "firewall_block"
+)
+
 // LargeUploadBlockedText is how the feed words an egress.blocked event of
 // category large_upload, whose Reason is the egress proxy's sentence
 // ("This sandbox tried to send more than 25 MiB to a destination it had
