@@ -138,6 +138,74 @@ type enterpriseRuntimePlane struct {
 	Running   bool   `json:"running"`
 	Mechanism string `json:"mechanism,omitempty"`
 	Reason    string `json:"reason,omitempty"`
+	// Backend is the kernel event backend of agent actions (plane c) on
+	// managed Linux: the host's Tetragon, or cn_proc and fanotify with the
+	// reason Tetragon is not used. Other hosts omit it.
+	Backend *enterpriseRuntimeBackend `json:"backend,omitempty"`
+}
+
+// enterpriseRuntimeBackend is the plane's backend as the runtime API reports
+// it.
+type enterpriseRuntimeBackend struct {
+	Kind           string `json:"kind"`
+	Version        string `json:"version,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	Socket         string `json:"socket,omitempty"`
+	EventsLost     *int64 `json:"events_lost,omitempty"`
+	LossKnown      *bool  `json:"loss_known,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
+	Policies       []struct {
+		Name  string `json:"name"`
+		Mode  string `json:"mode,omitempty"`
+		State string `json:"state,omitempty"`
+		Error string `json:"error,omitempty"`
+	} `json:"policies,omitempty"`
+	KernelFloor *struct {
+		Mode          string `json:"mode,omitempty"`
+		EnforcedUsers int    `json:"enforced_users"`
+		EnrolledUsers int    `json:"enrolled_users"`
+		BurnInUsers   int    `json:"burn_in_users"`
+		PausedUntil   string `json:"paused_until,omitempty"`
+	} `json:"kernel_floor,omitempty"`
+}
+
+// lines are the backend's lines under its plane, in the words of
+// `defenseclaw agent discovery runtime status`.
+func (b *enterpriseRuntimeBackend) lines() []string {
+	if b == nil {
+		return nil
+	}
+	var out []string
+	switch {
+	case strings.EqualFold(b.Kind, "tetragon"):
+		parts := []string{strings.TrimSpace("Tetragon " + b.Version)}
+		if b.Mode != "" {
+			parts = append(parts, b.Mode)
+		}
+		if (b.LossKnown != nil && !*b.LossKnown) || b.EventsLost == nil {
+			parts = append(parts, "events lost unknown")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d events lost", *b.EventsLost))
+		}
+		out = append(out, "kernel sensor: "+strings.Join(parts, ", "))
+	case b.FallbackReason != "":
+		out = append(out, "kernel sensor: cn_proc and fanotify (Tetragon not used: "+b.FallbackReason+")")
+	}
+	if floor := b.KernelFloor; floor != nil {
+		mode := defaultStr(floor.Mode, "monitor")
+		text := fmt.Sprintf("%s for %d users", mode, floor.EnrolledUsers)
+		if mode == "enforce" {
+			text = fmt.Sprintf("enforce for %d of %d users", floor.EnforcedUsers, floor.EnrolledUsers)
+			if floor.BurnInUsers > 0 {
+				text += fmt.Sprintf(" (%d in burn-in)", floor.BurnInUsers)
+			}
+		}
+		if floor.PausedUntil != "" {
+			text += "; paused until " + floor.PausedUntil
+		}
+		out = append(out, "kernel floor: "+text)
+	}
+	return out
 }
 
 type enterpriseRuntimeFinding struct {
@@ -525,6 +593,9 @@ func writeEnterpriseRuntime(w io.Writer, report enterpriseDiscoveryReport) {
 			fmt.Fprintf(w, "  %s: not running -- %s\n", plane.Name, plane.Reason)
 		default:
 			fmt.Fprintf(w, "  %s: unavailable -- %s\n", plane.Name, plane.Reason)
+		}
+		for _, line := range plane.Backend.lines() {
+			fmt.Fprintf(w, "    %s\n", line)
 		}
 	}
 	if len(view.Findings) == 0 {

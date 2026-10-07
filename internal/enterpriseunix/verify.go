@@ -104,6 +104,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.describe(ctx, record, true)
 	problems = append(problems, l.describeMachinePolicy(record)...)
+	problems = append(problems, l.describeTetragon(ctx)...)
 	if strict {
 		l.warnUnprivilegedUserNamespaces()
 	}
@@ -531,6 +532,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy := ""
+	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
 		r.Services = append(r.Services, status)
@@ -552,6 +554,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 					r.Readiness.Gateway = true
 					l.readInspection(body)
 					reportedPolicy = gatewayPolicyDigest(body)
+					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
 		case "guardian":
@@ -568,6 +571,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.Enrollment = l.enrollmentCounts()
 	l.describePolicy(ctx, reportedPolicy)
+	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.

@@ -141,6 +141,42 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported string) {
 	}
 }
 
+// gatewayKernelPolicy reads, from a /health body, the kernel_policy digest
+// the sensor helper reports it applies (policy.kernel.kernel_policy) and the
+// kernel_policy component of the gateway's policy generation
+// (policy.components.kernel_policy, present only where the deployment loads
+// kernel controls). Either is "" when the gateway does not publish it.
+func gatewayKernelPolicy(body []byte) (applied, generation string) {
+	var health struct {
+		Policy *struct {
+			Components map[string]string `json:"components"`
+			Kernel     *struct {
+				KernelPolicy string `json:"kernel_policy"`
+			} `json:"kernel"`
+		} `json:"policy"`
+	}
+	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
+		return "", ""
+	}
+	if health.Policy.Kernel != nil {
+		applied = health.Policy.Kernel.KernelPolicy
+	}
+	return applied, health.Policy.Components["kernel_policy"]
+}
+
+// describeKernelPolicy warns when the sensor helper applies another kernel
+// control set than the gateway's policy generation names: the helper did
+// not restart into this build. Both are compared as the 12-digit prefix an
+// administrator approves.
+func (l *lifecycle) describeKernelPolicy(applied, generation string) {
+	if applied == "" || generation == "" || shortDigest(applied) == shortDigest(generation) {
+		return
+	}
+	l.result.AddWarning(codeKernelPolicyNotApplied, fmt.Sprintf(
+		"the sensor helper applies kernel policy %s, but the gateway's policy generation has %s; run `%s` so the helper restarts with this build's controls",
+		shortDigest(applied), shortDigest(generation), l.env.lifecycleCommand(ActionEnsure)))
+}
+
 // shortDigest is "sha256:" and the first 12 hex digits, or "none".
 func shortDigest(digest string) string {
 	if digest == "" {

@@ -5,7 +5,17 @@
 # The socket lives in the helper's own runtime directory, so a gateway
 # restart never removes it. The helper resolves the gateway account itself
 # and reads the watched homes from the protected guardian manifest; no
-# environment file is involved.
+# environment file is involved. enterprise.tetragon reaches it only through
+# the lifecycle's drop-in 30-defenseclaw-tetragon.conf, written when the
+# setting differs from the default (consume).
+#
+# Tetragon: on a host that runs it, the helper reads its events over its
+# root-owned unix socket and, in observe and enforce, loads DefenseClaw's
+# kernel controls. After=tetragon.service only orders the two; it never
+# pulls Tetragon in. The helper keeps the names it loaded, the burn-in
+# record and the break-glass pause in its StateDirectory, which survives
+# restarts and reboots; the lifecycle removes the loaded policies (and then
+# the directory) on uninstall.
 #
 # SystemCallFilter: start from @system-service plus @network-io (netlink and
 # packet sockets), plus fanotify_init and fanotify_mark for the Plane C
@@ -19,6 +29,7 @@ Description=DefenseClaw sensor helper (privileged AI runtime acquisition)
 Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/ai-discovery/
 Wants=network-online.target
 After=network-online.target
+After=tetragon.service
 Before=defenseclaw-gateway.service
 StartLimitIntervalSec=0
 
@@ -33,6 +44,12 @@ Restart=always
 RestartSec=5s
 RuntimeDirectory=defenseclaw-sensor
 RuntimeDirectoryMode=0750
+# The until-reboot break-glass pause lives in the runtime directory: it must
+# outlive helper restarts and stops (ensure, repair, upgrades) and go only
+# with a reboot. The helper replaces a stale socket itself.
+RuntimeDirectoryPreserve=yes
+StateDirectory=defenseclaw-sensor
+StateDirectoryMode=0700
 WorkingDirectory=/
 UMask=0007
 

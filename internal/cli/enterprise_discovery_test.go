@@ -156,6 +156,59 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 	}
 }
 
+// On managed Linux, agent actions name their kernel backend: the host's
+// Tetragon, or the native fallback and why, and the kernel floor.
+func TestEnterpriseDiscoveryShowsTheKernelBackend(t *testing.T) {
+	var view enterpriseRuntimeView
+	if err := json.Unmarshal([]byte(`{"enabled":true,"planes":[
+		{"plane":"c","name":"agent actions","available":true,"running":true,"mechanism":"tetragon",
+		 "backend":{"kind":"tetragon","version":"v1.7.1","mode":"enforce","events_lost":0,"loss_known":true,
+		  "kernel_floor":{"mode":"enforce","enforced_users":2,"enrolled_users":3,"burn_in_users":1,"paused_until":"2026-10-07T14:05:00Z"}}},
+		{"plane":"b","name":"shadow egress","available":true,"running":true,"mechanism":"proc"}]}`), &view); err != nil {
+		t.Fatal(err)
+	}
+	stubEnterpriseDiscoveryRuntime(t, &view, nil)
+	var out bytes.Buffer
+	if err := writeEnterpriseDiscovery(&out, filepath.Join(t.TempDir(), "missing"), "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"agent actions: running via tetragon\n    kernel sensor: Tetragon v1.7.1, enforce, 0 events lost\n" +
+			"    kernel floor: enforce for 2 of 3 users (1 in burn-in); paused until 2026-10-07T14:05:00Z\n",
+		"shadow egress: running via proc\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	var asJSON bytes.Buffer
+	if err := writeEnterpriseDiscovery(&asJSON, filepath.Join(t.TempDir(), "missing"), "", true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(asJSON.String(), `"backend": {`) || strings.Count(asJSON.String(), `"backend"`) != 1 {
+		t.Fatalf("--json carries the backend only where the gateway reports one:\n%s", asJSON.String())
+	}
+
+	for backend, want := range map[string]string{
+		`{"kind":"native","fallback_reason":"tetragon_tcp_api: localhost:54321"}`:                    "kernel sensor: cn_proc and fanotify (Tetragon not used: tetragon_tcp_api: localhost:54321)",
+		`{"kind":"tetragon","version":"v1.7.1","mode":"consume","events_lost":4,"loss_known":false}`: "kernel sensor: Tetragon v1.7.1, consume, events lost unknown",
+		`{"kind":"tetragon","mode":"observe"}`:                                                       "kernel sensor: Tetragon, observe, events lost unknown",
+		`{"kind":"tetragon","mode":"observe","events_lost":3}`:                                       "kernel sensor: Tetragon, observe, 3 events lost",
+		`{"kind":"native","kernel_floor":{"mode":"observe","enrolled_users":2}}`:                     "kernel floor: observe for 2 users",
+	} {
+		var b enterpriseRuntimeBackend
+		if err := json.Unmarshal([]byte(backend), &b); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(b.lines(), "\n"); got != want {
+			t.Fatalf("%s: %q, want %q", backend, got, want)
+		}
+	}
+	if lines := (*enterpriseRuntimeBackend)(nil).lines(); lines != nil {
+		t.Fatalf("no backend: %v", lines)
+	}
+}
+
 // GAP-1144: root's discovery view read root's own ~/.defenseclaw/config.yaml
 // and never reached the managed gateway. The runtime read now pins the
 // managed deployment's config first; this runs the real fetch against a
