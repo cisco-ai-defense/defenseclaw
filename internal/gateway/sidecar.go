@@ -2287,6 +2287,12 @@ func openShellListenersChanged(oldCfg, newCfg *config.Config) bool {
 		oldCfg.OpenShellEgressPort() != newCfg.OpenShellEgressPort()
 }
 
+// watcherNeedsRestart reports whether a reload must rebuild the install
+// watcher. admission and asset_policy are not in the list: the watcher reads
+// them from the published config on every decision (SetConfigSource), and a
+// restart cancels the scans in flight, which fail closed. Every operator
+// block/allow writes asset_policy, so restarting for it blocked clean assets
+// whose scan was running (GAP-0315).
 func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
@@ -2295,8 +2301,6 @@ func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.Watch, newCfg.Watch) ||
 		!reflect.DeepEqual(oldCfg.Scanners, newCfg.Scanners) ||
-		!reflect.DeepEqual(oldCfg.Admission, newCfg.Admission) ||
-		!reflect.DeepEqual(oldCfg.AssetPolicy, newCfg.AssetPolicy) ||
 		oldCfg.Claw != newCfg.Claw ||
 		(!newCfg.SecureClientIntegration() && oldCfg.QuarantineDir != newCfg.QuarantineDir)
 }
