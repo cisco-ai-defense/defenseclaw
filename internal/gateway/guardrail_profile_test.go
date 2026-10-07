@@ -475,6 +475,26 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	if late := set.unknownGroupWarnings(2 * time.Second); len(late) != 2 {
 		t.Fatalf("warnings = %q after the pass finished, want 2", late)
 	}
+
+	// GAP-0229: an SSSD that is offline with a cold cache answers "no such
+	// group" for groups that exist. While lookups fail, or the explained
+	// account failed to resolve, nothing is warned and no pass is kept; the
+	// next pass runs once they work.
+	previousHealth := directoryCacheHealth
+	t.Cleanup(func() { directoryCacheHealth = previousHealth })
+	profileGroupExists = func(context.Context, string) (bool, error) { return false, nil }
+	set = &guardrailProfileSet{assignments: assignments}
+	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{Failing: 1} }
+	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 0 {
+		t.Fatalf("warnings = %q while directory lookups fail, want none", got)
+	}
+	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{} }
+	if got := profileExplainWarnings(set, profileDecision{}, &profileSubject{LookupFailed: true}); len(got) != 0 {
+		t.Fatalf("warnings = %q for an account whose lookup failed, want none", got)
+	}
+	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 4 {
+		t.Fatalf("warnings = %q once the directory answers, want the 4 absent groups", got)
+	}
 }
 
 // TestExplainShowsTheProfileRequestsStillGet pins GAP-0134: explain resolves

@@ -161,7 +161,11 @@ in the operating system, and a group it definitely does not find is a warning in
 `guardrail profile explain`, `guardrail profile list`, `guardrail status` and
 `doctor`, and a line in the gateway log at start and at every reload
 (`[guardrail] assignment 1: group "..." is not known to this host`). A lookup
-that fails or times out says nothing. On Windows the SID of a group survives a
+that fails or times out says nothing. Neither does the check while the
+directory is unreachable: an SSSD that is offline with a cold cache answers
+"no such group" for groups that exist, so the warnings wait while the
+"Directory lookups" warning is showing, and for an account whose own lookup
+failed. On Windows the SID of a group survives a
 rename, so it is the spelling to use there; on Linux and macOS a group is
 matched by its name.
 
