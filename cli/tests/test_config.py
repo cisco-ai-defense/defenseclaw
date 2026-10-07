@@ -1010,6 +1010,21 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertNotIn("ide_inventory", raw.get("ai_discovery", {}))
             self.assertNotIn("include_user_principal", raw.get("ai_discovery", {}))
 
+            # A hand-written unquoted off is the string off to the gateway
+            # (YAML 1.2); YAML 1.1 made it False, read as all, and a save then
+            # failed v8 validation.
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file, "a") as f:
+                f.write("ai_discovery:\n  enabled: true\n  ide_inventory: off\n")
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                loaded = load()
+            self.assertEqual(loaded.ai_discovery.ide_inventory, "off")
+            loaded.ai_discovery.enabled = False
+            loaded.save()
+            with open(config_file) as f:
+                self.assertEqual(yaml.safe_load(f)["ai_discovery"]["ide_inventory"], "off")
+
     def test_global_only_asset_policy_omits_connectors_key(self):
         # An enabled-but-global-only config must NOT emit `connectors:` so it
         # stays byte-identical to a pre-OTHER-7 config (omitempty mirror).

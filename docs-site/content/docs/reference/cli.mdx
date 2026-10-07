@@ -487,7 +487,7 @@ Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded 
 | `defenseclaw acp verify [--client X] [--agent Y]` | Fail when a managed editor entry or the guarded executable's digest has drifted. With no `--client`/`--agent`, every configured binding is checked. |
 | `defenseclaw acp refresh [--from-sha256 <digest>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). A changed agent binary or editor entry still needs `acp setup`. |
 | `defenseclaw-gateway enterprise acp enroll\|verify\|revoke ...` | Manage the protected per-principal/client/agent/profile credential and its private user copy. |
-| `defenseclaw-gateway enterprise acp setup --client X --agent Y --profile P [--activate] --api-port N` | Run by the enrolled user on a managed computer, with the command `enroll` reports: write the guarded editor entry and the contract lock. Reads no central configuration. |
+| `defenseclaw-gateway enterprise acp setup --client X --agent Y --profile P [--activate] --api-port N` | Run by the enrolled user on a standalone managed computer, with the command `enroll` reports: write the guarded editor entry and the contract lock. Reads no central configuration. Secure Client has no `setup`; its `enroll` reports `defenseclaw acp setup --managed`. |
 
 ## Guardrail
 

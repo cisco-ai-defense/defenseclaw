@@ -98,5 +98,5 @@ Lint: `ruff` (line length 120), `shellcheck` and PSScriptAnalyzer (including the
   it (Administrators, Users, Guests, Power Users, Remote Desktop Users, Remote Management
   Users). A per-user Windows install has no group list at all; use `users` assignments there.
 - The Linux `aad` module gives no Entra groups; use `users` assignments.
-- On Windows, `guardrail profile explain --user` takes a SID or `AzureAD\Name`, not a UPN.
+- On Windows, `guardrail profile explain --user` takes a SID, `AzureAD\Name`, the bare name or the UPN.
 - `entra_setup.py` uses the commercial Microsoft cloud (`graph.microsoft.com`).

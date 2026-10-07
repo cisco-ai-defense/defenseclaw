@@ -149,14 +149,15 @@ func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds pol
 	return &out
 }
 
-// fallbackVerdict is the verdict without a Rego module. Secure Client keeps
-// the 1.0 threshold-only answer (issue #1092): no Cisco trust level and no
-// HILT confirm.
-func (g *GuardrailInspector) fallbackVerdict(merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
+// fallbackVerdict is the verdict without a Rego module, with the HILT
+// settings of the guardrail profile of ctx (hiltInputFor). Secure Client
+// keeps the 1.0 threshold-only answer (issue #1092): no Cisco trust level
+// and no HILT confirm.
+func (g *GuardrailInspector) fallbackVerdict(ctx context.Context, merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
 	if gen := currentGeneration(); gen != nil && gen.Config != nil && gen.Config.SecureClientIntegration() {
 		return fallbackGuardrailVerdictForThresholds(merged, nil, thresholds, "", nil)
 	}
-	return fallbackGuardrailVerdictForThresholds(merged, cisco, thresholds, mode, g.hiltInput())
+	return fallbackGuardrailVerdictForThresholds(merged, cisco, thresholds, mode, g.hiltInputFor(ctx))
 }
 
 func errorVerdict(scanner string) *ScanVerdict {
@@ -530,17 +531,20 @@ func (g *GuardrailInspector) SetDetectionStrategy(global, prompt, completion, to
 // minSeverity defaults to "HIGH" — the same default the policy uses
 // when the field is absent from data.json.
 func (g *GuardrailInspector) SetHILTConfig(enabled bool, minSeverity string) {
-	normalized := strings.ToUpper(strings.TrimSpace(minSeverity))
-	if normalized == "" {
-		normalized = "HIGH"
-	}
 	g.hiltMu.Lock()
 	g.hilt = policy.GuardrailHILTInput{
 		Enabled:     enabled,
-		MinSeverity: normalized,
+		MinSeverity: normalizeHILTMinSeverity(minSeverity),
 	}
 	g.hiltSet = true
 	g.hiltMu.Unlock()
+}
+
+func normalizeHILTMinSeverity(minSeverity string) string {
+	if normalized := strings.ToUpper(strings.TrimSpace(minSeverity)); normalized != "" {
+		return normalized
+	}
+	return "HIGH"
 }
 
 // hiltInput returns a pointer to the cached HILT input for the Rego policy,
@@ -560,6 +564,21 @@ func (g *GuardrailInspector) hiltInput() *policy.GuardrailHILTInput {
 	}
 	cp := g.hilt
 	return &cp
+}
+
+// hiltInputFor is hiltInput with the HILT settings of ctx's guardrail
+// profile (proxyProfileFor), as explain reports them for the proxy's
+// connector (GAP-0313).
+func (g *GuardrailInspector) hiltInputFor(ctx context.Context) *policy.GuardrailHILTInput {
+	input := g.hiltInput()
+	if input == nil {
+		return nil
+	}
+	if resolved := proxyProfileFor(ctx); resolved != nil {
+		hilt := resolved.derived.EffectiveHILTForConnector(profileRequestConnector(ctx))
+		input.Enabled, input.MinSeverity = hilt.Enabled, normalizeHILTMinSeverity(hilt.MinSeverity)
+	}
+	return input
 }
 
 // effectiveStrategy resolves the detection strategy for a given direction.
@@ -953,7 +972,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	localResult = scanLocalPatterns(direction, content)
+	localResult = scanLocalPatternsFor(ctx, direction, content)
 	endRegex(phaseAction(localResult), phaseSeverity(localResult), time.Since(regexStart))
 
 	// The local-HIGH short-circuit historically returned early without
@@ -1000,7 +1019,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// actions are evaluated through the tool-call path where execution facts
 	// are available, rather than treating their literal appearance in prose as
 	// an action.
-	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
+	ruleFindings := scanProxyContentRules(ctx, content)
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
@@ -1199,7 +1218,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		fmt.Fprintf(defaultLogWriter, "  [guardrail] judge_first: judge unavailable (%s dir=%s), falling back to regex_only\n", reason, direction)
 		fallbackStart := time.Now()
 		_, endFallback := g.startPhaseSpan(ctx, "regex.fallback")
-		localResult := scanLocalPatterns(direction, content)
+		localResult := scanLocalPatternsFor(ctx, direction, content)
 		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart))
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
@@ -1234,7 +1253,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Keep the same content/action boundary as regex_judge. The trusted action
 	// dispatcher remains responsible for command, path, cognitive-file, and C2
 	// enforcement because it can reason over parsed execution facts.
-	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
+	ruleFindings := scanProxyContentRules(ctx, content)
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		if severityRank[maxSev] >= severityRank["HIGH"] {
@@ -1306,7 +1325,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		prepared = gen.OPA
 	}
 	if prepared == nil {
-		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
+		return g.fallbackVerdict(ctx, merged, ciscoResult, thresholds, mode)
 	}
 
 	input := policy.GuardrailInput{
@@ -1315,7 +1334,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		Mode:          mode,
 		ScannerMode:   g.scannerMode,
 		ContentLength: len(content),
-		HILT:          g.hiltInput(),
+		HILT:          g.hiltInputFor(ctx),
 		Thresholds:    &thresholds,
 	}
 
@@ -1344,7 +1363,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
+		return g.fallbackVerdict(ctx, merged, ciscoResult, thresholds, mode)
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 
@@ -1642,6 +1661,26 @@ var bulkAccessRegex = regexp.MustCompile(
 	`(?i)\b(?:users_list|contacts_list|mail_search|delegated_email_list_principals)\b.*\btop\s+\d{2,}\b`)
 
 func scanLocalPatterns(direction, content string) *ScanVerdict {
+	return scanLocalPatternsWithRules(direction, content, snapshotRulePackGeneration(""))
+}
+
+// scanLocalPatternsFor is scanLocalPatterns for a guardrail proxy request:
+// its content rules come from the rule pack of the request's profile
+// (proxyRuleGeneration).
+func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
+	return scanLocalPatternsWithRules(direction, content, proxyRuleGeneration(ctx))
+}
+
+// scanProxyContentRules is the content rule scan of a guardrail proxy
+// request, with the rule pack of its profile (proxyRuleGeneration).
+func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
+	if ManagedEnterpriseActive() {
+		return nil
+	}
+	return scanContentRuleCategoryWithGeneration(proxyRuleGeneration(ctx), content, "", ruleContentScopeUntrusted, "")
+}
+
+func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
 	// managed_enterprise: local regex detection is disabled — Cisco AI
 	// Defense is authoritative. Return an allow verdict so any residual
 	// call site (router lane, etc.) produces no local signal.
@@ -1751,7 +1790,7 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	// commands, paths, cognitive files, and C2 indicators are action categories
 	// and require parsed tool-call facts before they can affect enforcement.
 	maxRuleSev := "NONE"
-	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
+	ruleFindings := scanContentRuleCategoryWithGeneration(rules, content, "", ruleContentScopeUntrusted, "")
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {

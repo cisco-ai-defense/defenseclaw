@@ -77,6 +77,17 @@ def test_kit_files_are_ascii_with_unix_line_endings() -> None:
     assert checked >= 5
 
 
+def test_kit_does_not_say_an_empty_connector_entry_is_dropped() -> None:
+    # GAP-0305: the config loaders keep an empty entry such as `claudecode: {}` and enable that
+    # agent (GAP-0221), so the starter configs and their guides must not say it is dropped.
+    guides = ROOT / "docs-site" / "content" / "docs" / "enterprise"
+    paths = sorted(path for directory in KIT_DIRS for path in directory.glob("*.example.yaml"))
+    assert len(paths) >= 3
+    for path in [*paths, guides / "identity-okta.mdx", guides / "identity-entra-id.mdx"]:
+        text = " ".join(path.read_text(encoding="utf-8").replace("#", " ").split())
+        assert not re.search(r"\{\}`? is dropped", text), path.relative_to(ROOT)
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
 def test_okta_sssd_render_fills_every_placeholder_once(tmp_path: Path) -> None:
     out = tmp_path / "sssd.conf"

@@ -209,7 +209,8 @@ telemetry registry marks these five sensitive, and nothing joins on them. The
 `strict` profile, and a custom profile that extends it, removes them from every
 log and trace it delivers, Galileo and the local audit export included; `none`,
 `sensitive` and `content` keep them as plaintext. `user.id`, the account name and
-the agent and session ids stay in every profile, so records still join.
+the agent and session ids stay in every profile, so records still join. On the
+Secure Client profile every profile keeps all five, as before 1.0.
 
 `ai_discovery.include_user_principal` and `ai_discovery.include_user_email` decide
 whether the gateway attaches the principals and the email at all, for every

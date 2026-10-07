@@ -18,6 +18,7 @@ import (
 	"runtime"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -75,18 +76,24 @@ const enterpriseIdentityViewAnnotation = "defenseclaw.identity-view"
 
 // secureClientAbsentAnnotation marks a command main does not have, which a
 // Secure Client computer drops; secureClientShortAnnotation holds the help
-// line of main for a command whose line changed (issue #1092).
+// line and secureClientLongAnnotation the help text of main for a command
+// whose help changed, and the flag annotation secureClientUsageAnnotation
+// the usage line of main for a flag (issue #1092).
 const (
 	secureClientAbsentAnnotation = "defenseclaw.secure-client-absent"
 	secureClientShortAnnotation  = "defenseclaw.secure-client-short"
+	secureClientLongAnnotation   = "defenseclaw.secure-client-long"
+	secureClientUsageAnnotation  = "defenseclaw.secure-client-usage"
 )
 
 // keepCommandTreeOfMainOnSecureClient gives a Secure Client computer the
 // command tree of main (issue #1092): it removes the identity views of the
 // `enterprise <platform>` groups, whose routes its gateway does not serve,
 // and every command marked secureClientAbsentAnnotation (policy digest, scan
-// skill|mcp|plugin), and puts back the help line of main where a command
-// carries secureClientShortAnnotation (policy show, policy validate).
+// skill|mcp|plugin, enterprise acp setup), and puts back the help of main
+// where a command carries secureClientShortAnnotation (policy show, policy
+// validate) or secureClientLongAnnotation (enterprise acp), or a flag
+// carries secureClientUsageAnnotation (enterprise windows discovery --user).
 func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 	if !secureClientHost() {
 		return
@@ -101,6 +108,14 @@ func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 			if short := cmd.Annotations[secureClientShortAnnotation]; short != "" {
 				cmd.Short = short
 			}
+			if long := cmd.Annotations[secureClientLongAnnotation]; long != "" {
+				cmd.Long = long
+			}
+			cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+				if usage := flag.Annotations[secureClientUsageAnnotation]; len(usage) == 1 {
+					flag.Usage = usage[0]
+				}
+			})
 			keep(cmd)
 		}
 	}

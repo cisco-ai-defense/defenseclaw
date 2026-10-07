@@ -254,7 +254,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRedaction, err)
 	}
-	engine, err := redaction.NewEngineWithCorrelationKey(key)
+	engine, err := newObservabilityV8RedactionEngine(s.currentConfig(), key)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRedaction, err)
 	}
@@ -356,6 +356,18 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		runtime: runtime, redactionEngine: engine, dataDir: filepath.Clean(compiled.DataDir),
 		retainJudgeBodies: retainJudgeBodies,
 	}, nil
+}
+
+// newObservabilityV8RedactionEngine builds the projection engine every
+// destination, the local store and the reporter share. Secure Client keeps
+// every identifier under every profile, as on main (issue #1092); elsewhere
+// strict removes the personal identifiers.
+func newObservabilityV8RedactionEngine(cfg *config.Config, key redaction.CorrelationKey) (*redaction.Engine, error) {
+	engine, err := redaction.NewEngineWithCorrelationKey(key)
+	if err != nil || !cfg.SecureClientIntegration() {
+		return engine, err
+	}
+	return engine.WithPersonalIdentifiersKept(), nil
 }
 
 type sidecarOwnedObservabilityV8Runtime struct {

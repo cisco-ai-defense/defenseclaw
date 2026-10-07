@@ -91,6 +91,9 @@ const (
 	DefaultStateDBTimeout = 2 * time.Second
 
 	maxFieldLen = 256
+	// maxProductLen bounds an installation's product token, as the
+	// inventory's per-user report check does.
+	maxProductLen = 64
 )
 
 // Limits bounds one Scan. Zero values take the defaults.
@@ -258,33 +261,58 @@ func (s *scanner) charge(bytes int64) bool {
 	return true
 }
 
-// isDir reports whether path is a directory, without following a final
-// link unless the scan may.
+// isDir reports whether path is a directory, without following a link
+// unless the scan may.
 func (s *scanner) isDir(path string) bool {
-	var (
-		info os.FileInfo
-		err  error
-	)
-	if s.limits.FollowSymlinks {
-		info, err = os.Stat(path)
-	} else {
-		info, err = os.Lstat(path)
-	}
+	info, err := s.stat(path)
 	return err == nil && info.IsDir()
 }
 
 // isFile reports whether path is a regular file, with the same link rule.
 func (s *scanner) isFile(path string) bool {
-	var (
-		info os.FileInfo
-		err  error
-	)
-	if s.limits.FollowSymlinks {
-		info, err = os.Stat(path)
-	} else {
-		info, err = os.Lstat(path)
-	}
+	info, err := s.stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+var errLinkAbove = errors.New("a link or junction above the path")
+
+// stat follows links only when the scan may. Lstat and O_NOFOLLOW see only
+// the last element, so a scan that must not follow links first checks
+// every directory between the home and path: a link or junction there
+// (%USERPROFILE%\.vscode pointing at another profile's) would put another
+// account's plugins in this one's inventory.
+func (s *scanner) stat(path string) (os.FileInfo, error) {
+	if s.limits.FollowSymlinks {
+		return os.Stat(path)
+	}
+	if !s.plainDirsAbove(path) {
+		return nil, errLinkAbove
+	}
+	return os.Lstat(path)
+}
+
+// plainDirsAbove reports whether every directory between the home and path
+// is a plain directory; Lstat reports a link, and a Windows junction, as
+// no directory. The machine-wide scan has no home: Program Files is the
+// administrator's.
+func (s *scanner) plainDirsAbove(path string) bool {
+	home := s.layout.home
+	if home == "" || path == home {
+		return true
+	}
+	var dirs []string
+	for dir := filepath.Dir(path); dir != home; dir = filepath.Dir(dir) {
+		if filepath.Dir(dir) == dir {
+			return false // not inside the home
+		}
+		dirs = append(dirs, dir)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if info, err := os.Lstat(dirs[i]); err != nil || !info.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 // listDir returns up to limit entries of dir, sorted by name. Entries

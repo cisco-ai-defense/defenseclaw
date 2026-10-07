@@ -122,10 +122,14 @@ func TestCommittedCorrelationRelationshipBuildsExplainableExportLog(t *testing.T
 // GAP-0087: a native Codex log reports conversation.id but no agent, so its
 // relationship rows take the session agent the hook rows carry.
 func TestCorrelationRelationshipContextTakesSessionAgent(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
 	api := &APIServer{}
 	sessionOnly := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{SessionID: "session-1"})
-	root := stableLLMEventID("agent", "codex", "session-1", "root")
-	if got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(sessionOnly, "codex")).AgentID; got != root {
+	got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(sessionOnly, "codex")).AgentID
+	// The root agent the session's hooks record, scoped by the agent
+	// identity the hook path derives (GAP-0232).
+	hookCtx := enrichAgentHookContext(t.Context(), agentHookRequest{ConnectorName: "codex", SessionID: "session-1"})
+	if root := hookLLMEventMeta(hookCtx, "codex", "session-1", "", "", "", "", "", "", map[string]interface{}{}).AgentID; got != root {
 		t.Fatalf("no hook snapshot: agent=%q want conversation root %q", got, root)
 	}
 	api.rememberHookSessionState(t.Context(), llmEventMeta{

@@ -908,7 +908,8 @@ jobs:
           ./internal/ipc/...
       - name: Go tests of the darwin paths in the agent-process, connector, gateway and CLI packages
         # The go-test jobs run these packages on Linux only. On macOS this runs
-        # the kern.proc agent-process lookup, every connector package
+        # the kern.proc agent-process lookup, the gethostuuid machine id behind
+        # agt- IDs, every connector package
         # (hookexec and the /etc/codex requirements path included) and, in
         # internal/gateway and internal/cli, the tests of their darwin, unix,
         # linux||darwin and !windows test files plus the foreign-hook guard,
@@ -923,7 +924,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-tmp"
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
-          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/gateway/connector/...
+          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/agentidentity/... ./internal/gateway/connector/...
           unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
             local file names=()
             for file in "$@"; do

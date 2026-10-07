@@ -152,8 +152,9 @@ connector evidence leaves the field absent.
 option is enabled, it may be sent as plaintext to configured destinations,
 including the managed AI Defense destination. Only the `strict` profile (and a
 custom profile that extends it) removes this address; `none`, `sensitive` and
-`content` keep it. Keep the default off unless the destination and your privacy
-policy explicitly allow it.
+`content` keep it, and on the Secure Client profile every profile keeps it. Keep
+the default off unless the destination and your privacy policy explicitly allow
+it.
 </Callout>
 
 For Codex and Claude Code, join a hook event to the latest `ai.discovery` row

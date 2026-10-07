@@ -175,23 +175,36 @@ func fetchEnterpriseDiscoveryRuntime() (*enterpriseRuntimeView, error) {
 // request that needs a directory lookup (a cold SSSD, a slow domain
 // controller) is answered only after the gateway's own lookup bound of 20 s,
 // so the wait is longer, as the Python CLI's is (GAP-0140, GAP-0215).
-// Replaceable in tests.
-var enterpriseGatewayWait = 35 * time.Second
+// Secure Client keeps the wait of main, secureClientGatewayWait (issue
+// #1092). Both are replaceable in tests.
+var (
+	enterpriseGatewayWait   = 35 * time.Second
+	secureClientGatewayWait = 5 * time.Second
+)
+
+// enterpriseDiscoveryLoadConfig loads the pinned deployment's config;
+// replaceable in tests.
+var enterpriseDiscoveryLoadConfig = loadGatewayCommandConfigFor
 
 // enterpriseGatewayGet decodes one GET of the managed deployment's local
 // gateway API into out and returns the gateway's host:port. A gateway that
 // took the connection and did not answer in time is running, so the error
 // blames the lookup and does not send the administrator to the deployment
-// status; a connection that fails does.
+// status; a connection that fails does. Secure Client keeps the one error of
+// main for both (issue #1092).
 func enterpriseGatewayGet(path string, out any) (string, error) {
 	if err := enterpriseDiscoveryPinManagedEnv(); err != nil {
 		return "", err
 	}
-	if err := loadGatewayCommandConfigFor(runtimeCommand); err != nil {
+	if err := enterpriseDiscoveryLoadConfig(runtimeCommand); err != nil {
 		return "", err
 	}
+	wait, secureClient := enterpriseGatewayWait, cfg.SecureClientIntegration()
+	if secureClient {
+		wait = secureClientGatewayWait
+	}
 	host := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort))
-	ctx, cancel := context.WithTimeout(context.Background(), enterpriseGatewayWait)
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+path, nil)
 	if err != nil {
@@ -206,9 +219,9 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 		req.Header.Set("X-DefenseClaw-Token", token)
 	}
 	resp, err := http.DefaultClient.Do(req)
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) && !secureClient {
 		return "", fmt.Errorf("the gateway at %s took the connection but did not answer within %g s; it is running, and a request "+
-			"that waits for the directory (SSSD or the domain controller) can take that long. Try again", host, enterpriseGatewayWait.Seconds())
+			"that waits for the directory (SSSD or the domain controller) can take that long. Try again", host, wait.Seconds())
 	}
 	if err != nil {
 		return "", fmt.Errorf("the gateway at %s did not answer; check the deployment with: %s", host, enterpriseDiscoveryStatusHint())
@@ -331,6 +344,14 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	}
 	heading := fmt.Sprintf("AI Discovery inventory from the gateway's scan of each user profile (gateway %s)", host)
 	return writeEnterpriseDiscoveryReport(w, report, user, asJSON, heading)
+}
+
+// addWindowsDiscoveryUserFlag defines --user of `enterprise windows
+// discovery`. Secure Client matches the account name or SID only and keeps
+// the usage line of main (issue #1092).
+func addWindowsDiscoveryUserFlag(cmd *cobra.Command, user *string) {
+	cmd.Flags().StringVar(user, "user", "", "list one account's signals (account name, DOMAIN\\name or SID)")
+	_ = cmd.Flags().SetAnnotation("user", secureClientUsageAnnotation, []string{"list one account's signals (account name or SID)"})
 }
 
 // windowsDiscoveryAccountNotFound says why --user selected nothing: the

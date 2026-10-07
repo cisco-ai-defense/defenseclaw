@@ -223,6 +223,23 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 		strings.Contains(err.Error(), "check the deployment") {
 		t.Fatalf("slow gateway error = %v, want the directory lookup blamed", err)
 	}
+	// Secure Client keeps the 5 s wait and the error of main (GAP-0303,
+	// issue #1092).
+	previousLoad, previousSecureClientWait := enterpriseDiscoveryLoadConfig, secureClientGatewayWait
+	t.Cleanup(func() {
+		enterpriseDiscoveryLoadConfig, secureClientGatewayWait = previousLoad, previousSecureClientWait
+	})
+	secureClientGatewayWait = 100 * time.Millisecond
+	enterpriseDiscoveryLoadConfig = func(*cobra.Command) error {
+		cfg = &config.Config{DeploymentMode: "managed_enterprise", Gateway: config.GatewayConfig{
+			APIBind: "127.0.0.1", APIPort: gateway.Listener.Addr().(*net.TCPAddr).Port,
+		}}
+		return nil
+	}
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "did not answer; check the deployment") {
+		t.Fatalf("Secure Client slow gateway error = %v, want the error of main", err)
+	}
+	enterpriseDiscoveryLoadConfig = previousLoad
 	gateway.Close()
 	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "check the deployment") {
 		t.Fatalf("stopped gateway error = %v, want the deployment status hint", err)
@@ -352,9 +369,15 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	root := &cobra.Command{Use: "defenseclaw-gateway"}
 	enterprise := &cobra.Command{Use: "enterprise"}
 	group := &cobra.Command{Use: "windows"}
-	group.AddCommand(&cobra.Command{Use: "discovery"})
+	discovery := &cobra.Command{Use: "discovery"}
+	var discoveryUser string
+	addWindowsDiscoveryUserFlag(discovery, &discoveryUser)
+	group.AddCommand(discovery)
 	group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
-	enterprise.AddCommand(group)
+	// Nor does it have enterprise acp setup or its help line (GAP-0302).
+	acpGroup := &cobra.Command{Use: "acp", Long: enterpriseACPCmd.Long, Annotations: enterpriseACPCmd.Annotations}
+	acpGroup.AddCommand(&cobra.Command{Use: "enroll"}, &cobra.Command{Use: "setup", Annotations: enterpriseACPSetupCmd.Annotations})
+	enterprise.AddCommand(group, acpGroup)
 	root.AddCommand(enterprise)
 	policyGroup := &cobra.Command{Use: "policy"}
 	policyGroup.AddCommand(&cobra.Command{Use: "show", Short: policyShowCmd.Short, Annotations: policyShowCmd.Annotations},
@@ -365,16 +388,21 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	root.AddCommand(policyGroup, scanGroup)
 	secureClientHost = func() bool { return false }
 	keepCommandTreeOfMainOnSecureClient(root)
-	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) {
-		t.Fatalf("standalone group has %d commands, want the identity views too", got)
+	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 {
+		t.Fatalf("standalone groups have %d and %d commands, want the identity views and setup too", got, len(acpGroup.Commands()))
 	}
 	if len(policyGroup.Commands()) != 2 || len(scanGroup.Commands()) != 4 {
 		t.Fatalf("standalone policy %v, scan %v: want policy digest and scan skill|mcp|plugin", policyGroup.Commands(), scanGroup.Commands())
 	}
 	secureClientHost = func() bool { return true }
 	keepCommandTreeOfMainOnSecureClient(root)
-	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" {
-		t.Fatalf("Secure Client group = %v, want discovery only", got)
+	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" ||
+		discovery.Flag("user").Usage != "list one account's signals (account name or SID)" {
+		t.Fatalf("Secure Client group = %v, --user %q, want discovery only with the usage of main", got, discovery.Flag("user").Usage)
+	}
+	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
+		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
+		t.Fatalf("Secure Client acp group = %v, help %q, want the ones of main", got, acpGroup.Long)
 	}
 	if p, s := policyGroup.Commands(), scanGroup.Commands(); len(p) != 1 || p[0].Name() != "show" || len(s) != 1 || s[0].Name() != "code" {
 		t.Fatalf("Secure Client policy %v, scan %v: want the commands of main (policy show, scan code)", p, s)

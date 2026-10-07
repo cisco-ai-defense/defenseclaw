@@ -247,8 +247,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll \
 ```
 
 The JSON result contains a `token_file` and a `next` command, never the token
-value. The user runs the reported `defenseclaw-gateway enterprise acp setup ...`
-command, as themselves: a managed computer has no other DefenseClaw command.
+value. On a standalone managed computer the user runs the reported
+`defenseclaw-gateway enterprise acp setup ...` command, as themselves: that
+computer has no other DefenseClaw command. Secure Client reports
+`defenseclaw acp setup --managed ...` instead.
 It writes the guarded editor entry and the executable contract lock in that
 user's own state, from the enrollment alone. It reads no central configuration,
 so it cannot change policy, and the gateway refuses any request that does not

@@ -117,7 +117,7 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 | Key | Matches | Spell it as |
 | --- | --- | --- |
 | `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: the group name `id -Gn` prints. |
-| `users` | The verified user | A uid or SID, the account name, or the principal or UPN (`alice@CORP.EXAMPLE.COM`). |
+| `users` | The verified user | A uid or SID, the account name, `DOMAIN\user` (`CORP\alice`, the form winbind and Windows report), or the principal or UPN (`alice@CORP.EXAMPLE.COM`). |
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
 
@@ -244,9 +244,10 @@ What follows when the identity is missing:
   gateway log has one line when an account's lookups start to fail and one when
   they work again.
 
-Because an unverified or failed lookup always lands on the default profile,
-**set a strict `default_profile`**. A lenient default means a lookup failure
-is treated more leniently than a known user.
+Because a failed lookup always lands on the default profile, and so does an
+unverified request that no `connectors`-only assignment selects, **set a strict
+`default_profile`**. A lenient default means a lookup failure is treated more
+leniently than a known user.
 
 <Callout type="warn" title="Per-user installs on Windows have no groups">
 On a per-user Windows install the gateway cannot read the sign-in token's
@@ -329,7 +330,9 @@ hooks, its `/api/v1/inspect` calls and, for OpenClaw and ZeptoClaw, its LLM
 traffic through the guardrail proxy. The proxy attributes each request to the
 connector it serves and to that connector's install for the user the gateway
 runs as, so an OpenClaw or ZeptoClaw install appears in
-`defenseclaw agent identities` after its first proxied request.
+`defenseclaw agent identities` after its first proxied request. On proxied
+traffic the profile sets the mode, the block message, the rule pack,
+`block_at`, `alert_at` and `hilt`.
 
 A pin names one install, so keep three things in mind:
 

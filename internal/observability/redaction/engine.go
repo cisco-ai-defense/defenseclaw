@@ -25,6 +25,9 @@ type Engine struct {
 	origin       *engineOrigin
 	key          [hashV1KeySize]byte
 	keyAvailable bool
+	// keepPersonalIdentifiers turns off the strict removal of the personal
+	// identifiers, so every profile keeps every identifier-class field.
+	keepPersonalIdentifiers bool
 }
 
 // NewEngine accepts either no key or exactly 32 bytes and always snapshots it.
@@ -53,6 +56,20 @@ func NewEngineWithCorrelationKey(key CorrelationKey) (*Engine, error) {
 		material[index] = 0
 	}
 	return engine, err
+}
+
+// WithPersonalIdentifiersKept returns an engine whose profiles all keep the
+// personal identifiers, strict included, as before 1.0. Secure Client hosts use
+// it so their record output stays as on main (issue #1092). The new engine has
+// its own origin, so neither engine trusts projections made by the other.
+func (engine *Engine) WithPersonalIdentifiersKept() *Engine {
+	if engine == nil {
+		return nil
+	}
+	kept := *engine
+	kept.origin = &engineOrigin{identity: 1}
+	kept.keepPersonalIdentifiers = true
+	return &kept
 }
 
 // Project creates an independent immutable route projection.
@@ -253,8 +270,8 @@ func (state *projectionWalkState) transformLeaf(input any, pointer string) (any,
 	if !ok {
 		return nil, false, &ProjectionError{Code: ProjectionFailureContext}
 	}
-	if class == observability.FieldClassIdentifier && state.profile.RemovesPersonalIdentifiers() &&
-		isPersonalIdentifierPointer(pointer) {
+	if class == observability.FieldClassIdentifier && !state.engine.keepPersonalIdentifiers &&
+		state.profile.RemovesPersonalIdentifiers() && isPersonalIdentifierPointer(pointer) {
 		mode = ModeRemove
 	}
 	if mode == ModeRemove {

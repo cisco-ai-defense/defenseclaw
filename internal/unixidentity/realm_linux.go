@@ -43,6 +43,11 @@ type Realm struct {
 	// ServerSoftware is the server-software detail realmd reports, for
 	// example "active-directory" or "ipa".
 	ServerSoftware string
+	// ClientSoftware is the client-software detail, "sssd" or "winbind".
+	ClientSoftware string
+	// NetBIOS is the NetBIOS domain name of a winbind realm (CORP), in upper
+	// case, from its login format; empty for SSSD realms.
+	NetBIOS string
 }
 
 const (
@@ -120,11 +125,18 @@ func configuredRealms(ctx context.Context) []Realm {
 		if entry.Domain == "" {
 			entry.Domain = strings.ToLower(variantString(realm["Name"]))
 		}
+		var formats []string
+		if variant, ok := realm["LoginFormats"]; ok && variant.Store(&formats) == nil {
+			entry.NetBIOS = netBIOSName(formats)
+		}
 		var details []struct{ Key, Value string }
 		if variant, ok := realm["Details"]; ok && variant.Store(&details) == nil {
 			for _, detail := range details {
-				if detail.Key == "server-software" {
+				switch detail.Key {
+				case "server-software":
 					entry.ServerSoftware = detail.Value
+				case "client-software":
+					entry.ClientSoftware = detail.Value
 				}
 			}
 		}
@@ -140,16 +152,38 @@ func variantString(v dbus.Variant) string {
 	return strings.TrimSpace(s)
 }
 
+// netBIOSName reads the NetBIOS domain of a winbind realm from the login
+// format realmd reports for it, the workgroup before \%U (CORP\%U). SSSD
+// formats (%U@corp.example.com) and winbind with a default domain (%U)
+// carry none.
+func netBIOSName(formats []string) string {
+	for _, format := range formats {
+		if prefix, ok := strings.CutSuffix(format, `\%U`); ok && prefix != "" && !strings.ContainsAny(prefix, `\@%`) {
+			return strings.ToUpper(prefix)
+		}
+	}
+	return ""
+}
+
 // realmFor picks the configured realm that serves an account in domain:
 // the realm of that DNS domain or of its nearest parent (an Active
-// Directory child domain), or, for a name without a DNS domain (a bare
-// SSSD name, a winbind NetBIOS domain), the host's only realm. Nothing
+// Directory child domain), the realm whose NetBIOS name a winbind domain
+// is, or, for a name without a DNS domain that names no realm (a bare
+// name, a domain of an SSSD realm), the only realm of the host. Nothing
 // else is guessed, so a plain LDAP domain SSSD serves next to a joined
-// realm gets no realm facts.
+// realm, or the NetBIOS domain of a trusted domain, gets no realm facts.
 func realmFor(domain string, realms []Realm) (Realm, bool) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if !strings.Contains(domain, ".") {
-		if len(realms) == 1 {
+		for _, realm := range realms {
+			if domain != "" && strings.EqualFold(domain, realm.NetBIOS) {
+				return realm, true
+			}
+		}
+		// winbind qualifies the names of its own domain with the NetBIOS
+		// name realmd reports, or not at all (winbind use default domain),
+		// so another NetBIOS domain is a trusted domain of unknown realm.
+		if len(realms) == 1 && (domain == "" || (realms[0].NetBIOS == "" && realms[0].ClientSoftware != "winbind")) {
 			return realms[0], true
 		}
 		return Realm{}, false
@@ -167,15 +201,16 @@ func realmFor(domain string, realms []Realm) (Realm, bool) {
 }
 
 // applyRealm adds the facts of the realm that serves an SSSD or winbind
-// account: the domain and Kerberos realm when its name carries none, the
-// directory type of an Active Directory or IPA realm, and the
+// account: its DNS domain when the name carries none or only a NetBIOS
+// domain (CORP\alice), as Windows reports the same account; the Kerberos
+// realm; the directory type of an Active Directory or IPA realm; and the
 // sAMAccountName@REALM principal when there is none yet.
 func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {
 	realm, ok := realmFor(facts.Domain, realms)
 	if !ok {
 		return
 	}
-	if facts.Domain == "" {
+	if !strings.Contains(facts.Domain, ".") {
 		facts.Domain = realm.Domain
 	}
 	if facts.Realm == "" {

@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -62,9 +63,8 @@ type profileSubject struct {
 	// Groups are verified directory group names and SIDs.
 	Groups []string
 	// LookupFailed is set when the directory lookup for this subject failed
-	// and no cached facts within their TTL exist. The subject then selects
-	// like an unverified one, and the default reason is
-	// default_lookup_failed.
+	// and no cached facts within their TTL exist. The subject then gets the
+	// default profile, with the reason default_lookup_failed.
 	LookupFailed bool
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
@@ -496,7 +496,7 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // view. lookupAttempted says the directory lookup was waited on (a group or
 // user assignment is configured); a subject whose facts then never resolved
 // (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
-// has unknown groups, not empty ones, and selects like an unverified one.
+// has unknown groups, not empty ones, and gets the default profile.
 //
 // The account name is the bare one (alice for alice@corp.example.com and
 // CORP\alice) here, for every caller: a request and `explain --user` both
@@ -623,9 +623,12 @@ func accountGroups(account *osuser.User) ([]string, error) {
 
 // match runs the ordered assignments: the first match wins; within one
 // assignment the set keys AND together and the values of a key OR together.
-// Identity keys (users, groups, agents) match only a verified subject whose
-// directory lookup did not fail; a connector-only assignment matches any
-// request authenticated for that connector.
+// Identity keys (users, groups, agents) match only a verified subject; a
+// connector-only assignment matches any other request authenticated for that
+// connector. A subject whose directory lookup failed gets the default profile
+// (default_lookup_failed): its groups are unknown, so an identity assignment
+// listed before a connector-only one might have selected it, and the reason
+// must show the outage (GAP-0312).
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	if set.matches == nil {
 		return set.matchUncached(subject, source, connectorName, agent)
@@ -640,7 +643,10 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 }
 
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	verified := subject != nil && source != "" && !subject.LookupFailed
+	if subject != nil && subject.LookupFailed {
+		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	}
+	verified := subject != nil && source != ""
 	groups := &subjectGroups{}
 	if verified {
 		groups.list = subject.Groups
@@ -655,10 +661,7 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 		return decision
 	}
 	reason := profileMatchDefault
-	switch {
-	case subject != nil && subject.LookupFailed:
-		reason = profileMatchDefaultLookupFailed
-	case !verified:
+	if !verified {
 		reason = profileMatchDefaultUnverified
 	}
 	return set.decision(set.defaultProfile, reason, "", source)
@@ -718,10 +721,38 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 }
 
 // userEntryMatches reports whether a users entry names the subject: its uid
-// or SID, its account name without the domain, or its principal or UPN.
+// or SID, its account name without the domain, its principal or UPN, or its
+// account in DOMAIN\user form, the name winbind and Windows report. The
+// subject's name is bare and its principal is a UPN or user@REALM, so that
+// form matched none of them (GAP-0316).
 func userEntryMatches(subject *profileSubject, entry string) bool {
-	return anyEqualFold([]string{subject.UserID, subject.UserName}, entry) ||
-		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry)
+	if anyEqualFold([]string{subject.UserID, subject.UserName}, entry) ||
+		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry) {
+		return true
+	}
+	domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
+	return qualified && account != "" && useridentity.EqualFold(account, subject.UserName) && subjectInDomain(subject, domain)
+}
+
+// subjectInDomain reports whether domain, the DOMAIN of a DOMAIN\user entry,
+// names the subject's domain: by the name the directory reported (winbind
+// reports the NetBIOS name) or the first label of a DNS name, of that domain
+// or of the realm of the subject's principal (Windows reports the DNS name of
+// the computer's own domain).
+func subjectInDomain(subject *profileSubject, domain string) bool {
+	if domain = strings.TrimSpace(domain); domain == "" {
+		return false
+	}
+	for _, have := range []string{subject.Domain, useridentity.RealmOf(subject.Principal)} {
+		if have == "" {
+			continue
+		}
+		label, _, _ := strings.Cut(have, ".")
+		if useridentity.EqualFold(have, domain) || useridentity.EqualFold(label, domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // subjectGroups answers whether one of a subject's groups is the group an
@@ -846,9 +877,15 @@ func (a *APIServer) decisionConfigFrom(ctx context.Context, base *config.Config)
 
 // snapshotRulePackGenerationFor is snapshotRulePackGeneration for a request:
 // when the request's profile resolves connector to another rule pack than
-// the base configuration does, it returns that pack's compiled rules.
+// the base configuration does, it returns that pack's compiled rules. A
+// request with no stored resolution resolves it as decisionConfig does, so
+// its thresholds and its rule pack come from the same profile (GAP-0311).
 func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
-	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.derived != nil {
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if set := liveGuardrailProfiles.Load(); set != nil && (resolved == nil || resolved.set != set) {
+		resolved = resolveGuardrailProfileFor(ctx, set)
+	}
+	if resolved != nil && resolved.derived != nil {
 		if generation := resolved.ruleGeneration(connectorName); generation != nil {
 			return generation
 		}
@@ -890,25 +927,49 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	return r.set.rules[key]
 }
 
-// profileProxyOverride returns the mode and block message the guardrail
-// proxy applies for ctx, whose profile withProxyAgent resolved for the
-// proxy's connector and agent. It applies only to a request with a verified
-// user-scoped identity; without one the proxy keeps its own settings.
-func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
+// proxyProfileFor returns the profile resolution the guardrail proxy applies
+// to ctx, whose profile withProxyAgent resolved for the proxy's connector and
+// agent. It applies only to a request with a verified user-scoped identity;
+// without one (nil) the proxy keeps its own settings.
+func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
 	set := liveGuardrailProfiles.Load()
 	if set == nil {
-		return "", "", false
+		return nil
 	}
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || resolved.set != set {
 		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
 	if resolved == nil || resolved.derived == nil || resolved.decision.SubjectSource == "" {
+		return nil
+	}
+	return resolved
+}
+
+// profileProxyOverride returns the mode and block message the guardrail
+// proxy applies for ctx (proxyProfileFor).
+func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
+	resolved := proxyProfileFor(ctx)
+	if resolved == nil {
 		return "", "", false
 	}
 	connectorName = config.NormalizeConnectorName(connectorName)
 	return resolved.derived.Guardrail.EffectiveMode(connectorName),
 		resolved.derived.Guardrail.EffectiveBlockMessage(connectorName), true
+}
+
+// proxyRuleGeneration is the rule pack the guardrail proxy scans ctx's
+// content with: the one its profile selects (proxyProfileFor) when that is
+// another pack than the base configuration's, else the process-global one.
+// The proxy scanned every request with the global pack, so a profile's
+// rule_pack_dir never reached OpenClaw or ZeptoClaw traffic (GAP-0313).
+func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
+	if resolved := proxyProfileFor(ctx); resolved != nil {
+		if generation := resolved.ruleGeneration(""); generation != nil {
+			return generation
+		}
+	}
+	return snapshotRulePackGeneration("")
 }
 
 // guardrailProfileTelemetry carries the correlation.guardrail.profile
@@ -938,10 +999,24 @@ func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry
 		out.Name = observability.Present(d.Name)
 		out.Digest = observability.Present(d.Digest)
 	}
-	if d.Match == profileMatchGroup && d.MatchedGroup != "" {
+	if d.Match == profileMatchGroup && profileTelemetryGroupFits(d.MatchedGroup) {
 		out.MatchedGroup = observability.Present(d.MatchedGroup)
 	}
 	return out
+}
+
+// maxProfileMatchedGroupBytes is the registry bound of
+// defenseclaw.guardrail.profile.matched_group.
+const maxProfileMatchedGroupBytes = 256
+
+// profileTelemetryGroupFits reports whether a matched group fits the
+// attribute. An assignment may name a longer group (the config allows 512
+// characters), and a value out of range fails the whole record, which every
+// producer then dropped (GAP-0319). Such a group is left out; the profile and
+// the match still say what selected it, and explain names the group.
+func profileTelemetryGroupFits(group string) bool {
+	return group != "" && len(group) <= maxProfileMatchedGroupBytes && utf8.ValidString(group) &&
+		!strings.ContainsFunc(group, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 // guardrailProfileDigests maps each profile of set to its digest.

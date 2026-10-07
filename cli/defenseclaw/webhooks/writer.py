@@ -42,12 +42,11 @@ from functools import wraps
 from typing import Any
 from urllib.parse import urlparse
 
-import yaml
-
 from defenseclaw import envvars
 from defenseclaw.config import (
     config_path_for_data_dir,
     locked_config_yaml,
+    parse_config_yaml,
     write_config_yaml_secure,
 )
 
@@ -584,7 +583,7 @@ def redact_webhook_url(url: str) -> str:
 def _load_yaml(path: str) -> dict[str, Any]:
     try:
         with open(path) as f:
-            data = yaml.safe_load(f) or {}
+            data = parse_config_yaml(f.read()) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:

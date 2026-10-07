@@ -1627,6 +1627,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 	// two diverge the operator sees a 4-vs-755 mismatch on every
 	// process-only tick).
 	emittedFps := make(map[string]bool, len(signals))
+	predecessors, replaced := s.legacyEditorExtensionRows(prevMap, signals, full)
 	for _, sig := range signals {
 		sig.SignalID = stableSignalID(sig.Fingerprint)
 		sig.FirstSeen = now
@@ -1645,7 +1646,14 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			t := now
 			sig.LastActiveAt = &t
 		}
-		if old, ok := prevMap[sig.Fingerprint]; ok && (old.UserID != "" || sig.UserID == "") {
+		old, ok := prevMap[sig.Fingerprint]
+		if !ok {
+			if old, ok = predecessors[sig.Fingerprint]; ok {
+				// Its evidence hash describes the old key, not a change.
+				old.EvidenceHash, old.StoredEvidenceHash = "", ""
+			}
+		}
+		if ok && (old.UserID != "" || sig.UserID == "") {
 			if full && sig.Detector == "model_file" && sig.WorkspaceHash != "" &&
 				stats.ModelFileDeferred[sig.WorkspaceHash] {
 				// A cursor page can contain only part of a sharded model. Preserve
@@ -1682,7 +1690,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			// from before per-user attribution) now has one: the one
 			// discovered record with its user is what an administrator
 			// filters by (GAP-1739).
-			if old, ok := prevMap[sig.Fingerprint]; ok {
+			if ok {
 				sig.FirstSeen = old.FirstSeen
 			}
 			sig.State = AIStateNew
@@ -1740,7 +1748,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		}
 		for _, fp := range prevFingerprints {
 			old := prevMap[fp]
-			if _, ok := current[fp]; ok {
+			if _, ok := current[fp]; ok || replaced[fp] {
 				continue
 			}
 			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
