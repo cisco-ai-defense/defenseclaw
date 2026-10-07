@@ -132,8 +132,13 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 	req.Header.Set("X-DefenseClaw-Client", "defenseclaw-acp/1.0")
 	// The guard runs as the user inside the IDE's session, so it reports
 	// the session the way the hook runner does (claimed, never authority).
-	if facts := useridentity.CurrentSessionFactsHeader(); facts != "" {
-		req.Header.Set(useridentity.SessionFactsHeader, facts)
+	// On a Secure Client host the hooks collect no session facts and the
+	// guard collects none either: no klist, nothing written in the home
+	// (issue #1092).
+	if !secureClientHost() {
+		if facts := useridentity.CurrentSessionFactsHeader(); facts != "" {
+			req.Header.Set(useridentity.SessionFactsHeader, facts)
+		}
 	}
 	req.Header.Set(AuthKeyIDHeader, keyID)
 	req.Header.Set(AuthNonceHeader, requestNonce)
