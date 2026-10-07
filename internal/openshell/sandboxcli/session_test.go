@@ -692,6 +692,24 @@ func TestSessionSummary(t *testing.T) {
 		}, check: noStop,
 			want: []string{"DefenseClaw stopped " + sbName + ": Claude Code worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)"},
 			not:  []string{"stopped from outside"}},
+		// GAP-0170: a delete from another terminal read as a stop, then the
+		// review failed and the keep/undo question came for a sandbox that
+		// was gone.
+		{name: "deleted from elsewhere", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "deleting" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.mu.Lock()
+					delete(ta.daemon.sandboxes, sbName)
+					ta.daemon.mu.Unlock()
+				}
+				return nil
+			}
+		}, check: noStop,
+			want: []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
+			not:  []string{"stopped from outside", "could not review", "Keep changes?"}},
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},

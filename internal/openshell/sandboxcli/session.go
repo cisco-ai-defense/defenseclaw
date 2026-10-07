@@ -712,20 +712,28 @@ func firstN(list []string, n int) []string {
 func (s *session) end(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
 	a := s.app
+	deleted := func() error {
+		a.println()
+		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() +
+			"; there is nothing left to review, and its undo point went with it")
+		return nil
+	}
 	after, err := s.settled(ctx)
 	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-		a.println()
-		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() + "; there is nothing left to review")
-		return nil
+		return deleted()
 	}
 	if err != nil {
 		return apiError(err)
+	}
+	// A delete from another terminal stops the sandbox first: it reads as
+	// deleting, then is gone (GAP-0170).
+	if after, err = s.settledPhase(ctx, after); sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return deleted()
 	}
 	a.println()
 	if st, err := s.api.Status(ctx); err == nil {
 		s.daemonStarted = st.StartedAt
 	}
-	after = s.settledPhase(ctx, after)
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
 		a.warn(elsewhere)
@@ -771,6 +779,9 @@ func (s *session) end(ctx context.Context) error {
 		a.note(s.sb.Name + " is still running (it was running when you connected); changes it makes after this point are not in this review")
 	}
 	rev, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{})
+	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return deleted()
+	}
 	reviewed := err == nil
 	if !reviewed {
 		a.warn("could not review the session's changes: " + apiError(err).Error())
@@ -822,6 +833,19 @@ func (s *session) end(ctx context.Context) error {
 			a.page(diff.Diff)
 		}
 		decision, accepted = s.onExit(changed)
+	}
+	if changed && (decision == "u" || accepted) {
+		// The question may have waited while the sandbox was deleted, or a
+		// new sandbox took its name: the answer is not for that one
+		// (GAP-0170).
+		now, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			return deleted()
+		}
+		if err == nil && s.sb.ID != "" && now.ID != "" && now.ID != s.sb.ID {
+			a.warn(s.sb.Name + " was deleted while this question waited, and a new sandbox took its name; the answer does not apply to it")
+			return nil
+		}
 	}
 	switch {
 	case decision == "u":
@@ -909,22 +933,28 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 // or provisioning), and returns it as it then is. A session whose harness
 // failed while the sandbox passed through such a phase and came back
 // ready lost its connection to the sandbox, not the sandbox (lost).
-func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) *sandboxapi.Sandbox {
+//
+// A sandbox being deleted (from another terminal or the TUI) is passing
+// too: once it is gone, settledPhase returns the not-found error.
+func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (*sandboxapi.Sandbox, error) {
 	passing := func(phase string) bool {
 		switch phase {
-		case "unknown", "provisioning", "starting", "creating":
+		case "unknown", "provisioning", "starting", "creating", "deleting":
 			return true
 		}
 		return false
 	}
 	if !passing(after.Phase) {
-		return after
+		return after, nil
 	}
 	for range int(settlePhaseWait / settlePhaseInterval) {
 		if s.app.Sleep(ctx, settlePhaseInterval) != nil {
 			break
 		}
 		next, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			return nil, err
+		}
 		if err != nil {
 			break
 		}
@@ -934,7 +964,7 @@ func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) *
 		}
 	}
 	s.lost = after.Phase == "ready" && s.harnessCode != 0 && s.before != nil && s.before.Phase == "ready"
-	return after
+	return after, nil
 }
 
 // settlePhaseWait and settlePhaseInterval pace settledPhase.
@@ -1182,6 +1212,10 @@ func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
 			break
 		}
 		next, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			// Deleted while the session ended (GAP-0170).
+			return nil, err
+		}
 		if err != nil {
 			break
 		}
