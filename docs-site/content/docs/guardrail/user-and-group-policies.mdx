@@ -243,9 +243,10 @@ What follows when the identity is missing:
   gateway log has one line when an account's lookups start to fail and one when
   they work again.
 
-Because an unverified or failed lookup always lands on the default profile,
-**set a strict `default_profile`**. A lenient default means a lookup failure
-is treated more leniently than a known user.
+Because a failed lookup always lands on the default profile, and so does an
+unverified request that no `connectors`-only assignment selects, **set a strict
+`default_profile`**. A lenient default means a lookup failure is treated more
+leniently than a known user.
 
 <Callout type="warn" title="Per-user installs on Windows have no groups">
 On a per-user Windows install the gateway cannot read the sign-in token's

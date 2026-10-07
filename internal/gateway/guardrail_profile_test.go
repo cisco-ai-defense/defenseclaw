@@ -129,6 +129,7 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 		{name: "claimed headers over a verified other user", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"}), claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "unverified connector-only assignment", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "codex", profile: "tooling", match: profileMatchConnector},
 		{name: "failed directory lookup", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "alice@corp.example", LookupFailed: true})}, connector: "cursor", profile: "watch", match: profileMatchDefaultLookupFailed},
+		{name: "failed directory lookup on a connector-only assignment", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", LookupFailed: true})}, connector: "codex", profile: "watch", match: profileMatchDefaultLookupFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

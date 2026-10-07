@@ -62,9 +62,8 @@ type profileSubject struct {
 	// Groups are verified directory group names and SIDs.
 	Groups []string
 	// LookupFailed is set when the directory lookup for this subject failed
-	// and no cached facts within their TTL exist. The subject then selects
-	// like an unverified one, and the default reason is
-	// default_lookup_failed.
+	// and no cached facts within their TTL exist. The subject then gets the
+	// default profile, with the reason default_lookup_failed.
 	LookupFailed bool
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
@@ -490,7 +489,7 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // view. lookupAttempted says the directory lookup was waited on (a group or
 // user assignment is configured); a subject whose facts then never resolved
 // (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
-// has unknown groups, not empty ones, and selects like an unverified one.
+// has unknown groups, not empty ones, and gets the default profile.
 //
 // The account name is the bare one (alice for alice@corp.example.com and
 // CORP\alice) here, for every caller: a request and `explain --user` both
@@ -617,9 +616,12 @@ func accountGroups(account *osuser.User) ([]string, error) {
 
 // match runs the ordered assignments: the first match wins; within one
 // assignment the set keys AND together and the values of a key OR together.
-// Identity keys (users, groups, agents) match only a verified subject whose
-// directory lookup did not fail; a connector-only assignment matches any
-// request authenticated for that connector.
+// Identity keys (users, groups, agents) match only a verified subject; a
+// connector-only assignment matches any other request authenticated for that
+// connector. A subject whose directory lookup failed gets the default profile
+// (default_lookup_failed): its groups are unknown, so an identity assignment
+// listed before a connector-only one might have selected it, and the reason
+// must show the outage (GAP-0312).
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	if set.matches == nil {
 		return set.matchUncached(subject, source, connectorName, agent)
@@ -634,7 +636,10 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 }
 
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	verified := subject != nil && source != "" && !subject.LookupFailed
+	if subject != nil && subject.LookupFailed {
+		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	}
+	verified := subject != nil && source != ""
 	groups := &subjectGroups{}
 	if verified {
 		groups.list = subject.Groups
@@ -649,10 +654,7 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 		return decision
 	}
 	reason := profileMatchDefault
-	switch {
-	case subject != nil && subject.LookupFailed:
-		reason = profileMatchDefaultLookupFailed
-	case !verified:
+	if !verified {
 		reason = profileMatchDefaultUnverified
 	}
 	return set.decision(set.defaultProfile, reason, "", source)
