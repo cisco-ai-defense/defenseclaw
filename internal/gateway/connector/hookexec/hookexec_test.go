@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -2603,6 +2604,17 @@ func TestUnreachableDetailNamesTheNextStep(t *testing.T) {
 // runs no klist and writes no session-facts cache in the home of the user,
 // while a per-user hook in the same SSH session sends them.
 func TestSecureClientHookSendsNoSessionFacts(t *testing.T) {
+	// useridentity computes the session facts once per process, so any
+	// earlier hook test fixes them without the SSH session set here. The
+	// checks run in a fresh test process.
+	if os.Getenv("DEFENSECLAW_TEST_SESSION_FACTS_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestSecureClientHookSendsNoSessionFacts$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "DEFENSECLAW_TEST_SESSION_FACTS_CHILD=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("session facts checks in a fresh test process: %v\n%s", err, out)
+		}
+		return
+	}
 	t.Cleanup(func() { useridentity.KeepQualifiedNames(false) })
 	home := t.TempDir()
 	t.Setenv("HOME", home)
