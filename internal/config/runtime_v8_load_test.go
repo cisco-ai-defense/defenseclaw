@@ -63,12 +63,8 @@ observability: {}
 	}
 	// A Secure Client config keeps the file loader of main, which drops them.
 	if runtime.GOOS != "linux" {
-		path := filepath.Join(t.TempDir(), "config.yaml")
 		secureClient := append([]byte("deployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"), raw...)
-		if err := os.WriteFile(path, secureClient, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := loadFromFile(path, false, false)
+		cfg, err := loadFileSource(filepath.Join(t.TempDir(), "config.yaml"), secureClient, false, false, false)
 		if err != nil {
 			t.Fatal(err)
 		}

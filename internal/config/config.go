@@ -2433,11 +2433,16 @@ func loadFromFile(configFile string, publishProvenance, checkPolicyInputs bool) 
 	if err != nil {
 		return nil, err
 	}
+	return loadFileSource(configFile, raw, publishProvenance, true, checkPolicyInputs)
+}
+
+// loadFileSource decodes the source bytes loadFromFile read from configFile.
+func loadFileSource(configFile string, raw []byte, publishProvenance, enforceManagedTrust, checkPolicyInputs bool) (*Config, error) {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, true, checkPolicyInputs)
+	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, enforceManagedTrust, checkPolicyInputs)
 	if err != nil {
 		return nil, err
 	}
