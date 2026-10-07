@@ -134,3 +134,11 @@ def test_default_policy_survives_reload_and_regional_goal_starts_on_bedrock(tmp_
     model.open_wizard_form(SetupWizard.LLM, goal=goal)
     provider = next(field for field in model.form_fields if field.flag == "--provider")
     assert provider.value == "bedrock"
+
+
+def test_alert_at_editor_explains_effective_block_floor() -> None:
+    from defenseclaw.tui.panels.setup import _guardrail_section
+
+    field = next(field for field in _guardrail_section(None).fields if field.key == "guardrail.alert_at")
+    assert "blocking severities always alert" in field.hint
+    assert "Block At" in field.hint

@@ -8092,7 +8092,7 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             "guardrail.alert_at",
             "choice",
             ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
-            "Lowest severity prompts, completions and tool calls alert at; blank=the rule pack's level.",
+            "Lowest alert level; blocking severities always alert too. Effective level cannot be above Block At.",
         ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),
