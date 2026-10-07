@@ -461,7 +461,7 @@ func ExecuteContext(ctx context.Context) int {
 	}
 	addManagedWindowsSetupAnswer(rootCmd)
 	addManagedHostHelp(rootCmd)
-	dropCommandsMainLacksOnSecureClient(rootCmd)
+	keepCommandTreeOfMainOnSecureClient(rootCmd)
 	installUsageArgChecks(rootCmd)
 	pendingUnknownSubcommand = nil
 	err := rootCmd.ExecuteContext(ctx)

@@ -84,6 +84,7 @@ func policyConfigOnlyPostRun(*cobra.Command, []string) {}
 var policyValidateCmd = &cobra.Command{
 	Use:               "validate",
 	Short:             "Compile-check all Rego modules and the admission policy compiled from config.yaml",
+	Annotations:       map[string]string{secureClientShortAnnotation: "Compile-check all Rego modules and validate data.json"},
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -223,6 +224,7 @@ func policyCommandRegoDir(cmd *cobra.Command) (string, error) {
 var policyShowCmd = &cobra.Command{
 	Use:               "show",
 	Short:             "Display the admission policy and thresholds compiled from config.yaml",
+	Annotations:       map[string]string{secureClientShortAnnotation: "Display the current OPA data.json policy configuration"},
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(_ *cobra.Command, _ []string) error {

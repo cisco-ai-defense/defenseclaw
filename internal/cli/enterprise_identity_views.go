@@ -74,29 +74,37 @@ var enterpriseIdentityViews = []enterpriseIdentityView{
 const enterpriseIdentityViewAnnotation = "defenseclaw.identity-view"
 
 // secureClientAbsentAnnotation marks a command main does not have, which a
-// Secure Client computer drops (issue #1092).
-const secureClientAbsentAnnotation = "defenseclaw.secure-client-absent"
+// Secure Client computer drops; secureClientShortAnnotation holds the help
+// line of main for a command whose line changed (issue #1092).
+const (
+	secureClientAbsentAnnotation = "defenseclaw.secure-client-absent"
+	secureClientShortAnnotation  = "defenseclaw.secure-client-short"
+)
 
-// dropCommandsMainLacksOnSecureClient removes, on a Secure Client computer,
-// the commands main does not have, so its CLI keeps the commands of main
-// (issue #1092): the identity views of the `enterprise <platform>` groups,
-// whose routes its gateway does not serve, and every command marked
-// secureClientAbsentAnnotation (policy digest, scan skill|mcp|plugin).
-func dropCommandsMainLacksOnSecureClient(root *cobra.Command) {
+// keepCommandTreeOfMainOnSecureClient gives a Secure Client computer the
+// command tree of main (issue #1092): it removes the identity views of the
+// `enterprise <platform>` groups, whose routes its gateway does not serve,
+// and every command marked secureClientAbsentAnnotation (policy digest, scan
+// skill|mcp|plugin), and puts back the help line of main where a command
+// carries secureClientShortAnnotation (policy show, policy validate).
+func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 	if !secureClientHost() {
 		return
 	}
-	var drop func(parent *cobra.Command)
-	drop = func(parent *cobra.Command) {
+	var keep func(parent *cobra.Command)
+	keep = func(parent *cobra.Command) {
 		for _, cmd := range parent.Commands() {
 			if cmd.Annotations[enterpriseIdentityViewAnnotation] != "" || cmd.Annotations[secureClientAbsentAnnotation] != "" {
 				parent.RemoveCommand(cmd)
 				continue
 			}
-			drop(cmd)
+			if short := cmd.Annotations[secureClientShortAnnotation]; short != "" {
+				cmd.Short = short
+			}
+			keep(cmd)
 		}
 	}
-	drop(root)
+	keep(root)
 }
 
 // newEnterpriseIdentityViewCommands returns the identity views of
