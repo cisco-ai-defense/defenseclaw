@@ -119,8 +119,9 @@ func guardrailFallbackActionForProfile(severity, profile string) string {
 // fallbackGuardrailVerdictForThresholds applies the resolved thresholds to a
 // verdict when no OPA policy decides. It follows the same order as
 // guardrail.rego, so one config decides the same with or without the module:
-// observe mode alerts, an advisory Cisco block downgrades to alert, a Cisco
-// verdict at trust level none counts for nothing, and a confirm needs HILT.
+// an advisory Cisco block downgrades to alert, a Cisco verdict at trust level
+// none counts for nothing, and a confirm needs HILT. Observe mode is not
+// applied here: callers report this raw action and apply the mode after it.
 func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string, hilt *policy.GuardrailHILTInput) *ScanVerdict {
 	if v == nil {
 		return allowVerdict("fallback")
@@ -135,8 +136,6 @@ func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds pol
 	switch {
 	case rank <= severityNone:
 		out.Action = guardrailActionAllow
-	case mode == "observe" && rank >= thresholds.Alert:
-		out.Action = guardrailActionAlert
 	case thresholds.CiscoTrustLevel == "advisory" && ciscoRank >= thresholds.Block && localRank < thresholds.Alert:
 		out.Action = guardrailActionAlert
 	default:
@@ -151,8 +150,8 @@ func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds pol
 }
 
 // fallbackVerdict is the verdict without a Rego module. Secure Client keeps
-// the 1.0 threshold-only answer (issue #1092): no Cisco trust level, no HILT
-// confirm and no observe handling here.
+// the 1.0 threshold-only answer (issue #1092): no Cisco trust level and no
+// HILT confirm.
 func (g *GuardrailInspector) fallbackVerdict(merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
 	if gen := currentGeneration(); gen != nil && gen.Config != nil && gen.Config.SecureClientIntegration() {
 		return fallbackGuardrailVerdictForThresholds(merged, nil, thresholds, "", nil)

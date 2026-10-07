@@ -167,7 +167,6 @@ func TestFallbackGuardrailVerdict_FollowsRego(t *testing.T) {
 		{"none ignores the Cisco verdict", none, critical, "none", "action", nil, "allow"},
 		{"HILT confirms at its minimum severity", high, nil, "full", "action", hilt, "confirm"},
 		{"HILT does not confirm in observe mode", high, nil, "full", "observe", hilt, "alert"},
-		{"observe alerts instead of blocking", critical, nil, "full", "observe", nil, "alert"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := fallbackGuardrailVerdictForThresholds(tc.local, tc.cisco, thresholds(tc.trust), tc.mode, tc.hilt)
