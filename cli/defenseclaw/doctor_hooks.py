@@ -331,7 +331,7 @@ class WindowsHookCheck:
         elif self.raw_target:
             runtime = f"runtime_path={_display_path(self.raw_target)}"
         elif self.command:
-            runtime = f"runtime_command={self.command!r}"
+            runtime = f"runtime_command={_display_command(self.command)!r}"
         else:
             runtime = "runtime_path=unresolved"
         if self.healthy:
@@ -805,6 +805,17 @@ def _stable_regular_file(path: str, root: str, *, read_limit: int = 0) -> bytes:
 def _display_path(path: str, *, trusted: bool = False) -> str:
     """Render a path as-is unless it holds characters that need escaping."""
     return path if trusted or path.isprintable() else repr(path)
+
+
+# A PowerShell -EncodedCommand (or an abbreviation of it) and its base64 script.
+_ENCODED_SCRIPT = re.compile(r"(?i)((?:^|\s)[-/]e[a-z]*\s+)([A-Za-z0-9+/]{64,}={0,2})(?=\s|$)")
+
+
+def _display_command(command: str) -> str:
+    """A registered hook command for Doctor's text, with an encoded PowerShell
+    script shown by its length: the base64 only restates the hook wrapper, and
+    2.5 KB of it pushed the row's Next step off the screen (GAP-0158)."""
+    return _ENCODED_SCRIPT.sub(lambda m: f"{m.group(1)}<{len(m.group(2))}-character encoded script>", command)
 
 
 def _windows_hook_runtime_root(path: str) -> str | None:

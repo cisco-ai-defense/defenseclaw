@@ -2801,6 +2801,21 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(result.checks[-1]["status"], "pass", result.checks[-1])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
+        # GAP-0158: the version is the one setup recorded, and says so.
+        self.assertRegex(result.checks[-1]["detail"], r" agent=\S+ \(recorded at setup\) ")
+
+    def test_a_failed_runtime_shows_an_encoded_wrapper_by_its_length(self) -> None:
+        # GAP-0158: a policy-blocked Codex row printed the whole 2.5 KB
+        # -EncodedCommand and pushed its Next step off the screen.
+        command = self._encoded_hook_command(self._runtime())
+        encoded = command.rsplit(" ", 1)[1]
+        check = WindowsHookCheck(
+            "policy-blocked", "selected Codex executable no longer matches protected Setup evidence", command
+        )
+        text = check.runtime_description
+        self.assertNotIn(encoded[:64], text)
+        self.assertIn(f"-EncodedCommand <{len(encoded)}-character encoded script>", text)
+        self.assertIn("runtime_state=policy-blocked runtime_error=selected Codex executable", text)
 
     def test_windows_hermes_contract_uses_protected_executable_not_stale_discovery(self) -> None:
         runtime = self._runtime()
