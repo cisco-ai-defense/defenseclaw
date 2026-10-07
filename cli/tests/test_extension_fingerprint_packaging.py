@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
 import tarfile
 import zipfile
 from pathlib import Path
 
 import pytest
+from defenseclaw import extension_fingerprint
 from defenseclaw.extension_fingerprint import (
     REFERENCE_PACKAGE_PATH,
     ExtensionFingerprintError,
@@ -28,6 +30,7 @@ def _write_source_runtime(root: Path, *, index: str = "export default function r
     (root / "dist" / "policy").mkdir(parents=True)
     (root / "node_modules" / "js-yaml").mkdir(parents=True)
     (root / "node_modules" / "argparse").mkdir(parents=True)
+    (root / "node_modules" / "undici").mkdir(parents=True)
     (root / "src").mkdir()
     (root / "package.json").write_text(
         json.dumps({"name": "defenseclaw", "version": "9.8.7", "main": "dist/index.js"}),
@@ -41,6 +44,7 @@ def _write_source_runtime(root: Path, *, index: str = "export default function r
     (root / "dist" / "policy" / "default.json").write_text("{}\n", encoding="utf-8")
     (root / "node_modules" / "js-yaml" / "index.js").write_text("export {};\n", encoding="utf-8")
     (root / "node_modules" / "argparse" / "index.js").write_text("export {};\n", encoding="utf-8")
+    (root / "node_modules" / "undici" / "index.js").write_text("export {};\n", encoding="utf-8")
     (root / "src" / "not-published.ts").write_text("// source only\n", encoding="utf-8")
     (root / "package-lock.json").write_text("{}\n", encoding="utf-8")
 
@@ -53,8 +57,20 @@ def _write_runtime_archive(source: Path, archive: Path) -> None:
             "dist",
             "node_modules/js-yaml",
             "node_modules/argparse",
+            "node_modules/undici",
         ):
             output.add(source / relative, arcname=relative)
+
+
+def test_runtime_packages_cover_every_declared_plugin_dependency() -> None:
+    # GAP-0189: OpenClaw refuses a plugin whose declared dependency is missing, so the Makefile
+    # copy list and the fingerprint allow-list must name every package.json dependency.
+    package = json.loads((ROOT / "extensions" / "defenseclaw" / "package.json").read_text(encoding="utf-8"))
+    match = re.search(r"^PLUGIN_RUNTIME_DEPS\s*:=\s*(.+)$", (ROOT / "Makefile").read_text(encoding="utf-8"), re.M)
+    assert match is not None
+    copied = set(match.group(1).split())
+    assert copied == extension_fingerprint._RUNTIME_NODE_PACKAGES
+    assert set(package["dependencies"]) <= copied
 
 
 def _write_wheel(reference: Path, wheel: Path) -> None:

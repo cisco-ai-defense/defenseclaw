@@ -473,17 +473,21 @@ func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 		}}}}
 	})
 	findings := []string{"JUDGE-PII-EMAIL", "ENT-EMAIL-BULK"}
+	// GAP-0182: the alert counts the values in the result, not the findings, so one rule
+	// finding over two addresses (Codex, judge off) alerts like two findings (judge on).
+	emails := map[string]interface{}{"tool_response": "alice@example.com\nbob@example.com\n"}
 	for _, c := range []struct {
 		connector, event, tool string
 		findings               []string
+		payload                map[string]interface{}
 	}{
-		{"claudecode", "PostToolUse", "other_tool", findings},
-		{"claudecode", "PreToolUse", "listed_tool", findings},
-		{"claudecode", "PostToolUse", "listed_tool", findings[:1]},
-		{"claudecode", "PostToolUse", "listed_tool", findings},
-		{"codex", "PostToolUse", "listed_tool", findings},
+		{"claudecode", "PostToolUse", "other_tool", findings, nil},
+		{"claudecode", "PreToolUse", "listed_tool", findings, nil},
+		{"claudecode", "PostToolUse", "listed_tool", findings[:1], nil},
+		{"claudecode", "PostToolUse", "listed_tool", findings, nil},
+		{"codex", "PostToolUse", "listed_tool", findings[1:], emails},
 	} {
-		req := agentHookRequest{ConnectorName: c.connector, HookEventName: c.event, ToolName: c.tool}
+		req := agentHookRequest{ConnectorName: c.connector, HookEventName: c.event, ToolName: c.tool, Payload: c.payload}
 		resp := agentHookResponse{Action: "allow", Severity: "HIGH", Mode: "observe", Findings: c.findings}
 		api.finalizeAgentHook(t.Context(), c.connector, req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
 	}
