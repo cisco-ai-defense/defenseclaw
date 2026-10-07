@@ -223,7 +223,7 @@ installed. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
 | `mode` | `auto` or `manifest` | `auto` or `manifest` |
 | `include_users` | Adds these accounts even when discovery does not list them, and skips the uid and login-shell checks for them | Accepted. Every profile on the computer is already a candidate, so it adds and removes no one. |
 | `exclude_users` | Never enrolled. Wins over every other setting. | Never enrolled. Wins over every other setting. |
-| `include_groups`, `exclude_groups` | Group filters | Group filters for local, Active Directory and Microsoft Entra ID groups; see [Windows](#windows) |
+| `include_groups`, `exclude_groups` | Group filters | Group filters for local and Active Directory groups, and for the Microsoft Entra ID groups that a built-in local group lists; see [Group filters on Windows](#group-filters-on-windows) |
 | `exempt_users` | Not enrolled; their calls are allowed, inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
 | `unenrolled_users` | `inspect` or `deny` for machine-policy agents | Not applied: a user who is not enrolled fails closed |
 | `unverified_versions`, `unverified_versions_by_connector` | `report` or `refuse` for desktop apps and editor extensions | Same; a surface-only user is refused as an unenrolled user, and a call that names a refused surface is refused. Discovery reads the profile under the user's token, so a signed-out user's apps are found after sign-in. |

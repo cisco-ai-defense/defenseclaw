@@ -1,0 +1,14 @@
+{
+  "domain": "contoso.onmicrosoft.com",
+  "usage_location": "US",
+  "force_password_change": true,
+  "groups": [
+    {"name": "defenseclaw-ml-team", "description": "DefenseClaw guardrail profile: ML team"},
+    {"name": "defenseclaw-contractors", "description": "DefenseClaw guardrail profile: contractors"}
+  ],
+  "users": [
+    {"name": "dc-test-alice", "display_name": "DC Test Alice", "groups": ["defenseclaw-ml-team"]},
+    {"name": "dc-test-bob", "display_name": "DC Test Bob", "groups": ["defenseclaw-contractors"]},
+    {"name": "dc-test-carol", "display_name": "DC Test Carol", "groups": []}
+  ]
+}
