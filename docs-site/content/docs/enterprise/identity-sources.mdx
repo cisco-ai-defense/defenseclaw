@@ -150,12 +150,14 @@ has no directory type, because InfoPipe answers root only.
 
 #### When Linux attributes a principal
 
-The realm and the principal (`alice@corp.example.com`) of an SSSD account come
-from SSSD, never from a guess:
+An SSSD account gets a realm and a principal (`alice@corp.example.com`) only
+for a domain that SSSD confirms the account belongs to:
 
 - **Fully qualified names** (`use_fully_qualified_names = True`, what
-  `realm join` writes): SSSD names the account `alice@corp.example.com`, and
-  the domain in that name gives the realm and the principal.
+  `realm join` writes): SSSD names the account `alice@corp.example.com`. The
+  gateway asks SSSD for that name (`getent -s sss passwd
+  alice@corp.example.com`) and takes the realm and the principal from its
+  domain when SSSD answers with the same account.
 - **Short names** (`use_fully_qualified_names = False`): SSSD names the
   account `alice`, and it may serve a plain LDAP domain next to the joined AD
   domain under the same kind of name. The gateway asks SSSD for the name in
@@ -166,17 +168,25 @@ from SSSD, never from a guess:
   with an AD account, gets no realm and no principal. The SSSD domain must
   carry the name of the joined domain, as `realm join` names it
   (`[domain/corp.example.com]`).
-- **When SSSD does not confirm.** The lookup gets 2 seconds. When SSSD is
-  stopped, cannot answer, or does not answer in time, the account gets no
-  realm and no principal, and the gateway keeps that answer for the 15
-  minutes it keeps any directory answer. It never falls back to the only
-  realm of the host.
+- **Names that only look qualified.** With short names, a plain LDAP domain
+  whose account names are e-mail addresses (`ldap_user_name = mail`) can name
+  an account `bob@corp.example.com`. SSSD looks that name up in the joined
+  domain and answers with the AD account `bob`, so the LDAP account gets no
+  realm and no principal.
+- **When SSSD does not confirm.** The lookup in the joined domain gets 2
+  seconds. When SSSD is stopped, cannot answer, or does not answer in time, a
+  short name gets no realm and no principal. A per-user install keeps that
+  answer for the 15 minutes it keeps any directory answer. Standalone
+  enterprise keeps the facts of an SSSD account that has no UPN for 2 minutes,
+  then asks again. Neither falls back to the only realm of the host.
 - **Standalone enterprise.** The root guardian asks InfoPipe which SSSD domain
   holds the uid (`Users.FindByID`) and reads the UPN of the name in that
   domain, so the UPN of an AD account never reaches an LDAP account of the
   same short name. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing
   from `services` in `sssd.conf`) the principal of a confirmed account is
-  `account@REALM`.
+  `account@REALM`. When InfoPipe holds the uid in another domain than the
+  realm the account was given, the guardian drops that realm and its
+  principal.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with

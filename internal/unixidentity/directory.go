@@ -39,7 +39,9 @@ import (
 // bare SSSD name (use_fully_qualified_names = False) gets a realm only when
 // SSSD resolves the name qualified with that realm's domain to the same
 // account (sssdAccountInDomain): SSSD may serve a plain LDAP domain next to
-// the joined one, under the same kind of name.
+// the joined one, under the same kind of name. A qualified SSSD name gives
+// the realm of its domain only when SSSD resolves that name to the same
+// account, because a name may only look qualified (GAP-0568).
 // UPN and mail need SSSD InfoPipe, which only root may call, so the root
 // guardian adds them (enterprisehooks identity spool).
 
@@ -110,6 +112,9 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 	}
 	_, isLocal := local[account.Name]
 	isLocal = isLocal && local[account.Name] == uid
+	// unconfirmed marks an SSSD name whose domain SSSD does not confirm: it
+	// gets no domain, realm or principal, from its name or from realmd.
+	unconfirmed := false
 	if !isLocal {
 		if data, readErr := readSmallFile(nsswitchPath, 1<<20); readErr == nil {
 			for _, service := range ParseNSSwitchServices(string(data), "passwd") {
@@ -127,7 +132,24 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 				}
 				facts.Directory, facts.Source = known.directory, known.source
 				bare, domain := useridentity.SplitQualifiedName(account.Name)
-				if domain != "" && known.directory == useridentity.DirectoryEntraID {
+				qualified := strings.Contains(domain, ".")
+				if qualified && known.source == useridentity.SourceSSSD {
+					// With short names (use_fully_qualified_names = False) a
+					// name may carry an e-mail address, as a plain LDAP domain
+					// with ldap_user_name = mail names its accounts. SSSD looks
+					// bob@corp.example.com up in the joined corp.example.com,
+					// where it finds the AD bob, whose realm and principal this
+					// account must not take (GAP-0568). A name SSSD does
+					// qualify resolves to the account itself.
+					same, checkErr := r.sssdResolvesTo(account, account.Name)
+					if checkErr != nil {
+						return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: SSSD lookup of %s: %w", account.Name, checkErr)
+					}
+					unconfirmed = !same
+				}
+				switch {
+				case domain == "" || unconfirmed:
+				case known.directory == useridentity.DirectoryEntraID:
 					// The aad module, and Himmelblau with cn_name_mapping =
 					// false, name an Entra ID account by its UPN. It has no
 					// Kerberos realm, and the UPN is the principal Windows
@@ -138,12 +160,12 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 					facts.Domain = strings.ToLower(domain)
 					facts.UPN = useridentity.NormalizeUPN(account.Name)
 					facts.Principal = facts.UPN
-				} else if domain != "" {
+				default:
 					// Lower case, as Windows reports a NetBIOS domain it knows
 					// no DNS name for; applyRealm gives the DNS name of the
 					// realm a NetBIOS domain names.
 					facts.Domain = strings.ToLower(domain)
-					if strings.Contains(domain, ".") {
+					if qualified {
 						facts.Realm = strings.ToUpper(domain)
 						// sAMAccountName@REALM, the Kerberos principal SSSD
 						// and winbind accounts authenticate as, in the UPN form.
@@ -161,7 +183,7 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		}
 		facts.Groups = groups
 	}
-	if facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind {
+	if (facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind) && !unconfirmed {
 		realms, realmErr := hostRealms(r.context())
 		if realmErr != nil {
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: realmd lookup: %w", realmErr)
@@ -173,39 +195,55 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 	return facts, nil
 }
 
-// sssdDomainCheckTimeout bounds the lookup that confirms the SSSD domain of a
-// bare name. SSSD answers it from the entry the uid lookup just refreshed; a
-// lookup that runs out confirms nothing.
+// sssdDomainCheckTimeout bounds a lookup that confirms the SSSD domain of a
+// name. SSSD answers it from the entry the uid lookup just refreshed.
 const sssdDomainCheckTimeout = 2 * time.Second
 
 // sssdAccountInDomain asks SSSD for the account's name in the SSSD domain
 // named domain (getent -s sss passwd name@domain) and reports whether the
-// answer is this account: the same name, uid, primary group, home and shell.
-// SSSD looks a qualified name up in that domain only, whatever its
-// use_fully_qualified_names, and reports it in the domain's own name form,
-// so an account of another domain that has the same short name answers with
-// another uid, and a name that domain lacks is not found. Any account may
-// ask: the NSS responder needs no privilege, unlike InfoPipe. Every failure
-// confirms nothing.
+// answer is this account (sssdResolvesTo). SSSD looks a qualified name up in
+// that domain only, whatever its use_fully_qualified_names, and reports it
+// in the domain's own name form, so an account of another domain that has
+// the same short name answers with another uid, and a name that domain lacks
+// is not found. Any account may ask: the NSS responder needs no privilege,
+// unlike InfoPipe. Every failure confirms nothing.
 func (r *NSSResolver) sssdAccountInDomain(account Account, domain string) bool {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
-	key := bare + "@" + domain
-	if bare == "" || domain == "" || validName(key) != nil || strings.HasPrefix(key, "-") {
+	if bare == "" || domain == "" {
 		return false
+	}
+	same, err := r.sssdResolvesTo(account, bare+"@"+domain)
+	return same && err == nil
+}
+
+// sssdResolvesTo asks SSSD for name (getent -s sss passwd name) and reports
+// whether it answers with this account: the same name, uid, primary group,
+// home and shell. Another account, or none, is false; err is a lookup that
+// failed or ran past sssdDomainCheckTimeout.
+func (r *NSSResolver) sssdResolvesTo(account Account, name string) (bool, error) {
+	if validName(name) != nil || strings.HasPrefix(name, "-") {
+		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(r.context(), sssdDomainCheckTimeout)
 	defer cancel()
-	result, err := r.runner(ctx, r.path, []string{"-s", "sss", "passwd", key})
-	if err != nil || result.exitCode != getentExitOK {
-		return false
+	result, err := r.runner(ctx, r.path, []string{"-s", "sss", "passwd", name})
+	if err != nil {
+		return false, err
+	}
+	switch result.exitCode {
+	case getentExitOK:
+	case getentExitNotFound:
+		return false, nil
+	default:
+		return false, fmt.Errorf("getent -s sss passwd %s exited %d", name, result.exitCode)
 	}
 	lines := nonEmptyLines(string(result.stdout))
 	if len(lines) != 1 {
-		return false
+		return false, nil
 	}
 	found, err := ParsePasswdLine(lines[0])
 	return err == nil && strings.EqualFold(found.Name, account.Name) && found.UID == account.UID &&
-		found.GID == account.GID && found.Home == account.Home && found.Shell == account.Shell
+		found.GID == account.GID && found.Home == account.Home && found.Shell == account.Shell, nil
 }
 
 // groupNames names the account's groups with getent group calls of

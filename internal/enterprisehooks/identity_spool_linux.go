@@ -37,7 +37,9 @@ import (
 // (use_fully_qualified_names = False) is not enough: SSSD looks it up in its
 // domains in order, so an account of a plain LDAP domain that shares its
 // short name with an AD account would get the AD account's UPN. When
-// InfoPipe cannot say, the record carries no UPN.
+// InfoPipe cannot say, the record carries no UPN. When it holds the uid in a
+// domain other than the realm the NSS facts name, the record drops that
+// realm and its principal (GAP-0568).
 
 const (
 	infoPipeService   = "org.freedesktop.sssd.infopipe"
@@ -73,9 +75,15 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	}
 	if facts.Source == useridentity.SourceSSSD {
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
-		domain, provider, domainErr := infoPipeAccountDomain(callCtx, account.UID)
+		domain, provider, realm, domainErr := infoPipeAccountDomain(callCtx, account.UID)
 		cancel()
 		if domainErr == nil {
+			if facts.Realm != "" && !strings.EqualFold(domain, facts.Domain) && !strings.EqualFold(realm, facts.Realm) {
+				// The SSSD domain that holds the uid is not the realm the
+				// account was given, so that realm, the directory type it gave
+				// and the principal belong to another account.
+				facts.Domain, facts.Realm, facts.Principal, facts.Directory = "", "", "", ""
+			}
 			if facts.Directory == "" {
 				// A domain realmd did not join, such as a plain LDAP directory
 				// or a cloud directory's LDAP interface: its SSSD id provider
@@ -128,39 +136,40 @@ func infoPipeUPN(ctx context.Context, name string) (string, error) {
 	return "", errors.New("unexpected InfoPipe userPrincipalName type")
 }
 
-// infoPipeAccountDomain returns the name and id provider ("ldap", "ad",
-// "ipa", ...) of the SSSD domain that holds uid.
-func infoPipeAccountDomain(ctx context.Context, uid int) (string, string, error) {
+// infoPipeAccountDomain returns the name, id provider ("ldap", "ad",
+// "ipa", ...) and Kerberos realm of the SSSD domain that holds uid.
+func infoPipeAccountDomain(ctx context.Context, uid int) (name, provider, realm string, err error) {
 	if uid < 0 || int64(uid) > math.MaxUint32 {
-		return "", "", errors.New("uid out of range")
+		return "", "", "", errors.New("uid out of range")
 	}
 	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer conn.Close()
 	var user dbus.ObjectPath
 	if err := conn.Object(infoPipeService, infoPipeUsers).CallWithContext(ctx, infoPipeFindByID, 0, uint32(uid)).Store(&user); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	var domain dbus.Variant
 	if err := conn.Object(infoPipeService, user).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeUserIface, "domain").Store(&domain); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	domainPath, ok := domain.Value().(dbus.ObjectPath)
 	if !ok || !domainPath.IsValid() {
-		return "", "", errors.New("unexpected InfoPipe user domain")
+		return "", "", "", errors.New("unexpected InfoPipe user domain")
 	}
 	var props map[string]dbus.Variant
 	if err := conn.Object(infoPipeService, domainPath).CallWithContext(ctx, dbusGetAll, 0, infoPipeDomIface).Store(&props); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	name, _ := props["name"].Value().(string)
-	provider, _ := props["provider"].Value().(string)
+	name, _ = props["name"].Value().(string)
+	provider, _ = props["provider"].Value().(string)
+	realm, _ = props["realm"].Value().(string)
 	if name = strings.TrimSpace(name); name == "" || strings.ContainsAny(name, "@\\\x00") {
-		return "", "", errors.New("unexpected InfoPipe domain name")
+		return "", "", "", errors.New("unexpected InfoPipe domain name")
 	}
-	return name, provider, nil
+	return name, provider, strings.TrimSpace(realm), nil
 }
 
 // sssdProviderDirectory maps the id provider of an SSSD domain to the
