@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -398,5 +399,36 @@ observability: {}
 				t.Fatal("empty connector override disappeared")
 			}
 		})
+	}
+}
+
+// The schema's per-list maximum must fit inside the strict parser's total
+// node budget even for a compact assignment document.
+func TestProfileAssignmentSchemaLimitFitsYAMLNodeBudget(t *testing.T) {
+	raw, err := os.ReadFile("../../schemas/config/v8/defenseclaw-config.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Defs struct {
+			Guardrail struct {
+				Properties struct {
+					ProfileAssignments struct {
+						MaxItems int `json:"maxItems"`
+					} `json:"profile_assignments"`
+				} `json:"properties"`
+			} `json:"guardrail"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	n := schema.Defs.Guardrail.Properties.ProfileAssignments.MaxItems
+	if n == 0 {
+		t.Fatal("missing profile assignment schema maximum")
+	}
+	doc := "config_version: 8\nguardrail:\n  profiles:\n    baseline: {}\n  profile_assignments:\n" + strings.Repeat("    - profile: baseline\n      match: {agents: [agt-0000000000000000]}\n", n)
+	if err := ValidateV8SchemaBytes("config.yaml", []byte(doc)); err != nil {
+		t.Fatalf("%d schema-permitted assignments rejected: %v", n, err)
 	}
 }
