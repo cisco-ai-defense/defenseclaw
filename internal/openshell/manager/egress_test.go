@@ -320,6 +320,25 @@ func TestUnresolvablePolicyRecordSaysWhatToDo(t *testing.T) {
 	}
 }
 
+// TestRestartSuspendsAnUnresolvableSandboxsCredential (GAP-0180): a daemon
+// that restarts while a running sandbox's pack is gone still takes its proxy
+// credential back from the sandbox, and suspends it: the proxy refuses the
+// sandbox with the reason instead of as an unknown credential, whose
+// refusals raised a second alert about a stale or revoked credential.
+func TestRestartSuspendsAnUnresolvableSandboxsCredential(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	e.live(sandboxapi.CreateRequest{Name: "teambox", Pack: "team"})
+	e.stop()
+	must(t, os.Remove(filepath.Join(packDir, "team", "pack.yaml")))
+	e.restartDaemon()
+	proxy := startLiveProxy(t, e)
+	if status, body := proxy.connect(t, "teambox", "example.org:443"); status != http.StatusForbidden ||
+		body.Category != egress.CategoryEgressOff || !strings.Contains(body.Reason, "cannot be resolved") {
+		t.Fatalf("CONNECT after the restart = %d %+v, want the sandbox refused with the reason", status, body)
+	}
+}
+
 // Every change to a sandbox's proxy credential reaches its open tunnels:
 // block lists end exactly the ones they now refuse, and an unresolvable
 // policy or the deny network mode ends all of the sandbox's.

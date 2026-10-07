@@ -303,17 +303,25 @@ func (m *Manager) adopt(sb *openshell.Sandbox, driver openshell.Driver) *box {
 	needCred := b.cred.Username == "" && b.rec.BindingID != "" && !b.orphaned
 	username := b.rec.EgressUser
 	m.mu.Unlock()
-	eff, err := m.resolveBox(b)
-	if err != nil {
-		m.logf("resolve the policy of %s: %v", sb.Name, err)
-	} else if needCred {
-		if cred, ok := recoverCredential(sb, username); ok {
+	if needCred {
+		// The credential comes back before the policy resolves: a sandbox
+		// whose policy does not resolve then has it suspended (the proxy's
+		// 403 names why, next to the degraded record that says what to do)
+		// rather than unknown to the proxy, whose 407s read as a stale or
+		// revoked credential in a second alert (GAP-0180).
+		cred, ok := recoverCredential(sb, username)
+		if needCred = ok; ok {
 			m.mu.Lock()
 			b.cred = cred
 			b.rec.EgressUser = cred.Username
 			m.mu.Unlock()
-			m.syncCredential(b, eff)
 		}
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		m.logf("resolve the policy of %s: %v", sb.Name, err)
+	} else if needCred {
+		m.syncCredential(b, eff)
 	}
 	if b.orphaned {
 		m.logf("sandbox %s has DefenseClaw labels but no binding; its hooks cannot authenticate", sb.Name)
