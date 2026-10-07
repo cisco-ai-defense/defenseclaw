@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	osuser "os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -52,6 +53,71 @@ func TestSubjectGroupsMatchLikeEqualFold(t *testing.T) {
 	}
 }
 
+// A matched group longer than the attribute allows is left out of the
+// decision records instead of failing them (GAP-0319).
+func TestGuardrailProfileTelemetryBoundsTheMatchedGroup(t *testing.T) {
+	telemetry := func(group string) guardrailProfileTelemetry {
+		return guardrailProfileTelemetryFor(context.WithValue(t.Context(), resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
+			decision: profileDecision{Name: "strict", Digest: "sha256:0", Match: profileMatchGroup, MatchedGroup: group},
+		}))
+	}
+	if got, ok := telemetry(`CORP\Contractors`).MatchedGroup.Get(); !ok || got != `CORP\Contractors` {
+		t.Fatalf("matched group = %q (present %t), want CORP\\Contractors", got, ok)
+	}
+	long := telemetry(`CORP\` + strings.Repeat("組", 90))
+	if got, ok := long.MatchedGroup.Get(); ok {
+		t.Fatalf("a %d-byte matched group was kept", len(got))
+	}
+	if name, _ := long.Name.Get(); name != "strict" {
+		t.Fatalf("profile name = %q, want strict", name)
+	}
+}
+
+// The guardrail proxy scans the requests a profile selects with the
+// profile's rule pack, under the posture that pack implies, and applies its
+// HILT, as explain says it does (GAP-0313).
+func TestGuardrailProxyAppliesTheProfileRulePackAndHILT(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	packDir := filepath.Join(t.TempDir(), "strict")
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: PROXY-PROFILE-MARKER
+    pattern: "proxy_profile_marker_token"
+    title: proxy profile fixture
+    severity: MEDIUM
+    confidence: 0.99
+    tags: [test]
+`)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"contractors": {RulePackDir: packDir, HILT: &config.HILTConfig{Enabled: true, MinSeverity: "medium"}},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
+	}
+	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	inspector := NewGuardrailInspector("local", nil, nil, "")
+	inspector.SetHILTConfig(false, "HIGH")
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}}
+	ctx := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)).Context()
+	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "contractors" {
+		t.Skip("the gateway's own account is not a verified subject on this host")
+	}
+	// A completion: the prompt surface reports and never blocks.
+	verdict := inspector.Inspect(ctx, "completion", "please keep proxy_profile_marker_token safe", nil, "test-model", "action")
+	if verdict == nil || verdict.Action != "block" || !strings.Contains(strings.Join(verdict.Findings, ","), "PROXY-PROFILE-MARKER") {
+		t.Fatalf("proxy verdict = %+v, want a block by the profile's strict rule pack", verdict)
+	}
+	if hilt := inspector.hiltInputFor(ctx); hilt == nil || !hilt.Enabled || hilt.MinSeverity != "MEDIUM" {
+		t.Fatalf("proxy HILT input = %+v, want the profile's (enabled, MEDIUM)", hilt)
+	}
+}
+
 type testVerifiedSubjectKey struct{}
 
 // stubProfileSources replaces the verified-identity sources for one test:
@@ -84,7 +150,7 @@ func profileSecurityConfig() *config.Config {
 		"watch":   {Mode: "observe"},
 	}
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
-		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@CORP.EXAMPLE"}}},
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@CORP.EXAMPLE", `CORP\carol`}}},
 		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\Contractors`}}},
 		{Profile: "tooling", Match: config.ProfileMatch{Groups: []string{"dcidr-grp"}}},
 		{Profile: "tooling", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
@@ -124,11 +190,14 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 		{name: "verified UPN in any case", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "Alice@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
 		{name: "verified group", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", Groups: []string{"S-1-5-21-1", `corp\contractors`}})}, connector: "cursor", profile: "strict", match: profileMatchGroup, group: `CORP\Contractors`},
 		{name: "verified Windows group by bare name", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1001", Groups: []string{"S-1-5-21-7-1037", `HOST\DCIDR-grp`}})}, connector: "cursor", profile: "tooling", match: profileMatchGroup, group: "dcidr-grp"},
+		{name: "verified DOMAIN\\user of the Windows domain", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1105", UserName: "carol", Domain: "corp.example", Principal: "carol@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
+		{name: "DOMAIN\\user of another domain keeps default", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1005", UserName: "carol", Domain: "other.example"})}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "verified other user keeps default", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"})}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "claimed headers alone", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefaultUnverified},
 		{name: "claimed headers over a verified other user", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"}), claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "unverified connector-only assignment", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "codex", profile: "tooling", match: profileMatchConnector},
 		{name: "failed directory lookup", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "alice@corp.example", LookupFailed: true})}, connector: "cursor", profile: "watch", match: profileMatchDefaultLookupFailed},
+		{name: "failed directory lookup on a connector-only assignment", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", LookupFailed: true})}, connector: "codex", profile: "watch", match: profileMatchDefaultLookupFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -62,6 +62,50 @@ func TestACPEvaluateDeniedMethodHonorsProfileMode(t *testing.T) {
 	}
 }
 
+// An ACP decision resolves the guardrail profile with the ACP agent's
+// connector, as the hook, proxy and inspect paths do, so a connectors
+// assignment selects ACP traffic and the record names that profile
+// (GAP-0311).
+func TestACPEvaluateResolvesTheGuardrailProfileForItsConnector(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
+	cfg := &config.Config{ACP: config.ACPConfig{
+		Enabled: true, Mode: "action", DefaultProfile: "default",
+		Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "default"}},
+		Agents:  map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "default"}},
+		Profiles: map[string]config.ACPProfile{"default": {
+			Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"},
+			DeniedMethods: []string{"terminal/create"},
+		}},
+	}}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"acp-kiro": {Mode: "action"}, "watch": {Mode: "observe"}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "acp-kiro", Match: config.ProfileMatch{Connectors: []string{"kiro"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	api.scannerCfg = cfg
+	api.initGuardrailProfiles(cfg, nil)
+	payload := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"terminal/create","params":{"sessionId":"s","command":"false","args":[]}}`)
+	body, err := json.Marshal(acp.Evaluation{Profile: "default", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed", Direction: acp.AgentToClient, Surface: acp.SurfaceTerminal, Method: "terminal/create", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	api.handleACPEvaluate(response, httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(events) != 1 {
+		t.Fatalf("stored events = %d, want 1", len(events))
+	}
+	if name, match := events[0].Body["defenseclaw.guardrail.profile.name"], events[0].Body["defenseclaw.guardrail.profile.match"]; name != "acp-kiro" || match != profileMatchConnector {
+		t.Fatalf("ACP record profile=%v match=%v, want acp-kiro by connector (body=%v)", name, match, events[0].Body)
+	}
+}
+
 func TestACPEvaluateRequiresEnabledProfilePinnedBindings(t *testing.T) {
 	base := config.ACPConfig{
 		Enabled: true, DefaultProfile: "default",
@@ -486,6 +530,24 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	}
 	if none := instance(`{}`); none != "" {
 		t.Fatalf("a frame without a session got the instance %q", none)
+	}
+	// The agent and its ACP session are in the agent identity ledger, as a
+	// hook session is (GAP-0315).
+	if agent := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "kiro"}).ID; agent != "" {
+		pending, _ := sharedAgentIdentities.snapshot()
+		before := pending[agent].SessionsSeen
+		instance(`{"sessionId":"acp-session-ledger"}`)
+		instance(`{"sessionId":"acp-session-ledger"}`)
+		pending, _ = sharedAgentIdentities.snapshot()
+		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != "acp-session-ledger" {
+			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (acp-session-ledger)", got, agent)
+		}
+	}
+	restore := ManagedEnterpriseActive()
+	t.Cleanup(func() { SetManagedEnterpriseActive(restore) })
+	SetManagedEnterpriseActive(true)
+	if sc := instance(`{"sessionId":"acp-session-3"}`); sc != "" {
+		t.Fatalf("a Secure Client ACP frame got the instance %q; main records none (issue #1092)", sc)
 	}
 }
 
