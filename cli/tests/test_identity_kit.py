@@ -68,6 +68,116 @@ def test_graph_add_member_treats_an_existing_member_as_done() -> None:
         graph.add_member("group", "device")
 
 
+def test_intune_group_devices_match_directory_ids(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "managedDevices" in path:
+                return [
+                    {"id": "managed-1", "deviceName": "SHARED", "azureADDeviceId": "AAD-1"},
+                    {"id": "managed-2", "deviceName": "SHARED", "azureADDeviceId": "AAD-2"},
+                ]
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/members" in path:
+                return [{"deviceId": "aad-1"}]
+            raise AssertionError(path)
+
+    args = intune.build_parser().parse_args(["devices", "--group", "team", "--json"])
+    assert intune.cmd_devices(Graph(), args) == 0
+    import json
+    assert [d["id"] for d in json.loads(capsys.readouterr().out)] == ["managed-1"]
+
+
+@pytest.mark.parametrize("command", ["remediation", "macos-script"])
+def test_intune_script_validates_group_before_upsert(tmp_path: Path, command: str) -> None:
+    intune = _load(INTUNE)
+    script = tmp_path / "script.txt"
+    script.write_text("echo ok\n", encoding="ascii")
+    mutations = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return []
+            return [{"id": "script-1"}]
+
+        def request(self, method: str, path: str, body):
+            mutations.append((method, path))
+            return {}
+
+    options = (
+        ["--detect", str(script), "--remediate", str(script)]
+        if command == "remediation"
+        else ["--name", "test", "--file", str(script)]
+    )
+    args = intune.build_parser().parse_args([command, *options, "--group", "missing", "--apply"])
+    with pytest.raises(SystemExit, match="no group named"):
+        args.func(Graph(), args)
+    assert not mutations
+
+
+def test_intune_check_counts_every_managed_device_page() -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get(self, path: str, headers=None):
+            if "managedDevices" in path:
+                return {"value": [{"operatingSystem": "Windows", "complianceState": "compliant"}]}
+            return {"value": []}
+
+        def get_all(self, path: str, headers=None):
+            if "managedDevices" in path:
+                return [
+                    {"operatingSystem": "Windows", "complianceState": "compliant"},
+                    {"operatingSystem": "Windows", "complianceState": "compliant"},
+                ]
+            return []
+
+    items = intune.check_items(Graph(), ["windows"], [])
+    count = next(item["detail"] for item in items if item["item"] == "managed devices")
+    assert count == "windows/compliant: 2"
+
+
+def test_intune_devices_json_hides_users_by_default(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    paths = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            paths.append(path)
+            return [{"id": "device-1", "deviceName": "workstation", "userPrincipalName": "user@example.test"}]
+
+    args = intune.build_parser().parse_args(["devices", "--json"])
+    assert intune.cmd_devices(Graph(), args) == 0
+    import json
+    assert "userPrincipalName" not in paths[0]
+    assert "userPrincipalName" not in json.loads(capsys.readouterr().out)[0]
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="requires no-follow file opens")
+def test_entra_password_file_rejects_links_and_insecure_existing_file(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    target = tmp_path / "existing"
+    target.write_text("original\n", encoding="ascii")
+    target.chmod(0o644)
+    link = tmp_path / "passwords"
+    link.symlink_to(target)
+
+    with pytest.raises(SystemExit, match="password file"):
+        entra._record_password(str(link), "user@example.test", "generated-value")
+    assert target.read_text(encoding="ascii") == "original\n"
+
+    with pytest.raises(SystemExit, match="password file"):
+        entra._record_password(str(target), "user@example.test", "generated-value")
+    assert target.read_text(encoding="ascii") == "original\n"
+
+    target.chmod(0o600)
+    entra._record_password(str(target), "user@example.test", "generated-value")
+    assert target.read_text(encoding="ascii").endswith("user@example.test\tgenerated-value\n")
+
+
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
     entra = _load(ENTRA)
     # Data1 = 1; Data2 and Data3 share one little-endian word; Data4 is two more.
