@@ -560,12 +560,6 @@ func (t *procTree) ancestryLocked(node *procNode) []string {
 	return out
 }
 
-// lineageNamesLocked is the comm of each ancestor from the live process pid
-// up. Callers hold t.mu.
-func (t *procTree) lineageNamesLocked(pid int) []string {
-	return t.ancestryLocked(t.live[pid])
-}
-
 // Lineage returns the process pid of sandbox sandboxName and its ancestors,
 // nearest first, from the sandbox's process tree; nil while the tree is
 // off or does not hold the process. It implements ProcessLookup.
