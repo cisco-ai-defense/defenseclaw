@@ -69,7 +69,7 @@ func readyInputs(mode string) tetragonInputs {
 			Tetragon: kernelpolicy.TetragonStatus{Reachable: true, Version: "v1.7.1", PID: 912, LSM: &yes, KeepSensorsOnExit: &no},
 		}, BurnIn: kernelpolicy.BurnInFile{UIDs: map[string]*kernelpolicy.UIDRecord{}}},
 	}
-	in.Extra.Tetragon.MetricsAddress, in.Extra.Tetragon.HealthAddress = "127.0.0.1:2112", "127.0.0.1:6789"
+	in.Host.MetricsAddress, in.Host.MetricsKnown, in.Host.HealthAddress = "127.0.0.1:2112", true, "127.0.0.1:6789"
 	if mode == "enforce" {
 		in.Intent.EnforceConnectors = []string{"claudecode"}
 	}
@@ -185,14 +185,13 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		{"lsm probe not reported", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { in.State.Tetragon.LSM = nil },
 			[]want{{checkBPFLSM, checkWarn, "not reported"}}},
 		{"listeners on every interface", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
-			in.Extra.Tetragon.MetricsAddress, in.Extra.Tetragon.HealthAddress = ":2112", "0.0.0.0:6789"
+			in.Host.MetricsAddress, in.Host.HealthAddress = ":2112", "0.0.0.0:6789"
 		}, []want{{checkMetricsLoopback, checkWarn, "every interface (:2112)"}, {checkHealthLoopback, checkWarn, "0.0.0.0:6789"}}},
 		{"ipv6 loopback, unknown metrics", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
-			in.Extra.Tetragon.MetricsAddress, in.Extra.Tetragon.HealthAddress = "", "[::1]:6789"
+			in.Host.MetricsAddress, in.Host.MetricsKnown, in.Host.HealthAddress = "", false, "[::1]:6789"
 		}, []want{{checkMetricsLoopback, checkSkip, ""}, {checkHealthLoopback, checkPass, ""}}},
-		{"metrics off, health from tetragon.conf.d", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
-			in.Extra.Tetragon.MetricsAddress, in.Extra.Tetragon.HealthAddress = "", ""
-			in.Host.MetricsKnown, in.Host.HealthAddress = true, "127.0.0.1:6789"
+		{"metrics off in the info file", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.Host.MetricsAddress, in.Host.MetricsKnown, in.Host.HealthAddress = "", true, "127.0.0.1:6789"
 		}, []want{{checkMetricsLoopback, checkWarn, "serves no metrics endpoint (without metrics, events lost reads unknown)"},
 			{checkHealthLoopback, checkPass, "127.0.0.1:6789"}}},
 		{"plane c off", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) { in.Intent.PlaneC = false },
@@ -229,7 +228,9 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			in.Running, in.State.Loaded = false, []string{"defenseclaw-controls-0a1b2c3d"}
 		}, []want{{checkOrphans, checkFail, "defenseclaw-controls-0a1b2c3d"}}},
 		{"your policies", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
-			in.Extra.CustomerPolicies = []customerPolicyStatus{{Name: "10-file-sensitive", Mode: "enforce"}, {Name: "20-net-connect", Mode: "monitor"}}
+			// 30-removed left Tetragon's list; the helper keeps it for its events. Not loaded.
+			in.State.CustomerPolicies = []kernelpolicy.CustomerPolicy{{Name: "10-file-sensitive", Listed: true, Mode: "enforce"},
+				{Name: "20-net-connect", Listed: true, Mode: "monitor"}, {Name: "30-removed", Mode: "enforce"}}
 		}, []want{{checkTetragonYourPolicy, checkInfo, "2 of your Tetragon policies are loaded (1 enforcing)"}}},
 		{"a customer policy in DefenseClaw's pattern", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.Warnings = []string{kernelpolicy.WarnForeignName + ":defenseclaw-controls-deadbeef"}

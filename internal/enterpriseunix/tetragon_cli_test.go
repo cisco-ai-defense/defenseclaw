@@ -1023,12 +1023,6 @@ func statusHost(t *testing.T, block string, state kernelpolicy.FileState, extra 
 		t.Fatal(err)
 	}
 	for key, value := range extra {
-		if key == "tetragon" {
-			for k, v := range value.(map[string]any) {
-				doc["tetragon"].(map[string]any)[k] = v
-			}
-			continue
-		}
 		doc[key] = value
 	}
 	data, _ = json.Marshal(doc)
@@ -1193,23 +1187,27 @@ func TestTetragonStatusListsYourPolicies(t *testing.T) {
 				"actions": map[string]any{"post": 118, "override": 2}, "last_event_at": "2026-10-07T11:58:00Z"},
 			{"name": "20-net-connect", "listed": true, "mode": "monitor", "state": "enabled", "seen": 40, "forwarded": 3, "dropped": 9,
 				"capped_last_hour": 7, "actions": map[string]any{"post": 40, "monitor_override": 5}},
+			// Tetragon no longer lists it; the helper keeps it for the events it had.
+			{"name": "30-removed", "listed": false, "seen": 5, "forwarded": 1, "dropped": 0},
 		},
-		"tetragon": map[string]any{"metrics_address": "127.0.0.1:2112", "health_address": ":6789"},
 	}
 	state := publishedState(kernelpolicy.ModeConsume)
 	state.Warnings = []string{codeCustomerEventsCapped + ":20-net-connect"}
 	h := statusHost(t, "", state, extra)
+	writeHostFile(t, h, tetragonConfDir+"/health-server-address", ":6789\n")
 	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
 	validateTetragonReport(t, compileTetragonStatusSchema(t), rep)
-	if len(rep.CustomerPolicies) != 2 || rep.CustomerPolicies[0].Blocked != 2 || rep.CustomerPolicies[1].Blocked != 0 || rep.CustomerPolicies[1].Dropped != 9 {
+	if len(rep.CustomerPolicies) != 3 || rep.CustomerPolicies[0].Blocked != 2 || rep.CustomerPolicies[1].Blocked != 0 || rep.CustomerPolicies[1].Dropped != 9 ||
+		rep.CustomerPolicies[2].State != "not listed" {
 		t.Fatalf("customer policies %+v", rep.CustomerPolicies)
 	}
 	got := statusText(t, rep)
 	for _, want := range []string{
 		"  Your Tetragon policies (DefenseClaw reads their events and never changes them):\n",
-		"    NAME               MODE     STATE    EVENTS  FORWARDED  BLOCKED  LAST\n",
-		"    10-file-sensitive  enforce  enabled  120     12         2        2026-10-07T11:58:00Z\n",
-		"    20-net-connect     monitor  enabled  40      3          0        -\n",
+		"    NAME               MODE     STATE       EVENTS  FORWARDED  BLOCKED  LAST\n",
+		"    10-file-sensitive  enforce  enabled     120     12         2        2026-10-07T11:58:00Z\n",
+		"    20-net-connect     monitor  enabled     40      3          0        -\n",
+		"    30-removed         -        not listed  5       1          0        -\n",
 		"  ! " + codeCustomerEventsCapped + ":20-net-connect: 7 events of your Tetragon policy 20-net-connect from AI agents were not forwarded",
 	} {
 		if !strings.Contains(got, want) {

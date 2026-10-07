@@ -257,14 +257,9 @@ func tetragonReadiness(in tetragonInputs, readyFor string, probes tetragonProbes
 			skip(checkKeepSensorsOnExit, "only enforce needs it")
 			skip(checkBPFLSM, "only enforce needs it")
 		}
-		metrics, metricsKnown := in.Extra.Tetragon.MetricsAddress, in.Extra.Tetragon.MetricsAddress != ""
-		if !metricsKnown {
-			metrics, metricsKnown = host.MetricsAddress, host.MetricsKnown
-		}
-		health := defaultStr(in.Extra.Tetragon.HealthAddress, host.HealthAddress)
-		setLoopbackCheck(set, checkMetricsLoopback, "metrics", metrics, metricsKnown, "127.0.0.1:2112", "metrics-server", restart,
+		setLoopbackCheck(set, checkMetricsLoopback, "metrics", host.MetricsAddress, host.MetricsKnown, "127.0.0.1:2112", "metrics-server", restart,
 			" (without metrics, events lost reads unknown)")
-		setLoopbackCheck(set, checkHealthLoopback, "health", health, health != "", "127.0.0.1:6789", "health-server-address", restart, "")
+		setLoopbackCheck(set, checkHealthLoopback, "health", host.HealthAddress, host.HealthAddress != "", "127.0.0.1:6789", "health-server-address", restart, "")
 	}
 
 	// DefenseClaw.
@@ -593,17 +588,22 @@ func setYourPoliciesCheck(set func(id, status, message string, fix ...string), i
 		}
 	}
 	sort.Strings(foreign)
-	policies := in.Extra.CustomerPolicies
-	enforcing := 0
-	for _, policy := range policies {
-		if policy.enforcing() {
+	// Loaded are the ones Tetragon lists now; the helper also keeps a
+	// policy that left the list for the events it had.
+	loaded, enforcing := 0, 0
+	for _, policy := range in.State.CustomerPolicies {
+		if !policy.Listed {
+			continue
+		}
+		loaded++
+		if strings.EqualFold(policy.Mode, "enforce") {
 			enforcing++
 		}
 	}
 	message := "DefenseClaw never changes your own Tetragon policies; it reads their events"
-	if len(policies) > 0 {
+	if loaded > 0 {
 		message = fmt.Sprintf("%d of your Tetragon policies %s loaded (%d enforcing); DefenseClaw reads their events and never changes them",
-			len(policies), plural(len(policies), "is", "are"), enforcing)
+			loaded, plural(loaded, "is", "are"), enforcing)
 	}
 	if len(foreign) > 0 {
 		set(checkTetragonYourPolicy, checkWarn, message+"; "+strings.Join(foreign, ", ")+" "+plural(len(foreign), "has", "have")+
@@ -771,7 +771,7 @@ func (e *Env) tetragonInputs(ctx context.Context) (tetragonInputs, error) {
 	}
 	l := &lifecycle{env: e, opts: Options{Action: ActionStatus}, result: enterprisestatus.New(ActionStatus, "standalone", e.GOOS, e.ProductVersion)}
 	return tetragonInputs{GOOS: e.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: l.helperRunning(ctx),
-		Host: e.tetragonHost(), Extra: e.readHelperExtras()}, nil
+		Host: e.tetragonHost()}, nil
 }
 
 // tetragonProbes reads the unit state and the kernel's security modules.

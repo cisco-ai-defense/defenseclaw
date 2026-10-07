@@ -468,7 +468,7 @@ func tetragonFindings(in tetragonInputs) []tetragonFinding {
 			add(false, code, tetragonFacts{Version: state.Tetragon.Version, Mode: mode})
 		case code == "":
 		case perInstanceCodes[code]:
-			add(false, warning, tetragonFacts{Count: in.Extra.dropped(detail)})
+			add(false, warning, tetragonFacts{Count: cappedLastHour(state, detail)})
 		default:
 			add(false, code, tetragonFacts{Detail: detail, Digest: digest, Ack: intent.ack()})
 		}
@@ -577,9 +577,6 @@ func (l *lifecycle) describeTetragon(ctx context.Context) []string {
 	}
 	var problems []string
 	in := tetragonInputs{GOOS: env.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: running, Host: env.tetragonHost()}
-	if env.GOOS == "linux" {
-		in.Extra = env.readHelperExtras()
-	}
 	for _, finding := range tetragonFindings(in) {
 		switch {
 		case finding.Problem:
@@ -894,10 +891,9 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 	intent, haveIntent := env.installedTetragonIntent()
 	running := l.helperRunning(ctx)
 	host := env.tetragonHost()
-	extra := env.readHelperExtras()
 	rep.fill(env, intent, haveIntent, state, running, host)
-	rep.fillCustomer(extra)
-	in := tetragonInputs{GOOS: env.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: running, Host: host, Extra: extra}
+	rep.fillCustomer(state)
+	in := tetragonInputs{GOOS: env.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: running, Host: host}
 	if !haveIntent {
 		in.Intent = tetragonIntentOf(nil, env.GOOS, nil)
 	}
@@ -1057,9 +1053,8 @@ func nonNil(values []string) []string {
 }
 
 // tetragonInputs are what the findings and the readiness checks read: the
-// intent the deployment renders, the helper's published state, whether the
-// helper runs, Tetragon's info file, and the parts of the helper's state the
-// kernelpolicy reader does not model.
+// intent the deployment renders, the helper's published state (customer
+// policies included), whether the helper runs, and Tetragon's info file.
 type tetragonInputs struct {
 	GOOS       string
 	Intent     tetragonIntent
@@ -1067,88 +1062,39 @@ type tetragonInputs struct {
 	State      kernelpolicy.State
 	Running    bool
 	Host       tetragonHost
-	Extra      helperExtras
 }
 
 // maxCustomerPolicies bounds the customer policies the CLI shows.
 const maxCustomerPolicies = 64
 
-// helperExtras are the parts of tetragon-state.json the root CLI reads
-// beside kernelpolicy.State: the customer's own Tetragon policies with their
-// counts (item 1; the helper never changes them) and Tetragon's metrics and
-// health listeners. A helper that does not publish them leaves them empty.
-type helperExtras struct {
-	CustomerPolicies []customerPolicyStatus `json:"customer_policies"`
-	CustomerEvents   *customerEventCounts   `json:"customer_events"`
-	Tetragon         struct {
-		MetricsAddress string `json:"metrics_address"`
-		HealthAddress  string `json:"health_address"`
-	} `json:"tetragon"`
+// customerPolicies are the customer's own Tetragon policies the helper
+// published in tetragon-state.json (item 1; the helper never changes them),
+// by name, at most maxCustomerPolicies.
+func customerPolicies(state kernelpolicy.State) []kernelpolicy.CustomerPolicy {
+	policies := append([]kernelpolicy.CustomerPolicy(nil), state.CustomerPolicies...)
+	sort.Slice(policies, func(i, j int) bool { return policies[i].Name < policies[j].Name })
+	if len(policies) > maxCustomerPolicies {
+		policies = policies[:maxCustomerPolicies]
+	}
+	return policies
 }
 
-// customerPolicyStatus is one of the customer's Tetragon policies as the
-// helper last listed it, with the events it saw from that policy.
-type customerPolicyStatus struct {
-	Name    string   `json:"name"`
-	Mode    string   `json:"mode,omitempty"`
-	State   string   `json:"state,omitempty"`
-	Sensors []string `json:"sensors,omitempty"`
-	Error   string   `json:"error,omitempty"`
-	// Actions are Tetragon's own action counters of the policy (post,
-	// override, monitor_override, signal, ...): exact, for every process.
-	Actions map[string]uint64 `json:"actions,omitempty"`
-	// Seen, Forwarded and Dropped count the policy's events the helper saw,
-	// forwarded and did not forward (over the budget); CappedLastHour those
-	// it did not forward in the last hour.
-	Seen           uint64    `json:"seen"`
-	Forwarded      uint64    `json:"forwarded"`
-	Dropped        uint64    `json:"dropped"`
-	CappedLastHour uint64    `json:"capped_last_hour"`
-	LastEvent      time.Time `json:"last_event_at,omitempty"`
+// customerBlocked is how often Tetragon denied or killed for a customer
+// policy: its override, signal and notify_enforcer counters (exact, for
+// every process).
+func customerBlocked(policy kernelpolicy.CustomerPolicy) int64 {
+	return policy.Actions["override"] + policy.Actions["signal"] + policy.Actions["notify_enforcer"]
 }
 
-// customerEventCounts are the helper's totals over the customer's policies.
-type customerEventCounts struct {
-	Seen      uint64 `json:"seen"`
-	Forwarded uint64 `json:"forwarded"`
-	Dropped   uint64 `json:"dropped"`
-	Container uint64 `json:"container"`
-}
-
-// blocked is how often Tetragon denied or killed for the policy: its
-// override, signal and notify_enforcer counters.
-func (p customerPolicyStatus) blocked() uint64 {
-	return p.Actions["override"] + p.Actions["signal"] + p.Actions["notify_enforcer"]
-}
-
-// enforcing reports whether the policy runs in Tetragon's enforce mode.
-func (p customerPolicyStatus) enforcing() bool { return strings.EqualFold(p.Mode, "enforce") }
-
-// dropped is how many events of the customer policy name the helper did not
-// forward in the last hour, when it publishes the count.
-func (x helperExtras) dropped(name string) int {
-	for _, policy := range x.CustomerPolicies {
+// cappedLastHour is how many events of the customer policy name the helper
+// did not forward in the last hour (over the budget).
+func cappedLastHour(state kernelpolicy.State, name string) int {
+	for _, policy := range state.CustomerPolicies {
 		if policy.Name == name {
 			return int(policy.CappedLastHour)
 		}
 	}
 	return 0
-}
-
-// readHelperExtras reads the extras from tetragon-state.json; a missing or
-// unreadable file (status reports that through kernelpolicy.ReadState) or a
-// helper that does not publish them gives none.
-func (e *Env) readHelperExtras() helperExtras {
-	var out helperExtras
-	data, err := readBounded(e.sensorDirs().StateFile(), 4<<20)
-	if err != nil || json.Unmarshal(data, &out) != nil {
-		return helperExtras{}
-	}
-	if len(out.CustomerPolicies) > maxCustomerPolicies {
-		out.CustomerPolicies = out.CustomerPolicies[:maxCustomerPolicies]
-	}
-	sort.Slice(out.CustomerPolicies, func(i, j int) bool { return out.CustomerPolicies[i].Name < out.CustomerPolicies[j].Name })
-	return out
 }
 
 // tetragonAccount resolves a uid to its account name and home directory
@@ -1266,14 +1212,24 @@ func (e *Env) tetragonHost() tetragonHost {
 }
 
 // fillCustomer copies the customer's own Tetragon policies into the report.
-func (rep *TetragonReport) fillCustomer(extra helperExtras) {
-	for _, policy := range extra.CustomerPolicies {
-		rep.CustomerPolicies = append(rep.CustomerPolicies, TetragonCustomerPolicy{
-			Name: policy.Name, Mode: policy.Mode, State: policy.State, Error: policy.Error, Events: policy.Seen,
-			Forwarded: policy.Forwarded, Dropped: policy.Dropped, Blocked: policy.blocked(), LastEvent: formatTime(policy.LastEvent),
-		})
+// A policy Tetragon no longer lists (kept for the events it had) reads
+// "not listed" in the STATE column.
+func (rep *TetragonReport) fillCustomer(state kernelpolicy.State) {
+	for _, policy := range customerPolicies(state) {
+		row := TetragonCustomerPolicy{
+			Name: policy.Name, Mode: policy.Mode, State: policy.State, Error: policy.Error, Events: counted(policy.Seen),
+			Forwarded: counted(policy.Forwarded), Dropped: counted(policy.Dropped), Blocked: counted(customerBlocked(policy)),
+			LastEvent: formatTime(policy.LastEventAt),
+		}
+		if !policy.Listed {
+			row.State = "not listed"
+		}
+		rep.CustomerPolicies = append(rep.CustomerPolicies, row)
 	}
 }
+
+// counted is a helper counter as the report's unsigned count.
+func counted(n int64) uint64 { return uint64(max(n, 0)) }
 
 // onlyUser narrows the report to one enrolled user, by name or uid: its
 // row, its observed sessions and its burn-in. It reports whether one
