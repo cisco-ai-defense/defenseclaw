@@ -139,11 +139,6 @@ func (t tetragonIntent) helperMode() string {
 	return t.Mode
 }
 
-// envTetragonCustomerEvents carries enterprise.tetragon.customer_events to the
-// sensor helper, only when it is not the default (agent). The helper's
-// kernelpolicy.IntentFromLookup reads it with the other four.
-const envTetragonCustomerEvents = "DEFENSECLAW_SENSOR_TETRAGON_CUSTOMER_EVENTS"
-
 // approves reports whether the intent's enforce_ack approves digest.
 func (t tetragonIntent) approves(digest string) bool {
 	return config.TetragonEnforceAcks(t.EnforceAck).Approves(digest)
@@ -173,7 +168,7 @@ func (t tetragonIntent) dropin() []byte {
 		{kernelpolicy.EnvEnforceConnectors, strings.Join(t.EnforceConnectors, ",")},
 	}
 	if t.CustomerEvents != "" && t.CustomerEvents != config.TetragonCustomerEventsAgent {
-		lines = append(lines, [2]string{envTetragonCustomerEvents, t.CustomerEvents})
+		lines = append(lines, [2]string{kernelpolicy.EnvCustomerEvents, t.CustomerEvents})
 	}
 	for _, line := range lines {
 		fmt.Fprintf(&b, "Environment=%s\n", systemdQuote(line[0]+"="+line[1]))

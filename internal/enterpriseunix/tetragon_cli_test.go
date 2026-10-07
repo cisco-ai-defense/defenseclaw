@@ -260,7 +260,7 @@ func TestTetragonDropinAppliesTheCaps(t *testing.T) {
 			// customer_events alone is a written block; its variable appears
 			// only when it is not the default.
 			name: "customer events off", block: "    customer_events: off\n", planeC: true,
-			dropin: expectedTetragonDropin("consume", "168h", "", "", envTetragonCustomerEvents+"=off"),
+			dropin: expectedTetragonDropin("consume", "168h", "", "", kernelpolicy.EnvCustomerEvents+"=off"),
 		},
 	}
 	for _, tc := range cases {
