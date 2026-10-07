@@ -85,8 +85,8 @@ defaults to HIGH for `error`, MEDIUM for `unknown`, and INFO otherwise.
 
 ### Workspace
 
-One record per `snapshot`, `undo`, `mask`, `review`, `upload` or `pull`
-(`defenseclaw.sandbox.workspace.operation`, also reported as
+One record per `snapshot`, `undo`, `mask`, `review`, `upload`, `pull` or
+`quarantine` (`defenseclaw.sandbox.workspace.operation`, also reported as
 `defenseclaw.enforcement.effective_action`). It carries the snapshot kind
 (`git` or `filesystem`; callers report the workspace package's non-git
 `copy` snapshot as `filesystem`), the snapshot ref, the pull mode (`apply`,
@@ -94,17 +94,24 @@ One record per `snapshot`, `undo`, `mask`, `review`, `upload` or `pull`
 and bytes, and up to 64 workspace-relative paths. The paths are file names
 from the project, so each destination's redaction profile governs them.
 
+DefenseClaw itself records a `quarantine` (initiator `defenseclaw`) when a
+new nested git repository appears in a live-mounted project during a session
+and it renames that repository's `.git` entry. The record names the
+repository's folder, counts one file and one flagged file, and is `failed`
+(failure class `rename_failed`) when the rename did not happen. The
+`nested_repo` finding of the same detection is listed under Findings.
+
 The result is `applied`, `completed`, `failed`, `no_change`, `partial` or
-`skipped`. It defaults to `applied` for undo, mask and pull and to
+`skipped`. It defaults to `applied` for undo, mask, pull and quarantine and to
 `completed` for the rest; `failed` and `partial` may carry a failure class.
 
 Two kinds of record are mandatory:
 
-- a state change (`enforcement_state_change`): an undo, a mask, or a pull in
-  `apply` or `branch` mode, unless its result is `no_change` or `skipped`. A
-  `failed` or `partial` result still counts, because part of the change may
-  have been written. A `patch` pull writes only the patch file and is not a
-  state change;
+- a state change (`enforcement_state_change`): an undo, a mask, a quarantine,
+  or a pull in `apply` or `branch` mode, unless its result is `no_change` or
+  `skipped`. A `failed` or `partial` result still counts, because part of
+  the change may have been written. A `patch` pull writes only the patch
+  file and is not a state change;
 - any record with a flagged file count above zero (`enforced_outcome`): the
   session changed files that can run code on the host.
 
