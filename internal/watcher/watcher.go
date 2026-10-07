@@ -896,13 +896,13 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	cfg := w.liveConfig()
 	connector := w.eventConnector(evt)
-	assetDecision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	assetDecision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           evt.Name,
 		Connector:      connector,
 		SourcePath:     evt.Path,
 		RuntimeSurface: "watcher",
-	})
+	}))
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
 		if assetDecision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
@@ -1043,9 +1043,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 // apply to the event's connector. Secure Client hosts keep their operator
 // rows in the actions table, unchanged.
 func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent, targetType, connector string) policy.AdmissionInput {
-	block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
+	block, allow := policy.AssetPolicyListsFor(cfg, w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 		TargetType: targetType, Name: evt.Name, Connector: connector, SourcePath: evt.Path,
-	})
+	}))
 	if cfg.SecureClientIntegration() {
 		block, allow = w.legacyListEntries("block"), w.legacyListEntries("allow")
 	}
@@ -1057,6 +1057,23 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 		AllowList:  allow,
 		Admission:  policy.AdmissionFor(policy.CompileAdmission(cfg), targetType),
 	}
+}
+
+// withMCPDefinition adds how an MCP server starts (URL, command, args,
+// transport) to its asset_policy input, so a rule pinned to the server
+// definition matches it here as it does in mcp set: the shape mcp allow
+// writes and the url/command/args_prefix/transport rules admins write
+// (GAP-0371). Without it the watcher matched a pinned rule against a name
+// alone, which never matches. A Secure Client host keeps the name-only
+// input of main (issue #1092).
+func (w *InstallWatcher) withMCPDefinition(cfg *config.Config, evt InstallEvent, in config.AssetPolicyInput) config.AssetPolicyInput {
+	if evt.Type != InstallMCP || cfg == nil || cfg.SecureClientIntegration() {
+		return in
+	}
+	if entry, err := w.lookupMCPServer(evt); err == nil {
+		in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	}
+	return in
 }
 
 // legacyListEntries is the Secure Client operator list read from the

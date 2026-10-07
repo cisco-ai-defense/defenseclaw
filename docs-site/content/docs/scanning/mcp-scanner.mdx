@@ -326,6 +326,8 @@ defenseclaw mcp unblock cisco-internal                       # remove the block 
 
 `mcp block`, `mcp allow` and `mcp unblock` write the server's entry in `asset_policy.mcp` (`denied` or `allowed`) in `config.yaml`, and the gateway applies it at once; on a managed device they are refused, and the entry goes in the administrator's config. [Admission](/docs/policies/admission) covers `asset_policy`.
 
+A block follows the name. An allow is pinned to the server you reviewed: `mcp allow` copies the server's `url`, or its `command` and `args_prefix`, from the connector's MCP config into the rule, so a different server added later under the same name is scanned again. For a server that is not configured yet, pass the definition with `--url`, or `--command` and `--args`; otherwise the rule matches the name only and the command prints a note saying so.
+
 `mcp unblock` removes a server's block or allow entry, so its scan verdict
 decides again. It says which one it removed and prints the
 `defenseclaw mcp scan <name>` command to scan the server now.

@@ -428,13 +428,17 @@ def write_operator_decision(
     connector: str = "",
     reason: str = "",
     source_path: str = "",
+    pins: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write one operator block/allow/unblock/clear to config.yaml.
 
     A block or allow first drops every rule for the same name and connector
     from both lists, then appends the new rule (an allow is pinned to
     ``source_path`` when given); an unblock drops only the denied rule and a
-    clear drops both. The edit is made under the config writer lock against
+    clear drops both. An MCP allow with ``pins`` writes one rule per server
+    definition (``url``, or ``command`` + ``args_prefix``, and ``transport``),
+    so a different server added later under the same name is scanned again
+    (GAP-0371). The edit is made under the config writer lock against
     the lists on disk, not the ones loaded when this process started, so a
     concurrent block or allow (another CLI, the REST API, the TUI) is never
     lost; ``Config.save()`` then writes it. Refuses on a managed standalone
@@ -465,12 +469,39 @@ def write_operator_decision(
             )
         if op == OP_BLOCK:
             denied.append(rule)
+        elif op == OP_ALLOW and target_type == "mcp" and pins:
+            for pin in dict.fromkeys(mcp_pin_key(p) for p in pins):
+                url, command, args_prefix, transport = pin
+                allowed.append(AssetPolicyRule(
+                    name=name, connector=connector, reason=reason, url=url, command=command,
+                    args_prefix=list(args_prefix), transport=transport,
+                ))
         elif op == OP_ALLOW:
             allowed.append(rule)
         elif op == OP_UNBLOCK:
             allowed = list(holder.allowed)
         holder.denied, holder.allowed = denied, allowed
         cfg.save()
+
+
+def mcp_pin_key(pin: Any) -> tuple[str, str, tuple[str, ...], str]:
+    """``(url, command, args_prefix, transport)`` of a pin dict or an
+    AssetPolicyRule, for writing and comparing MCP allow pins."""
+    get = pin.get if isinstance(pin, dict) else (lambda key, default=None: getattr(pin, key, default))
+    return (
+        str(get("url", "") or "").strip(),
+        str(get("command", "") or "").strip(),
+        tuple(str(a) for a in (get("args_prefix", None) or [])),
+        str(get("transport", "") or "").strip(),
+    )
+
+
+def exact_scope_rules(cfg: Any, target_type: str, name: str, connector: str, decision: str) -> list[Any]:
+    """The asset_policy rules for ``name`` at exactly this connector scope
+    ("" is unscoped): ``decision`` "block" reads denied, "allow" allowed."""
+    holder = getattr(getattr(cfg, "asset_policy", None), target_type, None)
+    rules = getattr(holder, "denied" if decision == "block" else "allowed", []) if holder is not None else []
+    return [rule for rule in rules or [] if _same_asset(rule, name, connector, target_type)]
 
 
 def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) -> None:

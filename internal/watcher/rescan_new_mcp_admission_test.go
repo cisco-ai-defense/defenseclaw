@@ -49,3 +49,25 @@ func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 		t.Fatalf("the next cycle admitted the server again: %#v", admitted)
 	}
 }
+
+// GAP-0371: an allow pinned to the server URL (the rule mcp allow writes)
+// admits the added server without a scan; the watcher used to match the
+// rule against the name alone, which never matches a pinned rule.
+func TestAdmitAddedMCPServerMatchesAllowPinnedToItsURL(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: "ctx7", URL: "https://ctx7.example.test/mcp"}}
+	servers := []config.MCPServerEntry{}
+	var admitted []AdmissionResult
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	scans := &countingScanner{name: "mcp-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+	w.runRescanCycle(context.Background())
+	servers = append(servers, config.MCPServerEntry{Name: "ctx7", URL: "https://ctx7.example.test/mcp", Connector: "codex"})
+	w.AdmitAddedMCPServers([]string{"ctx7"})
+	w.admitAddedMCPServers(context.Background())
+	if len(admitted) != 1 || admitted[0].Verdict != VerdictAllowed || scans.calls != 0 {
+		t.Fatalf("admitted %#v after %d scans, want ctx7 allowed by its pinned rule without a scan", admitted, scans.calls)
+	}
+}

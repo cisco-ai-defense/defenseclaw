@@ -501,6 +501,14 @@ read_file    allow    global     vetted                                    2026-
   `--connector`, it covers that one. `skill allow` and `plugin allow` on an
   installed copy write a rule scoped to the connector that has the copy and
   pinned to its path.
+- `mcp allow` pins the rule to how the server starts: its `url`, or its
+  `command` and `args_prefix` (and `transport` when the server sets one), read
+  from the connector's MCP config. A different server added later under the
+  same name is scanned again. For a server that is not configured (for
+  example one `mcp set` just rejected), pass the definition you reviewed:
+  `defenseclaw mcp allow context7 --command npx --args '["-y", "@upstash/context7-mcp"]'`.
+  Without a configured copy or a pin the rule matches the name only, and
+  `mcp allow` says so.
 - `skill allow` and `plugin allow` remove the name from the block list as well.
 - `unblock` removes the block or allow rule for the name and clears its runtime
   state, so its scan verdict decides again: the CLI says the asset is scanned

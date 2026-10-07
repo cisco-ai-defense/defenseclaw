@@ -288,8 +288,23 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertIn("[mcp] Allowed 'ctx7' (claudecode).", result.output)
         self.assertIn("[mcp] Allowed 'ctx7' (codex).", result.output)
 
-        self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "claudecode"))
-        self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "codex"))
+        # GAP-0371: each rule is pinned to the configured server, so another
+        # server added later under the same name is scanned again.
+        rules = {(r.connector, r.url, r.transport) for r in self.app.cfg.asset_policy.mcp.allowed}
+        self.assertEqual(rules, {
+            ("claudecode", "https://claudecode.example/mcp", "sse"),
+            ("codex", "https://codex.example/mcp", "sse"),
+        })
+        self.assertIn("Pinned to: url https://claudecode.example/mcp (transport sse).", result.output)
+        from defenseclaw.enforce import asset_lists
+
+        def decide(url: str) -> str:
+            return asset_lists.list_decision(
+                self.app.cfg.asset_policy, "mcp", "ctx7", "claudecode", url=url, transport="sse",
+            )[0]
+
+        self.assertEqual(decide("https://claudecode.example/mcp"), "allow")
+        self.assertEqual(decide("https://other.example/mcp"), "")
         self.assertFalse(self.app.store.has_action("mcp", "ctx7", "install", "block", "codex"))
         self.assertFalse(pe.is_allowed("mcp", "ctx7"))
 
@@ -1925,6 +1940,7 @@ class TestMcpListUnconfigured(MCPCommandTestBase):
         self.assertEqual(self.app.cfg.asset_policy.mcp.denied, [])
         allowed = self.invoke(["allow", "demo-mcp"])
         self.assertIn("Allowed 'demo-mcp' (every connector)", allowed.output)
+        self.assertIn("this rule matches the name only", allowed.output)
         self.assertEqual([r.name for r in self.app.cfg.asset_policy.mcp.allowed], ["demo-mcp"])
 
     def test_unconfigured_set_does_not_touch_phantom(self):

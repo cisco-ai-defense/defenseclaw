@@ -1984,6 +1984,79 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
         click.echo(f"  Check the name with: {list_cmd}")
 
 
+def _mcp_entry_pin(entry: MCPServerEntry) -> dict:
+    """How a configured server starts: its URL, or its command and
+    arguments, plus the transport when the entry sets one."""
+    pin: dict = {"url": entry.url} if entry.url else {"command": entry.command, "args_prefix": list(entry.args or [])}
+    if entry.transport:
+        pin["transport"] = entry.transport
+    return pin
+
+
+def _mcp_explicit_allow_pin(
+    target: str, url: str, command: str, args: str, transport: str,
+) -> dict | None:
+    """The pin from ``mcp allow --url | --command [--args] [--transport]``."""
+    if not (url or command or args or transport):
+        return None
+    if "://" in target:
+        raise click.UsageError("--url, --command, --args and --transport pin a server name, not a URL target")
+    if url and command:
+        raise click.UsageError("pass --url or --command, not both")
+    if not (url or command):
+        raise click.UsageError("--args and --transport need --url or --command")
+    if args and not command:
+        raise click.UsageError("--args needs --command")
+    pin: dict = {"url": url} if url else {"command": command, "args_prefix": _parse_args(args) if args else []}
+    if transport:
+        pin["transport"] = transport
+    return pin
+
+
+def _mcp_allow_pins(app: AppContext, target: str, connector: str, explicit: dict | None) -> list[dict]:
+    """The server definitions an allow for *target* on *connector* is pinned
+    to: the explicit pin, else each configured copy of the server ([] when
+    it is not configured there, so the rule matches the name only)."""
+    if explicit is not None:
+        return [explicit]
+    if "://" in target or not connector or asset_lists.is_secure_client(app.cfg):
+        return []
+    try:
+        return [_mcp_entry_pin(s) for s in _collect_mcps_for_connector(app, connector) if s.name == target]
+    except Exception:  # noqa: BLE001 - an unreadable config leaves the rule name-only, and says so
+        return []
+
+
+def _describe_mcp_pin(pin: dict) -> str:
+    url, command, args, transport = asset_lists.mcp_pin_key(pin)
+    text = f"url {url}" if url else f"command {' '.join([command, *args])}"
+    return text + (f" (transport {transport})" if transport else "")
+
+
+def _echo_mcp_allow_scope(target: str, connector: str, pins: list[dict]) -> None:
+    """Say what an MCP allow covers (GAP-0371)."""
+    if "://" in target:
+        return
+    if pins:
+        click.echo(f"  Pinned to: {'; '.join(_describe_mcp_pin(p) for p in pins)}.")
+        click.echo("  A different command or URL under this name is scanned again.")
+        return
+    where = f"on {connector}" if connector else "on any configured connector"
+    click.secho(
+        f"  Note: this rule matches the name only: any server named {target!r} skips the scan. "
+        f"{target!r} is not configured {where}; pin the rule to the reviewed server with "
+        "--url, or --command and --args.",
+        fg="yellow",
+    )
+
+
+def _mcp_allow_unchanged(app: AppContext, target: str, connector: str, pins: list[dict]) -> bool:
+    """True when the allow at this exact scope already has these pins."""
+    rules = asset_lists.exact_scope_rules(app.cfg, "mcp", target, connector, "allow")
+    want = sorted({asset_lists.mcp_pin_key(p) for p in pins} or {asset_lists.mcp_pin_key({})})
+    return bool(rules) and sorted({asset_lists.mcp_pin_key(r) for r in rules}) == want
+
+
 @mcp.command()
 @click.argument("target")
 @click.option("--reason", default="", help="Reason for allowing")
@@ -1995,48 +2068,75 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
         "Pass --connector <name> to narrow to that connector."
     ),
 )
+@click.option("--url", "pin_url", default="", help="Allow only the server at this URL.")
+@click.option("--command", "pin_command", default="", help="Allow only a server started by this command (npx, uvx).")
+@click.option(
+    "--args", "pin_args", default="",
+    help="With --command: the arguments the server starts with (JSON array or comma-separated).",
+)
+@click.option(
+    "--transport", "pin_transport", default="", help="With --url or --command: the transport (stdio, sse, http).",
+)
 @pass_ctx
 @asset_lists.refuse_on_managed_device("mcp", asset_lists.OP_ALLOW, "target")
-def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> None:
+def allow(
+    app: AppContext, target: str, reason: str, connector_flag: str,
+    pin_url: str, pin_command: str, pin_args: str, pin_transport: str,
+) -> None:
     """Allow an MCP server (by name or URL).
+
+    The rule is pinned to how the server starts: its URL, or its command and
+    arguments, read from the connector's MCP config or given with --url,
+    --command and --args. A different server added later under the same
+    name is scanned again. When the server is not configured and no pin is
+    given, the rule matches the name only, and the command says so.
 
     Bare ``mcp allow <name>`` allows matching configured server copies;
     ``--connector <name>`` narrows the allow to one connector. A
     connector-scoped allow is authoritative for that connector before
     unscoped fallback applies.
+
+    \b
+    Example (after 'mcp set' rejected a server you reviewed):
+      defenseclaw mcp allow context7 --command npx --args '["-y", "@upstash/context7-mcp"]' --reason "reviewed"
     """
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
     target = asset_lists.policy_rule_name("mcp", target)
+    explicit = _mcp_explicit_allow_pin(target, pin_url, pin_command, pin_args, pin_transport)
     pe = PolicyEngine(app.store, app.cfg)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
     _refuse_bundled_mcp_policy_mutation(app, target, connector, "allow")
+    reason = reason or "manually allowed via CLI"
     if connector:
-        if pe.is_allowed_for_connector("mcp", target, connector):
-            if app.store and asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "allow"):
-                click.echo(f"[mcp] Already allowed {target!r} ({connector}).")
-            else:
-                click.echo(f"[mcp] Already allowed {target!r} globally (covers {connector}).")
+        pins = _mcp_allow_pins(app, target, connector, explicit)
+        if pe.is_allowed_for_connector("mcp", target, connector) and not (
+            app.store and asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "allow")
+        ):
+            click.echo(f"[mcp] Already allowed {target!r} globally (covers {connector}).")
             return
-        pe.allow_for_connector(
-            "mcp", target, connector, reason or "manually allowed via CLI",
-        )
+        if app.store and asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "allow") and (
+            asset_lists.is_secure_client(app.cfg) or _mcp_allow_unchanged(app, target, connector, pins)
+        ):
+            click.echo(f"[mcp] Already allowed {target!r} ({connector}).")
+            return
+        pe.allow_for_connector("mcp", target, connector, reason, pins=pins)
         click.secho(f"[mcp] Allowed {target!r} ({connector}).", fg="green")
+        if not asset_lists.is_secure_client(app.cfg):
+            _echo_mcp_allow_scope(target, connector, pins)
     else:
         targets = _mcp_policy_fanout_connectors(app, pe, target)
         if targets:
             for target_connector in targets:
-                pe.allow_for_connector(
-                    "mcp",
-                    target,
-                    target_connector,
-                    reason or "manually allowed via CLI",
-                )
+                pins = _mcp_allow_pins(app, target, target_connector, explicit)
+                pe.allow_for_connector("mcp", target, target_connector, reason, pins=pins)
                 click.secho(
                     f"[mcp] Allowed {target!r} ({target_connector}).",
                     fg="green",
                 )
+                if not asset_lists.is_secure_client(app.cfg):
+                    _echo_mcp_allow_scope(target, target_connector, pins)
             if app.store and pe.get_action("mcp", target) is not None:
                 pe.remove_action("mcp", target)
             if app.logger:
@@ -2044,11 +2144,16 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
                     "allow-mcp", target, f"reason={reason} connector=all",
                 )
             return
-        if pe.is_allowed("mcp", target):
+        pins = [explicit] if explicit is not None else []
+        if app.store and asset_lists.has_entry(app.cfg, app.store, "mcp", target, "", "allow") and (
+            asset_lists.is_secure_client(app.cfg) or _mcp_allow_unchanged(app, target, "", pins)
+        ):
             click.echo(f"[mcp] Already allowed {target!r} (every connector).")
             return
-        pe.allow("mcp", target, reason or "manually allowed via CLI")
+        pe.allow("mcp", target, reason, pins=pins)
         click.secho(f"[mcp] Allowed {target!r} (every connector).", fg="green")
+        if not asset_lists.is_secure_client(app.cfg):
+            _echo_mcp_allow_scope(target, "", pins)
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -2073,7 +2178,8 @@ def _mcp_only_allow_entry(app: AppContext, pe, target: str, connector: str) -> b
             or pe.is_quarantined("mcp", target)
             or app.store.has_action("mcp", target, "runtime", "disable")
         )
-        allowed = pe.is_allowed("mcp", target)
+        # has_entry, not is_allowed: a pinned allow matches no bare name.
+        allowed = asset_lists.has_entry(app.cfg, app.store, "mcp", target, "", "allow")
     return allowed and not restrictive
 
 
@@ -2199,7 +2305,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
         targets = _mcp_policy_fanout_connectors(app, pe, target)
         has_unscoped_state = bool(app.store) and (
             pe.is_blocked("mcp", target)
-            or pe.is_allowed("mcp", target)
+            or asset_lists.has_entry(app.cfg, app.store, "mcp", target, "", "allow")
             or pe.is_quarantined("mcp", target)
             or app.store.has_action("mcp", target, "runtime", "disable")
         )
