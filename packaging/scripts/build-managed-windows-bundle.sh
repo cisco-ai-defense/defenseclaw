@@ -328,7 +328,13 @@ echo "==> stamping defenseclaw-cmid-broker.exe VERSIONINFO / icon"
 # with -trimpath. Zero occurrences = overlay did not link, which fails
 # fast here instead of surviving to AVC's signing pipeline.
 for binary_path in "${GATEWAY_EXE}" "${HOOK_EXE}" "${BROKER_EXE}"; do
-    overlay_hits=$(grep -ao 'cisco-aispg' "${binary_path}" 2>/dev/null | wc -l | tr -d ' ')
+    # grep -ao returns exit 1 on zero matches, which under `set -euo
+    # pipefail` kills the script before the diagnostic branch below
+    # runs. Wrap the matcher in `|| true` so pipefail sees success and
+    # wc -l still reports 0 for a stub-linked binary - the ensuing
+    # `if ... -eq 0` is what emits the useful "cmid overlay did not
+    # link" message. Keeps the hard-fail intent; just surfaces WHY.
+    overlay_hits="$({ grep -ao 'cisco-aispg' "${binary_path}" 2>/dev/null || true; } | wc -l | tr -d ' ')"
     if [[ "${overlay_hits}" -eq 0 ]]; then
         echo "build-managed-windows-bundle: ${binary_path} has 0 cisco-aispg symbols; cmid overlay did not link" >&2
         echo "    expected the private overlay from ${OVERLAY_PATH} to compile in via -tags cmid" >&2
