@@ -73,6 +73,19 @@ func emitCorrelationRelationshipsV8WithEmitter(
 	instance audit.ConnectorInstanceID,
 	relationships []audit.CorrelationRelationship,
 ) error {
+	if !ManagedEnterpriseActive() {
+		// A relationship is a change record: export it when it is created
+		// or its status changes, not for each occurrence that only adds
+		// evidence, which was almost half the exported bytes of a session
+		// (GAP-0423). Secure Client keeps one record per occurrence (#1092).
+		changed := relationships[:0:0]
+		for _, relationship := range relationships {
+			if !relationship.Unchanged {
+				changed = append(changed, relationship)
+			}
+		}
+		relationships = changed
+	}
 	if emitter == nil || len(relationships) == 0 {
 		return nil
 	}
