@@ -49,6 +49,11 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 	if strings.Contains(env, "from-shell") {
 		t.Fatal("a shell scanner variable reached the runtime")
 	}
+	// Python's platform.machine() needs PROCESSOR_ARCHITECTURE on Windows.
+	t.Setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+	if !strings.Contains(strings.Join(skill.scanEnv(), "\n"), "PROCESSOR_ARCHITECTURE=AMD64") {
+		t.Fatal("the scanner environment drops PROCESSOR_ARCHITECTURE")
+	}
 
 	plugin := &PluginScanner{BinaryPath: runtimeBinary, IncludeSelf: true}
 	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--include-self"}) {

@@ -255,6 +255,9 @@ var skillScannerEnvPassthrough = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "USERPROFILE": true,
 	"TMPDIR": true, "TMP": true, "TEMP": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TZ": true,
 	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true, "SYSTEMDRIVE": true,
+	// Python's platform.machine() reads these on Windows; without them
+	// skill-scanner's CEL helper saw "win32/" and refused to start.
+	"PROCESSOR_ARCHITECTURE": true, "PROCESSOR_ARCHITEW6432": true, "NUMBER_OF_PROCESSORS": true, "OS": true,
 	"APPDATA": true, "LOCALAPPDATA": true, "PROGRAMDATA": true,
 	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true,
 	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "REQUESTS_CA_BUNDLE": true, "CURL_CA_BUNDLE": true,
