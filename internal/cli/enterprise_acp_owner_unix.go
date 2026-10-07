@@ -57,3 +57,7 @@ func alignEnterpriseACPCredentialOwner(_, _, _, _, _, _ string) error { return n
 func configureEnterpriseACPTargetLookup(ctx context.Context) {
 	configureEnterpriseHooksStandaloneUnix(ctx)
 }
+
+// enterpriseACPTargetError returns err: the Unix refusals already name the
+// account and what is wrong with it.
+func enterpriseACPTargetError(err error) error { return err }

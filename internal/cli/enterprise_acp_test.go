@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+
 	"github.com/spf13/cobra"
 )
 
@@ -116,6 +119,28 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Fatalf("user token survived revoke: %v", err)
+	}
+}
+
+// The Windows refusals named hook mutation and gave no next step; they now
+// name the ACP enrollment, LocalSystem and --user/--sid (GAP-0261).
+func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
+	cause := errors.New("enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service")
+	for name, got := range map[string]error{
+		"elevated prompt": enterpriseACPWindowsTargetError(cause, true),
+		"no session":      enterpriseACPWindowsTargetError(&enterprisehooks.WindowsTargetSessionUnavailableError{SID: "S-1-5-21-1-2-3-1001"}, false),
+		"system owner":    enterpriseACPWindowsTargetError(errors.New("enterprise hooks: refusing non-interactive target SID S-1-5-18"), false),
+	} {
+		message := got.Error()
+		if !strings.HasPrefix(message, "enterprise acp: ") || strings.Contains(message, "hook mutation") {
+			t.Errorf("%s: the refusal does not name the ACP enrollment: %q", name, message)
+		}
+		if name != "no session" && (!strings.Contains(message, "LocalSystem") || !strings.Contains(message, "--sid")) {
+			t.Errorf("%s: the refusal does not say how to enroll: %q", name, message)
+		}
+	}
+	if got := enterpriseACPWindowsTargetError(cause, true); !errors.Is(got, cause) {
+		t.Fatal("the refusal dropped its cause")
 	}
 }
 

@@ -251,7 +251,7 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 		return publishErr
 	})
 	if err != nil {
-		return enterpriseACPResult(cmd, nil, err)
+		return enterpriseACPResult(cmd, nil, enterpriseACPRefusal(err))
 	}
 	payload := map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
@@ -325,7 +325,7 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 		return nil
 	})
 	if err != nil {
-		return enterpriseACPResult(cmd, nil, err)
+		return enterpriseACPResult(cmd, nil, enterpriseACPRefusal(err))
 	}
 	return enterpriseACPResult(cmd, map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
@@ -367,6 +367,7 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		}
 		return os.Remove(tokenPath)
 	})
+	err = enterpriseACPRefusal(err)
 	payload := map[string]any{
 		"ok": err == nil, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,

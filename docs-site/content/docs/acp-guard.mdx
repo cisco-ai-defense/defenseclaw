@@ -246,6 +246,17 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll \
   --user alice --client zed --agent kiro --profile kiro-only --json
 ```
 
+On Windows only LocalSystem can write the token into a user profile. Run the
+enrollment as LocalSystem (an MDM script or a SYSTEM scheduled task) while the
+user is signed in, and name the user with `--user` or `--sid`. An elevated
+administrator prompt is refused, and `--user-home` alone names the owner of the
+profile folder, which can be SYSTEM:
+
+```powershell
+& "C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" enterprise acp enroll `
+  --user CONTOSO\alice --client zed --agent kiro --profile kiro-only --json
+```
+
 The JSON result contains a `token_file` and a `next` command, never the token
 value. The user runs the reported `defenseclaw-gateway enterprise acp setup ...`
 command, as themselves: a managed computer has no other DefenseClaw command.
@@ -256,7 +267,9 @@ match the enrollment. On a computer that has the Python CLI the same files come
 from `defenseclaw acp setup --managed`, which the **ACP Guard → Enroll managed
 enterprise ACP** panel of the TUI runs.
 
-Use the same exact selectors to verify or revoke an enrollment:
+Use the same exact selectors to verify or revoke an enrollment (on Windows,
+the same `defenseclaw.exe` commands as LocalSystem):
+
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp verify \
