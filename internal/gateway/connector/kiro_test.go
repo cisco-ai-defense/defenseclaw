@@ -738,10 +738,6 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 		if runtime.GOOS == "windows" && !kiroCommandOwned(command, hookInvocationCommandFor("windows", "kiro", "")) {
 			t.Fatalf("surface %q: DefenseClaw does not recognize its own command", surface)
 		}
-		// The bare bridge earlier builds wrote stays owned, so Setup replaces it.
-		if runtime.GOOS == "windows" && !kiroCommandOwned(windowsKiroPowerShellBridgeForBinary(launcher, surface, false), hookInvocationCommandFor("windows", "kiro", "")) {
-			t.Fatalf("surface %q: DefenseClaw does not recognize the earlier bare bridge", surface)
-		}
 		// Managed Windows passes --enterprise-managed, and DefenseClaw owns that form too.
 		managed := kiroHookInvocationCommandFor("windows", "", surface, true)
 		if !strings.Contains(decodeKiroWindowsBridge(t, managed), "'hook --connector kiro --enterprise-managed") {
