@@ -27,7 +27,7 @@ def _run(argv: list[str]):
     app, tmp_dir, db_path = make_app_context()
     try:
         result = CliRunner().invoke(
-            setup, ["guardrail", "--non-interactive", "--no-restart", "--no-verify", *argv], obj=app
+            setup, ["guardrail", "--non-interactive", "--no-restart", *argv], obj=app
         )
         return result, app.cfg.cisco_ai_defense.api_key_env
     finally:
@@ -51,7 +51,7 @@ def test_connector_alias_refuses_a_pasted_key_before_writing() -> None:
 
     app, tmp_dir, db_path = make_app_context()
     try:
-        argv = ["openclaw", "--yes", "--no-restart", "--no-verify", "--cisco-api-key-env", _PASTED_KEY]
+        argv = ["openclaw", "--yes", "--no-restart", "--cisco-api-key-env", _PASTED_KEY]
         with mock.patch("defenseclaw.commands.cmd_setup._setup_guardrail_connector_alias") as alias:
             result = CliRunner().invoke(setup, argv, obj=app)
         assert result.exit_code == 2, result.output

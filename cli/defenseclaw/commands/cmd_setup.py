@@ -6490,7 +6490,6 @@ def _resolve_judge_hook_gate(
 @click.option(
     "--restart/--no-restart", default=True, help="Restart gateway and the active connector after setup (default: on)"
 )
-@click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option(
     "--non-interactive",
     "--accept-defaults",
@@ -6549,7 +6548,6 @@ def setup_guardrail(
     hilt_min_severity,
     workspace_dir: str | None,
     restart: bool,
-    verify: bool,
     non_interactive: bool,
     _prior_snapshot: _SetupConfigSnapshot | None = None,
 ) -> None:
@@ -6571,6 +6569,7 @@ def setup_guardrail(
       action  - block prompts/responses that match security policies
 
     Use --disable to turn off the guardrail and restore direct LLM access.
+    To check the result afterwards, run: defenseclaw doctor
     """
 
     if cisco_api_key_env is not None:
@@ -12522,7 +12521,6 @@ def _setup_guardrail_connector_alias(
     human_approval: bool | None,
     hilt_min_severity: str | None,
     restart: bool,
-    verify: bool,
     replace: bool = False,
 ) -> None:
     """Run the full guardrail setup backend for a specific connector."""
@@ -12632,7 +12630,6 @@ def _setup_guardrail_connector_alias(
         human_approval=human_approval,
         hilt_min_severity=hilt_min_severity,
         restart=restart,
-        verify=verify,
         non_interactive=True,
         _prior_snapshot=prior_snapshot,
     )
@@ -12929,7 +12926,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         help="Minimum severity that asks for human approval.",
     )
     @click.option("--restart/--no-restart", default=True, show_default=True, help="Restart gateway after setup.")
-    @click.option("--verify/--no-verify", default=True, show_default=True, help="Run connectivity checks after setup.")
     @click.option(
         "--replace",
         is_flag=True,
@@ -12958,7 +12954,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         human_approval: bool | None,
         hilt_min_severity: str | None,
         restart: bool,
-        verify: bool,
         replace: bool,
     ) -> None:
         if cisco_api_key_env is not None:
@@ -12988,7 +12983,6 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
             restart=restart,
-            verify=verify,
             replace=replace,
         )
 

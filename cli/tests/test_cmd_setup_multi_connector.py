@@ -810,7 +810,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_openclaw_next_to_hook_connectors_is_refused(self):
         self._seed_map("codex", "cursor")
         with _setup_patches():
-            result = _invoke(["openclaw", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--yes", "--no-restart"], self.app)
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cannot run next to hook connectors", result.output)
         self.assertIn("setup remove", result.output)
@@ -827,12 +827,12 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_openclaw_next_to_single_hook_connector_is_refused(self):
         self._seed_single("hermes")
         with _setup_patches():
-            result = _invoke(["openclaw", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--yes", "--no-restart"], self.app)
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("1 configured (hermes)", result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "hermes")
         with _setup_patches(), patch("defenseclaw.commands.cmd_setup.setup_guardrail"):
-            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("--replace removes 1 hook connector(s): hermes", result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
@@ -843,7 +843,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self._seed_map("codex", "cursor")
         with _setup_patches():
             declined = CliRunner().invoke(
-                setup_group, ["openclaw", "--replace", "--no-restart", "--no-verify"], obj=self.app, input="n\n"
+                setup_group, ["openclaw", "--replace", "--no-restart"], obj=self.app, input="n\n"
             )
         self.assertIn("--replace removes 2 hook connector(s): codex, cursor", declined.output)
         # GAP-2117: say when the removed hooks go away, not only in the prompt.
@@ -852,7 +852,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
         with _setup_patches(), patch("defenseclaw.commands.cmd_setup.setup_guardrail") as backend:
-            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         backend.assert_called_once()
         self.assertIn("Remove them now with: defenseclaw-gateway restart", result.output)

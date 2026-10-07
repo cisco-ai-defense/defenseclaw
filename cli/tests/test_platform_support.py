@@ -363,7 +363,6 @@ def test_guardrail_windows_setup_rejects_unsupported_before_mutation() -> None:
                     "openhands",
                     "--non-interactive",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 obj=app,
             )

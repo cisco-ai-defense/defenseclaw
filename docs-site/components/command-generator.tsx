@@ -98,7 +98,6 @@ interface GeneratorState {
   workspaceDir: string;
   disableGuardrail: boolean;
   restart: boolean;
-  verify: boolean;
   showAdvanced: boolean;
   showJudgeProvider: boolean;
 }
@@ -146,7 +145,6 @@ export const DEFAULT_STATE: GeneratorState = {
   workspaceDir: '',
   disableGuardrail: false,
   restart: true,
-  verify: true,
   showAdvanced: false,
   showJudgeProvider: false,
 };
@@ -530,7 +528,6 @@ export function buildCommand(
   }
 
   if (!s.restart) lines.push('--no-restart');
-  if (!s.verify) lines.push('--no-verify');
 
   // Connector-specific HITL notes.
   if (s.mode === 'action' && s.humanApproval && connectorRow) {
@@ -1068,11 +1065,6 @@ defenseclaw-gateway restart`}
                 label="Restart gateway after setup"
                 checked={state.restart}
                 onChange={(v) => update('restart', v)}
-              />
-              <Toggle
-                label="Run connectivity verify"
-                checked={state.verify}
-                onChange={(v) => update('verify', v)}
               />
               <Toggle
                 label="Disable guardrail (teardown)"
