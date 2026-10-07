@@ -44,6 +44,7 @@ from typing import Any
 
 import click
 
+
 def tui_unavailable_message(*, stdin: object | None = None, stdout: object | None = None) -> str:
     """Explain the failed terminal prerequisite with a platform-specific remedy."""
 
