@@ -676,6 +676,10 @@ class InventoryPanelModel:
         # set when the command listed only the most recently seen ones.
         self.agent_identities: tuple[InventoryAgent, ...] = ()
         self.agent_identities_total = 0
+        # (inventory, agent identities, sub-tab, answer) of the last
+        # _show_user_column: the snapshots are immutable tuples, so the answer
+        # holds while the same objects are shown (GAP-0184).
+        self._user_column_memo: tuple[object, object, str, bool] | None = None
 
     def set_size(self, width: int, height: int) -> None:
         self.width = width
@@ -1103,15 +1107,24 @@ class InventoryPanelModel:
     def _show_user_column(self) -> bool:
         if self.inventory is None:
             return False
-        match self.active_sub:
+        sub = self.active_sub
+        if sub not in {"plugins", "mcp", "agents"}:
+            return False
+        # Every row of data_table_rows asks, and each answer reads every item
+        # of the sub-tab: with 1,300 agent identities that made each redraw
+        # (one per j or k key) take about 0.4 s (GAP-0184).
+        memo = self._user_column_memo
+        if memo is not None and memo[0] is self.inventory and memo[1] is self.agent_identities and memo[2] == sub:
+            return memo[3]
+        match sub:
             case "plugins":
-                return self._multi_user(self.inventory.plugins)
+                answer = self._multi_user(self.inventory.plugins)
             case "mcp":
-                return self._multi_user(self.inventory.mcps)
-            case "agents":
-                return self._multi_user((*self.inventory.agents, *self.agent_identities))
+                answer = self._multi_user(self.inventory.mcps)
             case _:
-                return False
+                answer = self._multi_user((*self.inventory.agents, *self.agent_identities))
+        self._user_column_memo = (self.inventory, self.agent_identities, sub, answer)
+        return answer
 
     def filtered_tools(self) -> tuple[InventoryTool, ...]:
         if self.inventory is None:
@@ -1622,6 +1635,21 @@ class InventoryPanelModel:
             return InventoryPanelAction(True)
         if key in {"k", "up"}:
             self.scroll_by(-1)
+            return InventoryPanelAction(True)
+        # Page and end jumps: reaching row 1,000 of a long list took holding
+        # j for minutes (GAP-0184). g and G follow the vim habit of j and k.
+        page = max(1, (self.height or 24) - 8)
+        if key in {"pagedown", "page_down", "ctrl+f"}:
+            self.scroll_by(page)
+            return InventoryPanelAction(True)
+        if key in {"pageup", "page_up", "ctrl+b"}:
+            self.scroll_by(-page)
+            return InventoryPanelAction(True)
+        if key in {"home", "g"}:
+            self.set_cursor(0)
+            return InventoryPanelAction(True)
+        if key in {"end", "G"}:
+            self.set_cursor(self.current_list_len() - 1)
             return InventoryPanelAction(True)
         if key == "esc" and self.detail_open:
             self.detail_open = False

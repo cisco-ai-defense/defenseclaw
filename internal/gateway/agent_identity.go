@@ -342,6 +342,23 @@ func inventoryAgentIdentityID(connectorName, userID string) string {
 	})
 }
 
+// withSessionAgentInstance joins a request outside the hook path (the Codex
+// notify webhook) to the agent instance its session was seen under on the hook
+// path, on the audit envelope, so its records carry the same ais- as the
+// session's hook records. Like agentIdentityIDForTraffic it is a join, not a
+// verification: it never sets the identity on the context (GAP-0203).
+func withSessionAgentInstance(ctx context.Context, sessionID string) context.Context {
+	identityID := agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx))
+	if identityID == "" {
+		return ctx
+	}
+	instance := SharedAgentRegistry().peekAgentInstance(identityID, sessionID)
+	if instance == "" {
+		return ctx
+	}
+	return refreshAuditEnvelopeFromIdentity(ctx, "", AgentIdentity{AgentInstanceID: instance})
+}
+
 // agentIdentityIDForTraffic is the agent identity of a request outside the
 // hook path (the LLM proxy, guardrail evaluate): the identity on ctx, else
 // the one identity its session was seen under on the hook path. The session
