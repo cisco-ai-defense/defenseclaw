@@ -680,7 +680,9 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	m.mu.Lock()
 	b := m.boxes[e.SandboxName]
 	var ident audit.SandboxIdentity
+	var harnessName string
 	if b != nil {
+		harnessName = b.rec.Harness
 		// The proxy's requests are no sign of the harness at work (hook
 		// silence): the proxy cannot tell the harness's from a tool's or a
 		// `sandbox exec` command's. OpenShell's record of the connection
@@ -708,6 +710,10 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
 		}
 		m.tel.RecordSandboxEgress(ctx, ev)
+		if blocked && harnessFetchHost(harnessName, e.Host, e.Port) {
+			// The harness's own background request, which it does without.
+			return
+		}
 		m.observeDestination(ctx, b, destinationSighting{host: e.Host, port: e.Port, at: e.Time, proxy: true, denied: blocked,
 			category: string(e.Category)})
 		if blocked || e.FirstSeen {

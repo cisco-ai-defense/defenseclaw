@@ -576,6 +576,9 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 	live := map[string]egress.DestinationStats{}
 	if proxy != nil && proxy.Counter() != nil && bindingID != "" {
 		for _, d := range proxy.Counter().DestinationsFor(bindingID) {
+			if !d.Contacted && harnessFetchHost(v.Harness, d.Host, 0) {
+				continue
+			}
 			live[strings.ToLower(d.Host)] = d
 			if d.Contacted {
 				v.Egress.Destinations++

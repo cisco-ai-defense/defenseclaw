@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/nestguard"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -130,6 +131,36 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	curl := e.propose("fetchbox", "raw.githubusercontent.com")
 	e.draft("fetchbox")
 	e.waitChunk("fetchbox", curl, "approved")
+}
+
+// TestProxyRefusedHarnessFetchIsQuiet (GAP-0095): OpenCode asks
+// models.opencode.ai for its model catalog at every start, through the
+// egress proxy, which balanced refuses: each start showed a blocked site
+// with an unblock hint, counted one blocked destination and raised a
+// shadow AI finding. The refusal is audited only; a tool's request to the
+// same host under another harness is the agent's.
+func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
+	e := newEnv(t, nil)
+	claude := e.images.rec
+	useOpenCode(t, e)
+	e.live(sandboxapi.CreateRequest{Name: "ocbox", Harness: "opencode"})
+	refuse := func(name string) {
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventBlocked, SandboxName: name, Host: "models.opencode.ai", Port: 443, Time: time.Now(),
+			Category: egress.CategoryNotAllowlisted, Unblockable: true}, 0)
+	}
+	refuse("ocbox")
+	audited := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "models.opencode.ai" && r.Blocked })
+	d, err := e.m.Destinations(t.Context(), "ocbox")
+	if len(audited) != 1 || err != nil || len(e.events("ocbox", sandboxapi.ActivityEgressBlocked, "")) != 0 || len(d.Destinations) != 0 ||
+		e.get("ocbox").Egress.Blocked != 0 || len(e.tel.findingsOf(audit.SandboxFindingShadowAI)) != 0 {
+		t.Fatalf("audited %d, feed %+v, destinations %+v (%v), blocked %d", len(audited), e.events("ocbox", sandboxapi.ActivityEgressBlocked, ""), d, err, e.get("ocbox").Egress.Blocked)
+	}
+	e.images.rec = claude
+	e.live(sandboxapi.CreateRequest{Name: "claudebox", Copy: true})
+	refuse("claudebox")
+	if len(e.events("claudebox", sandboxapi.ActivityEgressBlocked, "")) != 1 {
+		t.Fatal("another harness's request to the host is not on the feed")
+	}
 }
 
 // Of OpenShell's denials only the connection counts and shows on the feed: a

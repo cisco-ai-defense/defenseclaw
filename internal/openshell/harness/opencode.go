@@ -138,6 +138,13 @@ var OpenCode = register(&Spec{
 		// need it) but never let it pull an auto-update.
 		"OPENCODE_DISABLE_AUTOUPDATE": "1",
 	},
+	// OpenCode 1.18.31 asks models.opencode.ai for the model catalog at
+	// every start, through the egress proxy, which an allowlist pack
+	// refuses; it goes on with the catalog it ships with.
+	directFetches: []DirectFetch{{
+		Host: "models.opencode.ai", Port: 443,
+		What: "OpenCode's model catalog download at start; OpenCode uses the catalog it ships with instead",
+	}},
 })
 
 // OpenCodeLauncherPath is the in-image OpenCode launcher.

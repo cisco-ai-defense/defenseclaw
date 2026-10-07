@@ -590,6 +590,9 @@ func (m *Manager) proxyStats(bindingID string) map[string]egress.DestinationStat
 // Callers hold destMu.
 func (m *Manager) mergeLiveLocked(t *destTable, live map[string]egress.DestinationStats, harnessName string) {
 	for host, d := range live {
+		if !d.Contacted && harnessFetchHost(harnessName, host, 0) {
+			continue
+		}
 		r := t.rows[host]
 		if r == nil {
 			if r = t.row(m, host, d.FirstSeen, harnessName); r == nil {
