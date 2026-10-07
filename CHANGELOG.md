@@ -62,7 +62,7 @@ stopped`. Nothing is changed; use the install command above.
 ### Added
 
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
-  Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
+  Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update.check: false`.
 
 ### Removed
 
