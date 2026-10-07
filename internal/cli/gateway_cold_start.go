@@ -212,8 +212,9 @@ func hookColdStartRefusal(dataDir string, now time.Time) error {
 }
 
 // watchdogGatewayStarter starts a crashed per-user gateway from the watchdog
-// (GAP-0386). Tests replace it.
-var watchdogGatewayStarter = startCrashedGatewayFromWatchdog
+// (GAP-0386). The watchdog process sets it; it stays nil for a loop a test
+// drives, so no test reads or starts a gateway of the account running it.
+var watchdogGatewayStarter func(dataDir string) (bool, error)
 
 // startCrashedGatewayFromWatchdog runs `defenseclaw-gateway start
 // --hook-cold-start` for a per-user Linux or macOS gateway whose process is

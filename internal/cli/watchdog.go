@@ -360,6 +360,9 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr, "[watchdog] warn: gateway token unavailable; recovery telemetry will not be recorded")
 	}
 
+	if watchdogGatewayStarter == nil {
+		watchdogGatewayStarter = startCrashedGatewayFromWatchdog
+	}
 	watchdogLoopRunner(ctx, healthURL, interval, debounce, requirements, webhooks, recoveryRecorder)
 	if webhooks != nil {
 		webhooks.Close()
@@ -454,7 +457,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					current = stateDown
 					saveWatchdogState(dataDir, current)
 				}
-				if downCount >= debounce {
+				if downCount >= debounce && watchdogGatewayStarter != nil {
 					// A crashed per-user gateway is started again (GAP-0386);
 					// the start keeps its own backoff after a failure.
 					if started, err := watchdogGatewayStarter(dataDir); started && err != nil {
