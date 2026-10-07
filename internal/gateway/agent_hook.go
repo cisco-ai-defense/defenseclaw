@@ -142,6 +142,9 @@ type agentHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	HookOutput        map[string]interface{} `json:"hook_output,omitempty"`
+	// KernelBlocksTold are the ids of the kernel denials the answer told the
+	// agent of, for the audit row (kernel_blocks_told); never on the wire.
+	KernelBlocksTold []string `json:"-"`
 	// EvaluationID + RuleIDs join this hook response to the
 	// matching scan_findings rows / audit row. Additive — older
 	// connector hook scripts ignore the fields.
@@ -594,6 +597,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// a plain reason (rule, title, what to do instead) to the
 			// agent, the activity feed and last_blocked.
 			resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
+			// On a managed host, the post-tool answer tells the agent of
+			// the kernel denials its tool calls hit (kernel_block_notice.go).
+			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -622,7 +628,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
-		persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
+		auditExtra := hookRequestAuditExtra(ctx, profile)
+		if len(resp.KernelBlocksTold) > 0 {
+			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
+		}
+		persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
 		if err := chainFinalization.attach(persistCtx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)

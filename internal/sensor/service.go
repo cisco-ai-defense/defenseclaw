@@ -345,6 +345,19 @@ func (s *Service) Snapshot() Snapshot {
 	return snapshot
 }
 
+// SessionRootOf is the session root of the agent a process runs under (a
+// managed hook's peer), when the host plane attributes it.
+func (s *Service) SessionRootOf(pid int) (int, bool) {
+	if s == nil || s.hostPlane == nil || pid <= 0 {
+		return 0, false
+	}
+	lineage, ok := s.tracker.Lineage(pid, "")
+	if !ok {
+		return 0, false
+	}
+	return lineage.SessionRoot.PID, true
+}
+
 // KernelBlocks returns the attributed kernel denials (DefenseClaw's controls'
 // and the host's own Tetragon policies') at or after since, oldest first,
 // for the developer notice. nil where Plane C does not run.
