@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,11 +109,19 @@ func TestDestinationsAreClassified(t *testing.T) {
 	if len(shadow) != 3 {
 		t.Fatalf("shadow AI findings = %+v", shadow)
 	}
-	if f := shadow[0]; f.Severity != "LOW" || f.TargetRef != "api.openai.com" {
+	if f := shadow[0]; f.Severity != "LOW" || f.TargetRef != "api.openai.com" || strings.Contains(f.Remediation, "policy block") {
 		t.Errorf("refused shadow AI = %+v", f)
 	}
-	if f := shadow[1]; f.Severity != "MEDIUM" || f.TargetRef != "api.openai.com" || f.Sandbox.BindingID != id || f.UserName != "dev" {
+	// A connector's host is named by its vendor, not the connector.
+	if f := shadow[1]; f.Severity != "MEDIUM" || f.TargetRef != "api.openai.com" || f.Sandbox.BindingID != id || f.UserName != "dev" ||
+		f.Title != "Shadow AI: the sandbox reached OpenAI" || !strings.Contains(f.Remediation, "policy block api.openai.com") {
 		t.Errorf("reached shadow AI = %+v", f)
+	}
+	if r := rows["api.openai.com"]; r.Provider != "OpenAI" || r.Vendor != "OpenAI" {
+		t.Errorf("shadow AI row = %+v", r)
+	}
+	if r := rows["claude.ai"]; r.Provider != "Claude Code" {
+		t.Errorf("harness vendor row = %+v", r)
 	}
 	if f := shadow[2]; f.Severity != "LOW" || f.TargetRef != "inference.example-llm.net" {
 		t.Errorf("unknown AI = %+v", f)

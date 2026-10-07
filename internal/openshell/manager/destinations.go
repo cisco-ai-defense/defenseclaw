@@ -345,13 +345,13 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 	case r.ProviderRule:
 		provider = strings.TrimPrefix(r.Rule, providerRulePrefix)
 		if hit != nil {
-			provider, vendor = hit.DisplayName, hit.Vendor
+			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
 		return sandboxapi.DestinationModelProvider, provider, vendor
 	case hit != nil && hit.SupportedConnector != "" && hit.SupportedConnector == harnessName:
 		return sandboxapi.DestinationHarnessVendor, hit.DisplayName, hit.Vendor
 	case hit != nil:
-		return sandboxapi.DestinationOtherAI, hit.DisplayName, hit.Vendor
+		return sandboxapi.DestinationOtherAI, catalogProviderName(hit), hit.Vendor
 	case catalog.InferenceShaped(r.Host):
 		return sandboxapi.DestinationUnknownAI, "", ""
 	case !r.contacted():
@@ -361,6 +361,17 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 	default:
 		return sandboxapi.DestinationOther, "", ""
 	}
+}
+
+// catalogProviderName is how a catalogued AI provider is named: by its
+// vendor when the signature is a connector's, whose hosts are the vendor's
+// API (api.openai.com is OpenAI's, not the Codex agent's), else by the
+// signature's name.
+func catalogProviderName(p *catalog.Provider) string {
+	if p.SupportedConnector != "" && p.Vendor != "" {
+		return p.Vendor
+	}
+	return p.DisplayName
 }
 
 // shadowKey is the provider a shadow AI host is reported under: the
@@ -434,8 +445,12 @@ func (m *Manager) shadowAI(ctx context.Context, info destinationInfo, host strin
 		what = "a host that looks like an AI inference endpoint the AI provider catalog does not know"
 	}
 	severity, title, did := "LOW", "Shadow AI: the sandbox tried to reach "+firstNonEmpty(provider, host), "tried to reach"
+	remediation := "Check what in the sandbox tries to call " + host + " (`defenseclaw sandbox destinations " + info.name + "`); " +
+		"the policy refused it, so nothing reached it."
 	if reached {
 		severity, title, did = "MEDIUM", "Shadow AI: the sandbox reached "+firstNonEmpty(provider, host), "reached"
+		remediation = "Check what in the sandbox calls " + host + " (`defenseclaw sandbox destinations " + info.name + "`); " +
+			"if it is not expected, block it: defenseclaw sandbox policy block " + host + "."
 	}
 	evidence := fmt.Sprintf("host=%s kind=%s", sandboxapi.HostPort(host, port), kind)
 	if provider != "" {
@@ -448,9 +463,7 @@ func (m *Manager) shadowAI(ctx context.Context, info destinationInfo, host strin
 		Sandbox: info.id, Kind: audit.SandboxFindingShadowAI, Severity: severity, Title: truncate(title, 256),
 		Description: truncate(fmt.Sprintf("%s %s %s, %s, which is neither its model provider nor its harness's vendor.",
 			info.name, did, host, what), 1024),
-		Evidence: truncate(evidence, 512), TargetRef: host, Timestamp: at,
-		Remediation: "Check what in the sandbox calls " + host + " (`defenseclaw sandbox destinations " + info.name + "`); " +
-			"if it is not expected, block it: defenseclaw sandbox policy block " + host + ".",
+		Evidence: truncate(evidence, 512), TargetRef: host, Timestamp: at, Remediation: remediation,
 	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: info.name, Host: host, Port: port,
 		Severity: severity, Reason: sandboxapi.ReasonShadowAI,

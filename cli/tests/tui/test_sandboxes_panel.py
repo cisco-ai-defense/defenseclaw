@@ -272,8 +272,8 @@ def test_hook_events_are_in_the_details() -> None:
 DESTINATIONS = {
     "name": "myapp-claude-7f3a",
     "destinations": [
-        {"host": "api.openai.com", "kind": "other_ai_api", "provider": "Codex", "tunnels": 3, "binaries": ["/usr/bin/curl"]},
-        {"host": "api.anthropic.com", "kind": "model_provider", "provider": "Claude Code", "connections": 5},
+        {"host": "api.openai.com", "kind": "other_ai_api", "provider": "OpenAI", "tunnels": 3, "binaries": ["/usr/bin/curl"]},
+        {"host": "api.anthropic.com", "kind": "model_provider", "provider": "Anthropic", "connections": 5},
         {"host": "pastebin.com", "kind": "blocked", "category": "paste_site", "blocked": 4},
     ],
     "models": [{"provider": "anthropic", "model": "claude-haiku", "calls": 2, "failed": 1}],
@@ -287,8 +287,8 @@ def test_the_detail_lists_the_destinations() -> None:
     assert dict(pairs)["Sites"] == "23 contacted, 1 blocked · AI: 1 model API, 1 shadow AI"
     rows = [value for label, value in pairs if label == "Destination"]
     assert rows == [
-        "api.openai.com — shadow AI (Codex) · 3 requests · /usr/bin/curl",
-        "api.anthropic.com — model provider (Claude Code) · 5 requests",
+        "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl",
+        "api.anthropic.com — model provider (Anthropic) · 5 requests",
         "pastebin.com — blocked (paste site) · 0 requests, 4 refused",
     ]
     assert dict(pairs)["Model calls"] == "anthropic claude-haiku: 2 (1 failed)"
@@ -316,7 +316,7 @@ async def test_the_sandbox_detail_shows_its_destinations_at_80x24(fetch, monkeyp
         app.sandbox_model.detail_open = True
         await app._open_sandbox_detail()  # noqa: SLF001
     pairs = shown[0].model.pairs
-    assert ("Destination", "api.openai.com — shadow AI (Codex) · 3 requests · /usr/bin/curl") in pairs
+    assert ("Destination", "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl") in pairs
 
 
 def test_a_failed_refresh_keeps_the_last_good_snapshot() -> None:
