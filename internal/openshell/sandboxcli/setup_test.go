@@ -1047,6 +1047,24 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 	}
 }
 
+// TestSetupNamesTheGatewayTOMLOnceKnown (GAP-0061): before OpenShell was
+// installed the MicroVM question named ~/.config/openshell/gateway.toml,
+// and after the Homebrew install the plan edited the formula's file under
+// the Homebrew prefix. Until OpenShell is installed the question names no
+// path.
+func TestSetupNamesTheGatewayTOMLOnceKnown(t *testing.T) {
+	ta := setupApp(t, "n\n", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	ta.gateway.state.TOMLPath = filepath.Join(ta.home, ".config", "openshell", "gateway.toml")
+	_ = ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true})
+	has(t, ta.output(), `(sets compute_driver = "vm" in the gateway's gateway.toml and restarts the gateway;`)
+	lacks(t, ta.output(), "~/.config/openshell/gateway.toml")
+}
+
 // TestSetupSwitchesADockerDesktopMacToMicroVMs: a fresh Mac on Docker
 // Desktop, whose Linux VM has no Landlock, still reaches the MicroVM
 // question instead of stopping at the machine check; --yes and

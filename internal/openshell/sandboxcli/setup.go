@@ -145,8 +145,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.note("Landlock: " + c.Detail + "; MicroVMs have their own kernel, which enforces it")
 		}
 		a.listDockerSandboxes(ctx, rep)
-		where := openshell.GatewayTOMLFile
-		if st, err := a.Gateway.State(); err == nil && st.TOMLPath != "" {
+		// Which gateway.toml the service reads is known once OpenShell is
+		// installed: on a Mac the formula brings its own, under the
+		// Homebrew prefix.
+		where := "the gateway's " + openshell.GatewayTOMLFile
+		if st, err := a.Gateway.State(); err == nil && st.TOMLPath != "" && !rep.OpenShellInstallNeeded() {
 			where = a.tildePath(st.TOMLPath)
 		}
 		restarts := " and restarts the gateway"
