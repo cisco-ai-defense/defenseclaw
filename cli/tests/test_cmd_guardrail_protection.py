@@ -123,6 +123,36 @@ def test_rule_and_suppress_wrappers(env) -> None:
     ]
 
 
+def test_rule_enable_of_a_rule_the_pack_ships_on_only_drops_its_disable_entry(env) -> None:
+    # GAP-0258: rules.enable is for off-by-default rules; a leftover entry breaks a later pack switch.
+    app, _root, writes = env
+    app.cfg.guardrail.rules = GuardrailRulesConfig(disable=["SEC-AWS-KEY"])
+    assert _run(app, "rule", "enable", "SEC-AWS-KEY").exit_code == 0
+    assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", unset=True)]
+    # A connector re-enabling a rule the global scope disabled still needs its own entry.
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig()}
+    app.cfg.guardrail.rules = GuardrailRulesConfig(disable=["SEC-AWS-KEY"])
+    assert _run(app, "rule", "enable", "SEC-AWS-KEY", "--connector", "codex").exit_code == 0
+    assert writes[-1][0] == [config_writer.Change("guardrail.connectors.codex.rules.enable", ["SEC-AWS-KEY"])]
+
+
+def test_use_pack_drops_rule_references_the_new_pack_does_not_have(env) -> None:
+    # GAP-0258/0261: a reference to a rule of the old pack must not block the switch away from it.
+    app, _root, writes = env
+    app.cfg.guardrail.rules = GuardrailRulesConfig(
+        enable=["P0-GONE"], disable=["SEC-AWS-KEY", "P0-GONE"], severity_overrides={"P0-GONE": "LOW"}
+    )
+    result = _run(app, "use-pack", "permissive")
+    assert result.exit_code == 0, result.output
+    assert writes[-1][0] == [
+        config_writer.Change("guardrail.rule_pack", "permissive"),
+        config_writer.Change("guardrail.rules.enable", unset=True),
+        config_writer.Change("guardrail.rules.disable", ["SEC-AWS-KEY"]),
+        config_writer.Change("guardrail.rules.severity_overrides", unset=True),
+    ]
+    assert "Dropped rule references" in result.output and "guardrail.rules.enable: P0-GONE" in result.output
+
+
 def test_use_pack_writes_rule_pack_and_pins_custom_digest(env, tmp_path) -> None:
     app, root, writes = env
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="strict")}

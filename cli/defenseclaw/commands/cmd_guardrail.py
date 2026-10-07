@@ -3399,6 +3399,7 @@ def use_pack_cmd(
         pack_name: str = "",
         path: str = "",
         cleared: list[str] | None = None,
+        dropped: list[str] | None = None,
         validation: dict | None = None,
         warning: str = "",
     ) -> None:
@@ -3413,6 +3414,7 @@ def use_pack_cmd(
                         "pack": pack_name,
                         "path": path,
                         "cleared_overrides": list(cleared or []),
+                        "dropped_rule_references": list(dropped or []),
                         "validation": validation,
                         "message": message,
                     },
@@ -3608,6 +3610,9 @@ def use_pack_cmd(
                 other_key = _scope_key(other, None)
                 changes.append(config_writer.Change(f"{other_key}.rule_pack", unset=True))
                 cleared.append(other)
+    # Rule references the new pack does not ship would fail the whole save (GAP-0258, GAP-0261).
+    stale, dropped = _stale_rule_changes(app.cfg, path, connector_key)
+    changes.extend(stale)
     previous_pack = (
         policy_catalog.pack_name_for_path(
             app.cfg, policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
@@ -3622,6 +3627,8 @@ def use_pack_cmd(
             message += " Removed per-connector packs for: " + ", ".join(cleared) + "."
     else:
         message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack."
+    if dropped:
+        message += f" Dropped rule references the pack does not have: {'; '.join(dropped)}."
     _log_guardrail_change(
         app,
         "guardrail-use-pack",
@@ -3634,6 +3641,7 @@ def use_pack_cmd(
         pack_name=pack_name,
         path=path,
         cleared=cleared,
+        dropped=dropped,
         validation=validation,
         warning=warning,
         message=f"{message} {_applied_note(app, result)}",
@@ -3842,6 +3850,93 @@ def _rule_ids(rules, field: str) -> list[str]:
     return [str(v) for v in (getattr(rules, field, None) or []) if str(v or "").strip()]
 
 
+def _scope_blocks(cfg, connector_key: str | None, profile: str | None) -> list:
+    """The config blocks that shape a scope, widest first: global, connector, profile, profile connector."""
+    gc = cfg.guardrail
+    profiles = getattr(gc, "profiles", None) or {}
+    blocks = [gc, (getattr(gc, "connectors", None) or {}).get(connector_key) if connector_key else None]
+    if profile:
+        block = profiles.get(profile)
+        blocks.append(block)
+        if block is not None and connector_key:
+            blocks.append((getattr(block, "connectors", None) or {}).get(connector_key))
+    return [b for b in blocks if b is not None]
+
+
+def _scope_rule_defaults(cfg, connector_key: str | None, profile: str | None) -> dict[str, bool]:
+    """Rule id -> shipped on/off for the rule pack a scope enforces, protection packs layered on.
+
+    Empty when the pack's rule files can't be read here (the caller then keeps the plain behaviour)."""
+    from defenseclaw import policy_catalog
+
+    blocks = _scope_blocks(cfg, connector_key, profile)
+    pack_dir = ""
+    for block in reversed(blocks):
+        pack_dir = policy_catalog.configured_pack_dir(cfg, block)
+        if pack_dir:
+            break
+    pack_dir = pack_dir or policy_catalog.scope_pack_path(cfg, connector_key or "")
+    protections = [str(n) for b in blocks for n in (getattr(getattr(b, "rules", None), "protections", None) or [])]
+    return policy_catalog.rule_defaults_with_protections(pack_dir, protections)
+
+
+def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[list, list[str]]:
+    """Writer changes that drop ``guardrail.rules`` references the new rule pack does not ship.
+
+    A rule id the pack lacks fails the whole config, so after a pack switch the
+    old references would leave no single command that saves (GAP-0258, GAP-0261).
+    A global switch covers every scope that has no pack of its own. Returns
+    ``(changes, dropped "<key>.rules.<field>: <id>")``; nothing is dropped when the
+    new pack's rules can't be read."""
+    from defenseclaw import config_writer, policy_catalog
+
+    base = policy_catalog.pack_rule_defaults(pack_dir)
+    if not base:
+        return [], []
+    gc = cfg.guardrail
+    scopes: list[tuple[str, object]] = []
+    if connector_key:
+        scopes.append((_scope_key(connector_key, None), _scope_block(cfg, connector_key, None)))
+    else:
+        scopes.append(("guardrail", gc))
+        scopes.extend((f"guardrail.connectors.{c}", b) for c, b in sorted((gc.connectors or {}).items()))
+        for name, profile in sorted((gc.profiles or {}).items()):
+            if getattr(profile, "rule_pack", ""):
+                continue
+            scopes.append((f"guardrail.profiles.{name}", profile))
+            scopes.extend(
+                (f"guardrail.profiles.{name}.connectors.{c}", b)
+                for c, b in sorted((profile.connectors or {}).items())
+                if not getattr(b, "rule_pack", "")
+            )
+    global_protections = list(getattr(getattr(gc, "rules", None), "protections", None) or [])
+    changes: list = []
+    dropped: list[str] = []
+    for key, block in scopes:
+        rules = getattr(block, "rules", None)
+        if rules is None:
+            continue
+        known = policy_catalog.rule_defaults_with_protections(
+            pack_dir, [*global_protections, *(getattr(rules, "protections", None) or [])]
+        )
+        for field in ("enable", "disable"):
+            ids = _rule_ids(rules, field)
+            kept = [i for i in ids if i in known]
+            if len(kept) != len(ids):
+                dropped.extend(f"{key}.rules.{field}: {i}" for i in ids if i not in known)
+                path = f"{key}.rules.{field}"
+                changes.append(config_writer.Change(path, kept) if kept else config_writer.Change(path, unset=True))
+        overrides = dict(getattr(rules, "severity_overrides", None) or {})
+        kept_overrides = {i: v for i, v in overrides.items() if i in known}
+        if len(kept_overrides) != len(overrides):
+            dropped.extend(f"{key}.rules.severity_overrides: {i}" for i in overrides if i not in known)
+            path = f"{key}.rules.severity_overrides"
+            changes.append(
+                config_writer.Change(path, kept_overrides) if kept_overrides else config_writer.Change(path, unset=True)
+            )
+    return changes, dropped
+
+
 def _change_rule_lists(
     app: AppContext, rule_id: str, connector: str | None, profile: str | None, *, enable: bool, json_out: bool
 ) -> None:
@@ -3873,7 +3968,18 @@ def _change_rule_lists(
     other = _rule_ids(rules, remove_from)
     key = _scope_key(connector_key, profile_name)
     changes = []
-    if rule_id not in target:
+    # enable is for rules the pack ships off and disable for rules it ships on: when the pack
+    # already ships the rule in the wanted state (and no wider scope undoes that), dropping the
+    # opposite entry is all it takes, and a leftover entry would only break a later pack switch (GAP-0258).
+    own_block = _scope_block(app.cfg, connector_key, profile_name)
+    undone_above = any(
+        rule_id in _rule_ids(getattr(block, "rules", None), remove_from)
+        for block in _scope_blocks(app.cfg, connector_key, profile_name)
+        if block is not own_block
+    )
+    defaults = {} if undone_above else _scope_rule_defaults(app.cfg, connector_key, profile_name)
+    shipped_as_wanted = defaults.get(rule_id) is enable
+    if rule_id not in target and not shipped_as_wanted:
         changes.append(config_writer.Change(f"{key}.rules.{add_to}", [*target, rule_id]))
     if rule_id in other:
         rest = [v for v in other if v != rule_id]

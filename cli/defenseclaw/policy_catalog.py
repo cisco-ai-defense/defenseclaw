@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -929,6 +929,24 @@ def _pack_rules_by_id(pack_dir: str) -> dict[str, Mapping[str, Any]]:
             if rule_id:
                 out[rule_id] = rule
     return out
+
+
+def pack_rule_defaults(pack_dir: str) -> dict[str, bool]:
+    """Rule id -> shipped on (True) or off (False) for the rule files of *pack_dir*.
+
+    Empty when the directory is missing or has no readable rule file."""
+    return {rule_id: _rule_enabled(rule) for rule_id, rule in _pack_rules_by_id(pack_dir).items()}
+
+
+def rule_defaults_with_protections(pack_dir: str, protections: Iterable[str]) -> dict[str, bool]:
+    """``pack_rule_defaults`` with the named use-case packs layered on, as the gateway composes them
+    (a protection pack's rule replaces the base rule with the same id). Empty when the base has none."""
+    rules = pack_rule_defaults(pack_dir)
+    if not rules:
+        return {}
+    for name in protections:
+        rules.update(pack_rule_defaults(protection_pack_dir(name)))
+    return rules
 
 
 def _raw_rule_text(pack_dir: str) -> str:
