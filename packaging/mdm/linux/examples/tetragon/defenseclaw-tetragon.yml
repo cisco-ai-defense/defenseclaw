@@ -1,0 +1,123 @@
+# Install DefenseClaw standalone enterprise and set its Tetragon mode, ring by
+# ring. Ring variables live in group_vars, one file per ring group:
+#
+#   group_vars/defenseclaw_ring_pilot.yml
+#     defenseclaw_tetragon_mode: observe
+#     defenseclaw_tetragon_burn_in: 40h
+#   group_vars/defenseclaw_ring_broad.yml
+#     defenseclaw_tetragon_mode: enforce
+#     defenseclaw_tetragon_enforce_ack: sha256:08b71155b713   # from `tetragon verify --ready-for enforce`
+#
+# Run one ring at a time, and stop at the first host that fails its checks:
+#
+#   ansible-playbook -i inventory defenseclaw-tetragon.yml -e defenseclaw_ring=defenseclaw_ring_pilot
+- name: DefenseClaw standalone enterprise with Tetragon
+  hosts: "{{ defenseclaw_ring | default('defenseclaw_linux') }}"
+  become: true
+  serial: "{{ defenseclaw_serial | default(5) }}"
+  any_errors_fatal: true
+  vars:
+    defenseclaw_version: "1.0.0"
+    # SHA-256 values from the release's cosign-verified checksums.txt
+    defenseclaw_pins:
+      defenseclaw-enterprise-1.0.0-linux-amd64.deb: "<sha256>"
+      defenseclaw-enterprise-1.0.0-linux-amd64.rpm: "<sha256>"
+      defenseclaw-enterprise-1.0.0-linux-arm64.deb: "<sha256>"
+      defenseclaw-enterprise-1.0.0-linux-arm64.rpm: "<sha256>"
+    defenseclaw_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
+    defenseclaw_format: "{{ 'deb' if ansible_facts['pkg_mgr'] == 'apt' else 'rpm' }}"
+    defenseclaw_package: "defenseclaw-enterprise-{{ defenseclaw_version }}-linux-{{ defenseclaw_arch }}.{{ defenseclaw_format }}"
+    defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
+    defenseclaw_tetragon_mode: consume
+  tasks:
+    - name: Create the root-only staging folder
+      ansible.builtin.file:
+        path: /etc/mdm/defenseclaw
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Render the candidate config for this ring
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: /etc/mdm/defenseclaw/config.yaml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create the config folder
+      ansible.builtin.file:
+        path: /etc/defenseclaw
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Put the config in place before the first install
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: /etc/defenseclaw/config.yaml
+        owner: root
+        mode: "0640"
+        force: false
+
+    - name: Download the package and check its SHA-256
+      ansible.builtin.get_url:
+        url: "https://github.com/cisco-ai-defense/defenseclaw/releases/download/{{ defenseclaw_version }}/{{ defenseclaw_package }}"
+        dest: "/var/cache/{{ defenseclaw_package }}"
+        checksum: "sha256:{{ defenseclaw_pins[defenseclaw_package] }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install or upgrade the package (Debian, Ubuntu)
+      ansible.builtin.apt:
+        deb: "/var/cache/{{ defenseclaw_package }}"
+      when: ansible_facts['pkg_mgr'] == 'apt'
+
+    - name: Install or upgrade the package (RHEL family)
+      ansible.builtin.dnf:
+        name: "/var/cache/{{ defenseclaw_package }}"
+        state: present
+        # The rpm has no embedded signature; the SHA-256 check above proves it.
+        disable_gpg_check: true
+      when: ansible_facts['pkg_mgr'] in ['dnf', 'dnf5']
+
+    - name: Apply the config and converge
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - ensure
+          - --from-package
+          - --config
+          - /etc/mdm/defenseclaw/config.yaml
+          - --json
+      register: defenseclaw_ensure
+      until: defenseclaw_ensure.rc != 75
+      retries: 5
+      delay: 30
+      changed_when: defenseclaw_ensure.rc == 0 and not (defenseclaw_ensure.stdout | from_json).noop
+      failed_when: defenseclaw_ensure.rc != 0
+
+    - name: Verify the deployment
+      ansible.builtin.command:
+        argv: ["{{ defenseclaw_gateway }}", enterprise, linux, verify, --json]
+      changed_when: false
+
+    - name: Gate the ring on Tetragon readiness for its mode
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - tetragon
+          - verify
+          - --ready-for
+          - "{{ defenseclaw_tetragon_mode }}"
+      register: defenseclaw_tetragon_ready
+      changed_when: false
+      failed_when: defenseclaw_tetragon_ready.rc != 0
+      when: defenseclaw_tetragon_mode != 'off'

@@ -652,7 +652,7 @@ If the computer runs Tetragon, the root sensor helper connects to it, and Tetrag
 
 **Where:** Linux standalone, with Tetragon.
 
-**What reduces it:** Set Tetragon's `server-address` to a Unix socket. Keep `enterprise.tetragon.mode` at `consume` where you do not need the kernel controls. See [AI Discovery Plane C (Tetragon)](/docs/enterprise/linux#ai-discovery-plane-c-tetragon).
+**What reduces it:** Set Tetragon's `server-address` to a Unix socket. Keep `enterprise.tetragon.mode` at `consume` where you do not need the kernel controls. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon).
 
 #### The kernel controls are narrow, and fail open
 
@@ -662,13 +662,21 @@ The two controls deny in-place write opens of shell profiles and user autostart 
 - A second name for the same file that the user created beforehand, such as a link.
 - A library-based SSH tool (libssh2, paramiko) inside the agent's tree is denied like any other reader, which the burn-in shows first.
 - A process that is not below an enrolled agent: an IDE terminal, a look-alike program by name, or another user.
-- Agent configuration files, repository files, program execution and destinations. The kernel floor does not cover them at all.
+- Agent configuration files, repository files, program execution and destinations. The kernel controls do not cover them at all.
 
 Enforcement also fails open. While Tetragon is stopped nothing is denied, after a restart the policies are loaded again within about a minute, and while the helper is stopped the loaded policies keep the scope they had.
 
 **Where:** Linux standalone, with Tetragon in `enforce` mode.
 
-**What reduces it:** Hook rules and the `observe` policy record what the controls do not stop. Pause or end enforcement from the computer with `enterprise linux tetragon pause`; see [Agent segmentation, visibility and enforcement](/docs/segmentation#what-the-kernel-floor-leaves-to-other-layers).
+**What reduces it:** Hook rules and the `observe` policy record what the controls do not stop. Pause or end enforcement from the computer with `enterprise linux tetragon pause`; see [Agent segmentation, visibility and enforcement](/docs/segmentation#what-the-kernel-controls-leave-to-other-layers).
+
+#### Events of your own Tetragon policies
+
+The sensor helper also reads the events of the Tetragon policies you run yourself and reports the ones that hit an AI agent. It never manages them: the calls it may make name only the `defenseclaw-*` policies it recorded loading, a policy of yours is never added, changed or deleted, and a test with a fake Tetragon pins that through every mode, the cleanup, uninstall and rollback. What crosses from the helper to the gateway is typed and bounded: the policy name, the hook type and function, the action, the policy mode, the outcome, one target path or peer, tags and a message, and the process facts that every other event carries (with the command line redacted). String and byte arguments, integers, credentials, stack traces, return values and the raw event never cross. Events are attributed only below an AI agent; the rest are counted per policy. The target is a content field, so each destination's redaction profile decides whether it leaves the computer, and `enterprise.tetragon.customer_events: off` stops the forwarding.
+
+**Where:** Linux standalone, with Tetragon, in `consume`, `observe` and `enforce`.
+
+**What reduces it:** Set `customer_events: off` where your policies' targets must not leave the computer, and keep a redaction profile on the destinations. See [Your policies' events](/docs/enterprise/tetragon#step-2-see-your-own-policies-events).
 
 #### Codex notify arguments
 

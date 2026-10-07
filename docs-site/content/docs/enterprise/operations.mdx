@@ -242,6 +242,7 @@ The two summary fields are computed differently on each OS:
 | `machine_policy.<connector>.conflicts` or `.higher_precedence` | Not empty |
 | `enrollment.failed` | Greater than `0` (Linux and macOS) |
 | `transaction_pending` | `true` on two runs in a row |
+| Kernel controls (Linux with Tetragon) | Five Prometheus rules over `defenseclaw_kernel_*`: `DefenseClawKernelDenials` (any denial by a DefenseClaw control, informational), `DefenseClawKernelAckStale` (an `enforce_ack` that no longer matches the build, for 30 minutes), `DefenseClawKernelPausedLong` (a pause for 8 hours), `DefenseClawTetragonFallback` (Tetragon is installed but the helper runs on `cn_proc`, for 15 minutes) and `DefenseClawCustomerPolicyBlocksAgents` (your own Tetragon policy denied an agent). The rules ship in the local observability stack; see [Tetragon on a Linux fleet](/docs/enterprise/tetragon#check-the-fleet) |
 
 **Claude Code attestation (Windows).** With Claude Code enabled, Windows
 reports `security_complete: false` until an administrator confirms, with a
@@ -655,6 +656,7 @@ fill the event log.
 | `/var/log/defenseclaw` | Empty by default: the services write their output to the journal. The gateway may write only there and in `/var/lib/defenseclaw`, so it is the place for a `jsonl` file destination (see [Audit records and SIEM forwarding](#audit-records-and-siem-forwarding)) |
 | Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json`, and `last-package-result.log` beside it |
 | MDM wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` |
+| Kernel sensor records | With Tetragon and Plane C, the sensor helper's records reach your destinations as `ai.runtime.plane_health` (the backend, the mode, the approval, the users enforced and in burn-in), `ai.runtime.kernel_policy` (one per policy state change, and burn-in progress every 6 hours), `ai.runtime.kernel_event` (events of your own Tetragon policies that hit an AI agent) and `enforcement.block.applied` with the initiator `kernel` (a kernel denial). See [Tetragon on a Linux fleet](/docs/enterprise/tetragon) |
 
 ```bash
 journalctl -u defenseclaw-enterprise-verify.service -n 50 --no-pager

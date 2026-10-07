@@ -1,0 +1,30 @@
+# Candidate DefenseClaw admin config, rendered per ring by defenseclaw-tetragon.yml.
+# Merge the ai_discovery and enterprise.tetragon parts into the config you already push.
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw
+policy_dir: /etc/defenseclaw/policies
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {}
+    codex: {}
+ai_discovery:
+  runtime:
+    enabled: true
+    enable_host_plane: true      # Plane C; without it the Tetragon mode is off
+enterprise:
+  profile: standalone
+  tetragon:
+    mode: "{{ defenseclaw_tetragon_mode | default('consume') }}"                # consume | observe | enforce | off
+    customer_events: "{{ defenseclaw_tetragon_customer_events | default('agent') }}"       # your policies' events from AI agents: agent | off
+{% if defenseclaw_tetragon_burn_in | default('') | string != '' %}
+    burn_in: {{ defenseclaw_tetragon_burn_in }}                # covered agent-hours per user; 0, or 24h to 2160h
+{% endif %}
+{% if defenseclaw_tetragon_enforce_ack | default('') | length > 0 %}
+    enforce_ack: {{ defenseclaw_tetragon_enforce_ack | tojson }}   # one digest, or a list of up to 4 during a ring upgrade
+{% endif %}

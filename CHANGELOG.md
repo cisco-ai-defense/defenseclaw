@@ -20,8 +20,10 @@ says otherwise. Per-user installs never connect to Tetragon.
   sensor helper reads its events over its root-owned Unix socket and uses
   them as Plane C's process source, with `cn_proc` and `fanotify` as the
   fallback in the same stream. One new block controls it,
-  `enterprise.tetragon {mode, burn_in, enforce_ack}`:
-  - `consume` (the default, no setting needed) only reads events. Tetragon
+  `enterprise.tetragon {mode, burn_in, enforce_ack, customer_events}`:
+  - `consume` (the default mode) only reads events. It works only when Plane C
+    is on (`ai_discovery.runtime.enabled` and `enable_host_plane`, both
+    opt-in); with Plane C off the effective mode is `off`. Tetragon
     records the binary, arguments, user and parent at the exec, so short-lived
     processes keep their names, native Claude Code is identified by its
     executable, and a reused pid is no longer guessed from a name change.
@@ -35,18 +37,49 @@ says otherwise. Per-user installs never connect to Tetragon.
     write opens of shell profiles and user autostart entries). Nothing promotes
     on its own: it needs `mode: enforce` and an `enforce_ack` equal to the
     `kernel_policy` digest that `enterprise linux tetragon status` prints, a
-    per-user burn-in measured in covered agent-hours (default 168h, reset when
+    per-user burn-in measured in covered agent-hours (default 168h, which is
+    about five to six working weeks for a full-time agent user; reset when
     the control set or the user's connector set changes), and a connector in
-    `action` mode. Controls apply only below enrolled command-line agents of
+    `action` mode. `enforce_ack` takes one digest or a list of up to four, so
+    a ring upgrade that changes a control does not drop users to monitor mode. Controls apply only below enrolled command-line agents of
     the user; IDE terminals, look-alike processes, other users and containers
     are observed, never denied.
+  - Your own Tetragon policies stay yours. In `consume`, `observe` and
+    `enforce`, the events of your kprobe and LSM policies that hit an AI agent
+    are forwarded as `ai.runtime.kernel_event` records (`customer_events:
+    agent`, the default; `off` keeps the counts and forwards nothing), tagged
+    with the policy name, its action and outcome (`observed`, `would_block` or
+    `blocked`), and attributed to the agent, the user and the hook decision.
+    Only typed, bounded fields cross the broker; string and byte arguments
+    never do. DefenseClaw never adds, changes or deletes a policy of yours,
+    and these events are not scored.
   - The helper connects only to a Unix socket that root owns and root serves,
     never to TCP, and calls only what the mode allows. It changes only policies
     it recorded loading.
+  - Kernel controls digest: `sha256:08b71155b713` (first release with Tetragon
+    support). Approve it with `enforce_ack`; a later release that changes a
+    control changes this digest, and the release notes say so.
   - Support: RHEL 9 x86_64 with Tetragon 1.7.x supports `consume`, `observe`
     and `enforce`. Tetragon 1.6.x, Ubuntu 22.04/24.04 and arm64 support
     `consume` only. All of these are expected, not verified yet. RHEL 8 falls
     back to `cn_proc` and `fanotify`.
+- **Readiness check and fleet onboarding.** `enterprise linux tetragon verify
+  [--ready-for consume|observe|enforce]` checks one computer, one line per
+  check with the command that fixes a failure, and exits non-zero when a check
+  fails. For `enforce` it prints each user's burn-in progress and estimate,
+  every hit with its path and binary, and the `enforce_ack` block to approve.
+  `tetragon status` gains a `Next:` line, a section for your own Tetragon
+  policies and `--user`. `detect.sh --require-tetragon MODE` reports
+  compliance to an MDM. A new guide,
+  [Tetragon on a Linux fleet](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/tetragon),
+  walks an administrator through hardening Tetragon, the rings, the approval,
+  the help-desk runbook and the kill switch, with tested Ansible plays and a
+  shell script under `packaging/mdm/linux/examples/tetragon/`.
+- **Developers are told.** When a DefenseClaw kernel control (or, with
+  `customer_events` on, one of your own enforcing policies) blocks a tool call,
+  the agent's next answer says what was blocked and why, for Claude Code,
+  Codex, Copilot CLI, Cursor and Devin, so `Operation not permitted` is no
+  longer unexplained.
 - **Kill switch and cleanup.** `enterprise linux tetragon status|pause|resume`
   (root). A pause (default 4h, at most 7d) survives restarts of the helper and
   of Tetragon; a policy you move to monitor or delete with `tetra` is never put
@@ -55,8 +88,9 @@ says otherwise. Per-user installs never connect to Tetragon.
   (`defenseclaw-sensor-helper --tetragon-cleanup [--check]`); a rollback
   stops the helper first. Run by hand, the cleanup refuses while a helper in
   `observe` or `enforce` runs.
-  `verify` fails with `kernel_policy_orphaned` for a leftover policy, and warns
-  with the new `tetragon_*` and `kernel_*` codes documented under
+  `verify` fails with `kernel_policy_orphaned` for a leftover policy (and with
+  `kernel_policy_load_error:<name>` for a DefenseClaw policy Tetragon reports in
+  error), and warns with the new `tetragon_*` and `kernel_*` codes documented under
   [Troubleshooting](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/troubleshooting).
 - **Observability.** `plane_health` gains `plane_backend`, `plane_mechanism`,
   `events_lost`, `loss_known` and `container_events`; runtime activity and
@@ -64,10 +98,16 @@ says otherwise. Per-user installs never connect to Tetragon.
   `hook_seen` and, for kernel decisions, `kernel.outcome` and `kernel.control`;
   kernel denials are `log.enforcement.block.applied` records with the policy
   and the control-set digest, and reach notifications like hook blocks
-  (`block_enforced`, the hook source, labelled `kernel`); and a new low-volume family,
-  `log.ai.runtime.kernel_policy`, records each state change. Grafana gains a
-  **Kernel floor (Linux)** row and a Plane C source table, and the Splunk
-  bridge the matching macros and panels.
+  (`block_enforced`, the hook source, labelled `kernel`); and new low-volume
+  families, `log.ai.runtime.kernel_policy` (each state change, and burn-in
+  progress every 6 hours) and `log.ai.runtime.kernel_event` (events of your
+  own Tetragon policies). Plane C `plane_health` gains fleet fields (the
+  Tetragon version, helper mode, approval, users enrolled, enforced and in
+  burn-in, pause, and per-cycle would-block, block and customer-event counts).
+  Grafana gains a fleet table, a **Kernel controls (Linux)** row, a row for
+  your Tetragon policies and kernel denials on **Blocked events**; the local
+  stack gains five Prometheus alerts; and the Splunk bridge the matching
+  macros and panels.
 - **Surfaces.** `defenseclaw agent discovery runtime status` shows the backend
   and the kernel floor; `runtime permissions` explains why a per-user install
   does not connect to Tetragon; `defenseclaw doctor` has a **Kernel sensor
@@ -75,8 +115,11 @@ says otherwise. Per-user installs never connect to Tetragon.
   and, on Linux with the sandbox kernel feed installed, a **Sandbox kernel
   feed** row that prints the update command;
   `defenseclaw config get --effective` lists `enterprise.tetragon.*`;
-  the TUI Runtime panel shows the backend; `/health` and
-  `GET /api/v1/ai-usage/runtime` carry `backend` and `policy.kernel`.
+  the TUI Runtime panel shows the backend. These Python surfaces exist only
+  where a `defenseclaw` command line is installed: the managed Linux packages
+  ship none, and an administrator there uses the Go commands and telemetry.
+  `/health` and `GET /api/v1/ai-usage/runtime` carry `backend` and
+  `policy.kernel`.
 - **Sandbox kernel feed (open-source Linux, opt-in root service).** On a
   computer whose administrator runs Tetragon, `sudo defenseclaw-gateway sandbox
   kernel-feed install` adds Tetragon's exec and exit records to the process
@@ -93,6 +136,11 @@ says otherwise. Per-user installs never connect to Tetragon.
 
 ### Fixed
 
+- **Tetragon documentation.** The Tetragon reference moved from the Linux
+  page to the new guide, and `enable-ancestors` is no longer listed as a
+  requirement: DefenseClaw requests no ancestors and they cost CPU. The
+  hardening steps now say that restarting Tetragon drops every policy added
+  over its API, yours included; policies in `tetragon.tp.d` reload.
 - **`cn_proc` needs `CAP_NET_ADMIN`.** The runtime planes documentation, the
   permissions probe and the TUI said the Linux process connector needed no
   privilege. It needs `CAP_NET_ADMIN`, so an unprivileged install got no
@@ -123,7 +171,7 @@ says otherwise. Per-user installs never connect to Tetragon.
   `~/.local/bin` (used only by the sandbox kernel feed);
   `defenseclaw uninstall --binaries` removes it.
 - Downgrading below this release while policies are loaded: see
-  [Remove the policies, or downgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux#remove-the-policies-or-downgrade).
+  [Remove the policies, or downgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
 
 ### Removed
 

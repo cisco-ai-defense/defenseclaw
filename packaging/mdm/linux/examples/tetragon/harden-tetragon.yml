@@ -1,0 +1,91 @@
+# Harden the Tetragon you already run so the DefenseClaw sensor helper can
+# read it. This play is yours: DefenseClaw never writes under /etc/tetragon.
+#
+# Restarting Tetragon drops every policy added over its API with `tetra`
+# (DefenseClaw's and yours). Policies in /etc/tetragon/tetragon.tp.d reload.
+# Run it in a maintenance window, a few hosts at a time (tetragon_serial).
+#
+#   ansible-playbook -i inventory harden-tetragon.yml
+#   ansible-playbook -i inventory harden-tetragon.yml -e tetragon_for_enforce=true
+- name: Harden Tetragon for DefenseClaw
+  hosts: tetragon_hosts
+  become: true
+  serial: "{{ tetragon_serial | default(5) }}"
+  vars:
+    tetragon_conf_dir: /etc/tetragon/tetragon.conf.d
+    # Set to true on the rings that will enforce.
+    tetragon_for_enforce: false
+    # Required in every mode: the API is a root-owned unix socket, never TCP.
+    tetragon_required:
+      server-address: "unix:///var/run/tetragon/tetragon.sock"
+    # Required to enforce: stopping Tetragon must not leave programs enforcing
+    # with nobody updating them.
+    tetragon_required_for_enforce:
+      keep-sensors-on-exit: "false"
+    # Recommended: listeners on loopback only.
+    tetragon_recommended:
+      metrics-server: "127.0.0.1:2112"
+      health-server-address: "127.0.0.1:6789"
+    # Not needed: enable-ancestors. DefenseClaw requests no ancestors and
+    # they cost CPU on every event.
+  tasks:
+    - name: Create the Tetragon settings folder
+      ansible.builtin.file:
+        path: "{{ tetragon_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write the required settings
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ tetragon_conf_dir }}/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ tetragon_required | dict2items }}"
+      notify: Restart Tetragon
+
+    - name: Write the settings that enforcement needs
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ tetragon_conf_dir }}/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ tetragon_required_for_enforce | dict2items }}"
+      when: tetragon_for_enforce | bool
+      notify: Restart Tetragon
+
+    - name: Write the recommended settings
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ tetragon_conf_dir }}/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ tetragon_recommended | dict2items }}"
+      notify: Restart Tetragon
+
+    - name: Restart Tetragon now, so the checks below see the new settings
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read the kernel's list of security modules
+      ansible.builtin.command: cat /sys/kernel/security/lsm
+      register: tetragon_lsm
+      changed_when: false
+      when: tetragon_for_enforce | bool
+
+    - name: Require BPF LSM on hosts that will enforce
+      ansible.builtin.assert:
+        that: "'bpf' in tetragon_lsm.stdout"
+        fail_msg: "bpf is not in the kernel's lsm= list. Add it to the boot parameters and reboot before you enforce."
+        quiet: true
+      when: tetragon_for_enforce | bool
+
+  handlers:
+    - name: Restart Tetragon
+      ansible.builtin.systemd:
+        name: tetragon
+        state: restarted
