@@ -125,9 +125,10 @@ type box struct {
 	// synthetic maps the synthetic addresses OpenShell's policy DNS handed
 	// the sandbox to their names (noteSyntheticAddress).
 	synthetic map[string]string
-	// closedPorts are the undeclared host ports whose denial the feed
-	// explained this session (hostPortDenied).
-	closedPorts map[int]bool
+	// portLines is what the feed last said this session of each host port
+	// other than DefenseClaw's own: reached (true, hostPortAllowed) or
+	// closed (false, hostPortDenied).
+	portLines map[int]bool
 	// proxyOpens are OpenShell's records of the sandbox's connections to
 	// the egress proxy, which name the program that opened them, newest
 	// last (proxyActor).
@@ -306,7 +307,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// a session for silent hooks stops the next one too while they stay
 		// silent.
 		b.silentSince, b.silenceSent = time.Time{}, false
-		b.closedPorts, b.opens = nil, nil
+		b.portLines, b.opens = nil, nil
 		// The new session's hooks name its session.
 		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {

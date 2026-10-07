@@ -1052,6 +1052,32 @@ func TestSandboxEgressRowNamesTheHostAndTheSandbox(t *testing.T) {
 	}
 }
 
+// GAP-0160: a sandbox's degraded health row reads "sandbox degraded: …"
+// (its target names the sandbox), not "openshell degraded", which stays for
+// the OpenShell integration's own health.
+func TestSandboxHealthRowNamesTheSandbox(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	for _, ev := range []SandboxHealthEvent{
+		{Sandbox: testSandboxIdentity(), State: SandboxHealthDegraded, ErrorCode: "openshell_pack_invalid", ErrorSummary: "the sandbox policy cannot be resolved"},
+		{State: SandboxHealthDegraded, ErrorCode: "openshell_unavailable", ErrorSummary: "the gateway does not answer"},
+	} {
+		if err := recorder.RecordSandboxHealth(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Details] = true
+	}
+	if !got["sandbox degraded: the sandbox policy cannot be resolved"] || !got["openshell degraded: the gateway does not answer"] {
+		t.Fatalf("details = %v", got)
+	}
+}
+
 // TestSandboxEgressEndsAndActivity pins the records the sandbox manager adds
 // on top of the egress decisions: the end of an allowed connection
 // (completed with its bytes and duration, failed or timed out) without a

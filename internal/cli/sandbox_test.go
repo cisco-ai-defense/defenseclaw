@@ -441,6 +441,26 @@ func TestSandboxPackCommandsWithoutAConfig(t *testing.T) {
 	}
 }
 
+// GAP-0168: `policy test --host a --host b` tested b alone, without a word.
+// A second --host is refused and names --fixture.
+func TestSandboxPolicyTestTakesOneHost(t *testing.T) {
+	test, _, err := sandboxCmd.Find([]string{"policy", "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := test.Flags().Lookup("host")
+	t.Cleanup(func() { _ = f.Value.(pflag.SliceValue).Replace(nil) })
+	if err := f.Value.Set("example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Value.Set("unlisted.example.com"); err == nil || !strings.Contains(err.Error(), "--fixture") || f.Value.String() != "example.org" {
+		t.Fatalf("second --host: %v (value %q)", err, f.Value.String())
+	}
+	if f.Value.Type() != "string" {
+		t.Fatalf("--host type %q, want string (the manifest's)", f.Value.Type())
+	}
+}
+
 // GAP-1247: --json is the same as --output json.
 func TestSandboxJSONFlagSelectsJSONOutput(t *testing.T) {
 	cmd := &cobra.Command{Use: "x"}

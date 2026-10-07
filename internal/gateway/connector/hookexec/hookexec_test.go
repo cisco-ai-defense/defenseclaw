@@ -898,6 +898,29 @@ func TestUnreachable(t *testing.T) {
 	})
 }
 
+// GAP-0159: a per-user hook the gateway refused with its own message (a
+// Codex update left the protected hook setup stale: HTTP 409) showed only
+// "DefenseClaw hook failed closed" in the agent. The denial names the
+// refusal and doctor; a managed hook, and a body that is not the gateway's
+// JSON, keep the generic text.
+func TestPerUserGatewayRefusalNamesDoctor(t *testing.T) {
+	refusal := `{"error":"Codex hook contract does not match protected runtime lock"}`
+	for _, status := range []int{409, 503} {
+		r := run(t, "codex", &stubRT{status: status, body: refusal}, func(o *Options) { o.FailMode = "closed" })
+		if r.code != 0 || !strings.Contains(r.stdout, `"permissionDecision":"deny"`) ||
+			!strings.Contains(r.stdout, fmt.Sprintf("refused it (HTTP %d: Codex hook contract does not match protected runtime lock)", status)) ||
+			!strings.Contains(r.stdout, "Run `defenseclaw doctor`") {
+			t.Fatalf("HTTP %d: code=%d stdout=%q", status, r.code, r.stdout)
+		}
+	}
+	if text := perUserRefusalText(Options{ManagedEnterprise: true}, 409, []byte(refusal)); text != "" {
+		t.Fatalf("managed hook text = %q, want the generic one", text)
+	}
+	if text := perUserRefusalText(Options{}, 409, []byte("conflict")); text != "" {
+		t.Fatalf("plain body text = %q, want the generic one", text)
+	}
+}
+
 func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
 	rt := &stubRT{}
 	rt.onRequest = func(state *stubRT, _ *http.Request) (*http.Response, error) {

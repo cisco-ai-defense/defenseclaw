@@ -291,6 +291,35 @@ func TestUnresolvablePolicyFailsClosed(t *testing.T) {
 	e.waitChunk("teambox", waiting, "approved")
 }
 
+// TestUnresolvablePolicyRecordSaysWhatToDo (GAP-0160): the degraded record
+// of a sandbox whose pack is gone says what to do, and is an alert (HIGH)
+// only while the sandbox runs: a stopped one sends nothing under the
+// policy, and its start refuses with the reason.
+func TestUnresolvablePolicyRecordSaysWhatToDo(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	e.create(sandboxapi.CreateRequest{Name: "runbox", Pack: "team"})
+	e.create(sandboxapi.CreateRequest{Name: "idlebox", Pack: "team", Project: e.otherProject("idle")})
+	run, idle := e.boxOf("runbox"), e.boxOf("idlebox")
+	e.m.mu.Lock()
+	run.phase, idle.phase, idle.rec.Phase = audit.SandboxPhaseReady, audit.SandboxPhaseStopped, string(audit.SandboxPhaseStopped)
+	e.m.mu.Unlock()
+	must(t, os.Remove(filepath.Join(packDir, "team", "pack.yaml")))
+	e.m.refreshEgress()
+	record := func(name string) audit.SandboxHealthEvent {
+		got := where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool {
+			return h.Sandbox.Name == name && h.ErrorCode == "openshell_pack_invalid"
+		})
+		if len(got) != 1 || !strings.Contains(got[0].ErrorSummary, "or delete the sandbox: defenseclaw sandbox delete "+name) {
+			t.Fatalf("%s health = %+v", name, got)
+		}
+		return got[0]
+	}
+	if r, i := record("runbox"), record("idlebox"); r.Severity != "" || i.Severity != "MEDIUM" {
+		t.Fatalf("severities: running %q (want the default HIGH), stopped %q (want MEDIUM)", r.Severity, i.Severity)
+	}
+}
+
 // Every change to a sandbox's proxy credential reaches its open tunnels:
 // block lists end exactly the ones they now refuse, and an unresolvable
 // policy or the deny network mode ends all of the sandbox's.

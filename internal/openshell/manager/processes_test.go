@@ -276,6 +276,27 @@ func TestDestinationLineageByProgram(t *testing.T) {
 	}
 }
 
+// TestDestinationLineageWithoutExe (GAP-0139): the workload's processes are
+// not dumpable, so a live sample has no executable for them; the program's
+// name (its first argument or comm) finds the process instead. A process
+// whose executable is known to be another program is not taken.
+func TestDestinationLineageWithoutExe(t *testing.T) {
+	var sample atomic.Pointer[string]
+	sample.Store(psAnswer("P 1 0 1000 10", "Pc 1 init", "P 124 1 1000 20", "Pc 124 claude", "P 521 124 1000 30", "Pc 521 bash",
+		"P 526 521 1000 40", "Pc 526 curl", "Pa 526 curl", "Pa 526 -s",
+		"P 527 521 1000 41", "Pc 527 curl", "L /proc/527 exe /opt/other/curl"))
+	e := treeEnv(t, "noexe", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("noexe")); !ok {
+		t.Fatal("no sample")
+	}
+	e.ocsf("noexe", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> pypi.org:443/tcp [policy:allow_pypi engine:opa]", time.Now())
+	d, err := e.m.Destinations(context.Background(), "noexe")
+	if err != nil || len(d.Destinations) != 1 || len(d.Destinations[0].Lineage) != 4 || d.Destinations[0].Lineage[0].PID != 526 ||
+		d.Destinations[0].Lineage[2].Comm != "claude" {
+		t.Fatalf("destinations = %+v, %v", d.Destinations, err)
+	}
+}
+
 func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	var sample atomic.Pointer[string]
 	sample.Store(psAnswer("P 1 0 0 10", "Pc 1 init", "P 42 1 1000 20", "Pc 42 claude", "Pa 42 claude", "Pa 42 --token=dccertvalue",

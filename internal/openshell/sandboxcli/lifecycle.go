@@ -398,7 +398,8 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 		}
 		started = true
 	}
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
+		passArgs: len(o.Args) > 0}
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {

@@ -36,6 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -1216,6 +1217,11 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 	// "subsystem.degraded".
 	if subsystem, ok := payload["defenseclaw.health.subsystem"].(string); ok && subsystem != "" {
 		label := subsystem
+		if name, _ := payload["defenseclaw.sandbox.name"].(string); subsystem == string(gatewaylog.SubsystemOpenShell) && strings.TrimSpace(name) != "" {
+			// One sandbox's health (the target names it), not the OpenShell
+			// integration's (GAP-0160).
+			label = "sandbox"
+		}
 		if state, ok := payload["defenseclaw.health.state"].(string); ok && state != "" {
 			label += " " + state
 		}

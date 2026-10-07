@@ -328,10 +328,11 @@ your own Codex configuration does not change.
   requirements. Updating or reinstalling Codex (for example with npm) changes
   that file, so `defenseclaw doctor` fails the **Hook contract** and **Codex
   hooks** rows with `policy-blocked: selected Codex executable no longer
-  matches protected Setup evidence`, and a blocked call shows `DefenseClaw
-  hook failed closed` instead of the rule's message. Run
-  `defenseclaw setup codex --yes`: it selects the new executable and keeps
-  the current mode.
+  matches protected Setup evidence`, and every call is blocked with `DefenseClaw
+  blocked this tool call: the DefenseClaw gateway refused it (HTTP 409: ...).
+  Run defenseclaw doctor to see why and how to fix it.` instead of the
+  rule's message. Run `defenseclaw setup codex --yes`: it selects the new
+  executable and keeps the current mode.
 - **Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on
   127.0.0.1 directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Codex's own
   OTel exporter follows those variables and has no proxy option of its own,

@@ -692,6 +692,24 @@ func TestSessionSummary(t *testing.T) {
 		}, check: noStop,
 			want: []string{"DefenseClaw stopped " + sbName + ": Claude Code worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)"},
 			not:  []string{"stopped from outside"}},
+		// GAP-0170: a delete from another terminal read as a stop, then the
+		// review failed and the keep/undo question came for a sandbox that
+		// was gone.
+		{name: "deleted from elsewhere", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "deleting" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.mu.Lock()
+					delete(ta.daemon.sandboxes, sbName)
+					ta.daemon.mu.Unlock()
+				}
+				return nil
+			}
+		}, check: noStop,
+			want: []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
+			not:  []string{"stopped from outside", "could not review", "Keep changes?"}},
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
@@ -870,6 +888,21 @@ func TestSessionHookWarnings(t *testing.T) {
 			not:  []string{"hooks are not reaching"}, notLive: []string{"hooks are not reaching"}},
 		{name: "kiro the daemon found unreachable", opts: kiro, setup: quiet(0), exit: ExitHooksUnreachable,
 			during: unreachable("r2c1-kiro", "no hook request")},
+		// GAP-0157: `-- --version` prints and exits without a session; it
+		// sent no hook and nothing showed a session at work without them.
+		{name: "a connect that only asks the version", do: func(ta *testApp) error {
+			return ta.Connect(bg, ConnectOptions{Name: "verbox", Args: []string{"--version"}})
+		}, setup: func(ta *testApp) {
+			quiet(time.Hour)(ta)
+			sb := sampleSandbox("verbox")
+			sb.Phase = "stopped"
+			ta.daemon.add(sb)
+		}, want: []string{"no hook of this session reached DefenseClaw: Claude Code ran with the arguments after -- and may not have started a session; " +
+			"if it did, run: defenseclaw sandbox doctor"},
+			not: []string{"hooks are not reaching"}},
+		{name: "a pass-through run the daemon found unreachable", opts: RunOptions{Harness: "claude", Args: []string{"--model", "m"}}, setup: quiet(time.Hour),
+			exit: ExitHooksUnreachable, during: unreachable(sbName, "the hook token was refused"),
+			want: []string{"✗ " + hooksWarningText("the hook token was refused")}},
 		// PR 1022 review of N1: a daemon restart during the session left
 		// the new daemon's counters at zero, and the session said none of
 		// its hooks reached DefenseClaw (Copilot CLI, after 7 allowed tool

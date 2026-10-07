@@ -176,6 +176,52 @@ func outputFlag(cmd *cobra.Command) *string {
 	return out
 }
 
+// onceString is a string flag given at most once: a second value is
+// refused, with more saying what to do instead, where a plain string flag
+// kept only the last one without a word (`policy test --host a --host b`
+// tested b alone, GAP-0168).
+type onceString struct {
+	p    *string
+	set  bool
+	more string
+}
+
+func (v *onceString) String() string {
+	if v.p == nil {
+		return ""
+	}
+	return *v.p
+}
+
+func (v *onceString) Set(s string) error {
+	if v.set {
+		return errors.New("it takes one value; " + v.more)
+	}
+	*v.p, v.set = s, true
+	return nil
+}
+
+func (v *onceString) Type() string { return "string" }
+
+// Replace, Append and GetSlice make it a pflag.SliceValue, which a caller
+// that reuses the command tree resets with Replace.
+func (v *onceString) Replace(vals []string) error {
+	*v.p, v.set = "", false
+	if len(vals) > 0 {
+		return v.Set(vals[0])
+	}
+	return nil
+}
+
+func (v *onceString) Append(s string) error { return v.Set(s) }
+
+func (v *onceString) GetSlice() []string {
+	if !v.set {
+		return nil
+	}
+	return []string{*v.p}
+}
+
 // jsonOutputValue is the --json switch: setting it selects --output json.
 type jsonOutputValue struct {
 	out *string
@@ -768,7 +814,8 @@ list of {host, port, binary, expect: allow|block, rule} and exits 1 on any misma
 	tf.StringVar(&to.Pack, "pack", "", "resolve with this pack")
 	tf.StringVar(&to.Profile, "profile", "", "resolve with this profile")
 	tf.StringVar(&to.Harness, "harness", "", "resolve for this harness")
-	tf.StringVar(&to.Host, "host", "", "the destination host (or host:port)")
+	tf.Var(&onceString{p: &to.Host, more: "list several destinations with --fixture FILE"}, "host",
+		"the destination host (or host:port), given once (list several with --fixture)")
 	tf.IntVar(&to.Port, "port", 0, "the destination port (0: any port the policy carries)")
 	tf.StringVar(&to.Binary, "binary", "", "the program that connects (shown in the report)")
 	tf.StringVar(&to.Fixture, "fixture", "", "check every destination of this YAML or JSON list; exit 1 on a mismatch")

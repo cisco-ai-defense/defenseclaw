@@ -490,7 +490,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("pack", "string", "resolve with this pack", metavar="PACK"),
             _Flag("profile", "string", "resolve with this profile", metavar="PROFILE"),
             _Flag("harness", "string", "resolve for this harness", metavar="HARNESS"),
-            _Flag("host", "string", "the destination host (or host:port)", metavar="HOST"),
+            _Flag(
+                "host",
+                "string",
+                "the destination host (or host:port), given once (list several with --fixture)",
+                metavar="HOST",
+            ),
             _Flag("port", "int", "the destination port (0: any port the policy carries)", default="0", metavar="PORT"),
             _Flag("binary", "string", "the program that connects (shown in the report)", metavar="PATH"),
             _Flag(

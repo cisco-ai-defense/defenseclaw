@@ -402,8 +402,8 @@ func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
 	return out
 }
 
-// PIDOf is the pid of the one process of sandbox sandboxName whose
-// executable is exe and that ran at at (started by then, not seen exiting
+// PIDOf is the pid of the one process of sandbox sandboxName that runs exe
+// (runs) and that ran at at (started by then, not seen exiting
 // before), from the sandbox's process tree; 0 while the tree is off, or when
 // it holds no such process or several. A program shorter than a sample
 // interval is not in the tree. It implements ProcessLookup.
@@ -423,7 +423,7 @@ func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
 	pid := 0
 	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), t.exited} {
 		for _, n := range nodes {
-			if n.Exe != exe || n.Start.After(at) || (!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) || n.PID == pid {
+			if !n.runs(exe) || n.Start.After(at) || (!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) || n.PID == pid {
 				continue
 			}
 			if pid != 0 {
@@ -433,6 +433,22 @@ func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
 		}
 	}
 	return pid
+}
+
+// runs reports whether the process runs program exe. A sample seldom has a
+// workload process's executable (the workload's processes are not dumpable,
+// so the exec cannot read their exe link; GAP-0139): without one, the name
+// of its first argument or its comm (the kernel keeps 15 bytes of the
+// program's name) stands for it.
+func (n *procNode) runs(exe string) bool {
+	if n.Exe != "" {
+		return n.Exe == exe
+	}
+	name := path.Base(exe)
+	if argv0, _, _ := strings.Cut(n.Cmdline, " "); argv0 != "" && path.Base(argv0) == name {
+		return true
+	}
+	return n.Comm != "" && n.Comm == truncate(name, 15)
 }
 
 var _ ProcessLookup = (*Manager)(nil)

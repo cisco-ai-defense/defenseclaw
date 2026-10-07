@@ -314,12 +314,19 @@ func TestAnInspectedConnectionIsOneEgressRecord(t *testing.T) {
 }
 
 // An allowed connection to a host port other than DefenseClaw's own is an
-// allowed egress record and a destination.
+// allowed egress record and a destination, and the session's first one is a
+// feed line (GAP-0154).
 func TestAllowedHostPortConnectionsAreRecorded(t *testing.T) {
 	e := liveEnv(t, "portbox", nil)
-	e.ocsf("portbox", "NET:OPEN [INFO] ALLOWED /usr/bin/node(9) -> host.openshell.internal:8080/tcp [policy:allow_host_openshell_internal_8080 engine:opa]", time.Now())
+	for range 2 {
+		e.ocsf("portbox", "NET:OPEN [INFO] ALLOWED /usr/bin/node(9) -> host.openshell.internal:8080/tcp [policy:allow_host_openshell_internal_8080 engine:opa]", time.Now())
+	}
+	if lines := e.events("portbox", sandboxapi.ActivityEgressAllowed, ""); len(lines) != 1 || lines[0].Host != openshellHostAlias ||
+		lines[0].Port != 8080 || !strings.Contains(lines[0].Message, "port 8080 on this machine") {
+		t.Fatalf("feed = %+v", lines)
+	}
 	recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == openshellHostAlias })
-	if len(recs) != 1 || recs[0].Port != 8080 || recs[0].Blocked || recs[0].DecisionCode != "SANDBOX_EGRESS_ALLOWED" || recs[0].PID != 9 {
+	if len(recs) != 2 || recs[0].Port != 8080 || recs[0].Blocked || recs[0].DecisionCode != "SANDBOX_EGRESS_ALLOWED" || recs[0].PID != 9 {
 		t.Fatalf("host port = %+v", recs)
 	}
 	d, _ := e.m.Destinations(context.Background(), "portbox")
