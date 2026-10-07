@@ -1286,6 +1286,9 @@ deleted.
   sandbox's `hooks.on_silence` / `hooks.silence_after` show the setting;
   with `pack` locked, a run cannot switch to a pack that alerts or waits
   longer. The threshold was a fixed 10 minutes and silence only alerted.
+  A harness with switched-off hooks that works in bursts shorter than
+  `silence_after`, idle at least that long between them, is not flagged;
+  the sandbox guide and the policy pack reference state this limit.
 - **The activity feed names its epoch.** Every activity event carries
   `epoch`, which names the daemon's in-memory feed; a restarted daemon
   numbers its events from one again under a new epoch. The TUI's Sandboxes

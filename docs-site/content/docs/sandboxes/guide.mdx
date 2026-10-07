@@ -658,7 +658,12 @@ registration is the agent's to edit, so for those the pack's
 `hooks.on_silence` decides what follows. Only work that goes on that long
 counts: an idle stretch as long as `silence_after` starts the count over, so
 a sandbox left idle is not flagged when its harness wakes up (a new prompt,
-a background request).
+a background request). That reset is also a limit: a harness whose hooks
+were switched off and that works in bursts shorter than `silence_after`,
+each after an idle stretch at least that long (a tool call that sleeps, for
+example), is never flagged, at the cost of sitting idle for more than half
+of the time. Silence detection is a backstop; the file and network
+boundaries are enforced outside the sandbox and hold either way.
 
 ```text
 14:21:07 myapp-7f3a ⚠ the harness is active but its hooks are silent; stopping the sandbox (hooks.on_silence: stop)

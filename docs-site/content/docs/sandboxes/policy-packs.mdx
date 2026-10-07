@@ -230,7 +230,11 @@ These are the settings each pack controls. The
   stop. `silence_after` is 10 minutes in every built-in pack, long enough
   for a slow model turn without a tool call. An idle stretch as long as
   `silence_after` starts the count over, so a harness that wakes up after
-  one is not flagged for it.
+  one is not flagged for it. The same reset means a harness whose hooks
+  were switched off and that works in bursts shorter than `silence_after`,
+  with idle stretches at least that long between them, is never flagged;
+  it then sits idle for more than half of the time. The file and network
+  boundaries do not depend on hooks and hold either way.
 
 Hooks are DefenseClaw's judgment inside the sandbox boundary, and the
 workload runs as the same user as the hooks, so it could stop a hook

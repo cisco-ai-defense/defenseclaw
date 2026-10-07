@@ -1851,8 +1851,13 @@ compromised hook shows:
   to 24 hours) without a single hook request: one run of activity since the
   last hook (or the session's start) that no idle stretch of `silence_after`
   breaks (`noteActiveLocked`), so a harness that wakes up after a long idle
-  stretch, before its first hook, is no alarm. Commands the harness did not
-  start, such as the CLI's probe, a copy-mode upload or pull, or your own
+  stretch, before its first hook, is no alarm. Residual: the same reset lets
+  a harness with switched-off hooks that works in runs shorter than
+  `silence_after`, each after an idle stretch at least that long (for
+  example a tool call that sleeps), go unflagged, at the cost of being idle
+  more than half of the time; there is no cumulative-activity alarm. The
+  file and egress boundaries do not depend on hooks. Commands the harness
+  did not start, such as the CLI's probe, a copy-mode upload or pull, or your own
   `sandbox exec`, do not count, and neither do the egress proxy's own
   events, which cannot tell the harness's requests from theirs. For a
   user-tier harness (its hook registration is in the image HOME, the
