@@ -510,6 +510,10 @@ install it again) and run `uninstall --purge`, or delete those files by
 hand. If uninstall reports an
 error, it keeps the deployment record, the config and the state, so you can
 fix the cause and rerun it.
+After an uninstall and after a reinstall, ask users to restart their agents:
+an agent session left open through both runs without DefenseClaw until it
+restarts, and the `ensure` result, `status` and `verify` name it with the
+`agent_sessions_restart_required` warning.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 On a host installed from the package, `uninstall` leaves the package's
