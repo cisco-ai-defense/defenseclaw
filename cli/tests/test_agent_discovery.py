@@ -2090,6 +2090,30 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert kwargs["start_new_session"] is True
 
 
+def test_cold_start_probe_timeout_is_retried_once_and_shown_short(monkeypatch, tmp_path):
+    """GAP-0066: on a fresh clone the first --version of four CLIs timed out,
+    and the table split "<path>: version probe timed out" over three rows."""
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/codex")
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
+    answers = iter([subprocess.TimeoutExpired("codex", 8), "codex 1.2.3\n"])
+
+    def fake_run(args, **kwargs):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=answer, stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    assert ad._scan_agent("codex").version == "codex 1.2.3"
+
+    slow = ad.AgentSignal(
+        name="codex", installed=True, config_path="", binary_path="/opt/bin/codex",
+        version="", error=f"/opt/bin/codex: {ad.VERSION_PROBE_TIMED_OUT}",
+    )
+    assert ad._display_error(slow) == ad.VERSION_PROBE_TIMED_OUT
+
+
 def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     calls = []

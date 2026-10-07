@@ -1126,6 +1126,16 @@ def _display_version(version: str) -> str:
     return (version or "").strip().rstrip(".")
 
 
+def _display_error(signal: AgentSignal) -> str:
+    """The probe error without the path the Binary column already shows.
+
+    Each candidate's error reads "<path>: <reason>"; repeating the shown path
+    cut a timed-out probe's reason over three rows (GAP-0066)."""
+    prefix = f"{signal.binary_path}: " if signal.binary_path else ""
+    parts = (signal.error or "").split("; ")
+    return "; ".join(part[len(prefix) :] if prefix and part.startswith(prefix) else part for part in parts)
+
+
 def render_discovery_table(disc: AgentDiscovery) -> str:
     """Render discovery as a Rich table string suitable for click.echo."""
     try:
@@ -1148,7 +1158,7 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
-        detail = _display_version(signal.version) or signal.error
+        detail = _display_version(signal.version) or _display_error(signal)
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
@@ -1242,6 +1252,8 @@ def _scan_agent(
     error = ""
     version_ok = False
 
+    if name == "antigravity" and _is_windows_host():
+        require_trusted_binary_paths = True
     probe_errors: list[str] = []
     timed_out = ""
     for candidate in binary_candidates:
@@ -1249,11 +1261,7 @@ def _scan_agent(
             name,
             candidate,
             spec.version_args,
-            require_trusted_binary_paths=(
-                True
-                if name == "antigravity" and _is_windows_host()
-                else require_trusted_binary_paths
-            ),
+            require_trusted_binary_paths=require_trusted_binary_paths,
             data_dir=data_dir,
         )
         if candidate_version and not candidate_error:
@@ -1266,6 +1274,19 @@ def _scan_agent(
             probe_errors.append(f"{candidate}: {candidate_error}")
             if candidate_error == VERSION_PROBE_TIMED_OUT and not timed_out:
                 timed_out = candidate
+    if not version_ok and timed_out:
+        # The first start of a CLI on a cold disk (a fresh host or clone) can
+        # outlast the budget and answer in seconds right after, so ask once
+        # more before calling it slow (GAP-0066).
+        candidate_version, candidate_error = _version_for_agent_binary(
+            name,
+            timed_out,
+            spec.version_args,
+            require_trusted_binary_paths=require_trusted_binary_paths,
+            data_dir=data_dir,
+        )
+        if candidate_version and not candidate_error:
+            binary_path, version, version_ok = timed_out, candidate_version, True
     if not version_ok and probe_errors:
         error = "; ".join(probe_errors)
     if not version_ok and timed_out:
@@ -2577,7 +2598,7 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                     signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
-                    _display_version(signal.version) or signal.error,
+                    _display_version(signal.version) or _display_error(signal),
                 ]
             )
         )
