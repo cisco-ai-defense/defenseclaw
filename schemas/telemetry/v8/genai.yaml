@@ -5083,7 +5083,9 @@ attribute_extensions:
   cardinality: high
   normalization:
     id: identifier-v1
-    notes: remote address of the login session (for example the SSH client); never a metric label
+    overrides:
+      pattern: '^(::|[A-Za-z0-9])[A-Za-z0-9._:/-]*$'
+    notes: remote address of the login session (for example the SSH client); an IPv6 address can start with a double colon (loopback, IPv4-mapped); never a metric label
 - ref: db.collection.name
   field_class: identifier
   sensitivity: sensitive
