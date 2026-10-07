@@ -4069,10 +4069,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.writeJSON(w, http.StatusOK, map[string]string{
+	reloaded := map[string]any{
 		"status":     "reloaded",
 		"policy_dir": a.scannerCfg.PolicyDir,
-	})
+	}
+	// The live generation after the rebuild, so a caller can say which policy is enforcing now.
+	if g := livePolicyGeneration(); g != nil {
+		reloaded["generation"] = g.N
+		reloaded["digest"] = g.Digest
+	}
+	a.writeJSON(w, http.StatusOK, reloaded)
 }
 
 // codeScanRequest is the payload for POST /api/v1/scan/code.

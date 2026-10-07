@@ -664,6 +664,43 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
 }
 
+// maxEntityMatchesPerRule bounds the matches counted for one rule in one result.
+const maxEntityMatchesPerRule = 1000
+
+// countRuleEntities counts the distinct values the connector content rules
+// match in text: an address that two rules match counts once, and a rule that
+// matches the same value twice counts it once. A findings list holds one entry
+// per rule, so it cannot say how many values a result carries.
+func countRuleEntities(connector, text string) int {
+	if text == "" || ManagedEnterpriseActive() {
+		return 0
+	}
+	generation := snapshotRulePackGeneration(connector)
+	if generation == nil {
+		return 0
+	}
+	options := ruleScanOptions{contentScope: ruleContentScopeUntrusted}
+	seen := make(map[string]struct{})
+	for categoryIndex := range generation.categories {
+		cat := &generation.categories[categoryIndex]
+		if !options.allowsCategory(cat.Name) {
+			continue
+		}
+		for ruleIndex := range cat.Rules {
+			rule := &cat.Rules[ruleIndex]
+			if rule.Pattern == nil || !options.allows(rule.ID, rule.ToolCallOnly) {
+				continue
+			}
+			for _, loc := range rule.Pattern.FindAllStringIndex(text, maxEntityMatchesPerRule) {
+				if match := text[loc[0]:loc[1]]; acceptedRuleMatchAt(rule.ID, text, match, loc[0], loc[1]) {
+					seen[match] = struct{}{}
+				}
+			}
+		}
+	}
+	return len(seen)
+}
+
 // scanContentRulesForConnector applies the content-only rule boundary used by
 // connector prompts and tool results. Concrete actions (commands, paths,
 // cognitive-file mutations, and C2 operations) belong to the trusted tool-call

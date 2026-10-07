@@ -93,6 +93,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNVERSIONED,
     compare_agent_versions,
     connector_lock_contract_invariant,
+    normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
@@ -4436,19 +4437,15 @@ def _refuse_rotate_token_on_managed_host() -> None:
     hosts publish no such marker and are unaffected.
     """
 
-    from defenseclaw.upgrade_shim import managed_deployment
+    from defenseclaw.upgrade_shim import managed_deployment, managed_lifecycle_command
 
     deployment = managed_deployment()
     if not deployment:
         return
-    if os.name == "nt":
+    gateway = managed_lifecycle_command()
+    if not gateway:
         remedy = "rotating the credentials of a managed Windows deployment is not available yet"
     else:
-        gateway = (
-            "/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos"
-            if sys.platform == "darwin"
-            else "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux"
-        )
         remedy = f"an administrator rotates its per-user credentials with `sudo {gateway} rotate-credentials`"
     raise click.ClickException(
         f"This computer's DefenseClaw is managed by your organization ({deployment}), so per-user "
@@ -5563,8 +5560,8 @@ def _check_connector_version_supported_for_setup(
             ux.ok(f"{label}: version {version_display}; connector has no hook contract gate.")
             if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version):
                 ux.warn(
-                    f"{label}: {version_display} is in the OpenClaw ≥2026.6.8 transport range. "
-                    "A live :4000 port is not proof that agent LLM traffic is intercepted — "
+                    f"{label} {normalize_agent_version(raw_version)} is in the ≥2026.6.8 transport range. "
+                    "A live guardrail proxy port is not proof that agent LLM traffic is intercepted — "
                     "run `defenseclaw doctor` and confirm the OpenClaw interception check."
                 )
         return True
@@ -15258,17 +15255,25 @@ def _restart_openclaw_gateway() -> bool:
             timeout=60,
         )
         output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
-        if result.returncode == 0 and (
-            "openclaw gateway install" in output
-            or re.search(r"service (?:is )?not (?:loaded|enabled|installed|registered|found)", output)
+        # A gateway started with `openclaw gateway run` has no service to restart:
+        # OpenClaw 2026.9 exits non-zero ("Foreground Gateway owner pid N no longer
+        # listens ...") while that gateway keeps running (GAP-0191).
+        foreground_gateway = result.returncode != 0 and "foreground gateway" in output
+        if foreground_gateway or (
+            result.returncode == 0
+            and (
+                "openclaw gateway install" in output
+                or re.search(r"service (?:is )?not (?:loaded|enabled|installed|registered|found)", output)
+            )
         ):
-            # OpenClaw exits 0 but restarted nothing: there is no installed
-            # gateway service (for example a foreground `openclaw gateway`).
-            # Don't claim a restart happened (GAP-1408).
+            # OpenClaw restarted nothing: there is no installed gateway service
+            # (for example a foreground `openclaw gateway run`). Don't claim a
+            # restart happened (GAP-1408); the health check that follows confirms
+            # the gateway answers, and it reloads openclaw.json on its own.
             click.echo(" - (no OpenClaw gateway service to restart)")
             click.echo(
-                "    If OpenClaw runs in a terminal (openclaw gateway), restart it there so it loads "
-                "the DefenseClaw plugin."
+                "    If OpenClaw runs in a terminal (openclaw gateway run), restart it there if it does not "
+                "load the DefenseClaw plugin."
             )
             return True
         if result.returncode == 0:

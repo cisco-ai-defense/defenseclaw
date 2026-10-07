@@ -257,8 +257,16 @@ func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 }
 
 // TestPolicyReloadErrorIsPlain pins GAP-0160: a failed rebuild shows words, not
-// the HTTP status, the JSON body or the internal stage names.
+// the HTTP status, the JSON body or the internal stage names. GAP-0183: so does a
+// successful one.
 func TestPolicyReloadErrorIsPlain(t *testing.T) {
+	ok := policyReloadMessage([]byte(`{"status":"reloaded","policy_dir":"/p","generation":7,"digest":"sha256:ab"}`))
+	if ok != "Policy reloaded (generation 7, digest sha256:ab)." {
+		t.Fatalf("success sentence = %q", ok)
+	}
+	if got := policyReloadMessage([]byte(`{"status":"reloaded","policy_dir":"/p"}`)); got != "Policy reloaded." {
+		t.Fatalf("success without a generation = %q", got)
+	}
 	digest := "sha256:" + strings.Repeat("ab", 32)
 	pin := `{"error":"reload failed: config reload rule pack preflight: global rule pack \"p0m\": digest ` + digest +
 		` does not match guardrail.custom_packs.p0m.digest","status":"failed"}`

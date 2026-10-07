@@ -1641,12 +1641,11 @@ func TestResolveProvider_InstanceOverlay_FamilyMismatchUnrelatedURLSkipsOverlay(
 func TestProxyWithLocalInspector(t *testing.T) {
 	t.Run("local_scanner_blocks_injection_prompt", func(t *testing.T) {
 		// "ignore previous instructions" matches a CRITICAL-severity
-		// injection rule, so the prompt-surface clamp does not apply
-		// and the proxy still writes the [DefenseClaw] block message.
-		// HIGH-and-below prompts take the demote-to-alert path —
-		// covered by the clampPromptDirectionVerdict unit tests and
-		// the TestProxyPreCallInspection/confirm_*_alerts_and_forwards
-		// subtests.
+		// injection rule, which the default block_at blocks, so the proxy
+		// writes the [DefenseClaw] block message. A lower block_at blocks
+		// lower severities the same way (TestGuardrailInspectorFallbackUsesResolvedThresholds);
+		// a confirm verdict is audited as an alert
+		// (TestProxyPreCallInspection/confirm_*_alerts_and_forwards).
 		prov := &mockProvider{}
 		insp := NewGuardrailInspector("local", nil, nil)
 		proxy := newTestProxy(t, prov, insp, "action")

@@ -106,6 +106,17 @@ def managed_deployment() -> str | None:
     return managed_descriptor()
 
 
+def managed_lifecycle_command() -> str:
+    """The managed package's lifecycle command prefix (``enterprise linux`` or
+    ``enterprise macos``), or "" on Windows, where Setup is the lifecycle."""
+
+    if os.name == "nt":
+        return ""
+    if sys.platform == "darwin":
+        return "/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos"
+    return "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux"
+
+
 def managed_descriptor() -> str | None:
     """Return the managed runtime descriptor on this Linux or macOS host, if any."""
 

@@ -460,6 +460,27 @@ def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]
 MANAGED_EXIT_CODE = 3
 
 
+_CONNECTOR_ENABLED_PATH = re.compile(r"guardrail\.connectors\.[^.\[\]]+\.enabled")
+
+
+def _restart_still_pending(cfg: object, paths: list[str], local_digest: str) -> list[str]:
+    """The restart-required paths the running gateway does not already enforce.
+
+    A connector enabled flag is part of the effective policy digest, and the
+    gateway keeps its running value until it restarts. When it already reports
+    the digest config.yaml now computes to, the key is back at the running
+    value and nothing is pending (GAP-0221). Other keys keep their hint: some
+    are not part of the digest at all."""
+    flips = [path for path in paths if _CONNECTOR_ENABLED_PATH.fullmatch(path)]
+    if not flips or not local_digest:
+        return paths
+    from defenseclaw.gateway import running_policy_digest
+
+    if running_policy_digest(cfg) != local_digest:
+        return paths
+    return [path for path in paths if path not in flips]
+
+
 def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
@@ -491,13 +512,14 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     click.echo(f"{verb.capitalize()} {key} (config generation {result.generation}, sha256 {result.sha256[:12]}).")
     from defenseclaw.gateway import local_policy_digest
 
-    digest = local_policy_digest(app.cfg if app.cfg is not None else config_module.load(), timeout=20)
+    cfg = app.cfg if app.cfg is not None else config_module.load()
+    digest = local_policy_digest(cfg, timeout=20)
     if digest:
         click.echo(f"Effective policy digest: {digest['effective_digest']}")
-    if result.restart_required:
-        click.echo(
-            f"Restart the gateway to apply {', '.join(result.restart_required)}: defenseclaw-gateway restart"
-        )
+    local_digest = digest["effective_digest"] if digest else ""
+    pending = _restart_still_pending(cfg, result.restart_required, local_digest)
+    if pending:
+        click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
     logger = getattr(app, "logger", None)
     if logger is not None:
         try:

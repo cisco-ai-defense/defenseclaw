@@ -1557,3 +1557,21 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
     except ValueError:
         return None
     return report if isinstance(report, dict) and report.get("effective_digest") else None
+
+
+def running_policy_digest(cfg: Any, *, timeout: float = 3) -> str:
+    """The effective_digest the running gateway reports on /health; "" when it is not reachable."""
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(cfg),
+            port=cfg.gateway.api_port,
+            token=cfg.gateway.resolved_token(),
+            timeout=timeout,
+        )
+        try:
+            policy = client.health().get("policy")
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - not running, a foreign listener or a bad answer all mean "unknown"
+        return ""
+    return str(policy.get("effective_digest") or "") if isinstance(policy, dict) else ""

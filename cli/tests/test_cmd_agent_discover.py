@@ -407,7 +407,8 @@ class TestAgentDiscoverCommand(unittest.TestCase):
             packs.append(pack)
         good = "sha256:" + hashlib.sha256(packs[0].read_bytes()).hexdigest()
         bad = "sha256:" + "0" * 64
-        app.cfg.ai_discovery.signature_packs = [str(path) for path in packs]
+        gone = Path(tmp_dir) / "gone.json"  # GAP-0220: configured, but the file is missing
+        app.cfg.ai_discovery.signature_packs = [str(path) for path in packs] + [str(gone)]
         app.cfg.ai_discovery.signature_pack_digests = {str(packs[0]): good, str(packs[1]): bad}
         try:
             listed = self.runner.invoke(agent, ["signatures", "list", "--json"], obj=app, catch_exceptions=False)
@@ -421,9 +422,11 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertNotIn("tampered-ai", ids)
         self.assertIn(f"Not loaded: {packs[1].resolve()}", listed.stderr)
         self.assertIn(f"does not match the pinned {bad}", listed.stderr)
+        self.assertIn(f"Not loaded: {gone}: file not found", listed.stderr)
         packs_status = json.loads(status.stdout)["signature_packs"]
-        self.assertEqual(packs_status["configured"], 2)
-        [refused] = packs_status["not_loaded"]
+        self.assertEqual(packs_status["configured"], 3)
+        [missing, refused] = packs_status["not_loaded"]
+        self.assertEqual((missing["path"], missing["reason"]), (str(gone), "file not found"))
         self.assertEqual((refused["path"], refused["pinned"]), (str(packs[1].resolve()), bad))
         self.assertTrue(refused["digest"].startswith("sha256:") and refused["digest"] != bad)
 
