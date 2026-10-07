@@ -316,13 +316,23 @@ func TestSetupWithoutATerminalNeedsYesOrNonInteractive(t *testing.T) {
 	ta.IO.TTY = false
 	before, _ := os.ReadFile(ta.ConfigPath)
 	useGateway(ta)
-	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "there is no terminal; pass --yes to accept the defaults, or --non-interactive")
+	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "its standard input is not a terminal; pass --yes to accept the defaults, or --non-interactive")
 	if len(ta.gateway.planned) != 0 || ta.gateway.applied != 0 {
 		t.Fatalf("gateway plans = %+v, applied %d; want none", ta.gateway.planned, ta.gateway.applied)
 	}
 	if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 		t.Fatalf("the configuration changed:\n%s", after)
 	}
+
+	// GAP-0059: with only the output piped (`sandbox setup | tee
+	// setup.log`) someone at the terminal answers; setup asked for --yes.
+	piped := setupApp(t, "n\n", "", false)
+	piped.IO.TTY, piped.IO.InTTY = false, true
+	useGateway(piped)
+	if err := piped.Setup(bg, SetupOptions{SkipImages: true}); err != nil && strings.Contains(err.Error(), "not a terminal") {
+		t.Fatalf("Setup = %v with a terminal on standard input", err)
+	}
+	has(t, piped.output(), "Allow sandboxes to mount the project folder you launch from?")
 }
 
 func TestSetupNeedsConsentToInstall(t *testing.T) {
