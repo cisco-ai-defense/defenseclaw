@@ -253,6 +253,10 @@ func (state *projectionWalkState) transformLeaf(input any, pointer string) (any,
 	if !ok {
 		return nil, false, &ProjectionError{Code: ProjectionFailureContext}
 	}
+	if class == observability.FieldClassIdentifier && state.profile.RemovesPersonalIdentifiers() &&
+		isPersonalIdentifierPointer(pointer) {
+		mode = ModeRemove
+	}
 	if mode == ModeRemove {
 		state.report.removed()
 		return nil, true, nil

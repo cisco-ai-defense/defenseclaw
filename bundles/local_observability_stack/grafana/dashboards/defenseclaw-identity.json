@@ -1088,7 +1088,7 @@
       {
         "name": "user",
         "label": "User regex",
-        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive).",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Every panel on this board reads Loki, so every panel is narrowed.",
         "type": "textbox",
         "query": ".*",
         "current": {

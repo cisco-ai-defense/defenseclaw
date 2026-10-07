@@ -1093,6 +1093,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.runCapacityObservabilityV8(runCtx, sidecarCapacityInterval)
 	}()
 
+	// The audit write-ahead log is checkpointed once it passes a size limit, so
+	// sustained hook traffic cannot grow it without bound.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditWALGuard(runCtx)
+	}()
+
 	// Agent identities seen on the hook path are written to inventory.db in
 	// one batch per flush interval, never per hook.
 	agentIdentityStoreToken := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore {
@@ -1527,7 +1535,7 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 	if rp == nil {
 		return nil, fmt.Errorf("%s rule pack %q: loader returned no rule pack", scope, dir)
 	}
-	if err := rp.Validate(); err != nil {
+	if err := cache.Validate(rp); err != nil {
 		return nil, fmt.Errorf("%s rule pack %q: %w", scope, dir, err)
 	}
 	return rp, nil
@@ -3204,7 +3212,6 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 	return filtered
 }
 
-// runWatcher starts the skill/MCP install watcher if enabled in config.
 // watcherUsesConnectorDirs reports whether the watcher may watch the
 // connector's (or the OpenClaw default's) folders in the gateway's own home.
 // Not when no connector is configured (init --connector none, or setup remove
@@ -3226,18 +3233,32 @@ func WatcherWatchesDirs(cfg *config.Config) bool {
 	if !w.Enabled {
 		return false
 	}
-	return watcherUsesConnectorDirs(cfg) ||
+	return watcherUsesConnectorDirs(cfg) || watcherUsesEnrolledUserDirs(cfg) ||
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
+// runWatcher starts the skill/MCP install watcher if enabled in config,
+// and restarts it when a managed gateway's enrolled folders change.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
+	for {
+		restart, err := s.runWatcherOnce(ctx)
+		if !restart || ctx.Err() != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: the enrolled users' folders changed; restarting the watcher\n")
+	}
+}
+
+// runWatcherOnce runs one watcher until ctx ends, or until a managed
+// gateway's set of enrolled users' folders changes (restart is then true).
+func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) {
 	wcfg := s.currentConfig().Gateway.Watcher
 
 	if !wcfg.Enabled {
 		s.health.SetWatcher(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher disabled (set gateway.watcher.enabled=true to enable)\n")
 		<-ctx.Done()
-		return nil
+		return false, nil
 	}
 
 	// Resolve the active connector to get connector-specific component
@@ -3256,6 +3277,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 
 	skillDirs, pluginDirs, src := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
+	var enrolled *enrolledWatchSet
 	if cfg := s.currentConfig(); cfg != nil && !watcherUsesConnectorDirs(cfg) {
 		if src.Skill != watcherDirsFromConfig {
 			skillDirs = nil
@@ -3263,6 +3285,37 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		if src.Plugin != watcherDirsFromConfig {
 			pluginDirs = nil
 		}
+		if watcherUsesEnrolledUserDirs(cfg) {
+			set := resolveEnrolledWatchSet(cfg, reg, wcfg, serviceHomeDir())
+			enrolled = &set
+			if src.Skill != watcherDirsFromConfig {
+				skillDirs = set.skillDirs
+			}
+			if src.Plugin != watcherDirsFromConfig {
+				pluginDirs = set.pluginDirs
+			}
+		}
+	}
+	watchCtx := ctx
+	changed := make(chan struct{})
+	if enrolled != nil {
+		var cancel context.CancelFunc
+		watchCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-changed:
+				cancel()
+			case <-watchCtx.Done():
+			}
+		}()
+		defer func() {
+			select {
+			case <-changed:
+				restart = ctx.Err() == nil
+			default:
+			}
+		}()
 	}
 
 	if !wcfg.Skill.Enabled {
@@ -3283,8 +3336,11 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 			"idle":        "no directories configured",
 		})
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: no directories to watch\n")
-		<-ctx.Done()
-		return nil
+		if enrolled != nil {
+			s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, nil, changed)
+		}
+		<-watchCtx.Done()
+		return false, nil
 	}
 
 	s.health.SetWatcher(StateStarting, "", map[string]interface{}{
@@ -3314,6 +3370,10 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
 		return livePolicyDigestV8(), livePolicyGenerationV8()
 	})
+	if enrolled != nil {
+		w.SetRootConnectors(enrolled.roots)
+		w.SetMCPServerSource(enrolled.live.list)
+	}
 	if conn != nil {
 		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
@@ -3340,9 +3400,15 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	runErr := w.Run(ctx)
+	if enrolled != nil {
+		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, w, changed)
+	}
+	runErr := w.Run(watchCtx)
 	s.health.SetWatcher(StateStopped, "", nil)
-	return runErr
+	if errors.Is(runErr, context.Canceled) && ctx.Err() == nil {
+		runErr = nil
+	}
+	return false, runErr
 }
 
 // handleAdmissionResult processes watcher verdicts. It only forwards runtime
@@ -4743,34 +4809,44 @@ func managedGuardianStandaloneCoverage(dataDir string) (bool, string) {
 }
 
 func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []string, isolateTargets bool) (bool, string) {
+	authorization, reason := readManagedGuardianAuthorization(dataDir)
+	if authorization == nil {
+		return false, reason
+	}
+	return managedGuardianAuthorizationCovers(*authorization, connectorNames, isolateTargets)
+}
+
+// readManagedGuardianAuthorization reads the trusted, fresh guardian
+// authorization record, or returns why it cannot.
+func readManagedGuardianAuthorization(dataDir string) (*managedGuardianAuthorization, string) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
-		return false, err.Error()
+		return nil, err.Error()
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return false, fmt.Sprintf("open hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("open hook guardian authorization: %v", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return false, fmt.Sprintf("inspect hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("inspect hook guardian authorization: %v", err)
 	}
 	if !info.Mode().IsRegular() {
-		return false, "hook guardian authorization is not a regular file"
+		return nil, "hook guardian authorization is not a regular file"
 	}
 	if info.Size() > managedGuardianAuthorizationMaxBytes {
-		return false, fmt.Sprintf(
+		return nil, fmt.Sprintf(
 			"hook guardian authorization exceeds %d bytes",
 			managedGuardianAuthorizationMaxBytes,
 		)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, managedGuardianAuthorizationMaxBytes+1))
 	if err != nil {
-		return false, fmt.Sprintf("read hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("read hook guardian authorization: %v", err)
 	}
 	if int64(len(data)) > managedGuardianAuthorizationMaxBytes {
-		return false, fmt.Sprintf(
+		return nil, fmt.Sprintf(
 			"hook guardian authorization exceeds %d bytes",
 			managedGuardianAuthorizationMaxBytes,
 		)
@@ -4803,11 +4879,11 @@ func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []strin
 		decoder.DisallowUnknownFields()
 	}
 	if err := decoder.Decode(&authorization); err != nil {
-		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("parse hook guardian authorization: %v", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return false, "parse hook guardian authorization: trailing content"
+		return nil, "parse hook guardian authorization: trailing content"
 	}
 	// Accept version==0 (pre-spec-005 files that omit the `version`
 	// key — JSON decode leaves the int zero) and any version >= 1: on a
@@ -4815,11 +4891,17 @@ func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []strin
 	// consumed the fields we know. Negative versions are the only
 	// unsupported case (malformed producer).
 	if authorization.Version < 0 {
-		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
+		return nil, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
 	}
 	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
-		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
+		return nil, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
 	}
+	return &authorization, ""
+}
+
+// managedGuardianAuthorizationCovers checks a read record against the
+// connectors the gateway serves.
+func managedGuardianAuthorizationCovers(authorization managedGuardianAuthorization, connectorNames []string, isolateTargets bool) (bool, string) {
 	if isolateTargets {
 		// A target whose current repair failed keeps its last successful
 		// row (so a user cannot unenroll by breaking their own home), so

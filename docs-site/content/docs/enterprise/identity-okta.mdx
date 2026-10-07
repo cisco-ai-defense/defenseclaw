@@ -281,10 +281,7 @@ that name the Okta groups exactly as `id -Gn` prints them:
 - **Standalone enterprise profile.** Start from
   `admin-config.example.yaml`: it sets three profiles, assigns two of them to the
   groups `contractors` and `ml-research`, and makes `okta-standard` (block at HIGH)
-  the default for everyone else. Change the group names, then apply it as root.
-  Give each connector under `guardrail.connectors` at least one key, as the example
-  does with `enabled: true`: an empty entry such as `claudecode: {}` is dropped when
-  the config loads, and then nobody is enrolled for that connector. `ensure` validates the file first and keeps the
+  the default for everyone else. Change the group names, then apply it as root. `ensure` validates the file first and keeps the
   installed config when it is invalid, for example with
   `unknown profile "okta-nope"`.
 

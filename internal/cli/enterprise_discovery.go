@@ -171,8 +171,18 @@ func fetchEnterpriseDiscoveryRuntime() (*enterpriseRuntimeView, error) {
 	return view, nil
 }
 
+// enterpriseGatewayWait is how long a managed view waits for the gateway. A
+// request that needs a directory lookup (a cold SSSD, a slow domain
+// controller) is answered only after the gateway's own lookup bound of 20 s,
+// so the wait is longer, as the Python CLI's is (GAP-0140, GAP-0215).
+// Replaceable in tests.
+var enterpriseGatewayWait = 35 * time.Second
+
 // enterpriseGatewayGet decodes one GET of the managed deployment's local
-// gateway API into out and returns the gateway's host:port.
+// gateway API into out and returns the gateway's host:port. A gateway that
+// took the connection and did not answer in time is running, so the error
+// blames the lookup and does not send the administrator to the deployment
+// status; a connection that fails does.
 func enterpriseGatewayGet(path string, out any) (string, error) {
 	if err := enterpriseDiscoveryPinManagedEnv(); err != nil {
 		return "", err
@@ -181,7 +191,7 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 		return "", err
 	}
 	host := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), enterpriseGatewayWait)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+path, nil)
 	if err != nil {
@@ -196,6 +206,10 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 		req.Header.Set("X-DefenseClaw-Token", token)
 	}
 	resp, err := http.DefaultClient.Do(req)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "", fmt.Errorf("the gateway at %s took the connection but did not answer within %g s; it is running, and a request "+
+			"that waits for the directory (SSSD or the domain controller) can take that long. Try again", host, enterpriseGatewayWait.Seconds())
+	}
 	if err != nil {
 		return "", fmt.Errorf("the gateway at %s did not answer; check the deployment with: %s", host, enterpriseDiscoveryStatusHint())
 	}

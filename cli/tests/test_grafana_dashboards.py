@@ -281,6 +281,44 @@ def test_security_and_policy_log_queries_preserve_connector_scope() -> None:
     assert "process-global control-plane records without a connector" in policy["description"]
 
 
+# Loki panels whose records carry no user, so the User box cannot narrow them.
+_FLEET_WIDE_LOG_PANELS = {
+    "defenseclaw-agent-360.json": {
+        "Relationship warnings observed",
+        "Relationship evidence and conflict chronology",
+    },
+    "defenseclaw-agent-identity.json": {"Discovery runs ($__range)"},
+    "defenseclaw-ai-discovery.json": {"AI discovery summary log"},
+    "defenseclaw-policy-decisions.json": {"Recent OPA + egress events"},
+}
+
+
+def _all_panels(panels: list[dict]):
+    for panel in panels:
+        yield panel
+        yield from _all_panels(panel.get("panels", []))
+
+
+def test_user_variable_narrows_every_log_panel_that_carries_a_user() -> None:
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        dashboard = json.loads(path.read_text(encoding="utf-8"))
+        variables = {v["name"]: v for v in dashboard.get("templating", {}).get("list", [])}
+        if "user" not in variables:
+            continue
+        fleet_wide = _FLEET_WIDE_LOG_PANELS.get(path.name, set())
+        unfiltered = {
+            panel["title"]
+            for panel in _all_panels(dashboard["panels"])
+            for target in panel.get("targets", [])
+            if "loki" in json.dumps(target.get("datasource") or panel.get("datasource") or "").lower()
+            and "$user" not in target.get("expr", "")
+        }
+        assert unfiltered == fleet_wide, path.name
+        description = variables["user"].get("description", "")
+        for title in fleet_wide:
+            assert title.split(" (")[0] in description, (path.name, title)
+
+
 def test_traffic_dashboard_exposes_generated_stream_metrics() -> None:
     dashboard = _dashboard("defenseclaw-traffic.json")
     transitions = _panel(dashboard, "Stream transitions by outcome")
