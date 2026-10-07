@@ -69,7 +69,7 @@ func init() {
 	flags.StringVar(&enterpriseACPUserDataDir, "data-dir", "", "Per-user runtime data dir (default: <home>/.defenseclaw)")
 	flags.IntVar(&enterpriseACPAPIPort, "api-port", 0, "Gateway API port on this computer")
 	flags.StringVar(&enterpriseACPGuardBinary, "guard-binary", "", "Administrator-owned defenseclaw-acp (default: next to this executable)")
-	flags.StringVar(&enterpriseACPAgentBinary, "agent-binary", "", "Override the catalog agent executable")
+	flags.StringVar(&enterpriseACPAgentBinary, "agent-binary", "", "Path of the catalog agent executable when it is not on PATH (same name, for example kiro-cli)")
 	flags.BoolVar(&enterpriseACPJSON, "json", false, "Emit machine-readable JSON")
 	enterpriseACPCmd.AddCommand(enterpriseACPSetupCmd)
 }
@@ -169,6 +169,18 @@ func setupEnterpriseACPUserFiles(in enterpriseACPUserSetup) (result enterpriseAC
 	if in.profile == "" {
 		return result, errors.New("enterprise ACP setup requires --client, --agent, and --profile")
 	}
+	agentCommand := catalog.Command
+	if in.agentBinary != "" {
+		// The override only finds the enrolled agent outside PATH. Any
+		// executable used to be accepted, so an enrollment for one agent ran
+		// another, which the gateway and the audit then named after the
+		// enrollment (GAP-0398).
+		if !acpExecutableNamed(in.agentBinary, catalog.Command) {
+			return result, fmt.Errorf("--agent-binary %s is not the %s executable: the enrollment is for %s, whose executable is named %s",
+				in.agentBinary, catalog.Name, in.agent, catalog.Command)
+		}
+		agentCommand = in.agentBinary
+	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(in.dataDir, in.client, in.agent)
 	if err != nil {
 		return result, err
@@ -187,10 +199,6 @@ func setupEnterpriseACPUserFiles(in enterpriseACPUserSetup) (result enterpriseAC
 	if err := enterpriseACPGuardCustody(guard); err != nil {
 		return result, fmt.Errorf("--guard-binary %s is not the administrator-owned DefenseClaw ACP guard (%v); "+
 			"run the setup command the enrollment reports, which names the installed guard", guard, err)
-	}
-	agentCommand := catalog.Command
-	if in.agentBinary != "" {
-		agentCommand = in.agentBinary
 	}
 	agentExecutable, err := resolveACPExecutable(agentCommand, catalog.Name)
 	if err != nil {
@@ -343,6 +351,17 @@ func resolveACPExecutable(value, label string) (string, error) {
 		return "", fmt.Errorf("%s executable was not found: %s", label, value)
 	}
 	return resolved, nil
+}
+
+// acpExecutableNamed reports whether path names the executable command (on
+// Windows with any extension, in any case).
+func acpExecutableNamed(path, command string) bool {
+	base := filepath.Base(strings.TrimSpace(path))
+	if runtime.GOOS == "windows" {
+		base = strings.TrimSuffix(base, filepath.Ext(base))
+		return strings.EqualFold(base, command)
+	}
+	return base == command
 }
 
 // acpClientConfigPath is the editor file that holds the ACP agent entries.

@@ -54,7 +54,8 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 		if _, err := acp.PublishEnterpriseUserToken(dataDir, "zed", agent, credential.Token); err != nil {
 			t.Fatal(err)
 		}
-		binary := filepath.Join(t.TempDir(), agent+"-cli")
+		command := map[string]string{"kiro": "kiro-cli", "hermes": "hermes"}[agent]
+		binary := filepath.Join(t.TempDir(), command)
 		if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -67,6 +68,11 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 		})
 	}
 
+	if _, err := setup("kiro", filepath.Join(t.TempDir(), "openhands")); err == nil ||
+		!strings.Contains(err.Error(), "is not the Kiro executable") {
+		// A user enrolled for one agent ran another under it (GAP-0398).
+		t.Fatalf("setup accepted another program as the enrolled agent: %v", err)
+	}
 	if _, err := setup("kiro", "kiro-cli"); err == nil {
 		t.Fatal("setup without an enrolled token succeeded")
 	} else if body, _ := os.ReadFile(settings); string(body) != original {

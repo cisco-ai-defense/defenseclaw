@@ -268,7 +268,12 @@ computer has no other DefenseClaw command. Secure Client reports
 It writes the guarded editor entry and the executable contract lock in that
 user's own state, from the enrollment alone. It accepts only the guard the
 package installed: a `--guard-binary` outside the administrator-owned install
-(a copy in the home, a symlink, a folder the user can write) is refused. It reads no central configuration,
+(a copy in the home, a symlink, a folder the user can write) is refused. The
+agent is the catalog executable on the user's `PATH`, or the path
+`--agent-binary` names, which must carry the catalog name (for example
+`kiro-cli`); another program is refused. DefenseClaw cannot tell a different
+program installed under that name from the agent, so pair the enrollment with
+application control (see [Configuration](#configuration)). It reads no central configuration,
 so it cannot change policy, and the gateway refuses any request that does not
 match the enrollment. On a computer that has the Python CLI the same files come
 from `defenseclaw acp setup --managed`, which the **ACP Guard → Enroll managed
