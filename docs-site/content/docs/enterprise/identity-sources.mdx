@@ -78,7 +78,7 @@ how it authenticated the request, and the install decides which way that is.
 
 | Install | How the caller is authenticated | The user the gateway takes |
 | --- | --- | --- |
-| Per-user, any OS | The gateway, hook, ACP or telemetry token the request presents. The tokens are in the user's own files, and the gateway runs as that account | The account the gateway runs as |
+| Per-user, any OS | The gateway, hook or ACP token the request presents. The tokens are in the user's own files, and the gateway runs as that account | The account the gateway runs as |
 | Standalone enterprise, Linux and macOS | The kernel's peer credentials on the hook socket. On loopback TCP, a per-user credential | The peer's uid, or the uid the credential is bound to |
 | Standalone enterprise, Windows | A per-user credential on loopback TCP (`127.0.0.1:18970`). Windows gives the gateway no kernel check of a TCP caller | The SID the credential is bound to |
 | Sandbox of a per-user install | The sandbox binding's credential, which only that sandbox holds | The host user recorded on the binding |
