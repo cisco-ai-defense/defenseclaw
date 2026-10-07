@@ -2056,6 +2056,67 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     )
 
 
+_AUDIT_STORE_REOPEN_REPAIR_ID = "doctor.state.audit-db.reopen"
+
+
+def _audit_store_replaced(health: dict | None) -> bool:
+    entry = health.get("audit_store") if isinstance(health, dict) else None
+    return isinstance(entry, dict) and entry.get("state") == "replaced"
+
+
+def _check_live_audit_store(health: dict | None, r: _DoctorResult) -> None:
+    """FAIL when the running gateway writes to an audit.db that was deleted or
+    replaced on disk: every new audit record is lost while the file on disk
+    looks healthy (GAP-0325)."""
+    if _audit_store_replaced(health):
+        _emit(
+            "fail",
+            "Audit store",
+            "the running gateway writes to an audit.db that was deleted or replaced on disk, "
+            "so new audit records are lost",
+            r=r,
+            check_id="doctor.state.audit-db.live",
+            reason_code="audit-db-replaced-while-running",
+            remediation="restart the gateway: defenseclaw-gateway restart (doctor --fix --yes restarts it)",
+        )
+
+
+def _live_gateway_health(cfg) -> dict | None:
+    code, body = _http_probe(
+        _gateway_api_url(cfg, "/health"),
+        timeout=5.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+    if code != 200:
+        return None
+    try:
+        document = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _fix_audit_store_reopen(cfg, *, assume_yes: bool, plan_only: bool = False) -> tuple[str, str]:
+    """Restart a gateway whose audit.db was deleted or replaced under it."""
+    if not _audit_store_replaced(_live_gateway_health(cfg)):
+        return ("skip", "the running gateway writes to the audit.db on disk")
+    if plan_only:
+        return ("plan", "restart the gateway so it opens the audit.db on disk again")
+    if not assume_yes and not click.confirm(
+        "    Restart the gateway so it opens the audit.db on disk again?", default=True
+    ):
+        return ("skip", "declined by user")
+    trust = _trusted_gateway_listener_for_lifecycle(cfg)
+    if not trust.trusted:
+        return ("fail", f"{trust.detail}; run `defenseclaw-gateway restart`")
+    repaired, detail = _repair_gateway_lifecycle(cfg, start_if_stopped=False)
+    if not repaired:
+        return ("fail", f"could not restart the gateway ({detail}); run `defenseclaw-gateway restart`")
+    return ("pass", "restarted the gateway; it writes to the audit.db on disk again")
+
+
 def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import (
         _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
@@ -2069,14 +2130,21 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         data_dir=str(getattr(cfg, "data_dir", "") or ""),
     )
     if health.status is AuditDBHealthStatus.MISSING:
+        # A running gateway still writes to the deleted file, and the
+        # initialize repair refuses while it runs (GAP-0325).
+        running = bool(_recovery_gateway_blocker(cfg))
         _emit(
             "fail",
             "Audit database",
-            f"not found at {db_path}",
+            f"not found at {db_path}" + ("; the running gateway still writes to the deleted file" if running else ""),
             r=r,
             check_id="doctor.state.audit-db",
             reason_code="audit-db-missing",
-            remediation=("defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize"),
+            remediation=(
+                "restart the gateway so it creates a new one: defenseclaw-gateway restart"
+                if running
+                else "defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize"
+            ),
         )
         return
     if health.status is AuditDBHealthStatus.INVALID:
@@ -11000,6 +11068,7 @@ def doctor(
     sidecar_health = _check_sidecar(cfg, r)
     if sidecar_health is not None:
         _check_guardrail_profile(cfg, r)
+        _check_live_audit_store(sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
@@ -12061,6 +12130,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             (),
             ("restore the owner execute bit on the generated hook scripts setup sealed",),
             False,
+            False,
+        ),
+        (
+            _AUDIT_STORE_REOPEN_REPAIR_ID,
+            "audit store of the running gateway",
+            "disruptive",
+            _fix_audit_store_reopen,
+            ("doctor.gateway.service.reconcile",),
+            ("restart the gateway whose audit.db was deleted or replaced on disk, so it opens the file again",),
+            True,
             False,
         ),
         (

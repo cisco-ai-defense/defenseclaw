@@ -1088,3 +1088,23 @@ def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_
     assert status is DeviceKeyHealthStatus.VALID
     kept = [name for _root, _dirs, files in os.walk(data_dir) for name in files if ".orphaned-" in name]
     assert len(kept) == 2, kept
+
+
+def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> None:
+    # GAP-0325: the gateway health says its open audit.db is no longer on disk.
+    cfg = _cfg(_private_data_dir(tmp_path))
+    health = {"audit_store": {"state": "replaced"}}
+    rows = _DoctorResult()
+    cmd_doctor._check_live_audit_store(health, rows)
+    assert rows.checks[-1]["status"] == "fail"
+    assert "defenseclaw-gateway restart" in rows.checks[-1]["remediation"]
+
+    restart = Mock(return_value=(True, ""))
+    with (
+        patch.object(cmd_doctor, "_live_gateway_health", return_value=health),
+        patch.object(cmd_doctor, "_trusted_gateway_listener_for_lifecycle", return_value=_GatewayTrust("trusted", "", pid=4242)),
+        patch.object(cmd_doctor, "_repair_gateway_lifecycle", restart),
+    ):
+        assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+        assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True)[0] == "pass"
+    restart.assert_called_once()
