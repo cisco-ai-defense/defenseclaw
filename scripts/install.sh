@@ -769,6 +769,7 @@ fi
 if ! swap_in; then
     err "Installing ${VERSION} failed; restoring ${PREV_VERSION:-the previous state}"
     restore_snapshot
+    drop_staging
     die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
 fi
 START_RC=0
@@ -786,6 +787,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
         err "The ${VERSION} gateway did not become healthy; restoring ${PREV_VERSION:-the previous state}"
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         restore_snapshot
+        drop_staging
         die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
     fi
 fi
@@ -942,6 +944,14 @@ install_uv() {
 drop_new_uv() {
     [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
     [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"
+}
+
+# drop_staging: an install that was undone leaves only the .failed-<time>
+# copy it names. The staged release and the uv files this run added went
+# unmentioned next to it: about 1.2 GB after a rolled-back upgrade (GAP-0388).
+drop_staging() {
+    rm -rf "${STAGING}" || true
+    drop_new_uv || true
 }
 
 is_machinery() {

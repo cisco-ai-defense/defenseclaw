@@ -1159,6 +1159,19 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
+def test_an_undone_install_drops_what_it_staged() -> None:
+    # GAP-0388: after a rolled-back upgrade .staging (722 MB) and the new .uv
+    # (478 MB) stayed next to the .failed-<time> copy, and only that was named.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    swap = text[text.index("if ! swap_in; then") : text.index("\nfinish_swap\n")]
+    restores = swap.count("restore_snapshot\n")
+    assert restores == 2 and swap.count("restore_snapshot\n    drop_staging\n") + swap.count(
+        "restore_snapshot\n        drop_staging\n"
+    ) == restores
+    body = text[text.index("drop_staging() {") : text.index("\n}\n", text.index("drop_staging() {"))]
+    assert 'rm -rf "${STAGING}"' in body and "drop_new_uv" in body
+
+
 def test_a_full_disk_does_not_stop_the_restore_of_the_previous_install(tmp_path: Path) -> None:
     # GAP-0375: with no room for the .failed-<time> copy, its mkdir ended the
     # restore under set -e: no CLI, no gateway, and no word of what to do.
