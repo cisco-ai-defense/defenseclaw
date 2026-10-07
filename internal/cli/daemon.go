@@ -277,7 +277,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	err = runStartLocked(cmd, args, coldStart)
 	if err != nil && coldStart {
 		if running, _ := daemon.New(dataDir).IsRunning(); !running {
-			recordHookColdStartFailure(dataDir)
+			recordHookColdStartFailure(dataDir, err)
 		}
 	}
 	return err
@@ -313,7 +313,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
 	}
 	if err := daemonConfigLoadError("start", cfgLoadErr); err != nil {
-		return err
+		return startConfigLoadError{err: err}
 	}
 	if rotationTransaction {
 		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {

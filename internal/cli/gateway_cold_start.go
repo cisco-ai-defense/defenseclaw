@@ -164,11 +164,27 @@ func absolutePathEntries(path string) string {
 	return strings.Join(kept, string(os.PathListSeparator))
 }
 
-func recordHookColdStartFailure(dataDir string) {
+// startConfigLoadError marks a start that failed because config.yaml does not
+// load. Its message is the wrapped one.
+type startConfigLoadError struct{ err error }
+
+func (e startConfigLoadError) Error() string { return e.err.Error() }
+func (e startConfigLoadError) Unwrap() error { return e.err }
+
+// recordHookColdStartFailure writes the backoff marker. Its second line names
+// a config.yaml that does not load, so the hook can say that a start cannot
+// help until the file is fixed instead of "run defenseclaw-gateway start"
+// (GAP-0409).
+func recordHookColdStartFailure(dataDir string, cause error) {
 	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
 		return
 	}
-	_ = os.WriteFile(gatewayColdStartFailedPath(dataDir), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+	body := time.Now().UTC().Format(time.RFC3339) + "\n"
+	var configErr startConfigLoadError
+	if errors.As(cause, &configErr) {
+		body += "config-invalid\n"
+	}
+	_ = os.WriteFile(gatewayColdStartFailedPath(dataDir), []byte(body), 0o600)
 }
 
 // hookColdStartRefusal returns why a hook may not start the gateway now, or
