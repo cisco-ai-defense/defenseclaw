@@ -134,9 +134,9 @@ var OpenShellLockableKeys = []string{
 //
 // The legacy openshell-sandbox (0.0.x) sub-keys policy_dir, mode, version,
 // sandbox_home, auto_pair and host_networking are still accepted by the v8
-// schema and ignored. The config_version 9 migration drops mode and
-// sandbox_home and resets the addresses a standalone install pointed at its
-// sandbox's veth link (migrateRetiredStandaloneSandbox).
+// schema (a 0.8.x config holds them) and ignored. The config_version 9
+// migration drops all six and resets the addresses a standalone install
+// pointed at its sandbox's veth link (migrateRetiredStandaloneSandbox).
 type OpenShellConfig struct {
 	// Enabled turns on the sandbox ingress and egress listeners and the
 	// sandbox API. Off by default.
