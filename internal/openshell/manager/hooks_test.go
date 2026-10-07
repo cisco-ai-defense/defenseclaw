@@ -615,6 +615,28 @@ func TestHookCoverage(t *testing.T) {
 	}
 }
 
+// TestLowAlertsAreNoSessionFinding (GAP-0091): a LOW default-pack alert
+// (ENT-EMAIL-BULK on one commit author's address in `git log` output) was a
+// warning on the feed, the status and the session summary. LOW alerts are
+// audited only; MEDIUM and above stay findings.
+func TestLowAlertsAreNoSessionFinding(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "lowbox"})
+	binding, d := e.binding("lowbox"), e.decider("lowbox", "Bash")
+	e.m.ObserveIngress(binding, sandboxauth.RouteHook)
+	low, medium := d("PostToolUse", "", "alert"), d("PostToolUse", "", "alert")
+	low.Severity, low.Reason = "LOW", "Allowed but flagged by DefenseClaw rule ENT-EMAIL-BULK: Email address."
+	medium.Severity, medium.Reason = "MEDIUM", "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT: E2E sandbox alert marker."
+	e.m.ObserveHookDecision(low)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 0 {
+		t.Fatalf("a LOW alert on the feed: %+v", got)
+	}
+	e.m.ObserveHookDecision(medium)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 1 || got[0].Severity != "MEDIUM" {
+		t.Fatalf("findings = %+v", got)
+	}
+}
+
 // Every verdict counts under its hook event, the harness's name for it, tool
 // events or not (#956). The counts live as long as the sandbox's other hook
 // counters: a stop and start keep them, a new sandbox of the name and a

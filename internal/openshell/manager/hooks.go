@@ -329,13 +329,15 @@ func isConfirmAction(action string) bool {
 	return false
 }
 
-// flaggedSeverity is a verdict's severity when it carries a finding (LOW or
-// worse), upper-cased, else "".
+// flaggedSeverity is a verdict's severity when it carries a finding of the
+// session (MEDIUM or worse), upper-cased, else "".
 func flaggedSeverity(severity string) string {
 	switch s := strings.ToUpper(strings.TrimSpace(severity)); s {
-	case "LOW", "MEDIUM", "HIGH", "CRITICAL":
+	case "MEDIUM", "HIGH", "CRITICAL":
 		return s
 	}
+	// A LOW alert (one email address in a tool's output) stays in the
+	// audit log; it is nothing to review in a session.
 	return ""
 }
 
