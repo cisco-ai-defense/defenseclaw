@@ -4914,3 +4914,21 @@ def test_init_leaves_out_a_connector_setup_cannot_select_on_windows(tmp_path):
     assert report.setup[-1].next_command == "defenseclaw setup amp"
     assert "cannot select amp executable" in report.setup[-1].detail
 
+
+def test_fail_mode_prompt_keeps_the_new_install_default(tmp_path):
+    # GAP-0047: Enter at "Fail mode" saved open, while quickstart and
+    # `guardrail fail-mode` help call closed the new-install default.
+    from defenseclaw.commands import cmd_init
+
+    def ask(data_dir):
+        with (
+            patch.object(cmd_init.click, "prompt", side_effect=lambda *_a, **kw: kw["default"]),
+            patch.object(cmd_init.click, "confirm", return_value=False),
+        ):
+            return cmd_init._prompt_action_policy(
+                fail_mode=None, human_approval=None, hilt_min_severity=None, data_dir=data_dir
+            )[0]
+
+    assert ask(str(tmp_path)) == "closed"
+    (tmp_path / "config.yaml").write_text("guardrail:\n  hook_fail_mode: open\n", encoding="utf-8")
+    assert ask(str(tmp_path)) == "open"
