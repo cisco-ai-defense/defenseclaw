@@ -116,15 +116,47 @@ func guardrailFallbackActionForProfile(severity, profile string) string {
 	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
 }
 
-// fallbackGuardrailVerdictForThresholds applies resolved thresholds to a
-// verdict when no OPA policy decides; there is no human confirmation.
-func fallbackGuardrailVerdictForThresholds(v *ScanVerdict, thresholds policy.ThresholdsInput) *ScanVerdict {
+// fallbackGuardrailVerdictForThresholds applies the resolved thresholds to a
+// verdict when no OPA policy decides. It follows the same order as
+// guardrail.rego, so one config decides the same with or without the module:
+// an advisory Cisco block downgrades to alert, a Cisco verdict at trust level
+// none counts for nothing, and a confirm needs HILT. Observe mode is not
+// applied here: callers report this raw action and apply the mode after it.
+func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string, hilt *policy.GuardrailHILTInput) *ScanVerdict {
 	if v == nil {
 		return allowVerdict("fallback")
 	}
 	out := *v
-	out.Action = guardrailActionForRank(guardrailSeverityRank(out.Severity), thresholds.Block, thresholds.Alert, false, 0)
+	localRank := guardrailSeverityRank(v.Severity)
+	ciscoRank := 0
+	if cisco != nil && thresholds.CiscoTrustLevel != "none" {
+		ciscoRank = guardrailSeverityRank(cisco.Severity)
+	}
+	rank := max(localRank, ciscoRank)
+	switch {
+	case rank <= severityNone:
+		out.Action = guardrailActionAllow
+	case thresholds.CiscoTrustLevel == "advisory" && ciscoRank >= thresholds.Block && localRank < thresholds.Alert:
+		out.Action = guardrailActionAlert
+	default:
+		confirm := mode == "action" && hilt != nil && hilt.Enabled
+		hiltMin := severityHigh
+		if confirm {
+			hiltMin = guardrailSeverityRank(hilt.MinSeverity)
+		}
+		out.Action = guardrailActionForRank(rank, thresholds.Block, thresholds.Alert, confirm, hiltMin)
+	}
 	return &out
+}
+
+// fallbackVerdict is the verdict without a Rego module. Secure Client keeps
+// the 1.0 threshold-only answer (issue #1092): no Cisco trust level and no
+// HILT confirm.
+func (g *GuardrailInspector) fallbackVerdict(merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
+	if gen := currentGeneration(); gen != nil && gen.Config != nil && gen.Config.SecureClientIntegration() {
+		return fallbackGuardrailVerdictForThresholds(merged, nil, thresholds, "", nil)
+	}
+	return fallbackGuardrailVerdictForThresholds(merged, cisco, thresholds, mode, g.hiltInput())
 }
 
 func errorVerdict(scanner string) *ScanVerdict {
@@ -1274,7 +1306,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		prepared = gen.OPA
 	}
 	if prepared == nil {
-		return fallbackGuardrailVerdictForThresholds(merged, thresholds)
+		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
 	}
 
 	input := policy.GuardrailInput{
@@ -1312,7 +1344,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return fallbackGuardrailVerdictForThresholds(merged, thresholds)
+		return g.fallbackVerdict(merged, ciscoResult, thresholds, mode)
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 

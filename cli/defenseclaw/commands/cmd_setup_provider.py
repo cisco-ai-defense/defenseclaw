@@ -14,9 +14,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw setup provider — operator overlay for the LLM provider
-registry consumed by the Go sidecar's passthrough + shape-detection
-rails.
+"""defenseclaw setup provider — the custom LLM providers (``llm_providers``
+in config.yaml) added to the registry the Go sidecar's passthrough +
+shape-detection rails consume.
 
 Background
 ----------
@@ -36,18 +36,20 @@ not (yet) in the embedded list, the request would land in the
 the egress telemetry rail). Until a release ships with the new domain
 baked in, operators need an **in-place** way to extend the registry.
 
-``~/.defenseclaw/custom-providers.json`` is that surface. It is read by
-the Go side (:func:`internal/configs.LoadProviders`) on every call and
-merged additively over the embedded baseline — same Provider name is
+``llm_providers`` in config.yaml is that surface. The gateway merges it
+additively over the embedded baseline — same Provider name is
 case-insensitively unioned on Domains + EnvKeys; OllamaPorts are
-unioned; a malformed overlay is logged to stderr but *never* takes the
-guardrail offline.
+unioned. ``~/.defenseclaw/custom-providers.json`` is derived from it and
+rewritten on every change; the gateway ignores edits to that file, and
+``defenseclaw doctor`` fails the "Custom-provider overlay" row on one.
 
 The ``defenseclaw setup provider add`` / ``remove`` / ``list`` / ``show``
-commands below drive that file safely. They:
+commands below change ``llm_providers`` through the config writer, then
+regenerate the derived file. They:
 
-* read & write atomically via a temp file + rename, with a
-  ``~/.defenseclaw/custom-providers.json.bak`` backup on write;
+* write config.yaml atomically through the config writer (refused on a
+  managed device) and regenerate the derived file with a
+  ``~/.defenseclaw/custom-providers.json.bak`` backup;
 * refuse malformed inputs *before* touching disk;
 * strip leading ``https://`` / ``http://`` and any path from entered
   domains (common operator mistake — they paste a URL);
@@ -651,12 +653,14 @@ def _display_provider_registry(app: AppContext, as_json: bool) -> None:
 
 @click.group("provider")
 def provider() -> None:
-    """Manage the custom provider overlay (~/.defenseclaw/custom-providers.json).
+    """Manage the custom LLM providers (llm_providers in config.yaml).
 
-    The overlay additively extends the domains / env-vars / Ollama
+    Custom providers additively extend the domains / env-vars / Ollama
     ports the guardrail treats as "known LLM endpoints". Use this when
     you deploy an internal or self-hosted LLM and do not want to wait
-    for its domain to land in a DefenseClaw release.
+    for its domain to land in a DefenseClaw release. The settings live
+    in config.yaml; ~/.defenseclaw/custom-providers.json is derived from
+    them, so edit with these commands, not that file.
     """
 
 
@@ -880,9 +884,8 @@ def _provider_add_interactive() -> dict[str, Any]:
     click.echo()
     ux.section("Add a custom LLM provider")
     ux.subhead(
-        "This walkthrough writes a new entry to "
-        "~/.defenseclaw/custom-providers.json. Every prompt accepts a "
-        "blank line to skip optional fields."
+        "This walkthrough adds a new entry to llm_providers in config.yaml. "
+        "Every prompt accepts a blank line to skip optional fields."
     )
     click.echo()
 
@@ -1468,9 +1471,9 @@ def provider_add(
     azure_deployment_aliases: tuple[str, ...],
     no_reload: bool,
 ) -> None:
-    """Add a provider entry to the operator overlay.
+    """Add a custom provider to llm_providers in config.yaml.
 
-    Additive: if ``NAME`` already exists in the overlay, its Domains
+    Additive: if ``NAME`` already exists there, its Domains
     and EnvKeys are unioned; duplicates are collapsed so repeated
     ``add`` calls are idempotent.
     """
@@ -1788,9 +1791,9 @@ def provider_add(
 )
 @pass_ctx
 def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
-    """Remove an entry from the operator overlay.
+    """Remove a custom provider from llm_providers in config.yaml.
 
-    Only overlay entries are removable — the embedded baseline is
+    Only custom entries are removable — the embedded baseline is
     always in effect. If the name isn't present, exit 1 so scripts
     can tell removal from no-op.
     """

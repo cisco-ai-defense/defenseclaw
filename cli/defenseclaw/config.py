@@ -335,6 +335,13 @@ def _previous_config_hint(home: str) -> str:
     )
 
 
+def newer_config_message(version: int) -> str:
+    return (
+        f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
+        "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
+    )
+
+
 def require_current_config(*, path: str | None = None, allow_missing: bool = False) -> None:
     """Fail before full config loading unless the source is the current schema."""
 
@@ -344,10 +351,7 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
     if version is None:
         raise not_initialized_error()
     if version > CURRENT_CONFIG_VERSION:
-        raise ConfigVersionError(
-            f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
-            "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
-        )
+        raise ConfigVersionError(newer_config_message(version))
     if not is_current_schema(version):
         if version == 0 and config_is_empty(path):
             raise ConfigVersionError(empty_config_message(path))

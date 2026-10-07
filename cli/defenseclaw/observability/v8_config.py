@@ -967,6 +967,11 @@ _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# The corrective action of a retired key in a config_version 8 source;
+# cmd_config words it plainly for config set.
+RETIRED_KEY_ACTION_PREFIX = "this key was replaced by "
+
+
 def retired_key_replacement(field: str) -> str:
     """What replaced the config_version 8 key at dotted ``field``, or ""."""
 
@@ -1047,6 +1052,12 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
         action = _required_field_action(error)
     elif keyword == "additionalProperties" and v9:
         action = _unknown_field_action(error, parts)
+    elif keyword == "additionalProperties" and (
+        replacement := retired_key_replacement(".".join(str(part) for part in parts))
+    ):
+        # A config_version 8 source still carrying a key version 9 moved:
+        # migrating carries its value over, deleting it loses the value.
+        action = f"{RETIRED_KEY_ACTION_PREFIX}{replacement} in config_version 9; run: defenseclaw migrate"
     raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
 
 
