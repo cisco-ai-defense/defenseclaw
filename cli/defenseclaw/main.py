@@ -205,6 +205,25 @@ def _is_audit_export(ctx: click.Context) -> bool:
     return index + 1 < len(argv) and argv[index + 1] in {"export", "findings"}
 
 
+def _audit_logs_can_read_with_ide_scope_typo(ctx: click.Context, result: object) -> bool:
+    """A malformed inventory scope cannot change a read-only log tail."""
+    if ctx.invoked_subcommand != "audit":
+        return False
+    argv = sys.argv[1:]
+    try:
+        child = argv[argv.index("audit") + 1]
+    except (ValueError, IndexError):
+        return False
+    errors = getattr(result, "errors", [])
+    return (
+        child == "logs"
+        and not getattr(result, "timed_out", False)
+        and not getattr(result, "parse_error", "")
+        and len(errors) == 1
+        and "ai_discovery.ide_inventory" in errors[0]
+    )
+
+
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
     """Emit a stable installer-facing version record before config loading."""
     if not value or ctx.resilient_parsing:
@@ -354,7 +373,13 @@ def cli(ctx: click.Context) -> None:
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
-        if not result.ok:
+        if _audit_logs_can_read_with_ide_scope_typo(ctx, result):
+            ux.echo(
+                "Config warning: ai_discovery.ide_inventory is invalid; log output is still available. "
+                "Run 'defenseclaw config validate' to repair the scope.",
+                err=True,
+            )
+        elif not result.ok:
             timed_out = getattr(result, "timed_out", False)
             # GAP-1788: status is read-only and config.yaml loaded, so it
             # still shows the gateway and connectors, flags the problem, and
