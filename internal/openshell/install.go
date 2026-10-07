@@ -416,7 +416,12 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
-	if upgrading {
+	switch {
+	case upgrading && i.GOOS == "darwin":
+		// A Mac runs sandboxes in MicroVMs, which the restart stops.
+		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway once the release is installed, which stops every MicroVM sandbox on it",
+			"before the script: nothing runs while a MicroVM sandbox does (the restart would stop it without a flush)")
+	case upgrading:
 		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it",
 			"before the script: on the docker driver, Docker pulls the release's supervisor images from ghcr.io (the restarted gateway does not start without them); "+
 				"on the MicroVM driver, nothing runs while a sandbox does (the restart would stop it without a flush)")

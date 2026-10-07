@@ -346,6 +346,20 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 		}
 		f.assertNoLeftovers()
 	})
+	// GAP-0072: a Mac runs sandboxes in MicroVMs; its plan has no
+	// docker-driver note.
+	t.Run("upgraded on a Mac", func(t *testing.T) {
+		f, _ := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		f.inst.GOOS, f.inst.E2fsprogsDirs = "darwin", []string{t.TempDir()}
+		if _, err := f.inst.Upgrade(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		plan := f.out.String()
+		if !strings.Contains(plan, "which stops every MicroVM sandbox on it") || !strings.Contains(plan, "nothing runs while a MicroVM sandbox does") ||
+			strings.Contains(plan, "ghcr.io") || strings.Contains(plan, "docker driver") {
+			t.Fatalf("plan:\n%s", plan)
+		}
+	})
 	t.Run("Install keeps it", func(t *testing.T) {
 		f, prepared := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
 		if res, err := f.inst.Install(context.Background()); err != nil || res.Installed || f.hits.Load() != 0 || f.ran() || *prepared != 0 {
