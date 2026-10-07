@@ -14,6 +14,8 @@ package unixidentity
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -75,32 +77,47 @@ var realmCache struct {
 	fetched time.Time
 }
 
-func cachedRealms(ctx context.Context) []Realm {
+func cachedRealms(ctx context.Context) ([]Realm, error) {
 	realmCache.mu.Lock()
 	defer realmCache.mu.Unlock()
-	if realmCache.fetched.IsZero() || time.Since(realmCache.fetched) >= realmCacheTTL {
-		realmCache.realms, realmCache.fetched = configuredRealms(ctx), time.Now()
+	if !realmCache.fetched.IsZero() && time.Since(realmCache.fetched) < realmCacheTTL {
+		return realmCache.realms, nil
 	}
-	return realmCache.realms
+	realms, err := configuredRealms(ctx)
+	if err != nil {
+		return nil, err
+	}
+	realmCache.realms, realmCache.fetched = realms, time.Now()
+	return realms, nil
 }
 
-// configuredRealms asks realmd on the system bus for the realms it reports
-// as configured. Any failure means no realms.
-func configuredRealms(ctx context.Context) []Realm {
+// configuredRealms asks realmd on the system bus for configured realms. An
+// absent realmd service means an unjoined host; a failed query is unknown.
+func configuredRealms(ctx context.Context) ([]Realm, error) {
 	ctx, cancel := context.WithTimeout(ctx, realmdTimeout)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer conn.Close()
 	var paths []dbus.ObjectPath
 	if err := conn.Object(realmdService, realmdPath).CallWithContext(ctx, dbusGetProperty, 0, realmdProvider, "Realms").Store(&paths); err != nil {
-		return nil
+		var busErr *dbus.Error
+		if errors.As(err, &busErr) && busErr.Name == "org.freedesktop.DBus.Error.ServiceUnknown" {
+			return nil, nil
+		}
+		return nil, err
 	}
 	var owner uint32
-	if err := conn.BusObject().CallWithContext(ctx, dbusUnixUser, 0, realmdService).Store(&owner); err != nil || owner != 0 {
-		return nil
+	if err := conn.BusObject().CallWithContext(ctx, dbusUnixUser, 0, realmdService).Store(&owner); err != nil {
+		return nil, err
+	}
+	if owner != 0 {
+		return nil, fmt.Errorf("realmd system-bus owner uid %d is not root", owner)
 	}
 	var realms []Realm
 	for _, path := range paths {
@@ -109,15 +126,15 @@ func configuredRealms(ctx context.Context) []Realm {
 		}
 		object := conn.Object(realmdService, path)
 		var realm, kerberos map[string]dbus.Variant
-		if object.CallWithContext(ctx, dbusGetAll, 0, realmdRealm).Store(&realm) != nil {
-			continue
+		if err := object.CallWithContext(ctx, dbusGetAll, 0, realmdRealm).Store(&realm); err != nil {
+			return nil, err
 		}
-		// Configured names the membership interface of a joined realm; it
-		// is empty for a realm that was only discovered.
 		if configured, _ := realm["Configured"].Value().(string); configured == "" {
 			continue
 		}
-		_ = object.CallWithContext(ctx, dbusGetAll, 0, realmdKerberos).Store(&kerberos)
+		if err := object.CallWithContext(ctx, dbusGetAll, 0, realmdKerberos).Store(&kerberos); err != nil {
+			return nil, err
+		}
 		entry := Realm{
 			Domain: strings.ToLower(variantString(kerberos["DomainName"])),
 			Name:   strings.ToUpper(variantString(kerberos["RealmName"])),
@@ -144,7 +161,7 @@ func configuredRealms(ctx context.Context) []Realm {
 			realms = append(realms, entry)
 		}
 	}
-	return realms
+	return realms, nil
 }
 
 func variantString(v dbus.Variant) string {

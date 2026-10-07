@@ -145,7 +145,11 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 	}
 	facts.Groups = groups
 	if facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind {
-		applyRealm(&facts, account.Name, hostRealms(r.context()))
+		realms, realmErr := hostRealms(r.context())
+		if realmErr != nil {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: realmd lookup: %w", realmErr)
+		}
+		applyRealm(&facts, account.Name, realms)
 	}
 	return facts, nil
 }
@@ -269,7 +273,11 @@ func QualifiedGroupName(ctx context.Context, r Resolver, name string) string {
 	if r == nil || name == "" || strings.ContainsAny(name, `@\`) {
 		return ""
 	}
-	for _, realm := range hostRealms(ctx) {
+	realms, err := hostRealms(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, realm := range realms {
 		if realm.Domain == "" {
 			continue
 		}

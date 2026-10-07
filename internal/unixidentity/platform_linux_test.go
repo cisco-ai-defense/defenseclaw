@@ -48,7 +48,7 @@ func TestLinuxLocalAccountsAndDirectoryConfiguration(t *testing.T) {
 }
 
 // Tests never ask the host's realmd; the ones about realms set hostRealms.
-func init() { hostRealms = func(context.Context) []Realm { return nil } }
+func init() { hostRealms = func(context.Context) ([]Realm, error) { return nil, nil } }
 
 // A per-user gateway resolves the directory type of an SSSD account from the
 // realm realmd reports, as the root guardian does: by the account's DNS
@@ -70,9 +70,9 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	if err := os.WriteFile(localPasswdPath, []byte("lee:x:1000:70000::/home/lee:/bin/bash\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hostRealms = func(context.Context) []Realm {
+	hostRealms = func(context.Context) ([]Realm, error) {
 		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM", ServerSoftware: "active-directory",
-			ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{`CORP\%U`})}}
+			ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{`CORP\%U`})}}, nil
 	}
 	accounts := map[int]string{
 		70001: "alice@corp.example.com",
@@ -134,5 +134,47 @@ func TestBareSSSDAccountDoesNotInheritUnverifiedRealm(t *testing.T) {
 	applyRealm(&facts, "bob@LDAP", realm)
 	if facts.Directory != "" || facts.Domain != "ldap" || facts.Realm != "" || facts.Principal != "" {
 		t.Fatalf("unrelated SSSD account inherited AD realm: %+v", facts)
+	}
+}
+
+func TestFailedRealmdQueryDoesNotCacheEmptyRealms(t *testing.T) {
+	realmCache.mu.Lock()
+	oldRealms, oldFetched := realmCache.realms, realmCache.fetched
+	realmCache.realms, realmCache.fetched = nil, time.Time{}
+	realmCache.mu.Unlock()
+	t.Cleanup(func() {
+		realmCache.mu.Lock()
+		realmCache.realms, realmCache.fetched = oldRealms, oldFetched
+		realmCache.mu.Unlock()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cachedRealms(ctx)
+	realmCache.mu.Lock()
+	fetched := realmCache.fetched
+	realmCache.mu.Unlock()
+	if !fetched.IsZero() {
+		t.Fatal("a failed realmd query was cached as an empty answer")
+	}
+	oldRealmsFn, oldNSS, oldPasswd := hostRealms, nsswitchPath, localPasswdPath
+	t.Cleanup(func() { hostRealms, nsswitchPath, localPasswdPath = oldRealmsFn, oldNSS, oldPasswd })
+	hostRealms = func(context.Context) ([]Realm, error) { return nil, context.DeadlineExceeded }
+	dir := t.TempDir()
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const name = "alice@corp.example.com"
+	f := &fakeRun{results: map[string]commandResult{
+		"passwd 80001":        {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
+		"-s sss passwd 80001": {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
+		"initgroups " + name:  {stdout: []byte(name + " 80001\n")},
+		"group 80001":         {stdout: []byte(name + ":*:80001:\n")},
+	}}
+	if facts, err := newFakeNSS(f).DirectoryFactsForUID(80001, time.Now()); err == nil {
+		t.Fatalf("realmd failure produced cacheable facts: %+v", facts)
 	}
 }
