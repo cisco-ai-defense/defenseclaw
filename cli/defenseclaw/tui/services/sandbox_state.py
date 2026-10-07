@@ -472,9 +472,10 @@ class SandboxRow:
     nested_repos: tuple[NestedRepoRow, ...] = ()
     warnings: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
-    # The image the sandbox runs when it is not the harness image: on the
-    # MicroVM (vm) driver, the image its per-run harness files are baked into.
-    run_image: str = ""
+    # The harness image, tagged as "sandbox image list" shows it. Not the
+    # run image a MicroVM boots (defenseclaw.invalid/sandbox-run:...), a
+    # name no other view shows (GAP-0188).
+    image: str = ""
     # The sandbox's processes are sampled while it runs (observe.process_tree).
     process_tree: bool = False
 
@@ -653,7 +654,7 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         nested_repos=nested,
         warnings=tuple(_text(w) for w in _list(item.get("warnings")) if w),
         violations=tuple(v for v in violations if v),
-        run_image=_text(item.get("run_image")),
+        image=_text(item.get("image")),
         process_tree=bool(item.get("process_tree")),
     )
 
@@ -1943,8 +1944,8 @@ class SandboxesPanelModel:
             pairs.append(("Last tool block", verdict_reason(row.last_blocked)))
         if row.pending_approvals:
             pairs.append(("Asks waiting", str(row.pending_approvals)))
-        if row.run_image:
-            pairs.append(("Run image", row.run_image))
+        if row.image:
+            pairs.append(("Image", row.image))
         if row.process_tree:
             tree = self.processes.get(row.name) if row.running else None
             if tree:

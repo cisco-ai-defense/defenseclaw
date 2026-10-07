@@ -249,16 +249,19 @@ def test_the_status_names_the_gateways_compute_driver(gateway: dict[str, Any], t
         assert model.headline(max_width=52) == "2 running · 3 total"
 
 
-def test_a_run_image_is_in_the_details() -> None:
-    image = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
-    row = decode_sandbox({**COPY, "run_image": image})
-    assert row is not None and row.run_image == image and row.copy_mode
+def test_the_details_name_the_image_sandbox_image_list_shows() -> None:
+    # GAP-0188: the detail named the MicroVM run image, a defenseclaw.invalid
+    # name that neither `sandbox image list` nor doctor shows.
+    run = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
+    image = "defenseclaw/sandbox:claudecode-0123456789ab-u501"
+    row = decode_sandbox({**COPY, "image": image, "run_image": run})
+    assert row is not None and row.image == image and row.copy_mode
     model = SandboxesPanelModel()
-    model.set_snapshot(STATUS, [{**COPY, "run_image": image}], [])
+    model.set_snapshot(STATUS, [{**COPY, "image": image, "run_image": run}], [])
     pairs = dict(model.detail_pairs()[1])
-    assert pairs["Run image"] == image
+    assert pairs["Image"] == image and "Run image" not in pairs
     assert pairs["Undo"] == "reverts the last pull --apply (U)" and pairs["Pull"].startswith("P brings the work back")
-    assert "Run image" not in dict(_model().detail_pairs()[1])
+    assert "Image" not in dict(_model().detail_pairs()[1])
 
 
 def test_the_process_tree_is_in_the_details() -> None:
