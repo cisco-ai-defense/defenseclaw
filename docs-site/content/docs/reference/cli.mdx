@@ -1250,6 +1250,7 @@ see also [Sandbox](/docs/sandboxes/guide).
 | `defenseclaw sandbox image build\|list\|prune\|rm` | Build, list, prune, and remove the harness images. |
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
+| `defenseclaw sandbox kernel-feed install\|status\|uninstall` | Linux: install (as root), check or remove the opt-in sandbox kernel feed, a root service that adds Tetragon's exec and exit records to your docker sandboxes' process trees. Run as yourself, `install` prints the `sudo` command. See [sandbox kernel-feed](/docs/reference/sandbox-cli#sandbox-kernel-feed). |
 
 ## Enterprise
 
@@ -1329,9 +1330,18 @@ sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup --check
 
 `--tetragon-cleanup` deletes the Tetragon policies the helper recorded loading
 (only names that match `defenseclaw-<family>-<8 hex>` and are in its own
-state file) and empties that record. `--check` only reports whether this
-helper supports the cleanup, with exit `0`. `uninstall`, a rollback and the
-package's pre-removal script run it for you.
+state file) and empties that record. It exits `1`, and removes nothing, while
+a helper in `observe` or `enforce` runs (stop it first:
+`systemctl stop defenseclaw-sensor-helper`), and `3` when Tetragon does not
+answer. `--check` only reports whether this helper supports the cleanup, with
+exit `0`. `uninstall`, a rollback and the package's pre-removal script run it
+for you.
+
+On an open-source Linux install the same binary is the sandbox kernel feed:
+`defenseclaw-sensor-helper --sandbox-feed` serves it (its systemd unit runs
+that), `--sandbox-feed --check` checks Tetragon and Docker and exits `0` or
+`1`, and `--sandbox-feed --uninstall` removes the service and the root copy.
+Use `defenseclaw sandbox kernel-feed` rather than these.
 
 ### Lifecycle on Windows
 

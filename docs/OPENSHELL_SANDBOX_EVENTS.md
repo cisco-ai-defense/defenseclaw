@@ -284,7 +284,10 @@ while it runs (15 on the vm driver once a sample takes over a second) and
 adds OpenShell's `PROC` launch and terminate records. One record when a
 process joins the tree and one when it exits:
 `defenseclaw.sandbox.process.event` (`start`, `exit`), `.source` (`sample`,
-`ocsf`), `.pid`, `.parent_pid` (absent while only OpenShell reported the
+`ocsf`, or `tetragon` from the sandbox kernel feed when it is installed),
+`.pid` (absent on a `tetragon` record whose in-sandbox pid was not captured),
+`.host_pid` and `.exec_id` (Tetragon's exec id; both only on `tetragon`
+records), `.parent_pid` (absent while only OpenShell reported the
 process, which names no parent), `.name` (comm), `.executable`,
 `.command_line` (the first 16 arguments, joined, the values of arguments that
 name secrets replaced, at most 1,024 bytes), `.working_directory`,

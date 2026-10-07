@@ -272,6 +272,42 @@ defenseclaw sandbox run claude --copy --name fix-tests
 defenseclaw sandbox run codex --copy --name docs
 ```
 
+## Kernel feed (Tetragon)
+
+When your administrator runs [Tetragon](https://tetragon.io) on this
+computer, the opt-in sandbox kernel feed adds every process the kernel starts
+in your docker sandboxes to their process trees, including the many that live
+for milliseconds, which the 5-second sample never sees. Without it nothing
+changes.
+
+```bash
+defenseclaw sandbox kernel-feed status
+defenseclaw sandbox kernel-feed install
+```
+
+Run as yourself, `install` prints the exact `sudo` command for this install.
+The commands are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-kernel-feed).
+
+| Topic | Detail |
+| --- | --- |
+| Requirements | Docker sandboxes; Tetragon 1.6 or 1.7 serving its API on `unix:///var/run/tetragon/tetragon.sock` (its TCP default `localhost:54321` is refused) with a root-owned `tetragon-info.json`; systemd; you in the `docker` group |
+| What it reads | Only the exec and exit of container processes. Tetragon drops ancestors, environment variables, capabilities, namespaces, credentials and pod data before it sends them. Command lines are redacted in the root process (secret flags and values, key-shaped words, URL passwords), and a Codex notify program's turn payload is withheld |
+| Who sees what | Members of the `docker` group, each only their own sandboxes' records (the image's owner label). Members of the `docker` group can already see every container, so this is a courtesy between users, not a security boundary |
+| What it does not do | No Tetragon policy, no enforcement, no file or network events. macOS MicroVM sandboxes and the Linux vm driver are not covered: their guest kernel is not the host's |
+| Turn it on per sandbox | The process tree must be on (`sandbox run --process-tree`, or a pack's `observe.process_tree: true`). `sandbox ps` then says `source: kernel`, and a process whose in-sandbox pid was not captured is listed among the ended ones with its `host_pid` |
+| Files | `/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper` (the root copy), `/etc/systemd/system/defenseclaw-sandbox-feed.service`, the socket `/run/defenseclaw-sandbox-feed/feed.sock` (`root:docker 0660`); its log is `journalctl -u defenseclaw-sandbox-feed` |
+| Versions | The feed's protocol is versioned. Your gateway reads its own protocol and the previous one; otherwise it uses the 5-second sample and `sandbox ps`, `kernel-feed status`, `defenseclaw doctor` (**Sandbox kernel feed**) and the gateway log print the `sudo ... sandbox kernel-feed install` command. `defenseclaw upgrade` prints it too when the feed runs another release |
+| Uninstall | `defenseclaw uninstall` leaves the root service in place and prints `sudo <gateway> sandbox kernel-feed uninstall`. After `--binaries`, use `sudo /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper --sandbox-feed --uninstall` |
+
+| Reason | Means |
+| --- | --- |
+| `kernel_feed_not_installed` | No feed on this computer |
+| `kernel_feed_not_permitted` | You are not in the `docker` group, or your gateway started before you joined it |
+| `kernel_feed_untrusted` | The socket or its directory is not root's, or is writable by others, or root does not serve it |
+| `kernel_feed_unavailable` | The feed is installed but does not answer: `sudo systemctl status defenseclaw-sandbox-feed` |
+| `kernel_feed_version_skew` | The feed speaks another protocol: run the `install` command it prints |
+| `kernel_feed_unsupported` | Not Linux |
+
 ## Common problems
 
 | You see | Do this |

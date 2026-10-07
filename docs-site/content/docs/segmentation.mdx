@@ -56,9 +56,9 @@ dedicated hook port.
 
 | Computer | Hooks | Sandbox layers | Runtime planes | Tetragon |
 | --- | --- | --- | --- | --- |
-| **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/ai-discovery#what-to-grant-per-os) | Detected and explained, never connected to |
+| **Linux, open-source (per-user)** | Yes | Yes, on the Docker driver (rootful Docker and the `docker` group) | A and B. C needs capabilities a per-user install does not have; see [What to grant](/docs/ai-discovery#what-to-grant-per-os) | Detected and explained; the per-user gateway never connects to it. For docker sandboxes, see the next row |
 | **Linux, managed (standalone enterprise)** | Yes; the native hook is a root-owned binary | No: sandboxes are refused on a managed computer | A, B and C, through the root sensor helper | Consume, observe or enforce, through the root sensor helper |
-| **Linux sandbox** (Docker driver) | Yes, always fail closed | Yes | None inside the sandbox; the per-user gateway has no Plane C | Not used. The sandbox is contained by OpenShell |
+| **Linux sandbox** (Docker driver) | Yes, always fail closed | Yes | None inside the sandbox; the per-user gateway has no Plane C | Read only, when an administrator runs Tetragon and installs the opt-in [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon): every process start and exit in your sandboxes joins their process tree. No policy and no enforcement; the sandbox is contained by OpenShell |
 | **macOS, open-source** | Yes | Yes, MicroVM driver on Apple silicon | A and B | Not available: Tetragon has no macOS agent |
 | **macOS sandbox** (MicroVM) | Yes, always fail closed | Yes; copy mode only | None inside the guest | Not available: the guest kernel is not visible to the host |
 | **macOS, managed** | Yes | No | A, B and C (Endpoint Security, notify only) | Not available |
@@ -144,7 +144,7 @@ What a process did under which agent.
 | --- | --- | --- |
 | Linux host, open-source | Plane C when granted; findings are gated on agent lineage | - |
 | Linux host, managed | Plane C, through Tetragon when it is present (exec identity, parent and container), or `cn_proc` and `fanotify` | The kernel floor applies its controls only below an enrolled agent's own processes |
-| Linux sandbox | The opt-in process tree, plus the OpenShell supervisor's launches | The container is the boundary; stopping the sandbox ends every job in it |
+| Linux sandbox | The opt-in process tree (a 5-second sample, plus every exec and exit from the [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon) when it is installed), plus the OpenShell supervisor's launches | The container is the boundary; stopping the sandbox ends every job in it |
 | macOS host | Managed Endpoint Security exec events | - |
 | macOS sandbox | The process tree every 15 seconds | The virtual machine |
 | Windows | Process-creation audit events when enabled | - |
@@ -270,7 +270,7 @@ the settings.
 
 | Platform | Tetragon 1.7.x | Tetragon 1.6.x |
 | --- | --- | --- |
-| RHEL 9, x86_64 | Verified: consume, observe and enforce | Consume only, expected and not verified |
+| RHEL 9, x86_64 | Consume, observe and enforce; expected, not yet verified | Consume only, expected and not verified |
 | Ubuntu 22.04 and 24.04, arm64 | Consume only, expected and not verified | Consume only, expected and not verified |
 | RHEL 8 (kernel 4.18) | Not supported; uses `cn_proc` and `fanotify` | Not supported |
 | macOS, Windows | Not available | Not available |

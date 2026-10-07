@@ -34,7 +34,7 @@ the same config.
 | SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
 | Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
-| Tetragon | Optional. 1.7.x on RHEL 9 x86_64 is verified. See [AI Discovery Plane C (Tetragon)](#ai-discovery-plane-c-tetragon). |
+| Tetragon | Optional. 1.7.x on RHEL 9 x86_64 is the target platform (expected, not verified yet). See [AI Discovery Plane C (Tetragon)](#ai-discovery-plane-c-tetragon). |
 
 The systemd version decides how the gateway reads secrets:
 
@@ -484,16 +484,16 @@ you run, and never writes to `/etc/tetragon`.
 | Agent identity | The executable's base name, which for a native Claude Code is a version number | The executable path, so the agent is identified by what it is |
 | Process reuse | Guessed from a name change | Exec identifiers, so a reused pid is not confused with the earlier process |
 | Containers | A program in a container looks like a host process | Events carry the container, and are counted but never joined to a host agent's session |
-| Connections | Polled every 30 seconds, so short connects are missed | Kernel `tcp_connect` events per binary (`observe` and `enforce`) |
+| Connections | Polled every 30 seconds, so short connects are missed | Kernel `tcp_connect` events per binary (`observe` and `enforce`), which Plane B scores at the next poll even when the connection, or the process, is already gone |
 | Agent activity without a hook | Not seen (the `!` shell mode, programs inside a script, detached jobs) | Seen in every mode; a hook decision is joined when there is one, and `hook_seen=false` says there was none |
 
 ### Requirements
 
 | Requirement | Detail |
 | --- | --- |
-| Tetragon | Optional. 1.7.x is verified on RHEL 9 x86_64 for `consume`, `observe` and `enforce`. 1.6.x supports `consume` only, and is expected to work but was not verified. Other versions fall back to `cn_proc` and `fanotify` and report `tetragon_unsupported_version` |
+| Tetragon | Optional. 1.7.x on RHEL 9 x86_64 supports `consume`, `observe` and `enforce`, and 1.6.x supports `consume` only; both are expected to work and not verified yet. Other versions fall back to `cn_proc` and `fanotify` and report `tetragon_unsupported_version` |
 | Kernel | `consume` works wherever Tetragon runs. `enforce` needs BPF LSM: `lsm` must show as enabled in Tetragon's probes. RHEL 8 (kernel 4.18) is not supported |
-| Platform | Verified: RHEL 9, x86_64. Ubuntu 22.04 and 24.04 and arm64: `consume` only, expected and not verified |
+| Platform | RHEL 9, x86_64 (expected, not verified yet). Ubuntu 22.04 and 24.04 and arm64: `consume` only, expected and not verified |
 | Plane C | `ai_discovery.runtime.enable_host_plane: true`. With Plane C off, the effective mode is `off` and status reports `tetragon_plane_c_off` |
 | Deployment | Linux standalone only. macOS and Windows accept the setting and ignore it. The Secure Client profile refuses it |
 
@@ -746,8 +746,8 @@ them first, with the helper that loaded them:
 
 | Action | What happens |
 | --- | --- |
-| `enterprise linux uninstall` (with or without `--purge`), `apt remove`, `dnf remove` | Deletes the recorded `defenseclaw-*` policy names before any file is removed, then removes the state directory |
-| A failed `ensure` that rolls back | Runs the same cleanup before the files are restored. The restored helper loads what its own drop-in asks for |
+| `enterprise linux uninstall` (with or without `--purge`), `apt remove`, `dnf remove` | Deletes the recorded `defenseclaw-*` policy names before any file is removed, then removes the state directory and the runtime directory `/run/defenseclaw-sensor` (its socket and an until-reboot pause) |
+| A failed or interrupted `ensure` or upgrade that rolls back | Stops the sensor helper, runs the same cleanup with the helper that loaded the policies, then restores the files. The restored helper loads what its own drop-in asks for |
 | Package downgrade to a release before Tetragon support | The package's pre-removal script runs the cleanup with the helper that is still installed; for an older helper that lacks the cleanup, it deletes the recorded names with `tetra` when `tetra` is on root's `PATH`, and otherwise prints the names and tells you to run `systemctl restart tetragon` |
 | `ensure --allow-downgrade` from a payload | Run `enterprise linux tetragon pause`, set `mode: consume` and apply it, or run `sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup` before downgrading below the first release with Tetragon support |
 
@@ -757,6 +757,12 @@ To run the cleanup by hand, or only check that a helper supports it:
 sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup
 sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup --check
 ```
+
+The cleanup leaves everything in place and exits `1` while the helper runs in
+`observe` or `enforce`: those policies are the running helper's, and removing
+them under it would read as an operator's deletion. Stop it first with
+`systemctl stop defenseclaw-sensor-helper`. It exits `3` when Tetragon does
+not answer, and keeps the names for a later run.
 
 As a last resort, `systemctl restart tetragon` drops every policy that was
 loaded over its API on Tetragon 1.6 and 1.7, DefenseClaw's and anyone else's.
