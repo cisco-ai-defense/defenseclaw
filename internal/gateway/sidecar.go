@@ -6826,8 +6826,38 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// cache are lightweight in-process singletons; metrics are connected once
 	// so Prometheus scrapes reflect live fleet state.
 	fleetMgr := fleetmanager.New(func(alert fleetmanager.Alert) {
+		// Stderr line for immediate local visibility (unchanged).
 		fmt.Fprintf(os.Stderr, "[fleet-alert] type=%s device=%d severity=%s: %s\n",
 			alert.Type, alert.DeviceID, alert.Severity, alert.Message)
+
+		// Route through the gateway's audit pipeline so fleet alerts
+		// reach SQLite, Splunk, OTLP, JSONL, and webhooks automatically.
+		if s.logger != nil {
+			severity := strings.ToUpper(alert.Severity)
+			if severity == "" {
+				severity = "WARN"
+			}
+			_ = s.logger.LogAlert("fleet", severity,
+				fmt.Sprintf("fleet.%s device=%d: %s", alert.Type, alert.DeviceID, alert.Message),
+				map[string]any{
+					"alert_type": string(alert.Type),
+					"device_id":  alert.DeviceID,
+					"severity":   alert.Severity,
+				})
+		}
+
+		// Dispatch to webhook endpoints so external integrations
+		// (PagerDuty, Slack, SIEM) receive fleet events in real time.
+		if webhooks := s.webhooksSnapshot(); webhooks != nil {
+			webhooks.Dispatch(audit.Event{
+				Timestamp: alert.Timestamp,
+				Action:    string(audit.ActionFleetAlert),
+				Target:    fmt.Sprintf("%d", alert.DeviceID),
+				Actor:     "fleet-manager",
+				Details:   fmt.Sprintf("type=%s severity=%s: %s", alert.Type, alert.Severity, alert.Message),
+				Severity:  strings.ToUpper(alert.Severity),
+			})
+		}
 	})
 	// Persist fleet device state to SQLite so data survives gateway
 	// restarts.  Falls back to in-memory (no persistence) if the DB
@@ -6888,6 +6918,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	fleetOpts := []fleet.APIOption{fleet.WithPolicyService(policySvc)}
 	if fleetMQTTClient != nil {
 		fleetOpts = append(fleetOpts, fleet.WithMQTTClient(fleetMQTTClient))
+	}
+	if s.logger != nil {
+		fleetOpts = append(fleetOpts, fleet.WithAuditEmitter(s.logger))
 	}
 	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache, fleetOpts...))
 	// Load scoped tokens that connector setup or the enterprise hook guardian

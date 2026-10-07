@@ -22,12 +22,25 @@ import (
 	"github.com/google/uuid"
 )
 
+// AuditEmitter is the narrow interface the fleet API uses to emit events
+// through the gateway's observability pipeline. The gateway's *audit.Logger
+// satisfies this interface, routing fleet events to SQLite, Splunk, OTLP,
+// webhooks, and JSONL without importing the audit package directly.
+type AuditEmitter interface {
+	// LogAction emits an audit action (target is typically the device/fleet ID,
+	// details is a human-readable summary).
+	LogAction(action, target, details string) error
+	// LogAlert emits a runtime alert through the platform-health pipeline.
+	LogAlert(source, severity, summary string, details map[string]any) error
+}
+
 // API handles fleet REST endpoints.
 type API struct {
 	manager    *manager.FleetManager
 	cache      *verdict.Cache
 	policy     *policy.Service
 	mqttClient mqtt.Client
+	audit      AuditEmitter
 	mux        *http.ServeMux
 }
 
@@ -56,6 +69,38 @@ func WithPolicyService(svc *policy.Service) APIOption {
 func WithMQTTClient(client mqtt.Client) APIOption {
 	return func(a *API) {
 		a.mqttClient = client
+	}
+}
+
+// WithAuditEmitter attaches an audit emitter so fleet operations are
+// logged through the gateway's observability pipeline (SQLite, Splunk,
+// OTLP, webhooks, JSONL). When nil, fleet API handlers still function
+// but produce no audit trail beyond stderr.
+func WithAuditEmitter(e AuditEmitter) APIOption {
+	return func(a *API) {
+		a.audit = e
+	}
+}
+
+// emitAudit is a nil-safe helper that logs an audit action without
+// interrupting the HTTP handler on failure.
+func (a *API) emitAudit(action, target, details string) {
+	if a.audit == nil {
+		return
+	}
+	if err := a.audit.LogAction(action, target, details); err != nil {
+		log.Printf("[fleet-api] audit emit %s: %v", action, err)
+	}
+}
+
+// emitAlert is a nil-safe helper that logs a fleet alert through
+// the platform-health pipeline.
+func (a *API) emitAlert(severity, summary string, details map[string]any) {
+	if a.audit == nil {
+		return
+	}
+	if err := a.audit.LogAlert("fleet", severity, summary, details); err != nil {
+		log.Printf("[fleet-api] audit alert: %v", err)
 	}
 }
 
@@ -172,6 +217,11 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.emitAudit("fleet.device.registered",
+		fmt.Sprintf("%d", dev.DeviceID),
+		fmt.Sprintf("tenant=%d fleet=%d hw=%s fw=%s policy_v=%d",
+			req.TenantID, req.FleetID, req.HWProfile, req.FWVersion, req.PolicyVersion))
+
 	writeJSON(w, http.StatusCreated, dev)
 }
 
@@ -263,6 +313,10 @@ func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	a.emitAudit("fleet.device.command",
+		fmt.Sprintf("%d", deviceFullID),
+		fmt.Sprintf("command=%s command_id=%s", req.Command, commandID))
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"command_id": commandID,
@@ -398,6 +452,10 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[fleet-api] MarkDistributed(%d, %d, v%d) failed: %v", req.TenantID, req.FleetID, version, err)
 	}
 
+	a.emitAudit("fleet.policy.push",
+		fmt.Sprintf("tenant=%d/fleet=%d", req.TenantID, req.FleetID),
+		fmt.Sprintf("version=%d profile=%s blob_size=%d", version, req.Profile, len(signed)))
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":   version,
 		"blob_size": len(signed),
@@ -499,6 +557,17 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.emitAudit("fleet.policy.emergency",
+		fmt.Sprintf("tenant=%d/fleet=%d", req.TenantID, req.FleetID),
+		fmt.Sprintf("command=%s", req.Command))
+	a.emitAlert("HIGH",
+		fmt.Sprintf("Fleet emergency command %s dispatched to tenant=%d fleet=%d", req.Command, req.TenantID, req.FleetID),
+		map[string]any{
+			"tenant_id": req.TenantID,
+			"fleet_id":  req.FleetID,
+			"command":   req.Command,
+		})
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant_id": req.TenantID,
 		"fleet_id":  req.FleetID,
@@ -544,6 +613,10 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 		a.cache.Invalidate(hash)
 	}
 
+	a.emitAudit("fleet.threat_intel.push",
+		fmt.Sprintf("revoked=%d", len(req.RevokeAllowHash)),
+		fmt.Sprintf("emergency=%v hashes=%d", req.Emergency, len(req.RevokeAllowHash)))
+
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"revoked": len(req.RevokeAllowHash),
 	})
@@ -584,6 +657,10 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 			notFound = append(notFound, uint64(manager.ComposeID(d.TenantID, d.FleetID, d.DeviceID)))
 		}
 	}
+
+	a.emitAudit("fleet.device.decommission",
+		fmt.Sprintf("batch=%s", batchID),
+		fmt.Sprintf("requested=%d decommissioned=%d not_found=%d", len(req.Devices), decommissioned, len(notFound)))
 
 	resp := map[string]any{
 		"batch_id":       batchID,
