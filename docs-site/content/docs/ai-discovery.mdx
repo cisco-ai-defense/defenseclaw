@@ -377,6 +377,12 @@ in [Capability matrix](/docs/connectors/capability-matrix). Custom packs are use
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
 
+A pack whose sha256 is not the one pinned in `ai_discovery.signature_pack_digests` (or, on a
+managed standalone device, a pack with no pin) is not loaded. `signatures list` prints a
+`Not loaded:` line with both digests and leaves its signatures out, `agent discovery status`
+counts it, and `defenseclaw doctor` warns. A pack edited on disk while the gateway runs is
+checked again within a few seconds.
+
 ## IDE plugin inventory
 
 Beyond the AI agents on a host, DefenseClaw lists **every extension and plugin

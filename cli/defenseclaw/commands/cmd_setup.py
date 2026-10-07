@@ -429,6 +429,29 @@ def _only_hot_config_changes(ctx: click.Context, cfg_path: str | None) -> bool:
         return False
 
 
+def _echo_saved_without_restart(*, plural: bool = False) -> None:
+    """Closing line of a connector setup run with ``--no-restart`` (GAP-0199).
+
+    A running gateway applies a hot key (a rule pack, a mode) from its next
+    config generation on its own; anything else waits for a restart.
+    """
+    ctx = click.get_current_context(silent=True)
+    app = ctx.find_object(AppContext) if ctx is not None else None
+    if (
+        ctx is not None
+        and app is not None
+        and app.cfg is not None
+        and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx))
+    ):
+        ux.echo("  ℹ Saved. The running gateway applies it on its own, without a restart.")
+        return
+    ux.echo(
+        "  ℹ Saved. It takes effect once the gateway restarts and confirms the "
+        f"{'connectors' if plural else 'connector'} (defenseclaw-gateway restart)."
+    )
+
+
 @click.group(cls=_SetupGroup, invoke_without_command=True)
 @click.option(
     "--connector",
@@ -526,11 +549,7 @@ def setup(
         and app.preinit_setup_bootstrap
         and ctx.invoked_subcommand != "trusted-paths"
     ):
-        ux.echo(
-            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
-            err=True,
-        )
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
     if (
         ctx.invoked_subcommand != "trusted-paths"
@@ -574,6 +593,16 @@ def setup(
     )
 
 
+def _exit_not_initialized(ctx: click.Context) -> None:
+    """Stop with the missing-config message: run init, or on a managed
+    device that it is managed (exit 3)."""
+    from defenseclaw.config import not_initialized_error
+
+    error = not_initialized_error()
+    ux.echo(str(error), err=True)
+    ctx.exit(error.exit_code)
+
+
 def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> None:
     """Validate and initialize every setup path except trusted-paths.
 
@@ -584,8 +613,7 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     """
 
     if app is None or app.cfg is None:
-        ux.echo("DefenseClaw is not initialized — run 'defenseclaw init' first.", err=True)
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
     from defenseclaw.commands.cmd_config import validate_config
 
@@ -2533,11 +2561,7 @@ def trusted_paths(ctx: click.Context) -> None:
         and app.preinit_setup_bootstrap
         and ctx.invoked_subcommand not in {"add", "list", "remove"}
     ):
-        ux.echo(
-            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
-            err=True,
-        )
-        ctx.exit(1)
+        _exit_not_initialized(ctx)
 
 
 @trusted_paths.command("list")
@@ -10000,10 +10024,7 @@ def _apply_hook_connector_setup(
         else:
             ux.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
     elif _batch_summary is None:
-        ux.echo(
-            "  ℹ Saved. It takes effect once the gateway restarts and confirms the connector "
-            "(defenseclaw-gateway restart)."
-        )
+        _echo_saved_without_restart()
 
     if not defer_audit:
         _log_setup_action(
@@ -10037,29 +10058,7 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
             "defenseclaw guardrail fail-mode closed"
         )
     if not restart:
-        ux.echo(
-            "  ℹ Saved. It takes effect once the gateway restarts and confirms the connectors "
-            "(defenseclaw-gateway restart)."
-        )
-
-
-# Backwards-compat alias for any out-of-tree callers; new code must
-# use ``_apply_hook_connector_setup`` directly. Forces observe mode
-# so the legacy contract is preserved bit-for-bit.
-def _apply_connector_observability_only(
-    app: AppContext,
-    *,
-    connector: str,
-    restart: bool,
-) -> bool:
-    return _apply_hook_connector_setup(
-        app,
-        connector=connector,
-        mode="observe",
-        restart=restart,
-        allow_offline_audit=not restart,
-        workspace_dir=None,
-    )
+        _echo_saved_without_restart(plural=True)
 
 
 def _print_connector_observability_banner(connector: str, *, mode: str = "observe") -> None:
@@ -12386,11 +12385,6 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "kiro",
     }
 )
-
-# Legacy alias retained as a backstop for any out-of-tree code that
-# imported the old name. New call sites must use one of the two named
-# sets above. Slated for deletion once internal docs catch up.
-_OBSERVABILITY_ONLY_CONNECTORS = _HOOK_ENFORCED_CONNECTORS
 
 # Kept as separate name for legibility at call sites that mean
 # "supports the proxy enforcement surface".
@@ -18111,7 +18105,7 @@ def _disable_splunk(
                 if destination.kind != "otlp" or not _splunk_o11y_realm(destination.endpoint):
                     continue
                 try:
-                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False, "")
+                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False)
                 except click.ClickException:
                     pass
             click.echo("    Splunk O11y (OTLP): disabled")
@@ -18135,7 +18129,7 @@ def _disable_splunk(
                     if enterprise_only and is_local:
                         continue
                 try:
-                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False, "")
+                    _set_v8_destination_enabled(app.cfg.data_dir, destination.name, False)
                     if is_local:
                         disabled_local = True
                     else:
