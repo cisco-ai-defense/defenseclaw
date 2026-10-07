@@ -15,7 +15,9 @@ import (
 func TestEnterpriseHookTargetResolvesAnEntraIDAccount(t *testing.T) {
 	const sid = "S-1-12-1-1111111111-2222222222-3333333333-4444444444"
 	previousAccount, previousHome, previousCfg := enterprisePolicyAccount, enterprisePolicyProfileHome, cfg
-	t.Cleanup(func() { enterprisePolicyAccount, enterprisePolicyProfileHome, cfg = previousAccount, previousHome, previousCfg })
+	t.Cleanup(func() {
+		enterprisePolicyAccount, enterprisePolicyProfileHome, cfg = previousAccount, previousHome, previousCfg
+	})
 	cfg = nil
 	enterprisePolicyAccount = func(name string) (string, string, error) {
 		if name != `AzureAD\EntraAlice` {
