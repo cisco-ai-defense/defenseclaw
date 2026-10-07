@@ -13878,7 +13878,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             await self._load_inventory_merged(names, announce=announce)
             return
         self.inventory_model.show_connector_column = False
-        if names:
+        # _active_connector_names() is empty for both zero and one connector.
+        # Only the zero-connector case needs the IDE-only AIBOM path.
+        roster = getattr(self.overview_model.cfg, "connector_modes", ()) if self.overview_model.cfg else ()
+        if roster:
             intent = self.inventory_model.load_intent()
         else:
             # IDE inventory is per user and remains useful before any agent is configured.
