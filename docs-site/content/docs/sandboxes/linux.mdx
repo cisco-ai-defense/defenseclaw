@@ -307,6 +307,7 @@ on one host are tracked upstream in
 | `the DefenseClaw daemon is not running` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
 | `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
+| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. The Python harnesses (Hermes Agent, OpenHands, OmniGent) carry a DefenseClaw workaround. Other Python programs in the sandbox, such as `pip`, keep failing until an OpenShell release after 0.1.2 fixes it. |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

@@ -966,6 +966,15 @@ deleted.
   `openshell_install_version`.
 - The daemon reconnects when the gateway answers with another release, so
   `sandbox status` and the doctor name the release after an upgrade.
+- On Linux kernels older than 5.19 (RHEL 9 runs 5.14), OpenShell 0.1 won't
+  tell a sandboxed program whom its connection goes to (`getpeername` fails
+  with `EOPNOTSUPP`), and Python's `ssl` module asks before every handshake,
+  so every HTTPS request of a Python program failed with
+  `[Errno 95] Operation not supported`: Hermes Agent, OpenHands and OmniGent
+  never reached their model. Their images now carry a workaround in the
+  harness's own interpreter. Other Python programs in the sandbox, such as
+  `pip`, keep failing until an OpenShell release after 0.1.2
+  (NVIDIA/OpenShell #4058).
 - On a Mac the first start of each harness image after the upgrade prepares
   its MicroVM disk again (about a minute and 5 GB): the explain note and
   the daemon's disk-room check count only disks the gateway's release
