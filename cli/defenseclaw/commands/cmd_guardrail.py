@@ -55,6 +55,8 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import click
 
@@ -3324,6 +3326,40 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
     return None
 
 
+@contextmanager
+def _config_lock(app: AppContext, fail) -> Iterator[None]:
+    """Hold config.yaml.lock for a read-modify-write; the writer joins it."""
+    from defenseclaw import config_writer
+
+    try:
+        with config_writer.hold_lock(str(config_path_for_data_dir(app.cfg.data_dir))):
+            yield
+    except config_writer.ConfigLockBusyError as exc:
+        fail(1, f"Failed to save config: {config_writer.plain_error(exc)}")
+
+
+def _listed_now(app: AppContext, dotted: str, loaded: list) -> list:
+    """The list config.yaml holds at *dotted* now (the caller holds the lock).
+
+    A list edit builds on it, not on the list loaded when the command
+    started, so two edits of the same list compose instead of the last one
+    overwriting the other (GAP-0304). *loaded* stands in while there is no
+    config.yaml (or it can't be read; the writer then reports why).
+    """
+    import yaml
+
+    from defenseclaw import config_writer
+
+    try:
+        with open(config_path_for_data_dir(app.cfg.data_dir), "rb") as handle:
+            value = yaml.safe_load(handle.read()) or {}
+    except (OSError, ValueError, yaml.YAMLError):
+        return list(loaded)
+    for part in config_writer.parse_path(dotted):
+        value = value.get(part) if isinstance(value, dict) else None
+    return list(value) if isinstance(value, list) else []
+
+
 def _registered_pack_names(gc: object) -> str:
     """The guardrail.custom_packs names use-pack accepts, for the unknown-pack message."""
     names = sorted(getattr(gc, "custom_packs", None) or {})
@@ -3814,25 +3850,26 @@ def _change_protection(
 
     where = _scope_words(connector_key, profile_name)
     rules = _scope_rules(app.cfg, connector_key, profile_name)
-    on_now = [str(n) for n in (getattr(rules, "protections", None) or [])]
-    if (name in on_now) == enable:
-        state = "on" if enable else "off"
-        _finish(
-            ok=True,
-            exit_code=0,
-            protection=on_now,
-            message=f"{pack.title} is already {state} for {where}; nothing was changed.",
-        )
-        return
-
-    wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
-    order = {p.name: index for index, p in enumerate(packs)}
-    desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
     path = f"{_scope_key(connector_key, profile_name)}.rules.protections"
-    change = config_writer.Change(path, desired) if desired else config_writer.Change(path, unset=True)
-    _preflight_config_write(app)
-    verb = "enable" if enable else "disable"
-    result = _write_guardrail_config(app, [change], f"guardrail protection {verb} {name}", _fail)
+    with _config_lock(app, _fail):
+        on_now = _listed_ids(_listed_now(app, path, _rule_ids(rules, "protections")))
+        if (name in on_now) == enable:
+            state = "on" if enable else "off"
+            _finish(
+                ok=True,
+                exit_code=0,
+                protection=on_now,
+                message=f"{pack.title} is already {state} for {where}; nothing was changed.",
+            )
+            return
+
+        wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
+        order = {p.name: index for index, p in enumerate(packs)}
+        desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
+        change = config_writer.Change(path, desired) if desired else config_writer.Change(path, unset=True)
+        _preflight_config_write(app)
+        verb = "enable" if enable else "disable"
+        result = _write_guardrail_config(app, [change], f"guardrail protection {verb} {name}", _fail)
     _log_guardrail_change(
         app,
         "guardrail-protection",
@@ -3863,8 +3900,12 @@ def rule_group() -> None:
     """
 
 
+def _listed_ids(values) -> list[str]:
+    return [str(v) for v in (values or []) if str(v or "").strip()]
+
+
 def _rule_ids(rules, field: str) -> list[str]:
-    return [str(v) for v in (getattr(rules, field, None) or []) if str(v or "").strip()]
+    return _listed_ids(getattr(rules, field, None))
 
 
 def _scope_blocks(cfg, connector_key: str | None, profile: str | None) -> list:
@@ -3981,40 +4022,40 @@ def _change_rule_lists(
                 _fail(1, problem)
     rules = _scope_rules(app.cfg, connector_key, profile_name)
     add_to, remove_from = ("enable", "disable") if enable else ("disable", "enable")
-    target = _rule_ids(rules, add_to)
-    other = _rule_ids(rules, remove_from)
     key = _scope_key(connector_key, profile_name)
-    changes = []
-    # enable is for rules the pack ships off and disable for rules it ships on: when the pack
-    # already ships the rule in the wanted state (and no wider scope undoes that), dropping the
-    # opposite entry is all it takes, and a leftover entry would only break a later pack switch (GAP-0258).
-    own_block = _scope_block(app.cfg, connector_key, profile_name)
-    undone_above = any(
-        rule_id in _rule_ids(getattr(block, "rules", None), remove_from)
-        for block in _scope_blocks(app.cfg, connector_key, profile_name)
-        if block is not own_block
-    )
-    defaults = {} if undone_above else _scope_rule_defaults(app.cfg, connector_key, profile_name)
-    shipped_as_wanted = defaults.get(rule_id) is enable
-    if rule_id not in target and not shipped_as_wanted:
-        changes.append(config_writer.Change(f"{key}.rules.{add_to}", [*target, rule_id]))
-    if rule_id in other:
-        rest = [v for v in other if v != rule_id]
-        changes.append(
-            config_writer.Change(f"{key}.rules.{remove_from}", rest)
-            if rest
-            else config_writer.Change(f"{key}.rules.{remove_from}", unset=True)
-        )
     where = _scope_words(connector_key, profile_name)
     state = "on" if enable else "off"
-    if not changes:
-        message = f"Rule {rule_id} is already turned {state} for {where}; nothing was changed."
-        result = None
-    else:
-        _preflight_config_write(app)
-        result = _write_guardrail_config(app, changes, f"guardrail rule {add_to} {rule_id}", _fail)
-        _log_guardrail_change(app, "guardrail-rule", f"scope={key} rule={rule_id} {add_to}=true")
-        message = f"Rule {rule_id} is turned {state} for {where}. {_applied_note(app, result)}"
+    with _config_lock(app, _fail):
+        target = _listed_ids(_listed_now(app, f"{key}.rules.{add_to}", _rule_ids(rules, add_to)))
+        other = _listed_ids(_listed_now(app, f"{key}.rules.{remove_from}", _rule_ids(rules, remove_from)))
+        changes = []
+        # enable is for rules the pack ships off and disable for rules it ships on: when the pack
+        # already ships the rule in the wanted state (and no wider scope undoes that), dropping the
+        # opposite entry is all it takes, and a leftover entry would only break a later pack switch (GAP-0258).
+        own_block = _scope_block(app.cfg, connector_key, profile_name)
+        undone_above = any(
+            rule_id in _rule_ids(getattr(block, "rules", None), remove_from)
+            for block in _scope_blocks(app.cfg, connector_key, profile_name)
+            if block is not own_block
+        )
+        defaults = {} if undone_above else _scope_rule_defaults(app.cfg, connector_key, profile_name)
+        shipped_as_wanted = defaults.get(rule_id) is enable
+        if rule_id not in target and not shipped_as_wanted:
+            changes.append(config_writer.Change(f"{key}.rules.{add_to}", [*target, rule_id]))
+        if rule_id in other:
+            rest = [v for v in other if v != rule_id]
+            changes.append(
+                config_writer.Change(f"{key}.rules.{remove_from}", rest)
+                if rest
+                else config_writer.Change(f"{key}.rules.{remove_from}", unset=True)
+            )
+        if not changes:
+            message = f"Rule {rule_id} is already turned {state} for {where}; nothing was changed."
+        else:
+            _preflight_config_write(app)
+            result = _write_guardrail_config(app, changes, f"guardrail rule {add_to} {rule_id}", _fail)
+            _log_guardrail_change(app, "guardrail-rule", f"scope={key} rule={rule_id} {add_to}=true")
+            message = f"Rule {rule_id} is turned {state} for {where}. {_applied_note(app, result)}"
     if json_out:
         click.echo(json.dumps({"version": 1, "ok": True, "rule": rule_id, "scope": key, "message": message}, indent=2))
     else:
@@ -4175,33 +4216,33 @@ def _change_suppression(
         if problem:
             _fail(1, problem)
     rules = _scope_rules(app.cfg, connector_key, profile_name)
-    current = [
-        {
-            "id": str(getattr(s, "id", "")),
-            "finding_pattern": str(getattr(s, "finding_pattern", "")),
-            "entity_pattern": str(getattr(s, "entity_pattern", "")),
-            "reason": str(getattr(s, "reason", "")),
-        }
-        for s in (getattr(rules, "suppressions", None) or [])
-    ]
-    exists = any(s["id"] == sid for s in current)
-    where = _scope_words(connector_key, profile_name)
-    if entry is not None and exists:
-        _fail(1, f"Suppression {sid} already exists for {where}; remove it first. Nothing was changed.")
-    if entry is None and not exists:
-        _done(True, 0, f"There's no suppression {sid} for {where}; nothing was changed.")
-        return
-    if entry is not None:
-        clean = {k: v for k, v in entry.items() if v}
-        updated = [*current, clean]
-    else:
-        updated = [s for s in current if s["id"] != sid]
-    updated = [{k: v for k, v in s.items() if v} for s in updated]
     path = f"{_scope_key(connector_key, profile_name)}.rules.suppressions"
-    change = config_writer.Change(path, updated) if updated else config_writer.Change(path, unset=True)
-    _preflight_config_write(app)
-    verb = "add" if entry is not None else "remove"
-    result = _write_guardrail_config(app, [change], f"guardrail suppress {verb} {sid}", _fail)
+    where = _scope_words(connector_key, profile_name)
+    with _config_lock(app, _fail):
+        listed = _listed_now(app, path, list(getattr(rules, "suppressions", None) or []))
+        current = [
+            {
+                field: str((s.get(field) if isinstance(s, dict) else getattr(s, field, "")) or "")
+                for field in ("id", "finding_pattern", "entity_pattern", "reason")
+            }
+            for s in listed
+        ]
+        exists = any(s["id"] == sid for s in current)
+        if entry is not None and exists:
+            _fail(1, f"Suppression {sid} already exists for {where}; remove it first. Nothing was changed.")
+        if entry is None and not exists:
+            _done(True, 0, f"There's no suppression {sid} for {where}; nothing was changed.")
+            return
+        if entry is not None:
+            clean = {k: v for k, v in entry.items() if v}
+            updated = [*current, clean]
+        else:
+            updated = [s for s in current if s["id"] != sid]
+        updated = [{k: v for k, v in s.items() if v} for s in updated]
+        change = config_writer.Change(path, updated) if updated else config_writer.Change(path, unset=True)
+        _preflight_config_write(app)
+        verb = "add" if entry is not None else "remove"
+        result = _write_guardrail_config(app, [change], f"guardrail suppress {verb} {sid}", _fail)
     _log_guardrail_change(app, "guardrail-suppress", f"scope={_scope_key(connector_key, profile_name)} id={sid} {verb}")
     state = "added" if entry is not None else "removed"
     _done(True, 0, f"Suppression {sid} {state} for {where}. {_applied_note(app, result)}")
