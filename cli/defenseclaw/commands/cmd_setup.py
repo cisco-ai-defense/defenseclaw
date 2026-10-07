@@ -93,6 +93,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNVERSIONED,
     compare_agent_versions,
     connector_lock_contract_invariant,
+    normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
@@ -5540,8 +5541,8 @@ def _check_connector_version_supported_for_setup(
             ux.ok(f"{label}: version {version_display}; connector has no hook contract gate.")
             if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version):
                 ux.warn(
-                    f"{label}: {version_display} is in the OpenClaw ≥2026.6.8 transport range. "
-                    "A live :4000 port is not proof that agent LLM traffic is intercepted — "
+                    f"{label} {normalize_agent_version(raw_version)} is in the ≥2026.6.8 transport range. "
+                    "A live guardrail proxy port is not proof that agent LLM traffic is intercepted — "
                     "run `defenseclaw doctor` and confirm the OpenClaw interception check."
                 )
         return True

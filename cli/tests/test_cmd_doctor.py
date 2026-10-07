@@ -43,7 +43,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_hook_health,
     _check_llm_api_key,
-    _check_openclaw_transport_advisory,
     _check_openhands_hooks,
     _check_proxy_interception,
     _check_scanners,
@@ -424,7 +423,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.to_dict()["exit_code"], 1)
         self.assertIn("has not reported an interceptor self-test", result.checks[0]["detail"])
 
-    def test_disabled_openclaw_is_skipped_by_interception_and_transport_checks(self):
+    def test_disabled_openclaw_is_skipped_by_the_interception_check(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -448,36 +447,6 @@ class DoctorGuardrailTests(unittest.TestCase):
             live_health={"interception": {"verified": False}},
         )
         self.assertEqual(interception.checks, [])
-
-        advisory = _DoctorResult()
-        signal = SimpleNamespace(version="2026.6.8", installed=True)
-        with patch(
-            "defenseclaw.inventory.agent_discovery.discover_agents",
-            return_value=SimpleNamespace(agents={"openclaw": signal}),
-        ):
-            _check_openclaw_transport_advisory(cfg, advisory)
-        self.assertEqual(advisory.checks, [])
-
-    def test_openclaw_transport_advisory_for_2026_6(self):
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, connector="openclaw"),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        result = _DoctorResult()
-        signal = SimpleNamespace(version="2026.6.8", installed=True)
-        with patch(
-            "defenseclaw.inventory.agent_discovery.discover_agents",
-            return_value=SimpleNamespace(agents={"openclaw": signal}),
-        ):
-            _check_openclaw_transport_advisory(cfg, result)
-        self.assertEqual(result.warned, 1, result.checks)
-        self.assertIn("2026.6.8", result.checks[0]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_check_surfaces_disabled_summary(self, mock_probe):
