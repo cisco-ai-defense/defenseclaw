@@ -18,6 +18,8 @@ import os
 import re
 import socket
 import stat
+import subprocess
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -53,6 +55,10 @@ try:
     _SERVICE_UID = int(_decoded("{{SERVICE_UID_B64}}") or "0")
 except ValueError:
     _SERVICE_UID = 0
+# The administrator-owned hook binary of a standalone managed install, which
+# reads the user's Kerberos credential cache (see _full_session_facts). Empty
+# for a per-user install, which uses its own gateway binary.
+_SESSION_FACTS_BIN = _decoded("{{SESSION_FACTS_BIN_B64}}")
 _HOOK_PATH = "/api/v1/omnigent/hook"
 _ENDPOINT = f"http://{_API_ADDR}{_HOOK_PATH}"
 _TIMEOUT_SECONDS = 10
@@ -452,6 +458,43 @@ def _identity_headers() -> dict[str, str]:
 _SAFE_SESSION_FACT = re.compile(r"[A-Za-z0-9._@/:-]{1,256}")
 
 
+_FULL_SESSION_FACTS = re.compile(r"v1;[A-Za-z0-9._@/:;=-]{1,1020}")
+_session_facts_cache: dict[str, Any] = {"key": None, "value": "", "until": 0.0}
+
+
+def _full_session_facts() -> str:
+    """Ask a DefenseClaw binary for this login's whole session facts.
+
+    The Kerberos principal sits in a credential cache this module cannot read
+    (a KCM cache is a socket protocol), so `hook session-facts` reads it and
+    prints the whole X-DefenseClaw-Session-Facts value, the principal included.
+    The binary keeps its own five-minute cache in ~/.defenseclaw and this
+    module keeps the answer for the same time. No answer is a supported
+    outcome: the SSH and logind variables alone follow.
+    """
+    env = os.environ
+    key = "|".join(env.get(name, "") for name in ("KRB5CCNAME", "XDG_SESSION_ID", "SSH_CONNECTION", "SSH_TTY"))
+    now = time.monotonic()
+    if _session_facts_cache["key"] == key and now < _session_facts_cache["until"]:
+        return str(_session_facts_cache["value"])
+    value = ""
+    binary = _SESSION_FACTS_BIN or os.path.join(
+        os.path.expanduser("~"), ".local", "bin", "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
+    )
+    try:
+        completed = subprocess.run(
+            [binary, "hook", "session-facts"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3, check=False,
+        )
+        answer = completed.stdout.strip()
+        if completed.returncode == 0 and _FULL_SESSION_FACTS.fullmatch(answer):
+            value = answer
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    _session_facts_cache.update(key=key, value=value, until=now + (300.0 if value else 30.0))
+    return value
+
+
 def _session_facts_header() -> str:
     """Render the claimed SSH and logind session facts.
 
@@ -459,6 +502,9 @@ def _session_facts_header() -> str:
     sends. Each value is dropped unless it matches the header's allowlisted
     charset; everything here is claimed attribution, never authority.
     """
+    full = _full_session_facts()
+    if full:
+        return full
     connection = os.environ.get("SSH_CONNECTION", "").split()
     address = connection[0] if connection else ""
     tty = os.environ.get("SSH_TTY", "")

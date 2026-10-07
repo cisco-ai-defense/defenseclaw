@@ -1522,7 +1522,7 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	// does for in-agent plugins. Every other install (per-user, Secure
 	// Client, Windows) has no socket here and keeps the TCP transport.
 	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
-		render.socketTransport = shellHookSocketTransport(socket, serviceUID)
+		render.socketTransport = shellHookSocketTransport(socket, serviceUID, managedSessionFactsBinary(opts))
 	}
 	// The standalone Hermes hook also runs the foreign-hook guard first
 	// (shellHookForeignGuardBinary); no other hook or install does.

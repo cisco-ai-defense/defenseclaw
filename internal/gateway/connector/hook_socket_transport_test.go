@@ -41,7 +41,7 @@ var shellHookSocketConnectorTemplates = []string{
 // socket, without a bearer, when a standalone socket is configured, and
 // contains no trace of it otherwise.
 func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.T) {
-	transport := shellHookSocketTransport("/opt/cisco/defenseclaw/run/hook's.sock", 497)
+	transport := shellHookSocketTransport("/opt/cisco/defenseclaw/run/hook's.sock", 497, "/opt/defenseclaw/bin/defenseclaw-hook")
 	for _, name := range shellHookSocketConnectorTemplates {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
@@ -66,6 +66,12 @@ func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.
 		if !strings.Contains(socket, "DEFENSECLAW_HOOK_SOCKET='/opt/cisco/defenseclaw/run/hook'\"'\"'s.sock'\n") ||
 			!strings.Contains(socket, "DEFENSECLAW_HOOK_SOCKET_UID=497\n") {
 			t.Fatalf("%s: socket path or service uid not rendered as one shell word", name)
+		}
+		// The administrator-owned binary that reads the Kerberos cache is
+		// named before the identity headers are built (GAP-0194).
+		if !strings.Contains(socket, "DEFENSECLAW_SESSION_FACTS_BIN='/opt/defenseclaw/bin/defenseclaw-hook'\nexport DEFENSECLAW_SESSION_FACTS_BIN\n") ||
+			strings.Contains(tcp, "DEFENSECLAW_SESSION_FACTS_BIN") {
+			t.Fatalf("%s: session facts binary rendered wrongly", name)
 		}
 		block := strings.Index(socket, "if ! defenseclaw_hook_socket_trusted; then")
 		auth := strings.Index(socket, "\nAUTH_HEADER_ARGS=()")

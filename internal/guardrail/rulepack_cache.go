@@ -51,6 +51,37 @@ type RulePackCache struct {
 	packs    map[string]*RulePack
 	inflight map[string]*rulePackLoad
 	loader   func(string) (*RulePack, error)
+	// validated holds the outcome of Validate per cached pack, so a pack that
+	// many guardrail profiles resolve to is validated once.
+	validated map[*RulePack]*rulePackValidation
+}
+
+// validateRulePack is replaceable by tests that count validations.
+var validateRulePack = (*RulePack).Validate
+
+type rulePackValidation struct {
+	once sync.Once
+	err  error
+}
+
+// Validate runs rp.Validate once per pack and returns the remembered outcome
+// afterwards. Validation compiles the patterns of every rule (about 50 ms for
+// the default pack), and the candidate-asset check and the profile set build
+// validated the same cached pack again for every profile and connector: a
+// config with 100 profiles took 5.7 s to check on an 8-vCPU host.
+func (c *RulePackCache) Validate(rp *RulePack) error {
+	c.mu.Lock()
+	if c.validated == nil {
+		c.validated = make(map[*RulePack]*rulePackValidation)
+	}
+	v := c.validated[rp]
+	if v == nil {
+		v = &rulePackValidation{}
+		c.validated[rp] = v
+	}
+	c.mu.Unlock()
+	v.once.Do(func() { v.err = validateRulePack(rp) })
+	return v.err
 }
 
 type rulePackLoad struct {

@@ -10,7 +10,7 @@
 #   1. checks the host: root, RHEL family, the SSSD packages, and that this
 #      SSSD can talk to Okta (option ldap_use_ppolicy; stock SSSD 2.9 cannot)
 #   2. renders sssd-okta.conf.tmpl, checks it with `sssctl config-check`, and
-#      tests the bind user against Okta when ldapwhoami is installed
+#      tests the bind user against Okta when ldapsearch is installed
 #   3. installs /etc/sssd/sssd.conf (root, mode 0600; the previous file is
 #      kept as sssd.conf.bak-<time>) and restarts SSSD when the file changed
 #   4. selects the authselect sssd profile with home directories
@@ -74,7 +74,7 @@ Options:
   --no-sshd                 Do not write the sshd drop-in
   --no-pam                  Do not run authselect or enable oddjobd
   --install-packages        dnf install missing packages instead of stopping
-  --skip-bind-test          Do not test the bind user with ldapwhoami
+  --skip-bind-test          Do not test the bind user with ldapsearch
   --render-only FILE        Write the rendered config to FILE (mode 0600),
                             check it, and change nothing else. Works on any Linux.
   --dry-run                 Show what would change, change nothing

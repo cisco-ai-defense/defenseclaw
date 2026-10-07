@@ -101,10 +101,15 @@ type HookAuditEnvelope struct {
 	// parity contract. Connector is the existing field above.
 	//   - StepIdx: 1-indexed per-turn counter within a session.
 	//   - Enforced: true when the decision was an enforced block.
-	//   - RulePackDir: effective rule-pack dir the verdict used.
+	//   - RulePackDir: effective rule-pack dir the verdict used. It is a
+	//     filesystem path, so it travels in its own path-class field (the
+	//     audit column and the v8 record body), never inside the free-form
+	//     envelope text: a home directory with an SSSD fully qualified name
+	//     holds the user principal, and a redaction profile can only hash or
+	//     remove a path it can see as a path (GAP-0131).
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
-	RulePackDir string `json:"rule_pack_dir,omitempty"`
+	RulePackDir string `json:"-"`
 
 	// Agent lifecycle correlation is copied from the same phase snapshot used
 	// by native lifecycle/tool/hook-decision events. These additive fields let
@@ -159,7 +164,6 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	// log-injection controls are removed here; each destination applies its own
 	// configured redaction profile after routing.
 	env.Reason = sanitizeEnvelopeFreeForm(env.Reason)
-	env.RulePackDir = stripLogInjectionRunes(env.RulePackDir)
 	if phase, ok := gatewaylog.NormalizeAgentPhase(env.AgentPhase); ok {
 		env.AgentPhase = phase
 	} else {
