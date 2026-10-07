@@ -205,15 +205,11 @@ class OverviewConfig:
     # DISABLED rather than hiding them; a *fully removed* connector simply
     # leaves ``active_connectors()`` and never reaches the roster at all.
     connector_disabled: tuple[str, ...] = ()
-    # N3: scanner action overrides from the *active* policy's synced
-    # ``data.json`` (``scanner_overrides`` → scanner_type → severity →
-    # ``{install,file,runtime}`` → action). These live only in the active
-    # policy YAML / ``data.json``; today only ``policy show`` surfaces them, so
-    # ``defenseclaw status`` and the Overview guardrail summary are blind to a
-    # policy that, say, downgrades a scanner surface to ``warn``/``allow``.
-    # Stored flattened as ``(scanner_type, severity, surface, action)`` so the
-    # frozen dataclass stays hashable; empty for the default config → no
-    # Overview change. Populated by the adapter (which reads ``data.json``);
+    # N3: the admission actions config.yaml sets per asset type
+    # (``admission.<type>.actions``) that differ from the built-in policy.
+    # Stored flattened as ``(asset_type, severity, surface, action)`` so the
+    # frozen dataclass stays hashable; empty when config.yaml sets none → no
+    # Overview change. Populated by :func:`admission_action_overrides`;
     # rendered via :func:`format_scanner_overrides_summary` /
     # :meth:`OverviewPanelModel.scanner_overrides_summary`.
     scanner_overrides: tuple[tuple[str, str, str, str], ...] = ()
@@ -1375,13 +1371,11 @@ class OverviewPanelModel:
         return ""
 
     def scanner_overrides_summary(self) -> str:
-        """One-line summary of the active policy's scanner action overrides,
+        """One-line summary of the admission actions config.yaml overrides,
         or ``""`` when there are none (N3).
 
-        Surfaces overrides that today live only in ``policy show`` /
-        ``data.json``. Empty (the default config) renders nothing, so the
-        Overview is unchanged until the adapter populates
-        :attr:`OverviewConfig.scanner_overrides`. See
+        Empty (the default config) renders nothing. See
+        :attr:`OverviewConfig.scanner_overrides` and
         :func:`format_scanner_overrides_summary`.
         """
         if self.cfg is None:
@@ -2136,11 +2130,14 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
 def admission_action_overrides(
     config: object | None,
 ) -> tuple[tuple[str, str, str, str], ...]:
-    """The per-type admission actions config.yaml sets (N3).
+    """The per-type admission actions config.yaml sets that differ from the
+    built-in policy (N3).
 
     ``admission.<skill|mcp|plugin>.actions`` refine the inherited
-    ``admission.defaults`` for one asset type. Output: ``(type, severity,
-    surface, action)`` tuples for :func:`format_scanner_overrides_summary`.
+    ``admission.defaults`` for one asset type; an action equal to the built-in
+    one (for example after ``policy activate default``) is not an override and
+    is left out. Output: ``(type, severity, surface, action)`` tuples for
+    :func:`format_scanner_overrides_summary`.
     Malformed entries are skipped so a bad value degrades to a partial list,
     never a raise.
     """
@@ -2149,15 +2146,16 @@ def admission_action_overrides(
     if admission is None:
         return ()
     try:
-        from defenseclaw.enforce.admission import _compile_action
+        from defenseclaw.enforce.admission import _builtin_admission, _compile_action
     except Exception:  # noqa: BLE001 - the override summary is purely informational.
         return ()
     flat: list[tuple[str, str, str, str]] = []
     for target_type in ("skill", "mcp", "plugin"):
         actions = getattr(getattr(admission, target_type, None), "actions", None) or {}
+        builtin = _builtin_admission(target_type).actions
         for severity, raw in actions.items():
             compiled = _compile_action(raw)
-            if compiled is None:
+            if compiled is None or compiled == builtin.get(str(severity).upper()):
                 continue
             action = compiled[0]
             for surface in ("install", "file", "runtime"):
@@ -2170,10 +2168,8 @@ def format_scanner_overrides_summary(
 ) -> str:
     """One-line summary of active-policy scanner action overrides (N3).
 
-    ``overrides`` is the flattened ``(scanner_type, severity, surface, action)``
-    view of the active policy's ``scanner_overrides`` (synced into
-    ``data.json``; only ``policy show`` surfaces these today). Returns ``""``
-    when empty, so the Overview / ``defenseclaw status`` render nothing for the
+    ``overrides`` is the flattened ``(asset_type, severity, surface, action)``
+    view of :func:`admission_action_overrides`. Returns ``""`` when empty, so the Overview / ``defenseclaw status`` render nothing for the
     common default config. Groups by scanner then severity, e.g.::
 
         secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow
