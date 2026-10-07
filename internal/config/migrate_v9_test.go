@@ -1073,3 +1073,29 @@ func TestMigrateV9ReadsAuditDBUnderAnAwkwardPath(t *testing.T) {
 		t.Fatalf("rows after clear = %d, err = %v", len(rows), err)
 	}
 }
+
+// An audit allow at a distinct source path must survive alongside the v8
+// config allow for the same skill and connector.
+func TestMigrateV9KeepsDistinctPathPinnedAllow(t *testing.T) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(`asset_policy:
+  skill:
+    allowed: [{name: acme, connector: codex, source_path_contains: [/trusted]}]
+`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	m := &v9Migrator{}
+	row := v9ActionRow{id: "2", targetType: AdmissionTypeSkill, targetName: "acme",
+		connector: "codex", sourcePath: "/other"}
+	if !m.appendAssetRule(v8DocumentRoot(&doc), row, "allowed") {
+		t.Fatal("audit allow was not migrated")
+	}
+	root := v8DocumentRoot(&doc)
+	rules := v9SeqItems(v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "asset_policy"), "skill"), "allowed"))
+	if len(rules) != 2 {
+		t.Fatalf("allowed rules = %d, want both pinned paths", len(rules))
+	}
+	if path := v9SeqItems(v8YAMLMapValue(rules[1], "source_path_contains")); len(path) != 1 || yamlScalarValue(path[0]) != "/other" {
+		t.Fatalf("migrated allow has source_path_contains = %v", path)
+	}
+}
