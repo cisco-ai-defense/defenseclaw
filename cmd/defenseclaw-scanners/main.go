@@ -80,8 +80,9 @@ if t is None:
 print(json.dumps(scan_plugin(t,o).to_dict()))`
 
 	// mcpScanScript is the gateway's "mcp scan --json" for a remote server:
-	// the scanner settings come as arguments and the judge from the
-	// DEFENSECLAW_SCANNER_* variables the gateway derives from config.
+	// the scanner settings come as arguments, and the judge and AI Defense
+	// settings come from the environment that internal/scanner runtimeEnv
+	// derives from config.
 	mcpScanScript = `import os,sys
 from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, MCPScannerConfig
 from defenseclaw.scanner.mcp import MCPScannerWrapper
