@@ -1470,6 +1470,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		}
 		opts.AcceptSensitive = yes
 		if !yes {
+			a.note(notBroughtBack(after.Name, pull.Kind))
 			s.keepUnpulled()
 			return s.finish(ctx, false)
 		}
