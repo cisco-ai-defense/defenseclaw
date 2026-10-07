@@ -967,6 +967,17 @@ _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+def retired_key_replacement(field: str) -> str:
+    """What replaced the config_version 8 key at dotted ``field``, or ""."""
+
+    for parts, target in _V9_REMOVED_KEYS:
+        if field == ".".join(parts):
+            return target
+    if field.startswith("guardrail.") and field.endswith(".rule_pack_dir"):
+        return "rule_pack or custom_packs"
+    return ""
+
+
 def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
     """Name the replacement for a v8 key a config_version 9 source still carries."""
 
@@ -1025,7 +1036,6 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
         # holds it ("$.no.such", not "$").
         parts += _first_unexpected_key(error)
     path = _json_path(parts)
-    label = "v9" if v9 else "v8"
     action = {
         "additionalProperties": "remove unsupported fields; see the configuration reference",
         "const": "use the exact value from the configuration reference",
