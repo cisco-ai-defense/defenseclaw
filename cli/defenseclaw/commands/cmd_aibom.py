@@ -127,7 +127,7 @@ def scan(
             payload, note = _fetch_ide_plugins(app)
             if payload is None or note:
                 raise click.ClickException(f"IDE plugins: {note or 'not collected'}")
-            inv: dict[str, Any] = {"summary": {}, "ide_plugins": []}
+            inv: dict[str, object] = {"summary": {}, "ide_plugins": []}
             attach_ide_plugins(inv, payload)
             if as_json:
                 click.echo(json.dumps(inv, indent=2, sort_keys=True))
