@@ -298,6 +298,16 @@ type Snapshot struct {
 	// at most maxKernelEventsPerPoll; KernelEventsDropped counts the rest.
 	KernelEvents        []KernelEvent
 	KernelEventsDropped int64
+	// CustomerKernelEvents are the attributed events of the host's own
+	// Tetragon policies since the previous poll, at most
+	// maxCustomerRecordsPerPoll; CustomerKernelEventsDropped counts the rest.
+	// They are records of their own: never a finding, never scored.
+	CustomerKernelEvents        []CustomerKernelEvent
+	CustomerKernelEventsDropped int64
+	// RecentCustomerKernelEvents are the latest attributed ones (at most
+	// maxCustomerRecent, oldest first), as Service.Snapshot reads them for
+	// the runtime API; empty in a poll's own result.
+	RecentCustomerKernelEvents []CustomerKernelEvent
 	// Kernel is the sensor helper's kernel-policy state; nil when the
 	// acquirer is not a helper that reports one.
 	Kernel *KernelState

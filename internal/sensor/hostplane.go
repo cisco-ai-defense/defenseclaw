@@ -119,8 +119,12 @@ type hostPlane struct {
 	containerEvents atomic.Int64
 	ownEvents       atomic.Int64
 	hookUnexpected  atomic.Int64
-	// customerEvents counts the events of the host's own Tetragon policies.
-	customerEvents atomic.Int64
+	// customer holds the events of the host's own Tetragon policies:
+	// attributed records, the latest of them and per-policy counts.
+	customer customerPlane
+	// blocks are the recent attributed denials, DefenseClaw's controls' and
+	// customer policies', for the developer notice.
+	blocks []KernelBlock
 }
 
 // kernelConnect is a process's connection to a peer as a kernel connect
@@ -197,19 +201,19 @@ func (h *hostPlane) consume(ctx context.Context) {
 
 func (h *hostPlane) handle(event plane.Event) {
 	defer h.handled.Add(1)
+	if event.PolicyOwner == plane.PolicyOwnerCustomer || event.Kind == plane.KindPolicyEvent {
+		// An event of the host's own Tetragon policy: a record of its own,
+		// never a tactic, a score, a Plane B connect or a kernel control's
+		// outcome (customer.go).
+		h.handleCustomer(event)
+		return
+	}
 	if event.ContainerID != "" {
 		// A container process (a devcontainer, a docker run on a managed
 		// host): counted, and never joined to a host agent session. Its
 		// processes are not the host agent's, whatever their names say, and
 		// no host process descends from them.
 		h.containerEvents.Add(1)
-		return
-	}
-	if event.PolicyOwner == plane.PolicyOwnerCustomer || event.Kind == plane.KindPolicyEvent {
-		// An event of the host's own Tetragon policy: a record of its own,
-		// never a tactic, a score, a Plane B connect or a kernel control's
-		// outcome.
-		h.customerEvents.Add(1)
 		return
 	}
 	// Every exec teaches the tracker, whether or not it classifies. Lineage is
@@ -395,6 +399,18 @@ func (h *hostPlane) recordKernelEvent(event plane.Event, lineage agentchain.Line
 			if join, ok := h.joins.get(toolKey(lineage.Child.PID, lineage.Child.ExecID)); ok {
 				record.Hook = &join
 			}
+		}
+		if record.Outcome == plane.OutcomeBlocked {
+			block := KernelBlock{
+				At: at, Owner: plane.PolicyOwnerDefenseClaw, Control: record.Control, RuleID: record.RuleID,
+				Policy: record.Policy, Process: record.Process, Target: record.Path, UID: copyIntPtr(record.UID),
+				RootPID: record.RootPID, SessionRootPID: lineage.SessionRoot.PID, Connector: record.Connector,
+			}
+			if record.Hook != nil && record.Hook.Seen {
+				block.SessionID, block.ToolInvocationID = record.Hook.SessionID, record.Hook.ToolInvocationID
+			}
+			block.ID = kernelBlockID(block.Owner, record.Policy, record.ExecID, record.PID, record.Path, at)
+			h.noteBlockLocked(block)
 		}
 	}
 	if len(h.kernelEvents) >= maxKernelEventsPerPoll {
