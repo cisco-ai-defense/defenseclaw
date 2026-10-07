@@ -29,6 +29,9 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
+	if note := entraShortNameNote(set, subject); note != "" {
+		warnings = append(warnings, note)
+	}
 	if note := unnamedGroupsNote(subject); note != "" {
 		warnings = append(warnings, note)
 	}
@@ -136,13 +139,14 @@ type profileGroupCheck struct {
 // the background, so a command never waits for the directory: it gets the last
 // pass, or, before the first has finished, waits for it at most wait.
 func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []string {
-	return set.unknownGroupWarningsWith(profileGroupExists, directoryCacheHealth, wait)
+	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, directoryCacheHealth, wait)
 }
 
 // unknownGroupWarningsWith is unknownGroupWarnings with the group lookup and
 // the directory cache health taken from the caller. A pass can outlive the
 // caller, so it uses these and never reads the package hooks tests replace.
-func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Context, string) (bool, error), health func() identityCacheHealth, wait time.Duration) []string {
+func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Context, string) (bool, error), qualify func(context.Context, string) string,
+	health func() identityCacheHealth, wait time.Duration) []string {
 	if set == nil {
 		return nil
 	}
@@ -158,7 +162,7 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 		check.running = done
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
-			warnings := unknownAssignmentGroups(ctx, set.assignments, exists)
+			warnings := unknownAssignmentGroups(ctx, set.assignments, exists, qualify)
 			cancel()
 			failing := health().Failing > 0
 			if failing {
@@ -190,9 +194,9 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 // logUnknownGroups writes the unknown-group warnings to the gateway log in the
 // background; the gateway calls it for a new set at start and at each reload.
 func (set *guardrailProfileSet) logUnknownGroups() {
-	exists, health := profileGroupExists, directoryCacheHealth
+	exists, qualify, health := profileGroupExists, profileGroupQualifiedName, directoryCacheHealth
 	go func() {
-		for _, warning := range set.unknownGroupWarningsWith(exists, health, profileGroupCheckBudget+time.Second) {
+		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, health, profileGroupCheckBudget+time.Second) {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 		}
 	}()
@@ -201,8 +205,10 @@ func (set *guardrailProfileSet) logUnknownGroups() {
 // unknownAssignmentGroups looks up each distinct group the assignments name
 // and warns for those exists reports as definitely absent, unless their
 // directory does not answer at all. SIDs and ids are not names and are not
-// looked up.
-func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error)) []string {
+// looked up. qualify, when set, names the qualified form the host knows an
+// absent short name by, which the warning then suggests (GAP-0332).
+func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error),
+	qualify func(context.Context, string) string) []string {
 	type unknownGroup struct {
 		assignment    int
 		group, domain string
@@ -253,6 +259,14 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 				continue
 			}
 		}
+		if qualify != nil {
+			if qualified := qualify(ctx, u.group); qualified != "" {
+				warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host by that name, so it selects nobody; "+
+					"the host knows it as %q (SSSD use_fully_qualified_names = True): write that name, or set "+
+					"use_fully_qualified_names = False in sssd.conf", u.assignment, u.group, qualified))
+				continue
+			}
+		}
 		warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", u.assignment, u.group))
 	}
 	return warnings
@@ -292,6 +306,28 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 	return ""
 }
 
+// entraShortNameNote says when the host names an Entra ID account by its
+// short name and reports no UPN for it (Himmelblau's default
+// cn_name_mapping = true) while an assignment lists users by UPN: no such
+// entry can select an account of this host (GAP-0328).
+func entraShortNameNote(set *guardrailProfileSet, subject *profileSubject) string {
+	if set == nil || subject == nil || subject.LookupFailed || subject.Directory != useridentity.DirectoryEntraID ||
+		subject.UPN != "" || strings.Contains(subject.UserName, "@") {
+		return ""
+	}
+	for i, assignment := range set.assignments {
+		for _, entry := range assignment.Match.Users {
+			if entry = strings.TrimSpace(entry); strings.Contains(entry, "@") {
+				return fmt.Sprintf("this host names the Entra ID account %q by its short name and reports no UPN for it, so a users entry "+
+					"written as a UPN (assignment %d: %q) cannot select it; with Himmelblau, set cn_name_mapping = false in "+
+					"/etc/himmelblau/himmelblau.conf to name accounts by their UPN, or name the account by its short name or uid",
+					subject.UserName, i+1, entry)
+			}
+		}
+	}
+	return ""
+}
+
 // What requests of the explained account use right now.
 //
 // `explain --user` resolves the account through the operating system, so it
@@ -306,6 +342,13 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 // they were fetched. Tests replace it.
 var cachedDirectoryFacts = func(id string) (useridentity.DirectoryFacts, time.Time, bool) {
 	return peerDirectoryCache().peek(id)
+}
+
+// cachedDirectoryLifetime is how long the cache serves facts before it
+// refreshes them: shorter for an answer it calls incomplete, such as one with
+// a group no name answered for (GAP-0326). Tests replace it.
+var cachedDirectoryLifetime = func(facts useridentity.DirectoryFacts) time.Duration {
+	return peerDirectoryCache().lifetime(facts)
 }
 
 // cachedDirectoryFailure reports an account the gateway's own lookups fail
@@ -351,7 +394,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	if age < 0 {
 		age = 0
 	}
-	refresh := max(identityDirectoryTTL-age, 0)
+	refresh := max(cachedDirectoryLifetime(facts)-age, 0)
 	cached := profileSubjectFromVerified(VerifiedSubject{
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, true)

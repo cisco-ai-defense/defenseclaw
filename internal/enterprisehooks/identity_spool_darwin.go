@@ -24,11 +24,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// On macOS the root enumerator reads the account's Open Directory record,
-// the AD binding and the device Platform SSO configuration
-// (useridentity.ParseMacOSDirectoryFacts). The per-user Platform SSO login
-// UPN is not recorded: it stays claimed until a root-readable source for it
-// is confirmed on a live host.
+// On macOS the root enumerator reads the account's Open Directory record
+// (with the Platform SSO login UPN of AltSecurityIdentities), the AD binding
+// and the device Platform SSO configuration
+// (useridentity.ParseMacOSDirectoryFacts).
 
 const macOSIdentityToolTimeout = 10 * time.Second
 
@@ -38,7 +37,7 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		return IdentitySpoolRecord{}, errors.New("account has no usable name")
 	}
 	in := useridentity.MacOSDirectoryInputs{
-		DSCL:       runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "AuthenticationAuthority", "OriginalNodeName"),
+		DSCL:       runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "AuthenticationAuthority", "OriginalNodeName", "AltSecurityIdentities"),
 		DSConfigAD: runMacOSIdentityTool(ctx, "/usr/sbin/dsconfigad", "-show"),
 		AppSSO:     runMacOSIdentityTool(ctx, "/usr/bin/app-sso", "platform", "-s"),
 	}
