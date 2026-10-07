@@ -1046,6 +1046,17 @@ func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
 	return snapshotRulePackGeneration("")
 }
 
+// proxyGuardrailProfileTelemetryFor describes only a profile actually used
+// by proxyProfileFor. An unverified shared-gateway request uses the proxy's
+// base settings, even when a connector assignment resolves on the context.
+func proxyGuardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry {
+	resolved := proxyProfileFor(ctx)
+	if resolved == nil {
+		return guardrailProfileTelemetry{}
+	}
+	return guardrailProfileTelemetryFromDecision(resolved.decision)
+}
+
 // guardrailProfileTelemetry carries the correlation.guardrail.profile
 // attributes for one decision record.
 type guardrailProfileTelemetry struct {
@@ -1067,7 +1078,10 @@ func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry
 	if resolved == nil {
 		return guardrailProfileTelemetry{}
 	}
-	d := resolved.decision
+	return guardrailProfileTelemetryFromDecision(resolved.decision)
+}
+
+func guardrailProfileTelemetryFromDecision(d profileDecision) guardrailProfileTelemetry {
 	out := guardrailProfileTelemetry{Match: observability.Present(d.Match)}
 	if d.Name != "" {
 		out.Name = observability.Present(d.Name)

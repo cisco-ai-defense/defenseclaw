@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
@@ -176,6 +177,39 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("identity %s missing from %+v", want, body.Identities)
+	}
+}
+
+// A session id is caller supplied. A shared gateway cannot use it to
+// attribute a different user's hook identity to the current caller.
+func TestSharedGatewaySessionJoinDoesNotCrossUsers(t *testing.T) {
+	agentIdentityTestSetup(t)
+	registry := SharedAgentRegistry()
+	owner := withManagedHookPeer(t.Context(), managedHookPeer{UID: 4242, Name: "bob"})
+	identity := agentIdentityForGenericHook(owner, agentHookRequest{
+		ConnectorName: "codex", SessionID: "thread-bob", HookEventName: "PreToolUse",
+		Payload: map[string]interface{}{},
+	})
+	if identity.IdentityID == "" || identity.AgentInstanceID == "" {
+		t.Fatalf("hook identity = %+v", identity)
+	}
+	caller := withManagedHookPeer(withServiceAccountGateway(ContextWithSessionID(t.Context(), "thread-bob")),
+		managedHookPeer{UID: 4343, Name: "alice"})
+	if got := agentIdentityIDForTraffic(caller, AgentIdentity{}); got != "" {
+		t.Fatalf("joined another user's identity %q", got)
+	}
+	if got := registry.ResolvePeek(caller, "thread-bob", "").AgentInstanceID; got != "" {
+		t.Fatalf("peeked another user's instance %q", got)
+	}
+	if got := registry.Resolve(caller, "thread-bob", "").AgentInstanceID; got != "" {
+		t.Fatalf("minted another user's instance %q", got)
+	}
+	joined := withSessionAgentInstance(caller, "thread-bob")
+	if got := audit.EnvelopeFromContext(joined).AgentInstanceID; got != "" {
+		t.Fatalf("joined another user's instance %q", got)
+	}
+	if got := registry.AgentIdentityForSession(owner, "thread-bob"); got != identity.IdentityID {
+		t.Fatalf("hook session identity = %q, want %q", got, identity.IdentityID)
 	}
 }
 

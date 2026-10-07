@@ -118,6 +118,29 @@ rules:
 	}
 }
 
+// Proxy records must describe the configuration the proxy actually applies.
+func TestProxyTelemetryOmitsUnappliedProfile(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"contractors": {Mode: "action"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
+	}
+	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}}
+	request := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	if profile := proxyProfileFor(request.Context()); profile != nil {
+		t.Fatalf("unverified proxy applied profile %+v", profile.decision)
+	}
+	meta := proxyLLMEventMeta(proxy, request, &ChatRequest{Model: "test-model"}, "test-provider")
+	if name, present := meta.Profile.Name.Get(); present {
+		t.Fatalf("unapplied profile %q appeared in proxy telemetry", name)
+	}
+}
+
 type testVerifiedSubjectKey struct{}
 
 // stubProfileSources replaces the verified-identity sources for one test:
