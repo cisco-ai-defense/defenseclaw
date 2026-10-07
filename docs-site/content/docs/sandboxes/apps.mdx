@@ -34,7 +34,7 @@ Open the TUI and press `7`:
 defenseclaw tui
 ```
 
-![DefenseClaw TUI Sandboxes panel: READY header with the OpenShell gateway, a blocked-destination line, the action bar and one running sandbox](/images/sandboxes/screens/tui-sandboxes.png)
+![DefenseClaw TUI Sandboxes panel on a Mac: READY header with the OpenShell gateway and its MicroVM driver, a blocked-destination line, the action bar and one running sandbox with its pack, mode, sites, blocked sites and tool calls](/images/sandboxes/screens/tui-sandboxes.png)
 
 The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
 `UNREACHABLE`), how many sandboxes run, how many asks wait, and the gateway
@@ -81,11 +81,28 @@ Confirmations for delete, undo and the "always" choices start on
 of private networks, metadata addresses and your organization's block lists
 cannot be lifted here.
 
+### Sandbox details
+
+`Enter` on a sandbox opens its details: the harness, phase, pack, project and
+the counts of sites and tool calls, the hook events DefenseClaw received, the
+last blocked tool call, the image the sandbox runs, and the process tree when
+it is on (see
+[see what the sandbox runs](/docs/sandboxes/guide#see-what-the-sandbox-runs)).
+The dialog scrolls.
+
+![DefenseClaw TUI details of one sandbox on a Mac: name, harness, phase, uptime, pack, the project copy, sites contacted and blocked, tool calls, the hook events, the last blocked tool call, the run image and the process tree](/images/sandboxes/screens/tui-sandbox-processes.png)
+
+Each **Destination** row further down is one line of
+`defenseclaw sandbox destinations NAME`: the site, what it is, its requests and
+the program that connected. This one is from a Linux host:
+
+![DefenseClaw TUI details of one sandbox on Linux: tool calls and hook events, the process tree, and a Destination row for the model provider and for pypi.org with their kind, requests and program](/images/sandboxes/screens/tui-sandbox-destinations.png)
+
 ### Start a run from the TUI
 
 Press `n` for **New sandboxed run**.
 
-![DefenseClaw TUI New sandboxed run dialog: harness, project folder, name, network profile, work on a copy, keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
+![DefenseClaw TUI New sandboxed run dialog on a Mac: harness, project folder, name, network profile, work on a copy (ticked and locked), keep the harness's own permission prompts](/images/sandboxes/screens/tui-sandbox-launch.png)
 
 | Field | Meaning |
 | --- | --- |
@@ -126,7 +143,7 @@ Your answers are the consent: the wizard runs
 only `sudo` may still ask for your password. On Windows the wizard says that
 OpenShell sandboxes run on Linux and macOS only.
 
-![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard: the command it will run, the harness choices, credentials, this machine's checks and the Install OpenShell option](/images/sandboxes/screens/tui-setup.png)
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard on a Mac: the command it will run, the harness choices, credentials, this machine's checks, the Install OpenShell option, the MicroVMs note and the OpenShell telemetry option](/images/sandboxes/screens/tui-setup.png)
 
 The full reference for the panel is in the [TUI guide](/docs/tui#sandboxes-panel).
 

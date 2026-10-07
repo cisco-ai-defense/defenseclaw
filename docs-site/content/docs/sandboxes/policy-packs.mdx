@@ -166,7 +166,8 @@ These are the settings each pack controls. The
   repository policy's `observe.process_tree: true` for the project's runs.
   A process that starts and ends between two samples, and that OpenShell
   does not report, is not seen, and the agent chooses its processes' names
-  and arguments, so the tree is a view of what ran, not a control.
+  and arguments, so the tree is a view of what ran, not a control. See it on
+  [a real run](/docs/sandboxes/guide#see-what-the-sandbox-runs).
 - **Blocklist feeds** (`egress.feeds`): `builtin` is DefenseClaw's curated
   blocklist and the only feed.
 - **Block and allow lists** (`egress.block`, `egress.allow`): host patterns.
@@ -236,7 +237,8 @@ These are the settings each pack controls. The
   were switched off and that works in bursts shorter than `silence_after`,
   with idle stretches at least that long between them, is never flagged;
   it then sits idle for more than half of the time. The file and network
-  boundaries do not depend on hooks and hold either way.
+  boundaries do not depend on hooks and hold either way. A real stop is
+  [shown in the guide](/docs/sandboxes/guide#tamper-alerts).
 
 Hooks are DefenseClaw's judgment inside the sandbox boundary, and the
 workload runs as the same user as the hooks, so it could stop a hook
@@ -874,7 +876,10 @@ it actually reached:
    `openshell.pack: myapp`.
 5. Keep it locked in CI with `policy test` and a fixture (below).
 
-Nothing is applied by `suggest` itself.
+Nothing is applied by `suggest` itself. A real run after a session in which
+the sandbox reached one extra host:
+
+![defenseclaw sandbox policy suggest --pack-out: the pack it wrote, extending balanced and allowing one host with the program that reached it, then comments listing the hosts balanced already covers, the host that was only ever refused, the shadow AI host and the sandbox's model provider](/images/sandboxes/screens/terminal-policy-recorded-pack.png)
 
 ## Test the policy
 
@@ -894,6 +899,10 @@ included. Without it, the policy a run in this folder would get with
 `config.yaml` (or the defaults when there is none) and the folder's
 repository policy. The proxy decides by destination, the same for every
 program in the sandbox; `--binary` only names the program in the report.
+
+For example, what the policy of a running sandbox decides for a paste site:
+
+![defenseclaw sandbox policy test --sandbox myapp-claude --host pastebin.com:443: the destination is blocked by a blocklist feed entry, with the rule, the source and the reason](/images/sandboxes/screens/terminal-policy-test.png)
 
 For CI, list the destinations and what you expect in a fixture, YAML or
 JSON:

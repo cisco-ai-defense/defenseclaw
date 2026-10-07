@@ -237,6 +237,10 @@ defenseclaw sandbox doctor
   ✓ ready for sandboxes
 ```
 
+The same check on a real Red Hat Enterprise Linux 9 host:
+
+![defenseclaw sandbox doctor on Linux: Landlock, Docker with BuildKit and host networking, disk space, systemd linger, the openshell-gateway service and its registration, the sandbox ingress and egress ports served by the DefenseClaw daemon, the hook-verified harness images, and the closing line ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
+
 `✓` passed, `⚠` is a warning, `✗` failed and `-` was skipped, with the
 reason. Every warning and failure names its fix on the next line (`→ …`).
 `defenseclaw sandbox doctor --fix` applies the fixes that need only your
