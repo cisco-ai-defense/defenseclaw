@@ -44,19 +44,48 @@ var (
 	cmdlineURLPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^/@:\s]*:)([^/@\s]+)@`)
 )
 
-// CommandLine is a process's argument vector as DefenseClaw keeps and shows
-// it: joined with spaces, with the values of arguments that name secrets,
-// key-shaped arguments, URL passwords, the password of a user:password
-// argument (curl -u) and a MySQL client's attached -pPASSWORD replaced by
-// redaction placeholders, cut to at most max bytes without splitting a UTF-8
-// sequence (max <= 0 means no bound).
+// WithheldArgv replaces the arguments of a Codex notify program, which
+// receives the agent turn's JSON (the user's prompt and the agent's reply) as
+// its last argument (GAP-0045).
+const WithheldArgv = "[argv withheld: agent turn payload]"
+
+// CommandLine is a process's argument vector (argv[0] first) as DefenseClaw
+// keeps and shows it: joined with spaces, with the values of arguments that
+// name secrets, key-shaped arguments, URL passwords, the password of a
+// user:password argument (curl -u) and a MySQL client's attached -pPASSWORD
+// replaced by redaction placeholders, cut to at most max bytes without
+// splitting a UTF-8 sequence (max <= 0 means no bound). A Codex notify
+// program keeps only the words up to the program and then WithheldArgv.
 //
 // It is the one implementation shared by the sandbox process tree and the
 // Linux sensor helper, which runs it on every kernel-sourced command line
-// before the line leaves the helper. Telemetry destinations redact the result
-// again by their own profile: it is content.
+// (Tetragon's and the cn_proc fallback's) before the line leaves the helper.
+// Telemetry destinations redact the result again by their own profile: it is
+// content.
 func CommandLine(args []string, max int) string {
+	if prefix, ok := notifyPrefix(args); ok {
+		return truncateUTF8(strings.Join(CommandArgs(prefix), " ")+" "+WithheldArgv, max)
+	}
 	return truncateUTF8(strings.Join(CommandArgs(args), " "), max)
+}
+
+// notifyPrefix recognizes a Codex notify program in an argument vector: the
+// bridge script, run directly or by an interpreter within the first three
+// arguments, and `defenseclaw-hook notify` (also the sandbox's bridge). It
+// returns the words kept before the marker.
+func notifyPrefix(args []string) ([]string, bool) {
+	if len(args) > 1 && path.Base(strings.Trim(args[0], `"'`)) == "defenseclaw-hook" && args[1] == "notify" {
+		return args[:2], true
+	}
+	for i, word := range args {
+		if i > 3 {
+			break
+		}
+		if path.Base(strings.Trim(word, `"'`)) == "notify-bridge.sh" {
+			return args[:i+1], true
+		}
+	}
+	return nil, false
 }
 
 // CommandArgs is CommandLine's pass without the join: one output word per

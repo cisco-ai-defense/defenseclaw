@@ -33,10 +33,6 @@ import (
 // MaxCmdlineBytes bounds a forwarded command line.
 const MaxCmdlineBytes = 1024
 
-// WithheldArgv replaces the arguments of a Codex notify program, which
-// receives the agent turn's JSON as its last argument.
-const WithheldArgv = "[argv withheld: agent turn payload]"
-
 // unsetAUID is the kernel's "no login uid" (4294967295).
 const unsetAUID = ^uint32(0)
 
@@ -260,7 +256,7 @@ func (m *Mapper) mapExit(exit *pb.ProcessExit, at time.Time) []plane.Event {
 
 // commandLine is the forwarded command line of a process: its binary and
 // arguments, redacted, or the program and the withheld marker for a Codex
-// notify program.
+// notify program (redaction.CommandLine).
 //
 // Tetragon renders the arguments with spaces, wrapping the ones that contain
 // a space in double quotes; they are split on white space here, as the
@@ -270,40 +266,13 @@ func (m *Mapper) mapExit(exit *pb.ProcessExit, at time.Time) []plane.Event {
 // `-c "... eval '...'"`) while it checks the word, so a quoted secret
 // (`-c "--token=..."`) is caught and the line keeps its shape.
 func commandLine(process *pb.Process) string {
-	binary := process.GetBinary()
 	fields := strings.Fields(process.GetArguments())
-	if prefix, ok := notifyPrefix(binary, fields); ok {
-		return redaction.CommandLine(prefix, MaxCmdlineBytes) + " " + WithheldArgv
-	}
 	argv := make([]string, 0, len(fields)+1)
-	if binary != "" {
+	if binary := process.GetBinary(); binary != "" {
 		argv = append(argv, binary)
 	}
 	return redaction.CommandLine(append(argv, fields...), MaxCmdlineBytes)
 }
-
-// notifyPrefix recognizes a Codex notify program (GAP-0045): the bridge
-// script, run directly or by an interpreter, and `defenseclaw-hook notify`
-// (also the sandbox's bridge). It returns the words kept before the marker.
-func notifyPrefix(binary string, fields []string) ([]string, bool) {
-	if path.Base(binary) == "defenseclaw-hook" && len(fields) > 0 && fields[0] == "notify" {
-		return []string{binary, "notify"}, true
-	}
-	if isNotifyBridge(binary) {
-		return []string{binary}, true
-	}
-	for i, field := range fields {
-		if i > 2 {
-			break
-		}
-		if isNotifyBridge(field) {
-			return append([]string{binary}, fields[:i+1]...), true
-		}
-	}
-	return nil, false
-}
-
-func isNotifyBridge(p string) bool { return path.Base(strings.Trim(p, `"'`)) == "notify-bridge.sh" }
 
 // privilegeAtExec describes a privilege change Tetragon saw at exec: a
 // setuid or setgid binary, or file capabilities raising the process's set.

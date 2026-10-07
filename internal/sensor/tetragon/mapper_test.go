@@ -26,6 +26,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	pb "github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon"
 )
@@ -167,7 +168,7 @@ func TestMapperMapsTheRecordedSession(t *testing.T) {
 
 	notify := one(t, lines[17])
 	if strings.Contains(notify.Cmdline, "dccert-payload-marker") || strings.Contains(notify.Cmdline, "agent-turn") ||
-		notify.Cmdline != "/usr/bin/bash "+fixtureHome+"/.defenseclaw/notify-bridge.sh "+WithheldArgv {
+		notify.Cmdline != "/usr/bin/bash "+fixtureHome+"/.defenseclaw/notify-bridge.sh "+redaction.WithheldArgv {
 		t.Fatalf("notify argv %q", notify.Cmdline)
 	}
 
@@ -234,10 +235,10 @@ func TestNotifyPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		binary, args, want string
 	}{
-		{"/usr/bin/bash", fixtureHome + "/.defenseclaw/notify-bridge.sh {\"k\":\"dccert-payload-marker\"}", "/usr/bin/bash " + fixtureHome + "/.defenseclaw/notify-bridge.sh " + WithheldArgv},
-		{fixtureHome + "/.defenseclaw/notify-bridge.sh", fixtureHome + "/.defenseclaw/notify-bridge.sh {\"k\":\"dccert-payload-marker\"}", fixtureHome + "/.defenseclaw/notify-bridge.sh " + WithheldArgv},
-		{"/opt/defenseclaw/bin/defenseclaw-hook", "notify {\"k\":\"dccert-payload-marker\"}", "/opt/defenseclaw/bin/defenseclaw-hook notify " + WithheldArgv},
-		{"/usr/local/bin/defenseclaw-hook", "notify {\"k\":\"dccert-payload-marker\"}", "/usr/local/bin/defenseclaw-hook notify " + WithheldArgv},
+		{"/usr/bin/bash", fixtureHome + "/.defenseclaw/notify-bridge.sh {\"k\":\"dccert-payload-marker\"}", "/usr/bin/bash " + fixtureHome + "/.defenseclaw/notify-bridge.sh " + redaction.WithheldArgv},
+		{fixtureHome + "/.defenseclaw/notify-bridge.sh", fixtureHome + "/.defenseclaw/notify-bridge.sh {\"k\":\"dccert-payload-marker\"}", fixtureHome + "/.defenseclaw/notify-bridge.sh " + redaction.WithheldArgv},
+		{"/opt/defenseclaw/bin/defenseclaw-hook", "notify {\"k\":\"dccert-payload-marker\"}", "/opt/defenseclaw/bin/defenseclaw-hook notify " + redaction.WithheldArgv},
+		{"/usr/local/bin/defenseclaw-hook", "notify {\"k\":\"dccert-payload-marker\"}", "/usr/local/bin/defenseclaw-hook notify " + redaction.WithheldArgv},
 		{"/usr/bin/cat", "notes.txt", "/usr/bin/cat notes.txt"},
 	} {
 		got := commandLine(&pb.Process{Binary: tc.binary, Arguments: tc.args})

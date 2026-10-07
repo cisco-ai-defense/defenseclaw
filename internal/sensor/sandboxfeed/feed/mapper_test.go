@@ -27,8 +27,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
-	"github.com/defenseclaw/defenseclaw/internal/sensor/tetragon"
 	pb "github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon"
 )
 
@@ -255,7 +255,7 @@ func TestMapperWithholdsNotifyArguments(t *testing.T) {
 	notify := proc{pid: 9000, ktime: 1e9, docker: workload, binary: "/sandbox/.defenseclaw/notify-bridge.sh",
 		args: `{"type":"agent-turn-complete","last-assistant-message":"dccert-payload-marker"}`}
 	f := one(t, NewMapper(MapperConfig{Containers: testContainers()}).Map(context.Background(), execOf(notify))).Frame
-	if strings.Contains(f.Cmdline, "dccert-payload-marker") || !strings.Contains(f.Cmdline, tetragon.WithheldArgv) {
+	if strings.Contains(f.Cmdline, "dccert-payload-marker") || !strings.Contains(f.Cmdline, redaction.WithheldArgv) {
 		t.Fatalf("notify cmdline = %q", f.Cmdline)
 	}
 }

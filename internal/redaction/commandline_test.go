@@ -102,3 +102,23 @@ func TestCommandLineBound(t *testing.T) {
 		t.Fatal("max 0 bounded the line")
 	}
 }
+
+// A Codex notify program's argv carries the agent turn (the user's prompt
+// and the agent's reply): only the program survives, on every path that uses
+// CommandLine, the cn_proc fallback included.
+func TestCommandLineWithholdsTheNotifyPayload(t *testing.T) {
+	payload := `{"type":"agent-turn-complete","input-messages":["dccert-block-marker"]}`
+	for argv, want := range map[string]string{
+		"/usr/bin/bash /home/u/.defenseclaw/notify-bridge.sh " + payload: "/usr/bin/bash /home/u/.defenseclaw/notify-bridge.sh " + WithheldArgv,
+		"/home/u/.defenseclaw/notify-bridge.sh " + payload:               "/home/u/.defenseclaw/notify-bridge.sh " + WithheldArgv,
+		"/opt/defenseclaw/bin/defenseclaw-hook notify " + payload:        "/opt/defenseclaw/bin/defenseclaw-hook notify " + WithheldArgv,
+		"defenseclaw-hook notify " + payload:                             "defenseclaw-hook notify " + WithheldArgv,
+		"/usr/bin/cat notify-bridge-notes.txt":                           "/usr/bin/cat notify-bridge-notes.txt",
+		"/usr/bin/env a b c d notify-bridge.sh x":                        "/usr/bin/env a b c d notify-bridge.sh x",
+	} {
+		got := CommandLine(strings.Fields(argv), 1024)
+		if got != want || strings.Contains(got, "dccert-block-marker") {
+			t.Errorf("%q: %q, want %q", argv, got, want)
+		}
+	}
+}

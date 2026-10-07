@@ -25,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // fakeHalf stands in for a native half (cn_proc or fanotify).
@@ -217,6 +219,12 @@ func TestTetragonSourceFallsBackInStreamAndRecovers(t *testing.T) {
 	event := next(t, source)
 	if event.Source != SourceCNProc || strings.Contains(event.Cmdline, "dccertvalue") {
 		t.Fatalf("native event %+v", event)
+	}
+	// A Codex notify program's turn payload is withheld on the fallback too.
+	h.lastProc().events <- Event{Kind: KindExec, PID: 77, Name: "bash",
+		Cmdline: `/usr/bin/bash /home/u/.defenseclaw/notify-bridge.sh {"input-messages":["dccert-block-marker"]}`}
+	if event := next(t, source); event.Cmdline != "/usr/bin/bash /home/u/.defenseclaw/notify-bridge.sh "+redaction.WithheldArgv {
+		t.Fatalf("notify argv on the fallback %q", event.Cmdline)
 	}
 
 	// Tetragon comes up: the source switches without a reconnect, cn_proc
