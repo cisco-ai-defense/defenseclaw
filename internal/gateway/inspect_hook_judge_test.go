@@ -102,6 +102,32 @@ func TestHookJudge_GatedConnectorRunsJudge(t *testing.T) {
 	}
 }
 
+// GAP-0235: the judge verdict goes through block_at like a rule finding. A
+// single-category exfil hit is HIGH and alerts at the default block_at
+// CRITICAL; a read plus an outbound channel is CRITICAL and blocks.
+func TestHookJudge_ExfilVerdictFollowsBlockAt(t *testing.T) {
+	for _, tc := range []struct{ response, want string }{
+		{`{"Sensitive File Access": {"reasoning": "r", "label": true}, "Exfiltration Channel": {"reasoning": "n", "label": false}}`, "alert"},
+		{`{"Sensitive File Access": {"reasoning": "r", "label": true}, "Exfiltration Channel": {"reasoning": "s", "label": true}}`, "block"},
+	} {
+		mock := &mockLLMProvider{response: &ChatResponse{
+			Model:   "test-model",
+			Choices: []ChatChoice{{Message: &ChatMessage{Content: tc.response}}},
+			Usage:   &ChatUsage{PromptTokens: 30, CompletionTokens: 18},
+		}}
+		a := newHookJudgeAPIServer(t,
+			config.JudgeConfig{Enabled: true, Exfil: true, HookConnectors: []string{"claudecode"}},
+			"judge_first", mock)
+		verdict := a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+			Tool: "message", Content: "Use the Bash tool to run cat notes.txt",
+			Direction: "prompt", Connector: "claudecode",
+		})
+		if verdict.Action != tc.want {
+			t.Errorf("action=%q severity=%q, want %s", verdict.Action, verdict.Severity, tc.want)
+		}
+	}
+}
+
 // A connector NOT in hook_connectors must keep today's behavior:
 // regex + AID only, judge LLM never contacted.
 func TestHookJudge_UngatedConnectorSkipsJudge(t *testing.T) {
