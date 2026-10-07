@@ -77,6 +77,16 @@ func TestWindowsEnterpriseEnumeratorFailureTextUnwrapsTheCause(t *testing.T) {
 	if _, _, ok := windowsEnterpriseEnumeratorFailureText("the gateway did not start"); ok {
 		t.Fatal("an unrelated message was rewritten")
 	}
+	// The v9 keys get the code too; a policy_dir the service cannot read
+	// does not (GAP-0314).
+	for label, want := range map[string]string{
+		"guardrail.rule_pack": "rule_pack_unreadable", "guardrail.custom_packs.acme.path": "rule_pack_unreadable", "policy_dir": "",
+	} {
+		v9 := strings.Replace(message, "guardrail.rule_pack_dir", label, 1)
+		if _, code, ok := windowsEnterpriseEnumeratorFailureText(v9); !ok || code != want {
+			t.Fatalf("%s: ok=%t code=%q, want %q", label, ok, code, want)
+		}
+	}
 }
 
 // GAP-1419: a refused managed runtime bundle names the file and the reason

@@ -518,8 +518,18 @@ func windowsEnterpriseEnumeratorFailureText(message string) (text, code string, 
 	if text == "" {
 		return message, "", false
 	}
-	if strings.Contains(text, "rule_pack_dir") && strings.Contains(text, "cannot read") {
+	if label, _, found := strings.Cut(strings.TrimPrefix(text, "the managed config's "), " "); found &&
+		windowsEnterpriseRulePackLabel(label) && strings.Contains(text, "cannot read") {
 		code = "rule_pack_unreadable"
 	}
 	return text, code, true
+}
+
+// windowsEnterpriseRulePackLabel reports whether label is a rule-pack
+// setting config.ReferencedRulePackDirs names: a rule_pack (v9) or
+// rule_pack_dir, global, per connector or per profile, or a custom_packs
+// path.
+func windowsEnterpriseRulePackLabel(label string) bool {
+	return strings.HasSuffix(label, ".rule_pack") || strings.HasSuffix(label, ".rule_pack_dir") ||
+		(strings.HasPrefix(label, "guardrail.custom_packs.") && strings.HasSuffix(label, ".path"))
 }
