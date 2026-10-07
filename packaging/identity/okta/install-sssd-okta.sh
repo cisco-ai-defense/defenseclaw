@@ -397,11 +397,21 @@ install_conf() {
   log "  installed: $CONF"
 }
 
+authselect_profile_check() {
+  ((NO_PAM)) && return 0
+  local current
+  current=$(authselect current --raw 2> /dev/null || true)
+  if [[ -n $current && $current != sssd* ]] && ((FORCE == 0)); then
+    fail 3 "authselect uses '$current'; replacing a custom or winbind profile removes its PAM features. Review the change and rerun with --force, or use --no-pam."
+  fi
+}
+
 pam_step() {
   if ((NO_PAM)); then
     log "  skipped: authselect and oddjobd (--no-pam)"
     return 0
   fi
+  authselect_profile_check
   local current="" features=() force=()
   current=$(authselect current --raw 2> /dev/null || true)
   if [[ $current == sssd* && $current == *with-mkhomedir* ]]; then
@@ -541,6 +551,7 @@ main() {
   render "$WORK/sssd.conf" "$pw"
   config_check "$WORK/sssd.conf"
   bind_test
+  authselect_profile_check
   log "SSSD config ($CONF)"
   install_conf "$WORK/sssd.conf"
   log "PAM and home directories"

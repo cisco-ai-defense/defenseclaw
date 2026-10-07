@@ -288,3 +288,20 @@ def test_okta_render_accepts_utf8_bind_password(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert f"ldap_default_authtok = {password}" in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_installer_requires_force_for_custom_authselect(tmp_path: Path) -> None:
+    source = OKTA_INSTALL.read_text().rsplit('main "$@"', 1)[0]
+    probe = """
+authselect() { if [[ $1 == current ]]; then echo 'custom/cis with-faillock'; fi; }
+systemctl() { return 0; }
+act() { echo unexpected-profile-replacement; }
+NO_PAM=0 FORCE=0 DRY_RUN=0
+pam_step
+"""
+    script = tmp_path / "probe.sh"
+    script.write_text(source + probe)
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert "unexpected-profile-replacement" not in result.stdout
