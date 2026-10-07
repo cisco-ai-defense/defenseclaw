@@ -4436,19 +4436,15 @@ def _refuse_rotate_token_on_managed_host() -> None:
     hosts publish no such marker and are unaffected.
     """
 
-    from defenseclaw.upgrade_shim import managed_deployment
+    from defenseclaw.upgrade_shim import managed_deployment, managed_lifecycle_command
 
     deployment = managed_deployment()
     if not deployment:
         return
-    if os.name == "nt":
+    gateway = managed_lifecycle_command()
+    if not gateway:
         remedy = "rotating the credentials of a managed Windows deployment is not available yet"
     else:
-        gateway = (
-            "/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos"
-            if sys.platform == "darwin"
-            else "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux"
-        )
         remedy = f"an administrator rotates its per-user credentials with `sudo {gateway} rotate-credentials`"
     raise click.ClickException(
         f"This computer's DefenseClaw is managed by your organization ({deployment}), so per-user "

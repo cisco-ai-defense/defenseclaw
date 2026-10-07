@@ -173,7 +173,13 @@ def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path
     monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
     monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
     for argv in (
-        ["skill", "block", "x"], ["guardrail", "protection", "enable", "x"], ["setup", "codex", "--yes"], ["init"], ["quickstart"]
+        ["skill", "block", "x"],
+        ["guardrail", "protection", "enable", "x"],
+        ["setup", "codex", "--yes"],
+        ["init"],
+        ["quickstart"],
+        # GAP-0172: doctor said "not initialized, run init" on a managed device.
+        ["doctor"],
     ):
         result = CliRunner().invoke(cli, argv)
         assert result.exit_code == 3, (argv, result.output)
