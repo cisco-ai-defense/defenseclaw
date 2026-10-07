@@ -30,6 +30,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // Unix agent-version discovery for the standalone enumerator.
@@ -691,7 +693,7 @@ var unixAdminGroupMember = func(uid, gid uint32) bool {
 	if err != nil {
 		return false
 	}
-	groups, err := account.GroupIds()
+	groups, err := unixidentity.AccountGroupIDs(context.Background(), account)
 	if err != nil {
 		return false
 	}

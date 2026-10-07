@@ -296,7 +296,7 @@ rules:
 	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
 	raw := func(strict string) []byte {
 		return []byte(fmt.Sprintf(
-			"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  profiles:\n    strict: %s\n    watch: {mode: observe}\n  default_profile: watch\nobservability: {}\n",
+			"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  profiles:\n    strict: %s\n    watch: {mode: observe}\n  profile_assignments:\n    - {profile: strict, match: {users: [\"1001\"]}}\n  default_profile: watch\nobservability: {}\n",
 			fixture.dataDir, strict,
 		))
 	}
@@ -345,7 +345,6 @@ rules:
 		t.Fatalf("digest changes = %+v, want strict only", changes)
 	}
 	ctx := context.WithValue(context.Background(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
-	set.assignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
 	ctx = api.withGuardrailProfileDecision(ctx, "codex")
 	if ids := findingIDs(scanAllRulesForConnectorFor(ctx, "codex", "profile_marker_token", "exec")); !containsRuleID(ids, "PROFILE-MARKER") {
 		t.Fatalf("strict profile did not scan with its rule pack: %v", ids)
@@ -369,9 +368,9 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 	if err != nil || len(gids) == 0 {
 		t.Skip("no groups for the current account")
 	}
-	groups := localAccountGroups(account)
-	if len(groups) != len(gids) || identityGroupCount(groups) != int64(len(gids)) {
-		t.Fatalf("localAccountGroups = %v (count %d), want one entry per gid %v", groups, identityGroupCount(groups), gids)
+	groups, err := accountGroups(account)
+	if err != nil || len(groups) != len(gids) || identityGroupCount(groups) != int64(len(gids)) {
+		t.Fatalf("accountGroups = %v (count %d), err %v; want one entry per gid %v", groups, identityGroupCount(groups), err, gids)
 	}
 }
 
@@ -389,6 +388,22 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	subject, err := lookupDirectoryProfileSubject("dcad-manygroups")
 	if err != nil || !subject.LookupFailed || !strings.Contains(subject.LookupError, "3000 groups") || len(subject.Groups) != 0 {
 		t.Fatalf("subject = %+v, %v; want a failed lookup that names its reason and has no groups", subject, err)
+	}
+}
+
+// TestExplainReportsGroupsThatCannotBeListed pins GAP-0201: an account whose
+// groups the OS database cannot list is a failed lookup in explain too, with
+// the reason, not an account with no groups that gets the plain default.
+func TestExplainReportsGroupsThatCannotBeListed(t *testing.T) {
+	prev := accountGroupIDs
+	t.Cleanup(func() { accountGroupIDs = prev })
+	accountGroupIDs = func(*osuser.User) ([]string, error) {
+		return nil, errors.New("user: list groups for dcad-manygroups failed")
+	}
+	subject := localProfileSubject(&osuser.User{Uid: "94401116", Username: "dcad-manygroups"})
+	decision := (&guardrailProfileSet{}).match(&subject, profileSubjectLookup, "", "")
+	if !subject.LookupFailed || !strings.Contains(subject.LookupError, "list groups") || decision.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("subject = %+v, match %q; want a failed lookup that names its reason", subject, decision.Match)
 	}
 }
 
@@ -493,5 +508,36 @@ func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
 	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) { return cached, time.Time{}, false }
 	if view, _ := explainCacheView(set, explained, decision, "", "", now); view != nil {
 		t.Fatalf("view = %v for an account nothing is cached for", view)
+	}
+}
+
+// TestProfileExplainSaysWhyTheLookupFailed: explain --user for an account the
+// OS names but cannot resolve (an Entra user the aad module has not cached)
+// reported default_lookup_failed with no lookup_error and no user id.
+func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
+	prev := profileExplainSubjectLookup
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubject{UserID: "10259079", UserName: "bob", LookupFailed: true}, fmt.Errorf("uid 10259079: not found")
+	}
+	t.Cleanup(func() { profileExplainSubjectLookup = prev; liveGuardrailProfiles.Store(nil) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"watch": {Mode: "observe"}}
+	cfg.Guardrail.DefaultProfile = "watch"
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=bob", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var out struct {
+		Match       string         `json:"match"`
+		LookupError string         `json:"lookup_error"`
+		Subject     map[string]any `json:"subject"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body.String())
+	}
+	if out.Match != profileMatchDefaultLookupFailed || !strings.Contains(out.LookupError, "not found") || out.Subject["user_id"] != "10259079" {
+		t.Fatalf("explain = %s", rec.Body.String())
 	}
 }

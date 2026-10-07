@@ -76,12 +76,7 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     """
     if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
         return None
-    import getpass
-
-    try:
-        user = getpass.getuser()
-    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
-        user = ""
+    user, label = current_profile_account()
     if not user:
         return {"user": "", "error": "the account name is unknown"}
     try:
@@ -100,8 +95,32 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
         # The gateway took the connection and was still resolving the user.
         return {"user": user, "error": str(exc), "timed_out": True}
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
-        return {"user": user, "error": str(exc)}
-    return {**result, "user": user, "overrides": overrides}
+        return {"user": label, "error": str(exc)}
+    return {**result, "user": label, "overrides": overrides}
+
+
+def current_profile_account() -> tuple[str, str]:
+    """The account the gateway resolves for "you", and the name to show for it.
+
+    On Windows the gateway is asked for the process token SID: the login name
+    of an Entra ID account (EntraAlice) is no name Windows can look up, so
+    every Entra user got default_lookup_failed. Elsewhere both are the login
+    name.
+    """
+    import getpass
+
+    try:
+        label = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
+        label = ""
+    if os.name == "nt":
+        from defenseclaw.file_permissions import _windows_current_user_sid
+
+        try:
+            return _windows_current_user_sid(), label
+        except OSError:
+            pass
+    return label, label
 
 
 _PROFILE_OVERRIDE_PROBES = 16

@@ -8,7 +8,7 @@ keywords:
   - Linux Bash script Intune
 ---
 
-<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not delivered DefenseClaw in a live tenant yet. The tenant setup and an Ubuntu 24.04 Desktop enrollment it depends on were run on a test tenant: see [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant).</Callout>
 
 <Callout title="At a glance">
 - **You upload:** one platform script that runs as root: your copy of
@@ -31,6 +31,8 @@ detection and logs.
 
 ## Before you start
 
+- **Tenant**: licences and device groups are in place; see
+  [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). Intune has no Linux enrollment setting.
 - **Devices**: a distribution and version on Microsoft's list of Intune-supported
   Linux platforms, enrolled with the Microsoft Intune app, running systemd 239
   or later. The package depends on systemd 239. On a host where systemd is not
