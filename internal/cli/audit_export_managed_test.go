@@ -58,6 +58,16 @@ func TestAuditExportManagedEnvironmentPointsAnAdministratorAtTheDeployment(t *te
 			t.Fatalf("%s = %q, want %q", key, got, value)
 		}
 	}
+	// enterprise acp enroll|verify|revoke get the same pins (GAP-0249).
+	withAuditExportManagedSeams(t, true, true)
+	if err := pinEnterpriseACPAdministratorEnv(enterpriseACPEnrollCmd); err != nil {
+		t.Fatalf("enterprise acp: %v", err)
+	}
+	for key, value := range want {
+		if got := os.Getenv(key); got != value {
+			t.Fatalf("enterprise acp: %s = %q, want %q", key, got, value)
+		}
+	}
 }
 
 // GAP-2039: a standard account's read-only managed view (AI Discovery,
