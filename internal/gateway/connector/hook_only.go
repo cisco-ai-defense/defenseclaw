@@ -1346,12 +1346,9 @@ func (c *hookOnlyConnector) migrateOpenHandsConfigTarget(opts SetupOpts, target 
 }
 
 // migrateDevinConfigTarget closes the previous ownership cycle when the
-// Devin hook config moved. Earlier builds resolved the macOS config root
-// with os.UserConfigDir (~/Library/Application Support/devin), which the
-// Devin CLI never reads; its config is ~/.config/devin/config.json. Without
-// this, Setup over the old receipt fails with a backup target mismatch on
-// every upgraded macOS host. Switching between the user-global config and
-// a workspace hooks.v1.json is handled the same way.
+// Devin hook config target changes, for example between the user-global
+// config and a workspace hooks.v1.json. Without this, Setup over the old
+// receipt fails with a backup target mismatch.
 func (c *hookOnlyConnector) migrateDevinConfigTarget(opts SetupOpts, target string) error {
 	return c.migrateConfigTarget(opts, target, "Devin")
 }
@@ -2131,7 +2128,6 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
-		ownedCommands = append(ownedCommands, legacyAntigravityStartProcessWindowsHookCommands()...)
 		var cfg map[string]interface{}
 		if err := json.Unmarshal(data, &cfg); err == nil &&
 			structuredHookCommandReferences(cfg, ownedCommands) {
@@ -2603,7 +2599,6 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
-		ownedCommands = append(ownedCommands, legacyAntigravityStartProcessWindowsHookCommands()...)
 		return removeJSONHookReferences(path, ownedCommands...)
 	default:
 		return nil
@@ -5027,16 +5022,6 @@ func ensureJSONObject(obj map[string]interface{}, key string) map[string]interfa
 	return child
 }
 
-func appendUniqueFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
-	list, _ := raw.([]interface{})
-	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) {
-			return list
-		}
-	}
-	return append(list, entry)
-}
-
 func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
@@ -5225,16 +5210,6 @@ func legacyAntigravityNonWaitingWindowsHookCommand() string {
 	return legacyWindowsNativePowerShellHookCommandForBinary("antigravity", defenseclawHookBinary())
 }
 
-// legacyAntigravityStartProcessWindowsHookCommands are the event-bound
-// Start-Process bridge commands earlier builds registered on Windows.
-func legacyAntigravityStartProcessWindowsHookCommands() []string {
-	commands := make([]string, 0, len(antigravityLifecycleEvents))
-	for _, event := range antigravityLifecycleEvents {
-		commands = append(commands, legacyStartProcessWindowsNativePowerShellHookCommand("antigravity", event, "", defenseclawHookBinary()))
-	}
-	return commands
-}
-
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 	entry, ok := raw.(map[string]interface{})
 	if !ok {
@@ -5295,9 +5270,6 @@ func isCopilotNativeHookCommand(command string) bool {
 		}
 		for _, event := range copilotCurrentHookEvents {
 			if command == windowsCopilotPowerShellHookCommandForEvent(event, hookBinary) {
-				return true
-			}
-			if command == legacyWindowsCopilotPowerShellHookCommandForEvent(event, hookBinary) {
 				return true
 			}
 		}

@@ -161,17 +161,6 @@ def install_codeguard_skill(cfg, connector: str | None = None, replace: bool = F
     return install_codeguard_asset(cfg, connector=connector, target="skill", replace=replace)
 
 
-def ensure_codeguard_skill(claw_home: str, openclaw_config: str, connector: str = "") -> None:
-    """Deprecated no-op retained for older callers.
-
-    Native CodeGuard assets are fully opt-in; CLI startup, init, sandbox setup,
-    and sidecar setup must not call through to an implicit installer.
-    """
-    _ = claw_home
-    _ = openclaw_config
-    _ = connector
-
-
 def _resolve_connector(cfg, connector: str | None) -> str:
     if connector:
         return connector_paths.normalize(connector)

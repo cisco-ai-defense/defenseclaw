@@ -399,7 +399,7 @@ export DEFENSECLAW_TELEMETRY_ENABLED=1
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 export OTEL_SERVICE_NAME=defenseclaw
-export OTEL_RESOURCE_ATTRIBUTES=service.namespace=defenseclaw,deployment.environment=local-dev
+export OTEL_RESOURCE_ATTRIBUTES=service.namespace=defenseclaw,deployment.environment.name=local-dev
 EOF
     ;;
   help|-h|--help)

@@ -856,11 +856,9 @@ def _activate_policy(app: AppContext, name: str) -> str:
 
 @policy.command()
 @click.argument("name")
-@click.option("--force", is_flag=True, hidden=True,
-              help="Accepted for older scripts; has no effect")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
-def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
+def delete(app: AppContext, name: str, assume_yes: bool) -> None:
     """Delete a custom policy, or your edited copy of a built-in.
 
     The policy file is removed for good (no backup is kept). On a terminal
@@ -872,7 +870,6 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
     A policy is a preset: config.yaml keeps what ``policy activate``
     applied, so deleting a policy file never changes what is enforced.
     """
-    del force
     name = _sanitize_policy_name(name)
 
     user_dir = _policies_dir(app)

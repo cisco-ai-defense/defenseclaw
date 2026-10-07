@@ -57,20 +57,6 @@ def test_require_no_enforce_turns_enforcement_back_off(registry_app) -> None:
     assert saved["mode"] == "observe" and saved["mcp"]["registry_required"] is False
 
 
-@pytest.mark.parametrize("flags", [["--auto-sync"], ["--sync-interval-hours", "1"]])
-def test_add_and_edit_refuse_scheduled_sync_flags(registry_app, flags) -> None:
-    # GAP-2209
-    for sub in ("add", "edit"):
-        assert "auto-sync" not in _run(registry_app, sub, "--help").output
-    add = ["add", "s1", "--kind", "clawhub", "--content", "skill", "--non-interactive"]
-    result = _run(registry_app, *add, *flags)
-    assert result.exit_code == 2 and "scheduled sync is not available yet" in result.output
-    assert not registry_app.cfg.registries.sources
-    assert _run(registry_app, *add).exit_code == 0
-    result = _run(registry_app, "edit", "s1", "--non-interactive", *flags)
-    assert result.exit_code == 2 and "scheduled sync is not available yet" in result.output
-
-
 def test_list_names_a_source_whose_last_sync_failed(registry_app, monkeypatch) -> None:
     # GAP-2210
     registry_app.cfg.registries.sources = [

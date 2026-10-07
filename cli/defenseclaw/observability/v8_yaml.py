@@ -1107,7 +1107,7 @@ def _supported_path(path: YAMLPath) -> bool:
         return len(path) == 4 and path[2] == "attributes" and isinstance(path[3], str) and bool(path[3])
     if section == "trace_policy":
         if len(path) == 3:
-            return path[2] in {"sampler", "sampler_arg", "semantic_profile", "compatibility_aliases"}
+            return path[2] in {"sampler", "sampler_arg", "semantic_profile"}
         return len(path) == 4 and path[2] == "limits" and path[3] in _TRACE_LIMITS
     if section == "metric_policy":
         return len(path) == 3 and path[2] in {"export_interval_seconds", "temporality"}

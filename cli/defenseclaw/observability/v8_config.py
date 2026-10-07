@@ -229,11 +229,10 @@ CONFIGURABLE_CORE_RESOURCE_ATTRIBUTE_KEYS = frozenset(
         "workspace.id",
     }
 )
-_RESOURCE_ALIAS_PAIRS = (
-    ("deployment.environment.name", "deployment.environment"),
-    ("defenseclaw.deployment.mode", "deployment.mode"),
-    ("defenseclaw.device.public_key_fingerprint", "defenseclaw.device.id"),
-)
+# A config_version 8 source may still spell the environment deployment.environment
+# (read as deployment.environment.name); config_version 9 refuses it. The
+# deployment.mode and defenseclaw.device.id spellings were never configurable.
+_RESOURCE_ALIAS_PAIRS = (("deployment.environment.name", "deployment.environment"),)
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ENDPOINT_HOST_PUBLIC = "public"
 ENDPOINT_HOST_LOCALHOST = "localhost"

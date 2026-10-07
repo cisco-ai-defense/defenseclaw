@@ -277,15 +277,10 @@ type Config struct {
 	Gateway         GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
 	CloudAuth       CloudAuthConfig      `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
 	// Admission is the install-time admission policy (config_version 9).
-	// It replaces policies/rego/data.json and the *_actions keys below.
+	// It replaces policies/rego/data.json.
 	// Decoded from the source bytes, not viper, because an action is either
 	// a shorthand string or an install/file/runtime triple.
-	Admission AdmissionConfig `mapstructure:"-" yaml:"admission,omitempty"`
-	// SkillActions, MCPActions and PluginActions are v8 keys: migration
-	// input for admission, rejected in a config_version 9 source.
-	SkillActions   SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	Admission      AdmissionConfig            `mapstructure:"-" yaml:"admission,omitempty"`
 	AssetPolicy    AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
 	Registries     RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
 	ClaudeCode     AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
@@ -296,7 +291,6 @@ type Config struct {
 	// overrides used by webhook setup. The canonical v8 telemetry graph is
 	// parsed and compiled independently and owns all export routing.
 	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
-	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
@@ -363,17 +357,6 @@ type RoutingRemoteConfig struct {
 	Endpoint  string `mapstructure:"endpoint"   yaml:"endpoint,omitempty"`
 	TimeoutMs int    `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
 }
-
-// PrivacyConfig groups privacy/redaction toggles. Today it carries
-// only the redaction kill-switch; future fields (per-sink redaction
-// scope, custom redactor profiles) land here so operators have a
-// single section to audit.
-//
-// PrivacyConfig is the reserved, empty privacy: section. Redaction is
-// controlled by observability.redaction_profiles; the v7 disable_redaction
-// switch is rejected by the v8 entrypoint (yaml_v8.go) and only the 0.x
-// migration reads it.
-type PrivacyConfig struct{}
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
 // supported connectors and broader "shadow AI" usage signals. Outbound
@@ -2403,30 +2386,6 @@ type SeverityAction struct {
 	Install InstallAction `mapstructure:"install" yaml:"install"`
 }
 
-type SkillActionsConfig struct {
-	Critical SeverityAction `mapstructure:"critical" yaml:"critical"`
-	High     SeverityAction `mapstructure:"high"     yaml:"high"`
-	Medium   SeverityAction `mapstructure:"medium"   yaml:"medium"`
-	Low      SeverityAction `mapstructure:"low"      yaml:"low"`
-	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
-}
-
-type MCPActionsConfig struct {
-	Critical SeverityAction `mapstructure:"critical" yaml:"critical"`
-	High     SeverityAction `mapstructure:"high"     yaml:"high"`
-	Medium   SeverityAction `mapstructure:"medium"   yaml:"medium"`
-	Low      SeverityAction `mapstructure:"low"      yaml:"low"`
-	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
-}
-
-type PluginActionsConfig struct {
-	Critical SeverityAction `mapstructure:"critical" yaml:"critical"`
-	High     SeverityAction `mapstructure:"high"     yaml:"high"`
-	Medium   SeverityAction `mapstructure:"medium"   yaml:"medium"`
-	Low      SeverityAction `mapstructure:"low"      yaml:"low"`
-	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
-}
-
 // LoadFromFile reads one config file (the default config path when empty) and
 // decodes it with the strict runtime loader, the one path every consumer
 // shares with the gateway. A source older than config_version 8 is refused
@@ -2790,24 +2749,6 @@ func loadConfigSourceChecked(
 			ReportConfigLoadError(context.Background(), "observability_invalid")
 		}
 		return nil, fmt.Errorf("config: observability: %w", err)
-	}
-	if err := cfg.SkillActions.Validate(); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "skill_actions_invalid")
-		}
-		return nil, err
-	}
-	if err := cfg.MCPActions.Validate(); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "mcp_actions_invalid")
-		}
-		return nil, err
-	}
-	if err := cfg.PluginActions.Validate(); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "plugin_actions_invalid")
-		}
-		return nil, err
 	}
 	if err := cfg.ACP.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3250,54 +3191,6 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("watch.rescan_enabled", true)
 	viper.SetDefault("watch.rescan_interval_min", 60)
 	viper.SetDefault("watch.rescan_content_gated", true)
-
-	viper.SetDefault("skill_actions.critical.file", string(FileActionQuarantine))
-	viper.SetDefault("skill_actions.critical.runtime", string(RuntimeDisable))
-	viper.SetDefault("skill_actions.critical.install", string(InstallBlock))
-	viper.SetDefault("skill_actions.high.file", string(FileActionQuarantine))
-	viper.SetDefault("skill_actions.high.runtime", string(RuntimeDisable))
-	viper.SetDefault("skill_actions.high.install", string(InstallBlock))
-	viper.SetDefault("skill_actions.medium.file", string(FileActionNone))
-	viper.SetDefault("skill_actions.medium.runtime", string(RuntimeEnable))
-	viper.SetDefault("skill_actions.medium.install", string(InstallNone))
-	viper.SetDefault("skill_actions.low.file", string(FileActionNone))
-	viper.SetDefault("skill_actions.low.runtime", string(RuntimeEnable))
-	viper.SetDefault("skill_actions.low.install", string(InstallNone))
-	viper.SetDefault("skill_actions.info.file", string(FileActionNone))
-	viper.SetDefault("skill_actions.info.runtime", string(RuntimeEnable))
-	viper.SetDefault("skill_actions.info.install", string(InstallNone))
-
-	viper.SetDefault("mcp_actions.critical.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.critical.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.critical.install", string(InstallBlock))
-	viper.SetDefault("mcp_actions.high.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.high.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.high.install", string(InstallBlock))
-	viper.SetDefault("mcp_actions.medium.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.medium.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.medium.install", string(InstallNone))
-	viper.SetDefault("mcp_actions.low.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.low.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.low.install", string(InstallNone))
-	viper.SetDefault("mcp_actions.info.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.info.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.info.install", string(InstallNone))
-
-	viper.SetDefault("plugin_actions.critical.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.critical.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.critical.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.high.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.high.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.high.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.medium.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.medium.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.medium.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.low.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.low.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.low.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.info.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.info.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.info.install", string(InstallNone))
 
 	viper.SetDefault("asset_policy.enabled", false)
 	viper.SetDefault("asset_policy.mode", AssetPolicyModeObserve)

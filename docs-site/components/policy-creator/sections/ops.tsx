@@ -268,7 +268,7 @@ export function AuditSection({
             });
           }
         }}
-        hint="Days non-CRITICAL events are retained. CRITICAL events are kept indefinitely (see audit.rego)."
+        hint="Days audit events are retained."
       />
     </div>
   );

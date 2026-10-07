@@ -68,7 +68,7 @@ locals {
       { property = "verdict.stage", alias = "verdict stage" },
     ])
     token_economics = [
-      { property = "deployment.environment", alias = "environment" },
+      { property = "deployment.environment.name", alias = "environment" },
       { property = "service.name", alias = "service" },
       { property = "gen_ai.agent.name", alias = "agent" },
       { property = "gen_ai.request.model", alias = "model" },
@@ -1563,9 +1563,9 @@ locals {
     token_agent_table = {
       name        = "Agent token table"
       description = "Current token rows grouped by agent, service, environment, provider, and model."
-      group_by    = ["gen_ai.agent.name", "service.name", "deployment.environment", "gen_ai.provider.name", "gen_ai.request.model"]
+      group_by    = ["gen_ai.agent.name", "service.name", "deployment.environment.name", "gen_ai.provider.name", "gen_ai.request.model"]
       program     = <<-EOT
-        A = data('gen_ai.client.token.usage', filter=filter('gen_ai.operation.name', 'chat'), rollup='sum').sum(by=['gen_ai.agent.name', 'service.name', 'deployment.environment', 'gen_ai.provider.name', 'gen_ai.request.model']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Tokens')
+        A = data('gen_ai.client.token.usage', filter=filter('gen_ai.operation.name', 'chat'), rollup='sum').sum(by=['gen_ai.agent.name', 'service.name', 'deployment.environment.name', 'gen_ai.provider.name', 'gen_ai.request.model']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Tokens')
       EOT
     }
     sink_queue_by_sink = {

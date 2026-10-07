@@ -2817,16 +2817,6 @@ class RoutingConfig:
 
 
 @dataclass
-class PrivacyConfig:
-    """Reserved, empty ``privacy:`` section. Mirrors internal/config.PrivacyConfig.
-
-    Redaction is configured by ``observability.redaction_profiles``; the v7
-    ``disable_redaction`` switch is rejected by the v8 loader and read only by
-    the 0.x migration.
-    """
-
-
-@dataclass
 class AIRuntimeConfig:
     """AI Discovery runtime planes -- what actually ran.
 
@@ -3148,7 +3138,7 @@ class Config:
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
-    # config_version 9: admission replaces data.json and the *_actions keys.
+    # config_version 9: admission replaces data.json.
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
@@ -3157,7 +3147,6 @@ class Config:
     # legacy global-only behavior; resolution goes through
     # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
-    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
     # the file at load). Lets the merge distinguish "this process loaded
@@ -3167,7 +3156,7 @@ class Config:
     # dict-shaped authoritative paths.
     _loaded_owned_nested_values: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     # Exact source version observed by load(). Ordinary saves of an already-v8
-    # document must never serialize the legacy audit_db/otel/privacy model over
+    # document must never serialize the legacy audit_db/otel model over
     # the canonical observability graph.
     _source_config_version: int = field(default=0, repr=False, compare=False)
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
@@ -3724,17 +3713,10 @@ def _v9_rule_pack_for_dir(directory: str, policy_dir: str) -> tuple[str, list[st
 def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> None:
     """Write v8-modeled fields a caller changed in their config_version 9 keys.
 
-    Setup commands that still set a v8 field (``rule_pack_dir``,
-    ``update_check``) would otherwise write a key
-    config_version 9 rejects. This maps them the way the Go migration does;
-    it goes away as each caller moves to the v9 key. The ``*_actions`` maps
-    are dropped: nothing edits them since 9 (the admission actions are
-    ``admission.<type>.actions``).
+    Setup commands that still set a v8 field (``rule_pack_dir``) would
+    otherwise write a key config_version 9 rejects. This maps them the way the
+    Go migration does; it goes away as each caller moves to the v9 key.
     """
-    for key in ("skill_actions", "mcp_actions", "plugin_actions", "update_check"):
-        value = merged.pop(key, None)
-        if key == "update_check" and isinstance(value, bool):
-            merged.setdefault("update", {})["check"] = value
     watch = merged.get("watch")
     if isinstance(watch, dict):
         watch.pop("allow_list_bypass_scan", None)
@@ -4369,7 +4351,7 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset({"audit_db", "privacy", "observability"})
+_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset({"audit_db", "observability"})
 _V8_MISSING = object()
 
 # v4 LLM field -> the v5 slot that _migrate_llm_fields() copies it into.

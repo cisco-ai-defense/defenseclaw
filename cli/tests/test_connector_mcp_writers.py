@@ -2565,29 +2565,24 @@ class TestHermesWrites:
             "- web\r\n"
             "# mcp_servers:\r\n"
             "#   example: {}\r\n"
-            "mcp:\r\n"
-            "  servers:\r\n"
-            "    old: {command: legacy-mcp}\r\n"
         ).encode("utf-8")
         config.write_bytes(original)
 
         set_mcp_server("hermes", "deepwiki", {"url": "https://mcp.example.invalid/mcp"})
         set_mcp_server("hermes", "other", {"command": "inert-other"})
         text = config.read_bytes().decode("utf-8")
-        assert text.startswith(original.decode("utf-8").split("mcp:\r\n")[0])
+        assert text.startswith(original.decode("utf-8"))
         assert "\n" not in text.replace("\r\n", "")
         data = yaml.safe_load(text)
         assert data["mcp_servers"] == {
             "deepwiki": {"url": "https://mcp.example.invalid/mcp"},
             "other": {"command": "inert-other"},
         }
-        assert sorted(e.name for e in connector_paths.mcp_servers("hermes")) == ["deepwiki", "old", "other"]
+        assert sorted(e.name for e in connector_paths.mcp_servers("hermes")) == ["deepwiki", "other"]
 
-        # Unset also removes the copy older builds wrote under mcp.servers.
-        unset_mcp_server("hermes", "old")
         unset_mcp_server("hermes", "deepwiki")
         unset_mcp_server("hermes", "other")
-        assert config.read_bytes() == original.split(b"mcp:\r\n")[0]
+        assert config.read_bytes() == original
 
     def test_unparseable_layout_is_refused_untouched(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

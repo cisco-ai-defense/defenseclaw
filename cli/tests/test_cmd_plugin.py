@@ -2762,7 +2762,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient.disable_plugin")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
-    def test_install_action_strict_config_quarantines_critical(self, mock_fetch, mock_scan, mock_disable):
+    def test_install_action_critical_records_the_install_block(self, mock_fetch, mock_scan, mock_disable):
         """--action on CRITICAL quarantines (admission default) and records the scan block."""
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("strict-danger-pkg")

@@ -312,60 +312,11 @@ func mapInboundTraceCustomResourceV8(
 	}
 
 	known := inboundKnownKeysV8(match, target, observability.InboundLocationResourceAttribute)
-	aliases := observability.TelemetryResourceCompatibilityAliases()
 	preserved := make(map[string]struct{})
-	compatibilityAliases := false
-	if native {
-		for alias, canonical := range aliases {
-			aliasValue, aliasState := leaf.resource.attributes.stringValue(alias)
-			canonicalValue, canonicalState := leaf.resource.attributes.stringValue(canonical)
-			switch canonicalState {
-			case otlpTypedAttributeUnique:
-				if aliasState == otlpTypedAttributeAbsent {
-					continue
-				}
-				if aliasState != otlpTypedAttributeUnique || aliasValue != canonicalValue {
-					return observability.Absent[observability.TelemetryCustomResourceAttributes](), nil,
-						errOTLPInboundMappingV8
-				}
-				compatibilityAliases = true
-			case otlpTypedAttributeAbsent:
-				if aliasState != otlpTypedAttributeAbsent {
-					return observability.Absent[observability.TelemetryCustomResourceAttributes](), nil,
-						errOTLPInboundMappingV8
-				}
-			default:
-				return observability.Absent[observability.TelemetryCustomResourceAttributes](), nil,
-					errOTLPInboundMappingV8
-			}
-		}
-		if compatibilityAliases {
-			// Compatibility aliases are one generated policy bit, not
-			// independently selectable keys. If enabled, every alias whose
-			// canonical value exists must be present and equal.
-			for alias, canonical := range aliases {
-				canonicalValue, canonicalState := leaf.resource.attributes.stringValue(canonical)
-				aliasValue, aliasState := leaf.resource.attributes.stringValue(alias)
-				if canonicalState == otlpTypedAttributeUnique {
-					if aliasState != otlpTypedAttributeUnique || aliasValue != canonicalValue {
-						return observability.Absent[observability.TelemetryCustomResourceAttributes](), nil,
-							errOTLPInboundMappingV8
-					}
-					preserved[alias] = struct{}{}
-				}
-			}
-		}
-	}
-
 	customValues := make(map[string]string)
 	var sealed observability.TelemetryCustomResourceAttributes
 	for _, key := range leaf.resource.attributes.keys() {
 		if _, fixedOrTransport := known[key]; fixedOrTransport {
-			continue
-		}
-		if _, alias := aliases[key]; alias {
-			// External aliases are sender metadata and do not select the new
-			// local process resource's generated compatibility policy.
 			continue
 		}
 		value, state := leaf.resource.attributes.stringValue(key)
@@ -385,7 +336,7 @@ func mapInboundTraceCustomResourceV8(
 			trial[acceptedKey] = acceptedValue
 		}
 		trial[key] = value
-		candidate, candidateErr := observability.NewTelemetryCustomResourceAttributes(trial, false)
+		candidate, candidateErr := observability.NewTelemetryCustomResourceAttributes(trial)
 		if candidateErr != nil {
 			continue
 		}
@@ -395,9 +346,7 @@ func mapInboundTraceCustomResourceV8(
 	}
 	if native {
 		var err error
-		sealed, err = observability.NewTelemetryCustomResourceAttributes(
-			customValues, compatibilityAliases,
-		)
+		sealed, err = observability.NewTelemetryCustomResourceAttributes(customValues)
 		if err != nil {
 			return observability.Absent[observability.TelemetryCustomResourceAttributes](), nil,
 				errOTLPInboundMappingV8
@@ -407,7 +356,7 @@ func mapInboundTraceCustomResourceV8(
 		}
 	} else if len(customValues) == 0 {
 		var err error
-		sealed, err = observability.NewTelemetryCustomResourceAttributes(nil, false)
+		sealed, err = observability.NewTelemetryCustomResourceAttributes(nil)
 		if err != nil {
 			return observability.Absent[observability.TelemetryCustomResourceAttributes](), nil,
 				errOTLPInboundMappingV8

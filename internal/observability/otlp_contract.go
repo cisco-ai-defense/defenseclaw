@@ -69,18 +69,6 @@ func TraceOTLPResourceAttributeKind(family EventName, key string) (OTLPValueKind
 	return otlpDescriptorKind(contract.resourceFields, key)
 }
 
-// TelemetryResourceCompatibilityAliases returns the generated compatibility
-// resource aliases keyed by wire name. Receivers use this generated view to
-// validate a native round trip without maintaining a second reserved-key list.
-func TelemetryResourceCompatibilityAliases() map[string]string {
-	contract := generatedTelemetryResourceContract()
-	aliases := make(map[string]string, len(contract.aliases))
-	for _, alias := range contract.aliases {
-		aliases[alias.descriptor.key] = alias.canonical
-	}
-	return aliases
-}
-
 // TraceOTLPScopeAttributeKind resolves the immutable generated scope
 // vocabulary.
 func TraceOTLPScopeAttributeKind(family EventName, key string) (OTLPValueKind, bool) {

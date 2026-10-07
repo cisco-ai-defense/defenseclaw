@@ -510,3 +510,19 @@ func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
 		t.Fatalf("view = %v for an account nothing is cached for", view)
 	}
 }
+
+// After a hot reload, Secure Client decides with the start-time
+// configuration, as before the configuration generation (GAP-0140, issue
+// #1092); every other profile decides with the live generation.
+func TestSecureClientDecidesWithTheStartTimeConfig(t *testing.T) {
+	start := &config.Config{DeploymentMode: "managed_enterprise"}
+	live := &config.Config{DeploymentMode: "managed_enterprise"}
+	api := &APIServer{scannerCfg: start, generationSource: func() *Generation { return &Generation{Config: live} }}
+	if got := api.decisionConfig(context.Background()); got != start {
+		t.Fatal("Secure Client decided with the reloaded configuration")
+	}
+	start.DeploymentMode, live.DeploymentMode = "", ""
+	if got := api.decisionConfig(context.Background()); got != live {
+		t.Fatal("a per-user gateway decided with the start-time configuration")
+	}
+}

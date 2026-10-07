@@ -295,24 +295,6 @@ def is_local_splunk_stack_destination(
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
 
 
-def is_local_shell_stack_destination(
-    *,
-    name: str = "",
-    preset_id: str = "",
-    kind: str = "",
-    endpoint: str = "",
-) -> bool:
-    """Backward-compatible union classifier for older callers."""
-
-    return is_local_observability_stack_destination(
-        name=name, preset_id=preset_id, kind=kind, endpoint=endpoint
-    ) or is_local_splunk_stack_destination(
-        preset_id=preset_id,
-        kind=kind,
-        endpoint=endpoint,
-    )
-
-
 def destination_platform_unsupported(
     *,
     name: str = "",

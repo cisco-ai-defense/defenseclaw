@@ -76,10 +76,6 @@ type Options struct {
 	// KeepServiceAccount makes uninstall keep the gateway service account,
 	// which it removes otherwise.
 	KeepServiceAccount bool
-	// RemoveServiceAccount is the deprecated flag for what uninstall now
-	// does by default. It is accepted with a warning until the next minor
-	// release removes it.
-	RemoveServiceAccount bool
 	// ProductVersion, when set, must equal the payload's version.
 	ProductVersion string
 	// Reason annotates an ensure run (e.g. "path", "secret", "package").
@@ -121,7 +117,6 @@ const (
 	codeState               = "state_unreadable"
 	codeLeftovers           = "unmanaged_leftovers"
 	codeWSL                 = "wsl_distribution"
-	codeDeprecatedOption    = "deprecated_option"
 )
 
 type lifecycle struct {
@@ -426,20 +421,14 @@ func (l *lifecycle) validateOptions() int {
 	if o.Purge && o.Action != ActionUninstall {
 		return bad("--purge applies only to uninstall")
 	}
-	if (o.KeepState || o.KeepServiceAccount || o.RemoveServiceAccount) && o.Action != ActionUninstall {
-		return bad("--keep-state, --keep-service-account and --remove-service-account apply only to uninstall")
+	if (o.KeepState || o.KeepServiceAccount) && o.Action != ActionUninstall {
+		return bad("--keep-state and --keep-service-account apply only to uninstall")
 	}
 	if o.KeepState && o.Purge {
 		return bad("--keep-state and --purge are mutually exclusive")
 	}
-	if o.RemoveServiceAccount && (o.KeepServiceAccount || o.KeepState) {
-		return bad("--remove-service-account contradicts --keep-service-account and --keep-state")
-	}
 	if o.ConfigFile != "" && !filepath.IsAbs(o.ConfigFile) {
 		return bad("--config must be an absolute path")
-	}
-	if o.RemoveServiceAccount {
-		r.AddWarning(codeDeprecatedOption, "--remove-service-account is deprecated and will be removed in the next minor release: uninstall deletes the gateway service account by default (keep it with --keep-service-account)")
 	}
 	return 0
 }

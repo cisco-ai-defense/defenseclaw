@@ -127,7 +127,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
 
 
 def test_exact_v8_setup_replaces_legacy_observability_editors_with_effective_plan() -> None:
-    model = SetupPanelModel({"config_version": 8, "privacy": {"disable_redaction": True}})
+    model = SetupPanelModel({"config_version": 8})
     names = tuple(section.name for section in model.sections)
 
     assert "Privacy" not in names
