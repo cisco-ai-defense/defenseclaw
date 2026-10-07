@@ -194,6 +194,16 @@ func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 		requirePolicyPathCommandsSucceed(t)
 	})
 
+	// The managed packages ship no Rego: validate has nothing to compile and
+	// still prints where each admission policy comes from (GAP-0067).
+	t.Run("no Rego directory", func(t *testing.T) {
+		setPolicyPathTestConfig(t, &config.Config{PolicyDir: t.TempDir()})
+		output, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
+		if err != nil || !strings.Contains(output, "compiled from config.yaml alone") || !strings.Contains(output, "admission.skill: actions from") {
+			t.Fatalf("output = %q, error = %v", output, err)
+		}
+	})
+
 	// An upgraded 0.8 install can still hold the firewall and audit modules
 	// and the firewall data file (an edited copy is kept): the gateway's load
 	// and every policy command work around them.

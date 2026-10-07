@@ -139,15 +139,22 @@ def _cli_audit_db(cfg) -> str:
     The enterprise lifecycle owns that folder (root, 0755, read by every
     enrolled user's hooks). A CLI pointed at it with ``DEFENSECLAW_HOME`` would
     create an ``audit.db`` there, and the store drops the folder's world bits
-    when it creates one, so it gets an in-memory store instead (GAP-0062).
+    when it creates one, so it gets an in-memory store instead (GAP-0062). On a
+    managed host a database whose folder does not exist gets one too.
     """
 
     from defenseclaw.upgrade_shim import managed_descriptor
 
     descriptor = managed_descriptor()
     audit_db = cfg.audit_db
-    if descriptor and os.path.dirname(os.path.abspath(audit_db)) == os.path.dirname(descriptor):
-        return ":memory:"
+    if descriptor:
+        folder = os.path.dirname(os.path.abspath(audit_db))
+        # An administrator's shell aimed at the managed config has no data
+        # folder of its own (root's home has no .defenseclaw), and a local
+        # writer must still reach its managed refusal instead of failing to
+        # open a store (GAP-0168).
+        if folder == os.path.dirname(descriptor) or not os.path.isdir(folder):
+            return ":memory:"
     return audit_db
 
 
