@@ -601,6 +601,17 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     return True
 
 
+def _refuse_config_version(parts: list) -> None:
+    """config_version names the schema the file is written in; only the
+    migration changes it. Relabelling a version 9 file as 8 made the next
+    migration back it up as the 0.8.x original (config.yaml.v8.bak)."""
+    if parts and parts[0] == "config_version":
+        raise click.ClickException(
+            "config_version is set by the migration ('defenseclaw migrate'), not by config set or unset; "
+            "config.yaml was not changed."
+        )
+
+
 @config_cmd.command("set")
 @click.argument("key")
 @click.argument("value")
@@ -619,10 +630,11 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
     from defenseclaw.config_writer import Change, parse_path
 
     try:
-        parse_path(key)
+        parts = list(parse_path(key))
         parsed = json.loads(value) if as_json else load_config_value(value)
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
+    _refuse_config_version(parts)
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
 
 
@@ -643,6 +655,8 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         parsed = [(key, list(parse_path(key))) for key in keys]
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
+    for _key, parts in parsed:
+        _refuse_config_version(parts)
     if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
         return
     # Nothing was removed: a key with a default is already unset, anything

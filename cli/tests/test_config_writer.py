@@ -104,10 +104,14 @@ def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
     ):
         alone = CliRunner().invoke(cmd_config.config_cmd, ["unset", pack])
         both = CliRunner().invoke(cmd_config.config_cmd, ["unset", pack, digest])
+        # GAP-0307: relabelling the file as version 8 would make the next
+        # migration overwrite the 0.8.x backup; only the migration sets it.
+        relabel = CliRunner().invoke(cmd_config.config_cmd, ["set", "config_version", "8"])
     assert alone.exit_code != 0 and f"config unset {pack} {digest}" in alone.output
     assert both.exit_code == 0, both.output
+    assert relabel.exit_code == 1 and "defenseclaw migrate" in relabel.output
     text = open(path, encoding="utf-8").read()
-    assert "required_pack" not in text
+    assert "required_pack" not in text and "config_version: 9" in text
 
 
 def test_a_field_of_an_unlisted_destination_names_the_range(tmp_path, monkeypatch):
