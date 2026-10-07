@@ -613,27 +613,29 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 	}
 	facts, err := profileExplainDirectoryFacts(id)
 	if err != nil {
-		// The lookup the hook path would run failed, so a request from this
-		// account gets default_lookup_failed. Answering from the OS account
-		// database instead would explain a profile no request receives, and
-		// hide why (GAP-0124).
+		// A required lookup failure selects default_lookup_failed. With
+		// agent- or connector-only assignments, live requests can still match
+		// without directory facts. Keep the error for explain (GAP-0124).
 		return profileSubject{
 			UserID: id, IDKind: useridentity.KindForID(id), UserName: userName,
-			LookupFailed: true, LookupError: err.Error(),
+			LookupFailed: identityLookupBlocking.Load(), LookupError: err.Error(),
 		}, nil
 	}
 	if facts.ResolvedAt.IsZero() {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
+			if !identityLookupBlocking.Load() {
+				local.LookupFailed = false
+			}
 			return local, nil
 		}
 		// The account is named, so explain shows it with the reason, not a
 		// bare default_lookup_failed.
-		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true},
+		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: identityLookupBlocking.Load()},
 			fmt.Errorf("the operating system returned no directory facts for %s", id)
 	}
 	return profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
-	}, true), nil
+	}, identityLookupBlocking.Load()), nil
 }
 
 // lookupLocalProfileSubject resolves an account name or uid/SID through the
@@ -1209,7 +1211,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			if found.UserID == "" {
 				found = profileSubject{UserName: user}
 			}
-			found.LookupFailed = true
+			found.LookupFailed = identityLookupBlocking.Load()
 			out["lookup_error"] = err.Error()
 		} else if found.LookupError != "" {
 			out["lookup_error"] = found.LookupError

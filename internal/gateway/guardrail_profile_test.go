@@ -498,6 +498,9 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 // default_lookup_failed; it must not answer from the OS account database
 // with a profile no request receives.
 func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	prevAccount, prevFacts := profileExplainAccount, profileExplainDirectoryFacts
 	t.Cleanup(func() { profileExplainAccount, profileExplainDirectoryFacts = prevAccount, prevFacts })
 	profileExplainAccount = func(string) (string, string, error) { return "94401116", "dcad-manygroups@dclab.test", nil }
@@ -515,6 +518,9 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 // default_lookup_failed while its own lookups fail, and explain says so; groups
 // kept as numbers are named as a sign of an unreachable directory.
 func TestExplainShowsWhatRequestsGetWhileTheGatewayLookupFails(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	prevFacts, prevFailure := cachedDirectoryFacts, cachedDirectoryFailure
 	t.Cleanup(func() { cachedDirectoryFacts, cachedDirectoryFailure = prevFacts, prevFailure })
 	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
@@ -796,6 +802,9 @@ func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
 // OS names but cannot resolve (an Entra user the aad module has not cached)
 // reported default_lookup_failed with no lookup_error and no user id.
 func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	prev := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "10259079", UserName: "bob", LookupFailed: true}, fmt.Errorf("uid 10259079: not found")
@@ -863,5 +872,47 @@ func TestProfileWindowsAwaitingSpoolUsesLookupFailed(t *testing.T) {
 	}
 	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Match != profileMatchDefaultLookupFailed {
 		t.Fatalf("missing spool groups selected %+v", got)
+	}
+}
+
+// Explain and its live-cache view keep agent matches when the configuration
+// never requires a directory lookup.
+func TestProfileExplainKeepsAgentWhenLookupFails(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(false)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
+	prevAccount, prevFacts := profileExplainAccount, profileExplainDirectoryFacts
+	prevCached, prevFailure := cachedDirectoryFacts, cachedDirectoryFailure
+	t.Cleanup(func() {
+		profileExplainAccount, profileExplainDirectoryFacts = prevAccount, prevFacts
+		cachedDirectoryFacts, cachedDirectoryFailure = prevCached, prevFailure
+	})
+	profileExplainAccount = func(string) (string, string, error) { return "1201", "alice", nil }
+	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, errors.New("directory unavailable")
+	}
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
+		return useridentity.DirectoryFacts{}, time.Time{}, false
+	}
+	cachedDirectoryFailure = func(string) (time.Time, string, bool) {
+		return time.Now().Add(-time.Minute), "directory unavailable", true
+	}
+	subject, err := lookupDirectoryProfileSubject("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		assignments: []config.ProfileAssignment{
+			{Profile: "tooling", Match: config.ProfileMatch{Agents: []string{"agt-0123456789abcdef"}}},
+		},
+	}
+	decision := set.match(&subject, profileSubjectLookup, "", "agt-0123456789abcdef")
+	if decision.Match != profileMatchAgent {
+		t.Fatalf("explain selected %+v", decision)
+	}
+	view, _ := explainCacheView(set, &subject, decision, "", "agt-0123456789abcdef", time.Now())
+	if view == nil || view["match"] != profileMatchAgent {
+		t.Fatalf("cache view = %v", view)
 	}
 }
