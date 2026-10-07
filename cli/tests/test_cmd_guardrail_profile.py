@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -75,6 +76,10 @@ def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     # status ask about the account running the command, and status names its
     # profile (GAP-0056).
     monkeypatch.setattr("getpass.getuser", lambda: "alice")
+    if os.name == "nt":
+        # Windows asks for the token SID instead of the login name
+        # (test_explain_on_windows_asks_for_the_token_sid).
+        monkeypatch.setattr("defenseclaw.gateway.current_profile_account", lambda: ("alice", "alice"))
     app.cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
     mine = runner.invoke(
         cmd_guardrail.guardrail, ["profile", "explain", "--connector", "codex"], obj=app, catch_exceptions=False
@@ -105,6 +110,36 @@ def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     status = runner.invoke(cmd_guardrail.guardrail, ["status"], obj=app, catch_exceptions=False)
     assert asked["probes"] == [("", ""), ("codex", agent_id)]
     assert f"; except pin for Codex agent {agent_id} (by agent)" in status.output
+
+
+def test_explain_on_windows_asks_for_the_token_sid(monkeypatch):
+    # An Entra ID login name (EntraAlice) is no account name Windows can look
+    # up, so explain and doctor reported default_lookup_failed for every Entra
+    # user; they now ask for the token SID and still show the login name.
+    from defenseclaw.gateway import OrchestratorClient, current_user_guardrail_profile
+
+    asked = []
+
+    def resolve(self, *, user="", connector="", agent=""):
+        asked.append(user)
+        return {"profiles_configured": True, "profile": "entra", "match": "user", "subject": {"upn": "alice@contoso.onmicrosoft.com"}}
+
+    monkeypatch.setattr(OrchestratorClient, "guardrail_profile_resolve", resolve)
+    monkeypatch.setattr("defenseclaw.file_permissions._windows_current_user_sid", lambda: "S-1-12-1-1-2-3-4")
+    monkeypatch.setattr("getpass.getuser", lambda: "EntraAlice")
+    app = AppContext()
+    app.cfg = default_config()
+    app.logger = MagicMock()
+    app.cfg.guardrail.profiles = {"entra": GuardrailProfile(mode="action")}
+    monkeypatch.setattr("defenseclaw.gateway.os.name", "nt")
+
+    explained = CliRunner().invoke(cmd_guardrail.guardrail, ["profile", "explain"], obj=app, catch_exceptions=False)
+    mine = current_user_guardrail_profile(app.cfg)
+
+    assert explained.exit_code == 0, explained.output
+    assert "alice@contoso.onmicrosoft.com" in explained.output
+    assert asked == ["S-1-12-1-1-2-3-4", "S-1-12-1-1-2-3-4"]
+    assert mine["user"] == "EntraAlice"
 
 
 def _explain(monkeypatch, result, *args):

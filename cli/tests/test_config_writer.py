@@ -102,6 +102,16 @@ def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
     assert "required_pack" not in text
 
 
+def test_a_field_of_an_unlisted_destination_names_the_range(tmp_path, monkeypatch):
+    # GAP-0154: set indexes the destinations written in config.yaml, as get does.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(config_writer.ConfigWriteError, match=r"index is out of range \(config.yaml lists 0 destinations\)"):
+        config_writer.apply([Change("observability.destinations[1].enabled", False)], "cli:test", "t", path=path)
+    assert open(path, encoding="utf-8").read() == before
+
+
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
     import json
 
@@ -183,9 +193,10 @@ def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
     monkeypatch.setattr(config_module, "load", lambda: object())
     monkeypatch.setattr(logger_module.Logger, "from_config", staticmethod(lambda _cfg: audit))
     with click.Context(click.Command("set"), obj=AppContext()):
-        asset_lists.audit_managed_refusal("config-update", "guardrail.mode", "verb=set")
+        asset_lists.audit_managed_config_refusal("guardrail.mode", "config set")
+    # Not config-update: the gateway would record that as an applied change.
     audit.log_action.assert_called_once_with(
-        "config-update", "guardrail.mode", "outcome=refused reason=managed_device verb=set"
+        "action", "guardrail.mode", "outcome=refused reason=managed_device command=config set"
     )
 
 
@@ -237,12 +248,12 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     rejected.__cause__ = inspected
     assert config_writer.plain_error(rejected) == "guardrail.rules.enable: unknown rule NOPE-X. Fix the reference, then retry."
 
-    pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the canonical v8 schema and reference")
+    pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the configuration schema and reference")
     assert config_writer.plain_error(pattern) == (
         "guardrail.custom_packs.bad.digest is not in the expected format (sha256: followed by 64 hex digits)."
     )
-    other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the canonical v8 schema")
-    assert "canonical v8 schema" not in config_writer.plain_error(other)
+    other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the configuration schema")
+    assert "configuration schema" not in config_writer.plain_error(other)
 
 
 def test_a_refused_config_set_names_the_missing_and_the_unknown_field(tmp_path):

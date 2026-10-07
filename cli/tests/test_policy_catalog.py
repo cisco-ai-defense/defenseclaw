@@ -19,6 +19,8 @@ import pytest
 from defenseclaw import policy_catalog as pc
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 
+from tests.helpers import select_pack
+
 
 @pytest.fixture
 def policy_dir(tmp_path: Path) -> Path:
@@ -138,10 +140,10 @@ def _cfg(tmp_path: Path, *, connectors: dict[str, str] | None = None, global_dir
     cfg = default_config()
     cfg.data_dir = str(tmp_path)
     cfg.policy_dir = str(tmp_path / "policies")
-    cfg.guardrail.rule_pack_dir = global_dir
-    cfg.guardrail.connectors = {
-        name: PerConnectorGuardrailConfig(rule_pack_dir=path) for name, path in (connectors or {}).items()
-    }
+    select_pack(cfg, cfg.guardrail, global_dir)
+    cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig() for name in (connectors or {})}
+    for name, path in (connectors or {}).items():
+        select_pack(cfg, cfg.guardrail.connectors[name], path)
     return cfg
 
 

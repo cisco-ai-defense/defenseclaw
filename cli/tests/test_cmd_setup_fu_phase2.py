@@ -318,37 +318,6 @@ class _BaseSetup(unittest.TestCase):
 # B3 / E4d — per-connector guardrail write-surface
 # ---------------------------------------------------------------------------
 class TestPerConnectorWriteSurface(_BaseSetup):
-    def test_amp_version_admission_precedes_rule_pack_conflict(self):
-        events: list[str] = []
-
-        def admit(*_args, **_kwargs):
-            events.append("version")
-            return True
-
-        with (
-            patch(
-                "defenseclaw.commands.cmd_setup.platform_support.host_os",
-                return_value="windows",
-            ),
-            patch(
-                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
-                side_effect=admit,
-            ) as version_check,
-            patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections") as protected_selection,
-        ):
-            with self.assertRaisesRegex(click.UsageError, "mutually exclusive"):
-                cmd_setup._apply_hook_connector_setup(
-                    self.app,
-                    connector="amp",
-                    restart=False,
-                    rule_pack="strict",
-                    rule_pack_dir=self.tmp_dir,
-                )
-
-        self.assertEqual(events, ["version"])
-        version_check.assert_called_once()
-        protected_selection.assert_not_called()
-
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
@@ -598,13 +567,13 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         hermes = gc.connectors["hermes"]
         self.assertEqual(codex.mode, "action")
         self.assertEqual(codex.block_message, "codex-only")
-        self.assertTrue(codex.rule_pack_dir.endswith(os.path.join("policies", "guardrail", "strict")))
+        self.assertEqual(codex.rule_pack, "strict")
         self.assertIsNotNone(codex.hilt)
         self.assertTrue(codex.hilt.enabled)
         self.assertEqual(codex.hilt.min_severity, "CRITICAL")
         self.assertEqual(hermes.mode, "")
         self.assertEqual(hermes.block_message, "")
-        self.assertEqual(hermes.rule_pack_dir, "")
+        self.assertEqual(hermes.rule_pack, "")
         self.assertIsNone(hermes.hilt)
 
     def test_setup_guardrail_unscoped_mode_updates_all_active_overrides(self):

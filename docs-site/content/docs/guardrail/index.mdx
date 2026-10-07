@@ -354,11 +354,7 @@ The table follows `defenseclaw setup guardrail --help`.
     },
     "--rule-pack": {
       type: "default|strict|permissive",
-      description: "Bundled rule-pack profile. Writes guardrail.rule_pack (guardrail.connectors.<name>.rule_pack for a multi-connector peer).",
-    },
-    "--rule-pack-dir": {
-      type: "path",
-      description: "Path of a built-in pack folder (default, strict or permissive under ~/.defenseclaw/policies/guardrail/), instead of --rule-pack; pass an empty string to clear the setting. A custom directory is refused with a pointer to defenseclaw guardrail use-pack, which pins it by digest.",
+      description: "Bundled rule-pack profile. Writes guardrail.rule_pack (guardrail.connectors.<name>.rule_pack for a multi-connector peer). A custom pack folder is registered with defenseclaw guardrail use-pack, which pins it by digest.",
     },
     "--judge-model": {
       type: "string",

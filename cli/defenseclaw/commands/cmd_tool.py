@@ -46,6 +46,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 
 # Canonical write-tool names — mirrors internal/gateway/inspect.go
 # isWriteToolName. Used only to annotate `status`: an allowed WRITE tool still
@@ -237,6 +238,7 @@ def tool() -> None:
 @click.option("--source", default="", help="Audit scope to a skill/MCP server (block fail-closes to unscoped)")
 @click.option("--reason", default="", help="Reason for blocking")
 @pass_ctx
+@asset_lists.refuse_on_managed_device("tool", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, connector: str, source: str, reason: str) -> None:
     """Add a tool to the block list.
 
@@ -314,6 +316,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
 @click.option("--source", default="", help="Audit scope to a skill/MCP server (not runtime-enforced)")
 @click.option("--reason", default="", help="Reason for allowing")
 @pass_ctx
+@asset_lists.refuse_on_managed_device("tool", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, connector: str, source: str, reason: str) -> None:
     """Add a tool to the allow list (skip the scan gate).
 
@@ -379,6 +382,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
 @click.option("--connector", default="", help="Remove the connector-scoped entry (@<connector>/<tool>)")
 @click.option("--source", default="", help="Remove the source-scoped entry (<source>/<tool>)")
 @pass_ctx
+@asset_lists.refuse_on_managed_device("tool", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     """Remove a tool from the block/allow list.
 

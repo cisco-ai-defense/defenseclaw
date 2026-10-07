@@ -1276,10 +1276,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
-        self.assertEqual(summary["next_commands"], ["defenseclaw upgrade"])
+        self.assertEqual(summary["next_commands"], ["defenseclaw migrate"])
         config_step = next(step for step in summary["setup"] if step["name"] == "Config")
         self.assertEqual(config_step["status"], "fail")
-        self.assertEqual(config_step["next_command"], "defenseclaw upgrade")
+        self.assertEqual(config_step["next_command"], "defenseclaw migrate")
 
         persisted = Path(self.tmp_dir, "config.yaml").read_text(encoding="utf-8")
         self.assertNotIn("config_version: 8", persisted)
@@ -1299,7 +1299,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
-        self.assertEqual(summary["next_commands"], ["defenseclaw upgrade"])
+        self.assertEqual(summary["next_commands"], ["defenseclaw migrate"])
         activate.assert_not_called()
         self.assertEqual(Path(self.tmp_dir, "config.yaml").read_text(encoding="utf-8"), source)
 

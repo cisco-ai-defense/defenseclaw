@@ -665,8 +665,8 @@ def validate_candidate(target: str, candidate: bytes) -> None:
 _REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
 _RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
 _SCHEMA_WORDS = (
-    ("correct the field using the canonical v8 schema and reference", "check the value and its documented format"),
-    ("use the value type documented by the canonical v8 schema", "use the value type the reference documents"),
+    ("correct the field using the configuration schema and reference", "check the value and its documented format"),
+    ("use the value type documented by the configuration schema", "use the value type the reference documents"),
 )
 
 
@@ -785,6 +785,25 @@ def _lookup(document: Any, parts: tuple[str | int, ...]) -> Any:
     return current
 
 
+def _check_destination_index(document: Any, path: str, parts: tuple[str | int, ...]) -> None:
+    """Refuse a field of a destination config.yaml does not list.
+
+    Writing it would append a half-written entry that the schema then rejects
+    with a oneOf message, so say what config get says: the index is out of
+    range (GAP-0154). A whole new destination is written at index len().
+    """
+    if len(parts) < 4 or parts[:2] != ("observability", "destinations") or not isinstance(parts[2], int):
+        return
+    listed = _lookup(document, parts[:2])
+    count = len(listed) if isinstance(listed, list) else 0
+    if parts[2] >= count:
+        noun = "destination" if count == 1 else "destinations"
+        raise ConfigWriteError(
+            f"{path}: the index is out of range (config.yaml lists {count} {noun}); "
+            "add a destination with 'defenseclaw setup observability add'"
+        )
+
+
 def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -801,6 +820,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
         else:
             if before is not _MISSING and before == change.value:
                 continue
+            _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
         changed.append(change.path)
     if not mutations:

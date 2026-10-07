@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Firewall section: default action, blocked destinations, allowed
-// domains/ports. Wires into the firewall.wasm Live Test scenarios
-// (firewall-allowed-domain, firewall-imds).
+// domains/ports of the policy firewall block.
 
 'use client';
 

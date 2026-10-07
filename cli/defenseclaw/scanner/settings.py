@@ -66,8 +66,6 @@ VLLM_SERVE_HINT = (
     "--structured-outputs-config '{\"backend\": \"xgrammar\", \"disable_any_whitespace\": true}'"
 )
 
-_SEVERITY_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
-
 # DefenseClaw provider names the scanner reaches through its
 # openai-compatible route (a base URL and the served model name).
 OPENAI_COMPATIBLE_PROVIDERS = frozenset(
@@ -93,16 +91,13 @@ def effective_review_queue_min(sc: Any) -> str:
 
 
 def virustotal_enabled(sc: Any) -> bool:
-    """analyzers.virustotal.enabled, or the v8 use_virustotal migration input."""
     analyzers = getattr(sc, "analyzers", None)
-    vt = getattr(analyzers, "virustotal", None)
-    return bool(getattr(vt, "enabled", False) or getattr(sc, "use_virustotal", False))
+    return bool(getattr(getattr(analyzers, "virustotal", None), "enabled", False))
 
 
 def aidefense_enabled(sc: Any) -> bool:
     analyzers = getattr(sc, "analyzers", None)
-    aid = getattr(analyzers, "aidefense", None)
-    return bool(getattr(aid, "enabled", False) or getattr(sc, "use_aidefense", False))
+    return bool(getattr(getattr(analyzers, "aidefense", None), "enabled", False))
 
 
 def osv_enabled(sc: Any) -> bool:
@@ -113,31 +108,7 @@ def osv_enabled(sc: Any) -> bool:
 def virustotal_key_env(sc: Any) -> str:
     analyzers = getattr(sc, "analyzers", None)
     vt = getattr(analyzers, "virustotal", None)
-    return (
-        (getattr(vt, "api_key_env", "") or "").strip()
-        or (getattr(sc, "virustotal_api_key_env", "") or "").strip()
-        or "VIRUSTOTAL_API_KEY"
-    )
-
-
-def derived_admission_actions(sc: Any) -> dict[str, str]:
-    """admission.skill.actions when unset: derived from the scanner gate.
-
-    Severities at or above fail_on_severity quarantine, the review band
-    [review_queue_min, fail_on_severity) warns, and anything below is
-    allowed. An explicit admission.skill.actions wins.
-    """
-    gate = _SEVERITY_RANK[effective_fail_on_severity(sc)]
-    review = _SEVERITY_RANK[effective_review_queue_min(sc)]
-    out: dict[str, str] = {}
-    for severity, rank in _SEVERITY_RANK.items():
-        if rank >= gate:
-            out[severity.lower()] = "quarantine"
-        elif rank >= review:
-            out[severity.lower()] = "warn"
-        else:
-            out[severity.lower()] = "allow"
-    return out
+    return (getattr(vt, "api_key_env", "") or "").strip() or "VIRUSTOTAL_API_KEY"
 
 
 def normalize_mcp_analyzers(raw: Any) -> list[str]:

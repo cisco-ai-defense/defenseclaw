@@ -37,7 +37,7 @@ def app(tmp_path, monkeypatch):
     cfg.guardrail.mode = "observe"
     cfg.guardrail.port = 4321
     cfg.guardrail.hook_fail_mode = "closed"
-    cfg.guardrail.rule_pack_dir = "/packs/default"
+    cfg.guardrail.rule_pack = "default"
     cfg.save = MagicMock()
     ctx = AppContext()
     ctx.cfg = cfg
@@ -83,7 +83,7 @@ def _run(app, *args):
 
 def _untouched(app) -> None:
     gc = app.cfg.guardrail
-    assert (gc.enabled, gc.port, gc.rule_pack_dir) == (True, 4321, "/packs/default")
+    assert (gc.enabled, gc.port, gc.rule_pack) == (True, 4321, "default")
 
 
 def test_global_switch_sets_only_guardrail_mode(app) -> None:

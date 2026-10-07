@@ -35,9 +35,11 @@ this against the scanner-flip — see session notes):
   ``guardrail.rules`` layers of its scope (``protections``, ``enable``,
   ``disable`` and ``severity_overrides``, applied as the gateway composes them;
   ``suppressions`` and ``sensitive_tools`` describe traffic). When there is
-  neither (the built-in default, ``""``) we add NO overlay, so default-install
-  scans are unchanged and gain no false positives. The gateway's compiled-in
-  baseline is unaffected; "honor the rule pack" means honor it *when set*.
+  neither (the built-in default, ``""``) the MCP and plugin scans add NO
+  overlay, so their default-install results are unchanged. A skill scan acts
+  on the default pack instead (``default_pack=True``), because the gateway's
+  install watcher scans every skill with the pack its scope resolves to, the
+  default one included: both give one verdict (GAP-0164).
 * We apply ``rules/*.yaml`` (precise, severity-carrying regex rules) plus the
   regex pattern families in ``rules/local-patterns.yaml``
   (``injection_regexes``, ``pii_data_regexes``). The raw substring phrase lists
@@ -657,11 +659,17 @@ def _rule_layers(cfg, connector: str | None) -> tuple[RulesLayer, ...]:
     return tuple(layer for layer in map(_layer_of, blocks) if layer)
 
 
-def _resolve_pack(cfg, connector: str | None) -> tuple[str, tuple[RulesLayer, ...]]:
-    """The pack directory and ``guardrail.rules`` layers a scan applies; ``("", ())`` for none."""
+def _resolve_pack(
+    cfg, connector: str | None, *, default_pack: bool = False
+) -> tuple[str, tuple[RulesLayer, ...]]:
+    """The pack directory and ``guardrail.rules`` layers a scan applies; ``("", ())`` for none.
+
+    ``default_pack`` makes a scope that selects nothing act on the default
+    pack, as the gateway's install watcher does for a skill.
+    """
     layers = _rule_layers(cfg, connector)
     dir_path = _resolve_dir(cfg, connector)
-    if not dir_path and layers:
+    if not dir_path and (layers or (default_pack and getattr(cfg, "guardrail", None) is not None)):
         # guardrail.rules alone act on the default pack, as in the gateway.
         from defenseclaw import policy_catalog
 
@@ -803,17 +811,20 @@ def maybe_wrap(
     connector: str | None = None,
     *,
     pack_cache: RulePackOverlayCache | None = None,
+    default_pack: bool = False,
 ):
     """Wrap *inner* with the rule-pack overlay iff a rule pack or ``guardrail.rules`` is configured.
 
     Returns *inner* unchanged when neither is set (or the pack is empty), so the
     common no-rule-pack path has zero behavior change and pays no extra disk reads.
+    ``default_pack=True`` (the skill scan) wraps with the default pack when
+    nothing is selected, as the gateway's install watcher does (GAP-0164).
     Fan-out callers can provide a per-operation *pack_cache*: it de-duplicates
     identical effective directories while preserving an explicit connector
     lookup, so one peer's pack can never bleed into another peer's scan.
     """
     resolved = _active_connector(cfg, connector)
-    dir_path, layers = _resolve_pack(cfg, resolved)
+    dir_path, layers = _resolve_pack(cfg, resolved, default_pack=default_pack)
     if not dir_path:
         return inner
     cache_key = os.path.normcase(
