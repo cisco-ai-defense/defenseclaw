@@ -48,13 +48,19 @@ var jetbrainsProductTokens = map[string]string{
 	"studio":        "android-studio",
 }
 
-// jetbrainsToken turns a product directory prefix into a bounded token.
+// jetbrainsToken turns a product directory prefix into a token of at most
+// maxProductLen bytes: a product the table does not name keeps its
+// lowercased prefix, cut to fit.
 func jetbrainsToken(prefix string) string {
 	key := strings.ToLower(strings.ReplaceAll(prefix, "-", ""))
 	if token, ok := jetbrainsProductTokens[key]; ok {
 		return token
 	}
-	return "jetbrains-" + key
+	const unknown = "jetbrains-"
+	if len(key) > maxProductLen-len(unknown) {
+		key = key[:maxProductLen-len(unknown)] // ASCII letters only (jetbrainsProductDir)
+	}
+	return unknown + key
 }
 
 type jetbrainsProduct struct {

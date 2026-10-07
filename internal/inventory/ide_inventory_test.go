@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -107,13 +108,69 @@ func TestIDEInventoryAttributesPluginsToProfileOwners(t *testing.T) {
 		t.Fatalf("ide_plugins rows = %d, %v; want the two full scans only (3 + 2)", rows, err)
 	}
 
-	// ai_only keeps only the AI plugins.
+	// ai_only keeps only the AI plugins, and the non-AI rows it stops
+	// collecting are not reported removed.
 	svc.opts.IDEInventory = config.IDEInventoryAIOnly
-	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
+	report, err = svc.runScan(context.Background(), true, "test")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.IDEInventory(); len(got.Plugins) != 1 || got.Plugins[0].PluginID != "github.copilot" {
-		t.Fatalf("ai_only = %+v", got.Plugins)
+	if got := svc.IDEInventory(); len(got.Plugins) != 1 || got.Plugins[0].PluginID != "github.copilot" || len(report.IDEInventory.Removed) != 0 {
+		t.Fatalf("ai_only = %+v, removed %+v", got.Plugins, report.IDEInventory.Removed)
+	}
+}
+
+// A folder name far longer than any real one (an unknown JetBrains product
+// directory, a VS Code profile) is bounded by the scan, so the guardian
+// still accepts the user's report with every row in it.
+func TestUserScanBoundsOddIDEFolderNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-user scans run on Linux and macOS")
+	}
+	withoutMachineIDEs(t)
+	home := t.TempDir()
+	appData := filepath.Join(home, ".config")
+	if runtime.GOOS == "darwin" {
+		appData = filepath.Join(home, "Library", "Application Support")
+	}
+	if err := os.MkdirAll(filepath.Join(appData, "JetBrains", strings.Repeat("A", 60)+"2024.1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeVSCodeExtensions(t, home, "github.copilot")
+	mustWrite(t, filepath.Join(appData, "Code", "User", "profiles", strings.Repeat("p", 250), "extensions.json"),
+		`[{"identifier":{"id":"github.copilot"},"version":"1.0.0","relativeLocation":"github.copilot-1.0.0"}]`)
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), UserScanOptions{}, nil)
+	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+		t.Fatalf("SanitizeUserScanReport: %v", err)
+	}
+	if ide := report.IDEInventory; ide == nil || len(ide.Installations) != 2 || len(ide.Plugins) != 2 || ide.Partial {
+		t.Fatalf("IDE inventory = %+v, want the JetBrains and VS Code installations and both plugin rows", ide)
+	}
+}
+
+// An editor-extension row stored by 0.8.x or 1.0.0 (keyed on the extension
+// id) is the predecessor of the signal the IDE inventory keys on the
+// installation: the first scan after an upgrade keeps its first-seen time
+// and reports nothing gone.
+func TestUpgradeCarriesEditorExtensionRowsKeyedOnTheExtensionID(t *testing.T) {
+	withoutMachineIDEs(t)
+	home := t.TempDir()
+	writeVSCodeExtensions(t, home, "github.copilot")
+	copilot := AISignature{ID: "copilot", Name: "GitHub Copilot", Category: SignalSupportedConnector, ExtensionIDs: []string{"GitHub.copilot", "github.copilot-chat"}}
+	service := &ContinuousDiscoveryService{
+		catalog: []AISignature{copilot},
+		opts:    AIDiscoveryOptions{Mode: "passive", HomeDir: home, HomeDirs: []string{home}},
+		store:   NewAIStateStore(filepath.Join(t.TempDir(), "state.json")),
+	}
+	legacy := service.signalFromValue(copilot, SignalEditorExtension, "editor_extension", "github.copilot")
+	legacy.FirstSeen = time.Now().Add(-48 * time.Hour).UTC()
+	prev := aiStateFile{Signals: map[string]aiStoredSignal{legacy.Fingerprint: {AISignal: legacy}}}
+	signals, _ := service.detectEditorExtensions()
+	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
+	report := service.classifyAndPersist("full-1", "test", time.Now(), signals, stats, prev, true)
+	if len(report.Signals) != 1 || report.Signals[0].Fingerprint == legacy.Fingerprint ||
+		report.Signals[0].State != AIStateSeen || !report.Signals[0].FirstSeen.Equal(legacy.FirstSeen) {
+		t.Fatalf("signals = %+v, want the installation's signal, seen since the stored row", report.Signals)
 	}
 }
 

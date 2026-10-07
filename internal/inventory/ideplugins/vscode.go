@@ -87,7 +87,7 @@ func (s *scanner) scanVSCodeLocal(product vscodeProduct, extDir string) {
 			continue
 		}
 		pd, pstate := s.readVSCodeDisabled(filepath.Join(profileDir, "globalStorage", "state.vscdb"))
-		entries := s.readVSCodeManifest(manifest, extDir, "profile:"+clean(profile), &vscodeState{disabled: pd, known: pstate}, false)
+		entries := s.readVSCodeManifest(manifest, extDir, clean("profile:"+profile), &vscodeState{disabled: pd, known: pstate}, false)
 		inst.Plugins = append(inst.Plugins, entries...)
 	}
 	s.add(inst)

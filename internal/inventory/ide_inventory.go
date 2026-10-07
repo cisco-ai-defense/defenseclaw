@@ -258,6 +258,48 @@ func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, i
 	return out
 }
 
+// legacyEditorExtensionRows matches the editor-extension rows of 0.8.x and
+// 1.0.0 to the signals that replace them. Those builds keyed a signal on the
+// matched extension id (signalFromValue, as detectEditorExtensionsLegacy
+// still does for Secure Client); ideSignals keys it on the installation. A
+// full scan's editor-extension signal with no stored row takes the oldest
+// stored row of its signature's extension ids as its predecessor, and those
+// rows are replaced rather than gone: an upgrade keeps first-seen times and
+// reports no removal of a tool that is still installed. Remove once
+// upgrades from 0.8.x state files are no longer supported.
+func (s *ContinuousDiscoveryService) legacyEditorExtensionRows(prevMap map[string]aiStoredSignal, signals []AISignal, full bool) (map[string]aiStoredSignal, map[string]bool) {
+	if !full || s.opts.SecureClient || len(prevMap) == 0 {
+		return nil, nil
+	}
+	emitted := make(map[string]bool, len(signals))
+	for _, sig := range signals {
+		emitted[sig.Fingerprint] = true
+	}
+	catalog := make(map[string]AISignature, len(s.catalog))
+	for _, sig := range s.catalog {
+		catalog[sig.ID] = sig
+	}
+	predecessors, replaced := map[string]aiStoredSignal{}, map[string]bool{}
+	for _, sig := range signals {
+		if _, stored := prevMap[sig.Fingerprint]; stored || sig.Detector != "editor_extension" {
+			continue
+		}
+		signature := catalog[sig.SignatureID]
+		for _, ext := range signature.ExtensionIDs {
+			fp := s.signalFromValue(signature, SignalEditorExtension, "editor_extension", strings.ToLower(ext)).Fingerprint
+			old, ok := prevMap[fp]
+			if !ok || emitted[fp] || old.Detector != "editor_extension" {
+				continue
+			}
+			replaced[fp] = true
+			if first, have := predecessors[sig.Fingerprint]; !have || old.FirstSeen.Before(first.FirstSeen) {
+				predecessors[sig.Fingerprint] = old
+			}
+		}
+	}
+	return predecessors, replaced
+}
+
 // ideOwnerForHome names the account of a home: the profile owner on a
 // service-context scan, otherwise the account this process runs as.
 func (s *ContinuousDiscoveryService) ideOwnerForHome(home string, serviceContext bool) ideOwner {
@@ -423,6 +465,15 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 	if s.ideBaseline == nil {
 		s.ideBaseline = s.loadIDEBaseline()
 	}
+	if inv.Scope == config.IDEInventoryAIOnly {
+		// A row ai_only no longer collects leaves the baseline silently: a
+		// removal record would export the very plugin ai_only withholds.
+		for fp, prev := range s.ideBaseline {
+			if !prev.IsAI {
+				delete(s.ideBaseline, fp)
+			}
+		}
+	}
 	partial := map[string]bool{}
 	for _, inst := range inv.Installations {
 		if inst.Partial {
@@ -557,29 +608,70 @@ func validateUserScanIDE(inv *IDEInventory) error {
 	}
 	installs := map[string]bool{}
 	for _, inst := range inv.Installations {
-		if !ideFamilies[inst.Family] || !ideTokenPattern.MatchString(inst.Product) || !isSHA256Hash(inst.PathHash) {
-			return errors.New("ide installation fields are invalid")
-		}
-		for _, value := range []string{inst.InstallID, inst.Channel, inst.RemoteKind, inst.Version} {
-			if !userScanText(value, maxUserScanField) {
-				return errors.New("ide installation fields must be short printable text")
-			}
+		if err := ideInstallationError(inst); err != nil {
+			return err
 		}
 		installs[inst.InstallID] = true
 	}
 	for _, p := range inv.Plugins {
-		if !installs[p.InstallID] || !ideFamilies[p.Family] || !ideTokenPattern.MatchString(p.Product) ||
-			!ideEnabledStates[p.Enabled] || strings.TrimSpace(p.PluginID) == "" ||
-			(p.PathHash != "" && !isSHA256Hash(p.PathHash)) {
-			return errors.New("ide plugin fields are invalid")
-		}
-		for _, value := range []string{p.PluginID, p.DisplayName, p.Publisher, p.Version, p.EnabledSource, p.Scope, p.AISignatureID} {
-			if !userScanText(value, maxUserScanField) {
-				return errors.New("ide plugin fields must be short printable text")
-			}
+		if err := idePluginError(p, installs); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func ideInstallationError(inst IDEInstallation) error {
+	if !ideFamilies[inst.Family] || !ideTokenPattern.MatchString(inst.Product) || !isSHA256Hash(inst.PathHash) {
+		return errors.New("ide installation fields are invalid")
+	}
+	for _, value := range []string{inst.InstallID, inst.Channel, inst.RemoteKind, inst.Version} {
+		if !userScanText(value, maxUserScanField) {
+			return errors.New("ide installation fields must be short printable text")
+		}
+	}
+	return nil
+}
+
+func idePluginError(p IDEPlugin, installs map[string]bool) error {
+	if !installs[p.InstallID] || !ideFamilies[p.Family] || !ideTokenPattern.MatchString(p.Product) ||
+		!ideEnabledStates[p.Enabled] || strings.TrimSpace(p.PluginID) == "" ||
+		(p.PathHash != "" && !isSHA256Hash(p.PathHash)) {
+		return errors.New("ide plugin fields are invalid")
+	}
+	for _, value := range []string{p.PluginID, p.DisplayName, p.Publisher, p.Version, p.EnabledSource, p.Scope, p.AISignatureID} {
+		if !userScanText(value, maxUserScanField) {
+			return errors.New("ide plugin fields must be short printable text")
+		}
+	}
+	return nil
+}
+
+// boundUserScanIDE keeps a worker's IDE inventory within
+// validateUserScanIDE. A row it would refuse, or one past the per-user
+// limits, is dropped and the inventory marked partial, so one odd folder in
+// a home costs that row, never the user's whole report.
+func boundUserScanIDE(inv *IDEInventory) {
+	installs := map[string]bool{}
+	kept := inv.Installations[:0]
+	for _, inst := range inv.Installations {
+		if len(kept) < maxIDEInstallationsPerUser && ideInstallationError(inst) == nil {
+			kept = append(kept, inst)
+			installs[inst.InstallID] = true
+		} else {
+			inv.Partial = true
+		}
+	}
+	inv.Installations = kept
+	plugins := inv.Plugins[:0]
+	for _, p := range inv.Plugins {
+		if len(plugins) < MaxIDEPluginsPerUser && idePluginError(p, installs) == nil {
+			plugins = append(plugins, p)
+		} else {
+			inv.Partial = true
+		}
+	}
+	inv.Plugins = plugins
 }
 
 // sanitizeUserScanIDE strips the account a worker may have stamped; the
