@@ -153,7 +153,9 @@ func TestIdentityDirectoryCacheDropsFactsItCannotRefresh(t *testing.T) {
 		t.Fatalf("health = %+v, want one failing account served stale facts", h)
 	}
 	advance(identityDirectoryMaxAge)
-	if _, ok := cache.get("1201", false); ok {
+	// Block until the refresh this call starts has failed: a failure recorded
+	// after the advance below would set the retry gate past the next get.
+	if _, ok := cache.get("1201", true); ok {
 		t.Fatal("facts older than identityDirectoryMaxAge were still served")
 	}
 	down.Store(false)
