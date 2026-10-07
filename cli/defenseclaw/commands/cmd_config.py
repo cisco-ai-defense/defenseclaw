@@ -102,10 +102,7 @@ def config_cmd(ctx: click.Context) -> None:
         and path.exists()
         and not _looks_like_v8_config(str(path))
     ):
-        raise click.ClickException(
-            "This configuration was written by an older DefenseClaw"
-            " — run 'defenseclaw migrate' first."
-        )
+        raise click.ClickException(_not_current_message(str(path)))
 
 
 # ---------------------------------------------------------------------------
@@ -979,7 +976,7 @@ def validate_config() -> ValidationResult:
     if config_module.config_is_empty(cfg_path):
         res.errors.append(config_module.empty_config_message(cfg_path))
         return res
-    res.errors.append("This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first.")
+    res.errors.append(_not_current_message(cfg_path))
     return res
 
 
@@ -1215,6 +1212,19 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     # lists every section and field (GAP-1661).
     suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code in ("config_schema_invalid", "additionalProperties") else ""
     return f"{where}{field}: {detail}.{suffix}"
+
+
+def _not_current_message(path: str) -> str:
+    """Why a config_version this build does not load is refused: a newer file
+    needs an upgrade or rollback, not a migration (as the root preflight says)."""
+
+    try:
+        version = config_module.source_config_version(path=path)
+    except config_module.ConfigVersionError:
+        version = 0
+    if version and version > config_module.CURRENT_CONFIG_VERSION:
+        return config_module.newer_config_message(version)
+    return "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
 
 
 def _looks_like_v8_config(path: str) -> bool:

@@ -346,6 +346,16 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             "skill_actions was replaced by admission.skill.actions in config_version 9; run: defenseclaw migrate",
         )
 
+    def test_a_newer_config_version_is_not_sent_to_migrate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.yaml")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("config_version: 10\n")
+            self.assertIn("newer DefenseClaw (config_version 10)", cmd_config._not_current_message(path))
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("config_version: 7\n")
+            self.assertIn("run 'defenseclaw migrate'", cmd_config._not_current_message(path))
+
 
 def _chained(cause: BaseException) -> BaseException:
     error = ValueError("refused")
