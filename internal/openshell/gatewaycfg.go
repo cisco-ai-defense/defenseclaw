@@ -395,6 +395,18 @@ type GatewayConfigState struct {
 	VM VMConfig `json:"vm"`
 	// server holds the gateway.toml listener and authentication settings.
 	server gatewayServer
+	// docker holds the images the docker driver starts with
+	// (RuntimeImages).
+	docker dockerRuntime
+}
+
+// dockerRuntime is what [openshell.drivers.docker] in gateway.toml says
+// about the images OpenShell's docker driver starts with: each one set
+// replaces a default image of the gateway's release.
+type dockerRuntime struct {
+	// SupervisorImage is supervisor_image, SandboxRuntimeImage
+	// sandbox_runtime_image and SupervisorBin supervisor_bin.
+	SupervisorImage, SandboxRuntimeImage, SupervisorBin string
 }
 
 // Driver is the compute driver the configuration selects, and false when
@@ -566,6 +578,9 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 						ResourceAdmission struct {
 							Enabled *bool `toml:"enabled"`
 						} `toml:"resource_admission"`
+						SupervisorImage     string `toml:"supervisor_image"`
+						SandboxRuntimeImage string `toml:"sandbox_runtime_image"`
+						SupervisorBin       string `toml:"supervisor_bin"`
 					} `toml:"docker"`
 					VM struct {
 						SandboxUID     *int64 `toml:"sandbox_uid"`
@@ -589,6 +604,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 		if d.ResourceAdmission.Enabled != nil {
 			st.BindMounts.ResourceAdmission = *d.ResourceAdmission.Enabled
 		}
+		st.docker = dockerRuntime{SupervisorImage: d.SupervisorImage, SandboxRuntimeImage: d.SandboxRuntimeImage, SupervisorBin: d.SupervisorBin}
 		st.VM = VMConfig(doc.OpenShell.Drivers.VM)
 	}
 	st.overrideFromEnv()

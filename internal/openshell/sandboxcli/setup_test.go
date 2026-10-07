@@ -369,45 +369,66 @@ func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, 
 // it upgrades it in place (no by default, which --yes and -n take) and
 // says what the upgrade fixes and how to run it later; --install-openshell
 // upgrades it. The question and the flag name the sandboxes the gateway
-// restart stops.
+// restart disrupts. While MicroVM sandboxes run, which the restart would
+// stop without a flush, setup keeps 0.1.1 and says to stop them first,
+// and an upgrade the installer refused before its script (still running
+// MicroVMs, the supervisor images Docker could not pull) keeps it too.
 func TestSetupOffersTheUpgrade(t *testing.T) {
 	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
-	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (sudo; sha256 verified; restarts the gateway: " +
-		"it drops the connections of the 2 sandboxes running on it (dc-claude-theirs-a, dc-claude-theirs-b)) [y/N]"
+	const names = "(dc-claude-theirs-a, dc-claude-theirs-b)"
+	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's " +
+		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [y/N]"
+	flag := SetupOptions{NonInteractive: true, InstallOpenShell: true}
 	for _, tc := range []struct {
 		name     string
 		input    string
 		tty      bool
 		o        SetupOptions
+		driver   openshell.ComputeDriver
+		running  int
+		err      error
 		upgraded bool
 		says     []string
 	}{
-		{"a terminal answers no by default", "\n", true, SetupOptions{}, false, []string{question, later}},
-		{"a terminal answers yes", "y\ny\n", true, SetupOptions{}, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
-		{"--yes keeps it", "", true, SetupOptions{Yes: true}, false, []string{later}},
-		{"-n keeps it", "", false, SetupOptions{NonInteractive: true}, false, []string{later}},
-		{"--install-openshell upgrades it", "", false, SetupOptions{NonInteractive: true, InstallOpenShell: true}, true,
+		{"a terminal answers no by default", "\n", true, SetupOptions{}, "", 2, nil, false, []string{question, later}},
+		{"a terminal answers yes", "y\ny\n", true, SetupOptions{}, "", 2, nil, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
+		{"--yes keeps it", "", true, SetupOptions{Yes: true}, "", 2, nil, false, []string{later}},
+		{"-n keeps it", "", false, SetupOptions{NonInteractive: true}, "", 2, nil, false, []string{later}},
+		{"--install-openshell upgrades it", "", false, flag, "", 2, nil, true,
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: it drops the connections of the 2 sandboxes running on it"}},
-		// A MicroVM sandbox stops on the restart, once its disk is flushed.
-		{"on MicroVMs", "", false, SetupOptions{NonInteractive: true, InstallOpenShell: true}, true,
-			[]string{"restarts the gateway: the 2 sandboxes running on it (dc-claude-theirs-a, dc-claude-theirs-b) stop once their disks are flushed"}},
+		{"Docker cannot pull the images", "", false, flag, "", 0, fmt.Errorf("%w (docker pull: no such host): let Docker reach ghcr.io", openshell.ErrRuntimeImages), true,
+			[]string{"⚠ OpenShell 0.1.1 is kept: Docker could not pull the images the upgraded gateway starts with (docker pull: no such host): let Docker reach ghcr.io"}},
+		// The restart would stop a running MicroVM without a flush.
+		{"MicroVMs running", "", true, SetupOptions{}, openshell.DriverVM, 2, nil, false,
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes running on it " +
+				names + " without a flush", "→ stop them first (`defenseclaw sandbox stop NAME` flushes their disks), then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
+		{"MicroVMs running, --install-openshell", "", false, flag, openshell.DriverVM, 2, nil, false,
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes"}},
+		{"no MicroVM running", "", false, flag, openshell.DriverVM, 0, nil, true,
+			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: no sandbox runs on it now"}},
+		{"a MicroVM started meanwhile", "", false, flag, openshell.DriverVM, 0, fmt.Errorf("%w (dc-late): stop them first", openshell.ErrSandboxesRunning), true,
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush (dc-late): stop them first"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := setupApp(t, tc.input, "", true)
 			ta.IO.TTY = tc.tty
-			runningOn(t, ta, 2)
+			if tc.running > 0 {
+				runningOn(t, ta, tc.running)
+			} else {
+				useGateway(ta)
+			}
 			calls := 0
 			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
 				if calls++; calls == 1 {
 					return upgradableReport(func(r *openshell.DoctorReport) {
-						if tc.name == "on MicroVMs" {
-							r.Driver = openshell.DriverVM
+						if tc.driver != "" {
+							r.Driver = tc.driver
 						}
 					})(ctx, d)
 				}
 				return hostReport(nil)(ctx, d)
 			}
-			inst := &fakeInstaller{}
+			inst := &fakeInstaller{err: tc.err}
 			ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
 				inst.consent = consent
 				return inst
@@ -419,10 +440,10 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 				t.Fatalf("upgraded %v (installed %v), want %v\n%s", inst.upgraded, inst.ran, tc.upgraded, ta.output())
 			}
 			has(t, ta.output(), append([]string{"⚠ OpenShell 0.1.1 (" + openshell.InstallerVersion + " available)"}, tc.says...)...)
-			if !tc.upgraded {
-				lacks(t, ta.output(), "upgraded")
+			if !tc.upgraded || tc.err != nil {
+				lacks(t, ta.output(), "OpenShell upgraded")
 			}
-			if tc.o.Yes || tc.o.NonInteractive {
+			if tc.o.Yes || tc.o.NonInteractive || tc.driver == openshell.DriverVM && tc.running > 0 {
 				lacks(t, ta.output(), "Upgrade OpenShell 0.1.1")
 			}
 		})
@@ -577,7 +598,7 @@ func TestSetupOnAGatewayOfAnotherRelease(t *testing.T) {
 
 // TestSetupOffersTheInstallOnlyForTheCLI: with the supported OpenShell
 // 0.1.1 CLI and its openshell-gateway unit (or Homebrew service) installed
-// but stopped, setup asked "Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's
+// but stopped, setup asked "Install OpenShell 0.1.1 with NVIDIA's
 // installer?", whose yes installed nothing ("✓ OpenShell 0.1.1 is already
 // installed") before it showed the doctor's fix, and -n said "OpenShell
 // 0.1.1 is needed" without it. A CLI newer than supported got the same

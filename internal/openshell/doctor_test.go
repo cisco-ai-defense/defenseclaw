@@ -319,20 +319,30 @@ func TestDoctorHealthyHost(t *testing.T) {
 
 // TestDoctorOffersTheUpgrade: OpenShell 0.1.1 is supported and works, so
 // its CLI check only warns (the report stays OK), naming what
-// InstallerVersion fixes, with setup's in-place upgrade as the fix.
+// InstallerVersion fixes, with setup's in-place upgrade as the fix, which
+// says what the gateway restart needs on the configured driver.
 func TestDoctorOffersTheUpgrade(t *testing.T) {
 	f := newDoctorFixture(t) // OpenShell 0.1.1, CLI and gateway
 	r := f.run()
 	c := expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusWarn,
 		"0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug that can stall a sandbox's first connection")
 	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" || c.Fix.Automatic || c.Fix.Apply != nil ||
-		!strings.HasPrefix(c.Fix.Summary, "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this restarts the gateway") {
+		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this pulls its supervisor images from ghcr.io and restarts the gateway, "+
+			"which drops the connections of every sandbox on it)" {
 		t.Fatalf("openshell-cli fix = %+v", c.Fix)
 	}
 	if !r.OK() || !r.OpenShellUpgradeAvailable() || r.OpenShellInstallNeeded() {
 		t.Fatalf("OK %v, upgrade available %v, install needed %v\n%s", r.OK(), r.OpenShellUpgradeAvailable(), r.OpenShellInstallNeeded(), r)
 	}
 	expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
+
+	f = newDoctorFixture(t)
+	f.onMicroVMs()
+	c = expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusWarn, "0.1.1 at ")
+	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" ||
+		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this restarts the gateway; stop the running MicroVM sandboxes first with `defenseclaw sandbox stop NAME`)" {
+		t.Fatalf("openshell-cli fix on MicroVMs = %+v", c.Fix)
+	}
 }
 
 func TestDoctorPlatforms(t *testing.T) {

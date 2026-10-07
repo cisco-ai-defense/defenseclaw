@@ -140,7 +140,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "install-openshell",
                 "bool",
-                "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)",
+                "install OpenShell, or upgrade an older supported release in place, with NVIDIA's "
+                "pinned, sha256-verified installer (uses sudo on Linux)",
             ),
             _Flag(
                 "no-mounts",

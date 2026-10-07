@@ -5407,13 +5407,15 @@ def sandbox_wizard_fields(
         install_hint = f"{machine.openshell_detail}: yes installs {release} with {installer}."
     elif machine.openshell_upgrade:
         # It works: the upgrade restarts the shared gateway, so it is off
-        # until the operator turns it on (sandboxcli/setup.go).
+        # until the operator turns it on. A restart would stop a running
+        # MicroVM without a flush, so setup keeps the release while one
+        # runs (sandboxcli/setup.go offerOpenShellUpgrade).
         machine_line = machine.summary
         install = "no"
         restart = (
-            "and the MicroVM sandboxes running on it stop once their disks are flushed"
+            "so stop the MicroVM sandboxes running on it first (setup does not upgrade while one runs)"
             if macos
-            else "which drops the connections of every sandbox on it"
+            else "which drops the connections of every sandbox on it (Docker first pulls the new supervisor images from ghcr.io)"
         )
         install_hint = (
             f"{machine.openshell_detail}. Yes upgrades it in place to {release} with {installer}; that restarts "

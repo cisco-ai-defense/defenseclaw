@@ -668,11 +668,15 @@ func (a *App) installerHow() string {
 // upgrade (DoctorReport.OpenShellUpgradeAvailable). The question's default
 // is no, so --yes and --non-interactive keep the installed release, which
 // goes on working; --install-openshell upgrades it. NVIDIA's installer
-// restarts the gateway, which drops the connections of every sandbox on
-// it, of every owner, and stops the running MicroVM ones once their disks
-// are flushed (openshell.Installer.Upgrade). An
-// OpenShell installed another way is its user's to upgrade: the check's
-// fix says how. It returns the doctor report of the machine as it is then.
+// restarts the gateway once it has installed the release, of every owner:
+// on the docker driver that drops the connections of the running
+// sandboxes, after Docker pulls the release's supervisor images; on the
+// MicroVM driver it would stop them without a flush, so while one runs
+// the upgrade is not offered, and openshell.PrepareUpgrade checks again
+// before the script. A refused upgrade ran nothing: setup warns and goes
+// on with the release installed. An OpenShell installed another way is
+// its user's to upgrade: the check's fix says how. It returns the doctor
+// report of the machine as it is then.
 func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {
 	keep := func() (*openshell.DoctorReport, error) {
 		a.note("OpenShell " + cli.Detail)
@@ -684,20 +688,26 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 	if !rep.OpenShellUpgradeAvailable() {
 		return keep()
 	}
-	// What the restart does to the sandboxes on the gateway, of every
-	// owner: a MicroVM one stops (flushed first), a docker one keeps running
-	// and loses its connections.
 	microVM := rep.Driver == openshell.DriverVM
-	stops := "it drops the connections of every sandbox on it"
-	if microVM {
-		stops = "running sandboxes stop once their disks are flushed"
-	}
 	running, known := a.runningSandboxes(ctx)
-	switch names := "(" + shortList(running) + ")"; {
-	case known && len(running) > 0 && microVM:
-		stops = "the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it " + names + " stop once their disks are flushed"
+	if microVM && known && len(running) > 0 {
+		a.warn("OpenShell " + rep.CLIVersion + " is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the " +
+			plural(int64(len(running)), "MicroVM sandbox", "MicroVM sandboxes") + " running on it (" + shortList(running) + ") without a flush")
+		a.note("→ stop them first (`" + CommandName + " stop NAME` flushes their disks), then upgrade: `" + CommandName + " setup --install-openshell`")
+		return rep, nil
+	}
+	// What the restart does to the sandboxes on the gateway, of every
+	// owner.
+	how := a.installerHow() + "; sha256 verified; "
+	if !microVM {
+		how += "pulls OpenShell's " + openshell.InstallerVersion + " supervisor images from ghcr.io; "
+	}
+	stops := "it drops the connections of every sandbox on it"
+	switch {
+	case microVM && !known:
+		stops = "it does not run while a MicroVM sandbox does, and the sandboxes on it could not be listed"
 	case known && len(running) > 0:
-		stops = "it drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it " + names
+		stops = "it drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
 	case known:
 		stops = "no sandbox runs on it now"
 	}
@@ -705,7 +715,7 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 	if !upgrade && !o.NonInteractive {
 		var err error
 		upgrade, err = a.ask("Upgrade OpenShell "+rep.CLIVersion+" to "+openshell.InstallerVersion+" in place with NVIDIA's installer? ("+
-			a.installerHow()+"; sha256 verified; restarts the gateway: "+stops+")", false, o.Yes)
+			how+"restarts the gateway: "+stops+")", false, o.Yes)
 		if err != nil {
 			return nil, err
 		}
@@ -725,6 +735,11 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 	switch {
 	case errors.Is(err, openshell.ErrInstallDeclined):
 		return keep()
+	case errors.Is(err, openshell.ErrSandboxesRunning), errors.Is(err, openshell.ErrRuntimeImages):
+		// Nothing ran (openshell.PrepareUpgrade): the release installed
+		// goes on working.
+		a.warn("OpenShell " + rep.CLIVersion + " is kept: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		return rep, nil
 	case errors.Is(err, openshell.ErrHomebrewInstall):
 		a.bad("upgrade OpenShell: Homebrew could not install the nvidia/openshell formula")
 		a.note("→ " + homebrewInstallHint(err))

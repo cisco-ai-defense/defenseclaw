@@ -1447,13 +1447,19 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 // place. DefenseClaw's install step upgrades only the OpenShell NVIDIA's
 // installer set up, whose gateway service it restarts the gateway through:
 // one installed another way (no gateway service: GatewayUnmanaged) is the
-// user's to upgrade.
+// user's to upgrade. What the restart does depends on the configured
+// driver (PrepareUpgrade): on the MicroVM driver it would stop the running
+// sandboxes without a flush, so the upgrade waits until none runs.
 func (r *doctorRun) upgradeFix() *Fix {
 	if r.serviceMissing() {
 		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"}
 	}
-	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway, which drops the connections of every sandbox on it)",
-		Command: installOpenShellCommand}
+	if r.configured == DriverVM {
+		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway; stop the running MicroVM sandboxes first with `defenseclaw sandbox stop NAME`)",
+			Command: installOpenShellCommand}
+	}
+	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this pulls its supervisor images from ghcr.io and restarts the gateway, " +
+		"which drops the connections of every sandbox on it)", Command: installOpenShellCommand}
 }
 
 func (r *doctorRun) checkRegistration() {

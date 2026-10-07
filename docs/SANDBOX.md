@@ -2921,12 +2921,21 @@ nothing of the vm driver, but the names of its caches carry the release
   older than `InstallerVersion` (0.1.1) still works: the doctor's
   `openshell-cli` check warns, and setup upgrades it in place only with
   consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
-  question, whose default is no). NVIDIA's script restarts the gateway: the
-  docker driver keeps its running sandboxes (their connections drop, and
-  the restarted gateway pulls its release's supervisor image), the vm driver
-  stops them, so the upgrade flushes the running MicroVM sandboxes first
-  (`FlushSandboxes`). It never downgrades, and refuses an OpenShell
-  installed another way than NVIDIA's installer (`ErrUnmanagedUpgrade`).
+  question, whose default is no). NVIDIA's script restarts the gateway only
+  after its downloads and the package's (formula's) install, so
+  `PrepareUpgrade` runs right before the script, after consent. The docker
+  driver keeps its running sandboxes (their connections drop), and the
+  restarted gateway does not start without its release's supervisor and
+  sandbox runtime images (upstream `ensure_runtime_image` pulls one that is
+  not local), so Docker pulls them first (`PullRuntimeImages`; images
+  `[openshell.drivers.docker]` replaces are left alone) and a failed pull
+  refuses the upgrade (`ErrRuntimeImages`). The vm driver stops its running
+  sandboxes without a flush, and a flush before the script would leave
+  minutes of writes unsynced, so a running or starting sandbox refuses the
+  upgrade (`ErrSandboxesRunning`); setup checks first and says to stop
+  them. Either refusal ran nothing, and setup keeps the old release. It
+  never downgrades, and refuses an OpenShell installed another way than
+  NVIDIA's installer (`ErrUnmanagedUpgrade`).
   The daemon's periodic gateway recheck reconnects when the gateway answers
   with another release.
 - A local gateway only, registered with mTLS. Remote gateways and plaintext,

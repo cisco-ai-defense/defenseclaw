@@ -1445,19 +1445,33 @@ can stall until the client's own timeout, and every idle sandbox uses about
 OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer?``, or run
 `defenseclaw sandbox setup --install-openshell`. The question's default is
 no, so `--yes` and `--non-interactive` keep 0.1.1. In the TUI, turn
-**Install OpenShell** on: it stays off for an upgrade.
+**Install OpenShell** on: it stays off for an upgrade. On a Mac, first stop
+the running sandboxes with `defenseclaw sandbox stop <name>`.
 
 What the upgrade does:
 
 - NVIDIA's pinned installer installs the 0.1.2 package (with `sudo`) on
-  Linux, or reinstalls the `nvidia/openshell` Homebrew formula on a Mac, and
-  restarts the gateway, which drops the connections of every sandbox on it,
-  of every owner; setup names the running ones first. Running MicroVM
-  sandboxes stop: DefenseClaw flushes their disks before the restart, and
-  `defenseclaw sandbox start <name>` starts them again. Sandboxes made on
-  0.1.1 start on 0.1.2.
-- On the docker driver the restarted gateway pulls the 0.1.2 supervisor
-  image from `ghcr.io` as it starts.
+  Linux, or reinstalls the `nvidia/openshell` Homebrew formula on a Mac.
+  Only then, after its downloads, does it restart the gateway, which affects
+  every sandbox on it, of every owner; setup names the running ones first.
+- On the docker driver the running sandboxes keep running and lose their
+  connections. The restarted gateway needs the 0.1.2 supervisor images
+  (`ghcr.io/nvidia/openshell/supervisor:0.1.2` and
+  `ghcr.io/nvidia/openshell/sandbox:0.1.2`) before it starts, so Docker pulls
+  them before the installer runs. When Docker cannot reach `ghcr.io`, setup
+  says so and keeps 0.1.1, and nothing is changed. Images that
+  `[openshell.drivers.docker]` in `gateway.toml` replaces
+  (`supervisor_image`, `sandbox_runtime_image`, `supervisor_bin`) are not
+  pulled.
+- On the MicroVM driver the restart stops every running sandbox. A MicroVM
+  stopped that way loses what it wrote since its last sync, and the restart
+  comes minutes after the installer starts, so setup does not upgrade while
+  a sandbox runs or starts: it keeps 0.1.1 and names the sandboxes to stop.
+  `defenseclaw sandbox stop <name>` flushes a sandbox's disk and stops it,
+  and `defenseclaw sandbox start <name>` starts it again after the upgrade.
+- OpenShell's patch releases do not intentionally break its stable
+  interfaces, so docker sandboxes made on 0.1.1 should start on 0.1.2. The
+  MicroVM driver is experimental upstream and makes no such promise.
 - On a Mac the first start of each harness image prepares its MicroVM disk
   again (about a minute and 5 GB). The disks 0.1.1 prepared stay in
   `~/.local/state/openshell/vm-driver/images` until

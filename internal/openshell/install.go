@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -58,6 +59,16 @@ var (
 	// ErrUnmanagedUpgrade means Upgrade found a supported CLI that NVIDIA's
 	// installer did not install, and would not replace.
 	ErrUnmanagedUpgrade = errors.New("openshell: DefenseClaw upgrades only an OpenShell that NVIDIA's installer installed")
+	// ErrSandboxesRunning means Upgrade ran nothing: sandboxes run (or may
+	// run) on a gateway whose driver's stop keeps only what they synced (the
+	// MicroVM driver). NVIDIA's script restarts the gateway, which stops
+	// them, only after its downloads and the install, so a flush before the
+	// script would leave all they wrote meanwhile to be lost.
+	ErrSandboxesRunning = errors.New("openshell: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush")
+	// ErrRuntimeImages means Upgrade ran nothing: Docker could not pull the
+	// release's supervisor images (Installer.PrepareUpgrade), without which
+	// the restarted gateway's docker driver does not start.
+	ErrRuntimeImages = errors.New("openshell: Docker could not pull the images the upgraded gateway starts with")
 )
 
 // linuxPackageCLI is where the deb and rpm packages install the CLI.
@@ -220,12 +231,13 @@ type Installer struct {
 	// XcodeApp is the Xcode.app Homebrew checks (default XcodeApp), whose
 	// version a failed install on a Mac reports (HomebrewInstallError).
 	XcodeApp string
-	// FlushSandboxes runs before Upgrade runs the script, which restarts
-	// the gateway: where that stops the running sandboxes and the driver's
-	// stop keeps nothing a workload has not synced (the MicroVM driver) it
-	// flushes their disks, and an error stops the upgrade (default:
-	// discover the Discover registration, dial it and FlushSandboxes).
-	FlushSandboxes func(context.Context) error
+	// PrepareUpgrade readies the gateway for the restart of an upgrade to
+	// release. It runs after consent, right before Upgrade runs the script,
+	// which restarts the gateway only once it has downloaded and installed
+	// the release; an error stops the upgrade with nothing run (default:
+	// discover the Discover registration, dial it and PrepareUpgrade, with
+	// the images gateway.toml leaves to the release: RuntimeImages).
+	PrepareUpgrade func(ctx context.Context, release Version) error
 }
 
 func (i *Installer) defaults() {
@@ -282,8 +294,8 @@ func (i *Installer) defaults() {
 	if i.MaxScriptBytes <= 0 {
 		i.MaxScriptBytes = 1 << 20
 	}
-	if i.FlushSandboxes == nil {
-		i.FlushSandboxes = func(ctx context.Context) error { return flushGatewaySandboxes(ctx, i.Discover) }
+	if i.PrepareUpgrade == nil {
+		i.PrepareUpgrade = i.prepareUpgrade
 	}
 }
 
@@ -299,12 +311,11 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 
 // Upgrade is Install, but a supported CLI older than Release is upgraded
 // in place too: NVIDIA's installer installs the release's package (on a
-// Mac, reinstalls the Homebrew formula) and restarts the gateway, which
-// stops every running MicroVM sandbox, so FlushSandboxes runs first. It
-// never downgrades (a CLI of Release or later is kept), and it refuses a
-// CLI the install would not replace, one installed another way than
-// NVIDIA's installer (ErrUnmanagedUpgrade): that one is upgraded the way
-// it was installed.
+// Mac, reinstalls the Homebrew formula), then restarts the gateway, so
+// PrepareUpgrade runs first. It never downgrades (a CLI of Release or
+// later is kept), and it refuses a CLI the install would not replace, one
+// installed another way than NVIDIA's installer (ErrUnmanagedUpgrade):
+// that one is upgraded the way it was installed.
 func (i *Installer) Upgrade(ctx context.Context) (*InstallResult, error) {
 	return i.install(ctx, true)
 }
@@ -371,8 +382,9 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
 	if upgrading {
-		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway, which drops the connections of every sandbox on it; "+
-			"running MicroVM sandboxes stop, and DefenseClaw flushes their disks first")
+		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it",
+			"before the script: on the docker driver, Docker pulls the release's supervisor images from ghcr.io (the restarted gateway does not start without them); "+
+				"on the MicroVM driver, nothing runs while a sandbox does (the restart would stop it without a flush)")
 	}
 	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
 		// Setup offers it once OpenShell is installed only where the
@@ -415,7 +427,7 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		return nil, ErrInstallDeclined
 	}
 	if upgrading {
-		if err := i.FlushSandboxes(ctx); err != nil {
+		if err := i.PrepareUpgrade(ctx, target); err != nil {
 			return nil, err
 		}
 	}
@@ -461,6 +473,115 @@ func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 func (i *Installer) ResignVMDriver(ctx context.Context) error {
 	i.defaults()
 	return brew(ctx, i.Runner, "postinstall", GatewayFormula)
+}
+
+// prepareUpgrade is PrepareUpgrade on the gateway of i.Discover, whose
+// gateway.toml (in Discover.ConfigDir) may name its own runtime images. A
+// gateway that cannot be reached runs no sandbox the restart could stop.
+func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
+	reg, err := Discover(i.Discover)
+	if err != nil {
+		return nil
+	}
+	c, err := Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second})
+	if err != nil {
+		return nil
+	}
+	defer c.Close()
+	return PrepareUpgrade(ctx, c, func(ctx context.Context) error {
+		st, _ := (&GatewayConfigurator{Dir: i.Discover.ConfigDir, GOOS: i.GOOS, Runner: i.Runner}).Read()
+		return PullRuntimeImages(ctx, i.Runner, st.RuntimeImages(release))
+	})
+}
+
+// PrepareUpgrade readies the gateway c talks to for the restart of an
+// in-place upgrade, which NVIDIA's script makes only once it has
+// downloaded and installed the release, minutes after anything run before
+// it:
+//   - On the docker driver, whose restart keeps the sandboxes running, it
+//     runs pull (PullRuntimeImages): the restarted gateway pulls the
+//     release's supervisor images unless they are local, and does not
+//     start without them.
+//   - Elsewhere (the MicroVM driver, or a gateway whose driver
+//     GetGatewayInfo did not name) the restart stops every sandbox, and a
+//     MicroVM stopped without a flush loses what it wrote since its last
+//     sync: a flush before the script would leave minutes of writes
+//     unsynced. A sandbox running or starting refuses the upgrade
+//     (ErrSandboxesRunning, naming them), and so does a list that fails.
+//     One that answers neither call is taken to be down, and runs nothing.
+//
+// A sandbox started after this, while the script runs, is not covered.
+func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error) error {
+	info, infoErr := c.GatewayInfo(ctx)
+	if infoErr == nil {
+		if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
+			if d.Name == DriverDocker {
+				return pull(ctx)
+			}
+			return nil
+		}
+	}
+	list, err := c.ListSandboxes(ctx, nil)
+	if err != nil {
+		if infoErr != nil && ctx.Err() == nil && IsUnavailable(err) {
+			return nil
+		}
+		return fmt.Errorf("%w, and the sandboxes on it could not be listed: %v", ErrSandboxesRunning, err)
+	}
+	var running []string
+	for _, sb := range list {
+		if sb != nil && (sb.Status.Phase == PhaseReady || sb.Status.Phase == PhaseProvisioning) {
+			running = append(running, sb.Name)
+		}
+	}
+	if len(running) == 0 {
+		return nil
+	}
+	slices.Sort(running)
+	return fmt.Errorf("%w (%s): stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks, then upgrade",
+		ErrSandboxesRunning, strings.Join(running, ", "))
+}
+
+// runtimeImageRepository holds the images OpenShell's docker driver runs
+// its supervisor from, tagged with the release.
+const runtimeImageRepository = "ghcr.io/nvidia/openshell"
+
+// RuntimeImages are the images the docker driver of a gateway of release
+// needs before it starts (OpenShell's ensure_runtime_image, which pulls
+// one that is not local): the release's supervisor image and its sandbox
+// runtime image, but those gateway.toml replaces ([openshell.drivers.docker]
+// supervisor_image, sandbox_runtime_image, or supervisor_bin, a sandbox
+// binary on the host). A nil s is a gateway with no configuration.
+func (s *GatewayConfigState) RuntimeImages(release Version) []string {
+	var d dockerRuntime
+	if s != nil {
+		d = s.docker
+	}
+	var images []string
+	if strings.TrimSpace(d.SupervisorImage) == "" {
+		images = append(images, runtimeImageRepository+"/supervisor:"+release.String())
+	}
+	if strings.TrimSpace(d.SandboxRuntimeImage) == "" && strings.TrimSpace(d.SupervisorBin) == "" {
+		images = append(images, runtimeImageRepository+"/sandbox:"+release.String())
+	}
+	return images
+}
+
+// PullRuntimeImages has Docker pull each of images that is not local
+// (RuntimeImages), so that the upgraded gateway's docker driver finds them
+// as it starts. A pull that fails, most often because Docker cannot reach
+// ghcr.io, is ErrRuntimeImages: the restarted gateway would not start.
+func PullRuntimeImages(ctx context.Context, run Runner, images []string) error {
+	for _, img := range images {
+		if _, err := run.Output(ctx, Command{Name: "docker", Args: []string{"image", "inspect", "--format", "{{.Id}}", img}, Timeout: 30 * time.Second}); err == nil {
+			continue
+		}
+		if out, err := run.Output(ctx, Command{Name: "docker", Args: []string{"pull", img}, Timeout: 10 * time.Minute}); err != nil {
+			return fmt.Errorf("%w (docker pull %s: %v: %s): let Docker reach ghcr.io, or load the image, then upgrade",
+				ErrRuntimeImages, img, err, lastLine(out))
+		}
+	}
+	return nil
 }
 
 // configDir is the OpenShell configuration directory the gateway is

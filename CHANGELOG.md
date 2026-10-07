@@ -798,12 +798,15 @@ deleted.
   stays ready) and setup offers the upgrade to 0.1.2 in place:
   ``Upgrade OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer?``,
   no by default, so `--yes` and `--non-interactive` keep 0.1.1;
-  `--install-openshell` upgrades. NVIDIA's installer restarts the gateway,
-  which drops the connections of every sandbox on it: setup names the
-  running ones, and flushes the disks of running MicroVM sandboxes, which
-  stop, first. An OpenShell installed another
-  way is not upgraded; the check says to upgrade it the way you installed
-  it. The TUI wizard shows the upgrade with **Install OpenShell** off.
+  `--install-openshell` upgrades. NVIDIA's installer restarts the gateway
+  once it has installed the release, and setup names the running sandboxes
+  first. On the docker driver they keep running and lose their connections,
+  and Docker first pulls the 0.1.2 supervisor images from `ghcr.io`, which
+  the restarted gateway needs to start: when it cannot, setup keeps 0.1.1
+  and changes nothing. On the MicroVM driver the restart would stop running
+  sandboxes without a flush, so setup keeps 0.1.1 while one runs and says to
+  stop them first. An OpenShell installed another way is not upgraded; the
+  check says to upgrade it the way you installed it. The TUI wizard shows the upgrade with **Install OpenShell** off.
   `sandbox doctor --json` reports `openshell_upgrade` and
   `openshell_install_version`.
 - The daemon reconnects when the gateway answers with another release, so
