@@ -3491,6 +3491,32 @@ const alertNonAllowOutcomeSQL = `'alert','ask','block','blocked','confirm','deny
 	'fail','failed','failure','quarantine','quarantined','reject','rejected',
 	'revoked','terminated','timed_out'`
 
+// SandboxEgressCodeHarnessFetch is the decision code of a refused request a
+// sandbox's harness makes on its own and does without (OpenCode's model
+// catalog, the Codex tip download). The refusal is expected: it is audited
+// at INFO, but no alert (GAP-0130). Mirrors
+// ALERT_AUDIT_ONLY_DECISION_CODES in cli/defenseclaw/alert_semantics.py.
+const SandboxEgressCodeHarnessFetch = "SANDBOX_EGRESS_HARNESS_FETCH"
+
+// SandboxEgressCodeLookupRefused is the decision code of OpenShell's refusal
+// of a sandbox's name lookup. OpenShell judges the connection that follows
+// on its own, and that denial is the alert; the lookup is audited at INFO
+// (GAP-0134).
+const SandboxEgressCodeLookupRefused = "SANDBOX_EGRESS_LOOKUP_REFUSED"
+
+// auditOnlyEgressCode reports a decision code of a refusal that is audited
+// only: no alert, no defenseclaw.egress.events point and no blocked count on
+// the Sandboxes dashboard.
+func auditOnlyEgressCode(code string) bool {
+	return code == SandboxEgressCodeHarnessFetch || code == SandboxEgressCodeLookupRefused
+}
+
+// auditOnlyEgressSQL keeps the refusals that are audited only off the alert
+// queue.
+const auditOnlyEgressSQL = `COALESCE(CASE WHEN json_valid(COALESCE(event.payload_json,''))
+		THEN json_extract(event.payload_json, '$."defenseclaw.network.decision_code"') END, '')
+		NOT IN ('` + SandboxEgressCodeHarnessFetch + `','` + SandboxEgressCodeLookupRefused + `')`
+
 func canonicalAlertOutcomeSQL() string {
 	return `LOWER(COALESCE(
 		CASE WHEN json_valid(COALESCE(event.payload_json,''))
@@ -3590,6 +3616,7 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 		OR (
 			event.bucket IN ('enforcement.action','network.egress')
 			AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+			AND ` + auditOnlyEgressSQL + `
 		)
 		OR (
 			event.bucket IN ('platform.health','diagnostic')

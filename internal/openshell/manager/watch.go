@@ -184,16 +184,41 @@ func (m *Manager) handleEvent(ctx context.Context, b *box, ev stream.Event) {
 		m.triageNow(b)
 	case stream.KindGap:
 		m.mu.Lock()
-		id := b.identity()
+		id, deleted := b.identity(), b.deleted
 		m.mu.Unlock()
-		m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
-			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), ErrorSummary: "sandbox events were lost: " + ev.Gap.Reason, Timestamp: m.now()})
+		if deleted || ev.Gap == nil {
+			// A deleted sandbox's stream has nothing left to report.
+			return
+		}
+		m.tel.RecordSandboxHealth(ctx, gapHealth(id, ev.Gap.Reason, m.now()))
 	case stream.KindWarning:
 		m.streamWarning(ctx, b, ev.Warning)
 	case stream.KindConnected:
 		// A reconnect may have missed a draft notification.
 		m.triageNow(b)
 	}
+}
+
+// gapHealth is the degraded health record of events lost on a sandbox's
+// stream, in words (GAP-0137). A cursor out of range is what a gateway
+// restart (an upgrade, setup installing OpenShell) or a trimmed event log
+// leaves: MEDIUM, no alert. A cursor the gateway could not have issued (a
+// different gateway, a damaged state file) stays HIGH.
+func gapHealth(id audit.SandboxIdentity, reason string, at time.Time) audit.SandboxHealthEvent {
+	ev := audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), Timestamp: at}
+	switch reason {
+	case stream.GapCursorOutOfRange:
+		ev.Severity = "MEDIUM"
+		ev.ErrorSummary = "the OpenShell gateway restarted or trimmed its event log: this sandbox's events up to the reconnect at " +
+			at.UTC().Format("15:04:05") + " UTC may be missing (" + reason + ")"
+	case stream.GapCursorRejected:
+		ev.ErrorSummary = "the OpenShell gateway does not know where this sandbox's events left off (a different gateway, " +
+			"or a damaged sandbox record): its events up to the reconnect at " + at.UTC().Format("15:04:05") + " UTC may be missing (" + reason + ")"
+	default:
+		ev.ErrorSummary = "sandbox events were lost: " + reason
+	}
+	return ev
 }
 
 // streamWarning reports a warning of the sandbox's stream: OpenShell's
@@ -312,7 +337,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
-			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),
+			Blocked: r.Denied(), Reason: truncate(openshellReason(r, host), 512), PolicyOutcome: truncate(r.Policy, 256),
 			Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
 		}
 		if !quiet {
@@ -321,6 +346,21 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
+			switch {
+			case fetch:
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+			case dnsRefusal(r):
+				// The connection that follows is the refusal that counts
+				// (and the alert); the lookup alone is audited at INFO.
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeLookupRefused, "INFO"
+			case policyReloadCut(r):
+				// The end of a connection the policy still allows, not a
+				// refusal: no block, no alert, no blocked count (GAP-0138).
+				ev.Blocked, ev.End, ev.Terminated = false, audit.SandboxEgressFailed, true
+				ev.DecisionCode = "SANDBOX_EGRESS_TERMINATED"
+				ev.Reason = truncate("OpenShell closed it when the sandbox policy changed; the client connects again ("+
+					firstNonEmpty(r.Reason, r.Message)+")", 512)
+			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
 			// on the stream. A lookup draws none.
@@ -427,6 +467,24 @@ func (m *Manager) connectionRequest(b *box, r ocsf.Record, host string, at time.
 	o.at = at
 	o.pending++
 	return false
+}
+
+// openshellReason is the audit reason of an OpenShell record: for a denial
+// the words the activity feed shows for OpenShell's reason token, with the
+// token after them, and for SSH what to do instead; otherwise OpenShell's
+// reason or message (GAP-0134).
+func openshellReason(r ocsf.Record, host string) string {
+	token := firstNonEmpty(r.Reason, r.Message)
+	if !r.Denied() || token == "" {
+		return token
+	}
+	if r.Port == 22 {
+		return sandboxapi.SSHBlockedText(host) + " (" + token + ")"
+	}
+	if text, ok := sandboxapi.LookupReasonText(r.Reason); ok {
+		return text + " (" + token + ")"
+	}
+	return token
 }
 
 // dnsRefusal reports OpenShell's refusal of a name lookup ("NET:REFUSE …

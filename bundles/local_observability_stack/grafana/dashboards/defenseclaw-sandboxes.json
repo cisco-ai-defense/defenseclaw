@@ -250,7 +250,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -587,7 +587,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (net_source, net_decision) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=~\"egress[.]allowed|egress[.]blocked\" | json | __error__=\"\" | label_format net_source=\"{{.body_defenseclaw_network_source}}\", net_decision=\"{{.body_defenseclaw_network_decision}}\" [$__interval]))",
+          "expr": "sum by (net_source, net_decision) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=~\"egress[.]allowed|egress[.]blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format net_source=\"{{.body_defenseclaw_network_source}}\", net_decision=\"{{.body_defenseclaw_network_decision}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{net_source}} · {{net_decision}}"
         }
@@ -692,7 +692,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -715,7 +715,8 @@
                 "value": 10
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -769,7 +770,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -835,7 +837,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -889,7 +892,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -1007,7 +1011,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "BLOCKED",
           "instant": true,
           "queryType": "instant"
@@ -1159,7 +1163,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_network_source}} · {{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}:{{.body_server_port}} · {{.body_defenseclaw_network_decision_code}} · {{.body_defenseclaw_sandbox_process_executable}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_network_source}} · {{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}:{{.body_server_port}} · {{.body_defenseclaw_network_decision_code}} · {{.body_defenseclaw_sandbox_process_executable}}\"",
           "refId": "A"
         }
       ],
@@ -1232,7 +1236,8 @@
                 "value": 10
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.kind}"
         },
         "overrides": []
       },
@@ -1544,7 +1549,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.program}"
         },
         "overrides": []
       },

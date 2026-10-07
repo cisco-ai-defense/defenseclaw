@@ -979,7 +979,11 @@ the proxy relayed, and the last binary OpenShell named making the
 connection. The binary is what the process in the sandbox claims to be.
 With the [process tree](/docs/sandboxes/policy-packs) on, the binary column
 shows that process and its parents instead (`curl ← bash ← claude`), and
-`--output json` adds them (`lineage`). A second table lists the
+`--output json` adds them (`lineage`). OpenShell names no process id for a
+connection (on Linux and on the Mac), so the row finds the binary's process
+in the tree by its path and the time the host was last seen: a program that
+ran for less than one sample (5 seconds, 15 on a slow Mac) or in two copies
+at once keeps only the binary. A second table lists the
 models OpenShell's inference route reported calls to. The view survives
 daemon restarts and stops, keeps at most 512 hosts (the oldest that are not
 AI destinations make room; when every row is one, a provider the catalog

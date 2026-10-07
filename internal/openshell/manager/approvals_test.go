@@ -167,7 +167,8 @@ func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
 	refuse("ocbox")
 	audited := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "models.opencode.ai" && r.Blocked })
 	d, err := e.m.Destinations(t.Context(), "ocbox")
-	if len(audited) != 1 || err != nil || len(e.events("ocbox", sandboxapi.ActivityEgressBlocked, "")) != 0 || len(d.Destinations) != 0 ||
+	if len(audited) != 1 || audited[0].DecisionCode != audit.SandboxEgressCodeHarnessFetch || audited[0].Severity != "INFO" ||
+		err != nil || len(e.events("ocbox", sandboxapi.ActivityEgressBlocked, "")) != 0 || len(d.Destinations) != 0 ||
 		e.get("ocbox").Egress.Blocked != 0 || len(e.tel.findingsOf(audit.SandboxFindingShadowAI)) != 0 {
 		t.Fatalf("audited %d, feed %+v, destinations %+v (%v), blocked %d", len(audited), e.events("ocbox", sandboxapi.ActivityEgressBlocked, ""), d, err, e.get("ocbox").Egress.Blocked)
 	}
@@ -184,6 +185,25 @@ func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
 	refuse("claudebox")
 	if len(e.events("claudebox", sandboxapi.ActivityEgressBlocked, "")) != 1 {
 		t.Fatal("another harness's request to the host is not on the feed")
+	}
+}
+
+// TestOpenShellDenialAuditReadsLikeTheFeed (GAP-0134): one git ls-remote
+// over SSH raised two MEDIUM alerts, the refused lookup and the connection,
+// whose reasons were OpenShell's tokens. The lookup is audited at INFO under
+// a code the alerts leave out, and a denial's reason has the feed's words
+// (for SSH: use an HTTPS remote) before the token.
+func TestOpenShellDenialAuditReadsLikeTheFeed(t *testing.T) {
+	e := liveEnv(t, "gitbox", nil)
+	e.ocsf("gitbox", "NET:REFUSE [MED] DENIED github.com [reason:policy_dns_ineligible]", time.Now())
+	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/ssh(0) -> github.com:22 [reason:transparent_tcp_policy_denied]", time.Now())
+	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.example.net:443 [reason:transparent_tcp_policy_denied]", time.Now())
+	got := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool { return ev.Blocked })
+	if len(got) != 3 || got[0].DecisionCode != audit.SandboxEgressCodeLookupRefused || got[0].Severity != "INFO" ||
+		got[1].DecisionCode != "SANDBOX_EGRESS_OPENSHELL_DENIED" || got[1].Severity != "" ||
+		got[1].Reason != "SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…) (transparent_tcp_policy_denied)" ||
+		got[2].Reason != "no OpenShell rule allows it (transparent_tcp_policy_denied)" {
+		t.Fatalf("audited %+v", got)
 	}
 }
 
@@ -851,6 +871,11 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	// the ask's, not refused requests of the destinations.
 	if eg := e.get("hpbox").Egress; len(requested) != 1 || eg.BlockedRequests != 0 || eg.Blocked != 0 {
 		t.Fatalf("%d approval.requested events, egress %+v; want 1 and no blocked destination or request", len(requested), eg)
+	}
+	// Its audit record (an alert) reads as the ask, not as a raw OpenShell code (GAP-0138).
+	if recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Port == 38830 }); len(recs) == 0 ||
+		recs[0].DecisionCode != "SANDBOX_EGRESS_HOST_PORT_ASK" || !strings.Contains(recs[0].Reason, "asks to reach port 38830 on your machine") {
+		t.Fatalf("audited %+v", recs)
 	}
 	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)

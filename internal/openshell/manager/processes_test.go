@@ -204,6 +204,11 @@ func TestProcessCmdlineRedactsSecrets(t *testing.T) {
 		{[]string{"sh", "-c", `python3 -c "import time; time.sleep(90)" --token=dccertvalue`}, `"import time; time.sleep(90)" --token=<redacted`},
 		{[]string{"bash", "-c", `eval 'curl -H "Authorization: Bearer dccertvalue" https://example.invalid/'`}, `"Authorization: Bearer <redacted`},
 		{[]string{"curl", "-H", "X-Api-Key: dccertvalue", "https://example.invalid/"}, "X-Api-Key: <redacted"},
+		// Claude Code's wrapper of every Bash call: the escaped quotes of the
+		// nested script hid the header from the rules (GAP-0144).
+		{[]string{"/bin/bash", "-c", `source /sandbox/.claude/shell-snapshots/snapshot-bash.sh && eval 'sh -c "curl -s -H \"Authorization: Bearer dccertvalue\" https://example.invalid; sleep 40"' < /dev/null`},
+			`\"Authorization: Bearer <redacted`},
+		{[]string{"/bin/bash", "-c", `eval 'curl -H '\''X-Api-Key: dccertvalue'\'' https://example.invalid/'`}, `'\''X-Api-Key: <redacted`},
 	} {
 		if got := processCmdline(tc.argv); strings.Contains(got, "dccertvalue") || !strings.Contains(got, tc.kept) {
 			t.Fatalf("cmdline %q of %q, want %q kept", got, tc.argv, tc.kept)
@@ -241,6 +246,34 @@ func treeEnv(t *testing.T, name string, sample *atomic.Pointer[string]) *harness
 func psAnswer(lines ...string) *string {
 	s := string(answerOf(append(append([]string{"T 100 1700000000"}, lines...), collectEnd)...))
 	return &s
+}
+
+// TestDestinationLineageByProgram (GAP-0139, GAP-0133): OpenShell names pid 0
+// for every connection on both drivers, so a destination never had a
+// lineage although its program was in the tree. The one process of that
+// program running when the host was seen gives it; two copies give none.
+func TestDestinationLineageByProgram(t *testing.T) {
+	var sample atomic.Pointer[string]
+	tree := []string{"P 1 0 1000 10", "Pc 1 init", "P 124 1 1000 20", "Pc 124 claude", "P 521 124 1000 30", "Pc 521 bash",
+		"P 526 521 1000 40", "Pc 526 curl", "L /proc/526 exe /usr/bin/curl"}
+	sample.Store(psAnswer(tree...))
+	e := treeEnv(t, "linbox", &sample)
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
+		t.Fatal("no sample")
+	}
+	e.ocsf("linbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> pypi.org:443/tcp [policy:allow_pypi engine:opa]", time.Now())
+	d, err := e.m.Destinations(context.Background(), "linbox")
+	if err != nil || len(d.Destinations) != 1 || len(d.Destinations[0].Lineage) != 4 || d.Destinations[0].Lineage[0].PID != 526 ||
+		d.Destinations[0].Lineage[1].Comm != "bash" || d.Destinations[0].Lineage[2].Comm != "claude" {
+		t.Fatalf("destinations = %+v, %v", d.Destinations, err)
+	}
+	sample.Store(psAnswer(append(tree, "P 530 521 1000 50", "Pc 530 curl", "L /proc/530 exe /usr/bin/curl")...))
+	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
+		t.Fatal("no sample")
+	}
+	if d, _ = e.m.Destinations(context.Background(), "linbox"); len(d.Destinations[0].Lineage) != 0 {
+		t.Fatalf("two copies of the program ran: lineage %+v", d.Destinations[0].Lineage)
+	}
 }
 
 func TestSampleProcessesRecordsTheTree(t *testing.T) {

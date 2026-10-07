@@ -1147,7 +1147,9 @@ func TestPolicyMovedIntoTheMountFailsClosed(t *testing.T) {
 
 // A connection OpenShell closes because the policy changed under it (every
 // reload does that) showed as a block, twice per reload; it stays in the
-// audit record only. A real denial still counts.
+// audit record only, as the end of an allowed connection, not a block: it
+// raised MEDIUM alerts and counted on the dashboards' blocked egress
+// (GAP-0138). A real denial still counts.
 func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e := liveEnv(t, "portsbox", nil)
 	cut := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:L7 tunnel closed before inspection " +
@@ -1155,7 +1157,8 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e.ocsf("portsbox", cut, time.Now())
 	e.ocsf("portsbox", cut, time.Now())
 	audited := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool {
-		return ev.Host == "bedrock-mantle.us-east-1.api.aws" && ev.Blocked
+		return ev.Host == "bedrock-mantle.us-east-1.api.aws" && !ev.Blocked && ev.End == audit.SandboxEgressFailed && ev.Terminated &&
+			ev.DecisionCode == "SANDBOX_EGRESS_TERMINATED"
 	})
 	if got := e.events("portsbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 0 || e.get("portsbox").Egress.Blocked != 0 || len(audited) != 2 {
 		t.Fatalf("feed = %+v, blocked %d, audited %d; want the reload's cuts audited only", got, e.get("portsbox").Egress.Blocked, len(audited))

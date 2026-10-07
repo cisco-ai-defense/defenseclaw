@@ -475,7 +475,7 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	text := "✗ DefenseClaw blocked " + where
 	switch why := firstNonEmpty(ev.Category, ev.Reason); {
 	case sshPort(ev):
-		text += " (" + sshBlockedText(ev.Host) + ")"
+		text += " (" + sandboxapi.SSHBlockedText(ev.Host) + ")"
 	case ev.Category == sandboxapi.CategoryLargeUpload:
 		// The large-upload block (egress.block_large_uploads) cut an
 		// upload there (its event counts what went up), or refused a
