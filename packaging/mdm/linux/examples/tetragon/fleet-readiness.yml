@@ -1,0 +1,65 @@
+# One-screen readiness of the whole fleet for a Tetragon mode.
+#
+#   ansible-playbook -i inventory fleet-readiness.yml -e defenseclaw_tetragon_mode=enforce
+#
+# It changes nothing. Each host runs `tetragon verify` (exit 0 ready, 1 not
+# ready) and `tetragon status`; one summary follows. The plain-shell twin is
+# fleet-readiness.sh.
+- name: Fleet readiness for the DefenseClaw Tetragon integration
+  hosts: defenseclaw_linux
+  become: true
+  gather_facts: false
+  vars:
+    defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
+    defenseclaw_tetragon_mode: observe
+  tasks:
+    - name: Check readiness for the mode
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - tetragon
+          - verify
+          - --ready-for
+          - "{{ defenseclaw_tetragon_mode }}"
+          - --json
+      register: fleet_verify
+      changed_when: false
+      failed_when: fleet_verify.rc not in [0, 1]
+
+    - name: Read the Tetragon status
+      ansible.builtin.command:
+        argv: ["{{ defenseclaw_gateway }}", enterprise, linux, tetragon, status, --json]
+      register: fleet_status
+      changed_when: false
+      failed_when: fleet_status.rc not in [0, 1]
+
+    - name: Keep what the summary needs
+      ansible.builtin.set_fact:
+        fleet_ready: "{{ fleet_verify.rc == 0 }}"
+        fleet_failing: "{{ ((fleet_verify.stdout | from_json).checks | default([]) | selectattr('status', 'equalto', 'fail') | map(attribute='id') | list) }}"
+        fleet_digest: "{{ (fleet_status.stdout | from_json).kernel_policy | default('') }}"
+        fleet_users: "{{ (fleet_status.stdout | from_json).users | default([]) }}"
+
+    - name: Summarize the fleet
+      ansible.builtin.debug:
+        msg:
+          - "Mode checked: {{ defenseclaw_tetragon_mode }}"
+          - "Hosts ready: {{ fleet_ready_hosts | length }} of {{ fleet_vars | length }}"
+          - "Hosts not ready: {{ fleet_not_ready_hosts | join(', ') | default('none', true) }}"
+          - "Users enforcing: {{ fleet_users_all | selectattr('state', 'equalto', 'enforcing') | list | length }}"
+          - "Users in burn-in: {{ fleet_users_all | selectattr('state', 'equalto', 'burn_in') | rejectattr('would_block') | list | length }}"
+          - "Users reset by a hit: {{ fleet_users_all | selectattr('state', 'equalto', 'burn_in') | selectattr('would_block') | list | length }}"
+          - "Kernel controls digests: {{ fleet_vars | map(attribute='fleet_digest') | unique | list }} (more than one means hosts run different builds)"
+      run_once: true
+      vars:
+        fleet_vars: "{{ ansible_play_hosts | map('extract', hostvars) | list }}"
+        fleet_ready_hosts: "{{ fleet_vars | selectattr('fleet_ready') | map(attribute='inventory_hostname') | list }}"
+        fleet_not_ready_hosts: "{{ fleet_vars | rejectattr('fleet_ready') | map(attribute='inventory_hostname') | list }}"
+        fleet_users_all: "{{ fleet_vars | map(attribute='fleet_users') | flatten }}"
+
+    - name: Name each host that is not ready
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is not ready for {{ defenseclaw_tetragon_mode }}: {{ fleet_failing | join(', ') | default('see tetragon verify', true) }}"
+      when: not fleet_ready
