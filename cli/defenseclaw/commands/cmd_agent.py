@@ -5858,9 +5858,15 @@ def identities(
         if user or connector_name:
             existing = client.agent_identities(limit=1).get("total", 0)
             label = f"--user {user}" if user else f"--connector {connector_name}"
-            click.echo(f"No agent identity matches {label} ({existing} identities exist; run without a filter to list them).")
+            click.echo(
+                f"No agent identity matches {label} "
+                f"({existing} identities exist; run without a filter to list them)."
+            )
         else:
-            click.echo("No agent identities seen yet. They appear after an agent's first hook, LLM proxy or ACP request.")
+            click.echo(
+                "No agent identities seen yet. They appear after an agent's first hook, "
+                "LLM proxy or ACP request."
+            )
         return
     click.echo(_render_agent_identities(rows))
 
@@ -5884,7 +5890,10 @@ def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
         ))
     from rich.cells import cell_len
 
-    table = [tuple("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in cell) for cell in line) for line in table]
+    table = [
+        tuple("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in cell) for cell in line)
+        for line in table
+    ]
     widths = [max(cell_len(line[i]) for line in table) for i in range(len(headers) - 1)]
     lines = [
         "  ".join(cell + " " * (width - cell_len(cell)) for cell, width in zip(line[:-1], widths))
