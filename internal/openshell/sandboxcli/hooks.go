@@ -74,6 +74,9 @@ type sessionNotice struct {
 	// unblocked its line once the session saw host unblocked
 	// (session.unblockedHosts): the block, without the unblock command.
 	host, unblocked string
+	// dest is the host:port of an OpenShell refusal, and approved its
+	// line once an approval opened it (session.approved).
+	dest, approved string
 }
 
 // notice announces msg while the harness owns the terminal, once per key
@@ -170,9 +173,12 @@ func (s *session) printNotices() {
 	list := make([]string, 0, len(s.notices))
 	for _, n := range s.notices {
 		line := n.summary
-		if n.host != "" && s.unblockedHosts[n.host] {
+		switch {
+		case n.host != "" && s.unblockedHosts[n.host]:
 			// Unblocked since: no command to offer (RT U6).
 			line = n.unblocked
+		case n.dest != "" && s.approved[n.dest]:
+			line = n.approved
 		}
 		list = append(list, line)
 	}

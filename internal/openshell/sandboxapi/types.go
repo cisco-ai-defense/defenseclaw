@@ -753,6 +753,27 @@ const (
 	ApprovalFailed   = "failed"
 )
 
+// Who approved an ask: the Reason of the approval.resolved event of an
+// approval that was applied (ApprovalApplied).
+const (
+	ApprovedAutomatically = "automatic"
+	ApprovedByOperator    = "operator"
+	ApprovedByPolicy      = "policy"
+)
+
+// ApprovalApplied reports an approval.resolved event whose rule was
+// applied: the destination it names is open from then on.
+func ApprovalApplied(ev ActivityEvent) bool {
+	if ev.Kind != ActivityApprovalResolved {
+		return false
+	}
+	switch ev.Reason {
+	case ApprovedAutomatically, ApprovedByOperator, ApprovedByPolicy:
+		return true
+	}
+	return false
+}
+
 // Approval is one rare ask: an OpenShell draft proposal triage would not
 // decide on its own.
 type Approval struct {

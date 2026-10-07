@@ -151,6 +151,13 @@ type session struct {
 	// unblocked since, whose summary line offers no unblock.
 	blockedHosts   map[string]bool
 	unblockedHosts map[string]bool
+	// refused are the host:port destinations of OpenShell's own refusals
+	// the session announced, with their host; otherBlocks the hosts blocked
+	// another way too; approved the destinations an approval opened since
+	// (GAP-0196): no longer blocked, and not counted as such.
+	refused     map[string]string
+	otherBlocks map[string]bool
+	approved    map[string]bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -368,6 +375,10 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.blockNotice(ev)
 	case sandboxapi.ActivityEgressUnblocked:
 		s.onUnblock(ev.Host)
+	case sandboxapi.ActivityApprovalResolved:
+		if sandboxapi.ApprovalApplied(ev) {
+			s.onApproved(ev)
+		}
 	case sandboxapi.ActivityEgressLargeUpload:
 		s.largeUploadNotice(ev)
 	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookBlocked, sandboxapi.ActivityHookFailed:
@@ -500,17 +511,67 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
 		n.summary = text
 	}
+	// OpenShell refuses a connection no rule allows yet; an approval
+	// (triage's own, under the open profile) opens it: its line then says
+	// so instead of a block (onApproved).
+	direct := ev.Source == sandboxapi.SourceOpenShell && ev.Category == ""
+	if direct {
+		n.dest = strings.ToLower(where)
+		n.approved = "⚠ " + where + ": a connection was refused before a rule allowed it; approved since"
+	}
 	s.noticeMu.Lock()
 	if s.blockedHosts == nil {
-		s.blockedHosts = map[string]bool{}
+		s.blockedHosts, s.refused, s.otherBlocks = map[string]bool{}, map[string]string{}, map[string]bool{}
 	}
 	if len(s.blockedHosts) < maxSeenEvents {
 		s.blockedHosts[host] = true
+		if direct {
+			s.refused[n.dest] = host
+		} else {
+			s.otherBlocks[host] = true
+		}
 	}
-	// Blocked again after an unblock: the command applies again.
+	// Blocked again after an unblock or approval: the block applies again.
 	delete(s.unblockedHosts, host)
+	delete(s.approved, n.dest)
 	s.noticeMu.Unlock()
 	s.noticeWith(key, text, n)
+}
+
+// onApproved records that an approval opened a destination during the
+// session.
+func (s *session) onApproved(ev sandboxapi.ActivityEvent) {
+	dest := strings.ToLower(askDestination(ev))
+	if dest == "" {
+		return
+	}
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	if s.approved == nil {
+		s.approved = map[string]bool{}
+	}
+	if len(s.approved) < maxSeenEvents {
+		s.approved[dest] = true
+	}
+}
+
+// liftedBlocks counts the hosts the session announced blocked only by
+// OpenShell refusals of destinations an approval opened since. Under
+// noticeMu.
+func (s *session) liftedBlocks() int {
+	open := map[string]bool{}
+	for dest, host := range s.refused {
+		if _, seen := open[host]; !seen || !s.approved[dest] {
+			open[host] = s.approved[dest] && !s.otherBlocks[host]
+		}
+	}
+	n := 0
+	for _, lifted := range open {
+		if lifted {
+			n++
+		}
+	}
+	return n
 }
 
 // largeUploadNotice announces a large upload only the report saw (the
@@ -1308,7 +1369,8 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	parts = append(parts, contacted)
 	s.noticeMu.Lock()
-	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked)
+	lifted := s.liftedBlocks()
+	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked) - lifted
 	s.noticeMu.Unlock()
 	if sitesBlocked > 0 {
 		parts = append(parts, plural(int64(sitesBlocked), "site blocked", "sites blocked"))

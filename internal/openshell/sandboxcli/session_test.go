@@ -479,6 +479,33 @@ func TestTheSummaryOffersNoUnblockOfAHostUnblockedSince(t *testing.T) {
 	lacks(t, ta.output(), cmd("webhook.site"), cmd("Hooks.Example.COM"))
 }
 
+// GAP-0196: under the open profile OpenShell refused pypi.org until
+// triage approved its rule 18 s later, and the summary said "✗ DefenseClaw
+// blocked pypi.org:443" and counted a blocked site. A refusal an approval
+// opened since reads as such and is not counted; one still refused is.
+func TestTheSummaryTellsARefusalApprovedSince(t *testing.T) {
+	ta := newTestApp(t, "")
+	stderr := liveErr(ta)
+	noChanges(ta)
+	refused := func(seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Seq: seq, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: host, Port: 443,
+			Source: sandboxapi.SourceOpenShell, Reason: "transparent_tcp_policy_denied"}
+	}
+	ta.daemon.live = []sandboxapi.ActivityEvent{
+		refused(1, "pypi.org"),
+		{Seq: 2, Kind: sandboxapi.ActivityApprovalResolved, Sandbox: sbName, Host: "pypi.org", Port: 443,
+			Reason: sandboxapi.ApprovedAutomatically, Message: "approved pypi.org"},
+		refused(3, "files.example.org"),
+	}
+	ta.term.during = func() {
+		waitFor(t, "the last refusal", func() bool { return strings.Contains(stderr.String(), "files.example.org") })
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), "⚠ pypi.org:443: a connection was refused before a rule allowed it; approved since\n",
+		"✗ DefenseClaw blocked files.example.org:443 (no OpenShell rule allows it)", " · 1 site blocked")
+	lacks(t, ta.output(), "✗ DefenseClaw blocked pypi.org")
+}
+
 // Manual R2-2: while the daemon does not answer, the run says so (the hooks
 // fail closed meanwhile), then, as soon as it answers, that it is back, and
 // the summary keeps the outage.

@@ -37,11 +37,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
 
-// Approval actors.
+// Approval actors, the Reason of an applied approval's feed event.
 const (
-	actorAutomatic = "automatic"
-	actorOperator  = "operator"
-	actorPolicy    = "policy"
+	actorAutomatic = sandboxapi.ApprovedAutomatically
+	actorOperator  = sandboxapi.ApprovedByOperator
+	actorPolicy    = sandboxapi.ApprovedByPolicy
 )
 
 // maxPendingApprovals bounds asks per sandbox so a proposal flood cannot
