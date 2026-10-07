@@ -447,6 +447,16 @@ def test_admission_fields_edit_the_v9_admission_actions() -> None:
     apply_config_field(cfg, "admission.skill.actions.high", "")
     assert cfg.admission.skill.actions == {}
 
+    # policy activate writes exact triples: a known one reads as its shorthand
+    # (as config get shows it), a custom one stays selectable.
+    cfg.admission.skill.actions = {
+        "critical": {"install": "block", "file": "quarantine", "runtime": "disable"},
+        "high": {"install": "block", "file": "none", "runtime": "enable"},
+    }
+    critical, high = admission_action_fields("skill", cfg)[1:3]
+    assert critical.value == "quarantine" and critical.options == ("", "block", "quarantine", "warn", "allow")
+    assert "file=none" in high.value and high.value in high.options
+
 
 def test_config_validation_matches_go_setup_state_rules() -> None:
     assert validate_config_field(ConfigField("TLS", "gateway.tls", "bool", "maybe")).severity == "error"

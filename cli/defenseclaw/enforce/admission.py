@@ -75,6 +75,20 @@ _SHORTHANDS = {
 }
 
 
+def triple_shorthand(triple: Any) -> str:
+    """The shorthand a config ``{install, file, runtime}`` triple spells, or
+    "" when it matches none. ``allow`` shares ``warn``'s triple, so it reads
+    back as ``warn``, as :func:`action_label` does."""
+    if not isinstance(triple, dict):
+        return ""
+    for name, (action, _allow) in _SHORTHANDS.items():
+        if (triple.get("install"), triple.get("file"), triple.get("runtime")) == (
+            action.install, action.file, action.runtime,
+        ):
+            return name
+    return ""
+
+
 def action_label(action: tuple[SeverityAction, bool]) -> object:
     """A compiled action as config.yaml writes it: its shorthand, else the
     ``{install, file, runtime}`` triple."""

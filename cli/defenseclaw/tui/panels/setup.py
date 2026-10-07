@@ -2039,17 +2039,27 @@ def admission_action_fields(asset_type: str, cfg: object | Mapping[str, Any] | N
             hint="block/quarantine reject the install; warn admits with a warning; allow admits; blank=default",
         ),
     ]
+    from defenseclaw.enforce.admission import triple_shorthand
+
+    options = ("", "block", "quarantine", "warn", "allow")
     for severity in ("critical", "high", "medium", "low", "info"):
-        out.append(
-            _field(
-                cfg,
-                severity[:1].upper() + severity[1:],
-                f"admission.{asset_type}.actions.{severity}",
-                "choice",
-                ("", "block", "quarantine", "warn", "allow"),
-                f"On a {severity.upper()} finding; blank=the default for this severity.",
-            )
+        key = f"admission.{asset_type}.actions.{severity}"
+        row = _field(
+            cfg,
+            severity[:1].upper() + severity[1:],
+            key,
+            "choice",
+            options,
+            f"On a {severity.upper()} finding; blank=the default for this severity.",
         )
+        # policy activate writes exact triples: show one as the shorthand it
+        # spells (as config get does), and keep a custom triple selectable.
+        shorthand = triple_shorthand(get_config_value(cfg, key, ""))
+        if shorthand:
+            row = _field_with_original(row, shorthand)
+        elif row.value not in options:
+            row = replace(row, options=(*options, row.value))
+        out.append(row)
     return tuple(out)
 
 
