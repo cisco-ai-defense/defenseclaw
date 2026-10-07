@@ -235,9 +235,15 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			}
 		}
 	case "UserPromptSubmit":
+		// Secure Client keeps the prompt of main, so AI Defense is sent the
+		// text it was sent before (issue #1092).
+		prompt := req.Prompt
+		if !a.managedAIDOnly() {
+			prompt = codexPromptForInspection(prompt)
+		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:         "message",
-			Content:      codexPromptForInspection(req.Prompt),
+			Content:      prompt,
 			Direction:    "prompt",
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
