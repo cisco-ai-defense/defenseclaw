@@ -522,9 +522,9 @@ binaries and units in place, so dpkg or rpm still lists
 
 | Package command | Effect |
 | --- | --- |
-| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
+| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go, also after a package install that failed and rolled back; each user keeps `~/.defenseclaw`. |
 | `apt purge defenseclaw-enterprise` | The same, and it also deletes what a failed uninstall left of `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise` and `/var/log/defenseclaw`. |
-| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
+| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go, also after a package install that failed and rolled back; each user keeps `~/.defenseclaw`. |
 
 If the package's `uninstall` reports a problem, its result stays in
 `/var/lib/defenseclaw-enterprise/last-package-result.json`.

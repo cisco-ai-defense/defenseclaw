@@ -146,6 +146,9 @@ type lifecycle struct {
 	// gatewayKeptRunning is set when the gateway applied a config change
 	// itself (hotConfigApply) and was not restarted.
 	gatewayKeptRunning bool
+	// failedInstallLeftovers is set when an uninstall removes what a failed
+	// first package install left, with no deployment committed.
+	failedInstallLeftovers bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1840,16 +1843,25 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
 	if record == nil && !l.opts.Purge {
-		r.Noop = true
-		r.NoopReason = "not_installed"
-		// After a failed first package install, give the same finish step
-		// as status and verify (GAP-2410).
 		failure := env.lastPackageInstallFailure()
-		env.warnPackageInstallFailed(r, failure)
-		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, failure != ""))
+		// A first deb or rpm install that failed and rolled back left the
+		// package machine state (the config, the state and log folders, the
+		// lifecycle result and the service account the package created):
+		// the package removal runs this uninstall, which found no deployment
+		// and kept all of it (GAP-0421). It is removed as the state of a
+		// committed deployment is. State a --keep-state uninstall kept stays.
+		l.failedInstallLeftovers = env.GOOS == "linux" && failure != "" && !l.opts.KeepState && len(env.loadRetainedState()) == 0
+		if !l.failedInstallLeftovers {
+			r.Noop = true
+			r.NoopReason = "not_installed"
+			// After a failed first package install, give the same finish
+			// step as status and verify (GAP-2410).
+			env.warnPackageInstallFailed(r, failure)
+			if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
+				r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, failure != ""))
+			}
+			return 0
 		}
-		return 0
 	}
 	if !l.opts.Purge {
 		// Read before the machine state, and the accounts record with it, go.
@@ -1906,7 +1918,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
 	if gatewayPresent && (record != nil || enrollmentKept) {
 		perUserLeft = l.removePerUserRegistrations(ctx)
-	} else if record == nil {
+	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}
 	// DefenseClaw's vendor machine policy entries go next, while the hook
@@ -1967,6 +1979,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 		if ownedParent(filepath.Dir(path)) {
 			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
+		}
+	}
+	if record == nil && env.GOOS == "linux" {
+		for _, unit := range units {
+			// The drop-in folders a rolled-back install left empty.
+			_ = removeDirIfEmpty(env.P(filepath.Join("/etc/systemd/system", unit.Name+".d")))
 		}
 	}
 	if err := env.Services.Reload(ctx); err != nil {
@@ -2122,7 +2140,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	env, r := l.env, l.result
 	layout := env.Layout
 	removed := "stopped and removed the DefenseClaw services, binaries and deployment record"
-	if l.packageManaged {
+	if l.failedInstallLeftovers {
+		removed = "no deployment was committed (the package install failed); removed what that install left"
+	} else if l.packageManaged {
 		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
 	}
 	lines := []string{removed}

@@ -3,6 +3,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +92,40 @@ func TestFailedPkgInstallUninstallNoopNextStepsAgree(t *testing.T) {
 	leftovers := messagesOf(r.Warnings, codeLeftovers)
 	if leftovers == "" || strings.Contains(leftovers, "--config <file>") || !strings.Contains(leftovers, "as the "+codePackageInstallFailed+" warning says") {
 		t.Fatalf("unmanaged_leftovers warning = %q, want it to defer to the %s advice", leftovers, codePackageInstallFailed)
+	}
+}
+
+// dnf remove after a first rpm install that failed (config_invalid, rolled
+// back) left the rejected config.yaml, the state and log folders, the
+// lifecycle result, an empty drop-in folder and the service account: the
+// package scriptlet runs uninstall, which found no deployment and did
+// nothing (GAP-0421).
+func TestUninstallAfterAFailedPackageInstallRemovesItsLeftovers(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	h.runner.replies = map[string]fakeReply{"rpm -qf --quiet " + filepath.Join(h.env.Layout.BinDir, binGateway): {}}
+	if _, err := h.env.Accounts.Ensure(context.Background(), h.env.Layout.ServiceUser); err != nil {
+		t.Fatal(err)
+	}
+	dropin := "/etc/systemd/system/" + unitGuardian + ".d"
+	for _, dir := range []string{h.env.Layout.DataDir, h.env.Layout.LogDir, h.env.Layout.GuardianAuthDir, dropin} {
+		if err := os.MkdirAll(h.env.P(dir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHostFile(t, h, h.env.Layout.ConfigPath, "config_version: 9\ngateway:\n  api_port: 18971\n")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"gateway.api_port must be 18970"}]}`)
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	for _, path := range []string{h.env.Layout.ConfigDir, h.env.Layout.DataDir, h.env.Layout.LogDir, h.env.Layout.GuardianAuthDir, h.env.Layout.LifecycleDir, dropin} {
+		if exists(h.env.P(path)) {
+			t.Errorf("the uninstall after a failed package install left %s", path)
+		}
+	}
+	if _, ok, _ := h.env.Accounts.Lookup(context.Background(), h.env.Layout.ServiceUser); ok {
+		t.Error("the uninstall after a failed package install left the service account")
+	}
+	if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Error("the uninstall removed binaries the package owns")
 	}
 }
 

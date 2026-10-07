@@ -506,7 +506,8 @@ to keep the machine state for a reinstall instead.
 
 - **Linux packages.** Removing the package runs the lifecycle `uninstall`
   first, without purge, which removes the machine state and the
-  `defenseclaw` account. `apt purge` also deletes what a failed uninstall
+  `defenseclaw` account, also when the package install itself failed and
+  rolled back (then the rejected `config.yaml` goes too). `apt purge` also deletes what a failed uninstall
   left of `/etc/defenseclaw`, `/var/lib/defenseclaw`,
   `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`,
   and `/var/log/defenseclaw`. Each user keeps `~/.defenseclaw` and the
