@@ -635,3 +635,22 @@ func TestSpawnIntentDoesNotCrossAgentIdentity(t *testing.T) {
 		t.Fatalf("another identity inherited prompt %q", prompt)
 	}
 }
+
+func TestCodexChildThreadRequiresRealToolAndIdentityScope(t *testing.T) {
+	api := &APIServer{}
+	parent := llmEventMeta{Source: "codex", SessionID: "parent-session", AgentID: "agent-a", RootAgentID: "agent-a", AgentIdentityID: "agt-a", UserID: "1001"}
+	child := llmEventMeta{Source: "codex", SessionID: "child-session-0001", AgentID: "agent-b", RootAgentID: "agent-b", AgentIdentityID: "agt-b", UserID: "1001"}
+	response := `{"threadId":"child-session-0001"}`
+	api.rememberHookChildThread(parent, "mcp__thirdparty__codex_tui_create_thread", response)
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != "" {
+		t.Fatalf("lookalike tool linked a child: %+v", got)
+	}
+	api.rememberHookChildThread(parent, "mcp__codex_tui__create_thread", response)
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != "" {
+		t.Fatalf("another identity linked a child: %+v", got)
+	}
+	child.AgentIdentityID = parent.AgentIdentityID
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != parent.AgentID {
+		t.Fatalf("same identity did not link a child: %+v", got)
+	}
+}

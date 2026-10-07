@@ -332,11 +332,11 @@ var codexThreadIDPattern = regexp.MustCompile(`"threadId"\s*:\s*"([A-Za-z0-9][A-
 // hooks as a session with its own id, fires no SubagentStart, and names the
 // child only in this call's result, as {"threadId": "..."} (GAP-0179).
 func isCodexThreadSpawnTool(tool string) bool {
-	return strings.HasSuffix(canonicalEvent(tool), "codextuicreatethread")
+	return strings.EqualFold(strings.TrimSpace(tool), "mcp__codex_tui__create_thread")
 }
 
-func hookChildThreadKey(source, sessionID string) string {
-	return strings.ToLower(strings.TrimSpace(source)) + "\x00" + strings.TrimSpace(sessionID)
+func hookChildThreadKey(meta llmEventMeta) string {
+	return strings.ToLower(strings.TrimSpace(meta.Source)) + "\x00" + strings.TrimSpace(meta.SessionID) + "\x00" + meta.AgentIdentityID
 }
 
 // rememberHookChildThread records the thread a completed create_thread call
@@ -355,7 +355,9 @@ func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response st
 		return
 	}
 	now := time.Now().UTC()
-	key := hookChildThreadKey(meta.Source, match[1])
+	child := meta
+	child.SessionID = match[1]
+	key := hookChildThreadKey(child)
 
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
@@ -389,13 +391,13 @@ func (a *APIServer) applyHookChildThreadLineage(meta llmEventMeta) llmEventMeta 
 		return meta
 	}
 	a.llmPromptMu.Lock()
-	link, ok := a.hookChildThreads[hookChildThreadKey(meta.Source, meta.SessionID)]
+	link, ok := a.hookChildThreads[hookChildThreadKey(meta)]
 	a.llmPromptMu.Unlock()
 	if !ok || time.Since(link.createdAt) > hookChildThreadTTL {
 		return meta
 	}
 	parent := link.parent
-	if parent.UserID != "" && meta.UserID != "" && parent.UserID != meta.UserID {
+	if !sameHookIdentity(parent, meta) {
 		return meta
 	}
 	meta.ParentAgentID = parent.AgentID
