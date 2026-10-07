@@ -190,6 +190,11 @@ type Options struct {
 	// token, so while it returns an error Create and Start are refused.
 	// Nil assumes the caller holds them.
 	Listeners func() error
+	// DiscoveryRemoved is told the name of a sandbox whose AI discovery
+	// record a delete removed, so the AI inventory drops its signals now
+	// instead of at its next scan (GAP-0184). It must not block; nil does
+	// nothing.
+	DiscoveryRemoved func(name string)
 	// Guard runs the nested-repository guard of a mounted project while
 	// its sandbox is ready (default: package nestguard). GuardGitlinks
 	// lists a project's index gitlinks (default: the host git through

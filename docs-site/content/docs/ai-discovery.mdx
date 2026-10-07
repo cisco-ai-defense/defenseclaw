@@ -374,8 +374,9 @@ configured there, which its own scan of this machine never sees:
   separate entries. `defenseclaw agent usage --sandbox NAME` shows one
   sandbox's; every view tags them "(sandbox NAME)".
 - A stopped sandbox keeps what was found, without its processes; a deleted
-  one's entries turn `gone`. `ai_discovery.enabled: false` turns this off
-  too.
+  one's entries turn `gone` at once (the delete starts a scan, as
+  `agent usage --refresh` does). `ai_discovery.enabled: false` turns this
+  off too.
 
 ### Tunable knobs
 
