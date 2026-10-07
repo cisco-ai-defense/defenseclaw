@@ -153,8 +153,10 @@ that raises an ask has decision code `SANDBOX_EGRESS_HOST_PORT_ASK` and a
 reason that names the ask.
 The reason of an OpenShell denial (`defenseclaw.network.reason`) has the
 words the activity feed shows, with OpenShell's token after them: `no
-OpenShell rule allows it (transparent_tcp_policy_denied)`, and for port 22
-`SSH does not leave a sandbox: use an HTTPS remote (https://HOST/…)`.
+OpenShell rule allows it (transparent_tcp_policy_denied)`, for a cloud
+metadata or link-local address `cloud metadata or link-local address, never
+reachable from a sandbox`, and for port 22 `SSH does not leave a sandbox: use
+an HTTPS remote (https://HOST/…)`.
 OpenShell's refusal of a name lookup (`policy_dns_ineligible`) is recorded
 at INFO with decision code `SANDBOX_EGRESS_LOOKUP_REFUSED` and is no alert:
 the connection that follows is denied, recorded and alerted on its own.

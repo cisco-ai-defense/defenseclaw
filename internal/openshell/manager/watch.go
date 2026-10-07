@@ -470,9 +470,10 @@ func (m *Manager) connectionRequest(b *box, r ocsf.Record, host string, at time.
 }
 
 // openshellReason is the audit reason of an OpenShell record: for a denial
-// the words the activity feed shows for OpenShell's reason token, with the
-// token after them, and for SSH what to do instead; otherwise OpenShell's
-// reason or message (GAP-0134).
+// the words the activity feed shows for OpenShell's reason token and host
+// (a cloud metadata or link-local host by name, GAP-0147), with the token
+// after them, and for SSH what to do instead; otherwise OpenShell's reason
+// or message (GAP-0134).
 func openshellReason(r ocsf.Record, host string) string {
 	token := firstNonEmpty(r.Reason, r.Message)
 	if !r.Denied() || token == "" {
@@ -481,7 +482,7 @@ func openshellReason(r ocsf.Record, host string) string {
 	if r.Port == 22 {
 		return sandboxapi.SSHBlockedText(host) + " (" + token + ")"
 	}
-	if text, ok := sandboxapi.LookupReasonText(r.Reason); ok {
+	if text, ok := sandboxapi.LookupBlockedText(r.Reason, host); ok {
 		return text + " (" + token + ")"
 	}
 	return token

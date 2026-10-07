@@ -192,17 +192,20 @@ func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
 // over SSH raised two MEDIUM alerts, the refused lookup and the connection,
 // whose reasons were OpenShell's tokens. The lookup is audited at INFO under
 // a code the alerts leave out, and a denial's reason has the feed's words
-// (for SSH: use an HTTPS remote) before the token.
+// (for SSH: use an HTTPS remote; for a cloud metadata address its name,
+// GAP-0147) before the token.
 func TestOpenShellDenialAuditReadsLikeTheFeed(t *testing.T) {
 	e := liveEnv(t, "gitbox", nil)
 	e.ocsf("gitbox", "NET:REFUSE [MED] DENIED github.com [reason:policy_dns_ineligible]", time.Now())
 	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/ssh(0) -> github.com:22 [reason:transparent_tcp_policy_denied]", time.Now())
 	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.example.net:443 [reason:transparent_tcp_policy_denied]", time.Now())
+	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 169.254.169.254:80 [reason:transparent_tcp_policy_denied]", time.Now())
 	got := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool { return ev.Blocked })
-	if len(got) != 3 || got[0].DecisionCode != audit.SandboxEgressCodeLookupRefused || got[0].Severity != "INFO" ||
+	if len(got) != 4 || got[0].DecisionCode != audit.SandboxEgressCodeLookupRefused || got[0].Severity != "INFO" ||
 		got[1].DecisionCode != "SANDBOX_EGRESS_OPENSHELL_DENIED" || got[1].Severity != "" ||
 		got[1].Reason != "SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…) (transparent_tcp_policy_denied)" ||
-		got[2].Reason != "no OpenShell rule allows it (transparent_tcp_policy_denied)" {
+		got[2].Reason != "no OpenShell rule allows it (transparent_tcp_policy_denied)" ||
+		got[3].Reason != "cloud metadata or link-local address, never reachable from a sandbox (transparent_tcp_policy_denied)" {
 		t.Fatalf("audited %+v", got)
 	}
 }

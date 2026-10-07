@@ -16,7 +16,13 @@
 
 package sandboxapi
 
-import "strings"
+import (
+	"net/netip"
+	"slices"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+)
 
 // reasonTexts explain the reason tokens of blocked egress: OpenShell's own
 // for the connections it denies, the egress proxy's categories and
@@ -75,6 +81,47 @@ func ReasonText(token string) string {
 		return text
 	}
 	return strings.ReplaceAll(token, "_", " ")
+}
+
+// metadataText names a cloud metadata or link-local destination.
+const metadataText = "cloud metadata or link-local address, never reachable from a sandbox"
+
+// LookupBlockedText is why a block of host reads as it does, and whether
+// it has words: LookupReasonText, except that a cloud metadata or
+// link-local address is named as such whatever refused it (the proxy's
+// host_internal, or OpenShell's missing rule), not as this machine
+// (GAP-0147). The feed, a session's notices and the audit reason of an
+// OpenShell denial use it, so an alert reads like the feed (GAP-0134).
+func LookupBlockedText(token, host string) (string, bool) {
+	if metadataOrLinkLocal(host) {
+		return metadataText, true
+	}
+	return LookupReasonText(token)
+}
+
+// BlockedText is LookupBlockedText's words; an unknown token reads with
+// spaces for its underscores.
+func BlockedText(token, host string) string {
+	if text, ok := LookupBlockedText(token, host); ok {
+		return text
+	}
+	return ReasonText(token)
+}
+
+// metadataOrLinkLocal reports a link-local address, the cloud metadata
+// addresses and names outside that range the egress guard refuses
+// (egress.NeverReachPrefixes), and metadata.google.internal.
+func metadataOrLinkLocal(host string) bool {
+	h := strings.TrimSuffix(strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]"), ".")
+	if h == "metadata.google.internal" {
+		return true
+	}
+	addr, err := netip.ParseAddr(h)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsLinkLocalUnicast() || slices.ContainsFunc(egress.NeverReachPrefixes(), func(p netip.Prefix) bool { return p.Contains(addr) })
 }
 
 // SSHBlockedText says what to do instead of SSH to host. OpenShell opens no
