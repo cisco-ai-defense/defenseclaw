@@ -1364,3 +1364,32 @@ func findWarning(warnings []string, prefix string) string {
 	}
 	return ""
 }
+
+// TestStartRenewsTheModelCredential (GAP-0080): a sandbox kept the model
+// key it was created with, so after a Bedrock key expired every model call
+// of the next session failed (401) until the sandbox was deleted. A start
+// gives the provider the key the caller's environment holds now, for the
+// profile the sandbox was created with only, and only its own variables.
+func TestStartRenewsTheModelCredential(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "keybox", LLM: anthropicLLM})
+	key := func() map[string]string {
+		p, err := e.client.GetProvider(t.Context(), "keybox-llm")
+		must(t, err)
+		return p.Spec.Credentials
+	}
+	e.stopBox("keybox")
+	e.startBox("keybox", sandboxapi.StartRequest{LLM: &sandboxapi.LLMCredential{Profile: profiles.OpenAIID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-other"}}})
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-test-secret" {
+		t.Fatalf("another profile's credential replaced the key: %v", got)
+	}
+	e.stopBox("keybox")
+	e.startBox("keybox", sandboxapi.StartRequest{LLM: &sandboxapi.LLMCredential{Profile: profiles.AnthropicID,
+		Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-renewed", "OTHER_KEY": "x"}}})
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-renewed" || got["OTHER_KEY"] != "" {
+		t.Fatalf("provider credentials = %v", got)
+	}
+	if ev := e.events("keybox", sandboxapi.ActivityLifecycle, "model_credential_updated"); len(ev) != 1 {
+		t.Fatalf("feed = %+v", ev)
+	}
+}

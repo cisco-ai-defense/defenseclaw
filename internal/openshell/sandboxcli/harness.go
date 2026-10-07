@@ -281,6 +281,26 @@ func (a *App) detectLLM(spec *harness.Spec, choice, from, region string, reserve
 	return llmChoice{Note: "no model credential found (" + a.llmHint(spec, choice) + "); " + insideLoginCaveat}, nil
 }
 
+// currentModelCredential is the model credential the environment holds now
+// for the profile sb was created with, which a start hands the sandbox's
+// provider (a key renewed since the sandbox was created); nil when sb took
+// none, or the variable is unset now.
+func (a *App) currentModelCredential(sb *sandboxapi.Sandbox) *sandboxapi.LLMCredential {
+	spec, ok := harness.Get(sb.Harness)
+	if !ok || sb.Launch.CredentialProfile == "" {
+		return nil
+	}
+	for _, c := range a.llmCandidates(spec) {
+		if c.profile != sb.Launch.CredentialProfile {
+			continue
+		}
+		if v := c.value(); v != "" {
+			return &sandboxapi.LLMCredential{Profile: c.profile, Credentials: map[string]string{c.envName: v}, BedrockRegion: sb.Launch.BedrockRegion}
+		}
+	}
+	return nil
+}
+
 // insideLoginCaveat is what a login inside the sandbox costs: unlike a
 // shared credential, which the sandbox sees only as a placeholder, the
 // token it stores is real, and the agent can read it and send it out.

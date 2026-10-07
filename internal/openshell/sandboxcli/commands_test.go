@@ -1014,6 +1014,26 @@ func TestPullOfAStoppedSandboxReusesItsLastPull(t *testing.T) {
 	ta.wantCalls(t, 4, "POST", "copybox/start")
 }
 
+// TestStartSendsTheModelKeyTheEnvironmentHoldsNow (GAP-0080): a start of a
+// sandbox created with a model key from the environment hands the daemon
+// the key the environment holds now, which renews the provider's.
+func TestStartSendsTheModelKeyTheEnvironmentHoldsNow(t *testing.T) {
+	sb := copySandbox("keybox")
+	sb.Launch.CredentialProfile = profiles.AnthropicID
+	ta := newTestApp(t, "", sb, copySandbox("nokey"))
+	ta.env["ANTHROPIC_API_KEY"] = "sk-renewed-not-a-secret"
+	ta.ok(t, ta.Start(bg, "keybox", StartOptions{}))
+	var req sandboxapi.StartRequest
+	if bodies := ta.bodies("POST", "keybox/start"); len(bodies) != 1 || json.Unmarshal([]byte(bodies[0]), &req) != nil || req.LLM == nil ||
+		req.LLM.Profile != profiles.AnthropicID || req.LLM.Credentials["ANTHROPIC_API_KEY"] != "sk-renewed-not-a-secret" {
+		t.Fatalf("start request = %+v", req)
+	}
+	ta.ok(t, ta.Start(bg, "nokey", StartOptions{}))
+	if bodies := ta.bodies("POST", "nokey/start"); len(bodies) != 1 || strings.Contains(bodies[0], "llm") {
+		t.Fatalf("a sandbox created without a model key got one: %v", bodies)
+	}
+}
+
 // After a start and a stop whose look found the copy as the last pull read
 // it, that pull is reused, and the note says what holds: the copy has not
 // changed since that pull (it said the sandbox "has not run since" the pull,
