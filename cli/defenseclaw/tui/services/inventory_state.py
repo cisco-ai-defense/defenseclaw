@@ -1470,7 +1470,9 @@ class InventoryPanelModel:
 
     def _with_connector_cell(self, entity: object, cells: tuple[str, ...]) -> tuple[str, ...]:
         if self._show_user_column():
-            cells = (str(getattr(entity, "user", "") or "—"), *cells)
+            user = str(getattr(entity, "user", "") or "—")
+            user = "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in user)
+            cells = ((user[:29] + "...") if len(user) > 32 else user, *cells)
         if not self.show_connector_column:
             return cells
         return (str(getattr(entity, "connector", "") or "—"), *cells)

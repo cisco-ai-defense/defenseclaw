@@ -5871,9 +5871,13 @@ def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
             _format_relative_time(str(row.get("last_seen", "") or "")),
             root,
         ))
-    widths = [max(len(line[i]) for line in table) for i in range(len(headers) - 1)]
+    from rich.cells import cell_len
+
+    table = [tuple("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in cell) for cell in line) for line in table]
+    widths = [max(cell_len(line[i]) for line in table) for i in range(len(headers) - 1)]
     lines = [
-        "  ".join(cell.ljust(width) for cell, width in zip(line[:-1], widths)) + "  " + line[-1]
+        "  ".join(cell + " " * (width - cell_len(cell)) for cell, width in zip(line[:-1], widths))
+        + "  " + line[-1]
         for line in table
     ]
     return "\n".join(line.rstrip() for line in lines)
