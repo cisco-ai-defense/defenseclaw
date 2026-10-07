@@ -1258,6 +1258,20 @@ func TestLastUserTextEmpty(t *testing.T) {
 	}
 }
 
+// Secure Client keeps the prompt inspection source of main, the latest user
+// message, not the whole user turn of GAP-0190 (issue #1092).
+func TestSecureClientPromptInspectTextIsTheLatestUserMessage(t *testing.T) {
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(false) })
+	got := promptInspectText([]ChatMessage{
+		{Role: "user", Content: "the current prompt"},
+		{Role: "user", Content: "trailing context"},
+	})
+	if got != "trailing context" {
+		t.Fatalf("Secure Client promptInspectText() = %q, want the latest user message", got)
+	}
+}
+
 func TestPromptInspectText(t *testing.T) {
 	t.Parallel()
 

@@ -2440,10 +2440,13 @@ func currentTurnUserText(messages []ChatMessage) string {
 
 // promptInspectText is the pre-call inspection source: the user turn in
 // progress, else the latest user message, else prompt-side system/developer
-// text.
+// text. Secure Client keeps the source of main, the latest user message, so
+// AI Defense is sent the text it was sent before (issue #1092).
 func promptInspectText(messages []ChatMessage) string {
-	if text := currentTurnUserText(messages); text != "" {
-		return text
+	if !ManagedEnterpriseActive() {
+		if text := currentTurnUserText(messages); text != "" {
+			return text
+		}
 	}
 	if text := lastUserText(messages); strings.TrimSpace(text) != "" {
 		return text
