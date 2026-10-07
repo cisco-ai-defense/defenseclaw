@@ -1181,7 +1181,7 @@ func TestAgentPrefixesReachDiscovery(t *testing.T) {
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
 			want := "DEFENSECLAW_TRUSTED_BIN_PREFIXES"
 			if goos == "linux" {
-				for _, unit := range []string{unitGuardian, unitGuardianOneshot, unitEnumerator} {
+				for _, unit := range []string{unitGuardian, unitGuardianOneshot, unitEnumerator, unitSensorHelper} {
 					data := h.read(filepath.Join("/etc/systemd/system", unit+".d", dropinAgents))
 					if !strings.Contains(data, want+"=/opt/agents:/opt/tools") {
 						t.Fatalf("%s drop-in: %q", unit, data)

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -66,7 +67,7 @@ func kernelPolicyStart(ctx context.Context, logger *slog.Logger, lookup kernelpo
 		Enrollment: func() (kernelpolicy.Enrollment, error) {
 			return kernelpolicy.LoadEnrollment(manifestPath, validateManifestTrust, lookupUser)
 		},
-		ExtraPrefixes: agentPrefixes(lookup),
+		ExtraPrefixes: agentPrefixes(os.LookupEnv),
 	})
 	logger.Info("kernel policy controller starting", "mode", intent.Mode, "kernel_policy", kernelpolicy.Digest())
 	go func() {
@@ -78,14 +79,22 @@ func kernelPolicyStart(ctx context.Context, logger *slog.Logger, lookup kernelpo
 }
 
 // agentPrefixes are the administrator's extra agent install prefixes
-// (enrollment.agent_prefixes), when the lifecycle passed them to the helper.
+// (enrollment.agent_prefixes), which the lifecycle renders into the helper's
+// 40-defenseclaw-agent-prefixes.conf drop-in as it does for the enumerator and
+// the guardian. They are read straight from the environment, the way
+// internal/enterprisehooks reads them: the registry marks the variable
+// managed: ignore so a user's environment cannot widen a gateway's trust, but
+// this process's environment is the root-owned unit's.
 func agentPrefixes(lookup kernelpolicy.Lookup) []string {
 	if lookup == nil {
 		return nil
 	}
-	value, _ := lookup("DEFENSECLAW_TRUSTED_BIN_PREFIXES")
+	value, _ := lookup(trustedBinPrefixesEnv)
 	return filepath.SplitList(value)
 }
+
+// trustedBinPrefixesEnv is enterprisehooks.TrustedBinPrefixesEnv.
+const trustedBinPrefixesEnv = "DEFENSECLAW_TRUSTED_BIN_PREFIXES"
 
 func lookupUser(name string) (int, string, error) {
 	account, err := user.Lookup(name)

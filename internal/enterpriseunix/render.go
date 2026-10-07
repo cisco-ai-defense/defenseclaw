@@ -167,7 +167,10 @@ func (e *Env) renderDropins(in renderInputs) []renderedDropin {
 			fmt.Fprintf(&b, "Environment=%s\n", systemdQuote(key+"="+env[key]))
 		}
 		data := []byte(b.String())
-		for _, unit := range []string{unitGuardian, unitGuardianOneshot, unitEnumerator} {
+		// The sensor helper resolves the same installs to anchor its kernel
+		// controls (an agent under an administrator prefix is otherwise
+		// observe-only there).
+		for _, unit := range []string{unitGuardian, unitGuardianOneshot, unitEnumerator, unitSensorHelper} {
 			out = append(out, renderedDropin{Path: dropinPath(unit, dropinAgents), Data: data})
 		}
 	}
@@ -214,7 +217,8 @@ func (e *Env) guardianWritablePaths(cfg *validatedConfig) []string {
 }
 
 // agentPrefixEnvironment passes enrollment.agent_prefixes to the agent
-// discovery in the enumerator and guardian.
+// discovery in the enumerator and guardian, and on Linux to the sensor
+// helper's kernel-control anchors.
 func agentPrefixEnvironment(cfg *validatedConfig) map[string]string {
 	env := map[string]string{}
 	if cfg != nil && len(cfg.AgentPrefixes) > 0 {
