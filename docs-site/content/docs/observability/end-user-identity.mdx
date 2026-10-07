@@ -26,8 +26,8 @@ gateway's service account is not the person running the AI agent.
 | `defenseclaw.user.tenant_id` | Cloud directory tenant, for an Entra-joined Windows account. |
 | `defenseclaw.user.identity.source` | The OS facility that resolved the directory facts. |
 | `defenseclaw.user.principal.assurance` | `verified` when the gateway or the root guardian resolved the facts, `claimed` when only the hook reported them (`defenseclaw.user.identity.source` is then `hook_reported`). |
-| `defenseclaw.session.kind` | Login session of the agent: `local`, `ssh`, `rdp` or `console`. Reported when the session has the same assurance as the directory facts. |
-| `client.address` | The client address of an SSH or remote session, reported with the session kind. |
+| `defenseclaw.session.kind` | Login session of the agent: `local`, `ssh`, `rdp` or `console`. Reported when the session has the same assurance as the directory facts. Only Linux verifies a session, so Windows and macOS records of a resolved user omit it. |
+| `client.address` | The client address of an SSH or remote session, reported with the session kind (so it is absent on Windows and macOS records too). |
 | `defenseclaw.session.kerberos_principal` | The principal of the login session's Kerberos ticket cache. Always claimed. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.agent.identity.id` | The agent's own stable identity (`agt-`), one per connector install, user and machine. |
 | `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The [guardrail profile](/docs/guardrail/user-and-group-policies) that decided the request, its policy digest, why it was chosen, and the matching group. |
