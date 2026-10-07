@@ -1294,7 +1294,8 @@ starting and exiting, so a process that starts and ends between two samples,
 and that OpenShell does not report, is not seen. The agent chooses its
 processes' names and arguments: they are shown, never acted on. The same tree
 is in the TUI's sandbox detail and in the `sandbox.process_tree` telemetry
-records.
+records. A stopped sandbox lists no processes: `ps` says when it was last
+sampled, and `--json` lists the processes that ended.
 
 ```bash
 defenseclaw sandbox ps myapp-7f3a --tree

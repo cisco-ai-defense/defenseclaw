@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -79,6 +80,17 @@ func TestPsShowsTheTreeOrSaysItIsOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "process tree of sandbox box is off") {
+		t.Fatalf("output:\n%s", out)
+	}
+	// A stopped sandbox that was sampled says its tree lists the running
+	// processes only, not that it was never sampled (GAP-0115).
+	app, out = inventoryApp(t, sandboxapi.ProcessList{Name: "box", Enabled: true, SampledAt: time.Now(),
+		Exited: []sandboxapi.Process{{PID: 42, Comm: "claude"}}}, sandboxapi.DiscoveryResult{})
+	if err := app.Ps(context.Background(), PsOptions{Name: "box", Tree: true}); err != nil {
+		t.Fatal(err)
+	}
+	if s := out.String(); strings.Contains(s, "yet") || !strings.Contains(s, "no processes running in sandbox box (last sampled at") ||
+		!strings.Contains(s, "1 process ended") {
 		t.Fatalf("output:\n%s", out)
 	}
 }

@@ -94,7 +94,18 @@ func (a *App) Ps(ctx context.Context, o PsOptions) error {
 		return nil
 	}
 	if len(list.Processes) == 0 {
-		a.note("no processes sampled yet in sandbox " + list.Name + " (it is sampled while it runs)")
+		if list.SampledAt.IsZero() {
+			a.note("no processes sampled yet in sandbox " + list.Name + " (it is sampled while it runs)")
+			return nil
+		}
+		// A stopped sandbox was sampled: its tree lists running processes
+		// only, so say so rather than "not sampled yet" (GAP-0115).
+		msg := fmt.Sprintf("no processes running in sandbox %s (last sampled at %s); the tree lists the processes that run, "+
+			"sampled while the sandbox runs", list.Name, a.clock(list.SampledAt))
+		if n := len(list.Exited); n > 0 {
+			msg += fmt.Sprintf("; %s ended, listed by `%s ps %s --output json`", plural(int64(n), "process", "processes"), CommandName, list.Name)
+		}
+		a.note(msg)
 		return nil
 	}
 	now := time.Now()
