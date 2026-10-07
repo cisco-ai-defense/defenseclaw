@@ -177,14 +177,18 @@ A healthy `status` from a Linux host, trimmed to two of its eleven
 ```
 
 A failed run sets `ok` to `false` and names each problem in `errors[]`. This
-`verify` ran without root, so it checked nothing and exited `1`:
+`verify` ran without root, so it checked nothing and exited `1`. A `not_root`
+result leaves out every field that reports the deployment (`installed`,
+`installed_version`, `transaction_pending`, `services`, `readiness`,
+`inspection`, `machine_policy`, `enrollment`): a standard user cannot read the
+deployment record, and those fields would read as "not installed":
 
 ```json title="enterprise linux verify --json (failed, trimmed)"
 {
   "ok": false,
   "action": "verify",
-  "installed": false,
   "coverage_complete": false,
+
   "security_complete": false,
   "errors": [
     { "code": "not_root", "message": "run this command as root (sudo or the MDM agent)" }
