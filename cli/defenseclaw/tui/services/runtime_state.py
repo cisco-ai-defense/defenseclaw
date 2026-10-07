@@ -22,6 +22,7 @@ decision is testable from a fixture.
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
@@ -74,6 +75,42 @@ class RuntimeCommandIntent:
     description: str
 
 
+#: DefenseClaw's own Tetragon policy names end in an 8-hex digest suffix; the
+#: family in front of it is what an operator recognises.
+_POLICY_NAME = re.compile(r"^defenseclaw-(observe|connect|controls-burnin|controls)-[0-9a-f]{8}$")
+
+#: Most failing policies listed under the plane, so a bad load cannot push the
+#: findings table off an 80x24 screen.
+_MAX_POLICY_ERRORS = 2
+
+#: Gateway-supplied free text is clipped before it reaches the screen.
+_MAX_DETAIL = 80
+
+
+def _clip(text: str, limit: int = _MAX_DETAIL) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+@dataclass(frozen=True)
+class KernelPolicyRow:
+    """One DefenseClaw policy the kernel sensor has loaded."""
+
+    name: str
+    mode: str = ""
+    state: str = ""
+    error: str = ""
+
+    @property
+    def family(self) -> str:
+        match = _POLICY_NAME.match(self.name)
+        return match.group(1) if match else self.name
+
+    @property
+    def healthy(self) -> bool:
+        return not self.error and self.state in {"", "enabled"}
+
+
 @dataclass(frozen=True)
 class PlaneRow:
     """One plane's health, as rendered in the always-visible strip."""
@@ -84,6 +121,79 @@ class PlaneRow:
     running: bool
     mechanism: str = ""
     reason: str = ""
+    # Kernel sensor behind plane C on a managed Linux host. Only the sensor
+    # helper reports it, so every other gateway leaves these at their zero
+    # values and the plane reads exactly as before.
+    backend_kind: str = ""
+    backend_version: str = ""
+    backend_mode: str = ""
+    #: ``None`` when the helper cannot vouch for the count: a number it cannot
+    #: stand behind would read as a clean stream.
+    backend_events_lost: int | None = None
+    backend_fallback: str = ""
+    kernel_policies: tuple[KernelPolicyRow, ...] = ()
+    #: The kernel floor as one line, e.g. ``enforce for 2 of 3 users (1 in burn-in)``.
+    kernel_floor: str = ""
+    kernel_paused_until: str = ""
+
+    @property
+    def is_tetragon(self) -> bool:
+        return self.backend_kind == "tetragon"
+
+    @property
+    def backend_label(self) -> str:
+        """``Tetragon 1.7.1, observe`` when Tetragon is the Plane C backend."""
+
+        if not self.is_tetragon:
+            return ""
+        return ", ".join(part for part in (f"Tetragon {self.backend_version}".strip(), self.backend_mode) if part)
+
+    @property
+    def backend_loss(self) -> str:
+        """``0 events lost``, or ``events lost unknown`` when not measurable."""
+
+        if self.backend_events_lost is None:
+            return "events lost unknown"
+        return f"{self.backend_events_lost} events lost"
+
+    @property
+    def strip_label(self) -> str:
+        """The badge in the one-line strip, with the kernel sensor when there is one."""
+
+        text = f"{self.name}: {self.badge}"
+        if self.is_tetragon:
+            text += " (Tetragon, paused)" if self.kernel_paused_until else " (Tetragon)"
+        return text
+
+    def detail_lines(self) -> tuple[str, ...]:
+        """Kernel sensor facts for the expanded plane view; empty without a backend.
+
+        Plain text: the caller escapes it. Bounded, so it never crowds the
+        findings table.
+        """
+
+        lines: list[str] = []
+        if self.is_tetragon:
+            lines.append(f"kernel sensor: {self.backend_label}, {self.backend_loss}")
+        elif self.backend_fallback:
+            lines.append(
+                f"kernel sensor: cn_proc and fanotify (Tetragon not used: {_clip(self.backend_fallback)})"
+            )
+        if self.kernel_policies:
+            healthy = [policy for policy in self.kernel_policies if policy.healthy]
+            broken = [policy for policy in self.kernel_policies if not policy.healthy]
+            parts = [f"{policy.family} {policy.mode or 'loaded'}" for policy in healthy]
+            if broken:
+                parts.append(f"{len(broken)} not loaded")
+            lines.append("policies: " + ", ".join(parts))
+            for policy in broken[:_MAX_POLICY_ERRORS]:
+                why = _clip(policy.error or policy.state or "not loaded")
+                lines.append(f"  {policy.family}: {why}")
+        if self.kernel_floor:
+            lines.append(f"kernel floor: {self.kernel_floor}")
+        if self.kernel_paused_until:
+            lines.append("resume: defenseclaw-gateway enterprise linux tetragon resume")
+        return tuple(lines)
 
     @property
     def badge(self) -> str:
@@ -110,9 +220,16 @@ class PlaneRow:
         """
         if self.running:
             via = self.mechanism or "unknown mechanism"
+            sensor = ""
+            if self.is_tetragon:
+                # The mechanism usually names Tetragon already: add only the mode then.
+                named = "tetragon" in via.lower()
+                sensor = f" ({self.backend_mode} mode)" if named and self.backend_mode else (
+                    "" if named else f" ({self.backend_label})"
+                )
             if self.reason:
-                return f"{self.name}: partial via {via} -- {self.reason}"
-            return f"{self.name}: up via {via}"
+                return f"{self.name}: partial via {via}{sensor} -- {self.reason}"
+            return f"{self.name}: up via {via}{sensor}"
         detail = self.reason or "no reason reported"
         if self.available:
             return f"{self.name}: available but not running -- {detail}"
@@ -212,6 +329,59 @@ class RuntimeOverview:
     degraded_reason: str = ""
 
 
+def _kernel_floor_line(floor: dict[str, Any]) -> str:
+    """``enforce for 2 of 3 users (1 in burn-in)``, worded like the CLI's status."""
+
+    mode = str(floor.get("mode") or "").strip() or "monitor"
+    enrolled = _int(floor.get("enrolled_users"))
+    if mode == "enforce":
+        text = f"enforce for {_int(floor.get('enforced_users'))} of {enrolled} users"
+        burning = _int(floor.get("burn_in_users"))
+        if burning:
+            text += f" ({burning} in burn-in)"
+        return text
+    return f"{mode} for {enrolled} users"
+
+
+def _decode_backend(raw: Any) -> dict[str, Any]:
+    """Plane C backend fields from ``planes[].backend``; empty when absent.
+
+    Only the managed Linux sensor helper reports a backend. An older gateway,
+    or any other platform, sends none, and a malformed value is ignored the
+    same way: the plane then renders exactly as it did before the field existed.
+    """
+
+    if not isinstance(raw, dict):
+        return {}
+    fields: dict[str, Any] = {
+        "backend_kind": str(raw.get("kind") or "").strip().lower(),
+        "backend_version": str(raw.get("version") or "").strip(),
+        "backend_mode": str(raw.get("mode") or "").strip().lower(),
+        "backend_fallback": str(raw.get("fallback_reason") or "").strip(),
+    }
+    # Unknown unless the helper says it could measure it (same rule as the CLI).
+    if raw.get("loss_known") is not False and "events_lost" in raw:
+        fields["backend_events_lost"] = _int(raw.get("events_lost"))
+    policies = tuple(
+        KernelPolicyRow(
+            name=str(item.get("name") or ""),
+            mode=str(item.get("mode") or "").strip().lower(),
+            state=str(item.get("state") or "").strip().lower(),
+            error=str(item.get("error") or ""),
+        )
+        for item in (raw.get("policies") or [])
+        if isinstance(item, dict) and item.get("name")
+    )
+    if policies:
+        fields["kernel_policies"] = policies
+    floor = raw.get("kernel_floor")
+    if isinstance(floor, dict) and floor:
+        paused = str(floor.get("paused_until") or "").strip()
+        fields["kernel_floor"] = _kernel_floor_line(floor) + (f"; paused until {paused}" if paused else "")
+        fields["kernel_paused_until"] = paused
+    return fields
+
+
 def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
     """Decode the gateway response.
 
@@ -233,6 +403,7 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
             running=bool(raw.get("running")),
             mechanism=str(raw.get("mechanism") or ""),
             reason=str(raw.get("reason") or ""),
+            **_decode_backend(raw.get("backend")),
         ))
 
     rows: list[RuntimeRow] = []
@@ -445,7 +616,7 @@ class RuntimePanelModel:
             connections=self.snapshot.connections_observed,
             host_observations=self.snapshot.host_plane_observations,
             host_gated=self.snapshot.host_plane_gated,
-            plane_summary="  ".join(f"{plane.name}: {plane.badge}" for plane in self.snapshot.planes),
+            plane_summary="  ".join(plane.strip_label for plane in self.snapshot.planes),
             context=self.findings_context(),
             top_findings=tuple(top),
             next_action=self.next_action(),
@@ -602,7 +773,7 @@ class RuntimePanelModel:
         enable = "defenseclaw agent discovery runtime enable --enable-host-plane"
         if self.platform.startswith("linux"):
             return (
-                "Agent actions is optional. Process events need no grant; file events "
+                "Agent actions is optional. Process events need CAP_NET_ADMIN; file events "
                 f"need CAP_SYS_ADMIN (fanotify). Turn it on: {enable}"
             )
         if self.platform == "darwin":
@@ -670,7 +841,7 @@ class RuntimePanelModel:
             return ("plane health unavailable: the gateway reported no planes",)
         if self.planes_shown_expanded():
             return tuple(plane.summary for plane in self.snapshot.planes)
-        return tuple(f"{plane.name}: {plane.badge}" for plane in self.snapshot.planes)
+        return tuple(plane.strip_label for plane in self.snapshot.planes)
 
     def detail_text(self) -> str:
         row = self.selected()
