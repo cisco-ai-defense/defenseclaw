@@ -25,9 +25,14 @@ import (
 func customerSnapshot() sensor.Snapshot {
 	kernel := enforcingKernelState()
 	kernel.Status.Approval = "stale"
+	// Both burn-in users accrue half an hour of agent use per calendar hour
+	// (FetchedAt is 12:00): 4245 has 128h of agent use left (256h of calendar
+	// time), 4246 7.5h (15h). 4247's window is younger than a day: measuring.
+	windowStart := func(hoursAgo int) int64 { return kernel.FetchedAt.Add(-time.Duration(hoursAgo) * time.Hour).UnixNano() }
 	kernel.Status.Users = append(kernel.Status.Users,
-		acquire.KernelUserStatus{UID: 4245, Mode: "burnin", CoveredSeconds: 40 * 3600, BurnInSeconds: 168 * 3600},
-		acquire.KernelUserStatus{UID: 4246, Mode: "burnin", CoveredSeconds: 160*3600 + 1800, BurnInSeconds: 168 * 3600})
+		acquire.KernelUserStatus{UID: 4245, Mode: "burnin", CoveredSeconds: 40 * 3600, BurnInSeconds: 168 * 3600, WindowStartUnixNano: windowStart(80)},
+		acquire.KernelUserStatus{UID: 4246, Mode: "burnin", CoveredSeconds: 160*3600 + 1800, BurnInSeconds: 168 * 3600, WindowStartUnixNano: windowStart(321)},
+		acquire.KernelUserStatus{UID: 4247, Mode: "burnin", CoveredSeconds: 10 * 3600, BurnInSeconds: 168 * 3600, WindowStartUnixNano: windowStart(20)})
 	return sensor.Snapshot{
 		ScannedAt: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC),
 		Planes: []sensor.PlaneHealth{{Plane: platform.PlaneC, Available: true, Running: true,
@@ -66,7 +71,8 @@ func TestRenderCarriesTheCustomerPolicies(t *testing.T) {
 		t.Fatalf("customer events %v", events)
 	}
 	floor := backend["kernel_floor"].(map[string]interface{})
-	if floor["approval"] != "stale" || floor["next_ready_hours"] != 7.5 {
+	// Calendar time, not the 7.5 agent-hours 4246 still needs.
+	if floor["approval"] != "stale" || floor["next_ready_hours"] != float64(15) {
 		t.Fatalf("kernel floor %v", floor)
 	}
 	events := body["customer_kernel_events"].([]interface{})
@@ -117,8 +123,16 @@ func TestRenderWithoutCustomerData(t *testing.T) {
 			t.Fatalf("%s on a native backend with nothing counted", key)
 		}
 	}
-	if kernelNextReadyHours([]acquire.KernelUserStatus{{UID: 1, Ready: true, BurnInSeconds: 10}, {UID: 2, Mode: "observe_only", BurnInSeconds: 10}}) != nil {
-		t.Fatal("next_ready_hours with no user measuring")
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	old, young := now.Add(-72*time.Hour).UnixNano(), now.Add(-2*time.Hour).UnixNano()
+	if got := kernelNextReadyHours([]acquire.KernelUserStatus{
+		{UID: 1, Ready: true, BurnInSeconds: 10, WindowStartUnixNano: old},
+		{UID: 2, Mode: "observe_only", CoveredSeconds: 3600, BurnInSeconds: 7200, WindowStartUnixNano: old},
+		{UID: 3, Mode: "burnin", CoveredSeconds: 3600, BurnInSeconds: 7200, WindowStartUnixNano: young},
+		{UID: 4, Mode: "burnin", BurnInSeconds: 7200, WindowStartUnixNano: old},
+		{UID: 5, Mode: "burnin", CoveredSeconds: 3600, BurnInSeconds: 7200},
+	}, now); got != nil {
+		t.Fatalf("next_ready_hours %v with no user to estimate (ready, observe-only, measuring, no agent use, no window)", *got)
 	}
 }
 

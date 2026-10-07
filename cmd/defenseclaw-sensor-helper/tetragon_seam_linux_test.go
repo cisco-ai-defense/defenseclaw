@@ -130,7 +130,7 @@ func TestKernelStatusOfMapsTheState(t *testing.T) {
 		},
 		BurnIn: kernelpolicy.BurnInFile{UIDs: map[string]*kernelpolicy.UIDRecord{
 			"1001": {Blocked: map[string]*kernelpolicy.HitStats{"kernel.ssh_private_key_read": {Count: 4}}},
-			"1002": {WouldBlock: map[string]*kernelpolicy.HitStats{"kernel.persistence_write": {Count: 2}}},
+			"1002": {WouldBlock: map[string]*kernelpolicy.HitStats{"kernel.persistence_write": {Count: 2}}, WindowStart: time.Unix(1699900000, 0)},
 		}},
 		Pause: &kernelpolicy.PauseState{Pause: &kernelpolicy.Pause{Until: time.Unix(1700003600, 0), SetByUID: 0, SetAt: time.Unix(1700000000, 0), Reason: "incident"}},
 	}
@@ -154,6 +154,11 @@ func TestKernelStatusOfMapsTheState(t *testing.T) {
 	}
 	if status.Users[1].Hits["kernel.persistence_write"] != 2 {
 		t.Fatalf("would-block hits are per control: %+v", status.Users[1])
+	}
+	// The window start lets the gateway estimate calendar time; none without a record or a start.
+	if status.Users[1].WindowStartUnixNano != time.Unix(1699900000, 0).UnixNano() || status.Users[0].WindowStartUnixNano != 0 ||
+		status.Users[2].WindowStartUnixNano != 0 {
+		t.Fatalf("window starts = %+v", status.Users)
 	}
 	if status.Counters["would_block"] != 2 || status.Counters["blocked"] != 4 || status.Counters["roots_over_limit"] != 1 ||
 		status.Counters["roots_anchored"] != 2 || status.Counters["observed_not_enforced"] != 3 {

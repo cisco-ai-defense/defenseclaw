@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 )
 
@@ -263,8 +264,10 @@ type aiRuntimeKernelFloor struct {
 	// Approval is enforce_ack's state as the helper reports it: not_needed,
 	// missing, stale or approved.
 	Approval string `json:"approval,omitempty"`
-	// NextReadyHours is the covered agent time, in hours, that the user
-	// closest to the end of burn-in still needs; absent when nobody is.
+	// NextReadyHours is the calendar time, in hours, until the user closest
+	// to the end of burn-in is ready at the rate so far (the rule tetragon
+	// verify prints); absent when nobody is in burn-in and while every
+	// window is younger than a day ("measuring").
 	NextReadyHours *float64 `json:"next_ready_hours,omitempty"`
 }
 
@@ -495,20 +498,36 @@ func renderKernelFloor(kernel *sensor.KernelState) *aiRuntimeKernelFloor {
 			floor.BurnInUsers++
 		}
 	}
-	floor.NextReadyHours = kernelNextReadyHours(kernel.Status.Users)
+	floor.NextReadyHours = kernelNextReadyHours(kernel.Status.Users, kernelStatusTime(kernel))
 	return floor
 }
 
-// kernelNextReadyHours is the covered agent time, in hours to one decimal,
-// the user closest to the end of burn-in still needs; nil when no user is
-// measuring (everyone ready, observe-only or with no burn-in).
-func kernelNextReadyHours(users []acquire.KernelUserStatus) *float64 {
+// kernelStatusTime is when the gateway read the helper's answer: the calendar
+// "now" of a burn-in estimate. Not the helper's own UpdatedAt, which stops
+// moving while nothing accrues and would overstate the rate.
+func kernelStatusTime(kernel *sensor.KernelState) time.Time {
+	if !kernel.FetchedAt.IsZero() {
+		return kernel.FetchedAt
+	}
+	return time.Now()
+}
+
+// kernelNextReadyHours is the calendar time, in hours to one decimal, until
+// the user closest to the end of burn-in is ready (kernelpolicy.BurnInETA);
+// nil when no user has an estimate (everyone ready, observe-only, with no
+// burn-in, no agent use yet or a window younger than a day).
+func kernelNextReadyHours(users []acquire.KernelUserStatus, now time.Time) *float64 {
 	var next *float64
 	for _, user := range users {
-		if user.Ready || user.BurnInSeconds <= 0 || user.Mode == "observe_only" {
+		if user.Ready || user.BurnInSeconds <= 0 || user.Mode == "observe_only" || user.WindowStartUnixNano <= 0 {
 			continue
 		}
-		hours := math.Round(float64(max(user.BurnInSeconds-user.CoveredSeconds, 0))/360) / 10
+		eta, _, ok := kernelpolicy.BurnInETA(time.Duration(user.CoveredSeconds)*time.Second,
+			time.Duration(user.BurnInSeconds)*time.Second, time.Unix(0, user.WindowStartUnixNano), now)
+		if !ok {
+			continue
+		}
+		hours := math.Round(eta.Hours()*10) / 10
 		if next == nil || hours < *next {
 			next = &hours
 		}

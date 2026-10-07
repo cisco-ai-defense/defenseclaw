@@ -250,6 +250,9 @@ func kernelStatusOf(state kernelpolicy.State, intent kernelpolicy.Intent) acquir
 			CoveredSeconds: user.CoveredSeconds, BurnInSeconds: user.NeededSeconds,
 		}
 		if record := state.BurnIn.UIDs[fmt.Sprint(user.UID)]; record != nil {
+			if !record.WindowStart.IsZero() {
+				entry.WindowStartUnixNano = record.WindowStart.UnixNano()
+			}
 			entry.Hits = map[string]int64{}
 			for control, stats := range record.WouldBlock {
 				entry.Hits[control] += int64(stats.Count)

@@ -57,6 +57,31 @@ type UIDRecord struct {
 	ResetReason string               `json:"reset_reason,omitempty"`
 }
 
+// ETAMinWindow is how long a burn-in window must run before its rate gives
+// a calendar estimate; before that the progress reads "measuring".
+const ETAMinWindow = 24 * time.Hour
+
+// BurnInETA is the calendar time until a user's burn-in completes at the rate
+// so far. Covered time accrues only while an anchored agent of the user runs,
+// so the estimate is (needed - covered) / (covered / window age), never the
+// covered time still needed. measuring is true while the window is younger
+// than ETAMinWindow; ok is false then, before any agent use, without a window
+// start and once nothing is left to cover. tetragon verify, tetragon status
+// and the gateway's kernel_floor.next_ready_hours all use this one rule.
+func BurnInETA(covered, needed time.Duration, windowStart, now time.Time) (eta time.Duration, measuring, ok bool) {
+	if needed <= covered || windowStart.IsZero() {
+		return 0, false, false
+	}
+	age := now.Sub(windowStart)
+	if age < ETAMinWindow {
+		return 0, true, false
+	}
+	if covered <= 0 {
+		return 0, false, false
+	}
+	return time.Duration(float64(needed-covered) * float64(age) / float64(covered)), false, true
+}
+
 // BurnInFile is burnin.json.
 type BurnInFile struct {
 	Version int `json:"version"`

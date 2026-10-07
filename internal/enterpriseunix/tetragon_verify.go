@@ -931,10 +931,6 @@ func sentence(text string) string {
 
 // ---- burn-in arithmetic ----
 
-// etaMinWindow is how long a burn-in window must run before its rate gives
-// an ETA; before that the progress reads "measuring".
-const etaMinWindow = 24 * time.Hour
-
 // burnInProgress is one enrolled user's burn-in, in the terms an
 // administrator plans with: covered agent-hours of the needed ones, and the
 // calendar time until ready at the rate so far.
@@ -944,7 +940,7 @@ type burnInProgress struct {
 	Percent int
 	Ready   bool
 	// ETA is the calendar time until ready; HasETA is false while
-	// Measuring (the window is younger than etaMinWindow), with no agent
+	// Measuring (the window is younger than kernelpolicy.ETAMinWindow), with no agent
 	// use yet, and for users with no anchored agent.
 	ETA       time.Duration
 	HasETA    bool
@@ -956,8 +952,7 @@ type burnInProgress struct {
 }
 
 // progressOf computes a user's burn-in from the helper's per-user status and
-// burnin.json at now. Burn-in accrues only while an anchored agent of the
-// user runs, so the ETA is (needed - covered) / (covered / window age).
+// burnin.json at now. The ETA is kernelpolicy.BurnInETA's calendar estimate.
 func progressOf(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, now time.Time) burnInProgress {
 	p := burnInProgress{
 		Covered: time.Duration(user.CoveredSeconds) * time.Second,
@@ -979,17 +974,10 @@ func progressOf(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, now
 			}
 		}
 	}
-	if p.Ready || p.NoAgent || record == nil || record.WindowStart.IsZero() {
+	if p.Ready || p.NoAgent || record == nil {
 		return p
 	}
-	age := now.Sub(record.WindowStart)
-	switch {
-	case age < etaMinWindow:
-		p.Measuring = true
-	case p.Covered > 0:
-		rate := float64(p.Covered) / float64(age)
-		p.ETA, p.HasETA = time.Duration(float64(p.Needed-p.Covered)/rate), true
-	}
+	p.ETA, p.Measuring, p.HasETA = kernelpolicy.BurnInETA(p.Covered, p.Needed, record.WindowStart, now)
 	return p
 }
 

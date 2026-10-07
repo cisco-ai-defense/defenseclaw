@@ -233,6 +233,10 @@ type KernelUserStatus struct {
 	Hits           map[string]int64 `json:"hits,omitempty"`
 	Connectors     []string         `json:"connectors,omitempty"`
 	Reason         string           `json:"reason,omitempty"`
+	// WindowStartUnixNano is when the user's burn-in window started
+	// (burnin.json), so a reader can turn covered agent time into a calendar
+	// estimate (kernelpolicy.BurnInETA); 0 when the helper has no record.
+	WindowStartUnixNano int64 `json:"window_start_unix_ns,omitempty"`
 }
 
 // KernelPause is the break-glass pause.
