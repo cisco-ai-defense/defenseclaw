@@ -170,7 +170,9 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     uninstall of a half-installed host), a nested ``sandbox run`` inside a
     sandbox, which runs the harness natively, and the read-only ``sandbox
     pack list|show|validate`` (an administrator reads a pack's digest before
-    writing the config that pins it). An existing non-v8 document is still
+    writing the config that pins it) and ``sandbox policy test`` (a CI job
+    checks a pack against a fixture with no install, GAP-0124), which use
+    the default configuration there. An existing non-v8 document is still
     refused by the preflight.
     """
     if ctx.invoked_subcommand != "sandbox":
@@ -183,9 +185,11 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     child = argv[index + 1] if index + 1 < len(argv) else ""
     if child == "teardown":
         return True
+    grandchild = argv[index + 2] if index + 2 < len(argv) else ""
     if child == "pack":
-        grandchild = argv[index + 2] if index + 2 < len(argv) else ""
         return grandchild in {"list", "show", "validate"}
+    if child == "policy":
+        return grandchild == "test"
     return child == "run" and bool(os.environ.get("DEFENSECLAW_SANDBOX_ID", "").strip())
 
 
