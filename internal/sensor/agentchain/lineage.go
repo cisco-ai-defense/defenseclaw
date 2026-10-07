@@ -22,7 +22,6 @@
 package agentchain
 
 import (
-	"sort"
 	"sync"
 	"time"
 
@@ -774,29 +773,4 @@ func (t *Tracker) AttributionState(pid int) string {
 		return StateBootPersistent
 	}
 	return StateOrphaned
-}
-
-// RunningAgents lists the live agent processes, pid-ordered.
-func (t *Tracker) RunningAgents() []Attribution {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	agents := make([]Attribution, 0, 8)
-	for pid, record := range t.records {
-		if record.agentName == "" || !record.exitedAt.IsZero() {
-			continue
-		}
-		agents = append(agents, Attribution{
-			RootPID: pid, AgentName: record.agentName, Depth: 0,
-			Via: record.via, State: StateAttributed,
-		})
-	}
-	sort.Slice(agents, func(i, j int) bool { return agents[i].RootPID < agents[j].RootPID })
-	return agents
-}
-
-// Tracked is how many process records are held.
-func (t *Tracker) Tracked() int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return len(t.records)
 }
