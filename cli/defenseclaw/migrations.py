@@ -3433,6 +3433,23 @@ def _preview_config_v9(config_path: str, gateway_binary: str) -> None:
         f"config.yaml, {len(record.get('conflicts') or [])} conflicts"
     )
 
+def _check_staged_gateway_accepts(config_path: str, data_dir: str, gateway_binary: str) -> None:
+    """Fail the upgrade check when the staged gateway would refuse this config.
+
+    The staged gateway loads the config the way it will at start, rule packs and
+    their ``custom_packs`` pins included, so a pin it refuses ends the check
+    before the installer stops the gateway or swaps anything (GAP-0158). The
+    dry-run migration above validates the document only, not the packs it names.
+    """
+    from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
+    from defenseclaw.config_writer import plain_error
+
+    try:
+        inspect_v8_config("validate", config_path=config_path, data_dir=data_dir, gateway_binary=gateway_binary)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"the new release would refuse your configuration: {plain_error(exc)}") from exc
+
+
 # The schema written by the 0.8.5 hard cut. Anything older is a 0.x install
 # that the frozen ``MIGRATIONS`` chain imports.
 _FIRST_V8_CONFIG_VERSION = 8
@@ -3538,8 +3555,10 @@ def migrate(
                 raise
             except Exception as exc:  # noqa: BLE001 - reported like a failed step
                 raise MigrationError(f"the v8 conversion check failed: {exc}") from exc
-        if version >= _FIRST_V8_CONFIG_VERSION and gateway_binary and _V9_STEP_NAME in names:
-            _preview_config_v9(config_path, gateway_binary)
+        if version >= _FIRST_V8_CONFIG_VERSION and gateway_binary:
+            if _V9_STEP_NAME in names:
+                _preview_config_v9(config_path, gateway_binary)
+            _check_staged_gateway_accepts(config_path, data_dir, gateway_binary)
         return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
 
     if steps:

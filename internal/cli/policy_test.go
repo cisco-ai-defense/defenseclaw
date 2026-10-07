@@ -246,6 +246,27 @@ func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	}
 }
 
+// TestPolicyReloadErrorIsPlain pins GAP-0160: a failed rebuild shows words, not
+// the HTTP status, the JSON body or the internal stage names.
+func TestPolicyReloadErrorIsPlain(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	pin := `{"error":"reload failed: config reload rule pack preflight: global rule pack \"p0m\": digest ` + digest +
+		` does not match guardrail.custom_packs.p0m.digest","status":"failed"}`
+	want := "policy reload failed: rule pack p0m no longer matches its pin (guardrail.custom_packs.p0m.digest). " +
+		"The previous policy is still enforcing. Review the pack, then pin it with: " +
+		"defenseclaw config set guardrail.custom_packs.p0m.digest " + digest
+	if got := policyReloadError(http.StatusInternalServerError, []byte(pin)).Error(); got != want {
+		t.Fatalf("pin mismatch:\n got %q\nwant %q", got, want)
+	}
+	other := policyReloadError(http.StatusInternalServerError, []byte(`{"error":"reload failed: opa: bad rule","status":"failed"}`)).Error()
+	if other != "policy reload failed: opa: bad rule. The previous policy is still enforcing" {
+		t.Fatalf("other rebuild failure = %q", other)
+	}
+	if got := policyReloadError(http.StatusServiceUnavailable, []byte(`{"error":"policy_dir not configured"}`)).Error(); got != "policy reload failed: policy_dir not configured" {
+		t.Fatalf("unavailable = %q", got)
+	}
+}
+
 func policyPathTestCommands() []struct {
 	name string
 	cmd  *cobra.Command

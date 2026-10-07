@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -335,7 +336,7 @@ var policyReloadCmd = &cobra.Command{
 
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("reload failed (HTTP %d): %s", resp.StatusCode, string(body))
+			return policyReloadError(resp.StatusCode, body)
 		}
 
 		var result map[string]interface{}
@@ -347,6 +348,39 @@ var policyReloadCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// customPackPinMismatch matches the rebuild error for a custom rule pack whose
+// files no longer match its guardrail.custom_packs pin.
+var customPackPinMismatch = regexp.MustCompile(`rule pack "([^"]+)": digest (sha256:[0-9a-f]{64}) does not match guardrail\.custom_packs\.`)
+
+// policyReloadError says a refused /policy/reload in plain words: no HTTP
+// status, no JSON body and no internal stage names. A rebuild that fails leaves
+// the previous policy enforcing; a pin mismatch also names the command that
+// pins the pack as it is now.
+func policyReloadError(status int, body []byte) error {
+	var payload struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	reason := strings.TrimSpace(string(body))
+	if json.Unmarshal(body, &payload) == nil && payload.Error != "" {
+		reason = payload.Error
+	}
+	if reason == "" {
+		return fmt.Errorf("policy reload failed (HTTP %d)", status)
+	}
+	reason = strings.TrimPrefix(reason, "reload failed: ")
+	reason = strings.TrimPrefix(reason, "config reload rule pack preflight: ")
+	if m := customPackPinMismatch.FindStringSubmatch(reason); m != nil {
+		key := "guardrail.custom_packs." + m[1] + ".digest"
+		return fmt.Errorf("policy reload failed: rule pack %s no longer matches its pin (%s). The previous policy is still enforcing. "+
+			"Review the pack, then pin it with: defenseclaw config set %s %s", m[1], key, key, m[2])
+	}
+	if payload.Status == "failed" {
+		return fmt.Errorf("policy reload failed: %s. The previous policy is still enforcing", strings.TrimSuffix(reason, "."))
+	}
+	return fmt.Errorf("policy reload failed: %s", reason)
 }
 
 // ---------------------------------------------------------------------------

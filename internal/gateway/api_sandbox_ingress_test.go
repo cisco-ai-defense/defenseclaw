@@ -1140,7 +1140,7 @@ func mainAPIRoutePaths(t *testing.T) []string {
 	t.Helper()
 	known := []string{
 		"/health", "/status", "/api/v1/admin/shutdown", "/skill/disable", "/skill/enable",
-		"/plugin/disable", "/plugin/enable", "/scan/result", "/enforce/block",
+		"/plugin/disable", "/plugin/enable", "/config/patch", "/scan/result", "/enforce/block",
 		"/enforce/allow", "/enforce/blocked", "/enforce/allowed", "/alerts", "/audit/event",
 		"/policy/evaluate", "/policy/reload", "/skills", "/mcps", "/tools/catalog",
 		"/v1/skill/scan", "/v1/plugin/scan", "/v1/mcp/scan", "/v1/skill/fetch", "/v1/guardrail/event",

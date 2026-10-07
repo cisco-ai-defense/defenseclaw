@@ -278,9 +278,16 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	}
 	report := enterpriseDiscoveryReport{Gateway: host, Accounts: []enterpriseDiscoveryAccount{}}
 	byUser := map[string]int{}
+	// Secure Client keeps the exact account name or SID match and its
+	// message (issue #1092).
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
 	for _, signal := range usage.Signals {
 		name := signal.UserName
-		if user != "" && !useridentity.AccountFilterMatches(user, signal.UserID, name) {
+		matches := useridentity.AccountFilterMatches(user, signal.UserID, name)
+		if secureClient {
+			matches = strings.EqualFold(user, name) || strings.EqualFold(user, signal.UserID)
+		}
+		if user != "" && !matches {
 			continue
 		}
 		index, ok := byUser[strings.ToLower(name)]
@@ -298,8 +305,11 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	})
 	if user != "" && len(report.Accounts) == 0 {
 		// A --json caller reads this as JSON too, not an empty stdout (GAP-2456).
-		err := withExitCode(&managedViewRefusal{code: "account_not_found",
-			message: windowsDiscoveryAccountNotFound(user, usage)}, 1)
+		message := windowsDiscoveryAccountNotFound(user, usage)
+		if secureClient {
+			message = fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
+		}
+		err := withExitCode(&managedViewRefusal{code: "account_not_found", message: message}, 1)
 		if asJSON {
 			writeManagedViewRefusalJSON(w, err)
 		}

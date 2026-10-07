@@ -73,6 +73,9 @@ var configMigrateCmd = &cobra.Command{
 		if path == "" {
 			path = config.ConfigPath()
 		}
+		if raw, err := os.ReadFile(path); err == nil && config.SecureClientSource(raw) {
+			return fmt.Errorf("%s is a Secure Client config, which stays on config_version 8; nothing was changed", path)
+		}
 		if configMigrateAck {
 			if err := config.AcknowledgeMigrationV9(path); err != nil {
 				return fmt.Errorf("acknowledge %s: %w", config.MigrationRecordPath(path), err)

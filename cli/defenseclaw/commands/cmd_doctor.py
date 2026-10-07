@@ -15388,7 +15388,10 @@ def _fix_hook_script_drift(
         return ("skip", "declined by user")
     trust = _trusted_gateway_listener_for_lifecycle(cfg)
     if not trust.trusted:
-        return ("fail", f"{trust.detail}; start the gateway with `defenseclaw-gateway start`, then run doctor --fix again")
+        return (
+            "fail",
+            f"{trust.detail}; start the gateway with `defenseclaw-gateway start`, then run doctor --fix again",
+        )
     repaired, detail = _repair_gateway_lifecycle(cfg, start_if_stopped=False)
     if not repaired:
         return ("fail", f"could not restart the gateway ({detail}); run `defenseclaw-gateway restart`")
@@ -15397,7 +15400,10 @@ def _fix_hook_script_drift(
         from defenseclaw.hook_integrity import setup_command
 
         commands = ", ".join(f"`{setup_command(c)}`" for c in left)
-        return ("fail", f"the gateway restarted but {', '.join(left)} still differs from setup's render; run {commands}")
+        return (
+            "fail",
+            f"the gateway restarted but {', '.join(left)} still differs from setup's render; run {commands}",
+        )
     return ("pass", f"rendered the {names} hook script(s) again")
 
 

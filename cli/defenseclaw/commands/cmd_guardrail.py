@@ -3270,6 +3270,14 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
     return None
 
 
+def _registered_pack_names(gc: object) -> str:
+    """The guardrail.custom_packs names use-pack accepts, for the unknown-pack message."""
+    names = sorted(getattr(gc, "custom_packs", None) or {})
+    return f"not a registered guardrail.custom_packs name ({', '.join(names)})" if names else (
+        "not a registered guardrail.custom_packs name (none registered)"
+    )
+
+
 def _applied_note(app: AppContext, result: object) -> str:
     """How the change reaches the gateway, with the config generation."""
     generation = getattr(result, "generation", 0)
@@ -3480,8 +3488,8 @@ def use_pack_cmd(
                 pack_name=raw,
                 path=candidate,
                 message=(
-                    f"No rule pack {raw!r}: not a preset (default, strict, permissive) "
-                    "and not an existing directory. Nothing was changed."
+                    f"No rule pack {raw!r}: not a preset ({', '.join(policy_catalog.RULE_PACK_PRESETS)}), "
+                    f"{_registered_pack_names(gc)}, and not an existing directory. Nothing was changed."
                 ),
             )
         path = candidate

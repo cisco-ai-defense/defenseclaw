@@ -174,6 +174,31 @@ def test_check_converts_a_scratch_copy_with_the_staged_gateway(
     assert not Path(str(seen["scratch"])).exists()
 
 
+def test_check_refuses_a_config_the_staged_gateway_would_refuse(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GAP-0158: a stale custom_packs pin ends the upgrade check, before the installer swaps anything."""
+    from defenseclaw import config_inspect
+
+    _write_config(data_dir, "config_version: 9\n")
+    seen: list[str | None] = []
+
+    def validate(operation, *, gateway_binary=None, **_kwargs):
+        seen.append(gateway_binary)
+        raise config_inspect.ConfigInspectError(
+            "candidate",
+            field_path="$.guardrail",
+            reason='[config_semantic_invalid] config rule pack "p0m": digest sha256:ab does not match '
+            "guardrail.custom_packs.p0m.digest; fix the reference, then retry",
+        )
+
+    monkeypatch.setattr(config_inspect, "inspect_v8_config", validate)
+
+    migrate(str(data_dir), check=True)
+    assert seen == []
+    with pytest.raises(MigrationError, match=r"would refuse your configuration: guardrail: digest sha256:ab does not match guardrail\.custom_packs\.p0m\.digest"):
+        migrate(str(data_dir), check=True, gateway_binary="/staged/defenseclaw-gateway")
+    assert seen == ["/staged/defenseclaw-gateway"]
+
+
 def test_failing_step_names_itself(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(data_dir, "config_version: 7\n")
 

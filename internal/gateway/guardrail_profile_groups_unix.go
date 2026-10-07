@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"context"
+	osuser "os/user"
 
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -24,4 +25,11 @@ var profileGroupExists = func(ctx context.Context, name string) (bool, error) {
 	default:
 		return false, err
 	}
+}
+
+// accountGroupIDs lists an OS account's group ids: os/user's listing, which
+// on macOS is read again with `id -G` when it failed or filled its 256-group
+// buffer (an account in more groups, GAP-0201).
+var accountGroupIDs = func(account *osuser.User) ([]string, error) {
+	return unixidentity.AccountGroupIDs(context.Background(), account)
 }
