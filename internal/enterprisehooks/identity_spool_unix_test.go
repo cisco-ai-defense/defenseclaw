@@ -68,3 +68,13 @@ func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {
 		t.Fatalf("another account took the UPN: %+v", other)
 	}
 }
+
+// A lookup failure must reach the guardian so its next pass uses the short
+// retry interval rather than treating partial directory facts as refreshed.
+func TestIdentitySpoolReportsFailedAccount(t *testing.T) {
+	err := WriteIdentitySpool(context.Background(), t.TempDir(),
+		[]IdentitySpoolAccount{{UID: 999999999, User: ""}}, nil, nil)
+	if err == nil {
+		t.Fatal("failed account lookup was reported as a successful spool pass")
+	}
+}

@@ -14,6 +14,7 @@ package enterprisehooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,6 +63,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 	}
 	keep := map[string]bool{}
+	var passErr error
 	for _, account := range accounts {
 		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
 			continue
@@ -74,13 +76,16 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		if err == nil {
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
 		}
-		if err != nil && logf != nil {
-			logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
+		if err != nil {
+			passErr = errors.Join(passErr, fmt.Errorf("uid %d: %w", account.UID, err))
+			if logf != nil {
+				logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
+			}
 		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
 	}
 	for _, entry := range entries {
 		if keep[entry.Name()] {
@@ -91,5 +96,5 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
-	return nil
+	return passErr
 }

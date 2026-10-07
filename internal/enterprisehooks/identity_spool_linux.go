@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -70,14 +71,18 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 			callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
 			provider, providerErr := infoPipeDomainProvider(callCtx, nss.Name)
 			cancel()
-			if providerErr == nil {
-				facts.Directory = sssdProviderDirectory(provider)
+			if providerErr != nil {
+				return IdentitySpoolRecord{}, fmt.Errorf("SSSD InfoPipe provider lookup: %w", providerErr)
 			}
+			facts.Directory = sssdProviderDirectory(provider)
 		}
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
 		upn, upnErr := infoPipeUPN(callCtx, nss.Name)
 		cancel()
-		if upn = useridentity.NormalizeUPN(upn); upnErr == nil && upn != "" {
+		if upnErr != nil {
+			return IdentitySpoolRecord{}, fmt.Errorf("SSSD InfoPipe UPN lookup: %w", upnErr)
+		}
+		if upn = useridentity.NormalizeUPN(upn); upn != "" {
 			facts.UPN = upn
 			facts.Principal = upn
 			facts.Source = useridentity.SourceSSSDInfoPipe
