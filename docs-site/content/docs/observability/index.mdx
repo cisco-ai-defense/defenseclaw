@@ -234,11 +234,17 @@ Authentication failures open the affected route immediately for five minutes;
 a half-open probe then retries it. Unsafe-endpoint failures open for 24 hours
 because retrying an unchanged unsafe endpoint would repeat unsafe work.
 
-While a circuit is open, new and already queued work for that route is rejected
-before adapter delivery and size-estimation work. Sibling signals,
-destinations, and mandatory local SQLite persistence continue. When cooldown
-expires, exactly one record is admitted as a half-open recovery probe. Success
-closes the circuit; another terminal failure reopens it.
+While a circuit is open, new and already queued work for that route remains
+in its bounded in-memory queue. When the queue fills, the newest record for
+that route is dropped and counted. Sibling signals, destinations, and mandatory
+local SQLite persistence continue. After cooldown, the oldest queued batch is
+the half-open recovery probe. Success closes the circuit; another terminal
+failure reopens it. A gateway restart loses queued optional exports, and
+records permanently rejected by a collector or exhausted by the bounded retry
+window are not automatically replayed. The local SQLite event history retains
+them; export that history separately if backfill matters. Doctor shows dropped
+and rejected counts per destination, and destination metrics expose the same
+counters.
 
 Gateway health and `defenseclaw doctor` expose the circuit state, consecutive
 failures, bounded failure class, and open deadline. Transient-open and

@@ -293,14 +293,11 @@ func TestCircuitCooldownHalfOpenRecoveryAndGenerationReset(t *testing.T) {
 		t.Fatalf("recreated snapshot retained prior generation: %+v", recreatedSnapshot)
 	}
 	immediateOpenUntil := start.Add(immediateCircuitOpenDuration)
-	if admitted, halfOpen := first.admitCircuit(immediateOpenUntil.Add(-time.Nanosecond)); admitted || halfOpen {
-		t.Fatalf("admission before cooldown=(%v,%v)", admitted, halfOpen)
+	if mode, _ := first.circuitMode(immediateOpenUntil.Add(-time.Nanosecond)); mode != circuitDeliveryBlocked {
+		t.Fatalf("mode before cooldown = %v", mode)
 	}
-	if admitted, halfOpen := first.admitCircuit(immediateOpenUntil); !admitted || !halfOpen {
-		t.Fatalf("admission at cooldown=(%v,%v)", admitted, halfOpen)
-	}
-	if admitted, halfOpen := first.admitCircuit(immediateOpenUntil); admitted || halfOpen {
-		t.Fatalf("second half-open admission=(%v,%v)", admitted, halfOpen)
+	if mode, entered := first.circuitMode(immediateOpenUntil); mode != circuitDeliveryProbe || !entered {
+		t.Fatalf("mode at cooldown = %v, entered=%v", mode, entered)
 	}
 	reopenedAt := immediateOpenUntil
 	if !first.recordCircuitFailure(FailureClassTransient, reopenedAt) {
@@ -372,19 +369,21 @@ func TestTransientCircuitPersistsAcrossBatchesAndFailsFastWhileOpen(t *testing.T
 	}
 	for index := 0; index < 20; index++ {
 		result := dispatcher.Enqueue(circuitTestPayload(t, fmt.Sprintf("blocked-%d", index)))
-		if result.Disposition != EnqueueRejected || result.Reason != ReasonCircuitOpen {
-			t.Fatalf("blocked enqueue %d=%+v", index, result)
+		if !result.Accepted() {
+			t.Fatalf("queued enqueue %d=%+v", index, result)
 		}
 	}
 	if got := adapter.callCount(); got != 3 {
 		t.Fatalf("open circuit touched adapter %d times", got)
 	}
 	counters := dispatcher.Counters()
-	if counters.Accepted != 3 || counters.Rejected != 23 || counters.Failed != 3 ||
+	if counters.Accepted != 23 || counters.Rejected != 3 || counters.Failed != 3 ||
 		counters.Retried != 0 || counters.Delivered != 0 {
 		t.Fatalf("counters=%+v", counters)
 	}
-	closeCircuitTestDispatcher(t, dispatcher)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := dispatcher.Close(ctx); err != nil { t.Fatal(err) }
 }
 
 func TestOpenCircuitRejectsAcceptedBacklogWithoutAdapterWork(t *testing.T) {
@@ -426,28 +425,9 @@ func TestOpenCircuitRejectsAcceptedBacklogWithoutAdapterWork(t *testing.T) {
 		t.Fatalf("adapter calls=%d encoded=%d snapshot=%+v",
 			adapter.callCount(), adapter.encodedCalls.Load(), snapshot)
 	}
-	closeCircuitTestDispatcher(t, dispatcher)
-}
-
-func TestCircuitRejectedBatchResetsInFlightByteSnapshot(t *testing.T) {
-	config := circuitTestConfig(2)
-	config.MaxBatchItems = 2
-	dispatcher, err := NewDispatcher(config, &circuitTestAdapter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dispatcher.cancelRoot()
-	first := circuitTestPayload(t, "first-rejected")
-	second := circuitTestPayload(t, "second-rejected")
-	dispatcher.pending = []Payload{first, second}
-	dispatcher.inFlightBytes = 1_000_000
-	payloads := dispatcher.takeCircuitRejectedBatch()
-	if len(payloads) != 2 || dispatcher.inFlightItems != 2 ||
-		dispatcher.inFlightBytes != first.Size()+second.Size() {
-		t.Fatalf("payloads=%d in-flight=(%d,%d) want=(2,%d)",
-			len(payloads), dispatcher.inFlightItems, dispatcher.inFlightBytes,
-			first.Size()+second.Size())
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := dispatcher.Close(ctx); err != nil { t.Fatal(err) }
 }
 
 func TestPartialDeliveryResetsTerminalFailureStreak(t *testing.T) {
