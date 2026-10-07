@@ -1566,6 +1566,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
+			return
+		}
 		if provider == "bedrock" {
 			writeBedrockUpstreamError(w, upstreamErrorMessage("upstream error: ", err))
 		} else {
@@ -3247,6 +3251,10 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			llmCtx, r, req, providerName, promptID, "", "", lifecycleOutcome, "", nil,
 		)
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedChatReply(w, aliasModel, req.Stream, msg)
+			return
+		}
 		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
@@ -3941,6 +3949,16 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, pr
 	} else {
 		p.writeBlockedResponse(w, model, msg)
 	}
+}
+
+// writeBlockedChatReply answers a chat-completions request with msg as the
+// assistant turn, streamed when the client asked for a stream.
+func (p *GuardrailProxy) writeBlockedChatReply(w http.ResponseWriter, model string, stream bool, msg string) {
+	if stream {
+		p.writeBlockedStream(w, model, msg)
+		return
+	}
+	p.writeBlockedResponse(w, model, msg)
 }
 
 // writeBlockedResponseGemini returns a blocked response in Gemini
@@ -5738,6 +5756,10 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	resp, err := doProviderRequest(upReq, p.emitEgress)
 	if err != nil {
 		failModel("upstream_error", err)
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedChatReply(w, req.Model, req.Stream, msg)
+			return
+		}
 		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}

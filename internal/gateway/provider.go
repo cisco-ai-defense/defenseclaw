@@ -742,6 +742,19 @@ func upstreamErrorMessage(prefix string, err error) string {
 	return prefix + err.Error()
 }
 
+// privateUpstreamReply is the assistant turn for a refused private upstream.
+// Agents show a 5xx as a temporary provider error and retry it (OpenClaw:
+// "provider internal error, HTTP 502"), so the cause and the allow command
+// reached only the agent log (GAP-0246). Secure Client keeps the 502 of main
+// (issue #1092).
+func privateUpstreamReply(err error) (string, bool) {
+	var refusal *privateUpstreamRefusal
+	if ManagedEnterpriseActive() || !errors.As(err, &refusal) {
+		return "", false
+	}
+	return "[DefenseClaw] " + upstreamErrorMessage("", err), true
+}
+
 func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: timeout}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
