@@ -308,7 +308,11 @@ func (e *Effective) ruleSource(host string, out EgressDecision, raw egress.Decis
 	case RuleAllow:
 		switch {
 		case raw.Source == egress.SourceFeed || containsString(e.curatedAllow, out.Match):
-			return "DefenseClaw's curated allowlist (" + setting("egress.allow") + ")"
+			from := "egress.allow"
+			if s, ok := e.Setting("egress.allow"); ok {
+				from = s.Origin
+			}
+			return "DefenseClaw's curated allowlist (" + from + ")"
 		case e.Pack != nil && containsString(e.Pack.Egress.Allow, out.Match):
 			return "pack " + e.Pack.Name
 		}

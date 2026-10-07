@@ -167,6 +167,9 @@ func TestRepoPolicyHostileInput(t *testing.T) {
 	} {
 		_, err := ParseRepoPolicy([]byte(tc.doc), "repo")
 		pe := wantPackError(t, err, tc.code, "")
+		if !strings.HasPrefix(err.Error(), "repository policy repo") {
+			t.Fatalf("%s: %v does not name the repository policy", tc.name, err)
+		}
 		if strings.ContainsAny(err.Error(), "\x1b\x07\r\u202e") {
 			t.Fatalf("%s: the error carries a control character: %q", tc.name, err.Error())
 		}

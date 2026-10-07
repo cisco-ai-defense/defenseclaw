@@ -194,7 +194,7 @@ func ParseRepoPolicy(data []byte, source string) (*RepoPolicy, error) {
 			if pe.Code == "unknown_field" {
 				pe.Reason += "; a repository policy may set " + repoPolicyKeys
 			}
-			pe.Reason, pe.Field = printable(pe.Reason), printable(pe.Field)
+			pe.Reason, pe.Field, pe.What = printable(pe.Reason), printable(pe.Field), repoPolicyWhat
 		}
 		return nil, err
 	}
@@ -293,15 +293,18 @@ func ParseRepoPolicy(data []byte, source string) (*RepoPolicy, error) {
 		}
 	}
 	if v.err != nil {
-		v.err.Reason, v.err.Field = printable(v.err.Reason), printable(v.err.Field)
+		v.err.Reason, v.err.Field, v.err.What = printable(v.err.Reason), printable(v.err.Field), repoPolicyWhat
 		return nil, v.err
 	}
 	return rp, nil
 }
 
+// repoPolicyWhat names a repository policy in its errors.
+const repoPolicyWhat = "repository policy"
+
 func repoErr(source, field, code, format string, args ...any) *Error {
 	e := packErr(source, field, code, format, args...)
-	e.Reason = printable(e.Reason)
+	e.Reason, e.What = printable(e.Reason), repoPolicyWhat
 	return e
 }
 

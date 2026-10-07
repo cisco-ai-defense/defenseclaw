@@ -276,6 +276,9 @@ type Error struct {
 	Field  string `json:"field,omitempty"`
 	Code   string `json:"code"`
 	Reason string `json:"reason"`
+	// What names the file kind in the message ("sandbox pack" when empty,
+	// "repository policy").
+	What string `json:"-"`
 }
 
 func (e *Error) Error() string {
@@ -283,6 +286,9 @@ func (e *Error) Error() string {
 		return "sandbox pack error"
 	}
 	msg := "sandbox pack"
+	if e.What != "" {
+		msg = e.What
+	}
 	if e.Source != "" {
 		msg += " " + e.Source
 	}
