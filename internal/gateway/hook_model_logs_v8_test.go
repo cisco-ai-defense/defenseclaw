@@ -145,6 +145,27 @@ func TestHookModelAndLifecycleLogsV8CarrySandboxAndAgentIdentity(t *testing.T) {
 	}
 }
 
+// GAP-0158: the runtime the gateway runs reads the signed lifecycle history,
+// so a hook after a restart restores its session's lineage instead of
+// skipping the restore.
+func TestHookLifecycleHistoryReadsThroughTheGatewayRuntime(t *testing.T) {
+	api, _ := bindHookModelV8Runtime(t, []string{"logs"})
+	meta := richHookModelV8Meta()
+	if got := api.emitHookLifecycleEvent(t.Context(), meta); got != hookLifecycleV8Persisted {
+		t.Fatalf("lifecycle emission = %d, want persisted", got)
+	}
+	history, ok := api.observabilityV8RuntimeEmitter().(hookLifecycleHistoryRuntime)
+	if !ok {
+		t.Fatalf("gateway runtime %T reads no lifecycle history", api.observabilityV8RuntimeEmitter())
+	}
+	projection, found, err := history.LatestLifecycleProjection(t.Context(), audit.LifecycleProjectionQuery{
+		Connector: meta.Source, SessionID: meta.SessionID, AgentID: meta.AgentID,
+	})
+	if err != nil || !found || projection.ParentAgentID != meta.ParentAgentID || projection.Depth != meta.AgentDepth {
+		t.Fatalf("lifecycle history = %+v found=%t err=%v, want the parent link", projection, found, err)
+	}
+}
+
 func TestCodexNotifyEmitsCanonicalV8ModelLogsWithSourceFacts(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	const body = `{
