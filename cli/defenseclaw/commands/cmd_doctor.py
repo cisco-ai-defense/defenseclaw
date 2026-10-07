@@ -14674,10 +14674,9 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
             continue
         state = raw_state.strip().lower()
         if subsystem == "sandbox" and state == "degraded":
-            # The legacy sandbox shim, or a sandbox listener or manager that
-            # failed: a gateway restart cannot be relied on to fix either,
-            # and neither may block repairs of real drift. The legacy check
-            # and `defenseclaw sandbox doctor` report them.
+            # A sandbox listener or manager that failed: a gateway restart
+            # cannot be relied on to fix it, and it may not block repairs of
+            # real drift. `defenseclaw sandbox doctor` reports it.
             continue
 
         if expected is True and state in inactive_states:

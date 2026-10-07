@@ -9,7 +9,7 @@
       "author": "Maintainer"
     },
     {
-      "content": "Documentation should prioritize practical operator flows: installation, quick start, scanner usage, guardrail setup and tuning, legacy sandbox cleanup, observability, Splunk/local Grafana, TUI operation, policy authoring, plugin development, and testing. Keep durable Markdown docs under docs/ and keep package-local READMEs beside bundles or examples that need local context.",
+      "content": "Documentation should prioritize practical operator flows: installation, quick start, scanner usage, guardrail setup and tuning, OpenShell sandboxes, observability, Splunk/local Grafana, TUI operation, policy authoring, plugin development, and testing. Keep durable Markdown docs under docs/ and keep package-local READMEs beside bundles or examples that need local context.",
       "author": "Maintainer"
     },
     {
@@ -72,8 +72,8 @@
       "parent": "Home"
     },
     {
-      "title": "Firewall and Legacy Sandbox Cleanup",
-      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, the removal of the legacy openshell-sandbox 0.0.x standalone integration, and the config_version 9 migration that resets what it left in the config. NVIDIA OpenShell 0.1 support is coming in a future release; do not describe it. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/config/migrate_v9.go, internal/firewall/, internal/gateway/connector/subprocess.go, policies/rego/firewall.rego, and policies/rego/data-sandbox.json.",
+      "title": "Firewall and OpenShell Sandboxes",
+      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, NVIDIA OpenShell 0.1 sandboxes (defenseclaw sandbox setup and run, policy packs and the repository policy, the egress proxy, destinations, the opt-in process tree), the removal of the openshell-sandbox 0.0.x standalone integration, and the config_version 9 migration that resets what it left in the config. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, docs-site/content/docs/sandboxes/, internal/openshell/, internal/config/migrate_v9.go, internal/firewall/, internal/gateway/connector/subprocess.go, policies/rego/firewall.rego, and policies/rego/data-sandbox.json.",
       "parent": "Home"
     },
     {

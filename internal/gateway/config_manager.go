@@ -1253,9 +1253,9 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 
 // holdRestartRequired returns next with every restart-required section at
 // its running value, or nil when a path can not be held: storage paths, the
-// resource identity the compiled observability plan already carries, the
-// deployment mode and enterprise profile, and the legacy sandbox mode. Such
-// a reload still fails as restart-required.
+// resource identity the compiled observability plan already carries, and the
+// deployment mode and enterprise profile. Such a reload still fails as
+// restart-required.
 func holdRestartRequired(running, next *config.Config, restart []string) *config.Config {
 	if running == nil || next == nil {
 		return nil
