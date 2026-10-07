@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"maps"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
 const (
@@ -319,5 +321,55 @@ func TestPackPostureFollowsTheReloadedPack(t *testing.T) {
 	rememberPackPosture("/packs/b", "")
 	if got := packPosture(ref, "/packs/b"); got != "default" {
 		t.Fatalf("posture after the reload = %q, want default", got)
+	}
+}
+
+// TestAlertLevelIsReportedClampedToBlock: guardrail.alert_at above block_at
+// alerts at the block level, and policy show reports that level.
+func TestAlertLevelIsReportedClampedToBlock(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.BlockAt = "LOW"
+	cfg.Guardrail.AlertAt = "HIGH"
+	if got := ConfigThresholds(cfg, ""); got.Block != "LOW" || got.Alert != "LOW" {
+		t.Fatalf("levels = %+v, want block and alert LOW", got)
+	}
+}
+
+// TestBuildPostureIsVisibleOnlyOnceTheGenerationPublishes: a build that is then
+// rejected must not change the levels the running generation's hooks use.
+func TestBuildPostureIsVisibleOnlyOnceTheGenerationPublishes(t *testing.T) {
+	ref := config.RulePackRef{Name: "posture-pending-test"}
+	rememberPackPosture("/packs/live", "strict")
+	notePackPosture("/packs/live", "permissive")
+	if got := packPosture(ref, "/packs/live"); got != "strict" {
+		t.Fatalf("posture before publish = %q, want strict", got)
+	}
+	publishPackPostures()
+	if got := packPosture(ref, "/packs/live"); got != "permissive" {
+		t.Fatalf("posture after publish = %q, want permissive", got)
+	}
+}
+
+// TestSecureClientProxyKeepsTheDataJSONLevels: the 1.0 proxy verdict read the
+// data.json levels and trust level whatever the rule pack or block_at.
+func TestSecureClientProxyKeepsTheDataJSONLevels(t *testing.T) {
+	policyDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(policyDir, "rego"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"guardrail":{"block_threshold":3,"alert_threshold":1,"cisco_trust_level":"advisory"}}`
+	if err := os.WriteFile(filepath.Join(policyDir, "rego", "data.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: policyDir}
+	cfg.Guardrail.RulePack = "strict"
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("fixture is not a Secure Client configuration")
+	}
+	previous := liveGeneration.Load()
+	liveGeneration.Store(&Generation{Config: cfg})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	if got := requestThresholds(context.Background()); got != (policy.ThresholdsInput{Block: 3, Alert: 1, CiscoTrustLevel: "advisory"}) {
+		t.Fatalf("Secure Client proxy thresholds = %+v, want the data.json levels", got)
 	}
 }

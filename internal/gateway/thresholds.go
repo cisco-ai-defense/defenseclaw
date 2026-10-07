@@ -41,12 +41,37 @@ import (
 // does not change the running generation's levels. A pack without a
 // manifest posture is recorded as "", so a pack whose manifest drops the
 // field falls back to the folder-name table again.
+//
+// A build only notes the postures it read (notePackPosture); they become
+// visible here when the generation publishes (publishPackPostures), so an
+// edit of a pack's manifest in a candidate that is then rejected does not
+// change the levels hooks and sandbox decisions use under the running
+// generation.
 var packPostures sync.Map // directory -> posture
+
+// pendingPackPostures holds what builds read until a generation publishes.
+var pendingPackPostures sync.Map // directory -> posture
 
 func rememberPackPosture(dir, posture string) {
 	if dir = strings.TrimSpace(dir); dir != "" {
 		packPostures.Store(dir, posture)
 	}
+}
+
+func notePackPosture(dir, posture string) {
+	if dir = strings.TrimSpace(dir); dir != "" {
+		pendingPackPostures.Store(dir, posture)
+	}
+}
+
+// publishPackPostures makes the postures the published generation's build
+// read the ones the request path resolves with.
+func publishPackPostures() {
+	pendingPackPostures.Range(func(dir, posture any) bool {
+		packPostures.Store(dir, posture)
+		pendingPackPostures.Delete(dir)
+		return true
+	})
 }
 
 // packPosture returns the posture of ref's pack at dir (its resolved
@@ -150,6 +175,11 @@ func thresholdsFromLevels(gc *config.GuardrailConfig, connector, posture string,
 	}
 	if blockAt != "" || alertAt != "" {
 		out.Source = "config:" + thresholdConfigPath(gc, connector)
+	}
+	// Anything that blocks also alerts: report the alert level the gateway
+	// enforces (guardrailThresholdRanks clamps the same way).
+	if guardrailSeverityRank(out.Alert) > guardrailSeverityRank(out.Block) && guardrailSeverityRank(out.Block) > severityNone {
+		out.Alert = out.Block
 	}
 	return out
 }
@@ -321,12 +351,13 @@ func requestThresholds(ctx context.Context) policy.ThresholdsInput {
 	if resolved := requestProfile(ctx, g); resolved != nil {
 		profile = resolved.decision.Name
 	}
-	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
 	if g != nil && g.Config != nil && g.Config.SecureClientIntegration() {
-		// See guardrailContentAction: Secure Client content keeps the
-		// rule pack's posture levels.
-		resolved = resolvePackThresholds(g.Config, thresholdConnectorFrom(ctx))
+		// The 1.0 proxy verdict sent no thresholds, so the policy used the
+		// data.json levels and trust level (as /v1/guardrail/evaluate does),
+		// whatever the rule pack.
+		return policy.SecureClientGuardrailThresholds(g.Config.PolicyDir)
 	}
+	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
 	block, alert := guardrailThresholdRanks(resolved)
 	trust := config.CiscoTrustFull
 	if g != nil && g.Config != nil {

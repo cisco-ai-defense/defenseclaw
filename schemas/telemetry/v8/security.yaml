@@ -2322,6 +2322,7 @@ groups:
   - correlation.tool.identity
   - correlation.security
   - security.approval
+  - correlation.policy.effective
   - correlation.sandbox
   attributes:
   - ref: defenseclaw.sandbox.approval.kind
@@ -2344,6 +2345,7 @@ groups:
   - correlation.tool.identity
   - correlation.security
   - security.approval
+  - correlation.policy.effective
   - correlation.sandbox
   attributes:
   - ref: defenseclaw.sandbox.approval.kind
@@ -2434,6 +2436,7 @@ groups:
   - correlation.agent
   - correlation.tool.identity
   - security.network.egress
+  - correlation.policy.effective
   - correlation.sandbox
   attributes: []
   body_fields:

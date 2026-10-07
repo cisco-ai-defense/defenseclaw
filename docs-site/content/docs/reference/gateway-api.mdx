@@ -426,7 +426,7 @@ deployment; elsewhere they return `404`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/policy/evaluate` | Dry-run the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, scan_result?}}`, where `target_type` is `skill`, `mcp` or `plugin` and `scan_result` is `{scanner_name, max_severity, total_findings, exit_code?, scan_error?}`. DefenseClaw adds the `admission:` block for the type and the `asset_policy` block and allow rules from the live generation, and returns `{ok: true, data: <AdmissionOutput>}` with `verdict`, `reason`, `file_action`, `install_action` and `runtime_action`. The request has no connector, so rules scoped to a connector do not match. Arbitrary OPA domains and input are rejected. See [Admission and the block/allow list](/docs/policies/admission). |
+| `POST` | `/policy/evaluate` | Dry-run the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, connector?, scan_result?}}`, where `target_type` is `skill`, `mcp` or `plugin` and `scan_result` is `{scanner_name, max_severity, total_findings, exit_code?, scan_error?}`. DefenseClaw adds the `admission:` block for the type and the `asset_policy` block and allow rules from the live generation, and returns `{ok: true, data: <AdmissionOutput>}` with `verdict`, `reason`, `file_action`, `install_action` and `runtime_action`. Rules scoped to a connector match only when the request names it in `input.connector` (the OpenClaw plugin sends `openclaw`). Arbitrary OPA domains and input are rejected. See [Admission and the block/allow list](/docs/policies/admission). |
 | `POST` | `/policy/reload` | Rebuild the policy generation now and return `{"status":"reloaded","policy_dir":"...","generation":N,"digest":"sha256:..."}` (the generation and digest that are enforcing now); it also clears the judge cache. The gateway already watches `config.yaml`, the policy assets it names and the rule packs, and applies a valid change on its own, so this only forces a rebuild (for example from a script). A change that fails to build leaves the running generation in place; see [the `policy` object](#the-policy-object). |
 
 ### Guardrail control plane
@@ -605,7 +605,8 @@ Rows are most recently seen first. The gateway writes new rows to
 `inventory.db` in a batch every 30 seconds, and the route writes the rows it
 has not written yet before it lists them, so a new agent shows at once.
 `sessions_seen` counts each chat once, however many are open and also when one
-resumes after a gateway restart. `total` counts every matching identity; while
+resumes after a gateway restart. A sub-agent that runs in a session of its own,
+as a Codex 0.160 thread does, is not a chat and is not counted. `total` counts every matching identity; while
 `next_cursor` is not empty, pass it as `cursor` for the next page.
 `defenseclaw agent identities` reads every page.
 

@@ -84,15 +84,21 @@ func TestUnannouncedSubagentHooksAreChildrenOfTheMainAgent(t *testing.T) {
 // fires no SubagentStart; only the parent's create_thread result names it.
 // The thread's hooks are then a child of the calling agent, one level down,
 // with the parent session named (GAP-0179). A session nobody spawned stays a
-// root.
+// root. The thread is not a session of the agent identity: agent identities
+// counts chats (GAP-0226).
 func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 	api := &APIServer{}
 	const parentSession = "01a112f0-847b-7161-9d89-41cd7dbafd82"
 	const childSession = "01a112f1-8bff-77b2-b8f8-a675ceccfdd2"
-	parentAgent := stableLLMEventID("agent", "codex", parentSession, "root")
-	childAgent := stableLLMEventID("agent", "codex", childSession, "root")
+	const identity = "agt-00000000000000d2"
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: identity})
+	parentAgent := agentNodeID(identity, "codex", parentSession, "root")
+	childAgent := agentNodeID(identity, "codex", childSession, "root")
 	emit := func(session, event, tool string, response any) {
-		api.emitCodexHookLLMEvent(t.Context(), codexHookRequest{
+		if event == "SessionStart" { // the hook path counts a session it has not seen
+			sharedAgentIdentities.observe(agentIdentityFacts{ID: identity, UserID: "4747", Connector: "codex"}, session, true)
+		}
+		api.emitCodexHookLLMEvent(ctx, codexHookRequest{
 			HookEventName: event, SessionID: session, ToolName: tool, ToolUseID: "call-" + session + event,
 			ToolInput: map[string]any{"prompt": "run it"}, ToolResponse: response,
 			Payload: map[string]any{"source": "startup"},
@@ -116,9 +122,12 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 		t.Fatalf("parent lineage = %+v (retained %v), want depth 0", parent, ok)
 	}
 	other := "01a112f2-0000-7000-8000-000000000001"
-	stranger, ok := api.hookLifecycleSnapshot("codex", other, stableLLMEventID("agent", "codex", other, "root"))
+	stranger, ok := api.hookLifecycleSnapshot("codex", other, agentNodeID(identity, "codex", other, "root"))
 	if !ok || stranger.AgentDepth != 0 || stranger.ParentSessionID != "" {
 		t.Fatalf("a session nobody spawned = %+v (retained %v), want a root", stranger, ok)
+	}
+	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 2 || pending[identity].LastSessionID != other {
+		t.Fatalf("agent identity counted %+v, want the parent and the stranger, not the thread", pending[identity])
 	}
 }
 

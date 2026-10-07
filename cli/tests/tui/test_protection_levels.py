@@ -202,11 +202,12 @@ def test_a_pack_switch_says_when_set_levels_win_over_the_pack() -> None:
     def held(connector: str, pack: str, **kwargs: object) -> list[str]:
         choice = RulePackChoice(connector, pack, pack, f"/p/guardrail/{pack}", True, valid)
         modal = rule_pack_change_modal(levels_model(**kwargs), choice)  # type: ignore[arg-type]
-        return [line for line in modal.details if line.startswith("Tool calls still")]
+        return [line for line in modal.details if " still " in line]
 
     # claudecode blocks MEDIUM itself, so the default pack's CRITICAL doesn't apply.
     assert held("claudecode", "default") == [
-        "Tool calls still block at MEDIUM+ (not the pack's CRITICAL), as set with block-at / alert-at."
+        "Prompts, completions and tool calls still block at MEDIUM+ (not the pack's CRITICAL), "
+        "as set with block-at / alert-at."
     ]
     # Strict blocks MEDIUM+ anyway: nothing to say.
     assert held("claudecode", "strict") == []

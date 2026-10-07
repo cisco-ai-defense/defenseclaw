@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -166,3 +167,17 @@ def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
         "guardrail.rules.protections",
         f"outcome=refused reason=managed_device command=guardrail protection enable {DB}",
     )
+
+
+def test_preflight_names_the_managed_refusal_not_admin_elevation(env, monkeypatch, capsys) -> None:
+    app, _root, _writes = env
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    data_dir = Path(app.cfg.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "config.yaml").write_text("config_version: 9\ndeployment_mode: managed_enterprise\n")
+    with pytest.raises(SystemExit) as exited:
+        cmd_guardrail._preflight_config_write(app)
+    assert exited.value.code == 3
+    captured = capsys.readouterr()
+    shown = " ".join((captured.out + captured.err).split())
+    assert config_writer.MANAGED_REFUSAL in shown and "elevation" not in shown
