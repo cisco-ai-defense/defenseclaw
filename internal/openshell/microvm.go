@@ -629,6 +629,11 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes",
 			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size), pruneCommand)
 	}
+	if n, size := stagingDisks(filepath.Join(dir, "images")); n > 0 {
+		c.Detail += fmt.Sprintf("; %s from interrupted first starts occupy %s under %s; "+
+			"after confirming no sandbox start is running, remove these .staging-* directories",
+			plural(n, "staging MicroVM disk", "staging MicroVM disks"), humanBytes(size), filepath.Join(dir, "images"))
+	}
 	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
 		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
 		"(a backup or indexing app that holds a removed file open keeps its space until it lets go: `lsof +L1` lists them)",
@@ -642,6 +647,9 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Detail += fmt.Sprintf("; %s or more is recommended", humanBytes(VMDiskWarnBytes))
 	default:
 		c.Status = StatusPass
+	}
+	if n, _ := stagingDisks(filepath.Join(dir, "images")); n > 0 && c.Status == StatusPass {
+		c.Status = StatusWarn
 	}
 	return c
 }
@@ -675,6 +683,37 @@ func preparedDisks(dir string) (n int, size uint64) {
 				return nil
 			}
 			if info, err := d.Info(); err == nil && info.Mode().IsRegular() {
+				size += allocatedBytes(info)
+			}
+			return nil
+		})
+	}
+	return n, size
+}
+
+// stagingDisks reports preparation directories older than ten minutes.
+// A current first start can take several minutes; doctor must not suggest
+// removing its disk while the MicroVM driver is still writing it.
+func stagingDisks(dir string) (n int, size uint64) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, PreparedDiskPrefix) || !strings.Contains(name, ".staging-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || time.Since(info.ModTime()) < 10*time.Minute {
+			continue
+		}
+		n++
+		_ = filepath.WalkDir(filepath.Join(dir, name), func(_ string, item fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info, err := item.Info(); err == nil && info.Mode().IsRegular() {
 				size += allocatedBytes(info)
 			}
 			return nil
