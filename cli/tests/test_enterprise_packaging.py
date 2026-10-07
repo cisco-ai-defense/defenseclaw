@@ -771,6 +771,41 @@ def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_pat
     assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
 
 
+# GAP-0268: MDM writes config.yaml and then installs the package. The config
+# write started the apply unit, whose ensure ran the old binary while the
+# package replaced the files under it; it rolled back and marked the config
+# rejected, and the package ensure kept the previous config and said only
+# "active". The preinstall now holds the trigger and waits for that run, the
+# postinstall puts the trigger back, and a rejected config.yaml is named.
+def test_linux_preinstall_holds_the_apply_trigger_until_the_postinstall(tmp_path: Path) -> None:
+    rejected = {"code": "config_rejected", "message": "config.yaml was rejected; the last applied config is running"}
+    host = _Host(tmp_path, apply_path_active=True, gateway_out=json.dumps({"schema_version": 2, "ok": True, "warnings": [rejected]}))
+    held = tmp_path / "apply-path.held"
+    host.state.mkdir()
+    (host.state / "lifecycle.lock").write_text("", encoding="utf-8")
+    _write_stub(host.bin, "flock", f"echo \"flock $*\" >>'{host.log}'")
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(held),
+    }
+    pre = host.run(_rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting), "2")
+    assert pre.returncode == 0, pre.stderr
+    assert host.calls() == [
+        f"systemctl is-active --quiet {APPLY_PATH}",
+        f"systemctl stop {APPLY_PATH}",
+        f"flock -w 600 {host.state}/lifecycle.lock true",
+    ]
+    assert held.exists()
+    post = host.run(_linux_scriptlet(host, "postinstall.sh").replace("/run/defenseclaw-enterprise-apply-path.held", str(held)), "configure")
+    assert post.returncode == 0, post.stderr
+    calls = host.calls()
+    ensure = next(i for i, call in enumerate(calls) if call.startswith("gateway "))
+    assert calls.index(f"systemctl start {APPLY_PATH}") > ensure, calls
+    assert not held.exists()
+    assert f"config.yaml was not applied: {rejected['message']}" in post.stderr
+
+
 # Preremove ran uninstall with the 5 s default and exited 0
 # on busy (75), so dpkg/rpm deleted the binaries and units while machine
 # policy, per-user hooks and the running gateway still named them.

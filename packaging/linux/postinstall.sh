@@ -21,6 +21,9 @@ esac
 
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 state=/var/lib/defenseclaw-enterprise
+# The preinstall leaves this marker when it held the apply trigger for the
+# transaction (GAP-0268).
+held=/run/defenseclaw-enterprise-apply-path.held
 
 if [ ! -d /run/systemd/system ]; then
     echo "defenseclaw-enterprise: systemd is not running; run '$gateway enterprise linux ensure --from-package' on a systemd host." >&2
@@ -36,6 +39,10 @@ apply_path_was_active=0
 if systemctl is-active --quiet "$apply_path" >/dev/null 2>&1; then
     apply_path_was_active=1
     systemctl stop "$apply_path" >/dev/null 2>&1 || true
+fi
+if [ -e "$held" ]; then
+    apply_path_was_active=1
+    rm -f "$held"
 fi
 
 systemd-sysusers /usr/lib/sysusers.d/defenseclaw.conf >/dev/null 2>&1 || true
@@ -53,8 +60,31 @@ status=$?
 if [ "$apply_path_was_active" = 1 ]; then
     systemctl start "$apply_path" >/dev/null 2>&1 || true
 fi
+
+# ensure --json writes indented JSON, so join the lines first and allow
+# whitespace between the tokens.
+result=$(tr '\n' ' ' 2>/dev/null <"$state/last-package-result.json")
+unescape() {
+    sed 's/\\"/"/g; s/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g'
+}
+# message_of CODE prints the message of the errors[] or warnings[] entry
+# with that code, on one line ("" when there is none).
+message_of() {
+    printf '%s\n' "$result" |
+        sed -n 's/.*"code":[[:space:]]*"'"$1"'",[[:space:]]*"message":[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1/p' |
+        head -n 1 | unescape
+}
+
 case "$status" in
-    0) echo "defenseclaw-enterprise: the managed deployment is active." ;;
+    0)
+        echo "defenseclaw-enterprise: the managed deployment is active."
+        # A config.yaml the lifecycle rejected stays out: the deployment runs
+        # the last applied config, which a successful package run hid.
+        rejected=$(message_of config_rejected)
+        if [ -n "$rejected" ]; then
+            echo "  But config.yaml was not applied: $rejected" >&2
+        fi
+        ;;
     75)
         echo "defenseclaw-enterprise: installed, but another DefenseClaw lifecycle run held the lock for 10 minutes." >&2
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package" >&2
