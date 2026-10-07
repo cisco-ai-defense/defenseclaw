@@ -177,7 +177,8 @@ def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path
         ["guardrail", "protection", "enable", "x"],
         ["setup", "codex", "--yes"],
         ["init"],
-        ["quickstart"],
+        # GAP-0215: the connector flags reach the first-run steps, which printed tracebacks.
+        ["quickstart", "--connector", "claudecode", "--skip-gateway"],
         # GAP-0172: doctor said "not initialized, run init" on a managed device.
         ["doctor"],
     ):
