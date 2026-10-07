@@ -620,6 +620,12 @@ func splitStandaloneLifecycleJSON(output []byte) (document, diagnostics []byte) 
 	return output, nil
 }
 
+// writeEnterpriseSetupFailure reports err as the Secure Client Setup does;
+// the Secure Client golden gate pins this output.
+func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupOptions, err error) {
+	writeEnterpriseSetupFailureAs(stdout, stderr, enterpriseSetupArtifactName, opts, err)
+}
+
 // writeEnterpriseSetupFailureAs reports err under the Setup file name.
 func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts enterpriseSetupOptions, err error) {
 	if err == nil {
