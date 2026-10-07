@@ -361,6 +361,10 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 	}
 	meta, found := a.hookLifecycleSnapshot(authenticatedSource, conversationID, "")
 	if !found {
+		// Secure Client keeps its agentless native rows (issue #1092).
+		if a.managedAIDOnly() {
+			return fields, false, nil
+		}
 		return inboundConversationRootAgentV8(ctx, target, authenticatedSource, correlation, fields, selected), false, nil
 	}
 	// An agent or turn the native rail only inferred from the durable prompt
