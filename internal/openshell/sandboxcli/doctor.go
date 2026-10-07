@@ -107,6 +107,11 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	}
 	rep := a.HostDoctor(ctx, d)
 	if st != nil {
+		if st.unavailable && rep.GatewayPortElsewhere {
+			// The daemon's connection error is the other account's
+			// certificate refusal (GAP-0201): say what it means.
+			st.check.Detail = "running, but sandboxes are unavailable: the OpenShell gateway on its port is another account's (see Gateway service)"
+		}
 		rep.Checks = append(rep.Checks, st.check)
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
@@ -118,7 +123,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 }
 
 type statusProbe struct {
-	listening bool
+	// listening is set when the daemon holds its listeners; unavailable
+	// when it runs but serves no sandbox.
+	listening, unavailable bool
 	// available is set when the daemon serves sandboxes; ingress is its
 	// hook ingress address.
 	available bool
@@ -182,7 +189,7 @@ func (a *App) probeDaemon(ctx context.Context) *statusProbe {
 			c.Status, c.Detail = openshell.StatusWarn, "openshell.enabled is false: sandboxes are off"
 			c.Fix = &openshell.Fix{Summary: "turn sandboxes on", Command: CommandName + " setup"}
 		case !st.Available:
-			p.listening = st.IngressAddr != ""
+			p.listening, p.unavailable = st.IngressAddr != "", true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+firstNonEmpty(st.Reason, "not connected to OpenShell")
 		case st.DockerGroupMissing:
 			p.listening, p.available, p.ingress = true, true, st.IngressAddr

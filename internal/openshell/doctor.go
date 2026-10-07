@@ -162,6 +162,9 @@ type DoctorReport struct {
 	// MicroVM is what OpenShell's MicroVM driver needs on this Mac (nil
 	// off macOS).
 	MicroVM *MicroVMHost `json:"microvm,omitempty"`
+	// GatewayPortElsewhere is set when another account holds the gateway's
+	// port: the gateway that answers there is that account's.
+	GatewayPortElsewhere bool `json:"gateway_port_elsewhere,omitempty"`
 }
 
 // OK reports whether no check failed.
@@ -559,8 +562,9 @@ type doctorRun struct {
 	// startedApprox is set when started came from ps (to the second).
 	startedApprox bool
 	// portHeld is set when something else holds the gateway's port while
-	// its service is stopped (checkService).
-	portHeld bool
+	// its service is stopped (checkService); portOther when another
+	// account does (report.GatewayPortElsewhere).
+	portHeld, portOther bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -1070,7 +1074,8 @@ func (r *doctorRun) checkService(ctx context.Context) {
 		// Whatever the service manager says, another account's gateway on
 		// the port is what keeps this account's from running (GAP-0192).
 		if held, other := r.gatewayPortHeld(); other {
-			c.Detail, c.Fix, r.portHeld = held, r.portHeldFix(true), true
+			c.Detail, c.Fix, r.portHeld, r.portOther = held, r.portHeldFix(true), true, true
+			r.report.GatewayPortElsewhere = true
 		}
 		return
 	}
@@ -1091,7 +1096,8 @@ func (r *doctorRun) checkService(ctx context.Context) {
 			// would only restart over and over.
 			c.Detail += "; " + held
 			c.Fix = r.portHeldFix(other)
-			r.portHeld = true
+			r.portHeld, r.portOther = true, other
+			r.report.GatewayPortElsewhere = other
 		}
 	case !st.Enabled:
 		c.Status, c.Detail = StatusWarn, st.Unit+" runs but does not start at login"
@@ -1684,6 +1690,12 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		}
 		version.Status = StatusFail
 		switch {
+		case err != nil && r.portOther:
+			// The gateway on the port is another account's, with its own
+			// CA: no registration of this account's can reach it
+			// (GAP-0201).
+			version.Detail = "the gateway at " + r.reg.Endpoint + " is another account's (see Gateway service), so it refuses this account's client certificate"
+			version.Fix = &Fix{Summary: "ask that account to hand the gateway back, or run sandboxes from it (see Gateway service)"}
 		case err != nil && credentialFailure(err):
 			version.Detail = "the gateway refused DefenseClaw's TLS credentials: " + err.Error()
 			version.Fix = &Fix{Summary: "register the local gateway again, so the CLI's client certificate matches the gateway's CA",

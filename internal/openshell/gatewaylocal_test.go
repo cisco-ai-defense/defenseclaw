@@ -123,4 +123,24 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 			t.Fatalf("registration = %+v", reg)
 		}
 	})
+
+	// GAP-0201: the account that handed the gateway over keeps its
+	// registration; the gateway answering on the port is the other
+	// account's, whose CA refuses this account's certificate. The Gateway
+	// row printed the raw x509 error and told it to register again.
+	t.Run("another account's gateway answers on the port", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "disabled"), nil)
+		f.busy["127.0.0.1:17670"] = true
+		f.doctor.PortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{UID: 4242}, nil }
+		f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
+			return nil, errors.New("openshell: health: Unavailable: tls: failed to verify certificate: x509: certificate signed by unknown authority")
+		}
+		r := f.run()
+		gw := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "is another account's (see Gateway service)")
+		if strings.Contains(gw.Detail, "x509") || gw.Fix == nil || gw.Fix.Command != "" || !strings.Contains(gw.Fix.Summary, "hand the gateway back") ||
+			!r.GatewayPortElsewhere {
+			t.Fatalf("gateway = %+v, fix %+v, elsewhere %v", gw, gw.Fix, r.GatewayPortElsewhere)
+		}
+	})
 }
