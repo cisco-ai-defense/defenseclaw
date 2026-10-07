@@ -1,0 +1,230 @@
+# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:08b71155b713
+# Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defenseclaw-controls-c938a853
+spec:
+  options:
+    - name: policy-mode
+      value: enforce
+  lsmhooks:
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+        - index: 0
+          type: uint32
+          resolve: f_cred.uid.val
+          label: opener_uid
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - /usr/bin/ssh
+                - /usr/bin/ssh-add
+                - /usr/bin/ssh-keygen
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/alice/.ssh/id_dsa
+                - /home/alice/.ssh/id_ecdsa
+                - /home/alice/.ssh/id_ed25519
+                - /home/alice/.ssh/id_rsa
+          matchActions:
+            - action: NoPost
+        - matchBinaries:
+            - operator: In
+              values:
+                - /home/alice/.local/share/claude/versions/2.1.100
+                - /home/alice/.local/share/claude/versions/2.1.101
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/alice/.ssh/id_dsa
+                - /home/alice/.ssh/id_ecdsa
+                - /home/alice/.ssh/id_ed25519
+                - /home/alice/.ssh/id_rsa
+            - index: 2
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4010
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/alice/.ssh/id_dsa
+                - /home/alice/.ssh/id_ecdsa
+                - /home/alice/.ssh/id_ed25519
+                - /home/alice/.ssh/id_rsa
+            - index: 2
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchBinaries:
+            - operator: In
+              values:
+                - /home/alice/.local/share/claude/versions/2.1.100
+                - /home/alice/.local/share/claude/versions/2.1.101
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/alice/.bash_profile
+                - /home/alice/.bashrc
+                - /home/alice/.profile
+                - /home/alice/.zshrc
+            - index: 1
+              operator: Mask
+              values:
+                - "2"
+            - index: 2
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4010
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /home/alice/.bash_profile
+                - /home/alice/.bashrc
+                - /home/alice/.profile
+                - /home/alice/.zshrc
+            - index: 1
+              operator: Mask
+              values:
+                - "2"
+            - index: 2
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+        - index: 0
+          type: uint32
+          resolve: f_cred.uid.val
+          label: opener_uid
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - /home/alice/.local/share/claude/versions/2.1.100
+                - /home/alice/.local/share/claude/versions/2.1.101
+              followChildren: true
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /home/alice/.config/autostart/
+                - /home/alice/.config/systemd/user/
+            - index: 1
+              operator: Mask
+              values:
+                - "2"
+            - index: 2
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4010
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /home/alice/.config/autostart/
+                - /home/alice/.config/systemd/user/
+            - index: 1
+              operator: Mask
+              values:
+                - "2"
+            - index: 2
+              operator: Equal
+              values:
+                - "1001"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
