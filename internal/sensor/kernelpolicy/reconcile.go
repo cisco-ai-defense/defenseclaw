@@ -79,7 +79,8 @@ type Config struct {
 	Dirs   Dirs
 	Logger *slog.Logger
 	Dial   DialFunc
-	// Enrollment returns the guardian manifest's enabled rows.
+	// Enrollment returns the guardian manifest's enabled rows, and the
+	// machine-policy rows of the eligible accounts (WithMachinePolicy).
 	Enrollment func() (Enrollment, error)
 	// FS defaults to the operating system's.
 	FS FS
@@ -142,6 +143,10 @@ type Controller struct {
 	alive      map[int]int
 	// progressAt is when each user's last uid_progress change was emitted.
 	progressAt map[int]time.Time
+	// retireForeign are the policies in DefenseClaw's name pattern that the
+	// last retire step (off and consume) found in Tetragon unrecorded: the
+	// customer's, reported as tetragon_foreign_defenseclaw_name.
+	retireForeign []string
 
 	snapshot atomic.Pointer[State]
 	nudge    chan struct{}
@@ -214,8 +219,8 @@ func New(cfg Config) *Controller {
 	c.st.KernelPolicy = Digest()
 	c.st.Intent = IntentStatus{
 		Mode: cfg.Intent.Mode, BurnIn: burnInText(cfg.Intent.BurnIn), EnforceAck: strings.Join(cfg.Intent.EnforceAcks, ","),
-		EnforceConnectors: cfg.Intent.EnforceConnectors, CustomerEvents: cfg.Intent.CustomerEventsSetting(),
-		Problems: cfg.Intent.Problems,
+		EnforceConnectors: cfg.Intent.EnforceConnectors, MachinePolicyConnectors: cfg.Intent.MachinePolicyConnectors,
+		CustomerEvents: cfg.Intent.CustomerEventsSetting(), Problems: cfg.Intent.Problems,
 	}
 	if c.st.Applied == nil {
 		c.st.Applied = map[string]Applied{}
@@ -403,7 +408,7 @@ func (c *Controller) persist() {
 // ledger and the warnings they raise: a capped warning per policy over its
 // volume budget in the last hour and, in off and consume (no pass lists
 // Tetragon then), a foreign-name warning per customer policy named in
-// DefenseClaw's pattern.
+// DefenseClaw's pattern, from the retire step's listing and the stream's.
 func (c *Controller) applyCustomer() {
 	if c.cfg.Customer == nil {
 		return
@@ -422,6 +427,13 @@ func (c *Controller) applyCustomer() {
 			continue
 		}
 		kept = append(kept, warning)
+	}
+	if listing {
+		for _, name := range c.retireForeign {
+			if len(kept) < 64 {
+				kept = addUnique(kept, WarnForeignName+":"+name)
+			}
+		}
 	}
 	for _, policy := range policies {
 		if len(kept) >= 64 {
@@ -789,6 +801,7 @@ func (c *Controller) retireOnce(ctx context.Context) error {
 	// The record on disk is the truth: a --tetragon-cleanup run while this
 	// helper waited to retry may have retired the rest.
 	c.reloadRecord()
+	c.retireForeign = append([]string(nil), result.Foreign...)
 	for _, name := range result.Foreign {
 		c.st.Warnings = addUnique(c.st.Warnings, WarnForeignName+":"+name)
 	}

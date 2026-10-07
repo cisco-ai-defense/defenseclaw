@@ -30,7 +30,6 @@ from enum import Enum
 from typing import Any
 
 from defenseclaw.kernel_sensor import (
-    admin_command,
     kernel_controls_line,
     kernel_sensor_summary,
     your_policies_line,
@@ -197,9 +196,10 @@ class PlaneRow:
                 why = _clip(policy.error or policy.state or "not loaded")
                 lines.append(f"  {policy.family}: {why}")
         if self.kernel_paused_until:
-            # Root runs it, and the binaries are not on PATH: print what runs.
-            lines.append(f"{self.kernel_paused_label}; root can resume it with")
-            lines.append(admin_command("enterprise", "linux", "tetragon", "resume"))
+            # One line, so the findings table stays above the fold at 80x24
+            # (SPEC-TETRAGON-UX 5.8). The runnable root command is in the CLI,
+            # doctor and the docs.
+            lines.append(f"{self.kernel_paused_label}; root can resume it (tetragon resume)")
         return tuple(lines)
 
     @property

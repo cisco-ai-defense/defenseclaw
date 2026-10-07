@@ -80,6 +80,12 @@ type tetragonIntent struct {
 	// Both are set only in enforce mode (the drop-in carries them).
 	EnforceConnectors []string
 	GuardrailObserve  []string
+	// MachinePolicy are the enrolled command-line connectors on vendor
+	// machine policy that the enumerator gives no per-user rows
+	// (enrollment.unenrolled_users is not deny, enrollment.mode is not
+	// manifest): the helper enrolls them for every eligible account. Set only
+	// in observe and enforce, the modes that anchor agents.
+	MachinePolicy []string
 	// ActionCLI and ObserveCLI split the enrolled command-line connectors
 	// (the only ones a kernel control can anchor) by guardrail mode in every
 	// mode, for the readiness checks of a mode the host does not run yet.
@@ -127,7 +133,35 @@ func tetragonIntentOf(cfg *config.Config, goos string, connectors []string) tetr
 	if mode == config.TetragonModeEnforce {
 		intent.EnforceConnectors, intent.GuardrailObserve = action, observe
 	}
+	if mode == config.TetragonModeObserve || mode == config.TetragonModeEnforce {
+		intent.MachinePolicy = machinePolicyAnchors(cfg, goos, connectors)
+	}
 	return intent
+}
+
+// machinePolicyAnchors are the enrolled command-line connectors whose hooks
+// reach every eligible account through vendor machine policy, while the
+// enumerator writes no per-user rows for them: the same rule as the
+// enumerator's (enterprisehooks.EnumerateUnix), from the same config.
+func machinePolicyAnchors(cfg *config.Config, goos string, connectors []string) []string {
+	enrollment := cfg.Enterprise.Enrollment
+	if strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) ||
+		strings.EqualFold(strings.TrimSpace(enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		return nil
+	}
+	var owned []string
+	for _, connector := range connectors {
+		if cfg.Enterprise.MachinePolicy.PolicyFor(connector).Ownership != config.MachinePolicyOwnershipOff {
+			owned = append(owned, connector)
+		}
+	}
+	var out []string
+	for _, connector := range MachinePolicyConnectors(goos, owned) {
+		if kernelpolicy.IsCLIConnector(connector) {
+			out = append(out, connector)
+		}
+	}
+	return out
 }
 
 // helperMode is the mode the helper runs with this intent: its own default
@@ -152,7 +186,8 @@ func (t tetragonIntent) ack() string { return strings.Join(t.EnforceAck, ",") }
 // defaults). The header names the control-set digest this build ships, the
 // value enforce_ack approves. ENFORCE_ACK is a comma list (one digest, or
 // several while a ring upgrade runs two builds); CUSTOMER_EVENTS appears only
-// when it is not the default.
+// when it is not the default, MACHINE_POLICY_CONNECTORS only when it names
+// one.
 func (t tetragonIntent) dropin() []byte {
 	if !t.Written {
 		return nil
@@ -169,6 +204,9 @@ func (t tetragonIntent) dropin() []byte {
 	}
 	if t.CustomerEvents != "" && t.CustomerEvents != config.TetragonCustomerEventsAgent {
 		lines = append(lines, [2]string{kernelpolicy.EnvCustomerEvents, t.CustomerEvents})
+	}
+	if len(t.MachinePolicy) > 0 {
+		lines = append(lines, [2]string{kernelpolicy.EnvMachinePolicyConnectors, strings.Join(t.MachinePolicy, ",")})
 	}
 	for _, line := range lines {
 		fmt.Fprintf(&b, "Environment=%s\n", systemdQuote(line[0]+"="+line[1]))
@@ -463,7 +501,7 @@ func tetragonFindings(in tetragonInputs) []tetragonFinding {
 				add(true, warning, tetragonFacts{})
 			}
 		case code == kernelpolicy.WarnEnforceInactive:
-			add(false, code, inactiveFacts(detail, intent, state))
+			add(false, code, inactiveFacts(detail, in))
 		case code == kernelpolicy.WarnUnsupportedVersion:
 			add(false, code, tetragonFacts{Version: state.Tetragon.Version, Mode: mode})
 		case code == "":
@@ -509,10 +547,11 @@ func refusedEndpointFacts(code, detail string, state kernelpolicy.State, host te
 // inactiveFacts say why no control can be enforced: no anchor at all (the
 // users without an agent, and enrolled connectors no user has a row for), or
 // no user that finished burn-in yet (and when the next one is ready).
-func inactiveFacts(detail string, intent tetragonIntent, state kernelpolicy.State) tetragonFacts {
+func inactiveFacts(detail string, in tetragonInputs) tetragonFacts {
+	intent, state := in.Intent, in.State
 	if strings.Contains(detail, "burn-in") {
 		facts := tetragonFacts{Variant: variantNoReadyUser}
-		if eta, ok := nextReady(state, state.UpdatedAt); ok {
+		if eta, ok := nextReady(in, state.UpdatedAt); ok {
 			facts.ETA = humanDuration(eta)
 		}
 		return facts
@@ -693,7 +732,10 @@ type TetragonIntentView struct {
 	Approval          string   `json:"approval"`
 	EnforceConnectors []string `json:"enforce_connectors"`
 	GuardrailObserve  []string `json:"guardrail_observe"`
-	Dropin            bool     `json:"dropin"`
+	// MachinePolicyConnectors are the connectors the helper enrolls for
+	// every eligible account (vendor machine policy, no targets.yaml row).
+	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
+	Dropin                  bool     `json:"dropin"`
 }
 
 // TetragonHelperView is the sensor helper as its unit and state say.
@@ -735,9 +777,13 @@ type TetragonPolicy struct {
 
 // TetragonUser is one enrolled user's place in the rollout.
 type TetragonUser struct {
-	UID           int            `json:"uid"`
-	User          string         `json:"user,omitempty"`
-	Connectors    []string       `json:"connectors"`
+	UID        int      `json:"uid"`
+	User       string   `json:"user,omitempty"`
+	Connectors []string `json:"connectors"`
+	// MachinePolicy are the connectors of Connectors the user is enrolled
+	// for through vendor machine policy (an eligible account, no row in
+	// targets.yaml).
+	MachinePolicy []string       `json:"machine_policy"`
 	State         string         `json:"state"`
 	Reason        string         `json:"reason,omitempty"`
 	AnchoredRoots int            `json:"anchored_roots"`
@@ -900,7 +946,7 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 	now := env.Now()
 	rep.progress = map[int]burnInProgress{}
 	for _, user := range state.UIDs {
-		rep.progress[user.UID] = progressOf(user, state.BurnIn.UIDs[strconv.Itoa(user.UID)], now)
+		rep.progress[user.UID] = progressFor(user, state.BurnIn.UIDs[strconv.Itoa(user.UID)], in, now)
 	}
 	if opts.Action == TetragonActionStatus {
 		rep.next = statusNext(in, env.tetragonProbes(ctx), now)
@@ -939,7 +985,7 @@ func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool
 		BurnIn: intent.BurnIn, EnforceAck: intent.ack(), CustomerEvents: defaultStr(intent.CustomerEvents, config.TetragonCustomerEventsAgent),
 		Approval:          approvalOf(intent),
 		EnforceConnectors: nonNil(intent.EnforceConnectors), GuardrailObserve: nonNil(intent.GuardrailObserve),
-		Dropin: intent.Written,
+		MachinePolicyConnectors: nonNil(intent.MachinePolicy), Dropin: intent.Written,
 	}
 	rep.Helper = TetragonHelperView{
 		Unit: unitSensorHelper, Running: running, PID: state.HelperPID, Mode: string(state.Intent.Mode),
@@ -960,7 +1006,8 @@ func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool
 	sort.Slice(rep.Policies, func(i, j int) bool { return rep.Policies[i].Name < rep.Policies[j].Name })
 	for _, user := range state.UIDs {
 		view := TetragonUser{
-			UID: user.UID, User: user.User, Connectors: nonNil(user.Connectors), State: user.State, Reason: user.Reason,
+			UID: user.UID, User: user.User, Connectors: nonNil(user.Connectors), MachinePolicy: nonNil(user.MachinePolicy),
+			State: user.State, Reason: user.Reason,
 			AnchoredRoots: user.AnchoredRoots, CoveredHours: hours(user.CoveredSeconds), NeededHours: hours(user.NeededSeconds),
 			WouldBlock: []TetragonHits{}, Blocked: []TetragonHits{},
 		}
@@ -1313,8 +1360,8 @@ func statusNext(in tetragonInputs, probes tetragonProbes, now time.Time) []strin
 		}
 		sentence := fmt.Sprintf("Next: %d of %d %s %s ready", a.ReadyUsers, a.Users, plural(a.Users, "user", "users"), plural(a.ReadyUsers, "is", "are"))
 		if a.ReadyUsers < a.Users {
-			if eta, ok := nextReady(in.State, now); ok {
-				sentence += "; the next is ready in " + humanDuration(eta) + " of agent use"
+			if eta, ok := nextReady(in, now); ok {
+				sentence += "; the next is ready in " + humanDuration(eta) + " at the current rate"
 			}
 		}
 		return []string{sentence + ". Check with:", verify("--ready-for", "enforce")}
@@ -1322,30 +1369,35 @@ func statusNext(in tetragonInputs, probes tetragonProbes, now time.Time) []strin
 	return nil
 }
 
-// userStateWords is a user's place in the rollout in words.
-func userStateWords(user TetragonUser, progress burnInProgress) string {
+// userStateWords is a user's place in the rollout in words, and for a
+// monitor-only user why (status prints it under the table, which keeps the
+// table within 100 columns).
+func userStateWords(user TetragonUser, progress burnInProgress) (state, why string) {
 	switch user.State {
 	case kernelpolicy.UIDEnforcing:
-		return "enforcing"
+		return "enforcing", ""
 	case kernelpolicy.UIDBurnIn:
 		if progress.Reset {
-			return "reset by a hit"
+			return "reset by a hit", ""
 		}
-		return "in burn-in"
+		return "in burn-in", ""
 	case kernelpolicy.UIDInactive:
 		if user.Reason == kernelpolicy.ReasonNoAnchors {
-			return "no agent installed"
+			return "no agent installed", ""
 		}
 	case kernelpolicy.UIDMonitor:
-		// In observe every user's burn-in accrues toward enforce.
+		// In observe every user's burn-in accrues toward enforce, but
+		// enforce never denies for a user without a connector in action mode.
 		if user.Reason == "observe mode" {
 			switch {
+			case progress.MonitorOnly:
+				return "monitor only", monitorReasonWords[kernelpolicy.ReasonGuardrailObserve]
 			case progress.Ready:
-				return "ready for enforce"
+				return "ready for enforce", ""
 			case progress.Reset:
-				return "reset by a hit"
+				return "reset by a hit", ""
 			}
-			return "in burn-in"
+			return "in burn-in", ""
 		}
 	}
 	reason := user.Reason
@@ -1354,20 +1406,17 @@ func userStateWords(user TetragonUser, progress burnInProgress) string {
 	} else if words, ok := observedReasonWords[reason]; ok {
 		reason = words
 	}
-	if reason == "" {
-		return "monitor only"
-	}
-	return "monitor only: " + reason
+	return "monitor only", reason
 }
 
 // burnInWords is "40.5h of 168h (24%), ~9 days".
 func burnInWords(user TetragonUser, progress burnInProgress) string {
 	text := fmt.Sprintf("%.1fh of %sh", user.CoveredHours, trimHours(user.NeededHours))
 	switch {
+	case progress.NoAgent, progress.MonitorOnly:
+		return text
 	case progress.Ready:
 		return text + ", ready"
-	case progress.NoAgent:
-		return text
 	}
 	text += fmt.Sprintf(" (%d%%)", progress.Percent)
 	switch {
@@ -1527,24 +1576,34 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 	return nil
 }
 
-// writeStatusUsers prints the users table and up to three hit details per
-// user under it (the JSON keeps all).
+// writeStatusUsers prints the users table and, under it, why a user stays
+// monitor-only and up to three hit details per user (the JSON keeps all).
 func writeStatusUsers(w io.Writer, rep *TetragonReport) {
 	fmt.Fprintln(w, "  Users:")
 	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(table, "    USER\tSTATE\tCONNECTORS\tBURN-IN\tHITS")
+	viaPolicy := false
 	for _, user := range rep.Users {
 		hits := 0
 		for _, hit := range append(append([]TetragonHits{}, user.WouldBlock...), user.Blocked...) {
 			hits += hit.Count
 		}
 		progress := rep.progress[user.UID]
-		fmt.Fprintf(table, "    %s\t%s\t%s\t%s\t%d\n", statusUserLabel(user), userStateWords(user, progress),
-			defaultStr(strings.Join(user.Connectors, ","), "-"), burnInWords(user, progress), hits)
+		state, _ := userStateWords(user, progress)
+		fmt.Fprintf(table, "    %s\t%s\t%s\t%s\t%d\n", statusUserLabel(user), state, connectorsWords(user), burnInWords(user, progress), hits)
+		viaPolicy = viaPolicy || len(user.MachinePolicy) > 0
 	}
 	_ = table.Flush()
+	if viaPolicy {
+		fmt.Fprintln(w, "    * through vendor machine policy: an eligible account without a targets.yaml row")
+	}
 	for _, user := range rep.Users {
-		details := append(hitLines("would block", user.WouldBlock, user.UID), hitLines("blocked", user.Blocked, user.UID)...)
+		var details [][2]string
+		if _, why := userStateWords(user, rep.progress[user.UID]); why != "" {
+			details = append(details, [2]string{"monitor only: " + why, ""})
+		}
+		details = append(details, hitLines("would block", user.WouldBlock, user.UID)...)
+		details = append(details, hitLines("blocked", user.Blocked, user.UID)...)
 		for i, lines := range details {
 			if i == 3 {
 				fmt.Fprintf(w, "      %s: and %d more (see --json)\n", statusUserLabel(user), len(details)-3)
@@ -1556,6 +1615,24 @@ func writeStatusUsers(w io.Writer, rep *TetragonReport) {
 			}
 		}
 	}
+}
+
+// connectorsWords is the CONNECTORS column: a connector the user is
+// enrolled for through vendor machine policy carries a "*" ("claudecode*,
+// opencode"), which a line under the table explains.
+func connectorsWords(user TetragonUser) string {
+	machine := map[string]bool{}
+	for _, connector := range user.MachinePolicy {
+		machine[connector] = true
+	}
+	words := make([]string, 0, len(user.Connectors))
+	for _, connector := range user.Connectors {
+		if machine[connector] {
+			connector += "*"
+		}
+		words = append(words, connector)
+	}
+	return defaultStr(strings.Join(words, ","), "-")
 }
 
 func statusUserLabel(user TetragonUser) string {

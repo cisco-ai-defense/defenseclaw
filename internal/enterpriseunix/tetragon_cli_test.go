@@ -73,6 +73,11 @@ func expectedTetragonDropin(mode, burnIn, ack, connectors string, extra ...strin
 	return out
 }
 
+// machinePolicyAnchorsLine is the drop-in line of the test config's two
+// connectors: both are on vendor machine policy on Linux and, with the
+// default enrollment.unenrolled_users, have no targets.yaml rows.
+const machinePolicyAnchorsLine = kernelpolicy.EnvMachinePolicyConnectors + "=claudecode,codex"
+
 func (h *testHost) recordTetragonPolicies(names ...string) {
 	h.t.Helper()
 	writeHostFile(h.t, h, filepath.Join(kernelpolicy.DefaultStateDir, "tetragon-loaded"), strings.Join(names, "\n")+"\n")
@@ -161,7 +166,7 @@ func TestTetragonDropinFollowsTheBlock(t *testing.T) {
 
 	calls := len(h.services.calls)
 	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: tetragonTestConfig(t, h, "    mode: observe\n    burn_in: 48h\n", true)}))
-	if got, want := h.read(tetragonDropinPath), expectedTetragonDropin("observe", "48h", "", ""); got != want {
+	if got, want := h.read(tetragonDropinPath), expectedTetragonDropin("observe", "48h", "", "", machinePolicyAnchorsLine); got != want {
 		t.Fatalf("drop-in:\n%s\nwant:\n%s", got, want)
 	}
 	record, err := h.env.loadDeployment()
@@ -225,36 +230,55 @@ func TestTetragonDropinAppliesTheCaps(t *testing.T) {
 		},
 		{
 			name: "approved enforce", block: "    mode: enforce\n    enforce_ack: " + digest + "\n", planeC: true,
-			dropin:   expectedTetragonDropin("enforce", "168h", digest, "claudecode"),
+			dropin:   expectedTetragonDropin("enforce", "168h", digest, "claudecode", machinePolicyAnchorsLine),
 			warnings: []string{kernelpolicy.WarnGuardrailObserve + ":codex"},
 			absent:   []string{kernelpolicy.WarnEnforceAckMissing, kernelpolicy.WarnEnforceAckStale, kernelpolicy.WarnBurnInSkipped},
 		},
 		{
 			name: "enforce without approval", block: "    mode: enforce\n    burn_in: 0\n", planeC: true,
-			dropin:   expectedTetragonDropin("enforce", "0", "", "claudecode"),
+			dropin:   expectedTetragonDropin("enforce", "0", "", "claudecode", machinePolicyAnchorsLine),
 			warnings: []string{kernelpolicy.WarnEnforceAckMissing, kernelpolicy.WarnBurnInSkipped},
 		},
 		{
 			name: "stale approval", block: "    mode: enforce\n    enforce_ack: sha256:000000000000\n", planeC: true,
-			dropin:   expectedTetragonDropin("enforce", "168h", "sha256:000000000000", "claudecode"),
+			dropin:   expectedTetragonDropin("enforce", "168h", "sha256:000000000000", "claudecode", machinePolicyAnchorsLine),
 			warnings: []string{kernelpolicy.WarnEnforceAckStale},
 		},
 		{
 			name: "observe keeps an approval inert", block: "    mode: observe\n    enforce_ack: sha256:000000000000\n", planeC: true,
-			dropin: expectedTetragonDropin("observe", "168h", "sha256:000000000000", ""),
+			dropin: expectedTetragonDropin("observe", "168h", "sha256:000000000000", "", machinePolicyAnchorsLine),
 			absent: []string{kernelpolicy.WarnEnforceAckStale, kernelpolicy.WarnGuardrailObserve + ":codex"},
 		},
 		{
 			// A ring upgrade approves the old and the new build at once: the
 			// list reaches the helper as a comma list and approves this build.
 			name: "approval list", block: "    mode: enforce\n    enforce_ack: [sha256:000000000000, " + digest + "]\n", planeC: true,
-			dropin: expectedTetragonDropin("enforce", "168h", "sha256:000000000000,"+digest, "claudecode"),
+			dropin: expectedTetragonDropin("enforce", "168h", "sha256:000000000000,"+digest, "claudecode", machinePolicyAnchorsLine),
 			absent: []string{kernelpolicy.WarnEnforceAckMissing, kernelpolicy.WarnEnforceAckStale},
 		},
 		{
 			name: "approval list without this build", block: "    mode: enforce\n    enforce_ack:\n      - sha256:000000000000\n      - sha256:111111111111\n", planeC: true,
-			dropin:   expectedTetragonDropin("enforce", "168h", "sha256:000000000000,sha256:111111111111", "claudecode"),
+			dropin:   expectedTetragonDropin("enforce", "168h", "sha256:000000000000,sha256:111111111111", "claudecode", machinePolicyAnchorsLine),
 			warnings: []string{kernelpolicy.WarnEnforceAckStale},
+		},
+		{
+			// With unenrolled_users: deny the enumerator writes per-user rows
+			// for the machine-policy connectors; targets.yaml is the whole
+			// enrollment and the helper adds nothing.
+			name: "unenrolled users denied", block: "    mode: observe\n  enrollment:\n    unenrolled_users: deny\n", planeC: true,
+			dropin: expectedTetragonDropin("observe", "168h", "", ""),
+		},
+		{
+			// The administrator publishes targets.yaml (enrollment.mode
+			// manifest): its rows are the whole enrollment.
+			name: "manifest enrollment", block: "    mode: observe\n  enrollment:\n    mode: manifest\n", planeC: true,
+			dropin: expectedTetragonDropin("observe", "168h", "", ""),
+		},
+		{
+			// A connector whose machine policy is left alone has no
+			// DefenseClaw route, so no anchor either.
+			name: "machine policy ownership off", block: "    mode: observe\n  machine_policy:\n    connectors:\n      codex:\n        ownership: off\n", planeC: true,
+			dropin: expectedTetragonDropin("observe", "168h", "", "", kernelpolicy.EnvMachinePolicyConnectors+"=claudecode"),
 		},
 		{
 			// customer_events alone is a written block; its variable appears
@@ -1107,7 +1131,7 @@ func TestTetragonStatusTextInObserveWithAResetUser(t *testing.T) {
 		"    dcr-std2 (1002)  in burn-in         claudecode  40.5h of 168h (24%), ~9 days  0\n",
 		"    dcr-std3 (1003)  reset by a hit     claudecode  0.0h of 168h (0%), measuring  1\n",
 		"      dcr-std3 (1003): would block ssh_private_key_read 1x, last 2026-10-07T09:12:00Z\n        ~/.ssh/id_ed25519 by /usr/bin/python3.11\n",
-		"Next: 1 of 3 users is ready; the next is ready in ~9 days of agent use. Check with:\n" +
+		"Next: 1 of 3 users is ready; the next is ready in ~9 days at the current rate. Check with:\n" +
 			"  sudo " + adminBinDir + "/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -1131,6 +1155,50 @@ func TestTetragonStatusTextInObserveWithAResetUser(t *testing.T) {
 	none := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus, User: "nobody"})
 	if none.OK || none.ExitCode != 2 || !strings.Contains(none.Errors[0].Message, "enrolled: dcr-std1, dcr-std2, dcr-std3") {
 		t.Fatalf("--user nobody: %+v", none)
+	}
+}
+
+// A user whose connectors are all in observe mode is never enforced, so
+// observe does not call it ready for enforce whatever its burn-in says, and
+// the Next: footer does not count it.
+func TestTetragonStatusTextNamesMonitorOnlyUsers(t *testing.T) {
+	state := publishedState(kernelpolicy.ModeObserve)
+	state.UIDs = withUsers(readyInputs("observe")).State.UIDs
+	state.UIDs[0].Connectors = []string{"codex"} // dcr-std1 finished burn-in, but runs only Codex (observe mode)
+	state.UIDs[0].MachinePolicy = []string{"codex"}
+	h := statusHost(t, "    mode: observe\n", state, nil)
+	writeBurnIn(t, h)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	got := statusText(t, rep)
+	for _, want := range []string{
+		"    dcr-std1 (1001)  monitor only    codex*      168.0h of 168h                0\n",
+		"    * through vendor machine policy: an eligible account without a targets.yaml row\n",
+		"      dcr-std1 (1001): monitor only: connector in observe mode\n",
+		"Next: 0 of 3 users are ready; the next is ready in ~9 days at the current rate. Check with:\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("text lacks %q:\n%s", want, got)
+		}
+	}
+	if !reflect.DeepEqual(rep.Users[0].MachinePolicy, []string{"codex"}) || !reflect.DeepEqual(rep.Users[1].MachinePolicy, []string{}) {
+		t.Fatalf("machine_policy = %v / %v", rep.Users[0].MachinePolicy, rep.Users[1].MachinePolicy)
+	}
+	assertStatusColumns(t, got)
+}
+
+func TestConnectorsWordsMarkMachinePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		user TetragonUser
+		want string
+	}{
+		{TetragonUser{}, "-"},
+		{TetragonUser{Connectors: []string{"amp", "opencode"}}, "amp,opencode"},
+		{TetragonUser{Connectors: []string{"claudecode", "codex"}, MachinePolicy: []string{"claudecode", "codex"}}, "claudecode*,codex*"},
+		{TetragonUser{Connectors: []string{"claudecode", "opencode"}, MachinePolicy: []string{"claudecode"}}, "claudecode*,opencode"},
+	} {
+		if got := connectorsWords(tc.user); got != tc.want {
+			t.Errorf("connectorsWords(%+v) = %q, want %q", tc.user, got, tc.want)
+		}
 	}
 }
 

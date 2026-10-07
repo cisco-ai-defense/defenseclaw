@@ -710,6 +710,34 @@ func TestForeignNamesAreReportedAndNeverTouched(t *testing.T) {
 	}
 }
 
+// In off (no event stream) and consume (before the stream lists anything)
+// the retire step's report of a customer policy in DefenseClaw's pattern
+// survives the customer-policy refresh every persist runs. Production always
+// wires a customer source.
+func TestRetireStepKeepsTheForeignNameWarningWithACustomerSource(t *testing.T) {
+	for _, mode := range []Mode{ModeOff, ModeConsume} {
+		t.Run(string(mode), func(t *testing.T) {
+			h := newHarness(t, observeIntent(), baseTargets)
+			h.procs = twoUserProcs()
+			h.tg.addForeign("defenseclaw-controls-deadbeef")
+			h.pass()
+			h.start(Intent{Mode: mode})
+			h.ctl.cfg.Customer = func(time.Time) ([]CustomerPolicy, CustomerEvents) { return nil, CustomerEvents{} }
+			if err := h.ctl.retireOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			want := WarnForeignName + ":defenseclaw-controls-deadbeef"
+			if !containsStr(h.status().Warnings, want) {
+				t.Fatalf("warnings = %v, want %s", h.status().Warnings, want)
+			}
+			h.ctl.persist() // a later flush keeps it too
+			if !containsStr(h.status().Warnings, want) {
+				t.Fatalf("after a persist: warnings = %v", h.status().Warnings)
+			}
+		})
+	}
+}
+
 func TestApprovedUserWithNothingToAnchorIsInactive(t *testing.T) {
 	h := newHarness(t, enforceIntent(Digest()), `targets:
 - user: carol

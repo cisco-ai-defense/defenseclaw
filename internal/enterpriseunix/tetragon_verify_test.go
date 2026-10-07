@@ -296,7 +296,7 @@ func TestBurnInProgressAndETA(t *testing.T) {
 		}
 	}
 	in := withUsers(readyInputs("observe"))
-	if eta, ok := nextReady(in.State, readinessNow); !ok || humanDuration(eta) != "~9 days" {
+	if eta, ok := nextReady(in, readinessNow); !ok || humanDuration(eta) != "~9 days" {
 		t.Fatalf("next ready %v %v", eta, ok)
 	}
 }
@@ -343,8 +343,10 @@ func TestTetragonReadyForEnforceText(t *testing.T) {
       tetragon:
         mode: enforce
         enforce_ack: ` + digest + `
-Ready for enforce: 1 of 3 users would be enforced now; the others stay in monitor until their burn-in completes.
-Set the approve block above in your admin config and apply it with your config management.
+Ready for enforce: 1 of 3 users would be enforced now; 2 stay in monitor until
+their burn-in completes.
+Set the approve block above in your admin config and apply it with your config
+management.
 `
 	if got != want {
 		t.Fatalf("text:\n%s\nwant:\n%s", got, want)
@@ -352,16 +354,14 @@ Set the approve block above in your admin config and apply it with your config m
 	assertColumns(t, got, 80)
 }
 
-// assertColumns: every line fits width, except a copy-paste command or a
-// Next: sentence, which keep their own unwrapped line.
+// assertColumns: every line fits width, except a copy-paste command, which
+// keeps its own unwrapped line.
 func assertColumns(t *testing.T, text string, width int) {
 	t.Helper()
 	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if len([]rune(line)) <= width || strings.HasPrefix(trimmed, "sudo ") || strings.HasPrefix(trimmed, "echo ") ||
-			strings.HasPrefix(trimmed, "`sudo ") || strings.Contains(trimmed, "enforce_ack: [") ||
-			strings.HasPrefix(line, "Ready") || strings.HasPrefix(line, "Not ready") || strings.HasPrefix(line, "Set ") ||
-			strings.HasPrefix(line, "Next:") || strings.HasPrefix(line, "and apply") {
+			strings.HasPrefix(trimmed, "`sudo ") || strings.Contains(trimmed, "enforce_ack: [") {
 			continue
 		}
 		t.Errorf("line over %d columns (%d): %q", width, len([]rune(line)), line)
@@ -416,7 +416,7 @@ func TestTetragonReadinessTextFixtures(t *testing.T) {
 		"      echo unix:///var/run/tetragon/tetragon.sock | sudo tee /etc/tetragon/tetragon.conf.d/server-address\n",
 		"      sudo systemctl restart tetragon   # this drops policies added with tetra; tetragon.tp.d policies reload\n",
 		"      ai_discovery:\n        runtime:\n          enabled: true\n          enable_host_plane: true\n",
-		"Not ready for observe: 2 checks fail (tetragon.api, defenseclaw.plane_c). Fix them, then run again:\n" +
+		"Not ready for observe: 2 checks fail (tetragon.api, defenseclaw.plane_c). Fix\nthem, then run again:\n" +
 			"  sudo " + adminBinDir + "/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe\n",
 	} {
 		if !strings.Contains(text, want) {
@@ -431,6 +431,80 @@ func TestTetragonReadinessTextFixtures(t *testing.T) {
 	if got := readinessText(t, tetragonReadiness(readyInputs("observe"), "observe", readyProbes, readinessNow)); !strings.Contains(got, "Ready: this host runs observe as its config asks.\n") {
 		t.Fatalf("a healthy observe host:\n%s", got)
 	}
+}
+
+// The enforce promotion counts a user as ready only when enforce would deny
+// for it: its burn-in finished and one of its connectors is in action mode.
+func TestTetragonReadyForEnforceCountsOnlyActionModeUsers(t *testing.T) {
+	stubTetragonAccounts(t)
+	// Every connector in observe mode: enforce would deny nothing.
+	allObserve := withUsers(readyInputs("observe"))
+	allObserve.Intent.ActionCLI, allObserve.Intent.ObserveCLI = nil, []string{"claudecode"}
+	rep := tetragonReadiness(allObserve, "enforce", readyProbes, readinessNow)
+	if check := checkOf(t, rep, checkConnectorsAction); check.Status != checkFail ||
+		!strings.Contains(check.Message, "claudecode is in observe mode, so enforce would deny nothing") ||
+		!reflect.DeepEqual(check.Fix, []string{"guardrail.connectors.claudecode.mode: action"}) {
+		t.Fatalf("connectors_action = %+v", check)
+	}
+	if rep.Ready || rep.Approve.ReadyUsers != 0 || !rep.Users[0].MonitorOnly || rep.Users[0].Ready {
+		t.Fatalf("ready %v, approve %+v, users %+v", rep.Ready, rep.Approve, rep.Users)
+	}
+	text := readinessText(t, rep)
+	if !strings.Contains(text, "    dcr-std1 (1001)   168.0h/168h  monitor never     0\n") ||
+		!strings.Contains(text, "Not ready for enforce: 1 check fails (defenseclaw.connectors_action).") {
+		t.Fatalf("text:\n%s", text)
+	}
+	assertColumns(t, text, 80)
+
+	// Mixed: dcr-std1 finished burn-in with Codex in observe mode, the others
+	// run Claude Code in action mode.
+	mixed := withUsers(readyInputs("observe"))
+	mixed.State.UIDs[0].Connectors = []string{"codex"}
+	mixed.Intent.ObserveCLI = []string{"codex"}
+	rep = tetragonReadiness(mixed, "enforce", readyProbes, readinessNow)
+	if check := checkOf(t, rep, checkConnectorsAction); check.Status != checkWarn || !strings.Contains(check.Message, "codex is in observe mode (1 user stays monitor-only)") {
+		t.Fatalf("connectors_action = %+v", check)
+	}
+	if !rep.Ready || rep.Approve.ReadyUsers != 0 || checkOf(t, rep, checkBurnIn).Message != "1 of 3 enrolled users finished burn-in on this host" {
+		t.Fatalf("ready %v approve %+v burn-in %+v", rep.Ready, rep.Approve, checkOf(t, rep, checkBurnIn))
+	}
+	want := "Ready for enforce: 0 of 3 users would be enforced now; 2 stay in monitor until their burn-in completes; 1 stays monitor-only (connector in observe mode)."
+	if rep.Next[0] != want {
+		t.Fatalf("next %q, want %q", rep.Next[0], want)
+	}
+	assertColumns(t, readinessText(t, rep), 80)
+
+	// Nobody enrolled runs the one action-mode connector.
+	nobody := withUsers(readyInputs("observe"))
+	nobody.Intent.ActionCLI, nobody.Intent.ObserveCLI = []string{"codex"}, []string{"claudecode"}
+	if check := checkOf(t, tetragonReadiness(nobody, "enforce", readyProbes, readinessNow), checkConnectorsAction); check.Status != checkFail ||
+		!strings.Contains(check.Message, "no enrolled user runs a connector in action mode (codex)") {
+		t.Fatalf("connectors_action = %+v", check)
+	}
+}
+
+// From consume there is no measured burn-in: the promotion guide says to move
+// to observe first instead of printing an approve block.
+func TestTetragonReadyForEnforceFromConsumeSaysObserveFirst(t *testing.T) {
+	stubTetragonAccounts(t)
+	rep := tetragonReadiness(readyInputs("consume"), "enforce", readyProbes, readinessNow)
+	if rep.Ready || checkOf(t, rep, checkBurnIn).Status != checkFail || checkOf(t, rep, checkApproval).Status != checkInfo {
+		t.Fatalf("ready %v, burn-in %+v", rep.Ready, checkOf(t, rep, checkBurnIn))
+	}
+	text := readinessText(t, rep)
+	for _, want := range []string{
+		"  ✗ No burn-in is measured on this host yet (it runs consume); run mode observe\n    first, where every enrolled user's burn-in accrues\n",
+		"Not ready for enforce: this host runs consume, and the burn-in is measured in\nobserve. Move to observe first; check it with:\n" +
+			"  sudo " + adminBinDir + "/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Approve this build's kernel controls (same value") || strings.Contains(text, "Ready for enforce") {
+		t.Fatalf("a consume host is offered the approval:\n%s", text)
+	}
+	assertColumns(t, text, 80)
 }
 
 func compileTetragonVerifySchema(t *testing.T) *jsonschema.Schema {

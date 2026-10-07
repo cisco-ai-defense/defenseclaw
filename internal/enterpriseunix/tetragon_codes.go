@@ -301,7 +301,7 @@ var tetragonCodes = map[string]tetragonCodeText{
 		if f.Variant == variantNoReadyUser {
 			eta := "burn-in accrues while their agents run"
 			if f.ETA != "" {
-				eta = "the next user is ready in " + f.ETA + " of agent use"
+				eta = "the next user is ready in " + f.ETA + " at the current rate"
 			}
 			return "no user has finished burn-in yet (nothing is denied yet); nothing to do: " + eta
 		}

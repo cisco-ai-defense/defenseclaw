@@ -146,6 +146,11 @@ const (
 	EnvEnforceAck        = "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_ACK"
 	EnvEnforceConnectors = "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_CONNECTORS"
 	EnvCustomerEvents    = "DEFENSECLAW_SENSOR_TETRAGON_CUSTOMER_EVENTS"
+	// EnvMachinePolicyConnectors names the enrolled command-line connectors
+	// on vendor machine policy that get no per-user rows in targets.yaml
+	// (enrollment.unenrolled_users is not deny). The helper enrolls each of
+	// them for every account of the enumerator's eligible-accounts record.
+	EnvMachinePolicyConnectors = "DEFENSECLAW_SENSOR_TETRAGON_MACHINE_POLICY_CONNECTORS"
 )
 
 // MaxEnforceAcks bounds the digests enforce_ack may list: a release and
@@ -283,6 +288,9 @@ type Intent struct {
 	// EnforceConnectors are the enrolled connectors whose effective
 	// guardrail mode is action. Only they can be anchored for a deny.
 	EnforceConnectors []string
+	// MachinePolicyConnectors are the machine-policy connectors the helper
+	// enrolls for every eligible account (EnvMachinePolicyConnectors).
+	MachinePolicyConnectors []string
 	// CustomerEvents is customer_events: CustomerEventsAgent (also when
 	// empty) or CustomerEventsOff.
 	CustomerEvents string
@@ -387,22 +395,34 @@ func IntentFromLookup(lookup Lookup) Intent {
 			*notes = append(*notes, WarnConfigInvalid+":"+EnvCustomerEvents)
 		}
 	}
-	if value, ok := lookup(EnvEnforceConnectors); ok {
-		seen := map[string]bool{}
-		for _, part := range strings.Split(value, ",") {
-			connector := strings.ToLower(strings.TrimSpace(part))
-			switch {
-			case connector == "" || seen[connector]:
-			case !connectorName.MatchString(connector):
-				*notes = addUnique(*notes, WarnConfigInvalid+":"+EnvEnforceConnectors)
-			default:
-				seen[connector] = true
-				intent.EnforceConnectors = append(intent.EnforceConnectors, connector)
-			}
+	intent.EnforceConnectors = connectorList(lookup, EnvEnforceConnectors, notes)
+	intent.MachinePolicyConnectors = connectorList(lookup, EnvMachinePolicyConnectors, notes)
+	return intent
+}
+
+// connectorList reads a comma list of connector names from the drop-in,
+// sorted and without duplicates. A malformed name is dropped and noted: it
+// could never match an enrolled connector anyway.
+func connectorList(lookup Lookup, name string, notes *[]string) []string {
+	value, ok := lookup(name)
+	if !ok {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(value, ",") {
+		connector := strings.ToLower(strings.TrimSpace(part))
+		switch {
+		case connector == "" || seen[connector]:
+		case !connectorName.MatchString(connector):
+			*notes = addUnique(*notes, WarnConfigInvalid+":"+name)
+		default:
+			seen[connector] = true
+			out = append(out, connector)
 		}
 	}
-	sort.Strings(intent.EnforceConnectors)
-	return intent
+	sort.Strings(out)
+	return out
 }
 
 // parseAcks reads the drop-in's enforce_ack: one digest, or a comma list

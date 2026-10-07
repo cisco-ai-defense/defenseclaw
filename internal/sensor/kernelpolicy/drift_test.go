@@ -13,6 +13,8 @@
 package kernelpolicy
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -28,6 +30,29 @@ func TestCLIConnectorsAreKnownToTheEnumerator(t *testing.T) {
 		if !enterprisehooks.UnixAgentProbeKnown(connector) {
 			t.Errorf("%s is not a connector the enumerator probes", connector)
 		}
+	}
+}
+
+// The helper reads the enumerator's eligible-accounts record next to the
+// manifest: the same file name, and the record the enumerator writes parses.
+func TestEligibleAccountsRecordIsTheEnumerators(t *testing.T) {
+	if EligibleAccountsFileName != enterprisehooks.UnixEligibleAccountsFileName {
+		t.Fatalf("file name %s, the enumerator writes %s", EligibleAccountsFileName, enterprisehooks.UnixEligibleAccountsFileName)
+	}
+	const manifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
+	if got, want := EligibleAccountsPath(manifest), enterprisehooks.UnixEligibleAccountsPath(manifest); got != want {
+		t.Fatalf("path %s, the enumerator writes %s", got, want)
+	}
+	data, err := json.Marshal(struct {
+		Version  int                                   `json:"version"`
+		Accounts []enterprisehooks.UnixEligibleAccount `json:"accounts"`
+	}{1, []enterprisehooks.UnixEligibleAccount{{User: "alice", UID: 1001, GID: 1001, Home: "/home/alice", HomeInode: 7}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := ParseEligibleAccounts(data)
+	if err != nil || !reflect.DeepEqual(accounts, []EligibleAccount{{User: "alice", UID: 1001, Home: "/home/alice"}}) {
+		t.Fatalf("%+v %v", accounts, err)
 	}
 }
 

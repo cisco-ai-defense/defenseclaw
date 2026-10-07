@@ -22,7 +22,9 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
 )
 
@@ -65,20 +67,45 @@ func kernelPolicyStart(ctx context.Context, logger *slog.Logger, intent kernelpo
 		Logger: logger,
 		Dial:   dial,
 		Enrollment: func() (kernelpolicy.Enrollment, error) {
-			return kernelpolicy.LoadEnrollment(manifestPath, validateManifestTrust, lookupUser)
+			return loadKernelEnrollment(manifestPath, intent.MachinePolicyConnectors)
 		},
 		ExtraPrefixes: agentPrefixes(os.LookupEnv),
 		Customer:      customer,
 	})
 	logger.Info("kernel policy controller starting", "mode", intent.Mode, "kernel_policy", kernelpolicy.Digest(),
 		"burn_in", intent.BurnIn.String(), "enforce_ack_set", len(intent.EnforceAcks) > 0, "approval", intent.Approval(),
-		"enforce_connectors", intent.EnforceConnectors, "customer_events", intent.CustomerEventsSetting())
+		"enforce_connectors", intent.EnforceConnectors, "machine_policy_connectors", intent.MachinePolicyConnectors,
+		"customer_events", intent.CustomerEventsSetting())
 	go func() {
 		if err := controller.Run(ctx); err != nil {
 			logger.Error("kernel policy controller stopped", "error", err)
 		}
 	}()
 	return controller
+}
+
+// loadKernelEnrollment is the guardian manifest's enabled rows and, for the
+// machine-policy connectors the drop-in names, a row per account of the
+// enumerator's eligible-accounts record next to the manifest that the
+// manifest has no row for. Both files get the same root-owned trust check;
+// either one unreadable or untrusted is an error, and the reconciler keeps
+// its previous enrollment.
+func loadKernelEnrollment(manifestPath string, machinePolicy []string) (kernelpolicy.Enrollment, error) {
+	enrollment, err := kernelpolicy.LoadEnrollment(manifestPath, validateManifestTrust, lookupUser)
+	if err != nil || len(machinePolicy) == 0 || strings.TrimSpace(manifestPath) == "" {
+		return enrollment, err
+	}
+	accounts, err := kernelpolicy.LoadEligibleAccounts(kernelpolicy.EligibleAccountsPath(manifestPath), validateEligibleAccountsTrust)
+	if err != nil {
+		return kernelpolicy.Enrollment{}, err
+	}
+	return enrollment.WithMachinePolicy(accounts, machinePolicy), nil
+}
+
+// validateEligibleAccountsTrust is replaced by tests, which cannot create
+// root-owned fixtures.
+var validateEligibleAccountsTrust = func(path string) error {
+	return managed.ValidateTrustedFilePath(path, "eligible accounts record")
 }
 
 // agentPrefixes are the administrator's extra agent install prefixes

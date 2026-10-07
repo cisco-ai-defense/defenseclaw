@@ -7,6 +7,7 @@
 #   group_vars/defenseclaw_ring_broad.yml
 #     defenseclaw_tetragon_mode: enforce
 #     defenseclaw_tetragon_enforce_ack: sha256:08b71155b713   # from `tetragon verify --ready-for enforce`
+#     defenseclaw_guardrail_mode: action   # the kernel controls deny only for connectors in action mode
 #
 # Run one ring at a time, and stop at the first host that fails its checks:
 #

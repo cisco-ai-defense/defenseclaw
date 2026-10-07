@@ -4419,6 +4419,32 @@
       "security_note": "Read from the root-owned drop-in only. It can only narrow the enforcing scope: anchors still come from enrolled connectors in the guardian manifest resolved to their real install files."
     },
     {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_MACHINE_POLICY_CONNECTORS",
+      "category": "discovery",
+      "purpose": "Comma-separated enrolled command-line connectors whose DefenseClaw hooks reach every eligible account through vendor machine policy (Claude Code, Codex, Cursor, Copilot CLI and OpenCode on Linux) and that have no per-user rows in targets.yaml because enterprise.enrollment.unenrolled_users is not deny. For its kernel controls, the managed Linux sensor helper enrolls each of them for every account of the enumerator's root-only eligible-accounts.json (next to targets.yaml) that targets.yaml has no row for. Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf in observe and enforce when it names a connector; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (only targets.yaml rows are enrolled)",
+      "accepted_values": [
+        "comma-separated connector names",
+        "empty",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/tetragon_cli.go",
+          "description": "The lifecycle renders it from the enrolled machine-policy connectors and enterprise.enrollment (the only writer)"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it; the helper adds a machine-policy row per eligible account for each connector"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only, and the accounts come only from the enumerator's root-owned eligible-accounts record, checked like targets.yaml. A row only anchors an installed command-line agent below that account, and a targets.yaml row for the same user and connector, enabled or not, always wins."
+    },
+    {
       "name": "DEFENSECLAW_SENSOR_TETRAGON_MODE",
       "category": "discovery",
       "purpose": "How the managed Linux sensor helper uses the host's Tetragon (enterprise.tetragon.mode, with the Plane C cap applied): off (cn_proc and fanotify only), consume (read Tetragon's process events), observe (also load DefenseClaw's kernel controls in monitor mode) or enforce (let them deny once enforce_ack matches). Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf only when enterprise.tetragon differs from the default; read only by defenseclaw-sensor-helper --managed-enterprise.",

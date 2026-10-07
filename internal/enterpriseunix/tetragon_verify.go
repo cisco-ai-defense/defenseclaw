@@ -105,14 +105,17 @@ type TetragonReadiness struct {
 	ExitCode      int    `json:"exit_code"`
 	// Mode is the mode this host runs as its config renders it; ReadyFor
 	// the mode checked; Ready whether no check failed.
-	Mode         string                  `json:"mode"`
-	ReadyFor     string                  `json:"ready_for"`
-	Ready        bool                    `json:"ready"`
-	KernelPolicy string                  `json:"kernel_policy"`
-	Checks       []TetragonCheck         `json:"checks"`
-	Users        []TetragonUserReadiness `json:"users"`
-	Approve      *TetragonApproval       `json:"approve,omitempty"`
-	// Next are the lines of the next step, as printed.
+	Mode         string          `json:"mode"`
+	ReadyFor     string          `json:"ready_for"`
+	Ready        bool            `json:"ready"`
+	KernelPolicy string          `json:"kernel_policy"`
+	Checks       []TetragonCheck `json:"checks"`
+	// Users are the enrolled users' burn-in toward enforce, once the helper
+	// runs observe or enforce and checks for observe or enforce.
+	Users   []TetragonUserReadiness `json:"users"`
+	Approve *TetragonApproval       `json:"approve,omitempty"`
+	// Next are the lines of the next step: sentences, which the text view
+	// wraps at 80 columns, and copy-paste lines indented by two spaces.
 	Next   []string                   `json:"next"`
 	Errors []enterprisestatus.Message `json:"errors"`
 }
@@ -136,9 +139,15 @@ type TetragonUserReadiness struct {
 	CoveredHours float64 `json:"covered_hours"`
 	NeededHours  float64 `json:"needed_hours"`
 	Percent      int     `json:"percent"`
-	Ready        bool    `json:"ready"`
-	Reset        bool    `json:"reset"`
-	Measuring    bool    `json:"measuring"`
+	// Ready is whether enforce would deny for the user now: burn-in
+	// finished (or enforcing) and a connector of the user in action mode.
+	Ready     bool `json:"ready"`
+	Reset     bool `json:"reset"`
+	Measuring bool `json:"measuring"`
+	// MonitorOnly is set when no connector of the user is in action mode:
+	// enforce never denies for them (guardrail_observe), whatever the
+	// burn-in says.
+	MonitorOnly bool `json:"monitor_only"`
 	// ETAHours is the calendar time until ready at the user's rate so far;
 	// absent while measuring, without agent use, and once ready.
 	ETAHours *float64            `json:"eta_hours,omitempty"`
@@ -298,19 +307,29 @@ func tetragonReadiness(in tetragonInputs, readyFor string, probes tetragonProbes
 		skip(checkPause, "only observe and enforce need it")
 		skip(checkOverrides, "only observe and enforce need it")
 	}
+	if rank >= modeRank(config.TetragonModeObserve) {
+		rep.Users = readinessUsers(in, now)
+	}
 	if rank >= modeRank(config.TetragonModeEnforce) {
-		setConnectorsCheck(set, intent)
-		rep.Users = readinessUsers(state, now)
+		setConnectorsCheck(set, intent, rep.Users)
 		rep.Approve = approvalFor(intent, rep.Users)
-		switch rep.Approve.State {
-		case "approved":
-			set(checkApproval, checkPass, "enforce_ack approves this build's kernel controls ("+rep.KernelPolicy+")")
-		case "stale":
-			set(checkApproval, checkInfo, "The approval (enforce_ack "+intent.ack()+") does not include this build's "+rep.KernelPolicy+"; approve it (below)")
+		switch {
+		case !intent.helperModeLoadsPolicies():
+			// Burn-in is measured only while observe or enforce runs: from
+			// consume, the guide's next ring is observe.
+			set(checkApproval, checkInfo, "approve this build's kernel controls once the observe ring measured the burn-in")
+			set(checkBurnIn, checkFail, "no burn-in is measured on this host yet (it runs "+hostMode+"); run mode observe first, where every enrolled user's burn-in accrues")
 		default:
-			set(checkApproval, checkInfo, "this build's kernel controls are not approved yet; approve them (below)")
+			switch rep.Approve.State {
+			case "approved":
+				set(checkApproval, checkPass, "enforce_ack approves this build's kernel controls ("+rep.KernelPolicy+")")
+			case "stale":
+				set(checkApproval, checkInfo, "The approval (enforce_ack "+intent.ack()+") does not include this build's "+rep.KernelPolicy+"; approve it (below)")
+			default:
+				set(checkApproval, checkInfo, "this build's kernel controls are not approved yet; approve them (below)")
+			}
+			set(checkBurnIn, checkInfo, fmt.Sprintf("%d of %d enrolled users finished burn-in on this host", finishedBurnIn(rep.Users), len(rep.Users)))
 		}
-		set(checkBurnIn, checkInfo, fmt.Sprintf("%d of %d enrolled users finished burn-in on this host", rep.Approve.ReadyUsers, rep.Approve.Users))
 	} else {
 		for _, id := range []string{checkConnectorsAction, checkApproval, checkBurnIn} {
 			skip(id, "only enforce needs it")
@@ -564,17 +583,35 @@ func missingConnectorRows(intent tetragonIntent, users []kernelpolicy.UIDStatus)
 	return out
 }
 
-func setConnectorsCheck(set func(id, status, message string, fix ...string), intent tetragonIntent) {
+// setConnectorsCheck: a kernel control denies only for a command-line
+// connector in action mode. It fails when enforce would deny for nobody (no
+// such connector, or no enrolled user runs one) and warns while some users
+// stay monitor-only.
+func setConnectorsCheck(set func(id, status, message string, fix ...string), intent tetragonIntent, users []TetragonUserReadiness) {
+	fix := make([]string, 0, len(intent.ObserveCLI))
+	for _, connector := range intent.ObserveCLI {
+		fix = append(fix, "guardrail.connectors."+connector+".mode: action")
+	}
+	monitorOnly := 0
+	for _, user := range users {
+		if user.MonitorOnly {
+			monitorOnly++
+		}
+	}
+	observe := strings.Join(intent.ObserveCLI, ", ") + " " + plural(len(intent.ObserveCLI), "is", "are") + " in observe mode"
 	switch {
 	case len(intent.ActionCLI)+len(intent.ObserveCLI) == 0:
-		set(checkConnectorsAction, checkWarn, "no command-line connector is enrolled (a kernel control anchors only command-line agents)")
+		set(checkConnectorsAction, checkFail, "no command-line connector is enrolled (a kernel control anchors only command-line agents, so enforce would deny nothing)")
+	case len(intent.ActionCLI) == 0:
+		set(checkConnectorsAction, checkFail, observe+", so enforce would deny nothing (every user stays monitor-only); set the mode in the admin config and apply it", fix...)
+	case len(users) > 0 && monitorOnly == len(users):
+		set(checkConnectorsAction, checkFail, "no enrolled user runs a connector in action mode ("+strings.Join(intent.ActionCLI, ", ")+"), so enforce would deny nothing; set the mode of the connectors they run in the admin config and apply it", fix...)
 	case len(intent.ObserveCLI) > 0:
-		fix := make([]string, 0, len(intent.ObserveCLI))
-		for _, connector := range intent.ObserveCLI {
-			fix = append(fix, "guardrail.connectors."+connector+".mode: action")
+		stay := "their agents stay monitor-only"
+		if monitorOnly > 0 {
+			stay = fmt.Sprintf("%d %s monitor-only", monitorOnly, plural(monitorOnly, "user stays", "users stay"))
 		}
-		set(checkConnectorsAction, checkWarn, strings.Join(intent.ObserveCLI, ", ")+" "+plural(len(intent.ObserveCLI), "is", "are")+
-			" in observe mode (their agents stay monitor-only); set the mode in the admin config and apply it, or accept monitor-only", fix...)
+		set(checkConnectorsAction, checkWarn, observe+" ("+stay+"); set the mode in the admin config and apply it, or accept monitor-only", fix...)
 	default:
 		set(checkConnectorsAction, checkPass, "every enrolled command-line connector is in action mode ("+strings.Join(intent.ActionCLI, ", ")+")")
 	}
@@ -621,18 +658,20 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-// readinessUsers are the enrolled users' burn-in, in uid order.
-func readinessUsers(state kernelpolicy.State, now time.Time) []TetragonUserReadiness {
+// readinessUsers are the enrolled users' burn-in toward enforce, in uid
+// order.
+func readinessUsers(in tetragonInputs, now time.Time) []TetragonUserReadiness {
+	state := in.State
 	out := []TetragonUserReadiness{}
 	users := append([]kernelpolicy.UIDStatus(nil), state.UIDs...)
 	sort.Slice(users, func(i, j int) bool { return users[i].UID < users[j].UID })
 	for _, user := range users {
 		record := state.BurnIn.UIDs[strconv.Itoa(user.UID)]
-		p := progressOf(user, record, now)
+		p := progressFor(user, record, in, now)
 		view := TetragonUserReadiness{
 			UID: user.UID, User: user.User, State: user.State, CoveredHours: roundHours(p.Covered), NeededHours: roundHours(p.Needed),
-			Percent: p.Percent, Ready: p.Ready || user.State == kernelpolicy.UIDEnforcing, Reset: p.Reset, Measuring: p.Measuring,
-			Hits: hitDetails(record, user.UID),
+			Percent: p.Percent, Ready: (p.Ready || user.State == kernelpolicy.UIDEnforcing) && !p.MonitorOnly, Reset: p.Reset,
+			Measuring: p.Measuring, MonitorOnly: p.MonitorOnly, Hits: hitDetails(record, user.UID),
 		}
 		if p.HasETA {
 			hours := roundHours(p.ETA)
@@ -673,6 +712,18 @@ func hitDetails(record *kernelpolicy.UIDRecord, uid int) []TetragonHitDetail {
 	return out
 }
 
+// finishedBurnIn counts the users whose burn-in finished (or who are
+// enforcing), monitor-only ones included.
+func finishedBurnIn(users []TetragonUserReadiness) int {
+	n := 0
+	for _, user := range users {
+		if user.Ready || (user.MonitorOnly && (user.Percent == 100 || user.State == kernelpolicy.UIDEnforcing)) {
+			n++
+		}
+	}
+	return n
+}
+
 // approvalFor is the approve step for the users' readiness.
 func approvalFor(intent tetragonIntent, users []TetragonUserReadiness) *TetragonApproval {
 	enforce := intent
@@ -693,6 +744,14 @@ func readinessNext(rep *TetragonReadiness, failed []string) []string {
 	case rep.ReadyFor == config.TetragonModeOff:
 		return []string{"This host runs mode off: DefenseClaw does not use Tetragon. Check a mode with:",
 			"  " + adminCommand("enterprise", "linux", "tetragon", "verify", "--ready-for", "consume")}
+	case rep.ReadyFor == config.TetragonModeEnforce && modeRank(rep.Mode) < modeRank(config.TetragonModeObserve):
+		// The burn-in is measured in observe: name that step, not a fix.
+		text := "Not ready for enforce: this host runs " + rep.Mode + ", and the burn-in is measured in observe. Move to observe first"
+		if others := without(failed, checkBurnIn); len(others) > 0 {
+			text += " (and fix " + strings.Join(others, ", ") + ")"
+		}
+		return []string{text + "; check it with:",
+			"  " + adminCommand("enterprise", "linux", "tetragon", "verify", "--ready-for", config.TetragonModeObserve)}
 	case len(failed) > 0:
 		return []string{
 			fmt.Sprintf("Not ready for %s: %d %s (%s). Fix %s, then run again:", rep.ReadyFor, len(failed),
@@ -700,21 +759,57 @@ func readinessNext(rep *TetragonReadiness, failed []string) []string {
 			"  " + verify,
 		}
 	case rep.Approve != nil:
-		a := rep.Approve
-		summary := fmt.Sprintf("Ready for enforce: %d of %d users would be enforced now; the others stay in monitor until their burn-in completes.", a.ReadyUsers, a.Users)
-		if a.Users > 0 && a.ReadyUsers == a.Users {
-			summary = fmt.Sprintf("Ready for enforce: every enrolled user (%d) would be enforced now.", a.Users)
+		if rep.Mode == config.TetragonModeEnforce && rep.Approve.State == "approved" {
+			return []string{"Ready: this host runs enforce as its config asks: " + enforceCounts(rep.Users, false)}
 		}
-		if rep.Mode == config.TetragonModeEnforce && a.State == "approved" {
-			summary = strings.Replace(summary, "would be enforced now", "is enforced or enforcing as its burn-in completes", 1)
-			return []string{"Ready: this host runs enforce as its config asks. " + summary}
-		}
-		return []string{summary, "Set the approve block above in your admin config and apply it with your config management."}
+		return []string{"Ready for enforce: " + enforceCounts(rep.Users, true),
+			"Set the approve block above in your admin config and apply it with your config management."}
 	case rep.ReadyFor == rep.Mode:
 		return []string{"Ready: this host runs " + rep.Mode + " as its config asks."}
 	}
 	return []string{"Ready for " + rep.ReadyFor + ". Next: in your admin config set", "  enterprise:", "    tetragon:",
 		"      mode: " + rep.ReadyFor, "and apply it with your config management (its ensure run restarts the sensor helper)."}
+}
+
+// enforceCounts says how many users enforce denies for (or would, with
+// would), how many wait for their burn-in and how many stay monitor-only:
+// "1 of 3 users would be enforced now; 1 stays in monitor until its burn-in
+// completes; 1 stays monitor-only (connector in observe mode)."
+func enforceCounts(users []TetragonUserReadiness, would bool) string {
+	ready, monitorOnly := 0, 0
+	for _, user := range users {
+		switch {
+		case user.Ready:
+			ready++
+		case user.MonitorOnly:
+			monitorOnly++
+		}
+	}
+	verb := plural(ready, "is enforced", "are enforced")
+	if would {
+		verb = "would be enforced now"
+	}
+	if len(users) > 0 && ready == len(users) {
+		return fmt.Sprintf("every enrolled user (%d) %s.", len(users), strings.Replace(verb, "are", "is", 1))
+	}
+	text := fmt.Sprintf("%d of %d %s %s", ready, len(users), plural(len(users), "user", "users"), verb)
+	if waiting := len(users) - ready - monitorOnly; waiting > 0 {
+		text += fmt.Sprintf("; %d %s in monitor until %s burn-in completes", waiting, plural(waiting, "stays", "stay"), plural(waiting, "its", "their"))
+	}
+	if monitorOnly > 0 {
+		text += fmt.Sprintf("; %d %s monitor-only (connector in observe mode)", monitorOnly, plural(monitorOnly, "stays", "stay"))
+	}
+	return text + "."
+}
+
+func without(list []string, value string) []string {
+	var out []string
+	for _, item := range list {
+		if item != value {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // RunTetragonVerify runs `enterprise linux tetragon verify [--ready-for]`.
@@ -815,7 +910,8 @@ func WriteTetragonReadiness(w io.Writer, rep *TetragonReadiness, asJSON bool) er
 			writeBurnInTable(w, rep)
 		}
 	}
-	if a := rep.Approve; a != nil && (a.State != "approved" || rep.Mode != config.TetragonModeEnforce) {
+	if a := rep.Approve; a != nil && modeRank(rep.Mode) >= modeRank(config.TetragonModeObserve) &&
+		(a.State != "approved" || rep.Mode != config.TetragonModeEnforce) {
 		fmt.Fprintln(w, "  Approve this build's kernel controls (same value on every host of it):")
 		fmt.Fprintf(w, "    enterprise:\n      tetragon:\n        mode: enforce\n        enforce_ack: %s\n", a.Digest)
 		if a.State == "stale" && a.EnforceAck != "" {
@@ -825,10 +921,20 @@ func WriteTetragonReadiness(w io.Writer, rep *TetragonReadiness, asJSON bool) er
 	for _, e := range rep.Errors {
 		writeWrapped(w, "✗ ", "  ", e.Code+": "+e.Message, 80)
 	}
-	for _, line := range rep.Next {
-		fmt.Fprintln(w, line)
-	}
+	writeNext(w, rep.Next)
 	return nil
+}
+
+// writeNext prints the next-step lines: a sentence wrapped at 80 columns, a
+// copy-paste line (indented) as it is.
+func writeNext(w io.Writer, lines []string) {
+	for _, line := range lines {
+		if strings.HasPrefix(line, " ") {
+			fmt.Fprintln(w, line)
+			continue
+		}
+		writeWrapped(w, "", "", line, 80)
+	}
 }
 
 // writeBurnInTable prints the per-user burn-in of the enforce promotion.
@@ -844,12 +950,14 @@ func writeBurnInTable(w io.Writer, rep *TetragonReadiness) {
 		switch {
 		case user.Ready:
 			progress = "ready"
+		case user.MonitorOnly:
+			progress, eta = "monitor", "never"
 		case user.Reset:
 			progress = "reset"
 		case user.Measuring:
 			eta = "measuring"
 		}
-		if user.ETAHours != nil && !user.Ready {
+		if user.ETAHours != nil && !user.Ready && !user.MonitorOnly {
 			eta = humanDuration(time.Duration(*user.ETAHours * float64(time.Hour)))
 		}
 		hits := 0
@@ -949,6 +1057,40 @@ type burnInProgress struct {
 	Reset bool
 	// NoAgent is set for a user with no anchored agent (nothing accrues).
 	NoAgent bool
+	// MonitorOnly is set for a user none of whose connectors is in action
+	// mode: enforce never denies for them, whatever the burn-in says.
+	MonitorOnly bool
+}
+
+// progressFor is progressOf with what the installed config says about the
+// user's connectors: a user without a command-line connector in action mode
+// is monitor-only and has no ETA. Without a readable config it is not known.
+func progressFor(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, in tetragonInputs, now time.Time) burnInProgress {
+	p := progressOf(user, record, now)
+	if monitorOnlyUser(user, in) {
+		p.MonitorOnly, p.HasETA, p.ETA = true, false, 0
+	}
+	return p
+}
+
+// monitorOnlyUser reports whether enforce would never deny for user: the
+// helper says so (guardrail_observe), or none of its connectors is an
+// enrolled command-line connector in action mode in the installed config.
+func monitorOnlyUser(user kernelpolicy.UIDStatus, in tetragonInputs) bool {
+	if user.State == kernelpolicy.UIDInactive && user.Reason == kernelpolicy.ReasonGuardrailObserve {
+		return true
+	}
+	if !in.HaveIntent {
+		return false
+	}
+	for _, connector := range user.Connectors {
+		for _, action := range in.Intent.ActionCLI {
+			if connector == action {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // progressOf computes a user's burn-in from the helper's per-user status and
@@ -981,14 +1123,15 @@ func progressOf(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, now
 	return p
 }
 
-// nextReady is the shortest ETA of the users still in burn-in, as of now.
-func nextReady(state kernelpolicy.State, now time.Time) (time.Duration, bool) {
+// nextReady is the shortest ETA of the users still in burn-in, as of now; a
+// monitor-only user is never ready.
+func nextReady(in tetragonInputs, now time.Time) (time.Duration, bool) {
 	best, found := time.Duration(0), false
-	for _, user := range state.UIDs {
+	for _, user := range in.State.UIDs {
 		if user.State == kernelpolicy.UIDEnforcing {
 			continue
 		}
-		p := progressOf(user, state.BurnIn.UIDs[strconv.Itoa(user.UID)], now)
+		p := progressFor(user, in.State.BurnIn.UIDs[strconv.Itoa(user.UID)], in, now)
 		if p.HasETA && (!found || p.ETA < best) {
 			best, found = p.ETA, true
 		}

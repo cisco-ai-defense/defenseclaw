@@ -86,6 +86,47 @@ func cleanupDirs(t *testing.T, recorded ...string) kernelpolicy.Dirs {
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// The kernel enrollment is targets.yaml plus, for the machine-policy
+// connectors of the drop-in, the eligible accounts targets.yaml is silent
+// about; both files pass the same trust check.
+func TestKernelEnrollmentAddsTheEligibleAccountsForMachinePolicy(t *testing.T) {
+	trusted := func(string) error { return nil }
+	restoreManifest, restoreEligible := validateManifestTrust, validateEligibleAccountsTrust
+	validateManifestTrust, validateEligibleAccountsTrust = trusted, trusted
+	t.Cleanup(func() { validateManifestTrust, validateEligibleAccountsTrust = restoreManifest, restoreEligible })
+
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "targets.yaml")
+	if err := os.WriteFile(manifest, []byte("targets:\n- user: bob\n  uid: 1002\n  user_home: /home/bob\n  connector: opencode\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kernelpolicy.EligibleAccountsPath(manifest), []byte(`{"version":1,"accounts":[
+{"user":"alice","uid":1001,"gid":1001,"home":"/home/alice"},{"user":"bob","uid":1002,"gid":1002,"home":"/home/bob"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := func(e kernelpolicy.Enrollment) string {
+		var out []string
+		for _, row := range e.Rows {
+			out = append(out, row.User+":"+row.Connector)
+		}
+		return strings.Join(out, ",")
+	}
+	got, err := loadKernelEnrollment(manifest, []string{"claudecode"})
+	if err != nil || rows(got) != "alice:claudecode,bob:claudecode,bob:opencode" {
+		t.Fatalf("enrollment %q %v", rows(got), err)
+	}
+	if got, err := loadKernelEnrollment(manifest, nil); err != nil || rows(got) != "bob:opencode" {
+		t.Fatalf("without machine-policy connectors only targets.yaml counts: %q %v", rows(got), err)
+	}
+	if got, err := loadKernelEnrollment("", []string{"claudecode"}); err != nil || len(got.Rows) != 0 {
+		t.Fatalf("no manifest path reads nothing: %+v %v", got, err)
+	}
+	validateEligibleAccountsTrust = func(string) error { return errors.New("untrusted") }
+	if _, err := loadKernelEnrollment(manifest, []string{"claudecode"}); err == nil {
+		t.Fatal("an untrusted eligible-accounts record must be an error, so the reconciler keeps its last enrollment")
+	}
+}
+
 func TestKernelPolicyCleanupWithNothingRecordedNeverDials(t *testing.T) {
 	var out bytes.Buffer
 	dial := func(context.Context) (kernelpolicy.Client, func(), error) {

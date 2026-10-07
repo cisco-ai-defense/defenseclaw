@@ -9,7 +9,7 @@ gateway:
   api_port: 18970
 guardrail:
   enabled: true
-  mode: observe
+  mode: "{{ defenseclaw_guardrail_mode | default('observe') }}"         # observe | action; a kernel control denies only for a connector in action mode
   connectors:
     claudecode: {}
     codex: {}

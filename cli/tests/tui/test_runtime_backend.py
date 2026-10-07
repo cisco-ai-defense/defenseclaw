@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+import pytest
 from defenseclaw.tui.services.runtime_state import (
     PlaneRow,
     RuntimePanelModel,
@@ -176,27 +177,27 @@ def test_blocks_and_your_policies_appear_only_when_the_gateway_reports_them() ->
     assert _plane_c(no_blocks).detail_lines()[2] == "your policies: 12 agent events"
 
 
-def test_pause_names_who_and_when_and_prints_a_command_that_runs() -> None:
-    floor = {**_FLOOR, "paused_until": "2026-10-07T14:05:00Z", "paused_by": "alice"}
-    plane = _plane_c({**_ENFORCE, "kernel_floor": floor})
+_PAUSED_FLOOR = {**_FLOOR, "paused_until": "2026-10-07T14:05:00Z", "paused_by": "alice"}
+
+
+def test_pause_names_who_and_when_on_one_line() -> None:
+    plane = _plane_c({**_ENFORCE, "kernel_floor": _PAUSED_FLOOR})
     lines = plane.detail_lines()
-    assert lines[-2] == "paused until 14:05Z by alice; root can resume it with"
-    assert lines[-1] == "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume"
+    # One line within 78 columns: the runnable root command is in the CLI, doctor and the docs.
+    assert lines[-1] == "paused until 14:05Z by alice; root can resume it (tetragon resume)"
+    assert all(len(line) <= 78 for line in lines)
+    assert not any("defenseclaw-gateway" in line for line in lines)
     assert plane.kernel_paused_until == "2026-10-07T14:05:00Z"
     assert plane.strip_label == "agent actions: up (Tetragon, paused)"
     # Another day names the date; a reboot pause and an ended pause read right.
     other_day = _plane_c({**_ENFORCE, "kernel_floor": {**_FLOOR, "paused_until": "2026-10-08T01:30:00Z"}})
-    assert other_day.detail_lines()[-2] == "paused until 2026-10-08 01:30Z; root can resume it with"
+    assert other_day.detail_lines()[-1] == "paused until 2026-10-08 01:30Z; root can resume it (tetragon resume)"
     reboot = _plane_c({**_ENFORCE, "kernel_floor": {**_FLOOR, "paused_until": "reboot", "paused_by": "bob"}})
-    assert reboot.detail_lines()[-2].startswith("paused until the next reboot by bob;")
+    assert reboot.detail_lines()[-1] == "paused until the next reboot by bob; root can resume it (tetragon resume)"
     # An untrusted pause file holds enforcement off until resume removes it.
     untrusted = _plane_c({**_ENFORCE, "kernel_floor": {**_FLOOR, "paused_until": "resumed"}})
     assert untrusted.strip_label == "agent actions: up (Tetragon, paused)"
-    assert untrusted.detail_lines()[-2] == "paused until resumed; root can resume it with"
-    # The binaries are not on PATH and sudo resets it: no bare command is ever printed.
-    for text in lines:
-        if "defenseclaw-gateway" in text:
-            assert text.startswith("sudo /opt/defenseclaw/bin/defenseclaw-gateway ")
+    assert untrusted.detail_lines()[-1] == "paused until resumed; root can resume it (tetragon resume)"
 
 
 def test_failed_policies_are_counted_and_capped_and_text_is_clipped() -> None:
@@ -268,20 +269,24 @@ def test_linux_host_plane_hint_names_the_capability_cn_proc_needs() -> None:
     assert "CAP_NET_ADMIN" in hint and "CAP_SYS_ADMIN" in hint and "no grant" not in hint
 
 
-async def test_runtime_panel_shows_the_kernel_sensor_at_80x24(tmp_path) -> None:
+@pytest.mark.parametrize("paused", [False, True], ids=["running", "paused"])
+async def test_runtime_panel_shows_the_kernel_sensor_at_80x24(tmp_path, paused: bool) -> None:
     app = snapshot_app(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:
-        app.runtime_model.set_snapshot(_snapshot(_ENFORCE))
+        app.runtime_model.set_snapshot(_snapshot({**_ENFORCE, "kernel_floor": _PAUSED_FLOOR if paused else _FLOOR}))
         app.action_switch_panel("runtime")
         await pilot.pause()
         screen = screen_text(app)
-        assert "agent actions: up (Tetragon, enforce)" in screen
+        assert f"agent actions: up (Tetragon, {'paused' if paused else 'enforce'})" in screen
         assert "critical" in screen  # the findings table stays above the fold
         await pilot.press("p")
         await pilot.pause()
         expanded = screen_text(app)
-    for line in ("kernel sensor: Tetragon v1.7.1, enforce, 0 events lost",
-                 "kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days",
-                 "blocks (1h): 2 denied, 5 would-block; your policies: 12 agent events"):
+    lines = ["kernel sensor: Tetragon v1.7.1, enforce, 0 events lost",
+             "kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days",
+             "blocks (1h): 2 denied, 5 would-block; your policies: 12 agent events"]
+    if paused:
+        lines.append("paused until 14:05Z by alice; root can resume it (tetragon resume)")
+    for line in lines:
         assert line in expanded  # each on one row: nothing wraps at 80 columns
-    assert "critical" in expanded
+    assert "critical" in expanded  # still above the fold with the plane expanded

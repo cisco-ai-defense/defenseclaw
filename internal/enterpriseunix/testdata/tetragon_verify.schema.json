@@ -42,7 +42,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["uid", "state", "covered_hours", "needed_hours", "percent", "ready", "reset", "measuring", "hits"],
+        "required": ["uid", "state", "covered_hours", "needed_hours", "percent", "ready", "reset", "measuring", "monitor_only", "hits"],
         "properties": {
           "uid": { "type": "integer" },
           "user": { "type": "string" },
@@ -50,9 +50,10 @@
           "covered_hours": { "type": "number" },
           "needed_hours": { "type": "number" },
           "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
-          "ready": { "type": "boolean" },
+          "ready": { "type": "boolean", "description": "Enforce would deny for the user now: the burn-in finished (or the user is enforcing) and one of its connectors is in action mode." },
           "reset": { "type": "boolean", "description": "A would-block hit restarted the burn-in window." },
           "measuring": { "type": "boolean", "description": "The window is younger than 24h, so there is no ETA yet." },
+          "monitor_only": { "type": "boolean", "description": "No connector of the user is in action mode: enforce never denies for it (guardrail_observe), whatever the burn-in says." },
           "eta_hours": { "type": "number", "description": "Calendar hours until ready at the user's rate of agent use so far." },
           "hits": {
             "type": "array",

@@ -90,7 +90,8 @@ func MakePlan(in PlanInput) Plan {
 	uids := in.Enrollment.UIDs()
 	status := func(uid int, state, reason string) {
 		plan.UIDs[uid] = UIDStatus{UID: uid, User: in.Enrollment.UserOf(uid),
-			Connectors: in.Enrollment.Connectors(uid), State: state, Reason: reason}
+			Connectors: in.Enrollment.Connectors(uid), MachinePolicy: in.Enrollment.MachinePolicyConnectors(uid),
+			State: state, Reason: reason}
 	}
 	if len(uids) == 0 || !lsm {
 		return plan

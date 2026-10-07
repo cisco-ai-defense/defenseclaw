@@ -45,18 +45,16 @@ while IFS= read -r host; do
 	ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$host" \
 		"sudo $GW enterprise linux tetragon verify --ready-for $mode --json" >"$work/$n.verify" 2>/dev/null
 	vrc=$?
-	ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-		"sudo $GW enterprise linux tetragon status --json" >"$work/$n.status" 2>/dev/null
 	jq -c . "$work/$n.verify" >"$work/$n.verify.json" 2>/dev/null || echo null >"$work/$n.verify.json"
-	jq -c . "$work/$n.status" >"$work/$n.status.json" 2>/dev/null || echo null >"$work/$n.status.json"
-	jq -n -c --arg host "$host" --argjson rc "$vrc" \
-		--slurpfile verify "$work/$n.verify.json" --slurpfile status "$work/$n.status.json" '
+	# The users are each user's burn-in toward enforce (verify reports them
+	# for observe and enforce).
+	jq -n -c --arg host "$host" --argjson rc "$vrc" --slurpfile verify "$work/$n.verify.json" '
 		{
 		  host: $host,
 		  rc: $rc,
 		  failing: [($verify[0].checks // [])[] | select(.status == "fail") | .id],
-		  digest: ($status[0].kernel_policy // ""),
-		  users: [($status[0].users // [])[] | {state: .state, hits: ((.would_block // []) | length)}]
+		  digest: ($verify[0].kernel_policy // ""),
+		  users: [($verify[0].users // [])[] | {state: .state, ready: (.ready // false), reset: (.reset // false), monitor_only: (.monitor_only // false)}]
 		}' >>"$work/rows.jsonl"
 done <"$hosts"
 
@@ -82,8 +80,10 @@ jq -s -r --arg mode "$mode" '
 	    "Hosts not ready: \(if ($notready | length) > 0 then ($notready | map(.host) | join(", ")) else "none" end)",
 	    "Hosts not checked: \(if ($unchecked | length) > 0 then ($unchecked | join(", ")) else "none" end)",
 	    "Users enforcing: \($users | map(select(.state == "enforcing")) | length)",
-	    "Users in burn-in: \($users | map(select(.state == "burn_in" and .hits == 0)) | length)",
-	    "Users reset by a hit: \($users | map(select(.state == "burn_in" and .hits > 0)) | length)",
+	    "Users ready for enforce: \($users | map(select(.ready and .state != "enforcing")) | length)",
+	    "Users in burn-in: \($users | map(select((.ready or .reset or .monitor_only) | not)) | length)",
+	    "Users reset by a hit: \($users | map(select(.reset and (.ready | not) and (.monitor_only | not))) | length)",
+	    "Users monitor-only (connector in observe mode): \($users | map(select(.monitor_only)) | length)",
 	    "Kernel controls digests: \(if ($digests | length) > 0 then ($digests | join(", ")) else "none" end)\(if ($digests | length) > 1 then " (more than one means hosts run different builds)" else "" end)"
 	  )
 ' "$work/rows.jsonl"

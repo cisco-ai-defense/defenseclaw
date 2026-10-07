@@ -69,6 +69,9 @@ func TestIntentFromLookupFallsBackToTheNarrowSide(t *testing.T) {
 		{"a malformed connector is dropped", env(EnvMode, " OFF ", EnvEnforceConnectors, "Codex,bad connector,,codex"),
 			Intent{Mode: ModeOff, BurnIn: DefaultBurnIn, EnforceConnectors: []string{"codex"},
 				Problems: []string{WarnConfigInvalid + ":" + EnvEnforceConnectors}}},
+		{"machine-policy connectors", env(EnvMode, "observe", EnvMachinePolicyConnectors, "codex, ClaudeCode,codex,bad one"),
+			Intent{Mode: ModeObserve, BurnIn: DefaultBurnIn, MachinePolicyConnectors: []string{"claudecode", "codex"},
+				Problems: []string{WarnConfigInvalid + ":" + EnvMachinePolicyConnectors}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

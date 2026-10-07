@@ -20,7 +20,7 @@
       "type": "object",
       "additionalProperties": false,
       "description": "enterprise.tetragon as the deployment renders it into the helper's drop-in.",
-      "required": ["valid", "configured_mode", "mode", "burn_in", "enforce_ack", "customer_events", "approval", "enforce_connectors", "guardrail_observe", "dropin"],
+      "required": ["valid", "configured_mode", "mode", "burn_in", "enforce_ack", "customer_events", "approval", "enforce_connectors", "guardrail_observe", "machine_policy_connectors", "dropin"],
       "properties": {
         "valid": { "type": "boolean", "description": "False when the installed config could not be read or does not validate; the other fields are then the defaults." },
         "configured_mode": { "$ref": "#/$defs/mode" },
@@ -32,6 +32,7 @@
         "approval": { "enum": ["not_needed", "missing", "stale", "approved"] },
         "enforce_connectors": { "$ref": "#/$defs/strings" },
         "guardrail_observe": { "$ref": "#/$defs/strings" },
+        "machine_policy_connectors": { "$ref": "#/$defs/strings", "description": "Command-line connectors on vendor machine policy that the sensor helper enrolls for every eligible account (they have no targets.yaml rows unless enterprise.enrollment.unenrolled_users is deny)." },
         "dropin": { "type": "boolean", "description": "Whether 30-defenseclaw-tetragon.conf is rendered (only for a non-default block)." }
       }
     },
@@ -88,11 +89,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["uid", "connectors", "state", "anchored_roots", "covered_hours", "needed_hours", "would_block", "blocked"],
+        "required": ["uid", "connectors", "machine_policy", "state", "anchored_roots", "covered_hours", "needed_hours", "would_block", "blocked"],
         "properties": {
           "uid": { "type": "integer" },
           "user": { "type": "string" },
           "connectors": { "$ref": "#/$defs/strings" },
+          "machine_policy": { "$ref": "#/$defs/strings", "description": "The connectors of connectors the user is enrolled for through vendor machine policy (an eligible account, no targets.yaml row)." },
           "state": { "type": "string" },
           "reason": { "type": "string" },
           "anchored_roots": { "type": "integer" },

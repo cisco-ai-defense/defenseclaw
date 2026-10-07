@@ -106,7 +106,11 @@ RINGS = {
         {"mode": "observe", "customer_events": "agent", "burn_in": "40h"},
     ),
     "enforce": (
-        {"defenseclaw_tetragon_mode": "enforce", "defenseclaw_tetragon_enforce_ack": "sha256:08b71155b713"},
+        {
+            "defenseclaw_tetragon_mode": "enforce",
+            "defenseclaw_tetragon_enforce_ack": "sha256:08b71155b713",
+            "defenseclaw_guardrail_mode": "action",
+        },
         {"mode": "enforce", "customer_events": "agent", "enforce_ack": "sha256:08b71155b713"},
     ),
     "enforce-upgrade": (
@@ -139,6 +143,9 @@ def test_config_template_renders_each_ring(ring: str) -> None:
     assert config["deployment_mode"] == "managed_enterprise"
     assert config["enterprise"]["profile"] == "standalone"
     assert config["enterprise"]["tetragon"] == want
+    # A kernel control denies only for a connector in action mode: the ring
+    # variable sets it, and the default stays observe.
+    assert config["guardrail"]["mode"] == variables.get("defenseclaw_guardrail_mode", "observe")
     # Plane C must be on, or the Tetragon mode is off.
     assert config["ai_discovery"]["runtime"]["enabled"] is True
     assert config["ai_discovery"]["runtime"]["enable_host_plane"] is True
@@ -212,7 +219,7 @@ def test_every_gateway_command_and_flag_is_documented_in_the_cli_reference() -> 
             assert f"| `{phrase}` |" in reference, f"{name}: `{phrase}` is not a row of the CLI reference"
             for flag in (word for word in argv if word.startswith("--")):
                 assert f"`{flag}" in reference, f"{name}: {flag} is not in the CLI reference"
-    assert seen >= 9
+    assert seen >= 7
 
 
 def _guide_fences() -> dict[str, list[str]]:
@@ -230,36 +237,66 @@ def test_the_guide_shows_exactly_what_the_example_files_contain() -> None:
             assert block == _text(EXAMPLES / name), f"the block titled {name!r} differs from the file"
 
 
+# Per-user burn-in toward enforce as `tetragon verify --json` reports it: the
+# state the helper published, and verify's own ready, reset and monitor-only.
+_USERS = {
+    "enforcing": {"state": "enforcing", "ready": True, "reset": False, "monitor_only": False},
+    "ready": {"state": "monitor", "ready": True, "reset": False, "monitor_only": False},
+    "burn_in": {"state": "burn_in", "ready": False, "reset": False, "monitor_only": False},
+    # In observe every user is "monitor": verify still says where its burn-in is.
+    "monitor": {"state": "monitor", "ready": False, "reset": False, "monitor_only": False},
+    "reset": {"state": "monitor", "ready": False, "reset": True, "monitor_only": False},
+    "monitor_only": {"state": "monitor", "ready": False, "reset": False, "monitor_only": True},
+}
+
+
+def _verify(ready: bool, digest: str, users: list[str], failing: tuple[str, ...] = ()) -> dict[str, Any]:
+    checks = [{"id": check, "status": "fail"} for check in failing] or [{"id": "tetragon.running", "status": "pass"}]
+    return {
+        "ready": ready,
+        "kernel_policy": digest,
+        "checks": checks,
+        "users": [{"uid": 1000 + index, **_USERS[kind]} for index, kind in enumerate(users)],
+    }
+
+
+_FLEET_USERS = ["enforcing", "ready", "burn_in", "monitor", "reset", "monitor_only"]
+_FLEET_COUNTS = [
+    "Users enforcing: 1",
+    "Users ready for enforce: 1",
+    "Users in burn-in: 2",
+    "Users reset by a hit: 1",
+    "Users monitor-only (connector in observe mode): 1",
+]
+
+
+def test_fleet_play_counts_users_from_verify() -> None:
+    jinja2 = pytest.importorskip("jinja2")
+    play = yaml.safe_load(_text(EXAMPLES / "fleet-readiness.yml"))[0]
+    summary = next(task for task in play["tasks"] if task["name"] == "Summarize the fleet")
+    users = _verify(True, "sha256:08b71155b713", _FLEET_USERS)["users"]
+    env = jinja2.Environment()
+    lines = [env.from_string(line).render(fleet_users_all=users) for line in summary["ansible.builtin.debug"]["msg"] if line.startswith("Users")]
+    assert lines == _FLEET_COUNTS
+    keep = next(task for task in play["tasks"] if task["name"] == "Keep what the summary needs")
+    # Everything comes from verify: one command per host.
+    assert all("fleet_verify" in str(value) for value in keep["ansible.builtin.set_fact"].values())
+    assert [task["name"] for task in play["tasks"] if "ansible.builtin.command" in task] == ["Check readiness for the mode"]
+
+
 @pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required")
 class TestFleetReadinessScript:
     SCRIPT = EXAMPLES / "fleet-readiness.sh"
 
-    READY = {"ready": True, "checks": [{"id": "tetragon.running", "status": "pass"}]}
-    NOT_READY = {
-        "ready": False,
-        "checks": [{"id": "tetragon.api", "status": "fail"}, {"id": "kernel.bpf_lsm", "status": "fail"}],
-    }
-
-    @staticmethod
-    def _status(digest: str, users: list[tuple[str, int]]) -> dict[str, Any]:
-        return {
-            "kernel_policy": digest,
-            "users": [
-                {"uid": 1000 + index, "state": state, "would_block": [{"control": "c", "count": 1}] * hits}
-                for index, (state, hits) in enumerate(users)
-            ],
-        }
-
-    def _fleet(self, tmp_path: Path, hosts: dict[str, tuple[int, Any, Any]]) -> tuple[Path, Path]:
+    def _fleet(self, tmp_path: Path, hosts: dict[str, tuple[int, Any]]) -> tuple[Path, Path]:
         """A fake ssh in front of PATH that answers per host from files."""
         bin_dir = tmp_path / "bin"
         data = tmp_path / "data"
         bin_dir.mkdir()
         data.mkdir()
-        for host, (rc, verify, status) in hosts.items():
+        for host, (rc, verify) in hosts.items():
             (data / f"{host}.rc").write_text(str(rc), encoding="utf-8")
             (data / f"{host}.verify").write_text(json.dumps(verify), encoding="utf-8")
-            (data / f"{host}.status").write_text(json.dumps(status), encoding="utf-8")
         fake = bin_dir / "ssh"
         fake.write_text(
             "#!/bin/sh\n"
@@ -269,7 +306,6 @@ class TestFleetReadinessScript:
             'if [ "$host" = unreachable ]; then exit 255; fi\n'
             'case "$command" in\n'
             '*"tetragon verify"*) cat "$data/$host.verify"; exit "$(cat "$data/$host.rc")" ;;\n'
-            '*"tetragon status"*) cat "$data/$host.status"; exit 0 ;;\n'
             "esac\n"
             "exit 3\n",
             encoding="utf-8",
@@ -288,8 +324,8 @@ class TestFleetReadinessScript:
         bin_dir, hostfile = self._fleet(
             tmp_path,
             {
-                "a": (0, self.READY, self._status(digest, [("enforcing", 0), ("burn_in", 0)])),
-                "b": (0, self.READY, self._status(digest, [("enforcing", 0)])),
+                "a": (0, _verify(True, digest, _FLEET_USERS[:3])),
+                "b": (0, _verify(True, digest, _FLEET_USERS[3:])),
             },
         )
         result = self._run(bin_dir, "enforce", hostfile)
@@ -297,16 +333,27 @@ class TestFleetReadinessScript:
         assert "a: ready for enforce" in result.stdout
         assert "Hosts ready: 2 of 2" in result.stdout
         assert "Hosts not ready: none" in result.stdout
-        assert "Users enforcing: 2" in result.stdout
-        assert "Users in burn-in: 1" in result.stdout
+        for line in _FLEET_COUNTS:
+            assert line + "\n" in result.stdout
         assert f"Kernel controls digests: {digest}\n" in result.stdout
+
+    def test_an_observe_ring_counts_its_burn_in(self, tmp_path: Path) -> None:
+        # The main use: an observe ring checked for enforce. Every user is in
+        # state monitor there; the counts come from verify's burn-in fields.
+        bin_dir, hostfile = self._fleet(
+            tmp_path, {"pilot": (0, _verify(True, "sha256:08b71155b713", ["monitor", "reset", "ready"]))}
+        )
+        result = self._run(bin_dir, "enforce", hostfile)
+        assert result.returncode == 0, result.stderr
+        for line in ("Users enforcing: 0", "Users ready for enforce: 1", "Users in burn-in: 1", "Users reset by a hit: 1"):
+            assert line + "\n" in result.stdout
 
     def test_a_host_that_is_not_ready_names_its_failing_checks_and_exits_one(self, tmp_path: Path) -> None:
         bin_dir, hostfile = self._fleet(
             tmp_path,
             {
-                "a": (0, self.READY, self._status("sha256:08b71155b713", [("enforcing", 0)])),
-                "b": (1, self.NOT_READY, self._status("sha256:111111111111", [("burn_in", 2)])),
+                "a": (0, _verify(True, "sha256:08b71155b713", ["enforcing"])),
+                "b": (1, _verify(False, "sha256:111111111111", ["reset"], ("tetragon.api", "kernel.bpf_lsm"))),
             },
         )
         result = self._run(bin_dir, "enforce", hostfile)
@@ -321,8 +368,8 @@ class TestFleetReadinessScript:
         bin_dir, hostfile = self._fleet(
             tmp_path,
             {
-                "a": (0, self.READY, self._status("sha256:08b71155b713", [])),
-                "unreachable": (0, self.READY, self._status("", [])),
+                "a": (0, _verify(True, "sha256:08b71155b713", [])),
+                "unreachable": (0, _verify(True, "", [])),
             },
         )
         result = self._run(bin_dir, "observe", hostfile)
@@ -331,6 +378,6 @@ class TestFleetReadinessScript:
         assert "Hosts not checked: unreachable" in result.stdout
 
     def test_bad_arguments_exit_two_without_touching_a_host(self, tmp_path: Path) -> None:
-        bin_dir, hostfile = self._fleet(tmp_path, {"a": (0, self.READY, self._status("", []))})
+        bin_dir, hostfile = self._fleet(tmp_path, {"a": (0, _verify(True, "", []))})
         assert self._run(bin_dir, "everything", hostfile).returncode == 2
         assert self._run(bin_dir, "observe", tmp_path / "missing").returncode == 2

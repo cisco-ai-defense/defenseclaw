@@ -89,6 +89,10 @@ type UIDStatus struct {
 	UID        int      `json:"uid"`
 	User       string   `json:"user,omitempty"`
 	Connectors []string `json:"connectors,omitempty"`
+	// MachinePolicy are the connectors of Connectors the user is enrolled
+	// for through vendor machine policy (an eligible account, no row in
+	// targets.yaml).
+	MachinePolicy []string `json:"machine_policy,omitempty"`
 	// State is enforcing, burn_in, monitor or inactive.
 	State  string `json:"state"`
 	Reason string `json:"reason,omitempty"`
@@ -114,8 +118,9 @@ type IntentStatus struct {
 	BurnIn string `json:"burn_in"`
 	// EnforceAck is the approved digest, or the approved digests joined
 	// with commas, as the drop-in renders a list.
-	EnforceAck        string   `json:"enforce_ack,omitempty"`
-	EnforceConnectors []string `json:"enforce_connectors,omitempty"`
+	EnforceAck              string   `json:"enforce_ack,omitempty"`
+	EnforceConnectors       []string `json:"enforce_connectors,omitempty"`
+	MachinePolicyConnectors []string `json:"machine_policy_connectors,omitempty"`
 	// CustomerEvents is customer_events: agent or off.
 	CustomerEvents string   `json:"customer_events,omitempty"`
 	Problems       []string `json:"problems,omitempty"`
