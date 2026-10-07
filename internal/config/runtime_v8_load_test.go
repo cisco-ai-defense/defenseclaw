@@ -367,3 +367,36 @@ func TestRuntimeV8LoadersRetainManagedPathTrust(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeV8LoadersPreserveEmptyProfiles(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw-v8
+guardrail:
+  profiles:
+    baseline: {}
+    nested:
+      connectors:
+        codex: {}
+  profile_assignments:
+    - profile: baseline
+      match: {groups: [admins]}
+observability: {}
+`)
+	for name, load := range map[string]func() (*Config, error){
+		"runtime": func() (*Config, error) { return LoadRuntimeV8FromBytes("config.yaml", raw) },
+		"file":    func() (*Config, error) { return LoadFromBytes("config.yaml", raw) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := cfg.Guardrail.Profiles["baseline"]; !ok {
+				t.Fatal("empty baseline profile disappeared")
+			}
+			if _, ok := cfg.Guardrail.Profiles["nested"].Connectors["codex"]; !ok {
+				t.Fatal("empty connector override disappeared")
+			}
+		})
+	}
+}
