@@ -26,6 +26,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -204,4 +206,21 @@ func hasFinding(findings []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A URL block entered by the CLI must follow the configured server name into
+// the tool hook; the hook never supplies the endpoint itself.
+func TestMCPServerRuntimeBlock_URLRule(t *testing.T) {
+	store, _ := testStoreAndLogger(t)
+	path := filepath.Join(t.TempDir(), "openclaw.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"filesystem":{"url":"https://server.example/mcp"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Claw.ConfigFile = path
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "https://server.example/mcp"}}
+	pe := configPolicy(store, cfg)
+	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__filesystem__read", "", ""); !deny {
+		t.Fatal("URL block did not deny the configured server tool")
+	}
 }

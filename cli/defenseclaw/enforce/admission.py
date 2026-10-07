@@ -243,7 +243,6 @@ def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmis
     actions, source = dict(out.actions), out.source
     raw_actions = data.get("actions")
     if isinstance(raw_actions, dict) and raw_actions:
-        actions = {}
         by_type = data.get("scanner_overrides")
         overrides = by_type.get(target_type) if isinstance(by_type, dict) else None
         for layer in (raw_actions, overrides if isinstance(overrides, dict) else {}):
@@ -411,6 +410,7 @@ def evaluate_admission(
         args=args or [],
         transport=transport,
         runtime_surface=runtime_surface,
+        secure_client=legacy,
     )
     if asset_decision.verdict == "blocked":
         return asset_decision
@@ -529,10 +529,14 @@ def evaluate_asset_policy(
     args: list[str] | None = None,
     transport: str = "",
     runtime_surface: str = "cli",
+    secure_client: bool = False,
 ) -> AdmissionDecision:
-    # The explicit operator lists apply in every mode, as the audit.db
-    # actions rows they replace did (config_version 9).
+    # Version 9 operator lists enforce in every mode. Secure Client keeps
+    # the v8 enabled/mode behavior for these asset-policy rules.
     from defenseclaw.enforce import asset_lists
+
+    if secure_client and not getattr(asset_policy, "enabled", False):
+        return AdmissionDecision("allowed", "asset policy disabled", source="asset-policy-disabled")
 
     verdict, rule = asset_lists.list_decision(
         asset_policy, target_type, name, connector,
@@ -540,6 +544,10 @@ def evaluate_asset_policy(
     )
     if verdict == asset_lists.LIST_DENY:
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
+        if secure_client:
+            mode_resolver = getattr(asset_policy, "effective_mode", None)
+            mode = mode_resolver(connector) if callable(mode_resolver) else getattr(asset_policy, "mode", "observe")
+            return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
         return AdmissionDecision("blocked", reason, source="asset-policy-deny")
     if verdict == asset_lists.LIST_ALLOW:
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"

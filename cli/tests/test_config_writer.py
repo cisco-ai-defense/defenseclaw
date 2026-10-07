@@ -501,3 +501,19 @@ def test_a_global_mode_change_names_the_connectors_that_keep_their_own_mode(tmp_
     assert out.exit_code == 0, out.output
     assert "keeps its own mode (observe)" in out.output
     assert "defenseclaw guardrail mode action --connector codex" in out.output
+
+
+def test_operator_unblock_loaded_before_concurrent_block(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+    from defenseclaw.enforce.policy import PolicyEngine
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    _config(tmp_path)
+    stale = config_module.load(data_dir=str(tmp_path))
+    writer = config_module.load(data_dir=str(tmp_path))
+    PolicyEngine(None, writer).block("skill", "late", "operator")
+    PolicyEngine(None, stale).unblock("skill", "late")
+
+    persisted = config_module.load(data_dir=str(tmp_path))
+    assert not persisted.asset_policy.skill.denied
