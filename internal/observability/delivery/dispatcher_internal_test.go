@@ -216,6 +216,7 @@ func TestCircuitFailureClassesOpenAtBoundedThresholds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			dispatcher.now = func() time.Time { return at }
 			opened := false
 			for index := 0; index < test.failures; index++ {
 				opened = dispatcher.recordCircuitFailure(test.class, at)
