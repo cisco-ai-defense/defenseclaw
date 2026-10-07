@@ -125,8 +125,7 @@ type runConfigRecord struct {
 	// Safe reports the files keep the harness's permission prompts.
 	Safe bool `json:"safe"`
 	// Delivery is how the sandbox got the files: runDeliveryMount, or
-	// runDeliveryImage. Empty in records from before it was kept, which
-	// all mount them.
+	// runDeliveryImage.
 	Delivery string `json:"delivery,omitempty"`
 	// Digest is the files' image.RunConfigDigest.
 	Digest string `json:"digest,omitempty"`
@@ -963,16 +962,9 @@ func (m *Manager) refreshRunConfig(ctx context.Context, rec record, eff *packs.E
 	yolo := rec.Yolo && eff.Yolo
 	rr := rec.RunConfig
 	if rr == nil {
-		// A record from before run files were rendered again: they cannot
-		// be rebuilt, so only a policy that wants them stricter matters.
-		want := &sandboxapi.MCPSummary{ProjectServers: eff.MCP.ProjectServers}
-		if rec.MCP != nil && eff.MCP.Import {
-			want.Imported = rec.MCP.Imported
-		}
-		if runConfigTightened(!rec.Yolo, rec.MCP, !yolo, want) {
-			return nil, nil, nil, errRunConfigStricter(rec, runConfigFixed)
-		}
-		return rec.MCP, rr, rec.Verify, nil
+		// Every create of a harness with run files records them.
+		return nil, nil, nil, sandboxapi.Errorf(sandboxapi.CodeInternal,
+			"sandbox %s has no record of its harness run configuration; delete it and run it again", rec.Name)
 	}
 	d, _ := openshell.LookupDriver(rec.Driver)
 	target := connector.SandboxRenderTarget{

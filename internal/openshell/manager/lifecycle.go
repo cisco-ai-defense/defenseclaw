@@ -410,7 +410,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// variable of the sandbox spec, which OpenShell cannot change after
 	// create: it is kept for the sandbox's life (the agent can read it
 	// either way) rather than rotated into a token no hook presents.
-	if tokenDelivery(rec) == config.OpenShellTokenDeliveryProvider {
+	if rec.TokenDelivery == config.OpenShellTokenDeliveryProvider {
 		var token string
 		if binding, token, err = m.opts.Bindings.Rotate(rec.BindingID); err != nil {
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "rotate the sandbox binding: %v", err)
@@ -423,7 +423,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		if err != nil {
 			return upstream("get provider "+pname, err)
 		}
-		if !managedBy(p.Labels, m.ownerOf(rec)) || p.Labels[LabelSandbox] != rec.Name {
+		if !managedBy(p.Labels, rec.Owner) || p.Labels[LabelSandbox] != rec.Name {
 			// Provider names are gateway-global: the new token must never
 			// go into a provider another sandbox took the name of.
 			return sandboxapi.Errorf(sandboxapi.CodeConflict,
@@ -558,18 +558,6 @@ func stoppedPhase(p openshell.SandboxPhase) bool {
 		return true
 	}
 	return false
-}
-
-// tokenDelivery is how a sandbox received its ingress token. Records from
-// before the field existed tell by their ingress provider.
-func tokenDelivery(rec record) string {
-	if rec.TokenDelivery != "" {
-		return rec.TokenDelivery
-	}
-	if slices.Contains(rec.Providers, providerName(rec.Name, roleIngress, 0)) {
-		return config.OpenShellTokenDeliveryProvider
-	}
-	return config.OpenShellTokenDeliveryEnv
 }
 
 // checkNewSecrets refuses to start a mounted sandbox whose project now
@@ -866,7 +854,7 @@ func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record)
 	}
 	profileOf := map[string]string{}
 	if list, err := gw.Client.ListProviders(ctx); err == nil {
-		owner := m.ownerOf(rec)
+		owner := rec.Owner
 		for _, p := range list {
 			ours := managedBy(p.Labels, owner) && p.Labels[LabelSandbox] == rec.Name
 			switch {

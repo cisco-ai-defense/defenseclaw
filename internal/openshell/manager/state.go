@@ -136,14 +136,13 @@ type record struct {
 	Verify *verifyRecord `json:"verify,omitempty"`
 
 	// TokenDelivery is how the sandbox received its ingress token
-	// (openshell.token_delivery at create; empty in older records, see
-	// tokenDelivery).
+	// (openshell.token_delivery at create).
 	TokenDelivery string `json:"token_delivery,omitempty"`
 
 	// Gateway, GatewayEndpoint and GatewayWorkspace say where the sandbox
 	// lives: the gateway registration, its endpoint and the OpenShell
-	// workspace (older records learn them once reconciliation finds the
-	// sandbox). While DefenseClaw is connected to another gateway or
+	// workspace (a sandbox adopted without a record learns them once
+	// reconciliation finds it). While DefenseClaw is connected to another gateway or
 	// workspace, not finding the sandbox proves nothing, so it is not
 	// released (see gatewayElsewhere).
 	Gateway          string `json:"gateway,omitempty"`
@@ -178,7 +177,7 @@ type record struct {
 	ReadyAt time.Time `json:"ready_at,omitempty"`
 	// SessionYolo is the skip-permissions mode the session that began at
 	// ReadyAt was launched with (launchYolo then); nil while the sandbox
-	// is not ready, and in records from before it was kept.
+	// is not ready.
 	SessionYolo *bool `json:"session_yolo,omitempty"`
 	// Sessions counts the transitions to ready DefenseClaw saw (a create,
 	// every start, one outside DefenseClaw a restarted daemon finds): an
@@ -205,7 +204,7 @@ type record struct {
 	Workspace *sandboxapi.WorkspaceSummary `json:"workspace,omitempty"`
 	MCP       *sandboxapi.MCPSummary       `json:"mcp,omitempty"`
 	// RunConfig renders the per-run harness files again on start (nil for
-	// a harness without them, and in records from before it existed).
+	// a harness without them).
 	RunConfig *runConfigRecord `json:"run_config,omitempty"`
 	// Resources are the limits the sandbox's template got at create (an
 	// empty field is unlimited); nil in records from before they were kept.

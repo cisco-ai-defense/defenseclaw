@@ -350,7 +350,7 @@ func TestSandboxesOfAnEarlierOwnerStayManaged(t *testing.T) {
 	m := e.newManager()
 	m.mu.Lock()
 	b := m.boxes["earlier"]
-	if len(m.boxes) != 1 || b == nil || m.ownerOf(b.rec) != "ffffffffffffffff" {
+	if len(m.boxes) != 1 || b == nil || b.rec.Owner != "ffffffffffffffff" {
 		t.Errorf("boxes = %v", m.boxes)
 	}
 	m.mu.Unlock()
