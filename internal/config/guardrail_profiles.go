@@ -126,6 +126,22 @@ func (c *Config) ValidateGuardrailProfiles() error {
 	return c.Guardrail.validateProfiles(c.SecureClientIntegration())
 }
 
+// UnknownGuardrailProfileError is a profile name that an assignment or
+// guardrail.default_profile uses and guardrail.profiles does not define. The
+// text is the loader's, and config validate places it at Field (GAP-0288).
+type UnknownGuardrailProfileError struct {
+	// Where is the setting as the loader names it, Field the YAML path of the
+	// profile name it holds.
+	Where, Field string
+	Profile      string
+	// Defined are the profile names guardrail.profiles defines, sorted.
+	Defined []string
+}
+
+func (e *UnknownGuardrailProfileError) Error() string {
+	return fmt.Sprintf("%s: unknown profile %q", e.Where, e.Profile)
+}
+
 func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 	if !g.HasProfiles() {
 		return nil
@@ -148,7 +164,11 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 	}
 	for i, assignment := range g.ProfileAssignments {
 		if _, ok := g.Profiles[assignment.Profile]; !ok {
-			return fmt.Errorf("guardrail.profile_assignments[%d]: unknown profile %q", i, assignment.Profile)
+			return &UnknownGuardrailProfileError{
+				Where:   fmt.Sprintf("guardrail.profile_assignments[%d]", i),
+				Field:   fmt.Sprintf("guardrail.profile_assignments[%d].profile", i),
+				Profile: assignment.Profile, Defined: names,
+			}
 		}
 		if assignment.Match.Empty() {
 			return fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors or agents; use guardrail.default_profile for everyone else", i)
@@ -161,7 +181,9 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 	}
 	if def := strings.TrimSpace(g.DefaultProfile); def != "" {
 		if _, ok := g.Profiles[def]; !ok {
-			return fmt.Errorf("guardrail.default_profile: unknown profile %q", def)
+			return &UnknownGuardrailProfileError{
+				Where: "guardrail.default_profile", Field: "guardrail.default_profile", Profile: def, Defined: names,
+			}
 		}
 	}
 	return nil

@@ -16,7 +16,13 @@ import (
 // profileExplainAccount names an account (SID, DOMAIN\name, name or UPN)
 // through the LSA, as the hook path names a verified SID (see
 // resolveWindowsExplainAccount).
-var profileExplainAccount = func(name string) (id, userName string, err error) {
+var profileExplainAccount = LookupWindowsAccount
+
+// LookupWindowsAccount names a user account given as a SID, DOMAIN\name,
+// bare name or UPN through the LSA (see resolveWindowsExplainAccount).
+// Entra ID accounts resolve only this way; `enterprise policy show|verify
+// --user` uses it too (GAP-0242).
+func LookupWindowsAccount(name string) (id, userName string, err error) {
 	return resolveWindowsExplainAccount(name, lsaAccountBySID, lsaAccountByName)
 }
 

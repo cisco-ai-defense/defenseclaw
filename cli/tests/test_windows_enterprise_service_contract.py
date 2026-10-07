@@ -5343,6 +5343,12 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     )
     assert quiesce < validate_only < ipc_revoke < destructive_root_cleanup
     assert destructive_root_cleanup < service_delete
+    # GAP-0250: standalone removes its own IPC directory and OpenCode plugin,
+    # which the native validator does not adopt, once the services are
+    # stopped and before the root is validated.
+    standalone_ipc = fallback.index("Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout")
+    assert quiesce < standalone_ipc < validate_only
+    assert "Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout" in fallback[standalone_ipc:validate_only]
     quiesce_body = fallback[quiesce:ipc_revoke]
     assert "Set-DefenseClawServiceStartMode" in quiesce_body
     assert "Stop-DefenseClawService -Name $name" in quiesce_body

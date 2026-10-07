@@ -103,7 +103,8 @@ func TestHookModelLogsV8RouteRichUnredactedRequestAndResponseWithoutGatewayJSONL
 }
 
 // GAP-0070: a sandboxed session's model and agent lifecycle logs carry the
-// sandbox binding and the agent identity, so they join its hook decisions.
+// sandbox binding and the agent identity, so they join its hook decisions;
+// so do its tool_start and tool_end lifecycle logs (GAP-0202).
 func TestHookModelAndLifecycleLogsV8CarrySandboxAndAgentIdentity(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
@@ -115,7 +116,13 @@ func TestHookModelAndLifecycleLogsV8CarrySandboxAndAgentIdentity(t *testing.T) {
 	if got := api.emitHookLifecycleEvent(ctx, meta); got != hookLifecycleV8Persisted {
 		t.Fatalf("lifecycle emission = %d, want persisted", got)
 	}
-	eventuallyTrue(t, func() bool { return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 2 })
+	toolStart := meta
+	toolStart.LifecycleEvent, toolStart.LifecycleState, toolStart.ToolName, toolStart.ToolID =
+		observability.TelemetryEventToolStart, "running", "Bash", "call-1"
+	if got := api.emitHookLifecycleEvent(ctx, toolStart); got != hookLifecycleV8Persisted {
+		t.Fatalf("tool_start emission = %d, want persisted", got)
+	}
+	eventuallyTrue(t, func() bool { return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 3 })
 	seen := map[string]bool{}
 	for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
 		var wire struct {
@@ -132,8 +139,30 @@ func TestHookModelAndLifecycleLogsV8CarrySandboxAndAgentIdentity(t *testing.T) {
 		}
 		seen[name] = true
 	}
-	if !seen[observability.TelemetryEventModelRequest] || !seen[observability.TelemetryEventTurnEnd] {
-		t.Fatalf("captured log events = %v, want model.request and turn_end", seen)
+	if !seen[observability.TelemetryEventModelRequest] || !seen[observability.TelemetryEventTurnEnd] ||
+		!seen[observability.TelemetryEventToolStart] {
+		t.Fatalf("captured log events = %v, want model.request, turn_end and tool_start", seen)
+	}
+}
+
+// GAP-0158: the runtime the gateway runs reads the signed lifecycle history,
+// so a hook after a restart restores its session's lineage instead of
+// skipping the restore.
+func TestHookLifecycleHistoryReadsThroughTheGatewayRuntime(t *testing.T) {
+	api, _ := bindHookModelV8Runtime(t, []string{"logs"})
+	meta := richHookModelV8Meta()
+	if got := api.emitHookLifecycleEvent(t.Context(), meta); got != hookLifecycleV8Persisted {
+		t.Fatalf("lifecycle emission = %d, want persisted", got)
+	}
+	history, ok := api.observabilityV8RuntimeEmitter().(hookLifecycleHistoryRuntime)
+	if !ok {
+		t.Fatalf("gateway runtime %T reads no lifecycle history", api.observabilityV8RuntimeEmitter())
+	}
+	projection, found, err := history.LatestLifecycleProjection(t.Context(), audit.LifecycleProjectionQuery{
+		Connector: meta.Source, SessionID: meta.SessionID, AgentID: meta.AgentID,
+	})
+	if err != nil || !found || projection.ParentAgentID != meta.ParentAgentID || projection.Depth != meta.AgentDepth {
+		t.Fatalf("lifecycle history = %+v found=%t err=%v, want the parent link", projection, found, err)
 	}
 }
 

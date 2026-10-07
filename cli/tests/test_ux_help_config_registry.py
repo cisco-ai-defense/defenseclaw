@@ -103,6 +103,16 @@ def test_config_show_has_every_section_and_get_reads_one_key(tmp_path: Path) -> 
     assert missing.exit_code == 1
     assert "config show --section asset_policy" in missing.output
 
+    # GAP-0276: one key outside observability is read without validating the
+    # whole file (every guardrail profile) or asking for the observability plan.
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
+        patch.object(cmd_config, "inspect_v8_config", side_effect=AssertionError("observability plan")),
+        patch.object(cmd_config, "load_validate_v8", side_effect=AssertionError("full validation")),
+    ):
+        fast = CliRunner().invoke(cmd_config.config_cmd, ["get", "asset_policy.enabled"])
+    assert fast.exit_code == 0 and fast.output == "true\n", fast.output
+
 
 def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # 'init' writes only claw/config_version/gateway/observability; the

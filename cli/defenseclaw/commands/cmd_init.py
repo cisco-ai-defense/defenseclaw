@@ -1752,6 +1752,30 @@ def _report_unselectable_connectors(report, problems: dict[str, str]) -> None:
     report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
 
+def _record_agent_discovery(
+    connector: str | None,
+    *,
+    rescan_agents: bool,
+    data_dir: str | os.PathLike[str] | None,
+) -> None:
+    """Write agent_discovery.json for a scripted ``--connector`` run (GAP-0185).
+
+    The interactive wizard and the discovery-backed default scan the machine,
+    which persists the cache. A named connector skipped that scan, so the
+    gateway had no record of whether the agent exists and dialled the fleet
+    uplink every 15 s for a ZeptoClaw that is not installed. A cache that is
+    already there is reused unless ``--rescan-agents`` asks for a fresh scan.
+    """
+    names = _parse_connector_list(connector) if connector else []
+    if platform_support.host_os() == "windows" and "opencode" in {connector_paths.normalize(n) for n in names}:
+        # The exact SST image gates native-Windows OpenCode; no generic result is published first.
+        return
+    try:
+        agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
+    except Exception:  # noqa: BLE001 - the cache only speeds the gateway's decisions up
+        pass
+
+
 def _build_noninteractive_connector_settings(
     *,
     connector: str | None,
@@ -1780,6 +1804,8 @@ def _build_noninteractive_connector_settings(
     action_list = _parse_connector_list(action_connectors)
 
     def _single(connector_name: str | None, *, discover: bool) -> list[dict]:
+        if not discover:
+            _record_agent_discovery(connector_name, rescan_agents=rescan_agents, data_dir=data_dir)
         return [
             {
                 "connector": _normalize_connector_arg(

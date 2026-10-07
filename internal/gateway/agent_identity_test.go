@@ -61,6 +61,12 @@ func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
 	if nameAgentIdentityRows(rows); len(rows) != 1 || rows[0].UserName != "dcad-bob@dclab.test" {
 		t.Fatalf("listed rows = %+v, want the host's account name", rows)
 	}
+	// GAP-0278: the IDE plugin rows of the same account read the same.
+	plugins := []inventory.IDEPlugin{{UserID: "4646", UserName: "dcad-bob"}}
+	installs := []inventory.IDEInstallation{{UserID: "4646", UserName: "dcad-bob"}}
+	if nameIDERows(plugins, installs); plugins[0].UserName != "dcad-bob@dclab.test" || installs[0].UserName != "dcad-bob@dclab.test" {
+		t.Fatalf("IDE rows = %+v %+v, want the host's account name", plugins, installs)
+	}
 }
 
 // The agent identity comes from verified facts only: forged identity headers
@@ -215,6 +221,63 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	}
 }
 
+// GAP-0258: a Codex thread without a transcript (transcript_path null, the
+// helper thread a managed install's hooks reach) is not counted as a session;
+// a chat with a transcript is.
+func TestCodexTranscriptlessThreadIsNotASession(t *testing.T) {
+	agentIdentityTestSetup(t)
+	prev := sharedAgentIdentities
+	sharedAgentIdentities = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	t.Cleanup(func() { sharedAgentIdentities = prev })
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4747, Name: "erin", Home: t.TempDir()})
+	hook := func(session string, transcript any) AgentIdentity {
+		return agentIdentityForGenericHook(peer, agentHookRequest{
+			ConnectorName: "codex", SessionID: session, HookEventName: "SessionStart",
+			Payload: map[string]interface{}{"transcript_path": transcript},
+		})
+	}
+	chat := hook("thread-chat", "/home/erin/.codex/sessions/rollout.jsonl")
+	hook("thread-helper", nil)
+	pending, _ := sharedAgentIdentities.snapshot()
+	if rec := pending[chat.IdentityID]; rec.SessionsSeen != 1 || rec.LastSessionID != "thread-chat" {
+		t.Fatalf("recorded %+v, want only the chat counted", rec)
+	}
+}
+
+// GAP-0289: with AI discovery off the recorder's own inventory.db is pruned
+// by last seen like discovery's history, so the ledger does not grow
+// without bound.
+func TestAgentIdentityLedgerPrunedWithDiscoveryOff(t *testing.T) {
+	agentIdentityTestSetup(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	token := recorder.setStoreSource(func() *inventory.InventoryStore { return nil },
+		func() string { return dir }, func() int { return 1 })
+	t.Cleanup(func() { recorder.clearStoreSource(token) })
+	now := time.Now().UTC()
+	old := now.Add(-72 * time.Hour)
+	store := recorder.store()
+	if store == nil {
+		t.Fatal("recorder opened no store")
+	}
+	if err := store.UpsertAgentIdentities(ctx, []inventory.AgentIdentityRecord{
+		{AgentID: "agt-00000000000000d1", UserID: "4545", Connector: "codex", FirstSeen: old, LastSeen: old, SessionIDs: []string{"sess-old"}},
+		{AgentID: "agt-00000000000000d2", UserID: "4545", Connector: "claudecode", FirstSeen: now, LastSeen: now, SessionIDs: []string{"sess-new"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock := now
+	recorder.ownSweep.Now = func() time.Time { return clock }
+	recorder.sweepOwnStore(ctx) // starts the cadence
+	clock = clock.Add(3 * time.Minute)
+	recorder.sweepOwnStore(ctx)
+	rows, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil || len(rows) != 1 || rows[0].AgentID != "agt-00000000000000d2" {
+		t.Fatalf("rows after the sweep = %+v, err %v; want only the identity seen now", rows, err)
+	}
+}
+
 // GAP-0152: the route pages the stored and buffered identities instead of
 // stopping silently at 1000 rows, and says how many there are.
 func TestAgentIdentitiesRoutePages(t *testing.T) {
@@ -226,7 +289,7 @@ func TestAgentIdentitiesRoutePages(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	prev := sharedAgentIdentities
 	sharedAgentIdentities = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
-	sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore { return store }, nil)
+	sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore { return store }, nil, nil)
 	t.Cleanup(func() { sharedAgentIdentities = prev })
 	base := time.Now().Add(-48 * time.Hour)
 	batch := make([]inventory.AgentIdentityRecord, 0, agentIdentitiesPageLimit+1)

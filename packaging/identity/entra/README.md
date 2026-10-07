@@ -80,8 +80,8 @@ ran:
 | Item | Result |
 | --- | --- |
 | `entra_setup.py check`, `sids` (two groups, one missing, JSON), `GRAPH_ACCESS_TOKEN` | Ran against a live tenant. The SID Graph reports for two groups and a user equals the value `sid-from-object-id` computes, and the SIDs of that user and of her group matched her Windows sign-in token |
-| `entra_setup.py apply` | Preview ran against a live tenant with existing and new objects. `--apply` not run |
-| `setup-entra-ssh-linux.sh` | Plan mode ran against an Ubuntu 22.04 VM that already had the identity, the extension and a role, and against a Windows VM (refused). `--apply` not run |
+| `entra_setup.py apply` | Preview and `--apply` ran against a live tenant with throwaway objects: it created a group and a user, put the user in the group and wrote the password file; a second `--apply` changed nothing |
+| `setup-entra-ssh-linux.sh` | Plan mode ran against an Ubuntu 22.04 VM that already had the identity, the extension and a role, and against a Windows VM (refused). `--apply` granted the sign-in role to a new user and a new group on that VM, and a second run found both; the identity and extension steps were not needed there, so they ran only as checks |
 | `Add-EntraGroupToLocalGroup.ps1` | Ran on Windows Server 2025 in Windows PowerShell 5.1 and PowerShell 7 with a throwaway local group: `-WhatIf`, add, add again, remove, remove again, bad SID, missing group. The same API put a real Entra group into the token of an Entra-joined Windows 11 user |
 | `Get-DefenseClawEntraIdentity.ps1` | Ran on Windows Server 2025 (not Entra-joined) in both engines, as administrator and as SYSTEM, with a saved `dsregcmd` output. Not yet run on an Entra-joined computer |
 | The example configs | Accepted by the gateway's `config-v8 validate`; a bad profile name is rejected |

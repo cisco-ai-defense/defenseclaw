@@ -301,8 +301,7 @@ def usage(
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
@@ -529,8 +528,7 @@ def processes(
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
@@ -3876,6 +3874,22 @@ def _emit_discovery_report(
     except requests.RequestException as exc:
         result["error"] = f"sidecar request failed: {exc}"
     return result
+
+
+def _usage_rejected(exc: requests.HTTPError) -> click.ClickException:
+    """The error for an AI usage request the sidecar refused (GAP-0281).
+
+    A refresh with AI discovery off answers 503 "ai discovery disabled"; the
+    bare status gave no hint what to do.
+    """
+    response = exc.response
+    status = response.status_code if response is not None else "unknown"
+    if status == 503 and "discovery disabled" in (response.text or "").lower():
+        return click.ClickException(
+            "AI discovery is disabled, so there is nothing to refresh. "
+            "Enable it with: defenseclaw agent discovery enable"
+        )
+    return click.ClickException(f"sidecar rejected AI usage request: HTTP {status}")
 
 
 def _sidecar_unavailable(exc: Exception, host: str | None = None, port: int | None = None) -> str:

@@ -151,7 +151,7 @@ func resolveWindowsDirectoryFacts(
 	}
 	facts.Principal = facts.UPN
 	if facts.Principal == "" && facts.Realm != "" && account != "" {
-		facts.Principal = NormalizePrincipal(account + "@" + facts.Realm)
+		facts.Principal = AccountPrincipal(account, facts.Realm)
 	}
 	if facts.Domain == "" && facts.UPN != "" {
 		facts.Domain = strings.ToLower(facts.UPN[strings.LastIndexByte(facts.UPN, '@')+1:])

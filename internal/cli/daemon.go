@@ -307,6 +307,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return err
 	}
+	bootSource := configSourceDigest(config.ConfigPath())
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	if rotationTransaction && cfgLoadErr != nil {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
@@ -378,7 +379,14 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return fmt.Errorf("start daemon: %w%s", err, gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 
-	cfg, cfgErr = loadDaemonConfig(cmd)
+	// The readiness checks need the configuration the daemon reads. Load it
+	// again only when config.yaml changed since the load above, or a rotation
+	// must re-check the committed state: with a large guardrail policy each
+	// load is a full parse and validation (GAP-0264).
+	if rotationTransaction || cfgLoadErr != nil || bootSource == nil ||
+		!bytes.Equal(bootSource, configSourceDigest(config.ConfigPath())) {
+		cfg, cfgErr = loadDaemonConfig(cmd)
+	}
 	if rotationTransaction && cfgErr != nil {
 		return fmt.Errorf("rotation start could not reload committed configuration: %w", cfgErr)
 	}
@@ -1173,6 +1181,17 @@ func onlyYAMLComments(raw []byte) bool {
 		}
 	}
 	return true
+}
+
+// configSourceDigest is the SHA-256 of the file at path, or nil when it
+// cannot be read.
+func configSourceDigest(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	sum := sha256.Sum256(raw)
+	return sum[:]
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {

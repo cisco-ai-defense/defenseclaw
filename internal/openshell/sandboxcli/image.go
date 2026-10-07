@@ -205,6 +205,10 @@ func (b *builderImages) Remove(ctx context.Context, harnesses []string, dryRun b
 		if err != nil && !strings.Contains(stderr.String()+err.Error(), "No such image") {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("docker image rm %s: %w", tag, err)
+				if why := strings.TrimSpace(stderr.String()); why != "" {
+					// What docker said is the reason (GAP-0282): its exit status alone is none.
+					firstErr = fmt.Errorf("%w: %s", firstErr, why[strings.LastIndexByte(why, '\n')+1:])
+				}
 			}
 			continue
 		}

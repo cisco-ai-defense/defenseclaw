@@ -2491,14 +2491,20 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
         if line.strip():
             ux.echo(f"  {ux.dim('·')} {line.strip()}")
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    # GAP-0282: teardown goes on past a failed step, so the last line is the
+    # last step that worked. The failures are the lines it marks with a cross.
+    failed = [line.lstrip("✗ ").strip() for line in (proc.stdout or "").splitlines() if line.strip().startswith("✗")]
+    undone = sum(1 for line in (proc.stdout or "").splitlines() if line.strip().startswith("✓"))
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
         reason = detail[-1].lstrip("✗ ").strip() if detail else "OpenShell sandboxes are not supported here"
         ux.subhead(f"sandbox teardown skipped: {reason}")
         return
     if proc.returncode != 0:
+        reason = "; ".join(failed) or (detail[-1] if detail else "")
         raise click.ClickException(
             "aborting uninstall: sandbox teardown failed"
-            + (f" ({detail[-1]})" if detail else "")
+            + (f" ({reason})" if reason else "")
+            + (f"; {undone} step(s) listed above already ran and stay done" if undone else "")
             + "; fix it and rerun, run `defenseclaw-gateway sandbox teardown` yourself first, "
             + "or rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown"
         )

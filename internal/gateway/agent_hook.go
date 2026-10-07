@@ -1548,10 +1548,28 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 			}
 		}
 	}
-	if req.SessionID != doctorProbeSessionID {
+	switch {
+	case req.SessionID == doctorProbeSessionID:
+	case codexTranscriptlessThread(req):
+		sharedAgentIdentities.observe(facts, "", false)
+	default:
 		sharedAgentIdentities.observe(facts, req.SessionID, newSession)
 	}
 	return identity
+}
+
+// codexTranscriptlessThread reports a Codex hook from a thread Codex keeps no
+// transcript for: its hooks carry "transcript_path": null. That is the short
+// helper thread Codex runs next to each chat, which a managed install's
+// requirements.toml hooks reach while per-user hooks do not, so it is not
+// counted as a session of the agent identity (GAP-0258). Its hooks are still
+// evaluated and audited, and a Codex that omits the field counts as before.
+func codexTranscriptlessThread(req agentHookRequest) bool {
+	if req.ConnectorName != "codex" {
+		return false
+	}
+	value, present := req.Payload["transcript_path"]
+	return present && value == nil
 }
 
 func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHookResponse, elapsed time.Duration) {

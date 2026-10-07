@@ -181,6 +181,22 @@ class Graph:
                 time.sleep(3)
         raise GraphError(404, "NotFound", "still not readable 45 seconds after it was created: " + path)
 
+    def add_member(self, group_id: str, object_id: str) -> bool:
+        """Add a directory object to a group; False when it already was a member.
+
+        The members list lags a fresh add by seconds, so a rerun can repeat an
+        add Graph already made. Graph answers 400 "added object references
+        already exist", which is the result asked for.
+        """
+        ref = {"@odata.id": f"{GRAPH}/v1.0/directoryObjects/{object_id}"}
+        try:
+            self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
+        except GraphError as exc:
+            if exc.status == 400 and "already exist" in str(exc):
+                return False
+            raise
+        return True
+
 
 def odata_eq(field: str, value: str) -> str:
     """A URL-encoded OData $filter expression: field eq 'value'."""
@@ -433,10 +449,10 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
                 print(f"{tag}{upn} is in {group_name}")
             elif not apply:
                 print(f"{tag}add {upn} to {group_name}: would add")
-            else:
-                ref = {"@odata.id": f"{GRAPH}/v1.0/directoryObjects/{user['id']}"}
-                graph.request("POST", f"/v1.0/groups/{group['id']}/members/$ref", ref)
+            elif graph.add_member(group["id"], user["id"]):
                 print(f"added {upn} to {group_name}")
+            else:
+                print(f"{upn} is in {group_name}")
 
     if not apply:
         print("Nothing was changed. Run again with --apply to make these changes.")

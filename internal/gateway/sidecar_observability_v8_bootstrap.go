@@ -143,6 +143,7 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if alreadyBound {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, nil)
 	}
+	s.bootConfigSourceName, s.bootConfigSource = sourceName, raw
 	compiled, err := config.ParseCompileObservabilityV8(
 		sourceName,
 		raw,
@@ -446,6 +447,26 @@ func (owner *sidecarOwnedObservabilityV8Runtime) Emit(
 		return pipeline.LocalLogOutcome{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
 	}
 	return owner.runtime.Emit(ctx, metadata, builder)
+}
+
+// LatestLifecycleProjection reads the newest verified lifecycle record of a
+// hook agent through the active generation. The API server restores a hook
+// session's lineage from it after a restart; without it on the runtime the
+// gateway runs, the restore never ran and a child session's first hook after
+// a restart lost its parent link (GAP-0158).
+func (owner *sidecarOwnedObservabilityV8Runtime) LatestLifecycleProjection(
+	ctx context.Context,
+	query audit.LifecycleProjectionQuery,
+) (audit.LifecycleProjection, bool, error) {
+	if owner == nil || owner.runtime == nil {
+		return audit.LifecycleProjection{}, false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return audit.LifecycleProjection{}, false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.LatestLifecycleProjection(ctx, query)
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) EmitLocalOnly(

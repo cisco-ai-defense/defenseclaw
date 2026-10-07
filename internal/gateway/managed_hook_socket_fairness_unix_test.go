@@ -139,7 +139,7 @@ func TestManagedHookPeerLookupReusesAFailedLookupBriefly(t *testing.T) {
 		retryAfter time.Duration
 	}{
 		{"transient", errors.New("getent: timed out"), managedHookPeerLookupRetry},
-		{"not found", unixidentity.ErrNotFound, managedHookPeerHomeTTL},
+		{"not found", unixidentity.ErrNotFound, managedHookPeerLookupRetry}, // GAP-0256
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			resolver := &transientPeerResolver{err: test.err}

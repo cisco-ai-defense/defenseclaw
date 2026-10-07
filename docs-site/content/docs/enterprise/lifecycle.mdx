@@ -39,6 +39,13 @@ scripts wait the same, and a removal that still finds the lock busy fails
 without deleting anything (the macOS pkg has no removal script). On
 Windows a busy run exits `1618`. MDM agents retry both.
 
+A deb or rpm upgrade holds the apply trigger from before the package manager
+replaces any file until its postinstall has applied the package, and first
+waits for a run already in progress. A `config.yaml` pushed just before the
+package is therefore applied by the new version, not checked by the old binary
+against files being replaced. When the package run keeps the last applied
+config because it rejected `config.yaml`, the install output says so.
+
 A `config.yaml` or credential written while a run holds the lock is
 applied by a follow-up transaction of that run (warning `input_changed`).
 When the run fails instead, the apply trigger runs `ensure` again once it

@@ -2426,14 +2426,6 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 	return false, ""
 }
 
-// hermesProfileSkillsRoots are where a Hermes skills root sits in a
-// profile: %LOCALAPPDATA%\hermes\skills on Windows, ~/.hermes/skills
-// elsewhere (the catalog's two Hermes skill paths).
-var hermesProfileSkillsRoots = []string{
-	filepath.Join("AppData", "Local", "hermes", "skills"),
-	filepath.Join(".hermes", "skills"),
-}
-
 // isHermesSkillsRoot reports whether path is a Hermes skills root: this
 // process's own, or on a service-context scan (managed Windows) the one in
 // a scanned profile. hermesskills.IsRoot resolves only the service
@@ -2447,7 +2439,7 @@ func (s *ContinuousDiscoveryService) isHermesSkillsRoot(path string) bool {
 	if !ok {
 		return false
 	}
-	for _, tail := range hermesProfileSkillsRoots {
+	for _, tail := range hermesskills.ProfileRootTails {
 		if strings.EqualFold(filepath.Clean(path), filepath.Join(filepath.Clean(owner.Home), tail)) {
 			return true
 		}

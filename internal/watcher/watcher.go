@@ -657,10 +657,11 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		}
 	}
 	for _, root := range w.skillDirs {
-		if !hermesskills.IsRoot(root) || !watcherPathAtOrBelow(path, root) {
+		discover, _ := hermesSkillsDiscover(root)
+		if discover == nil || !watcherPathAtOrBelow(path, root) {
 			continue
 		}
-		entries, err := hermesskills.Discover(root, hermesskills.DefaultDirectoryLimit)
+		entries, err := discover(root, hermesskills.DefaultDirectoryLimit)
 		if err != nil {
 			return []InstallEvent{fallback}
 		}

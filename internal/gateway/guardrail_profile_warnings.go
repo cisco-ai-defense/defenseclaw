@@ -102,7 +102,12 @@ func unnamedGroupsNote(subject *profileSubject) string {
 // group" for groups that exist. So nothing is warned while the directory
 // lookups of the gateway fail (the "Directory lookups" warning says so once),
 // or for an account whose own lookup failed, and a pass that ran meanwhile
-// is not kept (GAP-0229).
+// is not kept (GAP-0229). Neither is it when the gateway's own lookups do not
+// show the outage: at start before the first failed lookup, or on a local
+// account. A domain none of whose groups the host knows is asked for its
+// Domain Users group, which every Active Directory domain has; when the host
+// does not know that one either, the directory does not answer, and the pass
+// says once that it could not check that domain's groups (GAP-0255).
 
 const (
 	profileGroupCheckTTL    = time.Minute
@@ -194,17 +199,24 @@ func (set *guardrailProfileSet) logUnknownGroups() {
 }
 
 // unknownAssignmentGroups looks up each distinct group the assignments name
-// and warns for those exists reports as definitely absent. SIDs and ids are
-// not names and are not looked up.
+// and warns for those exists reports as definitely absent, unless their
+// directory does not answer at all. SIDs and ids are not names and are not
+// looked up.
 func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error)) []string {
-	var warnings []string
-	absent := map[string]bool{} // by folded name; present for every group looked up
+	type unknownGroup struct {
+		assignment    int
+		group, domain string
+	}
+	var unknown []unknownGroup
+	absent := map[string]bool{}   // by folded name; present for every group looked up
+	answered := map[string]bool{} // by folded domain: the host knows a group of it
 	for i, assignment := range assignments {
 		for _, group := range assignment.Match.Groups {
 			group = strings.TrimSpace(group)
 			if group == "" || strings.HasPrefix(strings.ToUpper(group), "S-1-") || strings.Trim(group, "0123456789") == "" {
 				continue
 			}
+			_, domain := useridentity.SplitQualifiedName(group)
 			key := foldKey(group)
 			dead, looked := absent[key]
 			if !looked {
@@ -214,13 +226,48 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 				known, err := exists(ctx, group)
 				dead = err == nil && !known
 				absent[key] = dead
+				if known {
+					answered[foldKey(domain)] = true
+				}
 			}
 			if dead {
-				warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", i+1, group))
+				unknown = append(unknown, unknownGroup{assignment: i + 1, group: group, domain: domain})
 			}
 		}
 	}
+	var warnings []string
+	silent := map[string]bool{} // by folded domain, once asked: its directory does not answer
+	for _, u := range unknown {
+		domainKey := foldKey(u.domain)
+		if u.domain != "" && !answered[domainKey] {
+			quiet, asked := silent[domainKey]
+			if !asked {
+				quiet = !directoryAnswers(ctx, u.group, u.domain, exists)
+				silent[domainKey] = quiet
+				if quiet {
+					warnings = append(warnings, fmt.Sprintf("could not check the groups of %s: the directory does not answer "+
+						"(unreachable, or SSSD offline with an empty cache), so they are not reported as unknown", u.domain))
+				}
+			}
+			if quiet {
+				continue
+			}
+		}
+		warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", u.assignment, u.group))
+	}
 	return warnings
+}
+
+// directoryAnswers reports whether the host knows the Domain Users group of
+// the domain of group, spelled the way group is (name@domain or
+// DOMAIN\name).
+func directoryAnswers(ctx context.Context, group, domain string, exists func(context.Context, string) (bool, error)) bool {
+	probe := "domain users@" + domain
+	if strings.Contains(group, `\`) {
+		probe = domain + `\domain users`
+	}
+	known, err := exists(ctx, probe)
+	return err == nil && known
 }
 
 // shortNameUserNote says when a directory account was selected by a users

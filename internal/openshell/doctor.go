@@ -1010,6 +1010,9 @@ func (r *doctorRun) checkService(ctx context.Context) {
 		if r.GOOS == "linux" {
 			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}
 		}
+		if errors.Is(err, ErrBrewNeedsTerminal) {
+			c.Fix = &Fix{Summary: "run this command again from a normal terminal (Terminal.app, or an ssh login), not tmux"}
+		}
 		return
 	}
 	r.service, r.report.Service = st, st
@@ -1045,7 +1048,7 @@ func (r *doctorRun) checkService(ctx context.Context) {
 
 func (r *doctorRun) startCommand() serviceCommand {
 	if r.GOOS == "darwin" {
-		return serviceCommand{"brew", []string{"services", "start", GatewayFormula}}
+		return serviceCommand{r.Gateway.BrewCommand(), []string{"services", "start", GatewayFormula}}
 	}
 	return serviceCommand{"systemctl", []string{"--user", "enable", "--now", GatewayService}}
 }

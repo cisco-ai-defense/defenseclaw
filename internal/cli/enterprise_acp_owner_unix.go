@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"syscall"
@@ -49,3 +50,14 @@ func withEnterpriseACPServiceOwner(dataDir string, fn func() error) error {
 // owner writes the records itself (withEnterpriseACPServiceOwner), with the
 // 0600 and 0700 modes safefile gives them.
 func alignEnterpriseACPCredentialOwner(_, _, _, _, _, _ string) error { return nil }
+
+// configureEnterpriseACPTargetLookup turns on the standalone Unix account
+// rules the enterprise hooks commands use, including the directory lookup
+// for accounts the static gateway cannot find in /etc/passwd (GAP-0269).
+func configureEnterpriseACPTargetLookup(ctx context.Context) {
+	configureEnterpriseHooksStandaloneUnix(ctx)
+}
+
+// enterpriseACPTargetError returns err: the Unix refusals already name the
+// account and what is wrong with it.
+func enterpriseACPTargetError(err error) error { return err }

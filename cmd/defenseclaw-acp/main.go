@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -63,15 +64,31 @@ type startupError struct {
 func (e *startupError) Error() string { return e.message }
 func (e *startupError) Unwrap() error { return e.err }
 
-func newStartupError(err error, clientID, agentID, profile, mode string) error {
+func newStartupError(err error, clientID, agentID, profile, mode, contractLock string) error {
+	pair := clientID + "/" + agentID
+	activate := ""
+	if mode == string(acp.ModeAction) {
+		activate = " --activate"
+	}
+	if gateway := managedGatewayCommand(contractLock); gateway != "" {
+		// A managed host has only the gateway binary, not the Python CLI
+		// the per-user text names (GAP-0270).
+		next := fmt.Sprintf("If your administrator revoked or has not enrolled %s for you, ask them to run "+
+			"enterprise acp enroll; then run %s enterprise acp setup --client %s --agent %s --profile %s%s "+
+			"(the command the enrollment reports), or delete this editor entry.",
+			pair, gateway, clientID, agentID, profile, activate)
+		if errors.Is(err, acp.ErrRuntimeContractMissing) {
+			return &startupError{err: err, message: fmt.Sprintf(
+				"DefenseClaw ACP guard is not set up for %s (the binding was removed). %s", pair, next)}
+		}
+		return &startupError{err: err, message: fmt.Sprintf(
+			"DefenseClaw ACP guard could not start for %s: %v. %s", pair, err, next)}
+	}
 	setup := fmt.Sprintf("defenseclaw acp setup --client %s --agent %s", clientID, agentID)
 	if profile != "" && profile != "default" {
 		setup += " --profile " + profile
 	}
-	if mode == string(acp.ModeAction) {
-		setup += " --activate"
-	}
-	pair := clientID + "/" + agentID
+	setup += activate
 	if errors.Is(err, acp.ErrRuntimeContractMissing) {
 		return &startupError{err: err, message: fmt.Sprintf(
 			"DefenseClaw ACP guard is not set up for %s (the binding was removed). Run '%s', or delete this editor entry.",
@@ -80,6 +97,56 @@ func newStartupError(err error, clientID, agentID, profile, mode string) error {
 	return &startupError{err: err, message: fmt.Sprintf(
 		"DefenseClaw ACP guard could not start for %s: %v. Run 'defenseclaw acp verify', then '%s', or delete this editor entry.",
 		pair, err, setup)}
+}
+
+// guardExecutable is the path of this guard; a variable for tests.
+var guardExecutable = os.Executable
+
+// managedGatewayCommand returns the gateway command of a managed host, or
+// "" on a per-user install. A guard is managed when its contract lock
+// records managed custody or, with the lock gone, when it runs from an
+// administrator-owned path; either way the gateway binary must sit next to
+// it.
+func managedGatewayCommand(contractLock string) string {
+	guard, err := guardExecutable()
+	if err != nil {
+		return ""
+	}
+	if !contractLockManagedCustody(contractLock) && managed.ValidateTrustedFilePath(guard, "managed ACP guard") != nil {
+		return ""
+	}
+	names := []string{"defenseclaw-gateway"}
+	if runtime.GOOS == "windows" {
+		names = []string{"defenseclaw.exe", "defenseclaw-gateway.exe"}
+	}
+	for _, name := range names {
+		path := filepath.Join(filepath.Dir(guard), name)
+		if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
+			if runtime.GOOS == "windows" {
+				return "& \"" + path + "\""
+			}
+			return path
+		}
+	}
+	return ""
+}
+
+// contractLockManagedCustody reports whether the contract lock at path was
+// written by a managed enrollment. It only chooses the remediation text.
+func contractLockManagedCustody(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	body, err := safefile.ReadRegularFileBounded(filepath.Clean(path), acp.MaxContractLockBytes)
+	if err != nil {
+		return false
+	}
+	var lock struct {
+		Guard struct {
+			ManagedCustody bool `json:"managed_custody"`
+		} `json:"guard"`
+	}
+	return json.Unmarshal(body, &lock) == nil && lock.Guard.ManagedCustody
 }
 
 func stdinIsPipe() bool {
@@ -148,7 +215,9 @@ func run(args []string) error {
 		return encoder.Encode(acp.BuiltinCatalog())
 	}
 
-	fail := func(err error) error { return newStartupError(err, *clientID, *agentID, *profile, *mode) }
+	fail := func(err error) error {
+		return newStartupError(err, *clientID, *agentID, *profile, *mode, *contractLock)
+	}
 	commandArgs := flags.Args()
 	command := ""
 	if len(commandArgs) > 0 {

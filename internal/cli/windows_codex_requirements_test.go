@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func TestTrimWindowsJSONBOMAcceptsLegacyPowerShell51Output(t *testing.T) {
@@ -24,7 +25,7 @@ func TestTrimWindowsJSONBOMAcceptsLegacyPowerShell51Output(t *testing.T) {
 	}
 }
 
-func TestResolveWindowsCodexManifestApplicabilityUsesGuardianManifest(t *testing.T) {
+func TestEnableWindowsCodexManifestTargetsUsesGuardianManifest(t *testing.T) {
 	stateRoot := filepath.Clean(`C:\ProgramData\DefenseClaw\state`)
 	want := filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
 	oldTrust := windowsCodexRequirementsManifestTrust
@@ -50,8 +51,8 @@ func TestResolveWindowsCodexManifestApplicabilityUsesGuardianManifest(t *testing
 		}, nil
 	}
 
-	applicability, err := resolveWindowsCodexManifestApplicability(stateRoot)
-	if err != nil {
+	var opts connector.WindowsCodexMachineRequirementsOptions
+	if err := enableWindowsCodexManifestTargets(stateRoot, &opts); err != nil {
 		t.Fatal(err)
 	}
 	if trustedPath != want || loadedPath != want {
@@ -60,10 +61,7 @@ func TestResolveWindowsCodexManifestApplicabilityUsesGuardianManifest(t *testing
 	if trustedPath == filepath.Join(stateRoot, "etc", "targets.yaml") {
 		t.Fatal("legacy etc targets path must never be consulted")
 	}
-	if !applicability.Enterprise || !applicability.Codex || !applicability.Claude || !applicability.Cursor {
-		t.Fatalf(
-			"applicability = %+v, want all true",
-			applicability,
-		)
+	if !opts.CodexTargetEnabled || !opts.ClaudeTargetEnabled || !opts.CursorTargetEnabled {
+		t.Fatalf("manifest targets = %+v, want all three enabled", opts)
 	}
 }

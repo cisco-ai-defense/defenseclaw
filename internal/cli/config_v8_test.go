@@ -253,6 +253,38 @@ func TestConfigV8ValidateNamesTheFieldAndWhatItTakes(t *testing.T) {
 	}
 }
 
+// GAP-0288: an assignment naming a profile that guardrail.profiles does not
+// define reached the wire only as "configuration could not be compiled
+// safely" at "$". It now names the assignment's field and the profile.
+func TestConfigV8ValidateNamesTheUnknownProfile(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + directory + "\nguardrail:\n  profiles:\n    ihs-a: {mode: observe}\n" +
+		"  profile_assignments:\n    - profile: ihs-nope\n      match: {groups: [dc-s-a]}\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+	previousOutput := configV8ValidateCmd.OutOrStdout()
+	configV8ConfigPath, configV8DataDir = path, directory
+	output := &strings.Builder{}
+	configV8ValidateCmd.SetOut(output)
+	err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+	configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+	configV8ValidateCmd.SetOut(previousOutput)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted an assignment of an undefined profile")
+	}
+	var failure configV8WireFailure
+	if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+		t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+	}
+	if failure.Path != "$.guardrail.profile_assignments[0].profile" ||
+		!strings.Contains(failure.Reason, `unknown profile "ihs-nope"`) || !strings.Contains(failure.Reason, "defines ihs-a") {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+}
+
 func TestCompileConfigV8FileLoadsInstallationDotEnvForValidationOnly(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")

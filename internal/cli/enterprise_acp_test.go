@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+
 	"github.com/spf13/cobra"
 )
 
@@ -81,6 +84,32 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		return payload
 	}
 
+	// An enrollment that cannot publish the bearer leaves no credential,
+	// and a failed re-enrollment keeps the working one (GAP-0260).
+	failEnroll := func(why string) {
+		t.Helper()
+		var output bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&output)
+		if err := runEnterpriseACPEnroll(command, nil); err == nil {
+			t.Fatalf("enroll succeeded although %s: %s", why, output.String())
+		}
+	}
+	if err := os.WriteFile(userData, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failEnroll("the user data dir is a file")
+	pending, err := resolveEnterpriseACPEnrollment(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acp.LoadEnterpriseCredential(serviceData, pending.principal, "zed", "kiro", "locked"); !os.IsNotExist(err) {
+		t.Fatalf("a failed enrollment left its minted credential: %v", err)
+	}
+	if err := os.Remove(userData); err != nil {
+		t.Fatal(err)
+	}
+
 	enrolled := run(runEnterpriseACPEnroll)
 	if next, _ := enrolled["next"].(string); !strings.Contains(next, " --activate") ||
 		!strings.Contains(next, " enterprise acp setup --client zed --agent kiro --profile locked") {
@@ -116,6 +145,20 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); !ok {
 		t.Fatal("enrolled token did not authenticate")
 	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(tokenPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failEnroll("the user token path is a directory")
+	if _, ok := acp.MatchEnterpriseCredential(serviceData, credential.Token); !ok {
+		t.Fatal("a failed re-enrollment removed the working credential")
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	run(runEnterpriseACPEnroll)
 	// Revocation is an incident-response operation and must remain available
 	// after central policy has already been disabled.
 	cfg.ACP.Enabled = false
@@ -125,6 +168,28 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Fatalf("user token survived revoke: %v", err)
+	}
+}
+
+// The Windows refusals named hook mutation and gave no next step; they now
+// name the ACP enrollment, LocalSystem and --user/--sid (GAP-0261).
+func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
+	cause := errors.New("enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service")
+	for name, got := range map[string]error{
+		"elevated prompt": enterpriseACPWindowsTargetError(cause, true),
+		"no session":      enterpriseACPWindowsTargetError(&enterprisehooks.WindowsTargetSessionUnavailableError{SID: "S-1-5-21-1-2-3-1001"}, false),
+		"system owner":    enterpriseACPWindowsTargetError(errors.New("enterprise hooks: refusing non-interactive target SID S-1-5-18"), false),
+	} {
+		message := got.Error()
+		if !strings.HasPrefix(message, "enterprise acp: ") || strings.Contains(message, "hook mutation") {
+			t.Errorf("%s: the refusal does not name the ACP enrollment: %q", name, message)
+		}
+		if name != "no session" && (!strings.Contains(message, "LocalSystem") || !strings.Contains(message, "--sid")) {
+			t.Errorf("%s: the refusal does not say how to enroll: %q", name, message)
+		}
+	}
+	if got := enterpriseACPWindowsTargetError(cause, true); !errors.Is(got, cause) {
+		t.Fatal("the refusal dropped its cause")
 	}
 }
 

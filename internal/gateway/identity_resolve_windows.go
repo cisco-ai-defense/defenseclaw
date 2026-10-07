@@ -46,6 +46,7 @@ func peerDirectoryCache() *identityDirectoryCache {
 		windowsDirectories.incomplete = func(facts useridentity.DirectoryFacts) bool {
 			return adWithoutUPN(facts) || awaitingSpool(facts)
 		}
+		windowsDirectories.partial = func(facts useridentity.DirectoryFacts) bool { return facts.GroupsPartial }
 	})
 	return windowsDirectories
 }

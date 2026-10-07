@@ -1782,6 +1782,30 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	}
 }
 
+// With Docker stopped, teardown used to undo the sandboxes, providers,
+// profiles and gateway files and only then fail on the image removal, with no
+// reason shown (GAP-0282). It now stops before it changes anything, and
+// --keep-images goes on without Docker.
+func TestTeardownWithDockerStoppedChangesNothing(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	useGateway(ta)
+	ta.daemon.add(sampleSandbox("dc-claude-live"))
+	ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-1"}}
+	ta.images.goneIDsErr = errors.New("Cannot connect to the Docker daemon")
+
+	if err := ta.Teardown(bg, TeardownOptions{Yes: true}); err == nil {
+		t.Fatal("teardown went on without Docker")
+	}
+	has(t, ta.output(), "Docker: Cannot connect to the Docker daemon", "--keep-images", "nothing was changed")
+	if ta.calls("DELETE", "dc-claude-live") != 0 || len(ta.images.removed) != 0 || !loadConfig(t, ta).OpenShell.Enabled {
+		t.Fatal("the refused teardown changed something")
+	}
+
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
+	ta.wantCalls(t, 1, "DELETE", "dc-claude-live")
+}
+
 // TestTeardownDryRunListsEveryStep pins the dry run a newcomer reads: every
 // step, "none" and "nothing to restore" included, the provider profiles
 // labeled by whose they are, and a closing "nothing was changed" (manual

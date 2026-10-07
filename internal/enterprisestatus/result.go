@@ -297,6 +297,27 @@ func InvalidArgsExitCode(goos string) int {
 	return UnixExitInvalidArgs
 }
 
+// notRootCode is the refusal of a Linux or macOS action run without root.
+const notRootCode = "not_root"
+
+// deploymentStateFields report the deployment. A not_root result checked
+// nothing (a standard user cannot read the root-only deployment record), so
+// it leaves them out instead of reporting installed: false, no services and
+// every readiness flag false, which a script that ignores the error code read
+// as "not installed" (GAP-0279).
+var deploymentStateFields = []string{
+	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
+}
+
+func (r Result) refusedNotRoot() bool {
+	for _, e := range r.Errors {
+		if e.Code == notRootCode {
+			return true
+		}
+	}
+	return false
+}
+
 // MarshalJSON renders services in a stable order.
 func (r Result) MarshalJSON() ([]byte, error) {
 	type plain Result
@@ -319,6 +340,20 @@ func (r Result) MarshalJSON() ([]byte, error) {
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(sorted); err != nil {
+		return nil, err
+	}
+	if !r.refusedNotRoot() {
+		return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range deploymentStateFields {
+		delete(fields, name)
+	}
+	buf.Reset()
+	if err := encoder.Encode(fields); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil

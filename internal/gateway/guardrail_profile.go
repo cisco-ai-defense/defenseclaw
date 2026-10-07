@@ -1132,13 +1132,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		"connector":           connectorName,
 		"agent":               agent,
 	}
-	if set == nil {
-		out["profile"] = ""
-		out["match"] = ""
-		out["effective"] = profileEffectiveView(a.scannerCfg, connectorName)
-		a.writeJSON(w, http.StatusOK, out)
-		return
-	}
+	// The subject is resolved with or without profiles, so the identity check
+	// (`profile explain --user U --json | jq .subject`) answers on every
+	// install (GAP-0280).
 	var subject *profileSubject
 	source := ""
 	if user != "" {
@@ -1158,6 +1154,13 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			"principal": found.Principal, "upn": found.UPN, "groups": found.Groups,
 			"group_count": identityGroupCount(found.Groups),
 		}
+	}
+	if set == nil {
+		out["profile"] = ""
+		out["match"] = ""
+		out["effective"] = profileEffectiveView(a.scannerCfg, connectorName)
+		a.writeJSON(w, http.StatusOK, out)
+		return
 	}
 	if source == "" {
 		agent = ""

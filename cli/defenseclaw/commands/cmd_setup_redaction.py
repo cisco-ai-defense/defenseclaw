@@ -444,6 +444,7 @@ _BUILT_IN_PROFILE_SUMMARIES = {
     "content": "like sensitive, but replaces content, reasons, evidence and errors whole",
     "strict": "keeps only metadata and join identifiers (drops principals, client address, tenant, email)",
 }
+_PERSONAL_IDENTIFIERS = "user principal, Kerberos principal, client address, tenant ID, email"
 
 
 @redaction.group("profile")
@@ -498,6 +499,10 @@ def profile_show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
     for field_class in FIELD_CLASSES:
         mode = (found.get("field_classes") or {}).get(field_class, "-")
         click.echo(f"  {field_class}: {mode}")
+    # GAP-0257: the identifier class reads "preserve" for strict too; strict
+    # (and a custom profile that extends it) still removes the five personal ones.
+    removes = name == "strict" or found.get("extends") == "strict"
+    click.echo(f"  Personal identifiers: {'removed' if removes else 'kept as recorded'} ({_PERSONAL_IDENTIFIERS})")
 
 
 @profile_group.command("set")

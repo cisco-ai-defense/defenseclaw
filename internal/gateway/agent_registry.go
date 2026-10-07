@@ -304,9 +304,22 @@ func (r *AgentRegistry) evictOldestLocked() {
 		return
 	}
 	delete(r.sessions, oldestKey)
-	if ref, ok := r.sessionAgents[oldestKey.session]; ok && (ref.ambiguous || ref.agent == oldestKey.agent) {
-		delete(r.sessionAgents, oldestKey.session)
+	ref, ok := r.sessionAgents[oldestKey.session]
+	if !ok || (!ref.ambiguous && ref.agent != oldestKey.agent) {
+		return
 	}
+	// An ambiguous session stays ambiguous while another agent identity
+	// still holds an entry for it: forgetting that would let the evicted
+	// identity, seen again, claim the session's identity-less traffic alone
+	// (GAP-0291).
+	if ref.ambiguous {
+		for key := range r.sessions {
+			if key.session == oldestKey.session && key.agent != "" {
+				return
+			}
+		}
+	}
+	delete(r.sessionAgents, oldestKey.session)
 }
 
 func agentSessionKeyLess(a, b agentSessionKey) bool {

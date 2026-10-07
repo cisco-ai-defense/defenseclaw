@@ -56,7 +56,6 @@ type WindowsCodexMachineRequirementsOptions struct {
 	// that WDAC/AppLocker restricts every enabled enterprise agent to approved
 	// binaries.
 	AgentApplicationControlEnforced bool
-	EnterpriseTargetEnabled         bool
 	// ClaudeEffectivePolicyVerified records authenticated certification of
 	// the effective first-source-wins Claude policy. It is surfaced here for
 	// the aggregate Windows deployment report; the Codex requirements API
@@ -766,8 +765,26 @@ func windowsCodexCountOwnedPathReferences(value interface{}, needles []string) i
 	return 0
 }
 
+// EnableManifestTarget records one enabled targets.yaml row. Only Claude
+// Code, Codex and Cursor have a Windows machine policy, so only their rows
+// count toward security_complete. A deployment whose only rows are other
+// connectors (Copilot, OpenCode, the per-user connectors) is not
+// security-complete, as DefenseClawEnterprise.psm1 computes it; counting any
+// enabled row made status and verify fail with "aggregate security result
+// disagrees with protected evidence" (GAP-0238).
+func (o *WindowsCodexMachineRequirementsOptions) EnableManifestTarget(connectorName string) {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "claudecode":
+		o.ClaudeTargetEnabled = true
+	case "codex":
+		o.CodexTargetEnabled = true
+	case "cursor":
+		o.CursorTargetEnabled = true
+	}
+}
+
 func windowsCodexMachineSecurityComplete(opts WindowsCodexMachineRequirementsOptions) bool {
-	return opts.EnterpriseTargetEnabled &&
+	return (opts.ClaudeTargetEnabled || opts.CodexTargetEnabled || opts.CursorTargetEnabled) &&
 		(!opts.ClaudeTargetEnabled || opts.ClaudeEffectivePolicyVerified)
 }
 

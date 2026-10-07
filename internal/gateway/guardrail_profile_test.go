@@ -648,6 +648,14 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	if got := profileExplainWarnings(set, profileDecision{}, &profileSubject{LookupFailed: true}); len(got) != 0 {
 		t.Fatalf("warnings = %q for an account whose lookup failed, want none", got)
 	}
+	// GAP-0255: the gateway's own lookups work (a local account, or at start
+	// before the first failure) but no group of dclab.test is known, Domain
+	// Users included: one note, no group reported as renamed or deleted.
+	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not check the groups of dclab.test") {
+		t.Fatalf("warnings = %q while the directory does not answer, want one note", got)
+	}
+	profileGroupExists = func(_ context.Context, name string) (bool, error) { return name == "domain users@dclab.test", nil }
+	set = &guardrailProfileSet{assignments: assignments}
 	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 4 {
 		t.Fatalf("warnings = %q once the directory answers, want the 4 absent groups", got)
 	}
@@ -700,6 +708,34 @@ func TestSecureClientDecidesWithTheStartTimeConfig(t *testing.T) {
 	start.DeploymentMode, live.DeploymentMode = "", ""
 	if got := api.decisionConfig(context.Background()); got != live {
 		t.Fatal("a per-user gateway decided with the start-time configuration")
+	}
+}
+
+// TestProfileExplainShowsTheSubjectWithoutProfiles pins GAP-0280: the
+// documented identity check (`profile explain --user U --json | jq .subject`)
+// printed null on an install with no guardrail profiles, because the handler
+// answered before any directory lookup.
+func TestProfileExplainShowsTheSubjectWithoutProfiles(t *testing.T) {
+	prev := profileExplainSubjectLookup
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubject{UserID: "1201", UserName: "alice", Principal: "alice@CORP.EXAMPLE.COM", Groups: []string{"dc-devs@corp.example.com"}}, nil
+	}
+	t.Cleanup(func() { profileExplainSubjectLookup = prev; liveGuardrailProfiles.Store(nil) })
+	liveGuardrailProfiles.Store(nil)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=alice", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var out struct {
+		Configured bool           `json:"profiles_configured"`
+		Subject    map[string]any `json:"subject"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body.String())
+	}
+	if out.Configured || out.Subject["principal"] != "alice@CORP.EXAMPLE.COM" || out.Subject["group_count"] != float64(1) {
+		t.Fatalf("explain = %s", rec.Body.String())
 	}
 }
 

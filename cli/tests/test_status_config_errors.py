@@ -60,6 +60,27 @@ def test_empty_config_hint_dates_the_kept_copy(data_dir: Path) -> None:
     assert "lacks every change made since then" in message
 
 
+def test_refused_config_is_not_sent_back_to_init(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0288: a config.yaml that is there and refused (an assignment naming
+    # an undefined profile) is fixed in the file; `init` would not change it.
+    from defenseclaw.main import cli
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    (data_dir / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
+    monkeypatch.setattr(dcconfig, "require_v8_config", lambda **_: None)
+
+    def refuse(**_kwargs):
+        raise ValueError("guardrail.profile_assignments[0]: unknown profile 'ihs-nope'")
+
+    monkeypatch.setattr(dcconfig, "load", refuse)
+    result = CliRunner().invoke(cli, ["guardrail", "status"])
+    text = result.output + (result.stderr or "")
+    assert result.exit_code == 1, text
+    assert "guardrail.profile_assignments[0]: unknown profile 'ihs-nope'" in text
+    assert "defenseclaw config validate" in text
+    assert "defenseclaw init" not in text
+
+
 def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:
     path = data_dir / "config.yaml"
     path.write_text("gateway: {}\n", encoding="utf-8")

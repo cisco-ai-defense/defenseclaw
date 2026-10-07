@@ -192,6 +192,31 @@ class ValidateConfigTests(unittest.TestCase):
             ],
         )
 
+    def test_unknown_profile_refusal_names_the_assignment_and_its_line(self):
+        # GAP-0288: no "candidate field=$; reason=configuration could not be compiled safely".
+        refusal = ConfigInspectError(
+            "candidate field=$.guardrail.profile_assignments[0].profile; reason=...",
+            field_path="$.guardrail.profile_assignments[0].profile",
+            reason='[config_semantic_invalid] unknown profile "ihs-nope"; '
+            "guardrail.profiles defines ihs-a: use one of them, or define this one there",
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 8\nguardrail:\n  profiles:\n    ihs-a: {mode: observe}\n"
+                "  profile_assignments:\n    - profile: ihs-nope\n      match: {groups: [g]}\n",
+                encoding="utf-8",
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(
+            res.errors,
+            [
+                'line 6: guardrail.profile_assignments[0].profile: unknown profile "ihs-nope"; '
+                "guardrail.profiles defines ihs-a: use one of them, or define this one there."
+            ],
+        )
+        self.assertNotIn("defenseclaw init", " ".join(res.errors))
+
     def test_reference_yaml_drops_generator_header_and_help_names_json_schema(self):
         # GAP-1661: the YAML reference covers only observability; the help says
         # where every field is, and the output carries no repository paths.

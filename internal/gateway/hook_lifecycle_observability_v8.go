@@ -176,7 +176,7 @@ func buildHookLifecycleV8Record(
 	}
 	if meta.LifecycleEvent == observability.TelemetryEventToolStart ||
 		meta.LifecycleEvent == observability.TelemetryEventToolEnd {
-		return buildHookToolLifecycleV8Record(builder, envelope, meta)
+		return buildHookToolLifecycleV8Record(ctx, builder, envelope, meta)
 	}
 
 	base := observability.LogCompatSessionStartInput{
@@ -302,6 +302,7 @@ func hookLifecycleV8EventInput(base observability.LogCompatSessionStartInput) ob
 }
 
 func buildHookToolLifecycleV8Record(
+	ctx context.Context,
 	builder *observability.FamilyBuilder,
 	envelope observability.FamilyEnvelopeInput,
 	meta llmEventMeta,
@@ -345,6 +346,9 @@ func buildHookToolLifecycleV8Record(
 		DefenseClawTelemetryInputReported:  false,
 		DefenseClawTelemetryOutputReported: false,
 	}
+	// tool_start and tool_end join the sandbox like the session lifecycle
+	// and the tool invocation records of the same hook (GAP-0202).
+	base.DefenseClawSandboxID, base.DefenseClawSandboxName = hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 	meta.Identity.applyTo(&base)
 	if meta.LifecycleEvent == observability.TelemetryEventToolEnd {
 		return builder.BuildLogCompatToolEnd(observability.LogCompatToolEndInput(base))

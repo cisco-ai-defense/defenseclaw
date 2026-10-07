@@ -34,6 +34,7 @@ Subcommands:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -58,6 +59,7 @@ from defenseclaw.observability.v8_config import (
     RETIRED_KEY_ACTION_PREFIX,
     V8ConfigError,
     load_config_value,
+    load_masked_v8,
     load_validate_v8,
     retired_key_replacement,
 )
@@ -247,19 +249,28 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
     _managed_view_note()
-    if parts[:2] == ["admission", "defaults"] and not _written_in_source(app, parts):
+    # One parse of the source serves the value, the "not set" note and the
+    # written checks of a key outside observability; the observability plan
+    # and the full validation of every section are left to config show and
+    # config validate (GAP-0276).
+    written = _masked_source(str(config_module.config_path())) if parts[0] != "observability" else None
+    if parts[:2] == ["admission", "defaults"] and not _written_in_source(app, parts, written):
         raise click.ClickException(
             f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
             "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
         )
-    if effective or (_resolves_when_unset(parts) and not _written_in_source(app, parts)):
+    if effective or (_resolves_when_unset(parts) and not _written_in_source(app, parts, written)):
         resolved = _effective_value(app, parts)
         if resolved is not None:
             value, source = resolved
             click.echo(f"(source: {source})", err=True)
             _echo_value(value, fmt)
             return
-    view = _key_view(app, parts)
+    if written is not None:
+        view = _merge_defaults(written, _v8_defaults(app))
+        _resolve_defaults(app, view, written)
+    else:
+        view = _key_view(app, parts)
     found, value = _lookup(view, parts)
     if not found:
         if _is_destination_key(parts):
@@ -277,7 +288,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             f"Run 'defenseclaw config show --section {parts[0]}' to see the keys it has."
         )
     if parts[0] != "observability":
-        written = _show_data(app, source=True, effective=False, provenance=False)
+        if written is None:
+            written = _show_data(app, source=True, effective=False, provenance=False)
         if not _lookup(written, parts)[0]:
             click.echo(f"(default: config.yaml does not set {key})", err=True)
         elif effective:
@@ -335,8 +347,23 @@ def _destination_not_set(key: str, parts: list, written: dict) -> str:
     )
 
 
-def _written_in_source(app: AppContext, parts: list) -> bool:
+def _masked_source(cfg_path: str) -> dict | None:
+    """config.yaml as written, secrets masked, from one parse without the full
+    validation; None when it is not a v8 or later source (GAP-0276)."""
+    if not _looks_like_v8_config(cfg_path):
+        return None
+    try:
+        return load_masked_v8(Path(cfg_path).read_bytes(), source_name=cfg_path)
+    except OSError as exc:
+        raise click.ClickException(f"cannot read configuration source: {exc}") from exc
+    except (V8ConfigError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _written_in_source(app: AppContext, parts: list, written: dict | None = None) -> bool:
     """Whether config.yaml itself sets the key (a v8 or later source only)."""
+    if written is not None:
+        return _lookup(written, parts)[0]
     if not _looks_like_v8_config(str(config_module.config_path())):
         return True
     return _lookup(_show_data(app, source=True, effective=False, provenance=False), parts)[0]
@@ -1299,6 +1326,16 @@ def _not_current_message(path: str) -> str:
 
 
 def _looks_like_v8_config(path: str) -> bool:
+    """Detect a root v8 declaration, once per file version in a process."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return False
+    return _looks_like_v8_config_at(path, stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=8)
+def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
     """Detect a root v8 declaration without constructing source values.
 
     ``yaml.compose`` understands valid YAML presentation variants (including

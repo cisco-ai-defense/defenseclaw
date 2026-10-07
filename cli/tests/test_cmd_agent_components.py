@@ -908,6 +908,24 @@ class DiscoveryOffAndWordingTests(unittest.TestCase):
             self.assertIn("defenseclaw agent discovery enable", result.output)
             self.assertNotIn(empty_table, result.output)
 
+    def test_refresh_with_discovery_off_names_the_next_step(self):
+        # GAP-0281: the scan answers 503 "ai discovery disabled"; the CLI printed the bare status.
+        class _Refused(_FakeClient):
+            def scan_ai_usage(self):
+                response = requests.Response()
+                response.status_code = 503
+                response._content = b'{"error":"ai discovery disabled"}'
+                raise requests.HTTPError("503 Server Error", response=response)
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", _Refused):
+            result = CliRunner().invoke(cmd_agent.usage, ["--refresh"], obj=_make_ctx())
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("AI discovery is disabled", result.output)
+        self.assertIn("defenseclaw agent discovery enable", result.output)
+        self.assertNotIn("HTTP 503", result.output)
+
     def test_runtime_plane_changes_read_as_plain_words(self):
         self.assertEqual(
             cmd_agent._runtime_change_line("planes", [], ["a", "b"]),

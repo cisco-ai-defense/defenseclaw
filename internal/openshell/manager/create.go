@@ -955,11 +955,13 @@ func microVMRefusal(spec *harness.Spec, img image.Record) error {
 			Detail: img.MicroVMProblem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs " + spec.DisplayName +
 				"; to check the image again: " + recheck}
 	}
-	detail := "its image " + img.Tag + " was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
-		"check it: " + recheck
+	// The command comes first: the reason can be a long probe message
+	// (GAP-0274).
+	detail := "run " + recheck + " to check it; its image " + img.Tag + " was not checked with a MicroVM's name resolution " +
+		"(OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts)"
 	if img.MicroVMInconclusive != "" {
-		detail = "its image " + img.Tag + " was run with a MicroVM's name resolution, which settled nothing: " + img.MicroVMInconclusive +
-			"; check it again: " + recheck + " (a run without --no-build checks it first, too)"
+		detail = "run " + recheck + " to check it again (a run without --no-build checks it first, too); its image " + img.Tag +
+			" was run with a MicroVM's name resolution, which settled nothing: " + img.MicroVMInconclusive
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
 		Message: spec.DisplayName + "'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs)", Detail: detail}

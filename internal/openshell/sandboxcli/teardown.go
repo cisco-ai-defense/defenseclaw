@@ -52,6 +52,9 @@ type teardownPlan struct {
 	// providers are deleted.
 	ownIngress map[string]bool
 	images     []string
+	// dockerErr is why Docker could not be asked about those images: the
+	// removal would fail midway, after the rest was undone (GAP-0282).
+	dockerErr error
 	// imageIDs are the image IDs of those images, and vmDisks the disks the
 	// MicroVM driver prepared from them, which teardown removes once the
 	// images are gone and no sandbox is left that boots one.
@@ -119,6 +122,14 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 		a.println()
 		a.note("dry run: nothing was changed")
 		return nil
+	}
+	if p.dockerErr != nil {
+		// Before anything is undone: removing the images is the step that
+		// needs Docker, and it comes after the sandboxes, providers and
+		// profiles are gone.
+		a.bad("Docker: " + p.dockerErr.Error())
+		a.note("→ start Docker and rerun, or rerun with --keep-images to leave the images; nothing was changed")
+		return &Silent{Err: fmt.Errorf("teardown stopped before changing anything, because Docker cannot be asked about the images: %w", p.dockerErr)}
 	}
 	question := "Remove all of it? (OpenShell itself stays installed)"
 	if len(p.unhanded) > 0 {
@@ -238,6 +249,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		if len(p.images) > 0 {
 			p.imageIDs = a.storeImageIDs()
 			p.vmDisks = a.vmDisksOf(p.imageIDs, nil)
+			_, p.dockerErr = a.Images.GoneIDs(ctx, p.imageIDs)
 		}
 	}
 	if r, err := a.loadReceipt(); err == nil {

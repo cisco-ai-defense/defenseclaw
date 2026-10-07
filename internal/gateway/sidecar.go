@@ -142,6 +142,11 @@ type Sidecar struct {
 	// shutdown from republishing capabilities for the retiring owned runtime.
 	observabilityV8ConsumersDetached bool
 	observabilityV8Run               bool
+	// bootConfigSourceName and bootConfigSource are the config.yaml bytes
+	// the observability runtime was bootstrapped from, the source the
+	// gateway runs (GAP-0264).
+	bootConfigSourceName string
+	bootConfigSource     []byte
 	// exporterHealthMetric* retains only monotonic, content-free delivery
 	// counters for the active graph generation. It converts runtime health
 	// snapshots into delta exporter-error metrics without resurrecting a global
@@ -1067,6 +1072,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	)
 	s.configMgr.bindInitialObservabilityV8Plan(s.observabilityV8ActivePlan())
 	s.watchGenerationAssets()
+	s.configMgr.setStartupSource(s.bootConfigSourceName, s.bootConfigSource)
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	s.configMgr.bindObservabilityV8(metricRuntime)
 	// managed_enterprise: wire the AVC-authored env_config.json so the
@@ -1147,6 +1153,12 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			return cfg.DataDir
 		}
 		return ""
+	}, func() int {
+		// The audit retention window, as AI discovery's history uses.
+		if plan := s.observabilityV8ActivePlan(); plan != nil {
+			return plan.Snapshot().Local.RetentionDays
+		}
+		return config.ObservabilityV8DefaultRetentionDays
 	})
 	wg.Add(1)
 	go func() {

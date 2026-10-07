@@ -104,8 +104,13 @@ func sampleResults() map[string]*Result {
 	invalid.AddError("invalid_arguments", "--payload and --from-package are exclusive")
 	invalid.Finish("linux", InvalidArgsExitCode("linux"))
 
+	notRoot := New("ensure", "standalone", "linux", "1.4.0")
+	notRoot.AddError("not_root", "run this command as root (sudo or the MDM agent)")
+	notRoot.Finish("linux", 0)
+
 	return map[string]*Result{
 		"fresh": fresh, "installed": installed, "noop": noop, "busy": busy, "failed": failed, "invalid": invalid,
+		"not_root": notRoot,
 	}
 }
 
@@ -173,7 +178,13 @@ func TestLifecycleSchemaRejectsContractViolations(t *testing.T) {
 // TestLifecycleSchemaDescribesEveryField walks the Go types and requires the
 // schema to name exactly their JSON fields, requiring the ones rendered
 // without omitempty.
+func anySlice(value any) []any {
+	items, _ := value.([]any)
+	return items
+}
+
 func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
+
 	data, err := os.ReadFile(filepath.FromSlash(lifecycleSchemaPath))
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +229,17 @@ func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
 		var schemaRequired []string
 		for _, key := range object.schema["required"].([]any) {
 			schemaRequired = append(schemaRequired, key.(string))
+		}
+		if name == "result" {
+			// The deployment state fields are required of every result but
+			// a not_root one, which leaves them out (GAP-0279).
+			for _, clause := range root["allOf"].([]any) {
+				if otherwise, ok := clause.(map[string]any)["else"].(map[string]any); ok {
+					for _, key := range anySlice(otherwise["required"]) {
+						schemaRequired = append(schemaRequired, key.(string))
+					}
+				}
+			}
 		}
 		if object.schema["additionalProperties"] != false {
 			t.Errorf("%s: schema must set additionalProperties: false", name)
