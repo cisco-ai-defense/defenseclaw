@@ -339,7 +339,7 @@ protected executable (`/opt/defenseclaw/bin/defenseclaw-acp` on Linux).
 
 | Surface | ACP methods or messages | Protection |
 | --- | --- | --- |
-| Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON validation; no batches; 1 MiB frame and 128 pending-ID bounds |
+| Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON validation; no batches; 1 MiB frame and 128 pending-ID bounds. An error response with a null `id` (a peer that could not read a frame's `id`) is checked and forwarded; in action mode any other invalid frame ends the session with a message that names which side sent it |
 | Prompt | `session/prompt` | Rules, scanners, optional judge, observe/action policy |
 | Output | `session/update` and prompt response | Evaluated per frame and again as canonical per-field streams across the complete buffered turn; action mode releases nothing before the terminal prompt response passes |
 | Approval | `session/request_permission`, `elicitation/create` | Allow or block; an unresolved confirmation verdict fails closed in action mode |

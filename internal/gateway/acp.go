@@ -100,7 +100,13 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		msg, err := acp.ParseMessage(req.Payload)
+		// A guard forwards a null-id error response (GAP-0351); Secure
+		// Client keeps the parser of main.
+		parse := acp.ParseMessageAllowingNullIDErrors
+		if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+			parse = acp.ParseMessage
+		}
+		msg, err := parse(req.Payload)
 		if err != nil || msg.Method != req.Method || acp.Classify(msg, req.Direction) != req.Surface {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP envelope metadata does not match payload"})
 			return

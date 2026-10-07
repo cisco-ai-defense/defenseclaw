@@ -604,3 +604,20 @@ func TestCopyFramesActionGatewayNotReadyRetriesAfterAPauseAndNamesTheCause(t *te
 		t.Fatalf("refused turn = %q", text)
 	}
 }
+
+// An error response with a null id is valid JSON-RPC 2.0: an editor answers
+// an agent notification it could not parse that way. Action mode forwards it
+// and the session goes on (GAP-0351).
+func TestCopyFramesActionForwardsANullIDErrorResponse(t *testing.T) {
+	nullID := `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"Method not found"}}`
+	input := bytes.NewBufferString(nullID + "\n" + `{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"prompt":[]}}` + "\n")
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: AllowEvaluator{}}, state, ClientToAgent, input, &forwarded, &rejected)
+	if err != nil {
+		t.Fatalf("a null-id error response ended the session: %v", err)
+	}
+	if !strings.Contains(forwarded.String(), nullID) || !strings.Contains(forwarded.String(), `"id":8`) {
+		t.Fatalf("frames were not forwarded: %s", forwarded.String())
+	}
+}

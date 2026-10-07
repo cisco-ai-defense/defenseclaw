@@ -76,7 +76,10 @@ func Run(ctx context.Context, opts ProxyOptions) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	state := &proxyState{pendingClient: make(map[string]string), pendingAgent: make(map[string]string)}
+	state := &proxyState{
+		pendingClient: make(map[string]string), pendingAgent: make(map[string]string),
+		peerProtocolFixes: !secureClientHost(),
+	}
 	clientOut := &lockedWriter{writer: opts.Stdout}
 	agentInput := &lockedWriter{writer: agentIn}
 	clientDone := make(chan error, 1)
@@ -130,6 +133,10 @@ type proxyState struct {
 	// mutedSessions drops the agent's further session/update output for an
 	// aborted turn until its late answer arrives or a new prompt starts.
 	mutedSessions map[string]struct{}
+	// peerProtocolFixes accepts null-id error responses and words a session
+	// the guard ends without internals (GAP-0351). Off on a Secure Client
+	// host, which keeps the guard of main (issue #1092).
+	peerProtocolFixes bool
 }
 
 // errAbortedTurnFrame marks a frame of a turn the guard already ended. It is
@@ -174,6 +181,11 @@ func (s *proxyState) track(msg Message, direction Direction, mode Mode) (string,
 			s.turnBuffer = s.turnBuffer[:0]
 			s.turnFrames = s.turnFrames[:0]
 		}
+		return "", nil
+	}
+	if msg.Method == "" && s.peerProtocolFixes && msg.IsNullIDError() {
+		// An error report for a frame whose id the peer could not read: it
+		// answers nothing pending and is forwarded as is.
 		return "", nil
 	}
 	if msg.Method == "" {
@@ -633,9 +645,13 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 	scanner := bufio.NewScanner(src)
 	buf := make([]byte, 64<<10)
 	scanner.Buffer(buf, MaxFrameBytes+1)
+	parse := ParseMessage
+	if state.peerProtocolFixes {
+		parse = ParseMessageAllowingNullIDErrors
+	}
 	for scanner.Scan() {
 		frame := append([]byte(nil), scanner.Bytes()...)
-		msg, err := ParseMessage(frame)
+		msg, err := parse(frame)
 		matchedMethod := ""
 		if err == nil {
 			matchedMethod, err = state.track(msg, direction, opts.Mode)
@@ -644,6 +660,10 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			continue
 		}
 		if err != nil {
+			if opts.Mode == ModeAction && state.peerProtocolFixes {
+				return fmt.Errorf("DefenseClaw ended this ACP session because the %s sent a message that is not valid ACP JSON-RPC: %w",
+					acpPeerName(direction), err)
+			}
 			if opts.Mode == ModeAction {
 				return fmt.Errorf("ACP protocol blocked: %w", err)
 			}
@@ -657,6 +677,11 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			Profile: opts.Profile, Mode: opts.Mode, AgentID: opts.AgentID, ClientID: opts.ClientID,
 			Direction: direction, Surface: Classify(msg, direction), Method: msg.Method, Payload: msg.Raw,
 		})
+		if evalErr != nil && state.peerProtocolFixes && ctx.Err() != nil {
+			// The session is ending: an evaluation the shutdown cancelled
+			// is not a gateway problem to report (GAP-0351).
+			return nil
+		}
 		if evalErr != nil {
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
@@ -717,6 +742,14 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		return fmt.Errorf("read ACP frame: %w", err)
 	}
 	return nil
+}
+
+// acpPeerName names the peer that sent a frame travelling in direction.
+func acpPeerName(direction Direction) string {
+	if direction == AgentToClient {
+		return "agent"
+	}
+	return "editor"
 }
 
 // writeBlock answers a frame refused in action mode. dst is the peer the
