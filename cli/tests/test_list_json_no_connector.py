@@ -54,3 +54,24 @@ def test_tui_reads_empty_inventory_and_the_no_connector_hint() -> None:
     hint = _no_connector_hint("no connector configured — run 'defenseclaw setup <connector>'\n".encode())
     assert hint.startswith("No connector configured")
     assert _no_connector_hint(b"") == ""
+
+
+def test_ide_only_scan_without_connector_returns_rows_or_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.commands import cmd_aibom
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.active_connectors = lambda: []  # type: ignore[method-assign]
+        monkeypatch.setattr(cmd_aibom, "_fetch_ide_plugins", lambda _app: (
+            {"enabled": True, "scope": "all", "plugins": [
+                {"plugin_id": "github.copilot", "ide_product": "vscode", "is_ai": True},
+            ]}, "",
+        ))
+        result = make_separate_stderr_runner().invoke(aibom, ["scan", "--only", "ide_plugins", "--json"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["ide_plugins"][0]["plugin_id"] == "github.copilot"
+        monkeypatch.setattr(cmd_aibom, "_fetch_ide_plugins", lambda _app: (None, "gateway unavailable"))
+        error = make_separate_stderr_runner().invoke(aibom, ["scan", "--only", "ide_plugins"], obj=app)
+        assert error.exit_code != 0 and "gateway unavailable" in error.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
