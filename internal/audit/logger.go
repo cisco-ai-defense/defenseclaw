@@ -833,6 +833,12 @@ func (l *Logger) LogActionCtx(ctx context.Context, action, target, details strin
 	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, "INFO")
 }
 
+// LogActionCtxSeverity is LogActionCtx with a caller-chosen severity, for an
+// action row that is an alert: the alert views list only rows above INFO.
+func (l *Logger) LogActionCtxSeverity(ctx context.Context, action, target, details, severity string) error {
+	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, severity)
+}
+
 // LogCLIAction is the canonical Python/operator CLI ingress. It retains the
 // caller's raw source facts for central per-destination projection while
 // stamping actor/origin as CLI instead of misclassifying the authenticated
