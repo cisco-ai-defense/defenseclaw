@@ -1016,9 +1016,11 @@ class Store:
         structured = "structured_json" if "structured_json" in columns else "NULL"
         details = "COALESCE(details, '')" if "details" in columns else "''"
         decision = f"dc_hook_decision({details}, {structured}, enforced)"
+        may_block = hook_decision_may_block_sql(details, structured, "enforced")
         return f"""(
             LOWER(COALESCE(action, '')) = 'connector-hook'
             AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
+            AND {may_block}
             AND {decision} = 'block'
         )"""
 
