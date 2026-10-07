@@ -584,9 +584,10 @@ func dotEnvKeyIsProcessControl(key string) bool {
 		"CURL_CA_BUNDLE",
 		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
 		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
-		// The profile pin comes only from the service definition; a
-		// writable .env must not move a service onto another profile.
-		managed.EnterpriseProfileEnv,
+		// The deployment mode and profile pins come only from the service
+		// definition; a writable .env must not make an unmanaged host
+		// invalid or move a service onto another mode or profile.
+		managed.DeploymentModeEnv, managed.EnterpriseProfileEnv,
 		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
 		"DEFENSE" + "CLAW_DISABLE_REDACTION", "DEFENSECLAW_DUMP_RAW_SECRETS",
 		"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
