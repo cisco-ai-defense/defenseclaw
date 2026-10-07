@@ -975,9 +975,10 @@ boundary, and says what each one is:
   Each provider raises a `shadow_ai` finding once a session: LOW the first
   time the policy refuses it, MEDIUM the first time the sandbox reaches it
   (a refusal and then a contact raise one of each);
-- otherwise the category the egress proxy allowed it under (for example
-  `package registry`), **blocked** when it was only ever refused, or
-  **other**.
+- otherwise **blocked** when it was only ever refused (the KIND cell says
+  whose list refused it, for example `blocked (paste site)`), or **other**.
+
+The PROVIDER column names the AI provider, or is `-`.
 
 Each row shows the requests and refusals both boundaries counted, the bytes
 the proxy relayed, and the last binary OpenShell named making the
@@ -1004,6 +1005,10 @@ line of `sandbox status NAME` sums it up.
 defenseclaw sandbox destinations myapp-7f3a
 defenseclaw sandbox destinations myapp-7f3a --output json
 ```
+
+Output from a real sandbox named `myapp-claude`:
+
+![defenseclaw sandbox destinations myapp-claude: the model provider, one shadow AI destination, one blocked site and three ordinary sites, with requests, bytes, the program that connected and when it was last seen](/images/sandboxes/screens/terminal-destinations.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags destinations */}
 | Flag | Takes | Default | Description |
@@ -1289,6 +1294,10 @@ defenseclaw sandbox discover myapp-7f3a
 defenseclaw sandbox discover myapp-7f3a --json
 ```
 
+Output from a real sandbox named `myapp-claude`:
+
+![defenseclaw sandbox discover myapp-claude: one row per component with its category, product, what found it, its names and the file or folder that holds it](/images/sandboxes/screens/terminal-sandbox-discover.png)
+
 {/* AUTOGEN-BEGIN: sandbox-flags discover */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
@@ -1315,6 +1324,11 @@ sampled, and `--json` lists the processes that ended.
 defenseclaw sandbox ps myapp-7f3a --tree
 defenseclaw sandbox ps myapp-7f3a --json
 ```
+
+Output from a real sandbox named `myapp-claude` while a rate-limited `curl`
+ran:
+
+![defenseclaw sandbox ps myapp-claude --tree: the sandbox's init process, a login shell, the DefenseClaw supervisor, Claude Code, a shell it started and the curl under that shell, with the note that the tree is sampled every 5 seconds](/images/sandboxes/screens/terminal-sandbox-ps-tree.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags ps */}
 | Flag | Takes | Default | Description |

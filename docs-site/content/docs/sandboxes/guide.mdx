@@ -374,6 +374,12 @@ it copies anything, and the first start of an image says it takes longer:
 
 ### The banner, line by line
 
+A real banner from a Mac (copy mode, the `balanced` pack, the process tree on).
+Note the two `Model` lines: the credential and the only host it works at, then
+how that host is reached.
+
+![The banner of defenseclaw sandbox run claude on a Mac: the sandbox and its permission mode, the project copy, the model credential bound to its endpoint, the line saying OpenShell opens that endpoint to the harness's own program around the egress proxy, and where asks appear](/images/sandboxes/screens/terminal-run-banner.png)
+
 | Line | What it tells you |
 | --- | --- |
 | `Sandbox myapp-7f3a · …` | The sandbox name (`<folder>-<random>`, the folder name cut to fit OpenShell's 19 characters, unless you pass `--name`), the harness, and the permissions mode. `skip-permissions ON` means the harness runs with its own prompts off (`--dangerously-skip-permissions` for Claude Code, `--dangerously-bypass-approvals-and-sandbox` for Codex). With `--safe` it reads `skip-permissions OFF (harness prompts kept)`. |
@@ -492,6 +498,123 @@ OpenShell refuses before it denies a connection aren't listed or counted.
 When DefenseClaw starts again, OpenShell replays what it recorded while
 DefenseClaw was down. Those lines come after newer ones and end with
 `(while DefenseClaw was down)`.
+
+### See where the sandbox connected
+
+The feed shows events as they happen. `defenseclaw sandbox destinations NAME`
+shows the list: every site the sandbox reached or tried to reach, through the
+egress proxy or around it, and what each one is. The KIND column says whether
+it is the sandbox's model provider, another AI provider the harness does not
+use (shadow AI), a site that was only ever refused, or an ordinary site. A row
+also counts the requests (the refused ones and the model calls too), the bytes
+sent and received, the program that made the connection and when it was last
+seen. The line under the table counts the shadow AI destinations and names the
+command that blocks one. The list survives daemon restarts and stops, and is
+deleted with the sandbox. The TUI shows the same rows in the sandbox's details
+(`Enter` in the Sandboxes panel).
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={300}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox destinations for a Claude Code sandbox: the model provider, one shadow AI destination, one blocked site and three ordinary sites, each with its requests, bytes and the program that connected."
+  caption="Recorded from a real Claude Code sandbox named `myapp-claude` under the `open` pack, with a model key from Amazon Bedrock. `api.openai.com` is shadow AI, `pastebin.com` was refused by the blocklist, and the other rows are ordinary sites."
+  frames={[
+    { type: 'cmd', text: 'defenseclaw sandbox destinations myapp-claude', pauseMs: 700 },
+    { type: 'dim', text: 'DESTINATION                       KIND            PROVIDER        REQUESTS            UP / DOWN          BINARY                                    LAST SEEN' },
+    { type: 'out', text: 'api.openai.com                    shadow AI       OpenAI          1                   808 B / 4.3 KiB    /usr/bin/curl                             10-07 20:24' },
+    { type: 'out', text: 'bedrock-mantle.us-east-1.api.aws  model provider  Amazon Bedrock  15, 13 model calls  0 B / 0 B          /opt/defenseclaw-harness/claudecode/bin…  10-07 20:25' },
+    { type: 'out', text: 'pastebin.com                      blocked         paste_site      0 (1 refused)       0 B / 0 B          /usr/bin/curl                             10-07 20:24' },
+    { type: 'out', text: 'github.com                        other           -               1                   780 B / 581.7 KiB  /usr/bin/curl                             10-07 20:24' },
+    { type: 'out', text: 'registry.npmjs.org                other           -               1                   790 B / 25.9 KiB   /usr/bin/curl                             10-07 20:24' },
+    { type: 'out', text: 'pypi.org                          other           -               1                   789 B / 109.9 KiB  /usr/bin/curl                             10-07 20:24' },
+    { type: 'warn', text: '  ⚠ 1 AI destination the harness does not use (shadow AI); block one with `defenseclaw sandbox policy block HOST`' },
+  ]}
+/>
+
+[Destinations and shadow AI](/docs/sandboxes/network#destinations-and-shadow-ai)
+explains the kinds and the findings they raise.
+
+### See what the sandbox runs
+
+The process tree is opt-in. Turn it on for one run with `--process-tree` (or
+for a pack with `observe.process_tree: true`; see
+[pack settings](/docs/sandboxes/policy-packs#pack-settings-explained)), and
+`defenseclaw sandbox ps NAME --tree` lists the sandbox's processes under
+their parents, with the values of arguments that name secrets replaced. With
+the tree on, the BINARY column of `destinations` shows the program that
+connected together with its parents, and the TUI's sandbox details list the
+tree. The daemon samples every 5 seconds (every 15 seconds on a Mac when
+sampling its MicroVM is slow), so a process that starts and ends between two
+samples is not seen; the agent chooses its processes' names and arguments, so
+the tree is a view of what ran, not a control.
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={300}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox ps --tree: the sandbox's init process, a login shell, the DefenseClaw supervisor, Claude Code, and a shell that Claude Code started with a curl under it."
+  caption="Recorded from a real Claude Code sandbox on a Mac, started with `--process-tree`, while a rate-limited `curl` ran: `curl` under `bash` under `claude`."
+  frames={[
+    { type: 'cmd', text: 'defenseclaw sandbox ps myapp-claude --tree', pauseMs: 700 },
+    { type: 'dim', text: 'PID   PPID  UP   COMMAND' },
+    { type: 'out', text: '1     0     3m   /.openshell-bootstrap/opt/openshell/bin/openshell-sandbox launch-capability-free 507 20 /.openshell/state/bootstrap-91fc6d54-98c9-462d-b9c6-792d68776384.json' },
+    { type: 'out', text: '385   1     3m     /bin/bash -l' },
+    { type: 'out', text: '462   1     3m     /usr/bin/python3 -I -S /usr/local/lib/defenseclaw/bin/dc_supervisor.py /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u CDPATH -u' },
+    { type: 'out', text: '467   462   3m       /usr/local/bin/claude --dangerously-skip-permissions' },
+    { type: 'out', text: '1538  467   37s        /bin/bash -c source /sandbox/.claude/shell-snapshots/snapshot-bash-1791401891772-yau423.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval \'curl -s -o /dev/null --limit-rate 20k -m 60 -w "%{http_code} slow\\n" https://pypi.org/simple/\' < /dev/null &&' },
+    { type: 'out', text: '1543  1538  37s          curl -s -o /dev/null --limit-rate 20k -m 60 -w %{http_code} slow\\n https://pypi.org/simple/' },
+    { type: 'dim', text: '  sampled every 5s; a process that starts and ends between two samples is not seen' },
+  ]}
+/>
+
+### See the AI inside the sandbox
+
+An agent can install MCP servers, skills and plugins inside its sandbox that
+the AI discovery on your own machine never sees. `defenseclaw sandbox discover NAME`
+reads the sandbox now and lists what it found: the daemon also scans each ready
+sandbox on its own. `defenseclaw agent usage --sandbox NAME` shows the same
+components in the AI inventory, tagged with the sandbox, after the next scan;
+a deleted sandbox's entries turn `gone` at once. See
+[AI discovery](/docs/ai-discovery#inside-openshell-sandboxes).
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={420}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox discover and defenseclaw agent usage --sandbox for a Claude Code sandbox: the components found inside it, then the same components in the AI inventory marked with the sandbox name."
+  caption="Recorded from a real Claude Code sandbox on a Mac whose project holds a demo MCP server and a demo skill."
+  frames={[
+    { type: 'cmd', text: 'defenseclaw sandbox discover myapp-claude', pauseMs: 700 },
+    { type: 'dim', text: 'CATEGORY             PRODUCT         FOUND BY  NAMES                  EVIDENCE' },
+    { type: 'out', text: 'active_process       Claude Code     process   -                      -' },
+    { type: 'out', text: 'ai_cli               Claude Code     binary    -                      claude' },
+    { type: 'out', text: 'mcp_server           Claude Code     mcp       -                      .claude.json' },
+    { type: 'out', text: 'mcp_server           Claude Code     mcp       dc-demo-mcp            .mcp.json' },
+    { type: 'out', text: 'mcp_server           GitHub Copilot  mcp       dc-demo-mcp            .mcp.json' },
+    { type: 'out', text: 'skill                Claude Code     skill     dc-demo-skill, github  skills' },
+    { type: 'out', text: 'supported_connector  Claude Code     config    -                      .claude' },
+    { type: 'out', text: 'supported_connector  Claude Code     config    -                      skills' },
+    { type: 'out', text: 'supported_connector  GitHub Copilot  config    -                      .mcp.json' },
+    { type: 'dim', text: '  scanned in 56ms; `defenseclaw agent usage --sandbox myapp-claude` shows them in the AI inventory after its next scan' },
+    { type: 'spacer', pauseMs: 600 },
+    { type: 'cmd', text: 'defenseclaw agent usage --sandbox myapp-claude', pauseMs: 700 },
+    { type: 'out', text: '                                   AI visibility — active=46 new=0 changed=0 gone=0' },
+    { type: 'out', text: '┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓' },
+    { type: 'out', text: '┃ State ┃ Categories        ┃ Product                               ┃ Detectors          ┃ Count ┃ Sample evidence   ┃' },
+    { type: 'out', text: '┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━━┩' },
+    { type: 'out', text: '│ seen  │ active_process,   │ Claude Code (sandbox myapp-claude)    │ process, binary    │     7 │ claude,           │' },
+    { type: 'out', text: '│       │ ai_cli (+3)       │                                       │ (+3)               │       │ .mcp.json,        │' },
+    { type: 'out', text: '│       │                   │                                       │                    │       │ dc-demo-mcp (+5)  │' },
+    { type: 'out', text: '│ seen  │ mcp_server,       │ GitHub Copilot (sandbox myapp-claude) │ mcp, config        │     2 │ .mcp.json,        │' },
+    { type: 'out', text: '│       │ supported_connec… │                                       │                    │       │ dc-demo-mcp       │' },
+    { type: 'out', text: '└───────┴───────────────────┴───────────────────────────────────────┴────────────────────┴───────┴───────────────────┘' },
+    { type: 'out', text: '2 groups, 9 signals (process refresh 2026-10-07T19:41:19.782349Z; files are read on full scans). Narrow terminal:' },
+    { type: 'out', text: 'model status, component, vendor and last active are hidden. Use --wide for every column, --detail for per-signal rows,' },
+    { type: 'out', text: '--by-detector to split by category/detector, --json for raw, --state/--category/--product/--component to filter' },
+    { type: 'out', text: '(component also matches local model IDs).' },
+  ]}
+/>
 
 ### What the network allows
 
@@ -678,6 +801,13 @@ boundaries are enforced outside the sandbox and hold either way.
 ```text
 14:21:07 myapp-7f3a ⚠ the harness is active but its hooks are silent; stopping the sandbox (hooks.on_silence: stop)
 ```
+
+A real stop: OpenCode, a user-tier harness, in a sandbox on a custom pack that
+extends `balanced` with `hooks.silence_after: 1m`, after its hooks stopped
+reaching DefenseClaw. The warning names the pack setting, the sandbox is kept
+stopped, and the summary says how to resume it.
+
+![A defenseclaw sandbox run opencode session ended by DefenseClaw: the banner's Hooks line, the warning that the harness worked for 1m without a hook reaching DefenseClaw, the session summary, and the resume and delete commands](/images/sandboxes/screens/terminal-hook-silence-stop.png)
 
 | Pack | `hooks.on_silence` | Result for a user-tier harness |
 | --- | --- | --- |
