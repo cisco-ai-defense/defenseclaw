@@ -55,6 +55,7 @@ from defenseclaw.connector_paths import (
     opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config, PerConnectorGuardrailConfig
@@ -1612,8 +1613,8 @@ def _valid_env_name(value: str) -> bool:
 
 def _scanner_availability(cfg: Config) -> list[StepResult]:
     scanners = [
-        ("Skill scanner", cfg.scanners.skill_scanner.binary, "defenseclaw setup skill-scanner"),
-        ("MCP scanner", cfg.scanners.mcp_scanner.binary, "defenseclaw setup mcp-scanner"),
+        ("Skill scanner", SKILL_SCANNER_BINARY, "defenseclaw setup skill-scanner"),
+        ("MCP scanner", MCP_SCANNER_BINARY, "defenseclaw setup mcp-scanner"),
     ]
     out: list[StepResult] = []
     for label, binary, next_command in scanners:

@@ -1421,7 +1421,6 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     data_dir = cfg.data_dir
     click.echo()
     ux.section("Skill Scanner Configuration")
-    click.echo(f"  {ux.dim('Binary:')} {sc.binary}")
     click.echo()
 
     sc.use_llm = click.confirm("  Use the LLM judge (recommended)?", default=sc.use_llm)
@@ -1456,8 +1455,7 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
         sc, click.confirm("  Enable VirusTotal binary scanner?", default=scanner_settings.virustotal_enabled(sc))
     )
     if sc.analyzers.virustotal.enabled:
-        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", sc.virustotal_api_key, data_dir)
-        sc.virustotal_api_key = ""
+        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", "", data_dir)
     _set_skill_aidefense(
         sc, click.confirm("  Enable Cisco AI Defense analyzer?", default=scanner_settings.aidefense_enabled(sc))
     )
@@ -2791,20 +2789,16 @@ def _apply_scanner_llm_flags(llm, provider: str | None, model: str | None, base_
 
 
 def _set_skill_virustotal(sc, enabled: bool) -> None:
-    """analyzers.virustotal; the v8 use_virustotal/key fields are cleared."""
+    """analyzers.virustotal.enabled and the variable that holds its key."""
     sc.analyzers.virustotal.enabled = enabled
     if enabled and not sc.analyzers.virustotal.api_key_env:
-        sc.analyzers.virustotal.api_key_env = sc.virustotal_api_key_env or "VIRUSTOTAL_API_KEY"
+        sc.analyzers.virustotal.api_key_env = "VIRUSTOTAL_API_KEY"
     if not enabled:
         sc.analyzers.virustotal.api_key_env = ""
-    sc.use_virustotal = False
-    sc.virustotal_api_key_env = ""
 
 
 def _set_skill_aidefense(sc, enabled: bool) -> None:
-    """analyzers.aidefense; the v8 use_aidefense field is cleared."""
     sc.analyzers.aidefense.enabled = enabled
-    sc.use_aidefense = False
 
 
 # ---------------------------------------------------------------------------

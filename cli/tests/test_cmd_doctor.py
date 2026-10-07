@@ -122,9 +122,11 @@ class DoctorVirusTotalTests(unittest.TestCase):
     """GAP-1936: the VirusTotal row agrees with the credential row."""
 
     def _cfg(self, use_virustotal: bool, key_env: str = ""):
-        from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.config import SkillScannerAnalyzers, SkillScannerConfig, SkillScannerVirusTotal
 
-        sc = SkillScannerConfig(use_virustotal=use_virustotal, virustotal_api_key_env=key_env)
+        sc = SkillScannerConfig(
+            analyzers=SkillScannerAnalyzers(virustotal=SkillScannerVirusTotal(enabled=use_virustotal, api_key_env=key_env))
+        )
         return SimpleNamespace(scanners=SimpleNamespace(skill_scanner=sc))
 
     def test_disabled_is_skipped(self):

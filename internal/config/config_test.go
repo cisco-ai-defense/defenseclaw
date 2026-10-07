@@ -1078,7 +1078,6 @@ func TestSkillScannerConfigNoLLMFields(t *testing.T) {
 		t.Error("expected default lenient=true")
 	}
 	_ = sc.UseLLM
-	_ = sc.VirusTotalKey
 }
 
 func TestMCPScannerConfigNoLLMFields(t *testing.T) {

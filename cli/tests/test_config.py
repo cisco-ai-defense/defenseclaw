@@ -576,8 +576,6 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(cfg.data_dir.endswith(".defenseclaw"))
         self.assertTrue(cfg.audit_db.endswith("audit.db"))
         self.assertEqual(cfg.claw.mode, "openclaw")
-        self.assertEqual(cfg.scanners.skill_scanner.binary, "skill-scanner")
-        self.assertEqual(cfg.scanners.mcp_scanner.binary, "mcp-scanner")
         self.assertEqual(cfg.gateway.port, 18789)
         self.assertEqual(cfg.gateway.api_bind, "")
         self.assertEqual(cfg.gateway.api_port, 18970)
@@ -597,8 +595,8 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertFalse(sc.use_behavioral)
         self.assertFalse(sc.enable_meta)
         self.assertFalse(sc.use_trigger)
-        self.assertFalse(sc.use_virustotal)
-        self.assertFalse(sc.use_aidefense)
+        self.assertFalse(sc.analyzers.virustotal.enabled)
+        self.assertFalse(sc.analyzers.aidefense.enabled)
         self.assertEqual(sc.llm_consensus_runs, 0)
         self.assertTrue(sc.lenient)
 
@@ -1414,7 +1412,7 @@ class TestMergeMCPScannerClean(unittest.TestCase):
             "llm_provider": "openai",
             "api_key": "stale-key",
         })
-        self.assertEqual(cfg.binary, "mcp-scanner")
+        self.assertFalse(hasattr(cfg, "binary"))
         self.assertEqual(cfg.analyzers, "yara")
         self.assertFalse(hasattr(cfg, "llm_provider"))
         self.assertFalse(hasattr(cfg, "api_key"))
@@ -1434,13 +1432,27 @@ class TestSkillScannerConfigClean(unittest.TestCase):
         cfg = SkillScannerConfig(
             use_llm=True, use_behavioral=True,
             llm_consensus_runs=3, policy="strict",
-            virustotal_api_key="vt-key",
         )
         self.assertTrue(cfg.use_llm)
         self.assertTrue(cfg.use_behavioral)
         self.assertEqual(cfg.llm_consensus_runs, 3)
         self.assertEqual(cfg.policy, "strict")
-        self.assertEqual(cfg.virustotal_api_key, "vt-key")
+
+    def test_a_v8_source_folds_its_retired_scanner_keys_into_analyzers(self):
+        # GAP-0157: the models carry no v8-only fields; a version 8 source (a
+        # Secure Client document is never migrated) is read through analyzers.
+        from defenseclaw.config import _merge_skill_scanner_analyzers
+
+        folded = _merge_skill_scanner_analyzers(
+            {"use_virustotal": True, "use_aidefense": True, "virustotal_api_key_env": "VT_KEY"}
+        )
+        self.assertTrue(folded.virustotal.enabled and folded.aidefense.enabled)
+        self.assertEqual(folded.virustotal.api_key_env, "VT_KEY")
+        written = _merge_skill_scanner_analyzers(
+            {"use_virustotal": True, "analyzers": {"virustotal": {"enabled": False}}}
+        )
+        self.assertFalse(written.virustotal.enabled)
+        self.assertFalse(hasattr(SkillScannerConfig(), "use_virustotal"))
 
 
 class TestConfigTopLevelSections(unittest.TestCase):

@@ -1293,15 +1293,12 @@ class MCPScannerTimeouts:
 
 @dataclass
 class SkillScannerConfig:
-    binary: str = "skill-scanner"
     # The recommended default: the quiet policy with the LLM judge (it runs
     # when the top-level llm: block resolves a model; see scanner/settings.py).
     use_llm: bool = True
     use_behavioral: bool = False
     enable_meta: bool = False
     use_trigger: bool = False
-    use_virustotal: bool = False
-    use_aidefense: bool = False
     llm_consensus_runs: int = 0
     policy: str = "quiet"
     lenient: bool = True
@@ -1309,11 +1306,10 @@ class SkillScannerConfig:
     # Unset fields inherit from ``Config.llm`` via
     # ``Config.resolve_llm("scanners.skill")``.
     llm: LLMConfig = field(default_factory=LLMConfig)
-    virustotal_api_key: str = ""
-    virustotal_api_key_env: str = ""
-    # config_version 9 scanner model (empty = unset; see the schema).
-    # binary, use_virustotal, use_aidefense and virustotal_api_key[_env] are
-    # v8 migration input.
+    # config_version 9 scanner model (empty = unset; see the schema). The v8
+    # keys binary, use_virustotal, use_aidefense and virustotal_api_key[_env]
+    # are not modeled: the loader folds a config_version 8 source's toggles
+    # into ``analyzers`` (see _merge_skill_scanner_analyzers).
     policy_file: AssetFileRef = field(default_factory=AssetFileRef)
     judge_source: str = ""
     fail_on_severity: str = ""
@@ -1322,21 +1318,14 @@ class SkillScannerConfig:
     timeouts: SkillScannerTimeouts = field(default_factory=SkillScannerTimeouts)
 
     def resolved_virustotal_api_key(self) -> str:
-        """Return VirusTotal key from env var (if set) or direct value.
-
-        An empty ``virustotal_api_key_env`` falls back to
-        ``VIRUSTOTAL_API_KEY``, the gateway's default and the name
-        ``defenseclaw keys set`` stores (GAP-1936).
-        """
-        val = os.environ.get(self.virustotal_api_key_env or "VIRUSTOTAL_API_KEY", "")
-        if val:
-            return val
-        return self.virustotal_api_key
+        """Return the VirusTotal key from the variable ``analyzers.virustotal.api_key_env``
+        names; an empty name falls back to ``VIRUSTOTAL_API_KEY``, the gateway's default
+        and the name ``defenseclaw keys set`` stores (GAP-1936)."""
+        return os.environ.get(self.analyzers.virustotal.api_key_env or "VIRUSTOTAL_API_KEY", "")
 
 
 @dataclass
 class MCPScannerConfig:
-    binary: str = "mcp-scanner"
     analyzers: str = "auto"
     scan_prompts: bool = False
     scan_resources: bool = False
@@ -3735,8 +3724,8 @@ def _v9_rule_pack_for_dir(directory: str, policy_dir: str) -> tuple[str, list[st
 def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> None:
     """Write v8-modeled fields a caller changed in their config_version 9 keys.
 
-    Setup commands that still set a v8 field (``rule_pack_dir``, the v8
-    scanner toggles, ``update_check``) would otherwise write a key
+    Setup commands that still set a v8 field (``rule_pack_dir``,
+    ``update_check``) would otherwise write a key
     config_version 9 rejects. This maps them the way the Go migration does;
     it goes away as each caller moves to the v9 key. The ``*_actions`` maps
     are dropped: nothing edits them since 9 (the admission actions are
@@ -3769,29 +3758,8 @@ def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> No
     scanners = merged.get("scanners")
     if not isinstance(scanners, dict):
         return
-    skill = scanners.get("skill_scanner")
-    if isinstance(skill, dict):
-        skill.pop("binary", None)
-        if skill.pop("virustotal_api_key", None):
-            raise ConfigVersionError(
-                "config_version 9 does not store the VirusTotal key in config.yaml; "
-                "store it with 'defenseclaw keys set VIRUSTOTAL_API_KEY'"
-            )
-        analyzers = skill.setdefault("analyzers", {})
-        use_vt = skill.pop("use_virustotal", None)
-        key_env = skill.pop("virustotal_api_key_env", None)
-        if use_vt is not None:
-            analyzers.setdefault("virustotal", {})["enabled"] = bool(use_vt)
-        if key_env:
-            analyzers.setdefault("virustotal", {})["api_key_env"] = key_env
-        use_aid = skill.pop("use_aidefense", None)
-        if use_aid is not None:
-            analyzers.setdefault("aidefense", {})["enabled"] = bool(use_aid)
-        if not analyzers:
-            skill.pop("analyzers")
     mcp = scanners.get("mcp_scanner")
     if isinstance(mcp, dict):
-        mcp.pop("binary", None)
         if isinstance(mcp.get("analyzers"), str):
             items = [a.strip().lower() for a in mcp["analyzers"].split(",") if a.strip()]
             rest = [a for a in dict.fromkeys(items) if a != "auto"]
@@ -5450,14 +5418,9 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
 
 
 def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
-    """Parse mcp_scanner config with backward compat for bare-string values."""
-    if raw is None:
-        return MCPScannerConfig()
-    if isinstance(raw, str):
-        return MCPScannerConfig(binary=raw)
+    """Parse the mcp_scanner block."""
     if isinstance(raw, dict):
         return MCPScannerConfig(
-            binary=raw.get("binary", "mcp-scanner"),
             analyzers=_mcp_analyzers_text(raw.get("analyzers", "auto")),
             scan_prompts=raw.get("scan_prompts", False),
             scan_resources=raw.get("scan_resources", False),
@@ -5647,16 +5610,25 @@ def _merge_update(raw: Any) -> UpdateConfig:
     )
 
 
-def _merge_skill_scanner_analyzers(raw: Any) -> SkillScannerAnalyzers:
-    raw = _mapping(raw)
+def _merge_skill_scanner_analyzers(skill_raw: Any) -> SkillScannerAnalyzers:
+    """``scanners.skill_scanner.analyzers``, with the v8 spellings a config_version 8
+    source still holds (``use_virustotal``, ``use_aidefense``, ``virustotal_api_key_env``)
+    folded in. Gateway-managed files are migrated on upgrade; a Secure Client document
+    stays version 8. An ``analyzers`` key that is written wins. A version 9 source cannot
+    carry the v8 keys."""
+    skill_raw = _mapping(skill_raw)
+    raw = _mapping(skill_raw.get("analyzers"))
     vt = _mapping(raw.get("virustotal"))
+    aid = _mapping(raw.get("aidefense"))
     return SkillScannerAnalyzers(
         virustotal=SkillScannerVirusTotal(
-            enabled=vt.get("enabled") is True,
-            api_key_env=str(vt.get("api_key_env", "") or ""),
+            enabled=(vt["enabled"] if "enabled" in vt else skill_raw.get("use_virustotal")) is True,
+            api_key_env=str(vt.get("api_key_env") or skill_raw.get("virustotal_api_key_env") or ""),
             upload_files=vt.get("upload_files") is True,
         ),
-        aidefense=ScannerAnalyzerToggle(enabled=_mapping(raw.get("aidefense")).get("enabled") is True),
+        aidefense=ScannerAnalyzerToggle(
+            enabled=(aid["enabled"] if "enabled" in aid else skill_raw.get("use_aidefense")) is True
+        ),
         osv=ScannerAnalyzerToggle(enabled=_mapping(raw.get("osv")).get("enabled") is True),
     )
 
@@ -6224,8 +6196,6 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("inspect_llm", "api_key", "LLM_API_KEY")
     if cfg.cisco_ai_defense.api_key:
         _warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
-    if cfg.scanners.skill_scanner.virustotal_api_key:
-        _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
 
 
 #: The Linux and macOS managed standalone layouts: config path -> the
@@ -6311,24 +6281,19 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
         scanners=ScannersConfig(
             skill_scanner=SkillScannerConfig(
-                binary=ss_raw.get("binary", "skill-scanner"),
                 use_llm=ss_raw.get("use_llm", True),
                 use_behavioral=ss_raw.get("use_behavioral", False),
                 enable_meta=ss_raw.get("enable_meta", False),
                 use_trigger=ss_raw.get("use_trigger", False),
-                use_virustotal=ss_raw.get("use_virustotal", False),
-                use_aidefense=ss_raw.get("use_aidefense", False),
                 llm_consensus_runs=ss_raw.get("llm_consensus_runs", 0),
                 policy=ss_raw.get("policy", "quiet"),
                 lenient=ss_raw.get("lenient", True),
                 llm=_merge_llm(ss_raw.get("llm")),
-                virustotal_api_key=ss_raw.get("virustotal_api_key", ""),
-                virustotal_api_key_env=ss_raw.get("virustotal_api_key_env", ""),
                 policy_file=_merge_asset_file_ref(ss_raw.get("policy_file")),
                 judge_source=str(ss_raw.get("judge_source", "") or ""),
                 fail_on_severity=str(ss_raw.get("fail_on_severity", "") or ""),
                 review_queue_min=str(ss_raw.get("review_queue_min", "") or ""),
-                analyzers=_merge_skill_scanner_analyzers(ss_raw.get("analyzers")),
+                analyzers=_merge_skill_scanner_analyzers(ss_raw),
                 timeouts=_merge_skill_scanner_timeouts(ss_raw.get("timeouts")),
             ),
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
