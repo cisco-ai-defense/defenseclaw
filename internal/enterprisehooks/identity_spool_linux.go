@@ -72,7 +72,8 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 			provider, providerErr := infoPipeDomainProvider(callCtx, nss.Name)
 			cancel()
 			if providerErr != nil {
-				return IdentitySpoolRecord{}, fmt.Errorf("SSSD InfoPipe provider lookup: %w", providerErr)
+				record.Facts = facts
+				return record, fmt.Errorf("SSSD InfoPipe provider lookup: %w", providerErr)
 			}
 			facts.Directory = sssdProviderDirectory(provider)
 		}
@@ -80,7 +81,8 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		upn, upnErr := infoPipeUPN(callCtx, nss.Name)
 		cancel()
 		if upnErr != nil {
-			return IdentitySpoolRecord{}, fmt.Errorf("SSSD InfoPipe UPN lookup: %w", upnErr)
+			record.Facts = facts
+			return record, fmt.Errorf("SSSD InfoPipe UPN lookup: %w", upnErr)
 		}
 		if upn = useridentity.NormalizeUPN(upn); upn != "" {
 			facts.UPN = upn
