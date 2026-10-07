@@ -526,3 +526,34 @@ func TestSecureClientDecidesWithTheStartTimeConfig(t *testing.T) {
 		t.Fatal("a per-user gateway decided with the start-time configuration")
 	}
 }
+
+// TestProfileExplainSaysWhyTheLookupFailed: explain --user for an account the
+// OS names but cannot resolve (an Entra user the aad module has not cached)
+// reported default_lookup_failed with no lookup_error and no user id.
+func TestProfileExplainSaysWhyTheLookupFailed(t *testing.T) {
+	prev := profileExplainSubjectLookup
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubject{UserID: "10259079", UserName: "bob", LookupFailed: true}, fmt.Errorf("uid 10259079: not found")
+	}
+	t.Cleanup(func() { profileExplainSubjectLookup = prev; liveGuardrailProfiles.Store(nil) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"watch": {Mode: "observe"}}
+	cfg.Guardrail.DefaultProfile = "watch"
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=bob", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var out struct {
+		Match       string         `json:"match"`
+		LookupError string         `json:"lookup_error"`
+		Subject     map[string]any `json:"subject"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body.String())
+	}
+	if out.Match != profileMatchDefaultLookupFailed || !strings.Contains(out.LookupError, "not found") || out.Subject["user_id"] != "10259079" {
+		t.Fatalf("explain = %s", rec.Body.String())
+	}
+}

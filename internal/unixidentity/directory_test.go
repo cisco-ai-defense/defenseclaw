@@ -103,3 +103,34 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 		}
 	}
 }
+
+// TestEntraNSSAccountReportsItsUPN: the aad module names an Entra ID account
+// by its UPN. DefenseClaw reported it as a Kerberos principal with an
+// upper-case realm (alice@CONTOSO.ONMICROSOFT.COM) and no UPN, while Windows
+// reports the lower-case UPN for the same user, so records from the two
+// OSes did not join (seen live on an Ubuntu VM with AADSSHLoginForLinux).
+func TestEntraNSSAccountReportsItsUPN(t *testing.T) {
+	nss := filepath.Join(t.TempDir(), "nsswitch.conf")
+	if err := os.WriteFile(nss, []byte("passwd: files systemd aad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := nsswitchPath
+	nsswitchPath = nss
+	t.Cleanup(func() { nsswitchPath = orig })
+	const account = "alice@Contoso.onmicrosoft.com::9246366:9246366:Alice:/home/alice:/bin/bash\n"
+	f := &fakeRun{results: map[string]commandResult{
+		"passwd 9246366":                           {stdout: []byte(account)},
+		"-s aad passwd 9246366":                    {stdout: []byte(account)},
+		"initgroups alice@Contoso.onmicrosoft.com": {stdout: []byte("alice@Contoso.onmicrosoft.com 9246366\n")},
+		"group 9246366":                            {stdout: []byte("alice@Contoso.onmicrosoft.com::9246366:\n")},
+	}}
+	facts, err := newFakeNSS(f).DirectoryFactsForUID(9246366, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const upn = "alice@contoso.onmicrosoft.com"
+	if facts.Directory != useridentity.DirectoryEntraID || facts.Source != "nss_aad" || facts.UPN != upn ||
+		facts.Principal != upn || facts.Domain != "contoso.onmicrosoft.com" || facts.Realm != "" {
+		t.Fatalf("facts = %+v", facts)
+	}
+}
