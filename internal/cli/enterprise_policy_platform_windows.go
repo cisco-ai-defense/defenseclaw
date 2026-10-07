@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/spf13/cobra"
 )
 
 // pinStandaloneManagedEnv points an elevated administrator's (or
@@ -36,6 +37,16 @@ func pinStandaloneManagedEnv() error {
 	return pinManagedAdministratorEnvironment("enterprise policy", func() string {
 		return windowsManagedStandardUserViewAnswer("the machine policy",
 			"enterprise policy show --user "+managedHostCurrentAccountName())
+	})
+}
+
+// pinEnterpriseACPEnv points an elevated administrator's `enterprise acp`
+// command at the standalone managed deployment, as the policy commands are
+// (GAP-0253); a standard account is told to use an elevated prompt.
+func pinEnterpriseACPEnv(cmd *cobra.Command) error {
+	return pinManagedAdministratorEnvironment("enterprise acp", func() string {
+		return windowsManagedStandardUserViewAnswer("ACP enrollments",
+			"enterprise acp "+cmd.Name()+" --user "+managedHostCurrentAccountName())
 	})
 }
 

@@ -45,6 +45,13 @@ agent, and central policy profile. The service record remains in protected
 machine state; only the bearer copy is published into the target user's private
 ACP runtime. The gateway never writes an editor profile or user home.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// These are administrator commands: on a managed host they read the
+		// administrator-owned deployment, as `enterprise hooks` and
+		// `enterprise policy` do, not the caller's own ~/.defenseclaw
+		// (GAP-0253).
+		if err := pinEnterpriseACPEnv(cmd); err != nil {
+			return err
+		}
 		return rootPersistentPreRunNoAuditE(cmd, args)
 	},
 }
