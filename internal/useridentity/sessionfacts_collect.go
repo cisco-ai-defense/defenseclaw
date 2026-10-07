@@ -73,6 +73,12 @@ func CurrentSessionFactsHeader() string {
 	return sessionFactsHeader
 }
 
+// CurrentSessionFactsHeaderLive reads the current session for a long-lived
+// process such as an ACP guard. It bypasses the hook process and disk caches.
+func CurrentSessionFactsHeaderLive() string {
+	return currentSessionFactsHeaderLive(time.Now())
+}
+
 // cachedSessionFactsHeader returns the cached header for key and envKey
 // from path, or ok=false when the cache is missing, stale, keyed differently
 // or invalid.

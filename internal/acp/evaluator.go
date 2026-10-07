@@ -136,7 +136,7 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 	// guard collects none either: no klist, nothing written in the home
 	// (issue #1092).
 	if !secureClientHost() {
-		if facts := useridentity.CurrentSessionFactsHeader(); facts != "" {
+		if facts := useridentity.CurrentSessionFactsHeaderLive(); facts != "" {
 			req.Header.Set(useridentity.SessionFactsHeader, facts)
 		}
 	}
