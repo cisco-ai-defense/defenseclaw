@@ -101,9 +101,9 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	ad, sssd := useridentity.DirectoryActiveDirectory, useridentity.SourceSSSD
 	want := map[int]view{
-		70001: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "alice@corp.example.com"},
-		70002: {ad, sssd, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@emea.corp.example.com"},
-		70003: {ad, sssd, "corp.example.com", "CORP.EXAMPLE.COM", "carol@corp.example.com"},
+		70001: {"", sssd, "corp.example.com", "CORP.EXAMPLE.COM", "alice@corp.example.com"},
+		70002: {"", sssd, "emea.corp.example.com", "EMEA.CORP.EXAMPLE.COM", "bob@emea.corp.example.com"},
+		70003: {"", sssd, "", "", ""},
 		70004: {"", sssd, "ldap.example.org", "LDAP.EXAMPLE.ORG", "dave@ldap.example.org"},
 		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
 		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@corp.example.com"},
@@ -122,7 +122,17 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	// With winbind use default domain only the names of other domains are
 	// qualified, and realmd reports the format %U.
-	if realm, ok := realmFor("emea", []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}); ok {
+	if realm, ok := realmFor("emea", useridentity.SourceWinbind, []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}); ok {
 		t.Errorf("a trusted NetBIOS domain took the realm %+v", realm)
+	}
+}
+
+func TestBareSSSDAccountDoesNotInheritUnverifiedRealm(t *testing.T) {
+	realm := []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM",
+		ServerSoftware: "active-directory", ClientSoftware: "sssd"}}
+	facts := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "ldap"}
+	applyRealm(&facts, "bob@LDAP", realm)
+	if facts.Directory != "" || facts.Domain != "ldap" || facts.Realm != "" || facts.Principal != "" {
+		t.Fatalf("unrelated SSSD account inherited AD realm: %+v", facts)
 	}
 }

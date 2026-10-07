@@ -165,31 +165,37 @@ func netBIOSName(formats []string) string {
 	return ""
 }
 
-// realmFor picks the configured realm that serves an account in domain:
-// the realm of that DNS domain or of its nearest parent (an Active
-// Directory child domain), the realm whose NetBIOS name a winbind domain
-// is, or, for a name without a DNS domain that names no realm (a bare
-// name, a domain of an SSSD realm), the only realm of the host. Nothing
-// else is guessed, so a plain LDAP domain SSSD serves next to a joined
-// realm, or the NetBIOS domain of a trusted domain, gets no realm facts.
-func realmFor(domain string, realms []Realm) (Realm, bool) {
+// realmFor only associates a joined realm with an account when its qualified
+// name identifies that realm and realmd names the account's NSS backend.
+// A bare SSSD name may belong to any of several domains, including LDAP.
+func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
-	if !strings.Contains(domain, ".") {
-		for _, realm := range realms {
-			if domain != "" && strings.EqualFold(domain, realm.NetBIOS) {
-				return realm, true
-			}
+	client := "sssd"
+	if source == useridentity.SourceWinbind {
+		client = "winbind"
+	}
+	var candidates []Realm
+	for _, realm := range realms {
+		if strings.EqualFold(realm.ClientSoftware, client) {
+			candidates = append(candidates, realm)
 		}
-		// winbind qualifies the names of its own domain with the NetBIOS
-		// name realmd reports, or not at all (winbind use default domain),
-		// so another NetBIOS domain is a trusted domain of unknown realm.
-		if len(realms) == 1 && (domain == "" || (realms[0].NetBIOS == "" && realms[0].ClientSoftware != "winbind")) {
-			return realms[0], true
+	}
+	if !strings.Contains(domain, ".") {
+		if client == "winbind" {
+			for _, realm := range candidates {
+				if domain != "" && strings.EqualFold(domain, realm.NetBIOS) {
+					return realm, true
+				}
+			}
+			// Only an unqualified winbind name can use its sole default realm.
+			if domain == "" && len(candidates) == 1 {
+				return candidates[0], true
+			}
 		}
 		return Realm{}, false
 	}
 	best, found := Realm{}, false
-	for _, realm := range realms {
+	for _, realm := range candidates {
 		if domain == realm.Domain {
 			return realm, true
 		}
@@ -206,7 +212,7 @@ func realmFor(domain string, realms []Realm) (Realm, bool) {
 // realm; the directory type of an Active Directory or IPA realm; and the
 // sAMAccountName@REALM principal, in the UPN form, when there is none yet.
 func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {
-	realm, ok := realmFor(facts.Domain, realms)
+	realm, ok := realmFor(facts.Domain, facts.Source, realms)
 	if !ok {
 		return
 	}
