@@ -193,6 +193,10 @@ func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
 	jar := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\plugins\ai\lib\ai.jar`))
 	pkg := write(filepath.Join(home, `.vscode-server\cli\servers\Stable-0a1b\server\package.json`))
 	caches := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\caches\content.dat`))
+	private := write(filepath.Join(home, `AppData\Local\nvim-data\swap\secret.swp`))
+	if result, err := ensureInventoryReadACE(filepath.Join(home, `AppData\Local\nvim-data`), sid); err != nil || result != inventoryDACLGranted {
+		t.Fatalf("legacy broad grant = %v, %v", result, err)
+	}
 	linked := write(filepath.Join(outside, `AndroidStudio2025.1\plugins\x.jar`))
 	google := filepath.Join(home, `AppData\Local\Google`)
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", google, outside).CombinedOutput(); err != nil {
@@ -205,6 +209,12 @@ func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
 		}
 		dacl, _, err := sd.DACL()
 		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
+	}
+	if !hasACE(private) {
+		t.Fatal("legacy read grant did not reach private data")
+	}
+	if err := revokeLegacyIDEReadACE(home, `AppData\Local\nvim-data`, sid); err != nil {
+		t.Fatalf("revoke legacy grant: %v", err)
 	}
 	for pass, want := range []inventoryDACLResult{inventoryDACLGranted, inventoryDACLAlreadyPresent} {
 		for _, g := range inventoryDACLIDEGrants(home) {
@@ -223,7 +233,7 @@ func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
 			}
 		}
 	}
-	for path, want := range map[string]bool{jar: true, pkg: true, caches: false, filepath.Dir(caches): false, linked: false, outside: false} {
+	for path, want := range map[string]bool{jar: true, pkg: true, caches: false, filepath.Dir(caches): false, private: false, linked: false, outside: false} {
 		if got := hasACE(path); got != want {
 			t.Errorf("service ACE on %s = %v, want %v", path, got, want)
 		}

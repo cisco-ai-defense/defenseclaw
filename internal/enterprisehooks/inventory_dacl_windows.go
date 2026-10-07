@@ -162,6 +162,12 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 		// keeps the grants it always made.
 		grants := inventoryDACLAgentGrants(home, guardianOwned[key], ideInventory)
 		if ideInventory {
+			for _, rel := range ideplugins.WindowsLegacyBroadGrantPaths(home) {
+				if err := revokeLegacyIDEReadACE(home, rel, sid); err != nil {
+					failed++
+					logfSafely(logf, target.SID, fmt.Sprintf("inventory-DACL narrow dotdir=%s: %s", rel, sanitizeInventoryDACLError(err)))
+				}
+			}
 			grants = append(grants, inventoryDACLIDEGrants(home)...)
 		}
 		for _, g := range grants {
@@ -249,6 +255,48 @@ func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, re
 		grants = append(grants, grant(dir, ensureInventoryListACE))
 	}
 	return grants
+}
+
+// revokeLegacyIDEReadACE removes only the old inherited service read grant.
+// The following grant pass restores required self and narrow subtree rights.
+func revokeLegacyIDEReadACE(home, rel string, sid *windows.SID) error {
+	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+		return err
+	}
+	path := filepath.Join(home, rel)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	acl, _, err := sd.DACL()
+	if err != nil || acl == nil {
+		return err
+	}
+	if !daclContainsInventoryReadACE(acl, sid) {
+		return nil
+	}
+	entry := windows.EXPLICIT_ACCESS{
+		AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+	narrowed, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, acl)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, narrowed, nil)
 }
 
 // inventoryDACLIDEGrants lists the IDE folders and files of one profile that

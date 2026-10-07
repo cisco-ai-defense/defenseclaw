@@ -82,8 +82,17 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 			tree(dot + `\extensions`)
 		}
 		user := `AppData\Roaming\` + product.dataName + `\User`
-		tree(user + `\globalStorage`)
-		tree(user + `\profiles`)
+		self(user + `\globalStorage`)
+		self(user + `\globalStorage\state.vscdb`)
+		profiles := user + `\profiles`
+		self(profiles)
+		for _, profile := range windowsSubdirs(home, profiles, vscodeMaxProfiles) {
+			base := profiles + `\` + profile
+			self(base)
+			self(base + `\extensions.json`)
+			self(base + `\globalStorage`)
+			self(base + `\globalStorage\state.vscdb`)
+		}
 		for _, server := range product.servers {
 			self(server)
 			tree(server + `\extensions`)
@@ -94,7 +103,16 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 			}
 		}
 	}
-	tree(`AppData\Roaming\JetBrains`)
+	const roamingJetBrains = `AppData\Roaming\JetBrains`
+	self(roamingJetBrains)
+	for _, name := range windowsSubdirs(home, roamingJetBrains, jetbrainsMaxProducts) {
+		if jetbrainsProductDir.MatchString(name) {
+			base := roamingJetBrains + `\` + name
+			self(base)
+			self(base + `\disabled_plugins.txt`)
+			tree(base + `\plugins`)
+		}
+	}
 	const localJetBrains = `AppData\Local\JetBrains`
 	self(localJetBrains)
 	for _, name := range windowsSubdirs(home, localJetBrains, jetbrainsMaxProducts) {
@@ -117,15 +135,65 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 		self(google.dir)
 		for _, name := range windowsSubdirs(home, google.dir, jetbrainsMaxProducts) {
 			if strings.HasPrefix(name, "AndroidStudio") && jetbrainsProductDir.MatchString(name) {
-				tree(google.dir + `\` + name + google.sub)
+				base := google.dir + `\` + name
+				if google.sub == "" {
+					self(base)
+					self(base + `\disabled_plugins.txt`)
+					tree(base + `\plugins`)
+				} else {
+					tree(base + google.sub)
+				}
 			}
 		}
 	}
-	tree(`AppData\Local\Microsoft\VisualStudio`)
+	const visualStudio = `AppData\Local\Microsoft\VisualStudio`
+	self(visualStudio)
+	for _, name := range windowsSubdirs(home, visualStudio, visualStudioMaxInstances*4) {
+		if visualStudioInstanceDir.MatchString(name) {
+			base := visualStudio + `\` + name
+			self(base)
+			self(base + `\privateregistry.bin`)
+			tree(base + `\Extensions`)
+		}
+	}
 	tree(`AppData\Local\Zed\extensions\installed`)
-	tree(`AppData\Local\nvim`)
-	tree(`AppData\Local\nvim-data`)
-	tree(`vimfiles`)
+	grantVim := func(root string, data bool) {
+		self(root)
+		if !data {
+			self(root + `\lazy-lock.json`)
+		}
+		pack := root + `\pack`
+		if data {
+			pack = root + `\site\pack`
+		}
+		self(pack)
+		for _, name := range windowsSubdirs(home, pack, vimMaxPacks) {
+			group := pack + `\` + name
+			self(group)
+			for _, kind := range []string{"start", "opt"} {
+				plugins := group + `\` + kind
+				self(plugins)
+				for _, plugin := range windowsSubdirs(home, plugins, vimMaxPlugins) {
+					self(plugins + `\` + plugin)
+				}
+			}
+		}
+		if data {
+			tree(root + `\lazy`)
+			plugged := root + `\plugged`
+			self(plugged)
+			for _, plugin := range windowsSubdirs(home, plugged, vimMaxPlugins) {
+				self(plugged + `\` + plugin)
+			}
+		}
+	}
+	grantVim(`AppData\Local\nvim`, false)
+	grantVim(`AppData\Local\nvim-data`, true)
+	grantVim(`vimfiles`, false)
+	self(`vimfiles\plugged`)
+	for _, plugin := range windowsSubdirs(home, `vimfiles\plugged`, vimMaxPlugins) {
+		self(`vimfiles\plugged\` + plugin)
+	}
 	tree(`.eclipse`)
 	const bundles = `\configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`
 	self(`eclipse`)
@@ -147,6 +215,28 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 				out = append(out, WindowsGrant{Path: parent, Attributes: true})
 				seen[parent] = true
 			}
+		}
+	}
+	return out
+}
+
+// WindowsLegacyBroadGrantPaths names folders older identity builds granted
+// recursively. The enumerator removes those ACEs before applying narrow grants
+// so an upgrade does not retain access to private editor data.
+func WindowsLegacyBroadGrantPaths(home string) []string {
+	var out []string
+	for _, product := range vscodeProducts {
+		user := `AppData\Roaming\` + product.dataName + `\User`
+		out = append(out, user+`\globalStorage`, user+`\profiles`)
+	}
+	out = append(out,
+		`AppData\Roaming\JetBrains`,
+		`AppData\Local\Microsoft\VisualStudio`,
+		`AppData\Local\nvim`, `AppData\Local\nvim-data`, `vimfiles`)
+	const google = `AppData\Roaming\Google`
+	for _, name := range windowsSubdirs(home, google, jetbrainsMaxProducts) {
+		if strings.HasPrefix(name, "AndroidStudio") && jetbrainsProductDir.MatchString(name) {
+			out = append(out, google+`\`+name)
 		}
 	}
 	return out
