@@ -335,6 +335,25 @@ off:
 The [capability matrix](/docs/connectors/capability-matrix) lists each harness's hook
 file, pinned version and status.
 
+## What is in the sandbox image
+
+Each harness image is NVIDIA's OpenShell community base image (Ubuntu
+24.04, pinned by digest) with the harness and DefenseClaw's hooks on top.
+The agent finds these tools in it:
+
+- `gcc`, `g++` and `make`
+- Python 3.14 with `pip` (in `/sandbox/.venv`, first on `PATH`) and `uv`
+- Node.js 22 with `npm`
+- `git`, the GitHub CLI (`gh`), `curl`, `jq` and `ssh`
+
+There is no Go, Rust or Java toolchain, and the agent has no root, so it
+can't `apt-get install` one. It can install what `pip`, `uv` and `npm`
+fetch into the project or its home. For another system tool, build a base
+image of your own `FROM` the pinned base, push it, and set
+`openshell.image.base` in `config.yaml` to its digest (`<image>@sha256:…`;
+see the [configuration reference](/docs/reference/configuration)). The next
+run builds the harness images on it.
+
 ## Run an agent
 
 From the project folder:

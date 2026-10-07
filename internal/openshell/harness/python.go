@@ -17,6 +17,7 @@
 package harness
 
 import (
+	"encoding/base64"
 	"path"
 	"strings"
 )
@@ -156,6 +157,34 @@ def _defenseclaw_getpeername(self):
 _defenseclaw_getpeername.__wrapped__ = _getpeername
 _socket.socket.getpeername = _defenseclaw_getpeername
 `
+
+// WorkloadPythonStep is the image step that gives the workload's own
+// Python, the image's python3 on PATH and /usr/bin/python3, the fix of
+// pyPeerNameShim: pip, and any other HTTPS client written in Python, failed
+// with "[Errno 95] Operation not supported" in a sandbox on Linux before
+// 5.19 (GAP-0196). The shim goes into each interpreter's standard library,
+// imported from its sitecustomize module, so the venvs made from it (a
+// project's .venv) load it too. It is a compatibility fix, not a control: the
+// workload may change it. A base image whose Python cannot take it builds
+// on without it.
+func WorkloadPythonStep() InstallStep {
+	return InstallStep{
+		Comment: "TLS for the workload's own Python on Linux before 5.19 (OpenShell answers getpeername with EOPNOTSUPP there)",
+		Run:     workloadPythonRun(`"$(command -v python3 || true)" /usr/bin/python3`),
+	}
+}
+
+// workloadPythonRun is WorkloadPythonStep's command for the interpreters
+// pythons (shell words).
+func workloadPythonRun(pythons string) string {
+	shim := base64.StdEncoding.EncodeToString([]byte(pyPeerNameShim))
+	hook := base64.StdEncoding.EncodeToString([]byte("\ntry:\n    import " + pyPeerNameShimName + "\nexcept Exception:\n    pass\n"))
+	return `set -eu; for py in ` + pythons + `; do [ -n "$py" ] && [ -x "$py" ] || continue; { ` +
+		`lib="$("$py" -I -S -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" && [ -d "$lib" ] && ` +
+		`printf '%s' ` + shim + ` | base64 -d >"$lib/` + pyPeerNameShimName + `.py" && ` +
+		`{ grep -qs ` + pyPeerNameShimName + ` "$lib/sitecustomize.py" || printf '%s' ` + hook + ` | base64 -d >>"$lib/sitecustomize.py"; }; ` +
+		`} || echo "DefenseClaw: $py keeps failing HTTPS on Linux before 5.19 (no getpeername fix)" >&2; done`
+}
 
 // pythonStartupScrub is the launcher fragment that drops every PYTHON*
 // variable before a Python harness starts. The uv tool entry points run the
