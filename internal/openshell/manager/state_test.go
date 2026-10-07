@@ -781,6 +781,24 @@ func TestApprovalBatchesWatchProxyTunnels(t *testing.T) {
 // A subscriber gets its backlog and its sandbox's new events; a slow one gets
 // a marker counting what it dropped; subscribers are capped, and a cancel
 // releases the slot.
+// TestFeedEndsItsStreamsWhenTheManagerStops (GAP-0092): a follower of a
+// manager that stopped (its daemon let go of it, another took over) waited
+// on a feed that published nothing more. The streams end, so clients
+// reconnect to the feed that replaces it.
+func TestFeedEndsItsStreamsWhenTheManagerStops(t *testing.T) {
+	f := NewFeed(4, nil)
+	_, ch, cancel, ok := f.Subscribe(0, "")
+	if !ok {
+		t.Fatal("no subscription")
+	}
+	f.closeSubscribers()
+	if _, open := <-ch; open {
+		t.Fatal("the stream is still open")
+	}
+	cancel()
+	f.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle})
+}
+
 func TestFeed(t *testing.T) {
 	f := NewFeed(4, nil)
 	for i := 1; i <= 6; i++ {

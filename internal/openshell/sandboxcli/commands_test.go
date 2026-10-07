@@ -241,6 +241,48 @@ func TestActivityRendering(t *testing.T) {
 	has(t, ta.output(), "12:01:02 box ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2")
 }
 
+// TestActivityFollowsTheDaemonsNextFeed (GAP-0092, GAP-0105): a daemon
+// restart ended `sandbox activity -f` without a word and with 0, or left it
+// skipping the new feed's events, numbered from one again under another
+// epoch. The follower waits for the daemon, follows its new feed from the
+// start and says so; what it replays of a feed already shown is skipped.
+func TestActivityFollowsTheDaemonsNextFeed(t *testing.T) {
+	ta := newTestApp(t, "")
+	at := ta.Now()
+	ev := func(epoch string, seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Epoch: epoch, Seq: seq, Time: at, Kind: sandboxapi.ActivityEgressAllowed, Sandbox: "box", Host: host, Port: 443}
+	}
+	ta.daemon.mu.Lock()
+	ta.daemon.events = []sandboxapi.ActivityEvent{ev("e1", 1, "one.example"), ev("e1", 2, "two.example")}
+	ta.daemon.mu.Unlock()
+	ctx, cancel := context.WithTimeout(bg, time.Second)
+	defer cancel()
+	restarted := false
+	ta.Sleep = func(context.Context, time.Duration) error {
+		if !restarted {
+			restarted = true
+			ta.daemon.mu.Lock()
+			ta.daemon.events = []sandboxapi.ActivityEvent{ev("e2", 1, "three.example")}
+			ta.daemon.mu.Unlock()
+		}
+		return nil
+	}
+	ta.daemon.onStatus = func(*sandboxapi.Status) {
+		if restarted {
+			// The new feed's stream stays open until the test ends.
+			ta.daemon.hold = make(chan struct{})
+		}
+	}
+	if err := ta.Activity(ctx, ActivityOptions{Follow: true}); err != nil {
+		t.Fatalf("Activity = %v", err)
+	}
+	out := ta.output()
+	if strings.Count(out, "one.example") != 1 || strings.Count(out, "three.example") != 1 ||
+		!strings.Contains(out, "the DefenseClaw daemon restarted; following its new feed") {
+		t.Fatalf("followed:\n%s", out)
+	}
+}
+
 func TestApprovalsAndDecisions(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.approvals = []sandboxapi.Approval{{ID: "ap-1", Sandbox: "box", Kind: "host_port", Host: "127.0.0.1", Port: 5432, Risky: true,

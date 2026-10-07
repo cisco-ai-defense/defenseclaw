@@ -455,6 +455,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer func() {
 		m.stopWatchers()
 		m.closeGateway()
+		m.feed.closeSubscribers()
 		m.runMu.Lock()
 		m.runCtx = nil
 		m.runMu.Unlock()

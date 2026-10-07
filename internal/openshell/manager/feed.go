@@ -171,16 +171,28 @@ func (f *Feed) Subscribe(since uint64, sandbox string) (backlog []sandboxapi.Act
 	s := &subscriber{ch: make(chan sandboxapi.ActivityEvent, defaultSubscriberBuf), sandbox: sandbox}
 	f.subs[s] = struct{}{}
 	backlog = f.sinceLocked(since, sandbox)
-	var once sync.Once
 	cancel = func() {
-		once.Do(func() {
-			f.mu.Lock()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if _, ok := f.subs[s]; ok {
 			delete(f.subs, s)
 			close(s.ch)
-			f.mu.Unlock()
-		})
+		}
 	}
 	return backlog, s.ch, cancel, true
+}
+
+// closeSubscribers ends every subscription, whose streams then end: a
+// manager that stops (the daemon lets go of its sandboxes, or another
+// takes over) publishes nothing more, and a client that kept following it
+// would wait for ever instead of reconnecting to the feed that replaces it.
+func (f *Feed) closeSubscribers() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for s := range f.subs {
+		delete(f.subs, s)
+		close(s.ch)
+	}
 }
 
 // Seq returns the last sequence number published.
