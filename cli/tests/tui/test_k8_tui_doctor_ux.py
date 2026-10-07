@@ -158,3 +158,15 @@ def test_80_column_tab_strip_matches_documented_key_labels() -> None:
     assert strip_width(tuple(labels.values())) <= 66
     docs = (Path(__file__).parents[3] / "docs-site/content/docs/tui.mdx").read_text()
     assert "At 80 columns, the tab strip keeps every panel's key" in docs
+
+
+def test_doctor_skips_gateway_guess_after_config_validation_failure(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_doctor
+
+    result = cmd_doctor._DoctorResult()
+    result.checks.append({"check_id": "doctor.config.validation", "status": "fail"})
+    monkeypatch.setattr(cmd_doctor, "_http_probe", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probed invalid config")))
+    cmd_doctor._check_sidecar(SimpleNamespace(), result)
+    assert any(row["status"] == "skip" and "Sidecar API" in str(row) for row in result.checks)

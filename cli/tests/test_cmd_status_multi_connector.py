@@ -812,6 +812,8 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("1 problem(s)", result.output)
         self.assertIn("Sidecar", result.output)
+        self.assertIn("not checked while config.yaml is invalid", result.output)
+        self.assertNotIn("not running; start it", result.output)
         self.assertIn("Enforcement", result.output)
         as_json = self._invoke(["--json"])
         self.assertEqual(as_json.exit_code, 1, msg=as_json.output)

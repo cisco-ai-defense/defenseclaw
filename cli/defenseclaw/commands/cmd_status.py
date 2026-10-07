@@ -457,8 +457,14 @@ def status(app: AppContext, as_json: bool) -> None:
     # live counters from its identity-bound status snapshot). The same code
     # path drives a single-connector install (one row) and a fan-out install
     # (N rows), so the output never branches on connector count.
-    health = _fetch_runtime_bound_health(client, cfg)
-    if health is not None:
+    health = None if config_problems else _fetch_runtime_bound_health(client, cfg)
+    if config_problems:
+        _status_row(
+            "Sidecar",
+            ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
+        )
+        _print_agents(cfg, sidecar_down=True)
+    elif health is not None:
         from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
 
         if _gateway_runs_replaced_binary(cfg):
@@ -484,7 +490,7 @@ def status(app: AppContext, as_json: bool) -> None:
             "Health check:  defenseclaw doctor",
             "Subsystems:    defenseclaw-gateway status",
         )
-    else:
+    elif not config_problems:
         try:
             from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
 
@@ -1696,7 +1702,10 @@ def _status_payload(app) -> dict:
     except Exception:
         health = None
     running = health is not None
-    payload["sidecar"] = {"running": running}
+    if getattr(app, "config_problems", None):
+        payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
+    else:
+        payload["sidecar"] = {"running": running}
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

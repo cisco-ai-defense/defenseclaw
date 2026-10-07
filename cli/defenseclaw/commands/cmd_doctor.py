@@ -3038,6 +3038,14 @@ def _guardrail_health_mode(details: dict) -> str:
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
+    if _config_validation_failed(r):
+        _emit(
+            "skip",
+            "Sidecar API",
+            "not checked while config.yaml is invalid; run defenseclaw config validate",
+            r=r,
+        )
+        return None
     bind = _gateway_api_host(cfg)
     url = _gateway_api_url(cfg, "/health")
     code, body = _http_probe(

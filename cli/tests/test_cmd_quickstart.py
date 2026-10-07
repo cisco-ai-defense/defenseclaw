@@ -164,6 +164,32 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         with patch.object(cmd_quickstart, "_configured_quickstart_connectors", return_value=["claudecode"]):
             self.assertIsNone(cmd_quickstart._refuse_roster_narrowing(cfg_mod, "claudecode"))
 
+    def test_explicit_quickstart_refreshes_discovery_before_bootstrap(self):
+        from unittest.mock import Mock
+
+        order = []
+        report = Mock()
+        report.status = "ready"
+        report.setup = []
+        report.readiness = []
+        report.to_dict.return_value = {"status": "ready"}
+        def discover(**kwargs):
+            order.append("discover")
+            self.assertFalse(kwargs["use_cache"])
+            self.assertTrue(kwargs["refresh"])
+        def bootstrap(*args):
+            order.append("bootstrap")
+            return report
+        with (
+            patch("defenseclaw.inventory.agent_discovery.discover_agents", side_effect=discover),
+            patch("defenseclaw.bootstrap.run_first_run", side_effect=bootstrap),
+            patch("defenseclaw.commands.cmd_quickstart._refuse_roster_narrowing"),
+            patch("defenseclaw.platform_support.connector_platform_support", return_value=Mock(available=True)),
+        ):
+            result = self._invoke(["--connector", "codex", "--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(order, ["discover", "bootstrap"])
+
     def test_openclaw_defaults_to_observe_profile(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
             result = self._invoke([
