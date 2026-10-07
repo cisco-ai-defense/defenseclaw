@@ -273,9 +273,13 @@ func TestSinglePermanentPayloadFailureDoesNotSuppressNextValidRecord(t *testing.
 func TestExpiredCircuitAppearsHalfOpenWithoutProducerTraffic(t *testing.T) {
 	config := circuitTestConfig(91)
 	dispatcher, err := NewDispatcher(config, &circuitTestAdapter{})
-	if err != nil { t.Fatal(err) }
-	past := time.Now().Add(-config.Circuit.OpenDuration - time.Second)
-	if !dispatcher.recordCircuitFailure(FailureClassAuthentication, past) { t.Fatal("circuit did not open") }
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-authenticationCircuitOpenDuration - time.Second)
+	if !dispatcher.recordCircuitFailure(FailureClassAuthentication, past) {
+		t.Fatal("circuit did not open")
+	}
 	snapshot := dispatcher.DeliveryHealthSnapshot()
 	if snapshot.CircuitState != CircuitHalfOpen || snapshot.State != HealthDegraded ||
 		snapshot.Reason != string(HealthReasonCircuitHalfOpen) {
@@ -290,6 +294,7 @@ func TestCircuitCooldownHalfOpenRecoveryAndGenerationReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	first.now = func() time.Time { return start }
 	if !first.recordCircuitFailure(FailureClassUnsafeEndpoint, start) {
 		t.Fatal("unsafe-endpoint failure did not open circuit")
 	}
@@ -390,13 +395,15 @@ func TestTransientCircuitPersistsAcrossBatchesAndFailsFastWhileOpen(t *testing.T
 		t.Fatalf("open circuit touched adapter %d times", got)
 	}
 	counters := dispatcher.Counters()
-	if counters.Accepted != 23 || counters.Rejected != 3 || counters.Failed != 3 ||
+	if counters.Accepted != 23 || counters.Dropped != 3 || counters.Failed != 3 ||
 		counters.Retried != 0 || counters.Delivered != 0 {
 		t.Fatalf("counters=%+v", counters)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := dispatcher.Close(ctx); err != nil { t.Fatal(err) }
+	if err := dispatcher.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestOpenCircuitRejectsAcceptedBacklogWithoutAdapterWork(t *testing.T) {
@@ -440,7 +447,9 @@ func TestOpenCircuitRejectsAcceptedBacklogWithoutAdapterWork(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := dispatcher.Close(ctx); err != nil { t.Fatal(err) }
+	if err := dispatcher.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPartialDeliveryResetsTerminalFailureStreak(t *testing.T) {

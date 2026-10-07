@@ -168,19 +168,19 @@ func TestNilEmitterYieldsNoAdapter(t *testing.T) {
 }
 
 func TestRuntimeSnapshotExportsOnlyRunningPlaneHealth(t *testing.T) {
-    t.Parallel()
-    capture := &endpointInventoryCapture{}
-    snapshot := sensor.Snapshot{Planes: []sensor.PlaneHealth{
-        {Plane: "a", Available: true, Running: true, Mechanism: "process"},
-        {Plane: "b", Available: false, Running: false, Reason: "not selected"},
-    }}
-    if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
-        t.Fatal(err)
-    }
-    records := capture.snapshot()
-    if len(records) != 1 || records[0].EventName() != observability.EventName(observability.TelemetryEventAIRuntimePlaneHealth) {
-        t.Fatalf("exported %d plane health records, want one running plane", len(records))
-    }
+	t.Parallel()
+	capture := &endpointInventoryCapture{}
+	snapshot := sensor.Snapshot{Planes: []sensor.PlaneHealth{
+		{Plane: "a", Available: true, Running: true, Mechanism: "process"},
+		{Plane: "b", Available: false, Running: false, Reason: "not selected"},
+	}}
+	if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	records := capture.snapshot()
+	if len(records) != 1 || records[0].EventName() != observability.EventName(observability.TelemetryEventAIRuntimePlaneHealth) {
+		t.Fatalf("exported %d plane health records, want one running plane", len(records))
+	}
 }
 
 func TestRuntimeSnapshotEmitsUnattributedPlaneFinding(t *testing.T) {
