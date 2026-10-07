@@ -271,15 +271,20 @@ func kernelPolicyChange(removed []string) string {
 
 // removeSensorState removes the helper's state directory with the rest of
 // the machine state, unless it still records policies that may be loaded:
-// those names are what lets a later helper remove them.
+// those names are what lets a later helper remove them. Its runtime
+// directory goes in either case: the unit keeps it across stops
+// (RuntimeDirectoryPreserve, for the until-reboot pause), so with the unit
+// gone it would otherwise hold a stale socket and the pause until the next
+// reboot, and a reinstall in the same boot would start paused.
 func (e *Env) removeSensorState() error {
 	if e.GOOS != "linux" {
 		return nil
 	}
+	runErr := os.RemoveAll(e.P(kernelpolicy.DefaultRunDir))
 	if names, err := e.recordedKernelPolicies(); err != nil || len(names) > 0 {
-		return nil
+		return runErr
 	}
-	return os.RemoveAll(e.P(kernelpolicy.DefaultStateDir))
+	return errors.Join(runErr, os.RemoveAll(e.P(kernelpolicy.DefaultStateDir)))
 }
 
 // helperUnit is the sensor helper's unit, if this platform has one.

@@ -280,6 +280,8 @@ func TestUninstallRemovesTheTetragonPoliciesFirst(t *testing.T) {
 		h := newTestHost(t, "linux")
 		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 		h.recordTetragonPolicies(recordedTetragonPolicies...)
+		// The until-reboot pause the unit keeps across stops.
+		writeHostFile(t, h, filepath.Join(kernelpolicy.DefaultRunDir, "tetragon-pause"), "{}\n")
 		runner := &tetragonHelperRunner{Runner: h.runner, h: h}
 		h.env.Runner = runner
 		r := h.run(Options{Action: ActionUninstall, Purge: purge})
@@ -295,6 +297,9 @@ func TestUninstallRemovesTheTetragonPoliciesFirst(t *testing.T) {
 		}
 		if exists(h.env.P(kernelpolicy.DefaultStateDir)) {
 			t.Fatal("the helper's state outlived the uninstall")
+		}
+		if exists(h.env.P(kernelpolicy.DefaultRunDir)) {
+			t.Fatal("the helper's runtime directory (socket, until-reboot pause) outlived the uninstall")
 		}
 	}
 
