@@ -4704,7 +4704,7 @@ attributes:
   normalization:
     id: enum-v1
     overrides: {enum: [start, exit]}
-    notes: On sandbox.process start is a launch and exit its termination; on sandbox.process_tree start is when the process joined the tree (a sample of the sandbox's /proc or an OpenShell PROC launch saw it) and exit once it ended
+    notes: On sandbox.process start is a launch and exit its termination; on sandbox.process_tree start is when the process joined the tree (a sample of the sandbox's /proc, an OpenShell PROC launch or a Tetragon exec from the sandbox kernel feed saw it) and exit once it ended
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.source
   type: string
@@ -4717,8 +4717,8 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [ocsf, sample]}
-    notes: ocsf is an OpenShell supervisor PROC record; sample is DefenseClaw's opt-in sample of the sandbox's /proc
+    overrides: {enum: [ocsf, sample, tetragon]}
+    notes: ocsf is an OpenShell supervisor PROC record; sample is DefenseClaw's opt-in sample of the sandbox's /proc; tetragon is an exec the host's Tetragon reported through the sandbox kernel feed (process tree only)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.pid
   type: int64
@@ -4732,7 +4732,35 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 1, max: 4194304}
-    notes: The sandbox's own PID namespace, as its supervisor or a sample of its /proc reports it. Never a metric label
+    notes: The sandbox's own PID namespace, as its supervisor or a sample of its /proc reports it, or as the sandbox kernel feed read it when the exec was seen. Absent on a process tree record of a Tetragon exec whose in-sandbox pid could not be read (the process was gone); host_pid and exec_id name it then. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.host_pid
+  type: int64
+  brief: Host process ID of a sandbox process the sandbox kernel feed reported
+  examples: [217400]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 4194304}
+    notes: The host's PID namespace, another pid space than pid; set only on process tree records whose source is tetragon. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.process.exec_id
+  type: string
+  brief: Tetragon's execution ID of a sandbox process the sandbox kernel feed reported
+  examples: [ZGNjZXJ0LWhvc3Q6NDEyMTc3NDA4ODc4MDoyMTc0MDA=]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 256, pattern: '^[A-Za-z0-9+/]{4,252}={0,2}$'}
+    notes: Unique per process image on the host (Tetragon's base64 of node, boot-relative exec time and host pid); joins a process to its children without pid reuse. Set only on process tree records whose source is tetragon. Never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.parent_pid
   type: int64
@@ -4816,7 +4844,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: -2147483648, max: 2147483647}
-    notes: Present on exit records only, when an OpenShell PROC terminate record reported it; a sample sees only that the process is gone
+    notes: Present on exit records only, when an OpenShell PROC terminate record or Tetragon's exit reported it; a sample sees only that the process is gone
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.lineage
   type: string[]
@@ -11116,8 +11144,12 @@ groups:
   - ref: defenseclaw.sandbox.process.event
     requirement_level: required
   - ref: defenseclaw.sandbox.process.pid
-    requirement_level: required
+    requirement_level: recommended
   - ref: defenseclaw.sandbox.process.source
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.host_pid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.process.exec_id
     requirement_level: recommended
   - ref: defenseclaw.sandbox.process.parent_pid
     requirement_level: recommended
