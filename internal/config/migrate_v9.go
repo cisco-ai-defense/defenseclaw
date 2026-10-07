@@ -2240,8 +2240,6 @@ func v9AuditDBDamaged(err error) bool {
 		strings.Contains(message, "file is not a database")
 }
 
-// v9SecureClientDocument reports whether the document is a managed
-// deployment on the Secure Client profile (pinned or configured).
 // SecureClientSource reports whether config bytes describe a Secure Client
 // deployment (its deployment mode and profile, or their environment pins).
 // The Secure Client integration stays on config_version 8, so `config
@@ -2255,6 +2253,8 @@ func SecureClientSource(raw []byte) bool {
 	return root != nil && root.Kind == yaml.MappingNode && v9SecureClientDocument(root)
 }
 
+// v9SecureClientDocument reports whether the document is a managed
+// deployment on the Secure Client profile (pinned or configured).
 func v9SecureClientDocument(root *yaml.Node) bool {
 	mode := normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
 	if env := strings.TrimSpace(os.Getenv(managed.DeploymentModeEnv)); env != "" {

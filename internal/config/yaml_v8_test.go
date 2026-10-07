@@ -233,6 +233,36 @@ func TestParseV8YAMLNodeLimitCountsKeysAndScalars(t *testing.T) {
 	requireV8YAMLError(t, []byte(sequenceV8YAML(allowedItems+1)), V8YAMLErrorNodeLimit)
 }
 
+// A Secure Client source stays on config_version 8, so a legacy v7 key keeps
+// the targeted error of main (issue #1092).
+func TestParseV8YAMLSecureClientLegacyDiagnostics(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	for _, test := range []struct {
+		name, body, path, target string
+	}{
+		{"otel", "otel: {}\n", "$.otel", "observability"},
+		{"audit sinks", "audit_sinks: []\n", "$.audit_sinks", "observability.destinations"},
+		{"audit db", "audit_db: /tmp/audit.db\n", "$.audit_db", "observability.local.path"},
+		{"judge db", "judge_bodies_db: /tmp/judge.db\n", "$.judge_bodies_db", "observability.local.judge_bodies_path"},
+		{"privacy", "privacy:\n  disable_redaction: false\n", "$.privacy.disable_redaction", "bucket policies"},
+		{"discovery", "ai_discovery:\n  emit_otel: false\n", "$.ai_discovery.emit_otel", "ai.discovery"},
+		{"splunk", "splunk: {}\n", "$.splunk", "splunk_hec"},
+		{"connector sinks", "observability:\n  connectors:\n    codex:\n      audit_sinks: []\n", "$.observability.connectors.codex.audit_sinks", "connector selectors"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n" + test.body
+			err := requireV8YAMLError(t, []byte(source), V8YAMLErrorLegacyKeyForbidden)
+			if err.Path != test.path {
+				t.Fatalf("Path = %q, want %q", err.Path, test.path)
+			}
+			if !strings.Contains(err.Action, test.target) {
+				t.Fatalf("Action = %q, want the replacement %q", err.Action, test.target)
+			}
+		})
+	}
+}
+
 func TestParseV8YAMLConnectorWebhooksRemainsAllowed(t *testing.T) {
 	_, err := ParseV8YAML("config.yaml", []byte(`config_version: 8
 observability:
