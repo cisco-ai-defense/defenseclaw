@@ -272,6 +272,20 @@ func TestScanOtherEditors(t *testing.T) {
 // servers, %LOCALAPPDATA%\JetBrains and Android Studio included, must be
 // granted, while the caches and other data beside those folders and a
 // linked folder are not (GAP-0042).
+func TestWindowsHomeGrantsIncludeTraversalAttributes(t *testing.T) {
+	grants := WindowsHomeGrants(t.TempDir())
+	byPath := make(map[string]WindowsGrant, len(grants))
+	for _, g := range grants {
+		byPath[g.Path] = g
+	}
+	for _, path := range []string{`.vscode`, `AppData`, `AppData\Roaming`, `AppData\Roaming\Code`, `AppData\Roaming\Code\User`, `AppData\Local\Microsoft`} {
+		g, ok := byPath[path]
+		if !ok || g.Tree {
+			t.Errorf("missing narrow traversal grant: %s", path)
+		}
+	}
+}
+
 func TestVisualStudioEnabledNamesAcceptsShortEnumeration(t *testing.T) {
 	enabled, ok := visualStudioEnabledNames(func(limit int) ([]string, error) {
 		if limit != visualStudioMaxExtensions {

@@ -268,6 +268,8 @@ func inventoryDACLIDEGrants(home string) []inventoryDACLGrant {
 		ensure := ensureInventorySelfACE
 		if g.Tree {
 			ensure = ensureInventoryReadACE
+		} else if g.Attributes {
+			ensure = ensureInventoryAttributesACE
 		}
 		rel := g.Path
 		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
@@ -335,6 +337,11 @@ var (
 		mask: inventoryListMask, inheritance: windows.NO_INHERITANCE,
 		present: daclContainsInventoryListACE,
 	}
+	inventoryAttributesACE = inventoryACE{
+		mask:        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE,
+		inheritance: windows.NO_INHERITANCE,
+		present:     daclContainsInventoryAttributesACE,
+	}
 	inventorySelfACE = inventoryACE{
 		mask: inventorySelfMask, inheritance: windows.NO_INHERITANCE, files: true,
 		present: daclContainsInventorySelfACE,
@@ -357,6 +364,12 @@ const inventoryListMask = windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIB
 // (inventoryDACLListOnlyDirs).
 func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
 	return ensureInventoryACE(path, sid, inventoryListACE)
+}
+
+// ensureInventoryAttributesACE permits Lstat on an intermediate folder,
+// without a list or content right and without inheritance.
+func ensureInventoryAttributesACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, inventoryAttributesACE)
 }
 
 // inventorySelfMask lets the service read one folder's own listing or one
@@ -499,6 +512,27 @@ func daclContainsInventoryListACE(acl *windows.ACL, sid *windows.SID) bool {
 		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if aceSID != nil && windows.EqualSid(aceSID, sid) &&
 			uint32(ace.Mask)&uint32(inventoryListMask) == uint32(inventoryListMask) {
+			return true
+		}
+	}
+	return false
+}
+
+func daclContainsInventoryAttributesACE(acl *windows.ACL, sid *windows.SID) bool {
+	if acl == nil || sid == nil {
+		return false
+	}
+	want := windows.ACCESS_MASK(windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if aceSID != nil && windows.EqualSid(aceSID, sid) && mapWindowsUserPathGenericMask(ace.Mask)&want == want {
 			return true
 		}
 	}
