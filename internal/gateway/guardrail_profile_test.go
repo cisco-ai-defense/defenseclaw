@@ -437,6 +437,12 @@ func TestAssignmentsIgnoreUnicodeNormalisationForm(t *testing.T) {
 // directory) is a warning; one that exists, one whose lookup failed, and
 // SIDs are not.
 func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
+	// The directory cache is shared by the tests of the package; other tests
+	// leave failing lookups in it, and the group check says nothing then
+	// (GAP-0229).
+	previousHealth := directoryCacheHealth
+	t.Cleanup(func() { directoryCacheHealth = previousHealth })
+	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{} }
 	assignments := []config.ProfileAssignment{
 		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-rename-me@dclab.test", "dc-ml-team@dclab.test"}}},
 		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"S-1-5-21-1-2-3-1104", "dc-flaky@dclab.test", "DC-RENAME-ME@dclab.test"}}},
@@ -480,8 +486,6 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	// group" for groups that exist. While lookups fail, or the explained
 	// account failed to resolve, nothing is warned and no pass is kept; the
 	// next pass runs once they work.
-	previousHealth := directoryCacheHealth
-	t.Cleanup(func() { directoryCacheHealth = previousHealth })
 	profileGroupExists = func(context.Context, string) (bool, error) { return false, nil }
 	set = &guardrailProfileSet{assignments: assignments}
 	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{Failing: 1} }
