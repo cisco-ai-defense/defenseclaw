@@ -33,6 +33,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -1377,6 +1378,10 @@ func TestConfigManagerSecureClientReloadReadsNoDotEnv(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Loading a Secure Client profile turns on strict hook contract
+	// resolution for the whole process (Windows and macOS); later tests in
+	// the same go test process expect it off.
+	t.Cleanup(func() { connector.SetStrictHookContractResolution(false) })
 	loads := 0
 	config.RegisterDotEnvLoader(func(string) { loads++ })
 	t.Cleanup(func() { config.RegisterDotEnvLoader(nil) })
