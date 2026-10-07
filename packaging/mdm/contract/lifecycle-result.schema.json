@@ -86,6 +86,16 @@
     "changes": { "type": "array", "items": { "type": "string" } },
     "api_port_holders": { "type": "array", "items": { "$ref": "#/$defs/portHolder" }, "description": "With error api_port_held: the processes other than the DefenseClaw gateway that listen where the gateway API binds." },
     "policy": { "$ref": "#/$defs/policyState", "description": "Effective policy state; omitted under the Secure Client integration." },
+    "scanners": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "description": "Standalone Windows scanner runtime; omitted everywhere else.",
+      "properties": {
+        "state": { "type": "string", "enum": ["ready", "not_prepared", "missing"] },
+        "versions": { "type": "object", "additionalProperties": { "type": "string" } },
+        "policy": { "type": "string" },
+        "judge_model": { "type": "string" }
+      }
+    },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },

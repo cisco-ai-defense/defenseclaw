@@ -114,6 +114,7 @@ func NewSkillScannerFromLLM(cfg config.SkillScannerConfig, llm config.LLMConfig,
 	if cfg.Binary == "" {
 		cfg.Binary = "skill-scanner"
 	}
+	cfg.Binary = resolveScannerRuntime(cfg.Binary, "skill-scanner", "skill-scanner.exe")
 	return &SkillScanner{
 		Config:         cfg,
 		LLM:            llm,
@@ -186,6 +187,16 @@ func (s *SkillScanner) judge() (skillJudge, bool) {
 		return j, false
 	}
 	return j, true
+}
+
+// commandArgs is the scanner command line: buildArgs, led by the tool name
+// when the binary is the embedded scanner runtime.
+func (s *SkillScanner) commandArgs(target, policy string) []string {
+	args := s.buildArgs(target, policy)
+	if usesScannerRuntime(s.Config.Binary) {
+		return append([]string{"skill-scanner"}, args...)
+	}
+	return args
 }
 
 func (s *SkillScanner) buildArgs(target, policy string) []string {
@@ -356,7 +367,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.Config.ScanTimeoutSeconds())*time.Second)
 	defer cancel()
-	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.buildArgs(target, policy)...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(target, policy)...)
 	cmd.Env = s.scanEnv()
 
 	var stdout, stderr bytes.Buffer

@@ -46,15 +46,18 @@ const (
 )
 
 type windowsEnterpriseLifecycleOptions struct {
-	brokerBinary                  string
-	gatewayBinary                 string
-	acpBinary                     string
-	hookBinary                    string
-	sensorHelperBinary            string
-	cliBinary                     string
-	configPath                    string
-	manifestPath                  string
-	installerPath                 string
+	brokerBinary       string
+	gatewayBinary      string
+	acpBinary          string
+	hookBinary         string
+	sensorHelperBinary string
+	cliBinary          string
+	configPath         string
+	manifestPath       string
+	installerPath      string
+	// resolvedInstaller is the install-enterprise.ps1 the standalone
+	// lifecycle runs; the payload's scanner runtime is staged beside it.
+	resolvedInstaller             string
 	installRoot                   string
 	stateRoot                     string
 	gatewayServiceName            string
@@ -404,6 +407,7 @@ func runWindowsEnterpriseLifecycle(
 			return failPreflight(fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
 		}
 	}
+	opts.resolvedInstaller = script
 	if action == "ensure" {
 		return runWindowsEnterpriseStandaloneEnsure(ctx, cmd, opts, script)
 	}
