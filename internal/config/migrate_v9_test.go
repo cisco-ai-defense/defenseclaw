@@ -96,6 +96,35 @@ func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 	}
 }
 
+// A 0.8.x config with rule_pack_dir: "" (the 0.8.10 default: the embedded
+// packs) on a home without the default pack folder upgrades to a config whose
+// default pack exists: the migration writes the shipped pack, and a folder
+// that is there is left alone (GAP-0150).
+func TestMigrateV9SeedsAMissingDefaultRulePack(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: \"\"\n  connectors:\n    codex: {rule_pack_dir: \"\"}\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	strict := filepath.Join(dir, "policies", "guardrail", "strict")
+	if err := os.MkdirAll(strict, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	pack := filepath.Join(dir, "policies", "guardrail", "default")
+	if entries, err := os.ReadDir(pack); err != nil || len(entries) == 0 {
+		t.Fatalf("default pack folder after the migration: %v (%d entries), want the shipped pack", err, len(entries))
+	}
+	if entries, _ := os.ReadDir(strict); len(entries) != 0 {
+		t.Errorf("the existing strict folder was rewritten: %d entries", len(entries))
+	}
+}
+
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
