@@ -794,6 +794,9 @@ def _check_generated_hook_freshness(
         _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
         return
 
+    if any(reason.endswith(" missing") for reason in reasons):
+        _emit("skip", f"{label} freshness", "missing hook script is covered by Hook runtime files", r=r)
+        return
     detail = "; ".join(reasons[:2])
     if len(reasons) > 2:
         detail += f"; +{len(reasons) - 2} more"
@@ -12203,8 +12206,10 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
 def _repair_display_tag(state: str) -> str:
     if state == "applied":
         return "pass"
-    if state in {"failed", "blocked"}:
+    if state == "failed":
         return "fail"
+    if state == "blocked":
+        return "skip"
     if state in {"applicable", "manual", "requires_confirmation"}:
         return "warn"
     return "skip"
@@ -13472,7 +13477,7 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     missing token blocks every call, while the other hook rows stay green
     (GAP-1141, GAP-1138). Both are repaired by rerunning setup.
     """
-    from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
+    from defenseclaw.hook_integrity import hook_runtime_problems
 
     # Token problems are reported once, by the Connector hook credential row,
     # with the repair doctor --fix applies (GAP-1436).
@@ -13481,7 +13486,7 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
         _emit(
             "fail",
             "Hook runtime files",
-            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`, or `{setup_command(connector)}`",
+            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`",
             r=r,
         )
 

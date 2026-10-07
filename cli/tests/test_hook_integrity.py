@@ -74,7 +74,7 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     _check_hook_runtime_integrity(cfg, "codex", r)
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
-    assert "defenseclaw setup codex" in row["detail"] and "doctor --fix" in row["detail"]
+    assert "doctor --fix" in row["detail"] and "setup codex" not in row["detail"]
 
     # GAP-0098: --fix restarts the gateway, which renders the script again.
     from defenseclaw.commands import cmd_doctor
@@ -209,3 +209,20 @@ def test_fix_drops_a_stale_openclaw_lock_entry(tmp_path, monkeypatch):
     assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "pass"
     assert set(json.loads(lock_path.read_text())["connectors"]) == {"codex"} and restarts == [1]
     assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "skip"
+
+
+
+def test_missing_hook_script_is_named_as_missing_with_one_repair(tmp_path):
+    from defenseclaw.commands.cmd_doctor import _repair_display_tag
+
+    cfg, script = _install(tmp_path)
+    script.unlink()
+    problems = hook_runtime_problems(cfg, "codex")
+    assert len(problems) == 1 and "is missing" in problems[0]
+    assert "changed since setup" not in problems[0]
+
+    result = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", result)
+    row = next(row for row in result.checks if row.get("label") == "Hook runtime files")
+    assert row["detail"].count("doctor --fix") == 1
+    assert _repair_display_tag("blocked") == "skip"

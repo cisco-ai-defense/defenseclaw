@@ -116,6 +116,9 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     problems: list[str] = []
     for script in scripts:
         expected = digests.get(script.name)
+        if not script.exists():
+            problems.append(f"hook script {script} is missing")
+            break
         if expected and _sha256_regular_file(script) != expected:
             problems.append(
                 f"hook script {script} changed since setup (an edit, or a copy from another build; "
