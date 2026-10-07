@@ -13,12 +13,16 @@ or a password that was expanded a second time would only show up on a Linux host
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import time
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
 import pytest
@@ -234,3 +238,240 @@ def test_okta_sssd_render_fills_every_placeholder_once(tmp_path: Path) -> None:
     assert "ldap_default_bind_dn = uid=ldap-bind@example.com,dc=example,dc=okta,dc=com\n" in text
     assert "ldap_user_principal = uid\n" in text
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_okta_pagination_reads_separate_link_headers() -> None:
+    okta = _load(OKTA)
+    headers = Message()
+    headers.add_header("Link", '<https://example.okta.com/api/v1/users?limit=1>; rel="self"')
+    headers.add_header("Link", '<https://example.okta.com/api/v1/users?after=one>; rel="next"')
+
+    class Response(io.BytesIO):
+        status = 200
+        def __init__(self, body: bytes, response_headers: Message):
+            super().__init__(body)
+            self.headers = response_headers
+
+    responses = iter([Response(b'[{"id":"one"}]', headers), Response(b'[{"id":"two"}]', Message())])
+    client = okta.Okta("https://example.okta.com", "token")
+    client._opener.open = lambda *_args, **_kwargs: next(responses)
+    assert [user["id"] for user in client.get_all("/api/v1/users?limit=1")] == ["one", "two"]
+
+
+def test_okta_rate_limit_honors_lowercase_reset_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    waited = []
+    monkeypatch.setattr(okta.time, "sleep", waited.append)
+    reset = int(time.time()) + 20
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            raise urllib.error.HTTPError("https://example.okta.com/api/v1/users", 429,
+                                         "rate limit", {"x-rate-limit-reset": str(reset)}, io.BytesIO(b"{}"))
+
+    client = okta.Okta("https://example.okta.com", "token")
+    client._opener = Opener()
+    status, _, _ = client.call("GET", "/api/v1/users")
+    assert status == 429
+    assert waited and min(waited) > 5
+
+
+def test_okta_explicit_gid_is_not_its_own_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    group = {"id": "group1", "type": "OKTA_GROUP", "profile": {"name": "team"}}
+    monkeypatch.setattr(okta, "find_group", lambda *_args: group)
+
+    class Client:
+        def must(self, method, path, body):
+            assert (method, path, body["profile"]["gidNumber"]) == ("PUT", "/api/v1/groups/group1", 1720500)
+
+    report = okta.Report(dry_run=False)
+    assert okta.ensure_group(Client(), report, "team", 1720500, set(), 1720000) == (group, 1720500)
+    assert report.problems == 0
+
+
+def test_okta_bind_role_refuses_extra_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def get_all(self, path, key=None):
+            if key == "roles":
+                return [{"id": "role1", "label": "reader"}]
+            if key == "resource-sets":
+                return [{"id": "set1", "label": "all"}]
+            if key == "resources":
+                return [{"_links": {"self": {"href": self.org_url + "/api/v1/" + kind}}}
+                        for kind in ("users", "groups")]
+            raise AssertionError(path)
+        def must(self, method, path, body=None):
+            if path.endswith("/permissions"):
+                return {"permissions": [{"label": label} for label in
+                        [*okta.BIND_PERMISSIONS, "okta.users.manage"]]}
+            if path.endswith("/resources"):
+                return {"resources": [{"_links": {"self": {"href": self.org_url + "/api/v1/" + kind}}}
+                                      for kind in ("users", "groups")]}
+            if method == "GET":
+                return []
+            raise AssertionError("an overbroad role must not be assigned")
+
+    args = type("Args", (), {"apply": True, "bind_login": "bind@example.com",
+                             "role_label": "reader", "resource_set_label": "all"})()
+    assert okta.cmd_bind_role(Client(), args) == 1
+
+
+def test_okta_bind_role_refuses_narrow_resource_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def get_all(self, path, key=None):
+            if key == "roles":
+                return [{"id": "role1", "label": "reader"}]
+            if key == "resource-sets":
+                return [{"id": "set1", "label": "all"}]
+            if key == "resources":
+                return [{"_links": {"self": {"href": self.org_url + "/api/v1/users/one"}}}]
+            raise AssertionError(path)
+        def must(self, method, path, body=None):
+            if path.endswith("/permissions"):
+                return {"permissions": [{"label": label} for label in okta.BIND_PERMISSIONS]}
+            if method == "GET":
+                return []
+            raise AssertionError("a narrow resource set must not be assigned")
+
+    args = type("Args", (), {"apply": True, "bind_login": "bind@example.com",
+                             "role_label": "reader", "resource_set_label": "all"})()
+    assert okta.cmd_bind_role(Client(), args) == 1
+
+
+def test_okta_signon_rule_repairs_non_password_decisions() -> None:
+    okta = _load(OKTA)
+    people = {"users": {"include": ["bind1"]}}
+    for status, access, factor in [("INACTIVE", "ALLOW", "1FA"),
+                                   ("ACTIVE", "DENY", "1FA"), ("ACTIVE", "ALLOW", "2FA")]:
+        calls = []
+
+        class Client:
+            def must(self, method, path, body=None):
+                calls.append((method, path))
+                return {}
+
+        rule = {"id": "rule1", "name": "bind", "status": status, "conditions": {"people": people},
+                "actions": {"appSignOn": {"access": access, "verificationMethod": {
+                    "type": "ASSURANCE", "factorMode": factor,
+                    "constraints": [{"knowledge": {"types": ["password"]}}]}}}}
+        report = okta.Report(dry_run=False)
+        okta.ensure_rule(Client(), report, {"id": "policy1"}, [rule], "bind", 0, people, "bind user")
+        assert ("PUT", "/api/v1/policies/policy1/rules/rule1") in calls
+        if status == "INACTIVE":
+            assert ("POST", "/api/v1/policies/policy1/rules/rule1/lifecycle/activate") in calls
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_render_only_replaces_world_readable_output(tmp_path: Path) -> None:
+    out = tmp_path / "sssd.conf"
+    out.write_text("old")
+    out.chmod(0o644)
+    result = subprocess.run(
+        ["bash", str(OKTA_INSTALL), "--org", "example", "--bind-login", "bind@example.com",
+         "--allow-group", "linux-users", "--render-only", str(out)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "OKTA_BIND_PASSWORD": "test-password"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    assert "ldap_default_authtok = test-password" in out.read_text()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_render_accepts_utf8_bind_password(tmp_path: Path) -> None:
+    out = tmp_path / "sssd.conf"
+    password = "P@ssw\u00f6rd"
+    result = subprocess.run(
+        ["bash", str(OKTA_INSTALL), "--org", "example", "--bind-login", "bind@example.com",
+         "--allow-group", "linux-users", "--render-only", str(out)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "OKTA_BIND_PASSWORD": password},
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"ldap_default_authtok = {password}" in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_installer_requires_force_for_custom_authselect(tmp_path: Path) -> None:
+    source = OKTA_INSTALL.read_text().rsplit('main "$@"', 1)[0]
+    probe = """
+authselect() { if [[ $1 == current ]]; then echo 'custom/cis with-faillock'; fi; }
+systemctl() { return 0; }
+act() { echo unexpected-profile-replacement; }
+NO_PAM=0 FORCE=0 DRY_RUN=0
+pam_step
+"""
+    script = tmp_path / "probe.sh"
+    script.write_text(source + probe)
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert "unexpected-profile-replacement" not in result.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_dry_run_discloses_sssd_restart(tmp_path: Path) -> None:
+    conf = tmp_path / "installed.conf"
+    rendered = tmp_path / "new.conf"
+    conf.write_text("# Managed by DefenseClaw packaging/identity/okta\nold\n")
+    rendered.write_text("# Managed by DefenseClaw packaging/identity/okta\nnew\n")
+    source = OKTA_INSTALL.read_text().rsplit('main "$@"', 1)[0]
+    script = tmp_path / "probe.sh"
+    script.write_text(source + f'\nCONF={conf}\nDRY_RUN=1\ninstall_conf {rendered}\nrestart_sssd\n')
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "would restart sssd" in result.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_installer_restarts_stale_running_sssd(tmp_path: Path) -> None:
+    conf = tmp_path / "installed.conf"
+    conf.write_text("new configuration")
+    actions = tmp_path / "actions"
+    source = OKTA_INSTALL.read_text().rsplit('main "$@"', 1)[0]
+    probe = f"""
+CONF={conf}
+CONF_CHANGED=0
+DRY_RUN=0
+systemctl() {{
+  case $1 in
+    is-active|enable) return 0 ;;
+    show) echo '2020-01-01 00:00:00 UTC' ;;
+    restart) echo restart >> {actions} ;;
+  esac
+}}
+sss_cache() {{ return 0; }}
+wait_online() {{ return 0; }}
+check_allow_group() {{ return 0; }}
+restart_sssd
+"""
+    script = tmp_path / "probe.sh"
+    script.write_text(source + probe)
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert actions.read_text().strip() == "restart"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_template_filters_local_group_names(tmp_path: Path) -> None:
+    out = tmp_path / "sssd.conf"
+    result = subprocess.run(
+        ["bash", str(OKTA_INSTALL), "--org", "example", "--bind-login", "bind@example.com",
+         "--allow-group", "linux-users", "--render-only", str(out)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "OKTA_BIND_PASSWORD": "test-password"},
+    )
+    assert result.returncode == 0, result.stderr
+    line = next(line for line in out.read_text().splitlines() if line.startswith("filter_groups = "))
+    filtered = {name.strip() for name in line.partition("=")[2].split(",")}
+    local = {line.partition(":")[0] for line in Path("/etc/group").read_text().splitlines() if ":" in line}
+    assert local <= filtered
+    assert {"wheel", "sudo", "adm"} <= filtered
