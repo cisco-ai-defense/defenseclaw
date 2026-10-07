@@ -300,6 +300,7 @@ def test_other_sandbox_commands_never_mark_the_wizard() -> None:
 NO_OPENSHELL = {
     "ok": False,
     "docker_version": "29.4.0",
+    "openshell_install_version": "0.1.2",
     "checks": [
         {"id": "platform", "title": "Platform", "status": "pass", "detail": "linux/arm64"},
         {"id": "landlock", "title": "Landlock", "status": "pass", "detail": "ABI 6"},
@@ -348,7 +349,7 @@ def test_a_missing_openshell_presets_the_install_and_says_why() -> None:
     ]
     install = _row(model, "Install OpenShell")
     assert install.value == "yes"
-    assert install.hint.startswith("OpenShell is not installed: yes installs OpenShell 0.1.1")
+    assert install.hint.startswith("OpenShell is not installed: yes installs OpenShell 0.1.2 with")
     assert "--install-openshell" in model.wizard_command_preview()
 
     # The operator's own answer survives a later check and an Action rebuild.
@@ -370,6 +371,47 @@ def test_an_installed_openshell_needs_no_install() -> None:
     fields = sandbox_wizard_fields({}, machine=check)
     install = next(field for field in fields if field.label == "Install OpenShell")
     assert install.value == "no" and install.hint == "OpenShell 0.1.1 is installed; nothing to install."
+
+
+def test_an_older_openshell_is_offered_the_upgrade_with_the_install_off() -> None:
+    # OpenShell 0.1.1 works: setup upgrades it in place only with consent
+    # (DoctorReport.OpenShellUpgradeAvailable), as the upgrade restarts the
+    # shared gateway.
+    why = "OpenShell 0.1.2 fixes a supervisor bug that can stall a sandbox's first connection, and cuts the CPU an idle sandbox uses"
+    cli = {
+        "id": "openshell-cli",
+        "title": "OpenShell CLI",
+        "status": "warn",
+        "detail": f"0.1.1 at /usr/bin/openshell; {why}",
+        "fix": {
+            "summary": "upgrade OpenShell to 0.1.2 in place",
+            "command": "defenseclaw sandbox setup --install-openshell",
+        },
+    }
+    checks = READY["checks"]
+    report = {
+        **READY,
+        "openshell_install": False,
+        "openshell_upgrade": True,
+        "openshell_install_version": "0.1.2",
+        "checks": [*checks[:2], cli, *checks[3:]],
+    }
+    check = sandbox_machine_check(report)
+    assert check.openshell_upgrade and not check.openshell_needed and not check.openshell_attention
+    assert check.summary.split("\n") == ["✓ Docker 29.4.0", "⚠ OpenShell 0.1.1 (0.1.2 available)", "✓ bind mounts"]
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.apply_sandbox_machine_check(check)
+    install = _row(model, "Install OpenShell")
+    assert install.value == "no"
+    assert install.hint == (
+        f"OpenShell 0.1.1 is installed; {why}. Yes upgrades it in place to OpenShell 0.1.2 with NVIDIA's pinned, "
+        "sha256-verified installer (uses sudo; the terminal asks for your password); that restarts the OpenShell "
+        "gateway, and the sandboxes running on it stop once their disks are flushed."
+    )
+    assert "--install-openshell" not in model.wizard_command_preview()
+    model.form_fields = _set(model.form_fields, "Install OpenShell", "yes")
+    assert "--install-openshell" in model.wizard_command_preview()
 
 
 @pytest.mark.parametrize(

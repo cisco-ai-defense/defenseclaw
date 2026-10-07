@@ -5128,6 +5128,14 @@ class SandboxMachineCheck:
     # CLI or gateway one before it installs anything; a "vm-driver" one it
     # fixes with the install's consent (e2fsprogs) or stops on.
     openshell_attention: str = ""
+    # A supported OpenShell older than the release setup installs
+    # (DoctorReport.OpenShellUpgradeAvailable, the report's
+    # ``openshell_upgrade``): it works, and Install OpenShell, off by
+    # default, upgrades it in place.
+    openshell_upgrade: bool = False
+    # The release setup installs (the report's ``openshell_install_version``;
+    # "" from a doctor that does not say).
+    openshell_release: str = ""
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
@@ -5221,6 +5229,10 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     attention = "" if needed else next((i for i in _SETUP_STOPS if status(i) == "fail"), "")
     version = str(report.get("cli_version") or "").strip()
     name = f"OpenShell {version}" if version else "OpenShell"
+    release = str(report.get("openshell_install_version") or "").strip()
+    # A supported release older than the one setup installs, which setup
+    # upgrades in place with the install's consent (no by default).
+    upgrade = not needed and not unmanaged and not attention and report.get("openshell_upgrade") is True
     if unmanaged:
         # As setup's machine line marks it (sandboxcli/setup.go), and says
         # what it does with its gateway, naming where that OpenShell is.
@@ -5260,9 +5272,14 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         pass
     elif not needed:
         openshell = f"{name} is installed"
+        if upgrade:
+            # The CLI check says what the newer release fixes.
+            why = detail("openshell-cli").partition("; ")[2]
+            openshell += f"; {why}" if why else ""
+            parts.append(f"⚠ {name} ({release} available)" if release else f"⚠ {name}: an upgrade is available")
         if status("gateway-service") == "warn":
             parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
-        else:
+        elif not upgrade:
             parts.append(f"✓ {name}")
     elif "not on PATH" in detail("openshell-cli"):
         openshell = "OpenShell is not installed"
@@ -5293,6 +5310,8 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         openshell_detail=openshell,
         openshell_unmanaged=unmanaged,
         openshell_attention=attention,
+        openshell_upgrade=upgrade,
+        openshell_release=release,
     )
 
 
@@ -5372,16 +5391,29 @@ def sandbox_wizard_fields(
     # On macOS setup installs e2fsprogs, which the MicroVM driver formats
     # its disks with, under the same consent as OpenShell (sandboxcli/setup.go).
     e2fsprogs = " Yes also installs e2fsprogs for the MicroVM driver when it is missing (brew install e2fsprogs)."
+    # The release setup installs, as the doctor names it.
+    release = (
+        f"OpenShell {machine.openshell_release}" if machine is not None and machine.openshell_release else "OpenShell"
+    )
     if machine is None:
         machine_line = "Checking this machine… (defenseclaw sandbox doctor)"
-        install, install_hint = "no", f"Install OpenShell 0.1.1 with {installer} if it is missing."
+        install, install_hint = "no", f"Install {release} with {installer} if it is missing."
     elif machine.error:
         machine_line = machine.summary
-        install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
+        install, install_hint = "no", f"Could not check this machine; yes installs {release} with {installer}."
     elif machine.openshell_needed:
         machine_line = machine.summary
         install = "yes"
-        install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+        install_hint = f"{machine.openshell_detail}: yes installs {release} with {installer}."
+    elif machine.openshell_upgrade:
+        # It works: the upgrade restarts the shared gateway, so it is off
+        # until the operator turns it on (sandboxcli/setup.go).
+        machine_line = machine.summary
+        install = "no"
+        install_hint = (
+            f"{machine.openshell_detail}. Yes upgrades it in place to {release} with {installer}; that restarts "
+            "the OpenShell gateway, and the sandboxes running on it stop once their disks are flushed."
+        )
     elif machine.openshell_attention == "vm-driver":
         # Under the install's consent setup installs e2fsprogs and signs
         # the formula's driver (sandboxcli/setup.go prepareMicroVMs).

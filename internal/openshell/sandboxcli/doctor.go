@@ -472,8 +472,14 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// OpenShellInstall is when setup offers the OpenShell install
 			// (DoctorReport.OpenShellInstallNeeded), which the TUI presets.
 			OpenShellInstall bool `json:"openshell_install"`
+			// OpenShellUpgrade is when setup offers the in-place upgrade
+			// of a supported OpenShell (DoctorReport.OpenShellUpgradeAvailable),
+			// which the TUI shows with the install toggle off.
+			OpenShellUpgrade bool `json:"openshell_upgrade"`
+			// OpenShellInstallVersion is the release setup installs.
+			OpenShellInstallVersion string `json:"openshell_install_version"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep.OK() && !off, rep.OpenShellInstallNeeded(), rep})
+		}{rep.OK(), rep.OK() && !off, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable(), openshell.InstallerVersion, rep})
 	}
 	a.printDoctor(rep)
 	if !rep.OK() {

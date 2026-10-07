@@ -159,6 +159,39 @@ func TestTheDaemonFollowsADriverSwitch(t *testing.T) {
 	}
 }
 
+// Setup's in-place upgrade restarts the gateway on a newer release under
+// the connection: the status asks again once its last answer is a few
+// seconds old, and a new release drops the connection, whose replacement
+// reports it (and checks it against the supported window).
+func TestTheDaemonFollowsAnInPlaceUpgrade(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC))
+	connects := 0
+	e.m.opts.Connect = func(ctx context.Context) (*Gateway, error) {
+		connects++
+		h, err := e.client.Health(ctx)
+		if err != nil {
+			return nil, err
+		}
+		gw := *e.gw
+		gw.Version = h.RawVersion
+		return &gw, nil
+	}
+	if st, err := e.m.Status(t.Context()); err != nil || st.Gateway == nil || st.Gateway.Version != openshell.SupportedMin {
+		t.Fatalf("status = %+v, %v", st, err)
+	}
+	e.fake.SetRelease(openshell.InstallerVersion)
+	advance(driverRecheck)
+	if st, _ := e.m.Status(t.Context()); st.Gateway.Version != openshell.InstallerVersion || connects != 2 {
+		t.Fatalf("status after the recheck = %+v (connects %d)", st.Gateway, connects)
+	}
+	// The same release again keeps the connection.
+	advance(driverRecheck)
+	if st, _ := e.m.Status(t.Context()); st.Gateway.Version != openshell.InstallerVersion || connects != 2 {
+		t.Fatalf("status = %+v (connects %d)", st.Gateway, connects)
+	}
+}
+
 // A MicroVM cannot take a live mount of the project: a Claude Code create
 // that staged no copy is told to (CodeNeedsCopy) before anything is made,
 // on the host or on the gateway. (In copy mode its run files go into a run

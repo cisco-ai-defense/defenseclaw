@@ -266,6 +266,80 @@ func TestInstallExistingReleases(t *testing.T) {
 	}
 }
 
+// TestInstallUpgradesInPlace: Install keeps a supported CLI, and Upgrade
+// runs the pinned installer over one older than the release, after the
+// flush of the sandboxes the script's gateway restart stops. It never
+// downgrades, refuses a CLI the package would not replace, and fails when
+// the old CLI still answers afterwards.
+func TestInstallUpgradesInPlace(t *testing.T) {
+	setup := func(t *testing.T, existing, after string) (*installFixture, *int) {
+		f := newInstallFixture(t, fakeScript, existing, after)
+		f.inst.Release = openshell.InstallerTag
+		flushed := new(int)
+		f.inst.FlushSandboxes = func(context.Context) error {
+			if f.ran() {
+				t.Error("the sandboxes were flushed after the script ran")
+			}
+			*flushed++
+			return nil
+		}
+		return f, flushed
+	}
+	t.Run("upgraded", func(t *testing.T) {
+		f, flushed := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		res, err := f.inst.Upgrade(context.Background())
+		if err != nil || !res.Installed || res.CLIVersion.String() != openshell.InstallerVersion || *flushed != 1 || f.verified != 1 {
+			t.Fatalf("Upgrade = %+v, %v (flushed %d, gateway verified %d)", res, err, *flushed, f.verified)
+		}
+		if env := f.scriptRun().Env; !slices.Equal(env, []string{"OPENSHELL_VERSION=" + openshell.InstallerTag, "OPENSHELL_REGISTER_BIN=" + f.cliPath}) {
+			t.Fatalf("installer env = %v", env)
+		}
+		for _, want := range []string{"upgrades the installed openshell 0.1.1 to " + openshell.InstallerTag + " in place",
+			"the script restarts the OpenShell gateway, which stops every sandbox running on it"} {
+			if !strings.Contains(f.out.String(), want) {
+				t.Errorf("plan lacks %q:\n%s", want, f.out.String())
+			}
+		}
+		f.assertNoLeftovers()
+	})
+	t.Run("Install keeps it", func(t *testing.T) {
+		f, flushed := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		if res, err := f.inst.Install(context.Background()); err != nil || res.Installed || f.hits.Load() != 0 || f.ran() || *flushed != 0 {
+			t.Fatalf("Install = %+v, %v (downloads %d, flushed %d)", res, err, f.hits.Load(), *flushed)
+		}
+	})
+	for _, existing := range []string{"openshell " + openshell.InstallerVersion, "openshell 0.1.9"} {
+		t.Run("never downgrades "+existing, func(t *testing.T) {
+			f, flushed := setup(t, existing, "openshell 0.1.1")
+			if res, err := f.inst.Upgrade(context.Background()); err != nil || res.Installed || f.hits.Load() != 0 || f.ran() || *flushed != 0 {
+				t.Fatalf("Upgrade = %+v, %v (downloads %d, flushed %d)", res, err, f.hits.Load(), *flushed)
+			}
+		})
+	}
+	t.Run("a sandbox that cannot be flushed", func(t *testing.T) {
+		f, _ := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		f.inst.FlushSandboxes = func(context.Context) error { return openshell.ErrUnflushed }
+		if _, err := f.inst.Upgrade(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || f.ran() {
+			t.Fatalf("Upgrade = %v (ran %v)", err, f.ran())
+		}
+		f.assertNoLeftovers()
+	})
+	t.Run("installed another way", func(t *testing.T) {
+		f, flushed := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		f.inst.PackageCLI = filepath.Join(t.TempDir(), "openshell")
+		if _, err := f.inst.Upgrade(context.Background()); !errors.Is(err, openshell.ErrUnmanagedUpgrade) || !strings.Contains(err.Error(), "the way you installed it") ||
+			f.hits.Load() != 0 || f.ran() || *flushed != 0 {
+			t.Fatalf("Upgrade = %v (downloads %d, flushed %d)", err, f.hits.Load(), *flushed)
+		}
+	})
+	t.Run("the old CLI still answers", func(t *testing.T) {
+		f, _ := setup(t, "openshell 0.1.1", "")
+		if _, err := f.inst.Upgrade(context.Background()); err == nil || !strings.Contains(err.Error(), `still reports "openshell 0.1.1", not `+openshell.InstallerVersion) {
+			t.Fatalf("Upgrade = %v", err)
+		}
+	})
+}
+
 func TestInstallBreakingUpgrade(t *testing.T) {
 	for _, existing := range []string{"openshell 0.0.16", "openshell (build 1f2e)"} {
 		t.Run(existing, func(t *testing.T) {

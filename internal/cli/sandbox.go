@@ -215,7 +215,7 @@ Then it records the harnesses, offers shell wrappers and builds the harness imag
 		}),
 	}
 	f := cmd.Flags()
-	f.BoolVar(&o.InstallOpenShell, "install-openshell", false, "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)")
+	f.BoolVar(&o.InstallOpenShell, "install-openshell", false, "install OpenShell, or upgrade an older supported release in place, with NVIDIA's pinned, sha256-verified installer (uses sudo on Linux)")
 	f.BoolVar(&o.NoMounts, "no-mounts", false, "leave bind mounts off (Linux); no Claude Code or Codex sandbox can then start, a --copy run included, and other harnesses run on a copy")
 	f.BoolVar(&o.Wrappers, "wrappers", false, "make the harness commands run sandboxed without asking")
 	f.BoolVar(&o.NoWrappers, "no-wrappers", false, "do not offer the shell wrappers")

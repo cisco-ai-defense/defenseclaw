@@ -55,6 +55,9 @@ var (
 	// installs the nvidia/openshell Homebrew formula; Homebrew's output
 	// says why.
 	ErrHomebrewInstall = errors.New("openshell: Homebrew could not install the nvidia/openshell formula")
+	// ErrUnmanagedUpgrade means Upgrade found a supported CLI that NVIDIA's
+	// installer did not install, and would not replace.
+	ErrUnmanagedUpgrade = errors.New("openshell: DefenseClaw upgrades only an OpenShell that NVIDIA's installer installed")
 )
 
 // linuxPackageCLI is where the deb and rpm packages install the CLI.
@@ -217,6 +220,13 @@ type Installer struct {
 	// XcodeApp is the Xcode.app Homebrew checks (default XcodeApp), whose
 	// version a failed install on a Mac reports (HomebrewInstallError).
 	XcodeApp string
+	// FlushSandboxes runs before Upgrade runs the script, which restarts
+	// the gateway and so stops every sandbox on it: where the running
+	// driver's stop keeps nothing a workload has not synced (the MicroVM
+	// driver) it flushes their disks, and an error stops the upgrade
+	// (default: discover the Discover registration, dial it and
+	// FlushSandboxes).
+	FlushSandboxes func(context.Context) error
 }
 
 func (i *Installer) defaults() {
@@ -273,6 +283,9 @@ func (i *Installer) defaults() {
 	if i.MaxScriptBytes <= 0 {
 		i.MaxScriptBytes = 1 << 20
 	}
+	if i.FlushSandboxes == nil {
+		i.FlushSandboxes = func(ctx context.Context) error { return flushGatewaySandboxes(ctx, i.Discover) }
+	}
 }
 
 // Install runs the flow: detect an existing CLI, download the pinned
@@ -280,8 +293,24 @@ func (i *Installer) defaults() {
 // disk before that), print the plan, get consent (and, for a pre-0.0.37
 // install, a separate confirmation), run the script with
 // OPENSHELL_VERSION pinned, then verify `openshell --version` and the
-// gateway.
+// gateway. A supported CLI is kept as it is: nothing is downloaded or run.
 func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
+	return i.install(ctx, false)
+}
+
+// Upgrade is Install, but a supported CLI older than Release is upgraded
+// in place too: NVIDIA's installer installs the release's package (on a
+// Mac, reinstalls the Homebrew formula) and restarts the gateway, which
+// stops every sandbox on it, so FlushSandboxes runs first. It never
+// downgrades (a CLI of Release or later is kept), and it refuses a CLI
+// the install would not replace, one installed another way than NVIDIA's
+// installer (ErrUnmanagedUpgrade): that one is upgraded the way it was
+// installed.
+func (i *Installer) Upgrade(ctx context.Context) (*InstallResult, error) {
+	return i.install(ctx, true)
+}
+
+func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, error) {
 	i.defaults()
 	if err := CheckPlatform(i.GOOS); err != nil {
 		return nil, err
@@ -294,10 +323,23 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	}
 	existing := i.findExisting(ctx)
 	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS, ConfigDir: i.configDir()}
+	// upgrading: a supported CLI older than the release, which Upgrade
+	// replaces in place.
+	upgrading := false
+	target, targetErr := ParseVersion(i.Release)
 	if existing != nil && existing.Version != (Version{}) {
 		v := existing.Version
 		if err := CheckSupported(v); err == nil {
-			return &InstallResult{Plan: plan, CLIVersion: v}, nil
+			if !upgrade || targetErr != nil || v.Compare(target) >= 0 {
+				return &InstallResult{Plan: plan, CLIVersion: v}, nil
+			}
+			if i.staleCLIRemoval(existing) != "" {
+				// The package (the formula) would install the release
+				// beside it, and the old CLI would still answer.
+				return nil, fmt.Errorf("%w: OpenShell %s at %s was installed another way, which NVIDIA's installer does not replace; upgrade it to %s the way you installed it",
+					ErrUnmanagedUpgrade, v, existing.Path, target)
+			}
+			upgrading = true
 		}
 		if v.Compare(mustParse(SupportedBelow)) >= 0 {
 			return nil, &ErrUnsupportedVersion{Found: v}
@@ -328,6 +370,10 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	}
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
+	}
+	if upgrading {
+		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway, which stops every sandbox running on it; "+
+			"DefenseClaw first flushes the disks of those whose driver would not keep what they wrote")
 	}
 	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
 		// Setup offers it once OpenShell is installed only where the
@@ -369,6 +415,11 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	if !ok {
 		return nil, ErrInstallDeclined
 	}
+	if upgrading {
+		if err := i.FlushSandboxes(ctx); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}); err != nil {
 		if i.GOOS == "darwin" && ctx.Err() == nil {
@@ -385,6 +436,9 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	after, err := i.installedCLI(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if upgrading && after.Version.Compare(target) < 0 {
+		return nil, fmt.Errorf("openshell: the installer finished, but the CLI at %s still reports %q, not %s", after.Path, after.RawVersion, target)
 	}
 	if err := i.VerifyGateway(ctx); err != nil {
 		return nil, fmt.Errorf("openshell: %s installed but the gateway is not healthy: %w", after.Version, err)

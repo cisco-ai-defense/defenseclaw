@@ -139,6 +139,8 @@ func readyImages(ta *testApp) []image.Record {
 type fakeInstaller struct {
 	consent func(*openshell.InstallPlan) (bool, error)
 	ran     bool
+	// upgraded is set once Upgrade ran.
+	upgraded bool
 	// err is the installer's failure once it runs.
 	err error
 	// e2fsprogs and resigned count the Homebrew steps for the MicroVM
@@ -172,6 +174,20 @@ func (f *fakeInstaller) Install(context.Context) (*openshell.InstallResult, erro
 		return nil, f.err
 	}
 	v, _ := openshell.ParseVersion("0.1.1")
+	return &openshell.InstallResult{Installed: true, CLIVersion: v}, nil
+}
+
+func (f *fakeInstaller) Upgrade(context.Context) (*openshell.InstallResult, error) {
+	if ok, err := f.consent(&openshell.InstallPlan{Release: openshell.InstallerTag}); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, openshell.ErrInstallDeclined
+	}
+	f.upgraded = true
+	if f.err != nil {
+		return nil, f.err
+	}
+	v, _ := openshell.ParseVersion(openshell.InstallerVersion)
 	return &openshell.InstallResult{Installed: true, CLIVersion: v}, nil
 }
 
@@ -336,6 +352,76 @@ func TestSetupNeedsConsentToInstall(t *testing.T) {
 	}
 }
 
+// upgradableReport is hostReport on OpenShell 0.1.1, which the doctor
+// offers the in-place upgrade to InstallerVersion (its CLI check warns).
+func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+	return hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDCLI)
+		c.Status, c.Detail = openshell.StatusWarn, "0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug"
+		c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " in place", Command: "defenseclaw sandbox setup --install-openshell"}
+		if edit != nil {
+			edit(r)
+		}
+	})
+}
+
+// TestSetupOffersTheUpgrade: OpenShell 0.1.1 works, so setup asks before
+// it upgrades it in place (no by default, which --yes and -n take) and
+// says what the upgrade fixes and how to run it later; --install-openshell
+// upgrades it. The question and the flag name the sandboxes the gateway
+// restart stops.
+func TestSetupOffersTheUpgrade(t *testing.T) {
+	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
+	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (sudo; sha256 verified; restarts the gateway: " +
+		"the 2 sandboxes running on it (dc-claude-theirs-a, dc-claude-theirs-b) stop once their disks are flushed) [y/N]"
+	for _, tc := range []struct {
+		name     string
+		input    string
+		tty      bool
+		o        SetupOptions
+		upgraded bool
+		says     []string
+	}{
+		{"a terminal answers no by default", "\n", true, SetupOptions{}, false, []string{question, later}},
+		{"a terminal answers yes", "y\ny\n", true, SetupOptions{}, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
+		{"--yes keeps it", "", true, SetupOptions{Yes: true}, false, []string{later}},
+		{"-n keeps it", "", false, SetupOptions{NonInteractive: true}, false, []string{later}},
+		{"--install-openshell upgrades it", "", false, SetupOptions{NonInteractive: true, InstallOpenShell: true}, true,
+			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: the 2 sandboxes running on it"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setupApp(t, tc.input, "", true)
+			ta.IO.TTY = tc.tty
+			runningOn(t, ta, 2)
+			calls := 0
+			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+				if calls++; calls == 1 {
+					return upgradableReport(nil)(ctx, d)
+				}
+				return hostReport(nil)(ctx, d)
+			}
+			inst := &fakeInstaller{}
+			ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+				inst.consent = consent
+				return inst
+			}
+			o := tc.o
+			o.SkipImages, o.NoWrappers = true, true
+			ta.ok(t, ta.Setup(bg, o))
+			if inst.upgraded != tc.upgraded || inst.ran {
+				t.Fatalf("upgraded %v (installed %v), want %v\n%s", inst.upgraded, inst.ran, tc.upgraded, ta.output())
+			}
+			has(t, ta.output(), append([]string{"⚠ OpenShell 0.1.1 (" + openshell.InstallerVersion + " available)"}, tc.says...)...)
+			if !tc.upgraded {
+				lacks(t, ta.output(), "upgraded")
+			}
+			if tc.o.Yes || tc.o.NonInteractive {
+				lacks(t, ta.output(), "Upgrade OpenShell 0.1.1")
+			}
+		})
+	}
+}
+
 // TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when
 // Homebrew refuses the nvidia/openshell formula (an Xcode older than it
 // wants), and setup said only "install OpenShell: openshell: installer
@@ -423,8 +509,8 @@ func TestSetupInstallQuestionSaysHowItInstalls(t *testing.T) {
 			r.CLIVersion = ""
 			r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
 		})
-		wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-		has(t, ta.output(), "Install OpenShell 0.1.1 with NVIDIA's installer? "+want)
+		wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell "+openshell.InstallerVersion+" is needed")
+		has(t, ta.output(), "Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's installer? "+want)
 	}
 }
 
@@ -464,7 +550,7 @@ func TestSetupOnAGatewayOfAnotherRelease(t *testing.T) {
 
 // TestSetupOffersTheInstallOnlyForTheCLI: with the supported OpenShell
 // 0.1.1 CLI and its openshell-gateway unit (or Homebrew service) installed
-// but stopped, setup asked "Install OpenShell 0.1.1 with NVIDIA's
+// but stopped, setup asked "Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's
 // installer?", whose yes installed nothing ("✓ OpenShell 0.1.1 is already
 // installed") before it showed the doctor's fix, and -n said "OpenShell
 // 0.1.1 is needed" without it. A CLI newer than supported got the same
@@ -537,8 +623,8 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 	}
 	ta := setupApp(t, "n\n", "", false)
 	ta.HostDoctor = hostReport(older)
-	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-	has(t, ta.output(), "✗ OpenShell 0.0.40 unsupported", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell "+openshell.InstallerVersion+" is needed")
+	has(t, ta.output(), "✗ OpenShell 0.0.40 unsupported", "Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
 
 	// The TUI presets its "Install OpenShell" from `sandbox doctor --json`.
 	for _, tc := range []struct {
