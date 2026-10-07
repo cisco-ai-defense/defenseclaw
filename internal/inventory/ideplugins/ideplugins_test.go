@@ -136,6 +136,20 @@ func TestScanVSCodeFamily(t *testing.T) {
 	if total != 2 || !partial {
 		t.Fatalf("capped scan: total=%d partial=%v", total, partial)
 	}
+
+	// A scan that must not follow links passes through none above the last
+	// element either: another home's .cursor linked in is not read.
+	other := t.TempDir()
+	writeFile(t, filepath.Join(other, ".cursor", "extensions", "x.y-1.0.0", "package.json"), `{"name":"y","publisher":"x","version":"1.0.0"}`)
+	if err := os.Symlink(filepath.Join(other, ".cursor"), filepath.Join(home, ".cursor")); err != nil {
+		t.Skipf("symlink: %v", err) // Windows without the symlink privilege
+	}
+	if got := byID(Scan(home, "linux", Limits{}), FamilyVSCode, "cursor", ""); len(got) != 0 {
+		t.Fatalf("a scan that must not follow links read a linked folder: %v", got)
+	}
+	if got := byID(Scan(home, "linux", Limits{FollowSymlinks: true}), FamilyVSCode, "cursor", ""); len(got) != 1 {
+		t.Fatalf("a scan that follows links missed the linked folder: %v", got)
+	}
 }
 
 func TestScanJetBrains(t *testing.T) {
