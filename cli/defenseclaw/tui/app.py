@@ -4943,6 +4943,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("j/k or PgUp/PgDn", "Scroll the dashboard"),
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
+                ("G", "Start or restart the gateway"),
+                ("v", "Enable or run AI Discovery"),
                 ("g", "Setup guardrail"),
                 ("m", overview_m),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
@@ -10481,8 +10483,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # rendered overview, so the operator sees ``Scan all`` with
         # no key to press.
         quick = (
-            "\\[s] Scan all   \\[d] Doctor   \\[i] Inventory   "
-            "\\[g] Guardrail   \\[m] Mode   \\[l] Logs"
+            "\\[s] Scan  \\[d] Doctor  \\[G] Gateway  \\[v] AI Discovery  "
+            "\\[i] Inventory  \\[g] Setup"
         )
         return (
             "[bold #22D3EE]Overview[/]  [#9FB2CC]Command center for live risk, setup health, and next actions.[/]\n"
@@ -11873,6 +11875,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             action = self.audit_model.handle_key(_vim_key(key))
             return self._apply_audit_action(action)
         if self.active_panel == "overview":
+            if key == "G":
+                command = "start" if self.overview_model.gateway_down() else "restart"
+                self._submit_command_text(f"defenseclaw-gateway {command}")
+                return True
+            if key == "v":
+                ai_status = (self.overview_model.ai_discovery_box().status or "").lower()
+                command = "enable --yes" if ai_status in {"disabled", "offline"} else "scan"
+                self._submit_command_text(f"defenseclaw agent discovery {command}")
+                return True
             if key == "m":
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True

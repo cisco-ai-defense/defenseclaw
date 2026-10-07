@@ -88,3 +88,28 @@ def test_invalid_config_banner_names_file_line_and_repair() -> None:
     banner = _config_error_summary(Path("/home/user/.defenseclaw/config.yaml"), ValueError(detail))
     assert banner == "config.yaml line 62 is invalid; run defenseclaw config validate"
     assert len(banner) <= 80
+
+
+def test_overview_keyboard_actions_reach_gateway_and_ai_discovery(tmp_path, monkeypatch) -> None:
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from fixtures import snapshot_app
+
+    app = snapshot_app(tmp_path)
+    app.active_panel = "overview"
+    commands = []
+    monkeypatch.setattr(app, "_submit_command_text", commands.append)
+    monkeypatch.setattr(app.overview_model, "gateway_down", lambda: True)
+    monkeypatch.setattr(
+        app.overview_model, "ai_discovery_box",
+        lambda: SimpleNamespace(status="disabled"),
+    )
+    assert app._handle_active_panel_key(SimpleNamespace(key="G", character="G"))
+    assert app._handle_active_panel_key(SimpleNamespace(key="v", character="v"))
+    assert commands == [
+        "defenseclaw-gateway start",
+        "defenseclaw agent discovery enable --yes",
+    ]
