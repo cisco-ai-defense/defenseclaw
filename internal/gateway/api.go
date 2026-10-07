@@ -2728,7 +2728,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		cfg.CiscoAIDefense,
 	), installScanRulePack(""))
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), componentScanTimeout(cfg, "skill"))
 	defer cancel()
 
 	result, err := ss.Scan(ctx, req.Target)
@@ -3992,6 +3992,18 @@ func (a *APIServer) writeJSON(w http.ResponseWriter, status int, v interface{}) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// componentScanTimeout bounds one REST or hook scan of component. A skill
+// scan follows scanners.skill_scanner.timeouts.scan_s, as the install watcher
+// does, so a judge-on scan of a large skill is not cut at two minutes while
+// the watcher waits for it (GAP-0301). Plugin and MCP scans keep two minutes,
+// and so does a Secure Client host, as on main (issue #1092).
+func componentScanTimeout(cfg *config.Config, component string) time.Duration {
+	if component == "skill" && cfg != nil && !cfg.SecureClientIntegration() {
+		return time.Duration(cfg.Scanners.SkillScanner.ScanTimeoutSeconds()) * time.Second
+	}
+	return 120 * time.Second
 }
 
 func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {

@@ -3232,8 +3232,10 @@ def _scan_via_sidecar(
     if not as_json:
         click.echo(ux.dim(f"[scan] remote skill-scanner via sidecar -> {target}"))
 
+    # The gateway stops the scan at timeouts.scan_s (GAP-0301); wait a little longer.
+    scan_s = getattr(getattr(app.cfg.scanners.skill_scanner, "timeouts", None), "scan_s", 0) or 300
     try:
-        data = client.scan_skill(target=target, name=name)
+        data = client.scan_skill(target=target, name=name, timeout=max(120, scan_s + 30))
     except Exception as exc:
         if as_json:
             payload = _skill_scan_error_json_payload(target, exc, connector=connector)

@@ -973,7 +973,7 @@ class TestSkillScan(SkillCommandTestBase):
                 ]
             }
 
-        def scan_skill(*, target, name):
+        def scan_skill(*, target, name, timeout):
             if name == "beta":
                 raise RuntimeError("codex sidecar unavailable")
             return {
@@ -1103,7 +1103,7 @@ class TestSkillScan(SkillCommandTestBase):
         with patch("defenseclaw.commands.cmd_skill._sidecar_client", return_value=client):
             _scan_all_remote(self.app, as_json=False, connector="codex")
 
-        client.scan_skill.assert_called_once_with(target=regular, name="operator-skill")
+        client.scan_skill.assert_called_once_with(target=regular, name="operator-skill", timeout=330)
 
     def test_explicit_bundled_skill_scan_is_skipped_without_scanner_or_action(self):
         bundled = os.path.join(

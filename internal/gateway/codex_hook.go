@@ -4077,10 +4077,10 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 		result *scanner.ScanResult
 		err    error
 	)
-	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
 	// The live config: scanner and llm edits reload hot.
 	cfg := a.liveConfig()
+	scanCtx, cancel := context.WithTimeout(ctx, componentScanTimeout(cfg, component))
+	defer cancel()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
