@@ -247,12 +247,14 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll \
 ```
 
 The JSON result contains a `token_file` and a `next` command, never the token
-value. Run the reported `defenseclaw acp setup --managed ...` command in the
-target user's session, or deploy the equivalent Zed/JetBrains JSON through MDM.
-Managed setup verifies the central allow-list, writes the editor launch entry
-and executable contract lock in user-owned state, and cannot modify central
-policy. The TUI exposes the same path under **ACP Guard → Enroll managed
-enterprise ACP**.
+value. The user runs the reported `defenseclaw-gateway enterprise acp setup ...`
+command, as themselves: a managed computer has no other DefenseClaw command.
+It writes the guarded editor entry and the executable contract lock in that
+user's own state, from the enrollment alone. It reads no central configuration,
+so it cannot change policy, and the gateway refuses any request that does not
+match the enrollment. On a computer that has the Python CLI the same files come
+from `defenseclaw acp setup --managed`, which the **ACP Guard → Enroll managed
+enterprise ACP** panel of the TUI runs.
 
 Use the same exact selectors to verify or revoke an enrollment:
 
@@ -275,7 +277,7 @@ protected executable (`/opt/defenseclaw/bin/defenseclaw-acp` on Linux).
 | UX and custody | Normal user mode | Managed enterprise mode |
 | --- | --- | --- |
 | Policy owner | User config | Administrator-owned config; runtime mutation denied |
-| Setup | One `defenseclaw acp setup` command or the ACP TUI panel | Admin `enterprise acp enroll`, then the reported user-side `acp setup --managed` command or MDM equivalent |
+| Setup | One `defenseclaw acp setup` command or the ACP TUI panel | Admin `enterprise acp enroll`, then the user runs the `enterprise acp setup` command it reports |
 | Credential | One private local ACP token | Unique principal + client + agent + profile credential, with a private per-user copy |
 | Enforcement rollout | Observe by default; `--activate` selects action | Central profile chooses observe/action; the user cannot activate or downgrade it |
 | Revocation | Remove the guarded editor entry | Remove service authority first, then the user copy; stale bearers fail immediately |

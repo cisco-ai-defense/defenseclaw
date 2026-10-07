@@ -193,9 +193,6 @@ func foreignHookGuardedEvent(connectorName, event string) bool {
 // any non-standalone profile, so Secure Client and per-user installs render
 // unchanged.
 func standaloneForeignHookGuardBinary(connectorName string) string {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return ""
-	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "amp", enterprisepolicy.ConnectorOpenCode:
 	case "devin", enterprisepolicy.ConnectorHermes:
@@ -203,6 +200,30 @@ func standaloneForeignHookGuardBinary(connectorName string) string {
 			return ""
 		}
 	default:
+		return ""
+	}
+	return standaloneAdminHookBinary()
+}
+
+// standaloneManagedHookBinary is the administrator-owned hook binary a
+// standalone Linux or macOS connector shell hook runs as `hook
+// session-facts` to read the user's Kerberos credential cache, which a
+// shell cannot read and a managed user has no per-user gateway binary to
+// ask (GAP-0194). Every connector gets it, not only the ones that run the
+// foreign-hook guard. Empty on Windows, whose hooks are not shell scripts,
+// and on any non-standalone profile, so Secure Client and per-user installs
+// render unchanged.
+func standaloneManagedHookBinary() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return standaloneAdminHookBinary()
+}
+
+// standaloneAdminHookBinary is the standalone profile's administrator-owned
+// hook binary, or "" outside that profile.
+func standaloneAdminHookBinary() string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return ""
 	}
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()

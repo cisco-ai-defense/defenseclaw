@@ -465,6 +465,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		// reconcile verifies with it, so an install without it would be
 		// re-rendered on the next pass.
 		ForeignHookGuardBinary: standaloneForeignHookGuardBinary(enterpriseHookConnector),
+		ManagedHookBinary:      standaloneManagedHookBinary(),
 	}
 	// A single-target install renders the shared machine policy from the
 	// same deployment contract the guardian uses, so the next reconcile does
@@ -1736,6 +1737,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				Registry:      registry,
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
+				ManagedHookBinary:      standaloneManagedHookBinary(),
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
@@ -2066,6 +2068,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
+				ManagedHookBinary:       standaloneManagedHookBinary(),
 				MachinePolicyContractID: enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 			}
 			if err == nil {
