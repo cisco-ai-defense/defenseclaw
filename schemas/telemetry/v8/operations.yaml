@@ -4490,7 +4490,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 0, max: 4194304}
-    notes: 0 while only OpenShell reported the process, which names no parent; never a metric label
+    notes: absent while only OpenShell reported the process, which names no parent; never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.name
   type: string
