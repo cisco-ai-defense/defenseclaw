@@ -1380,7 +1380,8 @@ func (s *ContinuousDiscoveryService) scanSignals(
 				continue
 			}
 			seen[sig.Fingerprint] = true
-			if sig.UserID == "" && s.account.id != "" {
+			if sig.UserID == "" && s.account.id != "" &&
+				(len(s.homesToScan()) == 1 || sig.Detector == "process") {
 				sig.UserID, sig.UserName = s.account.id, s.account.name
 			}
 			signals = append(signals, sig)
@@ -1479,12 +1480,12 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		})
 	}
 
-	signals = s.dropUnbackedSharedSurfaceSignals(signals)
 	if s.tccSkipped {
 		stats.TCCSkipped = true
 		stats.Errors++
 		stats.DetectorErrors["macos_privacy"] = "protected folders were not scanned"
 	}
+	signals = s.dropUnbackedSharedSurfaceSignals(signals)
 	sortAISignals(signals)
 	return signals, stats
 }
@@ -1720,7 +1721,6 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			if _, ok := current[fp]; ok || replaced[fp] {
 				continue
 			}
-			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
 			if stats.TCCSkipped && (old.Detector == "package_manifest" || old.Detector == "model_file") {
 				// A protected subtree was skipped. Its absence is not proof of removal.
 				if old.Detector == "model_file" {
@@ -1733,6 +1733,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 				}
 				continue
 			}
+			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
 				continue
 			}
 			if carry.handleModelFileCarryForward(fp, old, stats, &fileCarryRemaining) {
