@@ -3441,3 +3441,16 @@ def test_user_name_regex_is_case_insensitive_on_filtered_log_panels() -> None:
                     filtered += 1
                     assert 'body_defenseclaw_user_name=~"(?i)$user"' in expression, (path.name, panel["title"])
     assert filtered > 0
+
+
+def test_identity_dashboard_keeps_host_local_user_ids_separate() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    variables = {variable["name"] for variable in dashboard["templating"]["list"]}
+    assert "host" in variables
+    users_observed = _panel(dashboard, "Users observed")["targets"][0]["expr"]
+    assert "sum by (host_name, user_id)" in users_observed
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            expression = target.get("expr", "")
+            if "$user" in expression:
+                assert 'host_name=~"$host"' in expression, panel["title"]
