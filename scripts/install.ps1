@@ -1555,14 +1555,27 @@ function Select-Connector {
     for ($index = 0; $index -lt $ConnectorChoices.Count; $index++) {
         Write-Host ("    {0,2}) {1}" -f ($index + 1), $ConnectorChoices[$index])
     }
-    try { $choice = Read-Host "  Choice [default 1=codex]" } catch { $choice = "" }
-    $number = 0
-    $picked = "codex"
-    if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
-        $picked = $ConnectorChoices[$number - 1]
+    # An answer that is neither a number on the list nor a name is asked
+    # again, never replaced with another agent (GAP-0333).
+    for ($try = 1; $try -le 3; $try++) {
+        # No console to answer on: the default, as before.
+        try { $choice = Read-Host "  Choice (number or name) [default 1=codex]" } catch { $choice = "" }
+        $answer = "$choice".Trim().ToLowerInvariant()
+        if (-not $answer) { $answer = "1" }
+        $number = 0
+        $picked = ""
+        if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
+            $picked = $ConnectorChoices[$number - 1]
+        } elseif ($ConnectorChoices -contains $answer) {
+            $picked = $answer
+        }
+        if ($picked) {
+            Write-Ok "Connector: $picked"
+            return $picked
+        }
+        if ($try -lt 3) { Write-Warn "'$choice' is not on the list: type a number from 1 to $($ConnectorChoices.Count) or an agent name such as claudecode" }
     }
-    Write-Ok "Connector: $picked"
-    return $picked
+    Stop-Usage "No agent picked ('$choice' is not on the list). Run the installer again and pick one, or pass -Connector NAME"
 }
 
 function Invoke-FirstInstallExtras {

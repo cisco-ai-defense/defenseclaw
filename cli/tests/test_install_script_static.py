@@ -111,6 +111,32 @@ def test_an_unknown_option_stops_and_value_options_take_the_equals_form(tmp_path
     assert "checksums.txt" in newer.stdout + newer.stderr
 
 
+@pytest.mark.parametrize(("answer", "rc", "expected"), [("ClaudeCode", 0, "Connector: claudecode"), ("99", 2, "No agent picked")])
+def test_the_agent_prompt_takes_a_name_and_never_swaps_an_unknown_answer(
+    tmp_path: Path, answer: str, rc: int, expected: str
+) -> None:
+    # GAP-0333: claudecode or 99 at the prompt installed codex without a word.
+    tty = tmp_path / "tty"
+    tty.write_text(answer + "\n", encoding="utf-8")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "pick.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + text[text.index("readonly CONNECTOR_CHOICES=") : text.index("\n", text.index("readonly CONNECTOR_CHOICES="))]
+        + '\nBOLD="" NC="" STAGING="/nonexistent" UV_DIR_NEW="" UV_INSTALLED=""\n'
+        + 'step() { :; }\nok() { echo "$*"; }\nwarn() { echo "$*"; }\nerr() { echo "$*" >&2; }\ndrop_new_uv() { :; }\n'
+        + text[text.index("usage_error() {") : text.index("\n", text.index("usage_error() {")) + 1]
+        + _install_sh_functions("read_tty_line", "connector_choice", "pick_connector").replace("/dev/tty", str(tty))
+        + "pick_connector\n",
+        encoding="utf-8",
+    )
+
+    result = _run([str(script)], tmp_path)
+
+    assert result.returncode == rc, result.stdout + result.stderr
+    assert expected in result.stdout + result.stderr
+    assert "Connector: codex" not in result.stdout
+
 
 def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:
     result = _run([str(_stamped(tmp_path)), "--version", "0.8.10"], tmp_path)

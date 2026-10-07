@@ -1598,21 +1598,42 @@ sys.exit(0 if "openclaw" in names else 1)
 PY
 }
 
+# connector_choice ANSWER: the connector a list number or a name selects.
+connector_choice() {
+    local answer index=1 name
+    answer="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    for name in ${CONNECTOR_CHOICES}; do
+        if [[ "${answer}" == "${index}" || "${answer}" == "${name}" ]]; then
+            printf '%s' "${name}"
+            return 0
+        fi
+        index=$((index + 1))
+    done
+    return 1
+}
+
 pick_connector() {
     step "Pick an agent to guard"
-    local index=1 name choice
+    local index=1 name choice tries=0
     for name in ${CONNECTOR_CHOICES}; do
         printf "    ${BOLD}%2d)${NC} %s\n" "${index}" "${name}"
         index=$((index + 1))
     done
-    printf "  Choice [default 1=codex]: " >&2
-    choice=$(read_tty_line) || choice=""
-    choice="${choice:-1}"
-    index=1
-    CONNECTOR=codex
-    for name in ${CONNECTOR_CHOICES}; do
-        [[ "${index}" == "${choice}" ]] && CONNECTOR="${name}"
-        index=$((index + 1))
+    index=$((index - 1))
+    # An answer that is neither a number on the list nor a name is asked
+    # again, never replaced with another agent (GAP-0333).
+    while :; do
+        printf "  Choice (number or name) [default 1=codex]: " >&2
+        # No terminal to answer on: the default, as before.
+        choice=$(read_tty_line) || choice=""
+        CONNECTOR="$(connector_choice "${choice:-1}")" && break
+        tries=$((tries + 1))
+        if [[ ${tries} -ge 3 ]]; then
+            rm -rf "${STAGING}"
+            drop_new_uv
+            usage_error "No agent picked ('${choice}' is not on the list). Run the installer again and pick one, or pass --connector NAME"
+        fi
+        warn "'${choice}' is not on the list: type a number from 1 to ${index} or an agent name such as claudecode"
     done
     ok "Connector: ${CONNECTOR}"
 }
