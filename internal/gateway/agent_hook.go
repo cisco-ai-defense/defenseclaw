@@ -128,8 +128,11 @@ type agentHookRequest struct {
 	// audit. Empty when the connector installs a single config, or when the
 	// config predates the marker.
 	HookSurface string
-	Payload     map[string]interface{}
-	toolChain   *toolChainHookCapture
+	// AgentIdentityID is the agent identity (agt-) the request runs under, ""
+	// when it has none. It scopes the agent ids the request mints.
+	AgentIdentityID string
+	Payload         map[string]interface{}
+	toolChain       *toolChainHookCapture
 }
 
 type agentHookResponse struct {
@@ -354,7 +357,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		runtime := hookRuntimeForProfile(profile)
-		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent)
+		// The agent identity (agt-) the hook runs under comes from the
+		// verified caller, not the payload. It scopes the agent ids the
+		// request mints.
+		agentIdentityID := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload}).ID
+		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, agentIdentityID)
 		if req.HookEventName == "" {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
@@ -1614,7 +1621,7 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 }
 
 func normalizeAgentHookRequest(connectorName string, payload map[string]interface{}) agentHookRequest {
-	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, connector.DefaultCorrelationSpec(connectorName), "")
+	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, connector.DefaultCorrelationSpec(connectorName), "", "")
 }
 
 // normalizeAgentHookRequestWithCorrelation decodes content using the shared
@@ -1624,10 +1631,14 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 // execution, message, step or task identifier as a turn changes correlation
 // meaning and therefore must be explicitly connector-scoped.
 func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[string]interface{}, spec connector.CorrelationSpec) agentHookRequest {
-	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, "")
+	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, "", "")
 }
 
-func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload map[string]interface{}, spec connector.CorrelationSpec, registeredEvent string) agentHookRequest {
+// normalizeAgentHookRequestWithCorrelationEvent also takes the agent identity
+// (agt-) the request runs under, "" when it has none. It scopes the agent ids
+// the request mints, so two users who send the same session id get different
+// agents (GAP-0232).
+func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload map[string]interface{}, spec connector.CorrelationSpec, registeredEvent, agentIdentityID string) agentHookRequest {
 	if spec.Connector == "" || len(spec.HookBindings) == 0 {
 		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
 	}
@@ -1714,7 +1725,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			agentType,
 			"subagent",
 		)
-		agentID = stableLLMEventID("agent", connectorName, sessionID, "subagent", childIdentity)
+		agentID = agentNodeID(agentIdentityID, connectorName, sessionID, "subagent", childIdentity)
 		agentName = firstNonEmpty(agentName, childIdentity)
 		values[connector.CorrelationTargetAgent] = connector.CorrelationValue{
 			Target: connector.CorrelationTargetAgent, Value: agentID,
@@ -1723,9 +1734,9 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 	}
 	if agentID == "" && spec.Allows(connector.CorrelationInferenceSubagentIdentity) && canonicalEvent(event) == "teammateidle" {
 		teammate := firstNonEmpty(firstString(payload, "teammate_name", "teammateName"), "teammate")
-		agentID = stableLLMEventID("agent", connectorName, sessionID, "teammate", teammate)
+		agentID = agentNodeID(agentIdentityID, connectorName, sessionID, "teammate", teammate)
 		agentName = firstNonEmpty(agentName, teammate)
-		payload["parent_agent_id"] = stableLLMEventID("agent", connectorName, sessionID, "root")
+		payload["parent_agent_id"] = agentNodeID(agentIdentityID, connectorName, sessionID, "root")
 		payload["agent_depth"] = 1
 	}
 	turnID := correlationValue(connector.CorrelationTargetTurn)
@@ -1860,27 +1871,28 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		CorrelationValues: values, CorrelationIdentifiers: identifiers,
 		CWD: cwd, ToolName: toolName, ToolArgs: json.RawMessage(argBytes),
 		Content: content, Direction: direction, Payload: payload,
+		AgentIdentityID: agentIdentityID,
 	}
 }
 
 func normalizeAgentHookRequestWithProfile(connectorName string, payload map[string]interface{}, profile connector.HookProfile) agentHookRequest {
-	return normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, nil, profile, "")
+	return normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, nil, profile, "", "")
 }
 
 func normalizeAgentHookRequestWithProfileEvent(connectorName string, payload map[string]interface{}, profile connector.HookProfile, registeredEvent string) agentHookRequest {
-	return normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, nil, profile, registeredEvent)
+	return normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, nil, profile, registeredEvent, "")
 }
 
 func normalizeAgentHookRequestWithRawProfile(connectorName string, payload map[string]interface{}, rawPayload []byte, profile connector.HookProfile) agentHookRequest {
-	return normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawPayload, profile, "")
+	return normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawPayload, profile, "", "")
 }
 
-func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload map[string]interface{}, rawPayload []byte, profile connector.HookProfile, registeredEvent string) agentHookRequest {
+func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload map[string]interface{}, rawPayload []byte, profile connector.HookProfile, registeredEvent, agentIdentityID string) agentHookRequest {
 	spec := profile.Correlation
 	if spec.Connector == "" || len(spec.HookBindings) == 0 {
 		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
 	}
-	req := normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, registeredEvent)
+	req := normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, registeredEvent, agentIdentityID)
 	req.Content = applyContentEnvelopeFallback(req.Content, payload, profile.ContentEnvelopeKey)
 	if profile.Decode == nil {
 		return req
