@@ -447,6 +447,35 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 	}
 }
 
+// A config_version 8 document that skips the in-memory migration (a Secure
+// Client one) still enables VirusTotal and AI Defense through its v8 keys; the
+// model carries them only as analyzers (GAP-0157).
+func TestRuntimeV8FoldsTheRetiredScannerKeysIntoAnalyzers(t *testing.T) {
+	const keyEnv = "DEFENSECLAW_TEST_GAP0157_VT"
+	t.Setenv(keyEnv, "")
+	raw := []byte("config_version: 8\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    use_aidefense: true\n" +
+		"    virustotal_api_key_env: " + keyEnv + "\n    virustotal_api_key: inline-test-value\nobservability: {}\n")
+	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cfg.Scanners.SkillScanner
+	if !sc.Analyzers.VirusTotal.Enabled || !sc.Analyzers.AIDefense.Enabled || sc.VirusTotalKeyEnvName() != keyEnv {
+		t.Errorf("analyzers = %+v, want virustotal and aidefense on with key env %s", sc.Analyzers, keyEnv)
+	}
+	if got := sc.ResolvedVirusTotalKey(); got != "inline-test-value" {
+		t.Errorf("inline v8 key = %q, want it kept for the document", got)
+	}
+	written := append(raw[:len(raw)-len("observability: {}\n")], []byte("    analyzers: {virustotal: {enabled: false}}\nobservability: {}\n")...)
+	cfg, err = LoadRuntimeV8FromBytes("config.yaml", written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scanners.SkillScanner.Analyzers.VirusTotal.Enabled {
+		t.Error("an analyzers key that is written must win over use_virustotal")
+	}
+}
+
 // A destination key that `defenseclaw keys set` stored in the data dir's .env
 // resolves for the candidate validator, as it does for `config validate` and
 // the gateway. The 8 -> 9 migration check used to refuse the config of a user

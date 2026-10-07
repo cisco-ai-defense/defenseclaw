@@ -147,7 +147,7 @@ from defenseclaw.openclaw_presence import (
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
-from defenseclaw.scanner_binary import resolve_scanner_binary
+from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -2595,7 +2595,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
 def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> None:
     """The gateway runs the skill-scanner launcher; probe it and its version."""
     name = "skill-scanner"
-    binary = getattr(cfg.scanners.skill_scanner, "binary", "") or "skill-scanner"
+    binary = SKILL_SCANNER_BINARY
     path = resolve_scanner_binary(binary)
     if not path:
         _emit(
@@ -2606,7 +2606,7 @@ def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> No
         )
         return
     probe_path = path
-    if os.name != "nt" and str(binary or "").strip() == "skill-scanner":
+    if os.name != "nt":
         installed_launcher = os.path.abspath(os.path.expanduser("~/.local/bin/skill-scanner"))
         if os.path.lexists(installed_launcher):
             # Scanner resolution intentionally prefers the managed venv so

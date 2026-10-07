@@ -301,13 +301,13 @@ def yaml_error_mark(exc: BaseException) -> Any:
 class V8ConfigError(ValueError):
     """A source-validation error whose message never contains source values."""
 
-    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str, *, label: str = "v8") -> None:
+    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str) -> None:
         self.source_name = source_name
         self.path = path or "$"
         self.keyword = keyword
         self.corrective_action = corrective_action
         super().__init__(
-            f"{source_name}: invalid {label} configuration at {self.path} ({keyword}); {corrective_action}"
+            f"{source_name}: invalid configuration at {self.path} ({keyword}); {corrective_action}"
         )
 
 
@@ -915,7 +915,6 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
             _json_path(parts),
             "legacy-key-forbidden",
             f"a v8 configuration key is not accepted in config_version 9; use {target}",
-            label="v9",
         )
 
     for parts, target in _V9_REMOVED_KEYS:
@@ -959,18 +958,16 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     path = _json_path(parts)
     action = {
         "additionalProperties": "remove unsupported fields; see the configuration reference",
-        "const": "use the exact v8 value from the canonical reference",
-        "enum": "choose a value from the canonical v8 vocabulary",
-        "oneOf": "use exactly one supported v8 source shape",
-        "type": "use the value type documented by the canonical v8 schema",
-    }.get(keyword, "correct the field using the canonical v8 schema and reference")
+        "const": "use the exact value from the configuration reference",
+        "enum": "choose a value from the documented vocabulary",
+        "oneOf": "use exactly one supported source shape",
+        "type": "use the value type documented by the configuration schema",
+    }.get(keyword, "correct the field using the configuration schema and reference")
     if keyword == "required":
         action = _required_field_action(error)
     elif keyword == "additionalProperties" and v9:
         action = _unknown_field_action(error, parts)
-    raise V8ConfigError(
-        source_name, path, keyword, _declared_action(keyword, error) or action, label="v9" if v9 else "v8"
-    )
+    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
 
 
 _PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")

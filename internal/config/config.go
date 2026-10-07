@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -890,6 +891,35 @@ func (l LLMConfig) IsLocalProvider() bool {
 	return false
 }
 
+// openAIStyleLLMProviders speak the OpenAI chat-completions route
+// (<base>/v1/chat/completions). Keep in step with _OPENAI_STYLE_LLM_PROVIDERS
+// in cli/defenseclaw/config.py.
+var openAIStyleLLMProviders = map[string]struct{}{
+	"openai": {}, "openai-compatible": {}, "custom-openai": {}, "vllm": {},
+	"lm_studio": {}, "lmstudio": {}, "local": {},
+}
+
+// RequestBaseURL is BaseURL as LiteLLM and the Python scanners must send it.
+// The judge's client appends /v1/chat/completions to the host, while LiteLLM
+// appends only /chat/completions to what it is given, so a bare host reached
+// the two on different paths. For an OpenAI-style provider a base URL with no
+// path gets /v1; a URL with a path is used as written (GAP-0156). Mirrors
+// LLMConfig.request_base_url in cli/defenseclaw/config.py.
+func (l LLMConfig) RequestBaseURL() string {
+	raw := strings.TrimSpace(l.BaseURL)
+	if raw == "" {
+		return l.BaseURL
+	}
+	if _, ok := openAIStyleLLMProviders[l.ProviderPrefix()]; !ok {
+		return l.BaseURL
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return l.BaseURL
+	}
+	return strings.TrimRight(raw, "/") + "/v1"
+}
+
 // ForwardCustomHeadersEnabled reports whether the gateway forwards
 // inbound HTTP headers from the agent through to the upstream LLM
 // provider. The feature is enabled by default; nil (unset YAML) is
@@ -1209,25 +1239,28 @@ func (c *InspectLLMConfig) ResolvedAPIKey() string {
 }
 
 type SkillScannerConfig struct {
-	// Binary, UseVirusTotal, UseAIDefense, VirusTotalKey and
-	// VirusTotalKeyEnv are v8 keys: migration input, rejected in a
-	// config_version 9 source (see Analyzers).
+	// Binary is the launcher name. It is a v8 key (rejected in a
+	// config_version 9 source) kept for a config_version 8 document that
+	// skips the in-memory migration, as a Secure Client one does; it goes
+	// when that document moves to config_version 9 (spec section 7, row 19).
+	// The v8 use_virustotal, use_aidefense and virustotal_api_key[_env] keys
+	// are not modeled: foldV8ScannerKeys reads them into Analyzers.
 	Binary        string `mapstructure:"binary"                 yaml:"binary"`
 	UseLLM        bool   `mapstructure:"use_llm"                yaml:"use_llm"`
 	UseBehavioral bool   `mapstructure:"use_behavioral"         yaml:"use_behavioral"`
 	EnableMeta    bool   `mapstructure:"enable_meta"            yaml:"enable_meta"`
 	UseTrigger    bool   `mapstructure:"use_trigger"            yaml:"use_trigger"`
-	UseVirusTotal bool   `mapstructure:"use_virustotal"         yaml:"use_virustotal"`
-	UseAIDefense  bool   `mapstructure:"use_aidefense"          yaml:"use_aidefense"`
 	LLMConsensus  int    `mapstructure:"llm_consensus_runs"     yaml:"llm_consensus_runs"`
 	Policy        string `mapstructure:"policy"                 yaml:"policy"`
 	Lenient       bool   `mapstructure:"lenient"                yaml:"lenient"`
 	// LLM overrides the top-level llm: block for the skill scanner.
 	// Every field is optional: unset fields inherit from Config.LLM
 	// via Config.ResolveLLM("scanners.skill").
-	LLM              LLMConfig `mapstructure:"llm"                    yaml:"llm,omitempty"`
-	VirusTotalKey    string    `mapstructure:"virustotal_api_key"     yaml:"virustotal_api_key"`
-	VirusTotalKeyEnv string    `mapstructure:"virustotal_api_key_env" yaml:"virustotal_api_key_env"`
+	LLM LLMConfig `mapstructure:"llm"                    yaml:"llm,omitempty"`
+
+	// legacyVirusTotalKey is the inline v8 virustotal_api_key of a document
+	// that skips the in-memory migration. Read once at load, never serialized.
+	legacyVirusTotalKey string
 
 	// PolicyFile pins a custom scan policy by digest; required when Policy
 	// is "custom" (config_version 9).
@@ -1245,7 +1278,7 @@ type SkillScannerConfig struct {
 }
 
 // ResolvedVirusTotalKey returns the VirusTotal key from its env var (the
-// keys store first, then the process), or the v8 inline value.
+// keys store first, then the process), or the inline value of a v8 document.
 func (c *SkillScannerConfig) ResolvedVirusTotalKey() string {
 	name := c.VirusTotalKeyEnvName()
 	if v, ok := GetKey(name); ok && strings.TrimSpace(v) != "" {
@@ -1254,7 +1287,7 @@ func (c *SkillScannerConfig) ResolvedVirusTotalKey() string {
 	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
 		return v
 	}
-	return c.VirusTotalKey
+	return c.legacyVirusTotalKey
 }
 
 type MCPScannerConfig struct {
@@ -2620,6 +2653,7 @@ func loadConfigSourceChecked(
 		}
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	foldV8ScannerKeys(&cfg)
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, sourceBytes); err != nil {
 		return nil, err
 	}
@@ -3035,9 +3069,6 @@ func warnPlaintextSecrets(cfg *Config) {
 	if cfg.CiscoAIDefense.APIKey != "" {
 		warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
 	}
-	if cfg.Scanners.SkillScanner.VirusTotalKey != "" {
-		warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
-	}
 }
 
 func validateDeploymentMode(mode string) error {
@@ -3132,13 +3163,9 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("scanners.skill_scanner.use_behavioral", false)
 	viper.SetDefault("scanners.skill_scanner.enable_meta", false)
 	viper.SetDefault("scanners.skill_scanner.use_trigger", false)
-	viper.SetDefault("scanners.skill_scanner.use_virustotal", false)
-	viper.SetDefault("scanners.skill_scanner.use_aidefense", false)
 	viper.SetDefault("scanners.skill_scanner.llm_consensus_runs", 0)
 	viper.SetDefault("scanners.skill_scanner.policy", DefaultSkillScannerPolicy)
 	viper.SetDefault("scanners.skill_scanner.lenient", true)
-	viper.SetDefault("scanners.skill_scanner.virustotal_api_key", "")
-	viper.SetDefault("scanners.skill_scanner.virustotal_api_key_env", "VIRUSTOTAL_API_KEY")
 	viper.SetDefault("scanners.mcp_scanner.binary", "mcp-scanner")
 	viper.SetDefault("scanners.mcp_scanner.analyzers", "auto")
 	viper.SetDefault("scanners.mcp_scanner.scan_prompts", false)
