@@ -43,6 +43,20 @@ def test_empty_config_is_named_not_migrated(data_dir: Path, content: str) -> Non
     assert path.read_text(encoding="utf-8") == content
 
 
+def test_cut_short_config_is_named_not_migrated(data_dir: Path) -> None:
+    # GAP-0482: a file cut off mid-document (no config_version, no final
+    # newline) gets the same plain text as an empty one, not --from-version.
+    path = data_dir / "config.yaml"
+    content = "guardrail:\n  enabled: true\n  connectors:\n    claudecode:\n      mo"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(MigrationError, match="is incomplete") as raised:
+        migrate(str(data_dir))
+    assert "--from-version" not in str(raised.value)
+    with pytest.raises(dcconfig.ConfigVersionError, match="nothing was changed"):
+        dcconfig.require_v8_config(path=str(path))
+    assert path.read_text(encoding="utf-8") == content
+
+
 def test_empty_config_hint_dates_the_kept_copy(data_dir: Path) -> None:
     # GAP-1786: previous/ only changes on a version upgrade, so say how old it is.
     path = data_dir / "config.yaml"

@@ -131,6 +131,14 @@ func TestGatewayConfigLoadErrorsCallAnEmptyConfigEmpty(t *testing.T) {
 	if err := daemonConfigLoadError("start", loadErr); strings.Contains(err.Error(), "is empty") {
 		t.Fatalf("a non-empty config was called empty: %v", err)
 	}
+	// GAP-0482: a file cut off before config_version is incomplete, not old.
+	if err := os.WriteFile(config.ConfigPath(), []byte("guardrail:\n  enabled: true\n  conn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg := gatewayStatusConfigLoadError(loadErr).Error(); !strings.Contains(msg, "is incomplete") ||
+		strings.Contains(msg, "migrate") {
+		t.Fatalf("cut-short config: %q", msg)
+	}
 }
 
 // GAP-1876: the gateway's empty-config message dates the copy the last
