@@ -170,3 +170,11 @@ def test_doctor_skips_gateway_guess_after_config_validation_failure(monkeypatch)
     monkeypatch.setattr(cmd_doctor, "_http_probe", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probed invalid config")))
     cmd_doctor._check_sidecar(SimpleNamespace(), result)
     assert any(row["status"] == "skip" and "Sidecar API" in str(row) for row in result.checks)
+
+
+def test_setup_missing_agent_message_is_explicit() -> None:
+    from defenseclaw.commands.cmd_setup import _connector_not_detected_message
+
+    message = _connector_not_detected_message("Claude Code")
+    assert "agent is not installed" in message
+    assert "not ready" in message
