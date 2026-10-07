@@ -312,7 +312,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
-			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),
+			Blocked: r.Denied(), Reason: truncate(openshellReason(r, host), 512), PolicyOutcome: truncate(r.Policy, 256),
 			Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
 		}
 		if !quiet {
@@ -321,8 +321,13 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
-			if fetch {
+			switch {
+			case fetch:
 				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+			case dnsRefusal(r):
+				// The connection that follows is the refusal that counts
+				// (and the alert); the lookup alone is audited at INFO.
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeLookupRefused, "INFO"
 			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
@@ -430,6 +435,24 @@ func (m *Manager) connectionRequest(b *box, r ocsf.Record, host string, at time.
 	o.at = at
 	o.pending++
 	return false
+}
+
+// openshellReason is the audit reason of an OpenShell record: for a denial
+// the words the activity feed shows for OpenShell's reason token, with the
+// token after them, and for SSH what to do instead; otherwise OpenShell's
+// reason or message (GAP-0134).
+func openshellReason(r ocsf.Record, host string) string {
+	token := firstNonEmpty(r.Reason, r.Message)
+	if !r.Denied() || token == "" {
+		return token
+	}
+	if r.Port == 22 {
+		return sandboxapi.SSHBlockedText(host) + " (" + token + ")"
+	}
+	if text, ok := sandboxapi.LookupReasonText(r.Reason); ok {
+		return text + " (" + token + ")"
+	}
+	return token
 }
 
 // dnsRefusal reports OpenShell's refusal of a name lookup ("NET:REFUSE …

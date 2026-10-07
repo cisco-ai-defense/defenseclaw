@@ -33,11 +33,11 @@ func TestEveryBlockedReasonReadsInWords(t *testing.T) {
 		triage.ReasonAdmin, triage.ReasonBlocklisted, triage.ReasonIPLiteral, triage.ReasonPortNotAllowed, triage.ReasonAgentProposalOff,
 		triage.ReasonResolvesToHost, triage.ReasonUnresolved, triage.ReasonRuleShape, triage.ReasonMultipleHosts, triage.ReasonHarnessFetch,
 		triage.ReasonRateLimited, triage.ReasonRuleLimit, triage.ReasonTooManyPending} {
-		if _, ok := reasonTexts[string(r)]; !ok {
-			t.Errorf("reason %s has no words: %q", r, reasonText(string(r)))
+		if _, ok := sandboxapi.LookupReasonText(string(r)); !ok {
+			t.Errorf("reason %s has no words: %q", r, sandboxapi.ReasonText(string(r)))
 		}
 	}
-	if got := reasonText(string(triage.ReasonRuleShape)); !strings.HasPrefix(got, "no OpenShell rule allows it") {
+	if got := sandboxapi.ReasonText(string(triage.ReasonRuleShape)); !strings.HasPrefix(got, "no OpenShell rule allows it") {
 		t.Fatalf("unsupported_rule = %q", got)
 	}
 }

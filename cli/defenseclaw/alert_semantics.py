@@ -34,9 +34,11 @@ ALERT_NON_ALLOW_OUTCOMES = (
 )
 
 # Decision codes of refusals that are audited only and never alerts: a
-# sandbox harness's own request that it does without (GAP-0130). Mirrors
-# SandboxEgressCodeHarnessFetch in internal/audit/store.go.
-ALERT_AUDIT_ONLY_DECISION_CODES = ("SANDBOX_EGRESS_HARNESS_FETCH",)
+# sandbox harness's own request that it does without (GAP-0130), and
+# OpenShell's refusal of a name lookup, whose connection is refused (and
+# alerted) on its own (GAP-0134). Mirrors SandboxEgressCodeHarnessFetch and
+# SandboxEgressCodeLookupRefused in internal/audit/store.go.
+ALERT_AUDIT_ONLY_DECISION_CODES = ("SANDBOX_EGRESS_HARNESS_FETCH", "SANDBOX_EGRESS_LOOKUP_REFUSED")
 
 ALERT_LEGACY_FINDING_ACTIONS = (
     "alert",

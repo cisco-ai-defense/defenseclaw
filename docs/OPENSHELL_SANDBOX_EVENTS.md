@@ -142,6 +142,13 @@ OpenShell's denials are recorded as they come (decision code
 policy reload ("policy generation is stale") and the denials of this
 install's own ingress and egress ports; those two are not counted in the
 sandbox's blocked requests and are not shown as blocks on the activity feed.
+The reason of an OpenShell denial (`defenseclaw.network.reason`) has the
+words the activity feed shows, with OpenShell's token after them: `no
+OpenShell rule allows it (transparent_tcp_policy_denied)`, and for port 22
+`SSH does not leave a sandbox: use an HTTPS remote (https://HOST/…)`.
+OpenShell's refusal of a name lookup (`policy_dns_ineligible`) is recorded
+at INFO with decision code `SANDBOX_EGRESS_LOOKUP_REFUSED` and is no alert:
+the connection that follows is denied, recorded and alerted on its own.
 A refusal of a request the harness makes on its own and does without
 (OpenCode's model catalog, the Codex tip download), by OpenShell or the
 proxy, is recorded at INFO with decision code `SANDBOX_EGRESS_HARNESS_FETCH`

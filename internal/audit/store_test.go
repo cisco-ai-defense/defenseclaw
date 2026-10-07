@@ -877,6 +877,9 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 		('harness-fetch', '2026-07-17T12:00:01.5Z', 'sandbox-egress', 'defenseclaw', '',
 		 'INFO', 'network.egress', 'egress.blocked',
 		 '{"defenseclaw.network.decision":"block","defenseclaw.network.decision_code":"SANDBOX_EGRESS_HARNESS_FETCH"}', NULL),
+		('lookup-refused', '2026-07-17T12:00:01.7Z', 'sandbox-egress', 'defenseclaw', '',
+		 'INFO', 'network.egress', 'egress.blocked',
+		 '{"defenseclaw.network.decision":"block","defenseclaw.network.decision_code":"SANDBOX_EGRESS_LOOKUP_REFUSED"}', NULL),
 		('health-error', '2026-07-17T12:00:02Z', 'sink-failure', 'gateway', '',
 		 'ERROR', 'platform.health', 'destination.export_failed', '{}', NULL),
 		('canonical-allow', '2026-07-17T12:00:03Z', 'enforcement', 'gateway', '',
@@ -908,7 +911,7 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	}
 	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		AlertIDs: []string{
-			"blank-severity-deny", "canonical-deny", "canonical-egress", "harness-fetch", "health-error", "canonical-allow",
+			"blank-severity-deny", "canonical-deny", "canonical-egress", "harness-fetch", "lookup-refused", "health-error", "canonical-allow",
 			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
 			"legacy-unrelated-high",
 		},

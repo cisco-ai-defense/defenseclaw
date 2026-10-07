@@ -165,12 +165,12 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
 		switch why := firstNonEmpty(ev.Category, ev.Reason); {
 		case sshPort(ev):
-			b.WriteString(" (" + sshBlockedText(ev.Host) + ")")
+			b.WriteString(" (" + sandboxapi.SSHBlockedText(ev.Host) + ")")
 		case ev.Category == sandboxapi.CategoryLargeUpload:
 			// The proxy's reason names the threshold the upload crossed.
 			b.WriteString(" (" + sandboxapi.LargeUploadBlockedText(ev.Reason) + ")")
 		case why != "":
-			b.WriteString(" (" + reasonText(why) + ")")
+			b.WriteString(" (" + sandboxapi.ReasonText(why) + ")")
 		}
 		if ev.Unblockable && ev.Host != "" && !sshPort(ev) {
 			scope := ""
@@ -232,65 +232,9 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	return b.String()
 }
 
-// reasonTexts explain the reason tokens the feed carries for blocked
-// egress: OpenShell's own for the connections it denies, and the egress
-// proxy's categories.
-var reasonTexts = map[string]string{
-	"transparent_tcp_policy_denied":  "no OpenShell rule allows it",
-	"transparent_tcp_mapping_denied": "no OpenShell rule allows this port",
-	"policy_dns_ineligible":          "no OpenShell rule allows the name",
-	"paste_site":                     "paste site",
-	"file_drop":                      "file-sharing site",
-	"webhook_catcher":                "webhook catcher",
-	"tunnel":                         "tunnel service",
-	"anonymizer":                     "anonymizer",
-	"host_internal":                  "this machine",
-	"private_network":                "private network",
-	"port_not_allowed":               "port not allowed",
-	"invalid_destination":            "invalid destination",
-	"admin_block":                    "blocked by your organization",
-	"admin_allow_only":               "not on your organization's allowed list",
-	"operator_block":                 "on your block list",
-	"pack_block":                     "on the pack's block list",
-	"repo_policy_block":              "on the repository policy's block list, .defenseclaw/sandbox.yaml",
-	"firewall_block":                 "a deny rule of the host egress firewall",
-	"not_allowlisted":                "not on the allowlist",
-	"rate_limited":                   "rate limited",
-	"ip_literal":                     "IP address instead of a name",
-	// Triage's verdicts on the rule OpenShell drafts for a denied
-	// connection (triage.Reason).
-	"unsupported_rule":         "no OpenShell rule allows it, and DefenseClaw does not approve the rule drafted for it",
-	"no_endpoints":             "the rule drafted for it names no destination",
-	"wildcard_destination":     "wildcard destination",
-	"policy_refused":           "the sandbox policy refuses it",
-	"admin_violation":          "blocked by your organization",
-	"blocklisted":              "on the block list",
-	"agent_proposals_disabled": "no OpenShell rule allows it, and this sandbox takes no new rules",
-	"resolves_to_host":         "the name leads to this machine",
-	"unresolved":               "the name does not resolve",
-	"multiple_hosts":           "the rule drafted for it names several hosts",
-	"harness_background_fetch": "a background fetch of the harness, which it does without",
-	"rule_limit":               "the sandbox added its limit of rules this session",
-	"too_many_pending":         "too many approvals are waiting",
-}
-
 // sshPort reports a refused connection to port 22: git over SSH, ssh.
 // OpenShell opens no SSH out of a sandbox, which no unblock changes.
 func sshPort(ev sandboxapi.ActivityEvent) bool { return ev.Port == 22 }
-
-// sshBlockedText says what to do instead of SSH to host.
-func sshBlockedText(host string) string {
-	return "SSH does not leave a sandbox: use an HTTPS remote (https://" + host + "/…)"
-}
-
-// reasonText is the short explanation of a feed reason token; an unknown
-// token reads with spaces for its underscores.
-func reasonText(token string) string {
-	if text, ok := reasonTexts[token]; ok {
-		return text
-	}
-	return strings.ReplaceAll(token, "_", " ")
-}
 
 // largeUploadText is an egress.large_upload report to dest (the feed's
 // hostPort, a session's host) without its ⚠: "large upload to

@@ -3498,11 +3498,17 @@ const alertNonAllowOutcomeSQL = `'alert','ask','block','blocked','confirm','deny
 // ALERT_AUDIT_ONLY_DECISION_CODES in cli/defenseclaw/alert_semantics.py.
 const SandboxEgressCodeHarnessFetch = "SANDBOX_EGRESS_HARNESS_FETCH"
 
+// SandboxEgressCodeLookupRefused is the decision code of OpenShell's refusal
+// of a sandbox's name lookup. OpenShell judges the connection that follows
+// on its own, and that denial is the alert; the lookup is audited at INFO
+// (GAP-0134).
+const SandboxEgressCodeLookupRefused = "SANDBOX_EGRESS_LOOKUP_REFUSED"
+
 // auditOnlyEgressSQL keeps the refusals that are audited only off the alert
 // queue.
 const auditOnlyEgressSQL = `COALESCE(CASE WHEN json_valid(COALESCE(event.payload_json,''))
 		THEN json_extract(event.payload_json, '$."defenseclaw.network.decision_code"') END, '')
-		<> '` + SandboxEgressCodeHarnessFetch + `'`
+		NOT IN ('` + SandboxEgressCodeHarnessFetch + `','` + SandboxEgressCodeLookupRefused + `')`
 
 func canonicalAlertOutcomeSQL() string {
 	return `LOWER(COALESCE(
