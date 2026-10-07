@@ -899,6 +899,17 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 // applyAdopting is apply that first takes over an adopted layout.
 func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopting *adoption) int {
 	env, r := l.env, l.result
+	if !l.opts.NoStart {
+		// Checked before anything changes: the API socket cannot listen
+		// while another process holds the port.
+		if held := l.apiPortPreflight(ctx, record); held != "" {
+			r.AddError(codeAPIPortHeld, held)
+			if record != nil {
+				l.describe(ctx, record, false)
+			}
+			return 0
+		}
+	}
 	serviceName := env.Layout.ServiceUser
 	account, err := env.Accounts.Ensure(ctx, serviceName)
 	if err != nil {

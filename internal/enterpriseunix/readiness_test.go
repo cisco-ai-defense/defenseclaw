@@ -120,6 +120,27 @@ func plantLinuxListener(t *testing.T, h *testHost, pid, uid string) {
 	}
 }
 
+// A per-user gateway still listening on 127.0.0.1:18970 let the first
+// managed install change everything, fail to start the API socket and roll
+// back with activation_failed, while linux.mdx promised only a warning. The
+// install is refused before anything changes, naming the holder (GAP-0366).
+func TestInstallRefusesAHeldAPIPortBeforeChangingAnything(t *testing.T) {
+	h := newTestHost(t, "linux")
+	plantLinuxListener(t, h, "31337", "4242")
+	if err := os.Symlink("/home/dcr-u1/.local/bin/defenseclaw-gateway", h.env.P("/proc/31337/exe")); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")})
+	requireError(t, r, codeAPIPortHeld)
+	if got := messagesOf(r.Errors, codeAPIPortHeld); !strings.Contains(got, "held by pid 31337 (uid 4242), a per-user DefenseClaw gateway") ||
+		!strings.Contains(got, "nothing was changed") || !strings.Contains(got, "kill 31337") {
+		t.Fatalf("the refusal does not name the per-user gateway: %s", got)
+	}
+	if exists(h.env.P(h.env.Layout.ConfigPath)) || countCalls(h.services.calls, "start "+unitAPISocket) > 0 {
+		t.Fatalf("the refused install changed the host: %v", h.services.calls)
+	}
+}
+
 // lsofRunner answers lsof like macOS does for a listener on the API port.
 type lsofRunner struct {
 	Runner
@@ -213,10 +234,10 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 			t.Fatal("status reports the gateway ready")
 		}
 
-		h.services.failStart[unitAPISocket] = errors.New("systemctl start defenseclaw-gateway-api.socket: exit 1: Job for defenseclaw-gateway-api.socket failed. See \"journalctl -xe\" for details.")
+		// Repair refuses before it changes anything (GAP-0366).
 		repair := h.run(Options{Action: ActionRepair})
-		requireError(t, repair, codeActivate)
-		if got := messagesOf(repair.Errors, codeActivate); !strings.Contains(got, want) {
+		requireError(t, repair, codeAPIPortHeld)
+		if got := messagesOf(repair.Errors, codeAPIPortHeld); !strings.Contains(got, want) {
 			t.Fatalf("repair does not name the port holder: %s", got)
 		}
 	})

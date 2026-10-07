@@ -471,8 +471,14 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
-A per-user gateway that was already running keeps running until it is
-stopped. The install, `status` and `verify` name each such account with the
+A per-user gateway that is still running holds the managed gateway port,
+`127.0.0.1:18970`, unless its user moved it to another port. The install then
+stops before it changes anything: it fails with `api_port_held`, which names
+the process and gives the `kill` command (the package install still completes,
+and `last-package-result.json` has the error). Stop that gateway, or move it to
+another port, then run `defenseclaw-gateway enterprise linux ensure --from-package`.
+A per-user gateway on another port keeps running until it is stopped. The
+install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.
 
 ## Remove

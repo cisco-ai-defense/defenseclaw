@@ -203,7 +203,11 @@ managed install reaches a computer:
 3. Then deploy the managed install.
 
 A per-user gateway listens on the same loopback port as the managed gateway,
-`127.0.0.1:18970`, which is why you remove the per-user install first.
+`127.0.0.1:18970`, which is why you remove the per-user install first. The
+port must be free: if a per-user gateway still holds it, the managed install
+on Linux and macOS stops before it changes anything with `api_port_held`,
+naming the process. Stop that gateway, or move it to another port, then run
+`ensure` again.
 
 On Linux and macOS, `--adopt-existing` covers a different case: DefenseClaw
 files at the managed paths that no committed deployment owns, such as an
