@@ -177,6 +177,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	resp["scope"] = inv.Scope
+	resp["partial"] = inv.Partial
 	resp["scan_id"] = ""
 	resp["scanned_at"] = inv.ScannedAt
 	plugins := []inventory.IDEPlugin{}

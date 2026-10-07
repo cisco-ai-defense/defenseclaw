@@ -471,6 +471,8 @@ def ide_plugins(
         )
     if payload.get("scope") == "ai_only":
         summary += " (the inventory keeps AI plugins only)"
+    if payload.get("partial") or any(i.get("partial") for i in payload.get("installations") or []):
+        summary += " — partial installation; scan limits were reached"
     click.echo(summary)
 
 

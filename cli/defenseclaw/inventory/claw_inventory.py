@@ -301,6 +301,9 @@ def attach_ide_plugins(inv: dict[str, Any], payload: dict[str, Any] | None, note
         "disabled": sum(1 for p in plugins if p.get("enabled") == "disabled"),
         "users": len(users),
         "scope": str((payload or {}).get("scope") or ""),
+        "partial": bool((payload or {}).get("partial")) or any(
+            inst.get("partial") for inst in (payload or {}).get("installations") or []
+        ),
     }
     if payload is None or payload.get("enabled") is False:
         entry["collected"] = False

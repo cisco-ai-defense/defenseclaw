@@ -494,6 +494,7 @@ class InventorySnapshot:
     ide_plugins: tuple[InventoryIDEPlugin, ...] = ()
     ide_collected: bool = False
     ide_note: str = ""
+    ide_partial: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventorySnapshot:
@@ -566,6 +567,7 @@ class InventorySnapshot:
             ),
             ide_collected="ide_plugins" in raw,
             ide_note=str(raw.get("ide_plugins_note") or ""),
+            ide_partial=bool((summary_raw or {}).get("ide_plugins", {}).get("partial")) if isinstance(summary_raw, Mapping) else False,
         )
 
     @classmethod
@@ -819,7 +821,8 @@ class InventoryPanelModel:
                 label=INVENTORY_SUBTAB_LABELS[subtab],
                 active=subtab == self.active_sub,
                 count=counts.get(subtab),
-                partial=subtab == "agents" and self.agent_identities_total > 0,
+                partial=(subtab == "agents" and self.agent_identities_total > 0)
+                        or (subtab == "ide_plugins" and bool(self.inventory and self.inventory.ide_partial)),
             )
             for subtab in INVENTORY_SUBTABS
         )
@@ -1004,6 +1007,7 @@ class InventoryPanelModel:
             ide_plugins=tuple(ide_plugins),
             ide_collected=ide_collected,
             ide_note=ide_note,
+            ide_partial=any(snap.ide_partial for snap in snaps),
         )
 
     def scroll_by(self, delta: int) -> None:
