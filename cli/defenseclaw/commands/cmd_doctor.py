@@ -9062,8 +9062,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
 
 
 def _check_signature_packs(cfg, r: _DoctorResult) -> None:
-    """A signature pack that fails its pin is not loaded, and discovery is
-    blind to the agents it describes: name it with both digests."""
+    """A signature pack that fails its pin, or whose file is gone, is not
+    loaded and discovery is blind to the agents it describes: name it, with
+    both digests for a pin mismatch."""
     discovery = getattr(cfg, "ai_discovery", None)
     if not getattr(discovery, "enabled", False) or not getattr(discovery, "signature_packs", None):
         return
@@ -9085,8 +9086,8 @@ def _check_signature_packs(cfg, r: _DoctorResult) -> None:
         check_id="doctor.discovery.signature-pack-refused",
         reason_code="signature-pack-refused",
         remediation=(
-            "Restore the pinned pack, or pin the file you trust in ai_discovery.signature_pack_digests "
-            "with `defenseclaw config set`"
+            "Restore the pack file, drop it from ai_discovery.signature_packs, or pin the file you trust in "
+            "ai_discovery.signature_pack_digests with `defenseclaw config set`"
         ),
     )
 
