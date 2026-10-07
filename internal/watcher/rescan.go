@@ -235,15 +235,18 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 // profile's root that the managed gateway watches for every enrolled user.
 // IsRoot alone resolves only the service account's own Hermes home, so each
 // user's category folders (devops, software-development) were rescanned as
-// skills and logged a failed scan every cycle (GAP-0285).
-func hermesSkillsDiscover(dir string) func(string, int) ([]hermesskills.Entry, error) {
+// skills and logged a failed scan every cycle (GAP-0285). trustBundled is
+// false for a profile root: its manifest and Hermes checkout belong to that
+// account, which could mark its own skill bundled, so every skill there is
+// rescanned.
+func hermesSkillsDiscover(dir string) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
 	switch {
 	case hermesskills.IsRoot(dir):
-		return hermesskills.Discover
+		return hermesskills.Discover, true
 	case hermesskills.IsProfileRoot(dir):
-		return hermesskills.DiscoverProfileRoot
+		return hermesskills.DiscoverProfileRoot, false
 	}
-	return nil
+	return nil, false
 }
 
 // enumerateTargets lists all direct child directories under watched roots plus
@@ -257,11 +260,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if discover := hermesSkillsDiscover(dir); discover != nil {
+		if discover, trustBundled := hermesSkillsDiscover(dir); discover != nil {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
 				for _, entry := range entries {
-					if entry.Bundled {
+					if entry.Bundled && trustBundled {
 						continue
 					}
 					targets = append(targets, InstallEvent{

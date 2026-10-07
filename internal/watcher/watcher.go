@@ -492,7 +492,7 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		}
 	}
 	for _, root := range w.skillDirs {
-		discover := hermesSkillsDiscover(root)
+		discover, _ := hermesSkillsDiscover(root)
 		if discover == nil || !watcherPathAtOrBelow(path, root) {
 			continue
 		}
