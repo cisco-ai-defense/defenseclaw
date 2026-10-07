@@ -667,6 +667,24 @@ func TestReapScriptStopsTheSession(t *testing.T) {
 	}
 }
 
+// TestExecSaysWhyTheSandboxEndedIt (GAP-0077): a hook-silence stop ended
+// a `sandbox exec` command with only OpenShell's "exec relay closed before
+// the command reported an exit status". The exec says what stopped the
+// sandbox under the command.
+func TestExecSaysWhyTheSandboxEndedIt(t *testing.T) {
+	ta := newTestApp(t, "", sampleSandbox("box"))
+	ta.IO.TTY = false
+	ta.stream.answer = func(argv []string) (int, string) {
+		ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
+			sb.Phase = "stopped"
+			sb.Hooks.Silent, sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = true, "stop", "1m"
+		})
+		return 255, ""
+	}
+	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"sleep", "600"}}), 255)
+	has(t, ta.output(), "DefenseClaw stopped box while the command ran: its harness worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)")
+}
+
 func TestExecAndLogs(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("box"))
 	ta.IO.TTY = false
@@ -687,6 +705,7 @@ func TestExecAndLogs(t *testing.T) {
 	}
 	ta.ok(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"ls", "-la"}}))
 	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"false"}}), 7)
+	lacks(t, ta.output(), "while the command ran")
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 50}))
 	cmds := ta.stream.commands()
 	// `sandbox exec` runs the command through sandbox-env, under its
