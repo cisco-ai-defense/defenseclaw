@@ -988,6 +988,8 @@ jobs:
           cp "dist/defenseclaw-enterprise-${version}-linux-amd64.deb" \
             "dist/defenseclaw-enterprise-${version}-linux-amd64.rpm" "$RUNNER_TEMP/enterprise-install-linux/"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+      # build-setup.sh builds the Python scanner runtime with uv.
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Build the hash-pinned unsigned Windows standalone Setup
         shell: bash
         run: packaging/windows/standalone/build-setup.sh --version 9.9.9 --out-dir "$RUNNER_TEMP/enterprise-install-windows"
