@@ -1046,10 +1046,7 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 	block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: targetType, Name: evt.Name, Connector: connector, SourcePath: evt.Path,
 	})
-	if cfg.SecureClientIntegration() {
-		block, allow = w.legacyListEntries("block"), w.legacyListEntries("allow")
-	}
-	return policy.AdmissionInput{
+	input := policy.AdmissionInput{
 		TargetType: targetType,
 		TargetName: evt.Name,
 		Path:       evt.Path,
@@ -1057,6 +1054,12 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 		AllowList:  allow,
 		Admission:  policy.AdmissionFor(policy.CompileAdmission(cfg), targetType),
 	}
+	if cfg.SecureClientIntegration() {
+		input.BlockList, input.AllowList = w.legacyListEntries("block"), w.legacyListEntries("allow")
+	} else {
+		input.VerifyFirstParty()
+	}
+	return input
 }
 
 // legacyListEntries is the Secure Client operator list read from the

@@ -454,7 +454,9 @@ def evaluate_admission(
     # merely lands under a first-party provenance directory.
     fp_constraints = policy.first_party_allow.get(name)
     if allow_first_party and fp_constraints and policy.allow_list_bypass_scan:
-        if _matches_provenance(fp_constraints, source_path):
+        if _matches_provenance(fp_constraints, source_path) and (
+            legacy or _own_first_party_content(target_type, name, source_path)
+        ):
             return _done(AdmissionDecision(
                 "allowed", f"{target_type} '{name}' is on the allow list — scan skipped", source="policy-allow",
             ))
@@ -889,6 +891,26 @@ def _matches_amp_user_home(
     if os.path.normcase(common_path) != os.path.normcase(resolved_home):
         return False
     return os.path.normcase(resolved_source) == os.path.normcase(expected_source)
+
+
+def _own_first_party_content(target_type: str, name: str, source_path: str) -> bool:
+    """Whether a first-party entry may trust the asset at *source_path* (GAP-0419).
+
+    A skills or plugins folder holds whatever the user installs, so the names
+    of DefenseClaw's own assets never switch the scan off by themselves: an
+    entry named ``codeguard`` trusts only an exact copy of the shipped
+    CodeGuard skill, and an entry named ``defenseclaw`` trusts no plugin here
+    (the gateway recognizes DefenseClaw's own plugin by its bytes). Other
+    first-party entries keep their name and location match. Mirrors Go
+    ``AdmissionInput.VerifyFirstParty``.
+    """
+    if target_type == "skill" and name == "codeguard":
+        from defenseclaw.codeguard_skill import is_shipped_codeguard_skill
+
+        return is_shipped_codeguard_skill(source_path)
+    if target_type == "plugin" and name == "defenseclaw":
+        return False
+    return True
 
 
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:

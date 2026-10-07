@@ -194,7 +194,8 @@ Each severity resolves on its own, first match wins:
 | `info` | `allow` | `warn` | `warn` |
 
 The built-in first-party entries are `codeguard` for skills, `defenseclaw` for
-plugins, and none for MCP servers.
+plugins, and none for MCP servers. Both names are DefenseClaw's own, so they
+trust only DefenseClaw's own content; see [First-party assets](#first-party-assets).
 
 ### The scanner gate
 
@@ -285,6 +286,22 @@ using either slash. A look-alike never matches:
 ```bash
 defenseclaw config set admission.skill.first_party_allow_list --json '[{"name":"acme-review","source_path_contains":[".acme/skills/acme-review"],"reason":"first-party Acme skill"}]'
 ```
+
+`codeguard` and `defenseclaw` are DefenseClaw's own asset names, and a folder
+in a skills or plugins folder can be written by anything the user installs (a
+`git clone`, `npx skills add`). So an entry with one of these names, built in or
+set by you or a policy profile, never trusts a folder by its name and location
+alone:
+
+- `codeguard` (skill) skips the scan only for an exact copy of the CodeGuard
+  skill DefenseClaw ships, checked by a SHA-256 digest of its files. A folder
+  named `codeguard` with any other content is scanned like any other skill.
+- `defenseclaw` (plugin) skips nothing by itself. The gateway recognizes
+  DefenseClaw's own plugin by its bytes (the OpenClaw plugin it installs, the
+  Amp bridge file) before admission; any other plugin with that name is
+  scanned.
+
+Entries with other names match by name and location, as above.
 
 The list you set replaces the built-in one for that asset type, so list
 `codeguard` again if you still want it trusted. `--json '[]'` trusts no asset.
