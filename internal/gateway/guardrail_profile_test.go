@@ -84,7 +84,7 @@ func profileSecurityConfig() *config.Config {
 		"watch":   {Mode: "observe"},
 	}
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
-		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@CORP.EXAMPLE"}}},
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@CORP.EXAMPLE", `CORP\carol`}}},
 		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\Contractors`}}},
 		{Profile: "tooling", Match: config.ProfileMatch{Groups: []string{"dcidr-grp"}}},
 		{Profile: "tooling", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
@@ -124,6 +124,8 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 		{name: "verified UPN in any case", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "Alice@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
 		{name: "verified group", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", Groups: []string{"S-1-5-21-1", `corp\contractors`}})}, connector: "cursor", profile: "strict", match: profileMatchGroup, group: `CORP\Contractors`},
 		{name: "verified Windows group by bare name", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1001", Groups: []string{"S-1-5-21-7-1037", `HOST\DCIDR-grp`}})}, connector: "cursor", profile: "tooling", match: profileMatchGroup, group: "dcidr-grp"},
+		{name: "verified DOMAIN\\user of the Windows domain", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1105", UserName: "carol", Domain: "corp.example", Principal: "carol@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
+		{name: "DOMAIN\\user of another domain keeps default", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1005", UserName: "carol", Domain: "other.example"})}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "verified other user keeps default", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"})}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "claimed headers alone", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefaultUnverified},
 		{name: "claimed headers over a verified other user", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"}), claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefault},

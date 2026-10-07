@@ -714,10 +714,38 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 }
 
 // userEntryMatches reports whether a users entry names the subject: its uid
-// or SID, its account name without the domain, or its principal or UPN.
+// or SID, its account name without the domain, its principal or UPN, or its
+// account in DOMAIN\user form, the name winbind and Windows report. The
+// subject's name is bare and its principal is a UPN or user@REALM, so that
+// form matched none of them (GAP-0316).
 func userEntryMatches(subject *profileSubject, entry string) bool {
-	return anyEqualFold([]string{subject.UserID, subject.UserName}, entry) ||
-		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry)
+	if anyEqualFold([]string{subject.UserID, subject.UserName}, entry) ||
+		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry) {
+		return true
+	}
+	domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
+	return qualified && account != "" && useridentity.EqualFold(account, subject.UserName) && subjectInDomain(subject, domain)
+}
+
+// subjectInDomain reports whether domain, the DOMAIN of a DOMAIN\user entry,
+// names the subject's domain: by the name the directory reported (winbind
+// reports the NetBIOS name) or the first label of a DNS name, of that domain
+// or of the realm of the subject's principal (Windows reports the DNS name of
+// the computer's own domain).
+func subjectInDomain(subject *profileSubject, domain string) bool {
+	if domain = strings.TrimSpace(domain); domain == "" {
+		return false
+	}
+	for _, have := range []string{subject.Domain, useridentity.RealmOf(subject.Principal)} {
+		if have == "" {
+			continue
+		}
+		label, _, _ := strings.Cut(have, ".")
+		if useridentity.EqualFold(have, domain) || useridentity.EqualFold(label, domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // subjectGroups answers whether one of a subject's groups is the group an
