@@ -719,10 +719,13 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             raise SystemExit(1)
         actives = scoped
 
+    from defenseclaw.hook_integrity import setup_command, unrunnable_hook_problem
+
     rows: list[dict[str, tuple[str, str]]] = []
     any_disabled = False
     runtime_drift_rows: list[str] = []
     runtime_limit_rows: list[str] = []
+    posture_rows: list[str] = []
     for name in actives:
         cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
         configured_cfm = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else fail_mode
@@ -775,6 +778,15 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         else:
             state_raw = "disabled"
             state = ux._style(state_raw, fg="yellow")
+        if gc.enabled and c_enabled:
+            unrunnable = unrunnable_hook_problem(app.cfg, name)
+            if unrunnable:
+                # The agent treats a hook it cannot start as a non-blocking
+                # error, so "closed" in the table would be a false promise.
+                posture_rows.append(
+                    f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
+                    f"to a hook the agent cannot run; repair with {setup_command(name)}"
+                )
         fail_raw = cfm
         cfm_display = _style_fail_mode(cfm)
         if not (gc.enabled and c_enabled) and not as_json:
@@ -831,9 +843,11 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
 
     profile = current_user_guardrail_profile(app.cfg)
     if as_json:
-        _echo_status_json(gc, rows, runtime_drift_rows + runtime_limit_rows, profile)
+        _echo_status_json(gc, rows, posture_rows + runtime_drift_rows + runtime_limit_rows, profile)
         return
     _render_connector_table(rows)
+    for posture_row in posture_rows:
+        ux.warn(posture_row, indent="  ")
     for drift_row in runtime_drift_rows:
         ux.warn("runtime fail-mode drift: " + drift_row, indent="  ")
     for limit_row in runtime_limit_rows:

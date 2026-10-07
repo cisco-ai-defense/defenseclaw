@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.commands.cmd_doctor import _check_hook_runtime_integrity, _DoctorResult
-from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems
+from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, unrunnable_hook_problem
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
@@ -166,3 +166,22 @@ def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
         cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     row = r.checks[-1]
     assert row["status"] == "warn" and "defenseclaw-gateway restart" in row["remediation"]
+
+
+def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch):
+    # GAP-0542 / GAP-0543: after a rename the lock (and the agent hooks) name
+    # the old home; doctor and status say DefenseClaw is not guarding.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    new_home = tmp_path / "new"
+    new_home.mkdir()
+    cfg, script = _install(new_home)
+    lock_path = new_home / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text())
+    old_script = str(tmp_path / "old" / "hooks" / script.name)
+    lock["connectors"]["codex"]["locations"]["hook_script_paths"] = [old_script]
+    lock_path.write_text(json.dumps(lock))
+
+    problem = unrunnable_hook_problem(cfg, "codex")
+    assert f"set up in {tmp_path / 'old'}" in problem
+    assert "not guarding" in problem
+

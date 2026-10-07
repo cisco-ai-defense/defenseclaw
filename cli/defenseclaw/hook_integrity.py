@@ -102,6 +102,26 @@ def non_executable_hook_scripts(cfg: Any, connector: str) -> list[Path]:
     return found
 
 
+def _moved_install_root(script: Path, data_dir: str) -> str:
+    """The old DefenseClaw folder a sealed hook script names, when the install moved.
+
+    Setup seals absolute paths. After an account rename or a home move the
+    lock still names the old home, which no longer exists (GAP-0543).
+    """
+
+    if not data_dir:
+        return ""
+    old_root = script.parent.parent
+    try:
+        script.relative_to(Path(data_dir))
+        return ""
+    except ValueError:
+        pass
+    if os.path.lexists(old_root) or not Path(data_dir, "hooks", script.name).exists():
+        return ""
+    return str(old_root)
+
+
 def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     """Return short descriptions of drifted hook files for *connector*."""
 
@@ -114,7 +134,26 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     from defenseclaw.fail_mode import _sha256_regular_file
 
     problems: list[str] = []
+    missing = [script for script in scripts if not os.path.lexists(script)]
+    if missing:
+        # The agent runs a hook it cannot find as a non-blocking error, so the
+        # call goes through even when the fail mode is closed (GAP-0542).
+        data_dir = str(getattr(cfg, "data_dir", "") or "")
+        moved_from = _moved_install_root(missing[0], data_dir)
+        if moved_from:
+            problems.append(
+                f"this install was set up in {moved_from} but now lives in {data_dir} "
+                "(the account was renamed or its home moved): the agent hooks run scripts that no longer exist, "
+                "so DefenseClaw is not guarding its tool calls"
+            )
+        else:
+            problems.append(
+                f"hook script {missing[0]} is missing, so the agent cannot run it and DefenseClaw is not "
+                "guarding its tool calls"
+            )
     for script in scripts:
+        if script in missing:
+            continue
         expected = digests.get(script.name)
         if expected and _sha256_regular_file(script) != expected:
             problems.append(
@@ -150,6 +189,20 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
             problems.append(f"hook token {token_path} is empty or damaged, so every hook call fails")
         break
     return problems
+
+
+def unrunnable_hook_problem(cfg: Any, connector: str) -> str:
+    """The first reason the agent cannot run the hooks of *connector*, or "".
+
+    A hook the agent cannot start (missing, unreadable, not executable, or
+    left at the old home after a move) is a non-blocking error to the agent,
+    so the fail mode never applies (GAP-0403, GAP-0542).
+    """
+
+    for problem in hook_runtime_problems(cfg, connector):
+        if "cannot run it" in problem or "no longer exist" in problem:
+            return problem
+    return ""
 
 
 _CONFIG_LIMIT = 2 * 1024 * 1024
