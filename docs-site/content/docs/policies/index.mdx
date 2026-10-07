@@ -233,7 +233,7 @@ What activation copies, and where it goes:
 
 The preset's `hilt`, `patterns`, `severity_mappings`, `firewall`, `enforcement` and `audit` sections are not copied: HITL has its own command ([HITL](/docs/hitl)), and the rule pack carries the patterns. Activation **replaces the whole `admission:` section**, so re-apply any hand-tuned admission entries afterwards, or edit the live policy with `defenseclaw policy edit` or `defenseclaw config set` instead of activating again. The `admission` keys are described on the [admission policy](/docs/policies/admission) page.
 
-The running gateway applies the new policy without a restart. If the preset also changes `watch` or `cisco_ai_defense` settings, `policy activate` restarts the gateway itself.
+The running gateway applies the new policy without a restart, `watch` and `cisco_ai_defense` settings included. Only a preset that changes a key the gateway reads at start (a listener, `guardrail.enabled`, `guardrail.scanner_mode`) makes `policy activate` restart it. On a Secure Client computer `policy activate` still restarts the gateway when the preset changes `watch` or `cisco_ai_defense`.
 
 `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input. There is no `data.json` since `config_version: 9`; a leftover one is ignored and reported by `defenseclaw doctor`. Each package exposes domain-specific results rather than one universal decision object:
 
