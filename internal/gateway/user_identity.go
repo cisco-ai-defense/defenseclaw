@@ -188,7 +188,7 @@ func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	userName = sanitizeLLMEventUser(userName)
 	if trustedID {
 		// An OS-derived name may be fully qualified (SSSD's alice@realm).
-		userName = useridentity.BareAccountName(userName)
+		userName = useridentity.ProfileAccountName(userName)
 	}
 	if userID == "" && userName == "" {
 		userID, userName = localProcessUser()
@@ -223,7 +223,7 @@ func localProcessUser() (string, string) {
 		return "", ""
 	}
 	return sanitizeLLMEventUser(firstNonEmpty(current.Uid, current.Username)),
-		sanitizeLLMEventUser(firstNonEmpty(useridentity.BareAccountName(current.Username), current.Name, current.Uid))
+		sanitizeLLMEventUser(firstNonEmpty(useridentity.ProfileAccountName(current.Username), current.Name, current.Uid))
 }
 
 // userFieldsFromHookPayload pulls the user fields a connector may report in

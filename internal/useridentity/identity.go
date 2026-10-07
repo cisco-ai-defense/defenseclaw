@@ -32,6 +32,10 @@ var keepQualifiedNames atomic.Bool
 // account. The Secure Client profile keeps its names that way (issue #1092).
 func KeepQualifiedNames(keep bool) { keepQualifiedNames.Store(keep) }
 
+// ProfileAccountName preserves qualified names only for the Secure Client
+// profile. Use it for OS-derived names that arrive through hook headers too.
+func ProfileAccountName(name string) string { return passwdAccountName(name) }
+
 // passwdAccountName is the bare account of a passwd name, or the name as the
 // system reports it under KeepQualifiedNames.
 func passwdAccountName(name string) string {
