@@ -3504,6 +3504,13 @@ const SandboxEgressCodeHarnessFetch = "SANDBOX_EGRESS_HARNESS_FETCH"
 // (GAP-0134).
 const SandboxEgressCodeLookupRefused = "SANDBOX_EGRESS_LOOKUP_REFUSED"
 
+// auditOnlyEgressCode reports a decision code of a refusal that is audited
+// only: no alert, no defenseclaw.egress.events point and no blocked count on
+// the Sandboxes dashboard.
+func auditOnlyEgressCode(code string) bool {
+	return code == SandboxEgressCodeHarnessFetch || code == SandboxEgressCodeLookupRefused
+}
+
 // auditOnlyEgressSQL keeps the refusals that are audited only off the alert
 // queue.
 const auditOnlyEgressSQL = `COALESCE(CASE WHEN json_valid(COALESCE(event.payload_json,''))

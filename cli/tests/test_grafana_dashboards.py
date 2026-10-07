@@ -1025,6 +1025,22 @@ def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
         assert panel["fieldConfig"]["defaults"]["displayName"] == "${__field.labels." + label + "}", panel["title"]
 
 
+def test_sandboxes_blocked_egress_leaves_out_audit_only_refusals() -> None:
+    # GAP-0134: a refused name lookup is audited before the refused
+    # connection it precedes, and a harness's own request is expected
+    # (GAP-0130): neither counts as blocked egress, as on `sandbox status`.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    exprs = [
+        target["expr"]
+        for panel in board["panels"]
+        for target in panel.get("targets", [])
+        if "egress.blocked" in target.get("expr", "") or "egress[.]blocked" in target.get("expr", "")
+    ]
+    assert exprs
+    for expr in exprs:
+        assert 'body_defenseclaw_network_decision_code!~"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)"' in expr, expr
+
+
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
     audit = _load_audit_module()
 

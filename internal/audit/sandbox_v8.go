@@ -922,7 +922,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 		},
 	}
 	var metrics []RuntimeV8GeneratedMetric
-	if input.End == "" {
+	if input.End == "" && !auditOnlyEgressCode(input.DecisionCode) {
 		metrics = append(metrics, newSandboxEgressMetric(event, identity.Connector, decision, string(input.Source)))
 	}
 	return recorder.emit(ctx, log, metrics)

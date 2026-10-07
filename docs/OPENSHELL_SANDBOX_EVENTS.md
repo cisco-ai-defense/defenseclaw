@@ -135,7 +135,10 @@ add the origin-form path of a plain-HTTP request
 (`defenseclaw.network.target_path`); the DefenseClaw proxy never records
 URL paths. Blocked decisions default to
 MEDIUM, allowed ones to INFO. Each record also increments
-`defenseclaw.egress.events`.
+`defenseclaw.egress.events`, except a refusal that is audited only
+(`SANDBOX_EGRESS_LOOKUP_REFUSED`, `SANDBOX_EGRESS_HARNESS_FETCH`, below),
+which is no blocked request: the Sandboxes dashboard leaves those out of its
+blocked egress too.
 
 OpenShell's denials are recorded as they come (decision code
 `SANDBOX_EGRESS_OPENSHELL_DENIED`), including the denials of this

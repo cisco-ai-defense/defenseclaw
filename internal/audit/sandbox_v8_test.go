@@ -1057,6 +1057,27 @@ func TestSandboxEgressRowNamesTheHostAndTheSandbox(t *testing.T) {
 // (completed with its bytes and duration, failed or timed out) without a
 // second metric point, the actor OpenShell named, the binding, the launching
 // user and the hooks' session, and the process, SSH and inference families.
+// GAP-0134, GAP-0138: a refusal that is audited only (a refused name lookup,
+// the harness's own request) counts no egress decision, and OpenShell's
+// record of a connection it closed on a policy reload carries no bytes or
+// time, which OpenShell does not count.
+func TestSandboxEgressAuditOnlyRecords(t *testing.T) {
+	harness := newSandboxHarness(t)
+	sb := testSandboxIdentity()
+	envelope := CorrelationEnvelope{SessionID: "envelope-session", AgentID: "agent-sandbox-1"}
+	runtime, _ := harness.recordOne(t, router.AdmissionOrdinary, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceOpenShell,
+		Host: "github.com", Blocked: true, DecisionCode: SandboxEgressCodeLookupRefused, Severity: "INFO"}, envelope)
+	if events := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawEgressEvents); len(events) != 0 {
+		t.Fatalf("a refused lookup counted %d egress decisions", len(events))
+	}
+	_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceOpenShell,
+		Host: "api.example.com", Port: 443, End: SandboxEgressFailed, Terminated: true, DecisionCode: "SANDBOX_EGRESS_TERMINATED"}, envelope)
+	if record.Outcome() != observability.OutcomeCancelled {
+		t.Fatalf("outcome = %q", record.Outcome())
+	}
+	assertSandboxFields(t, sandboxBody(t, record), map[string]any{"defenseclaw.network.bytes_up": nil, "defenseclaw.network.duration_ms": nil})
+}
+
 func TestSandboxEgressEndsAndActivity(t *testing.T) {
 	harness := newSandboxHarness(t)
 	sb := testSandboxIdentity()
