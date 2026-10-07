@@ -181,6 +181,18 @@ func (t tetragonIntent) dropin() []byte {
 	return []byte(b.String())
 }
 
+// noteTetragonRestart says, when a run rewrote or removed the helper's
+// Tetragon drop-in, that the sensor helper restarted into the new mode: the
+// one thing an administrator pushing enterprise.tetragon wants to read back.
+func (l *lifecycle) noteTetragonRestart(ctx context.Context, p *plan, changed map[string]bool) {
+	if l.env.GOOS != "linux" || p == nil || p.config == nil || !changed[filepath.Join("/etc/systemd/system", unitSensorHelper+".d", dropinTetragon)] {
+		return
+	}
+	if unit, ok := l.helperUnit(); ok && l.env.Services.Active(ctx, unit) {
+		l.noteChange("the sensor helper restarted into enterprise.tetragon mode %s", p.config.Tetragon.helperMode())
+	}
+}
+
 // sensorDirs are the helper's state and runtime directories on this host.
 func (e *Env) sensorDirs() kernelpolicy.Dirs {
 	return kernelpolicy.Dirs{State: e.P(kernelpolicy.DefaultStateDir), Run: e.P(kernelpolicy.DefaultRunDir)}

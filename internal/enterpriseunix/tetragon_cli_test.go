@@ -175,6 +175,12 @@ func TestTetragonDropinFollowsTheBlock(t *testing.T) {
 	if !strings.Contains(restarted, "stop "+unitSensorHelper) || !strings.Contains(restarted, "start "+unitSensorHelper) {
 		t.Fatalf("a changed drop-in must restart the helper: %v", h.services.calls[calls:])
 	}
+	if record, _ := h.env.loadDeployment(); record == nil {
+		t.Fatal("no deployment record")
+	}
+	if r := h.run(Options{Action: ActionEnsure, ConfigFile: tetragonTestConfig(t, h, "    mode: observe\n    burn_in: 72h\n", true)}); !strings.Contains(strings.Join(r.Changes, "\n"), "the sensor helper restarted into enterprise.tetragon mode observe") {
+		t.Fatalf("ensure does not say the helper restarted into the new mode: %v", r.Changes)
+	}
 	if !h.run(Options{Action: ActionEnsure}).Noop {
 		t.Fatal("an unchanged block must settle to a no-op")
 	}
@@ -187,6 +193,9 @@ func TestTetragonDropinFollowsTheBlock(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionRepair}))
 	if got := h.read(tetragonDropinPath); !strings.Contains(got, "MODE=observe") {
 		t.Fatalf("repair did not restore the drop-in: %s", got)
+	}
+	if r := h.run(Options{Action: ActionEnsure}); strings.Contains(strings.Join(r.Changes, "\n"), "restarted into enterprise.tetragon") {
+		t.Fatalf("an unchanged drop-in names no helper restart: %v", r.Changes)
 	}
 
 	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: tetragonTestConfig(t, h, "", true)}))

@@ -161,16 +161,79 @@ type enterpriseRuntimeBackend struct {
 		Error string `json:"error,omitempty"`
 	} `json:"policies,omitempty"`
 	KernelFloor *struct {
-		Mode          string `json:"mode,omitempty"`
-		EnforcedUsers int    `json:"enforced_users"`
-		EnrolledUsers int    `json:"enrolled_users"`
-		BurnInUsers   int    `json:"burn_in_users"`
-		PausedUntil   string `json:"paused_until,omitempty"`
+		Mode           string   `json:"mode,omitempty"`
+		EnforcedUsers  int      `json:"enforced_users"`
+		EnrolledUsers  int      `json:"enrolled_users"`
+		BurnInUsers    int      `json:"burn_in_users"`
+		PausedUntil    string   `json:"paused_until,omitempty"`
+		Approval       string   `json:"approval,omitempty"`
+		NextReadyHours *float64 `json:"next_ready_hours,omitempty"`
 	} `json:"kernel_floor,omitempty"`
+	// CustomerPolicies and CustomerEvents are the customer's own Tetragon
+	// policies and their event counts: DefenseClaw reads their events and
+	// never changes them.
+	CustomerPolicies []struct {
+		Name      string `json:"name"`
+		Mode      string `json:"mode,omitempty"`
+		State     string `json:"state,omitempty"`
+		Seen      int64  `json:"seen"`
+		Forwarded int64  `json:"forwarded"`
+		Dropped   int64  `json:"dropped"`
+	} `json:"customer_policies,omitempty"`
+	CustomerEvents *struct {
+		Seen      int64 `json:"seen"`
+		Forwarded int64 `json:"forwarded"`
+		Dropped   int64 `json:"dropped"`
+	} `json:"customer_events,omitempty"`
+}
+
+// tetragonFallbackWords say why the native backend runs although Tetragon is
+// wanted, in the words of defenseclaw.kernel_sensor.fallback_text.
+var tetragonFallbackWords = map[string]string{
+	"tetragon_unavailable":         "Tetragon is not running or its info file is missing",
+	"tetragon_tcp_api":             "its API listens on TCP instead of a local socket",
+	"tetragon_untrusted_endpoint":  "its socket or info file is not owned by root",
+	"tetragon_unsupported_version": "this Tetragon version is not supported",
+}
+
+func tetragonFallback(reason string) string {
+	code, detail, _ := strings.Cut(strings.TrimSpace(reason), ":")
+	if words, ok := tetragonFallbackWords[strings.TrimSpace(code)]; ok {
+		return words
+	}
+	text := strings.Join(strings.Fields(defaultStr(strings.TrimSpace(detail), strings.ReplaceAll(code, "_", " "))), " ")
+	if len(text) > 80 {
+		text = text[:77] + "..."
+	}
+	return defaultStr(text, "no reason reported")
+}
+
+// readyETA is "~9 days" for a number of hours, as the Python shared module
+// words it; "" for no estimate.
+func readyETA(hours *float64) string {
+	switch {
+	case hours == nil || *hours <= 0:
+		return ""
+	case *hours < 1:
+		return "~1 hour"
+	case *hours < 48:
+		if n := int(*hours + 0.5); n != 1 {
+			return fmt.Sprintf("~%d hours", n)
+		}
+		return "~1 hour"
+	}
+	return fmt.Sprintf("~%d days", int(*hours/24+0.5))
+}
+
+func usersNoun(n int) string {
+	if n == 1 {
+		return "1 user"
+	}
+	return fmt.Sprintf("%d users", n)
 }
 
 // lines are the backend's lines under its plane, in the words of
-// `defenseclaw agent discovery runtime status`.
+// `defenseclaw agent discovery runtime status` (defenseclaw.kernel_sensor).
 func (b *enterpriseRuntimeBackend) lines() []string {
 	if b == nil {
 		return nil
@@ -178,7 +241,11 @@ func (b *enterpriseRuntimeBackend) lines() []string {
 	var out []string
 	switch {
 	case strings.EqualFold(b.Kind, "tetragon"):
-		parts := []string{strings.TrimSpace("Tetragon " + b.Version)}
+		version := strings.TrimSpace(b.Version)
+		if version != "" && version[0] >= '0' && version[0] <= '9' {
+			version = "v" + version
+		}
+		parts := []string{strings.TrimSpace("Tetragon " + version)}
 		if b.Mode != "" {
 			parts = append(parts, b.Mode)
 		}
@@ -189,21 +256,50 @@ func (b *enterpriseRuntimeBackend) lines() []string {
 		}
 		out = append(out, "kernel sensor: "+strings.Join(parts, ", "))
 	case b.FallbackReason != "":
-		out = append(out, "kernel sensor: cn_proc and fanotify (Tetragon not used: "+b.FallbackReason+")")
+		out = append(out, "kernel sensor: cn_proc and fanotify (Tetragon not used: "+tetragonFallback(b.FallbackReason)+")")
 	}
 	if floor := b.KernelFloor; floor != nil {
-		mode := defaultStr(floor.Mode, "monitor")
-		text := fmt.Sprintf("%s for %d users", mode, floor.EnrolledUsers)
-		if mode == "enforce" {
-			text = fmt.Sprintf("enforce for %d of %d users", floor.EnforcedUsers, floor.EnrolledUsers)
+		var text string
+		switch {
+		case !strings.EqualFold(defaultStr(floor.Mode, "monitor"), "enforce"):
+			text = "monitoring " + usersNoun(floor.EnrolledUsers) + ", not enforcing"
+		case floor.Approval == "missing":
+			text = "monitoring " + usersNoun(floor.EnrolledUsers) + "; enforce is not approved yet"
+		case floor.Approval == "stale":
+			text = "monitoring " + usersNoun(floor.EnrolledUsers) + "; the approval is for another build"
+		default:
+			text = fmt.Sprintf("enforcing %d of %d users", floor.EnforcedUsers, floor.EnrolledUsers)
 			if floor.BurnInUsers > 0 {
-				text += fmt.Sprintf(" (%d in burn-in)", floor.BurnInUsers)
+				text += fmt.Sprintf("; %d in burn-in", floor.BurnInUsers)
+				if eta := readyETA(floor.NextReadyHours); eta != "" {
+					text += ", next ready " + eta
+				}
 			}
 		}
 		if floor.PausedUntil != "" {
 			text += "; paused until " + floor.PausedUntil
 		}
-		out = append(out, "kernel floor: "+text)
+		out = append(out, "kernel controls: "+text)
+	}
+	if len(b.CustomerPolicies) > 0 || b.CustomerEvents != nil {
+		enforcing := 0
+		for _, policy := range b.CustomerPolicies {
+			if strings.EqualFold(policy.Mode, "enforce") {
+				enforcing++
+			}
+		}
+		text := fmt.Sprintf("%d loaded (%d enforcing)", len(b.CustomerPolicies), enforcing)
+		if events := b.CustomerEvents; events != nil {
+			noun := "events"
+			if events.Forwarded == 1 {
+				noun = "event"
+			}
+			text += fmt.Sprintf("; %d agent %s forwarded", events.Forwarded, noun)
+			if events.Dropped > 0 {
+				text += fmt.Sprintf(", %d over the budget", events.Dropped)
+			}
+		}
+		out = append(out, "your Tetragon policies: "+text+" (DefenseClaw never changes them)")
 	}
 	return out
 }
