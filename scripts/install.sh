@@ -513,10 +513,16 @@ if [[ "${ROLLBACK}" == true ]]; then
         info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
+    # Each install shows only its own audit window, so say how to read the
+    # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
         info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+        [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
+            && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else
         info "Data written while ${current} ran is kept in ${PREVIOUS} and comes back if you roll back again."
+        [[ -f "${PREVIOUS}/data/audit.db" ]] \
+            && info "Its audit events: defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     fi
     exit "${rollback_rc}"
 fi

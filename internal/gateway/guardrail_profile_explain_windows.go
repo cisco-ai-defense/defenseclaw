@@ -14,7 +14,7 @@ import (
 )
 
 // profileExplainAccount names an account (name or SID) through the LSA.
-func profileExplainAccount(name string) (id, userName string, ok bool) {
+var profileExplainAccount = func(name string) (id, userName string, ok bool) {
 	account, err := osuser.Lookup(name)
 	if err != nil {
 		if account, err = osuser.LookupId(name); err != nil {
@@ -30,6 +30,6 @@ const profileExplainUPNWait = 5 * time.Second
 
 // profileExplainDirectoryFacts resolves the facts a verified request from
 // sid carries: the Windows identity store plus the guardian identity spool.
-func profileExplainDirectoryFacts(id string) (useridentity.DirectoryFacts, error) {
+var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
 	return resolveWindowsDirectoryFacts(id, profileExplainUPNWait)
 }
