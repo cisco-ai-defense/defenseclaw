@@ -1188,15 +1188,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("audit_db", oldCfg.AuditDB, newCfg.AuditDB)
 	add("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
 	// Secure Client keeps the reload classification it had before the
-	// configuration generation (issue #1092): its v8 action keys, the hot
-	// set below, a restart for any gateway edit but the reload mode, and
-	// every per-connector guardrail setting.
+	// configuration generation (issue #1092): the hot set below, a restart
+	// for any gateway edit but the reload mode, and every per-connector
+	// guardrail setting. Its v8 action keys (skill_actions, mcp_actions,
+	// plugin_actions) are read as admission, which the restart set covers.
 	secureClient := oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration()
-	if secureClient {
-		add("skill_actions", oldCfg.SkillActions, newCfg.SkillActions)
-		add("mcp_actions", oldCfg.MCPActions, newCfg.MCPActions)
-		add("plugin_actions", oldCfg.PluginActions, newCfg.PluginActions)
-	}
 	standalone := oldCfg.StandaloneEnterprise() || newCfg.StandaloneEnterprise()
 	if standalone {
 		// The standalone profile keeps its runtime settings in the enterprise
