@@ -242,6 +242,37 @@ def test_setup_v8_failed_add_takes_the_new_key_back_out_of_dotenv(
     assert "DEFENSECLAW_SPLUNK_HEC_TOKEN" not in os.environ
 
 
+def test_setup_v8_failed_add_keeps_its_error_when_the_key_cannot_be_taken_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0374: a hand-made .env refused the restore on Windows, and the
+    # rollback error hid why the add failed while the token stayed set.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setattr(
+        "defenseclaw.observability.v8_writer.inspect_v8_config",
+        lambda *_args, **_kwargs: SimpleNamespace(valid=False),
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise v8_activation_module.V8ActivationRollbackError("rollback_incomplete", "windows_publish_verification")
+
+    monkeypatch.setattr("defenseclaw.commands.cmd_setup_observability.restore_secret", refuse)
+    monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN")
+    result = CliRunner().invoke(
+        observability,
+        ["add", "splunk-hec", "--non-interactive", "--name", "hec", "--token", "dummy-hec",
+         "--endpoint", "https://hec.example.com:8088/services/collector"],
+        obj=_setup_app(tmp_path),
+    )
+
+    assert result.exit_code != 0
+    assert "rollback_incomplete" not in result.output
+    assert "is still in" in result.output
+    assert "DEFENSECLAW_SPLUNK_HEC_TOKEN" not in os.environ
+
+
 def test_setup_v8_interactive_loopback_otlp_asks_instead_of_failing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
