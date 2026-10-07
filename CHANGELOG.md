@@ -8,6 +8,109 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — Tetragon on managed Linux
+
+Applies to the enterprise standalone profile on Linux, except where an entry
+says otherwise. Per-user installs never connect to Tetragon.
+
+### Added
+
+- **Tetragon on managed Linux: consume, observe and an enforcement pilot.**
+  When the computer already runs [Tetragon](https://tetragon.io), the root
+  sensor helper reads its events over its root-owned Unix socket and uses
+  them as Plane C's process source, with `cn_proc` and `fanotify` as the
+  fallback in the same stream. One new block controls it,
+  `enterprise.tetragon {mode, burn_in, enforce_ack}`:
+  - `consume` (the default, no setting needed) only reads events. Tetragon
+    records the binary, arguments, user and parent at the exec, so short-lived
+    processes keep their names, native Claude Code is identified by its
+    executable, and a reused pid is no longer guessed from a name change.
+  - `observe` also loads DefenseClaw's own `defenseclaw-*` policies: file opens
+    of credential, persistence and agent-configuration paths of enrolled
+    users, connects per binary, and two kernel controls in monitor mode that
+    count what they would have denied.
+  - `enforce` lets the two controls return `EPERM`: `kernel.ssh_private_key_read`
+    (exact SSH private key names) and `kernel.persistence_write` (in-place
+    write opens of shell profiles and user autostart entries). Nothing promotes
+    on its own: it needs `mode: enforce` and an `enforce_ack` equal to the
+    `kernel_policy` digest that `enterprise linux tetragon status` prints, a
+    per-user burn-in measured in covered agent-hours (default 168h, reset when
+    the control set or the user's connector set changes), and a connector in
+    `action` mode. Controls apply only below enrolled command-line agents of
+    the user; IDE terminals, look-alike processes, other users and containers
+    are observed, never denied.
+  - The helper connects only to a Unix socket that root owns and root serves,
+    never to TCP, and calls only what the mode allows. It changes only policies
+    it recorded loading.
+  - Support: RHEL 9 x86_64 with Tetragon 1.7.x is verified. Tetragon 1.6.x
+    supports `consume` only, and Ubuntu 22.04/24.04 and arm64 support
+    `consume` only; these are expected, not verified. RHEL 8 falls back to
+    `cn_proc` and `fanotify`.
+- **Kill switch and cleanup.** `enterprise linux tetragon status|pause|resume`
+  (root). A pause (default 4h, at most 7d) survives restarts of the helper and
+  of Tetragon; a policy you move to monitor or delete with `tetra` is never put
+  back until the intent changes. Uninstall, purge, rollback and package
+  downgrade delete the policies the helper loaded, before any file is removed
+  (`defenseclaw-sensor-helper --tetragon-cleanup [--check]`).
+  `verify` fails with `kernel_policy_orphaned` for a leftover policy, and warns
+  with the new `tetragon_*` and `kernel_*` codes documented under
+  [Troubleshooting](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/troubleshooting).
+- **Observability.** `plane_health` gains `plane_backend`, `plane_mechanism`,
+  `events_lost`, `loss_known` and `container_events`; runtime activity and
+  finding records gain the user, the agent identity, `event_source`,
+  `hook_seen` and, for kernel decisions, `kernel.outcome` and `kernel.control`;
+  kernel denials are `log.enforcement.block.applied` records with the policy
+  and the control-set digest; and a new low-volume family,
+  `log.ai.runtime.kernel_policy`, records each state change. Grafana gains a
+  **Kernel floor (Linux)** row and a Plane C source table, and the Splunk
+  bridge the matching macros and panels.
+- **Surfaces.** `defenseclaw agent discovery runtime status` shows the backend
+  and the kernel floor; `runtime permissions` explains why a per-user install
+  does not connect to Tetragon; `defenseclaw doctor` has a **Kernel sensor
+  (Tetragon)** row (TCP API, fallback, policy not applied, pause, orphans);
+  `defenseclaw config get --effective` lists `enterprise.tetragon.*`;
+  the TUI Runtime panel shows the backend; `/health` and
+  `GET /api/v1/ai-usage/runtime` carry `backend` and `policy.kernel`.
+- **New page: Agent segmentation, visibility and enforcement.** Which layer
+  (hooks, OpenShell, the egress proxy, the runtime planes, Tetragon, the
+  sandbox manager) sees and which enforces each intent on each kind of
+  computer, with fail-open and fail-closed per layer.
+
+### Fixed
+
+- **`cn_proc` needs `CAP_NET_ADMIN`.** The runtime planes documentation, the
+  permissions probe and the TUI said the Linux process connector needed no
+  privilege. It needs `CAP_NET_ADMIN`, so an unprivileged install got no
+  process events. `runtime permissions` now probes it, and
+  `runtime permissions --grant` includes it.
+- **The enterprise-block refusal covers every field.** The checks that refuse
+  an `enterprise` block in an open-source or Secure Client config list fields
+  by hand; a reflection test now fails when a new field is missing from them,
+  and `enterprise.tetragon` is covered.
+- **Container processes no longer join host agent sessions** when Tetragon is
+  the source. A program named `claude` in a devcontainer used to be scored as a
+  host agent; it is now counted in `container_events` and never joined. Plane C
+  findings for such hosts change accordingly.
+
+### Changed
+
+- The sensor helper's unit starts after `tetragon.service` and has a private
+  state directory, `/var/lib/defenseclaw-sensor`. The first `ensure` or
+  `repair` of this release applies them. A host that sets no
+  `enterprise.tetragon` gets no new drop-in.
+- Downgrading below this release while policies are loaded: see
+  [Remove the policies, or downgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux#remove-the-policies-or-downgrade).
+
+### Removed
+
+- **`ai_discovery.runtime.acquisition` and `helper_socket`.** The closed config
+  schema always rejected them and they were never in a release; the helper is
+  chosen automatically (`DEFENSECLAW_SENSOR_HELPER_SOCKET` stays).
+- **The claim that `cn_proc` is unprivileged** (comments, the permissions
+  probe, docs and TUI copy): it was false.
+- **The sandbox manager's private command-line redaction.** One shared
+  implementation now serves the manager and the sensor helper.
+
 ## [1.0.0] — Release-owned upgrades
 
 1.0 replaces the 0.x upgrade system. `defenseclaw upgrade` now downloads the
