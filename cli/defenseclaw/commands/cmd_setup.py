@@ -2895,7 +2895,11 @@ def setup_mcp_scanner(
 
     if non_interactive:
         if analyzers is not None:
-            mc.analyzers = ",".join(scanner_settings.normalize_mcp_analyzers(analyzers)) or "auto"
+            names = scanner_settings.normalize_mcp_analyzers(analyzers)
+            problem = _unknown_mcp_analyzers(names)
+            if problem:
+                raise click.BadParameter(problem, param_hint="'--analyzers'")
+            mc.analyzers = ",".join(names) or "auto"
         # The judge's base URL is set with `setup skill-scanner --llm-base-url`
         # or `setup llm`; both scanners share the top-level llm: block.
         _apply_scanner_llm_flags(llm, llm_provider, llm_model, None)
@@ -2945,6 +2949,21 @@ def setup_mcp_scanner(
         _log_setup_action(app, ACTION_SETUP_MCP_SCANNER, " ".join(parts), allow_offline=True)
 
 
+def _unknown_mcp_analyzers(names: list[str]) -> str:
+    """The message for analyzers the MCP scanner does not have, or "" (GAP-0055).
+
+    The skill scanner has a virustotal analyzer; the MCP scanner does not, and the
+    config schema rejects the name at save time.
+    """
+    unknown = [name for name in names if name not in scanner_settings.MCP_ANALYZERS]
+    if not unknown:
+        return ""
+    return (
+        f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not an MCP scanner analyzer; "
+        f"use {', '.join(scanner_settings.MCP_ANALYZERS)} or auto."
+    )
+
+
 def _validated_api_key_env_name(
     value: str,
     param_hint: str = "'--api-key-env'",
@@ -2991,13 +3010,18 @@ def _interactive_mcp_setup(mc, cfg) -> None:
     click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
-    raw = click.prompt(
-        "  Analyzers (comma-separated, e.g. yara,llm,behavioral; auto = YARA plus a ready LLM)",
-        default=",".join(scanner_settings.normalize_mcp_analyzers(mc.analyzers)) or "auto",
-    )
-    # "auto" inside a list stands for YARA: appending llm to "auto" used to
-    # save "auto,llm", which ran the LLM alone and dropped YARA.
-    names = scanner_settings.normalize_mcp_analyzers(raw)
+    while True:
+        raw = click.prompt(
+            "  Analyzers (comma-separated, e.g. yara,llm,behavioral; auto = YARA plus a ready LLM)",
+            default=",".join(scanner_settings.normalize_mcp_analyzers(mc.analyzers)) or "auto",
+        )
+        # "auto" inside a list stands for YARA: appending llm to "auto" used to
+        # save "auto,llm", which ran the LLM alone and dropped YARA.
+        names = scanner_settings.normalize_mcp_analyzers(raw)
+        problem = _unknown_mcp_analyzers(names)
+        if not problem:
+            break
+        click.echo(f"  {problem}")
 
     use_llm = click.confirm("  Enable LLM analyzer?", default=bool(llm.model))
     if use_llm:

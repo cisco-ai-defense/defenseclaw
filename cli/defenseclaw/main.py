@@ -702,8 +702,9 @@ def main() -> None:
     ux.configure_console_output()
     _keep_console_width_when_piped()
     _force_utf8_io()
-    from defenseclaw.config_writer import ManagedConfigWriteError
+    from defenseclaw.config_writer import ConfigWriteError, ManagedConfigWriteError, plain_error
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+    from defenseclaw.observability.v8_config import V8ConfigError
 
     try:
         if not _try_launch_tui():
@@ -730,6 +731,12 @@ def main() -> None:
         # exit 3, never a traceback.
         click.echo(f"error: {exc}", err=True)
         sys.exit(3)
+    except (ConfigWriteError, V8ConfigError) as exc:
+        # A change the config writer refuses (a value the schema rejects, a
+        # config.yaml that changed underneath) ends here as one plain line, never
+        # a traceback (GAP-0055). The file is left as it was.
+        click.echo(f"Error: config.yaml was not changed: {plain_error(exc)}", err=True)
+        sys.exit(1)
     except OSError as exc:
         if _output_pipe_closed(exc):
             _silence_closed_stdout()
