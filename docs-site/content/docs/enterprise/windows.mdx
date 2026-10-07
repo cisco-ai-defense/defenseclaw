@@ -49,6 +49,7 @@ cannot change either tree.
 | Gateway data | `C:\ProgramData\Cisco\DefenseClaw\runtime` |
 | Authorization ledger | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state` |
 | Service logs | `C:\ProgramData\Cisco\DefenseClaw\logs` |
+| Scanner runtime | `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`: `defenseclaw-scanners.exe` and the Python runtime it unpacks (the skill scanner, the MCP scanner and LiteLLM). LocalSystem and Administrators have full control; the gateway service can only read and run it. The lifecycle installs it from the Setup payload and removes it on uninstall. |
 | Hook runtime | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, readable by users. It holds, for each per-user connector, the enrollment list and runtime selector, and `machine-policy.json`, the public machine-policy summary. |
 | Lifecycle log | `%WINDIR%\Logs\DefenseClaw`: `enterprise-lifecycle.log`, `last-result.json` and, for MDM runs, `mdm-wrapper.log`. Users can read these files. |
 
@@ -168,8 +169,10 @@ guardrail:
     claudecode: {}
 ```
 
-Each key under `guardrail.connectors` turns on protection for that agent. A
-config with no connectors protects nothing. See
+Each key under `guardrail.connectors` turns on protection for that agent; an
+empty value (`{}`) enables it with the default settings. A config with no
+connectors protects nothing: `status` warns `no_connectors_enabled` and
+`verify` fails. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
@@ -283,6 +286,55 @@ The command runs only from an elevated prompt. It writes
 `C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key` and restarts the
 gateway. See [AI Defense key](/docs/enterprise/ai-defense-key) for the config
 keys and for rotation.
+
+### 5. Add the LLM judge
+
+The LLM judge checks prompts (and, if you turn it on, tool results) for the
+connectors you list, and the skill and MCP scanners use the same model for
+their LLM analyzers. The gateway runs as a service account without a user
+environment, so it never reads `llm.api_key_env` or a `.env` key here. Name
+a protected credential for the key instead:
+
+```yaml title="config.yaml (excerpt)"
+llm:
+  model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+  region: us-east-1
+guardrail:
+  judge:
+    enabled: true
+    hook_connectors: [claudecode, codex]
+  # Judge tool results too. Without this line the judge reads prompts only:
+  # the default strategy for tool results is regex_only.
+  detection_strategy_completion: regex_judge
+scanners:
+  skill_scanner:
+    policy: quiet
+    use_llm: true
+  mcp_scanner:
+    analyzers: [yara, llm]
+enterprise:
+  profile: standalone
+  inspection:
+    llm:
+      credential: llm-judge
+```
+
+Run `/ensure` with the updated config, then store the key the same way as
+the AI Defense key:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set `
+  --name llm-judge --from-file 'C:\ProgramData\DefenseClaw-Staging\llm.key' --json
+Remove-Item 'C:\ProgramData\DefenseClaw-Staging\llm.key'
+```
+
+The judge and the skill, MCP and plugin scanners all take their key from
+that credential. A missing credential leaves them without a key; they never
+fall back to an environment variable. Store a new key with the same command
+to rotate it. `enterprise windows status` then prints a `Scanners:` line with
+the scanner versions, the skill scanner policy and the judge model. Without
+an `llm:` block it warns `scanner_judge_missing`: the scanners then run their
+static analyzers only.
 
 ## Verify the install
 
@@ -511,15 +563,49 @@ signals; it takes the account name or SID), then the runtime discovery
 planes (`ai_discovery.runtime`) with their state, last poll and findings.
 Standard accounts cannot run it.
 
-Skills and MCP servers are inventoried, not scanned: a managed deployment
-does not run the skill or MCP scanners. The `discovery` view names each
-skill and MCP server per user. Your observability destinations get the
+The `discovery` view names each skill and MCP server per user. Install
+admission is separate: see [Scan skills, MCP servers and plugins](#scan-skills-mcp-servers-and-plugins). Your observability destinations get the
 `ai_component.discovered`, `changed` and `removed` records with the user
 (`user.id`, `defenseclaw.user.name`) but without the skill or MCP server
 name: the per-entry `ai_component.observed` records stay in the local
 inventory, so read the names with `discovery --user <account> --json`. See
 [AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)
 for the folders the service may read in each profile.
+
+## Scan skills, MCP servers and plugins
+
+The gateway service watches the skill and plugin folders of every user the
+hook guardian protects, for each connector, and the Codex and Claude Code MCP
+server lists in those users' profiles. A skill, plugin or MCP server that
+appears there goes through install admission with the scanners in the scanner
+runtime and the `admission` and `scanners` keys of the admin config, as on a
+per-user install:
+
+- A verdict at a level whose `admission.<type>.actions` value is `block`
+  blocks the asset. Its folder stays where the user put it
+  (`file_action=none` in the audit row).
+- With `admission.mcp.scan_on_install: false` a new MCP server is admitted
+  without a scan, and the audit row says `reason=scan-disabled`.
+- A folder created after the gateway starts is picked up within about 30
+  seconds. The gateway never creates a folder in a user profile.
+
+Standard users have no `skill`, `mcp` or `plugin` commands on a managed
+computer. An administrator scans a folder or a remote MCP server with the
+same scanners, policy and judge from an elevated prompt:
+
+```powershell title="Elevated Administrator prompt"
+$Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
+& $Cli scan skill 'C:\Users\Public\review\my-skill'
+& $Cli scan mcp https://mcp.example.com/mcp
+& $Cli scan plugin 'C:\Users\Public\review\my-plugin'
+```
+
+Each command prints the verdict, the findings, the skill scanner policy (or
+the MCP analyzers) and the judge model; add `--json` for the full response.
+The gateway service reads the folder, so scan a copy in a folder it can
+read, such as one under `C:\Users\Public`. Variables such as
+`SKILL_SCANNER_LLM_MODEL` in the administrator's shell are ignored: the scan
+runs in the gateway service with the admin config.
 
 ## Inspect machine policy
 

@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,5 +125,33 @@ func TestBundledSkillScanPathDoesNotTrustHermesManifestWithoutInstalledSource(t 
 
 	if isBundledSkillScanPath(target) {
 		t.Fatal("user-writable Hermes manifest alone created a scanner bypass")
+	}
+}
+
+// A folder the gateway's own account cannot read gets one actionable line, not
+// the scanner's Python traceback (GAP-0229).
+func TestHandleSkillScanNamesAFolderTheGatewayCannotRead(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a POSIX permission denial for a non-root user")
+	}
+	locked := filepath.Join(t.TempDir(), "locked")
+	target := filepath.Join(locked, "skill")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	body, err := json.Marshal(skillScanRequest{Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+
+	(&APIServer{}).handleSkillScan(w, httptest.NewRequest(http.MethodPost, "/v1/skill/scan", bytes.NewReader(body)))
+
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "service account cannot read") {
+		t.Fatalf("response = %d %q, want 403 naming the unreadable folder", w.Code, w.Body.String())
 	}
 }

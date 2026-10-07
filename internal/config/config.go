@@ -2433,13 +2433,21 @@ func loadFromFile(configFile string, publishProvenance, checkPolicyInputs bool) 
 	if err != nil {
 		return nil, err
 	}
+	return loadFileSource(configFile, raw, publishProvenance, true, checkPolicyInputs)
+}
+
+// loadFileSource decodes the source bytes loadFromFile read from configFile.
+func loadFileSource(configFile string, raw []byte, publishProvenance, enforceManagedTrust, checkPolicyInputs bool) (*Config, error) {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, true, checkPolicyInputs)
+	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, enforceManagedTrust, checkPolicyInputs)
 	if err != nil {
 		return nil, err
+	}
+	if candidate.SecureClientIntegration() {
+		dropEmptyGuardrailConnectors(candidate, raw)
 	}
 	applyRuntimeV8DataDirDefaults(candidate, document, candidate.DataDir)
 	return candidate, nil
@@ -2926,6 +2934,27 @@ func restoreSignaturePackDigests(cfg *Config, raw []byte, configFile string) err
 	}
 	cfg.AIDiscovery.SignaturePackDigests = source.AIDiscovery.SignaturePackDigests
 	return nil
+}
+
+// dropEmptyGuardrailConnectors removes the guardrail.connectors entries whose
+// value is empty (codex: {} or a bare codex:). The strict loader keeps them as
+// enabled with the defaults (GAP-0221); the file loader of main, which the
+// Windows guardian, enumerator and Setup read a Secure Client config with,
+// dropped them, so a Secure Client file load still does (issue #1092).
+func dropEmptyGuardrailConnectors(cfg *Config, raw []byte) {
+	var source struct {
+		Guardrail struct {
+			Connectors map[string]any `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if yaml.Unmarshal(raw, &source) != nil {
+		return
+	}
+	for name, value := range source.Guardrail.Connectors {
+		if body, isMap := value.(map[string]any); value == nil || (isMap && len(body) == 0) {
+			delete(cfg.Guardrail.Connectors, name)
+		}
+	}
 }
 
 // validateManagedEnterpriseListenerBindings keeps every inbound enterprise

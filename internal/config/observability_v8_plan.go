@@ -74,7 +74,12 @@ type ObservabilityV8EffectiveTracePolicy struct {
 	SamplerArg          string                             `json:"sampler_arg,omitempty"`
 	SemanticProfile     string                             `json:"semantic_profile"`
 	SemanticProfileLock ObservabilityV8SemanticProfileLock `json:"semantic_profile_lock"`
-	Limits              ObservabilityV8TraceLimitsSource   `json:"limits"`
+	// CompatibilityAliases is the retired alias switch. Only the plan of a
+	// Secure Client source carries it, as on main: the plan digest stamps
+	// every local audit record (provenance.config_digest, content_hash), so
+	// Secure Client keeps the digest of main (issue #1092). Nothing reads it.
+	CompatibilityAliases *bool                            `json:"compatibility_aliases,omitempty"`
+	Limits               ObservabilityV8TraceLimitsSource `json:"limits"`
 }
 
 type ObservabilityV8SemanticProfileLock struct {

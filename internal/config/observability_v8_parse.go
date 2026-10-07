@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -115,6 +116,12 @@ func ParseCompileObservabilityV8(
 	if err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
+	if secureClientManagedDocument(runtime.GOOS, v8DocumentRoot(document.Document)) {
+		plan, err = withObservabilityV8SecureClientAliasSwitch(plan, source.TracePolicy.CompatibilityAliases)
+		if err != nil {
+			return nil, annotateObservabilityV8SemanticError(document, err)
+		}
+	}
 	plan, err = addObservabilityV8SourceProvenance(plan, document)
 	if err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
@@ -124,6 +131,21 @@ func ParseCompileObservabilityV8(
 		Observability: source,
 		Plan:          plan,
 	}, nil
+}
+
+// withObservabilityV8SecureClientAliasSwitch puts the retired
+// trace_policy.compatibility_aliases switch back into the plan of a Secure
+// Client source, with the value and provenance main compiled for it (true
+// unless the source turns it off). The plan digest stamps every local audit
+// record, so Secure Client keeps the digest of main (issue #1092).
+func withObservabilityV8SecureClientAliasSwitch(plan *ObservabilityV8Plan, source *bool) (*ObservabilityV8Plan, error) {
+	effective := cloneObservabilityV8EffectivePlan(plan.effective)
+	value := source == nil || *source
+	effective.TracePolicy.CompatibilityAliases = &value
+	effective.Provenance = append(effective.Provenance, ObservabilityV8Provenance{
+		Path: "observability.trace_policy.compatibility_aliases", Origin: originObservabilityV8Pointer(source),
+	})
+	return newObservabilityV8Plan(effective)
 }
 
 func addObservabilityV8SourceProvenance(

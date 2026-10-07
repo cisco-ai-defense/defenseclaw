@@ -418,6 +418,9 @@ guardrail:
   port: 4000                   # guardrail proxy port
   block_message: ""            # custom; empty -> default
   detection_strategy: regex_judge  # default; regex_only | regex_judge | judge_first
+  detection_strategy_prompt: ""      # per-lane override; empty -> detection_strategy
+  detection_strategy_completion: regex_only  # default for tool results and completions; regex_judge also sends them to the judge
+  detection_strategy_tool_call: ""   # per-lane override; empty -> detection_strategy
 
   cisco:
     endpoint: ""
@@ -1193,6 +1196,7 @@ and examples, see the [enterprise settings reference](/docs/enterprise/configura
 | `enterprise.profile` | `secure_client` \| `standalone` (Windows and macOS: `secure_client`; Linux: `standalone`) | all | Linux accepts only `standalone` |
 | `enterprise.inspection.ai_defense.enabled` | bool (`false`) | all | Adds Cisco AI Defense to the local engine |
 | `enterprise.inspection.ai_defense.credential` | credential name | all | Lowercase letters, digits, and dashes; must be valid when AI Defense is enabled. Store the value with `enterprise secret set`. An inline `cisco_ai_defense.api_key` is rejected |
+| `enterprise.inspection.llm.credential` | credential name | standalone | Names the stored API key of the `llm:` block for the judge and the scanners. Store the value with `enterprise secret set`; `llm.api_key_env` and `.env` are not read when it is set. Refused under the Secure Client profile |
 | `enterprise.enrollment.mode` | `auto` \| `manifest` (`auto`) | all | With `manifest` you publish `targets.yaml` and the enumerator does nothing. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`) |
 | `enterprise.enrollment.include_users` | list | all | Linux and macOS: also enrolls these accounts, bypassing the uid range and the login-shell check. Windows: accepted, but every profile is already a candidate, so it changes nothing |
 | `enterprise.enrollment.exclude_users` | list | all | Never enrolled; wins over every include. Linux and macOS also match a numeric uid |

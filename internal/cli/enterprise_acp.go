@@ -47,18 +47,29 @@ machine state; only the bearer copy is published into the target user's private
 ACP runtime. The administrator commands never write an editor profile; the
 enrolled user runs "setup" to write their own editor entry.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// enroll, verify and revoke are administrator commands: on a managed
-		// host they read the administrator-owned deployment, as `enterprise
-		// hooks` and `enterprise policy` do, not the own ~/.defenseclaw of
-		// the caller (GAP-0253). The user-side setup reads no central config
-		// and runs as the user.
+		// The administrator commands read the managed deployment (GAP-0249).
+		// The user-side setup reads no central config and runs as the user
+		// (GAP-0254).
 		if cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] != "true" {
-			if err := pinEnterpriseACPEnv(cmd); err != nil {
+			if err := pinEnterpriseACPAdministratorEnv(cmd); err != nil {
 				return err
 			}
 		}
 		return rootPersistentPreRunNoAuditE(cmd, args)
 	},
+}
+
+// pinEnterpriseACPAdministratorEnv points an administrator on a standalone
+// host at the managed deployment, as status, audit export and enterprise
+// policy do: root on Linux and macOS, an elevated administrator or
+// LocalSystem on Windows. Both used to read their own missing per-user
+// config.yaml and got the standard-user refusal (GAP-0249).
+func pinEnterpriseACPAdministratorEnv(cmd *cobra.Command) error {
+	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
+	return pinManagedAdministratorEnvironment("enterprise acp", func() string {
+		return windowsManagedStandardUserViewAnswer("the ACP enrollments",
+			"enterprise acp "+cmd.Name()+" --user <name> --client <client> --agent <agent> --profile <profile>")
+	})
 }
 
 var enterpriseACPEnrollCmd = &cobra.Command{

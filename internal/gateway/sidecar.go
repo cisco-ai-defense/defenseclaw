@@ -272,7 +272,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// A hook-only topology (managed standalone, no OpenClaw fleet) never
 	// dials gateway.host:port, so only announce the fleet client when the
 	// gateway loop will actually use it; the device identity still loads.
-	if RequiresFleetGateway(cfg) {
+	// Secure Client keeps the line of its service log (issue #1092).
+	if RequiresFleetGateway(cfg) || cfg.SecureClientIntegration() {
 		fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 			cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 	}
@@ -872,6 +873,24 @@ func (s *Sidecar) claimAIDiscoveryRun() (*inventory.ContinuousDiscoveryService, 
 // accompanying test fails if the two drift.
 const sidecarWorkerCount = 8
 
+// logSecureClientPolicyEngine prints the policy engine start-up line of
+// main on a Secure Client host (issue #1092).
+func (s *Sidecar) logSecureClientPolicyEngine() {
+	cfg := s.currentConfig()
+	if cfg == nil || !cfg.SecureClientIntegration() || cfg.PolicyDir == "" {
+		return
+	}
+	g := s.Generation()
+	switch err := policy.SecureClientPolicyLoadError(cfg.PolicyDir); {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
+	case g != nil && g.OPA != nil:
+		fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", cfg.PolicyDir)
+	case g != nil && g.opaError != "":
+		fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %s\n", g.opaError)
+	}
+}
+
 func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.beginObservabilityV8Run(); err != nil {
 		return err
@@ -989,6 +1008,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			}
 		}
 	}
+
+	s.logSecureClientPolicyEngine()
 
 	// ("Redacted AI discovery events expose reversible
 	// path fingerprints"): the AI-discovery service runs in goroutine 5

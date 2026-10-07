@@ -1025,10 +1025,11 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	// arrives with no retained lifecycle, as after a gateway restart or from
 	// an agent that never had a SubagentStart, was recorded as a second root
 	// at depth 0 (GAP-0161, GAP-0162). Other child events inherit the
-	// relationship from the retained lifecycle trace.
+	// relationship from the retained lifecycle trace. Secure Client keeps the
+	// lineage of main (issue #1092).
 	if parentAgentID == "" && agentID != rootAgentID &&
 		(lifecycleEvent == "subagent_start" || lifecycleEvent == "subagent_stop" ||
-			(reportedRootAgentID != agentID && payloadNamesSubagent(source, agentID, payload))) {
+			(!ManagedEnterpriseActive() && reportedRootAgentID != agentID && payloadNamesSubagent(source, agentID, payload))) {
 		parentAgentID = rootAgentID
 	}
 	rootAgentID = firstNonEmpty(

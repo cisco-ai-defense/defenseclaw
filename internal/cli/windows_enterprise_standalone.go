@@ -597,6 +597,7 @@ func applyWindowsEnterpriseInstallerReport(
 			}
 		}
 		applyWindowsEnterpriseUnprotectedAgents(result)
+		applyWindowsEnterpriseEnrolledConnectors(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
 		applyWindowsEnterpriseAccountFolders(result)
 	}
@@ -1203,6 +1204,54 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 				label, filepath.Join(account.Home, ".defenseclaw")))
 		}
 	}
+}
+
+// windowsEnterpriseEnrolledConnectors returns the hook connectors the
+// installed config enrols, loaded as the guardian loads it; replaceable in
+// tests.
+var windowsEnterpriseEnrolledConnectors = func() ([]string, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(layout.ConfigPath); err != nil {
+		return nil, err
+	}
+	restore := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv:            layout.ConfigPath,
+		"DEFENSECLAW_HOME":               layout.DataDir,
+		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
+		managed.WindowsServiceAccountEnv: layout.ServiceUser,
+	})
+	defer restore()
+	cfg, err := config.LoadManagedFileForLifecycleRecovery(layout.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+}
+
+// applyWindowsEnterpriseEnrolledConnectors reports an installed config that
+// enrols no connector: the enumerator then writes no target, so DefenseClaw
+// protects no agent while every service reads healthy. verify fails on it;
+// the other actions warn and report the deployment security-incomplete
+// (GAP-0221). A config this token cannot load is left to the checks that
+// report it.
+func applyWindowsEnterpriseEnrolledConnectors(result *enterprisestatus.Result) {
+	connectors, err := windowsEnterpriseEnrolledConnectors()
+	if err != nil || len(connectors) != 0 {
+		return
+	}
+	const code = "no_connectors_enabled"
+	message := "config.yaml enrols no connector under guardrail.connectors, so DefenseClaw protects no agent; " +
+		"list the agents to protect (for example guardrail.connectors.claudecode: {}) and run ensure"
+	if result.Action == "verify" {
+		result.AddError(code, message)
+	} else {
+		result.AddWarning(code, message)
+	}
+	result.SecurityComplete = false
 }
 
 // applyWindowsEnterpriseAmpMachineFolder reports an Amp machine folder a

@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -2696,13 +2697,8 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify target exists on this host.
-	// If the path doesn't exist locally, the scanner will fail with a clear
-	// error — we still attempt the scan so that when the sidecar runs on the
-	// same host as OpenClaw (the intended remote deployment), it works.
-	if info, err := os.Stat(req.Target); err != nil || !info.IsDir() {
-		// Log a warning but proceed — the scanner will produce the definitive error.
-		fmt.Fprintf(os.Stderr, "[api] warning: target directory not found locally: %s\n", req.Target)
+	if a.rejectUnreadableScanTarget(w, "target directory", req.Target) {
+		return
 	}
 
 	if a.scannerCfg == nil {
@@ -2740,6 +2736,25 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
+}
+
+// rejectUnreadableScanTarget answers 403 with one actionable line when the
+// account the gateway runs as is not allowed to read a skill or plugin folder:
+// the scanner subprocess would otherwise die on the same permission error and
+// the caller would get its Python traceback (GAP-0229). A folder that is
+// missing or not a directory is only logged: the scanner reports it.
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string) bool {
+	info, err := os.Stat(target)
+	if errors.Is(err, fs.ErrPermission) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": fmt.Sprintf("the gateway's service account cannot read %s: copy the folder somewhere it can read, or grant that account read access", target),
+		})
+		return true
+	}
+	if err != nil || !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "[api] warning: %s not found locally: %s\n", what, target)
+	}
+	return false
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -2826,8 +2841,8 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if info, err := os.Stat(req.Target); err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "[api] warning: plugin target directory not found locally: %s\n", req.Target)
+	if a.rejectUnreadableScanTarget(w, "plugin target directory", req.Target) {
+		return
 	}
 
 	if a.scannerCfg == nil {
@@ -3301,6 +3316,13 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	// action mode (and an explicit alert in observe mode for
 	// audit visibility).
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
+		if a.scannerCfg.SecureClientIntegration() {
+			// Secure Client keeps the engine load error of main (issue #1092).
+			if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+				return policyOutageVerdict(input,
+					fmt.Sprintf("policy engine load failed: %v", err)), nil
+			}
+		}
 		prepared, err := a.preparedPolicy(ctx)
 		if err != nil {
 			return policyOutageVerdict(input,
@@ -3945,8 +3967,14 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
-	if cfg != nil && cfg.SecureClientIntegration() {
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	if secureClient {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
+		// The engine of main needed data.json: without it, main answered from
+		// its fallback even when policy_dir held Rego modules (issue #1092).
+		if policy.SecureClientPolicyLoadError(a.startPolicyDir()) != nil {
+			return policy.EvaluateSecureClientAdmission(input, a.startPolicyDir()), nil
+		}
 	}
 	if a.generationSource != nil || (a.scannerCfg != nil && a.scannerCfg.PolicyDir != "") {
 		if prepared, err := a.preparedPolicy(ctx); err == nil {
@@ -3955,7 +3983,19 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 			}
 		}
 	}
+	if secureClient {
+		// Secure Client keeps the admission fallback of main (issue #1092).
+		return policy.EvaluateSecureClientAdmission(input, a.startPolicyDir()), nil
+	}
 	return policy.EvaluateAdmissionFallback(input), nil
+}
+
+// startPolicyDir is the policy_dir of the start-time configuration.
+func (a *APIServer) startPolicyDir() string {
+	if a.scannerCfg == nil {
+		return ""
+	}
+	return a.scannerCfg.PolicyDir
 }
 
 // legacyPolicyListEntries is the Secure Client block/allow list read from
@@ -4023,6 +4063,19 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	recordFailure := func(reason string) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
+
+	// Secure Client keeps the reload check of main (issue #1092): it fails
+	// while the policy directory has no data.json.
+	if a.scannerCfg.SecureClientIntegration() {
+		if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+			recordFailure(err.Error())
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error":  "reload failed: " + err.Error(),
+				"status": "failed",
+			})
+			return
+		}
 	}
 
 	// Rebuild the configuration generation now: Rego modules and rule packs

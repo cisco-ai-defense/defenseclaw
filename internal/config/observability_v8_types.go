@@ -105,9 +105,10 @@ type ObservabilityV8TracePolicySource struct {
 	SemanticProfile string `json:"semantic_profile,omitempty" mapstructure:"semantic_profile" yaml:"semantic_profile,omitempty"`
 	// CompatibilityAliases is the retired alias switch. Telemetry carries only
 	// canonical attribute names, so a config_version 8 source (Secure Client
-	// files stay on 8) may still hold the key and nothing reads it; a
-	// config_version 9 source may not (the schema forbids it). Drop it with the
-	// config_version 8 loader.
+	// files stay on 8) may still hold the key; only a Secure Client plan
+	// keeps its value, for the digest of main. A config_version 9 source may
+	// not hold it (the schema forbids it). Drop it with the config_version 8
+	// loader.
 	CompatibilityAliases *bool                            `json:"compatibility_aliases,omitempty" mapstructure:"compatibility_aliases" yaml:"compatibility_aliases,omitempty"`
 	Limits               ObservabilityV8TraceLimitsSource `json:"limits,omitempty" mapstructure:"limits" yaml:"limits,omitempty"`
 }

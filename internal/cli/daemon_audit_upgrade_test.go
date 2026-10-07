@@ -52,6 +52,33 @@ func TestUpgradeAuditStoreBeforeStartAppliesPendingMigrations(t *testing.T) {
 	}
 }
 
+// A Secure Client host keeps the per-migration notes of main on stderr, in
+// the start upgrade and in one-shot commands (issue #1092).
+func TestSecureClientKeepsTheMigrationNotesOfMain(t *testing.T) {
+	secureClient := &config.Config{DeploymentMode: "managed_enterprise", AuditDB: filepath.Join(t.TempDir(), "audit.db")}
+	if err := os.WriteFile(secureClient.AuditDB, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, warn bytes.Buffer
+	if stderr := captureStderr(t, func() { upgradeAuditStoreBeforeStart(secureClient, &out, &warn) }); !strings.Contains(stderr, "[audit] applying migration 1: ") {
+		t.Fatalf("Secure Client start upgrade wrote %q to stderr (output %q, warnings %q)", stderr, out.String(), warn.String())
+	}
+	previous := cfg
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	t.Cleanup(func() { cfg = previous })
+	stderr := captureStderr(t, func() {
+		store, err := openCommandAuditStore(filepath.Join(t.TempDir(), "audit.db"))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = store.Close()
+	})
+	if !strings.Contains(stderr, "[audit] applying migration 1: ") {
+		t.Fatalf("Secure Client command wrote %q to stderr", stderr)
+	}
+}
+
 func captureStderr(t *testing.T, run func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()

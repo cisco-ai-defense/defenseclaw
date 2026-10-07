@@ -649,16 +649,35 @@ func (c *Config) ObservabilityCredentialsDir() string {
 // standaloneManagedDocument reports whether a v8 source root resolves, with
 // the service pins, to the standalone managed-enterprise profile on goos.
 func standaloneManagedDocument(goos string, root *yaml.Node) bool {
+	profile, ok := managedDocumentProfile(goos, root)
+	return ok && managed.IsStandaloneProfile(profile)
+}
+
+// secureClientManagedDocument reports whether a v8 source document resolves
+// to the Secure Client profile.
+func secureClientManagedDocument(goos string, root *yaml.Node) bool {
+	profile, ok := managedDocumentProfile(goos, root)
+	return ok && managed.IsSecureClientProfile(profile)
+}
+
+// managedDocumentProfile resolves the enterprise profile of a
+// managed-enterprise v8 source document from its deployment mode (the
+// pinned one first), the pinned profile, enterprise.profile and the OS
+// default. ok is false for any other document.
+func managedDocumentProfile(goos string, root *yaml.Node) (string, bool) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return "", false
+	}
 	mode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if mode == "" {
 		mode = normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
 	}
 	if !managed.IsManagedEnterprise(mode) {
-		return false
+		return "", false
 	}
 	declared := yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "profile"))
 	profile, err := managed.ResolveEnterpriseProfile(goos, mode, os.Getenv(managed.EnterpriseProfileEnv), declared)
-	return err == nil && managed.IsStandaloneProfile(profile)
+	return profile, err == nil
 }
 
 // standaloneCredentialsDir is where the observability credential references

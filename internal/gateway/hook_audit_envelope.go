@@ -110,6 +110,9 @@ type HookAuditEnvelope struct {
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"-"`
+	// SecureClientRulePackDir is RulePackDir inside the envelope text, where
+	// the Secure Client profile keeps it as on main (issue #1092).
+	SecureClientRulePackDir string `json:"rule_pack_dir,omitempty"`
 
 	// Agent lifecycle correlation is copied from the same phase snapshot used
 	// by native lifecycle/tool/hook-decision events. These additive fields let
@@ -164,6 +167,7 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	// log-injection controls are removed here; each destination applies its own
 	// configured redaction profile after routing.
 	env.Reason = sanitizeEnvelopeFreeForm(env.Reason)
+	env.SecureClientRulePackDir = stripLogInjectionRunes(env.SecureClientRulePackDir)
 	if phase, ok := gatewaylog.NormalizeAgentPhase(env.AgentPhase); ok {
 		env.AgentPhase = phase
 	} else {
