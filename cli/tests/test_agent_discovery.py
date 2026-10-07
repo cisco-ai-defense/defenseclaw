@@ -2084,6 +2084,10 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert kwargs["timeout"] == ad.VERSION_TIMEOUT_SECONDS
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is False
+    # GAP-0057, GAP-0065: a probe holding the tty reset init's picker to line
+    # mode, or left raw output, when it or its child exited later.
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["start_new_session"] is True
 
 
 def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):

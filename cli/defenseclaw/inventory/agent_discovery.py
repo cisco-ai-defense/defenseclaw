@@ -1876,11 +1876,19 @@ def _version_for_binary(
         timeout = max(timeout, timeout_override)
 
     try:
+        # A probe never gets the terminal. Node restores the tty mode it saw
+        # at start when it exits, and a launcher's child outlives a timed-out
+        # probe, so a probe that shared the tty switched init's checkbox
+        # picker back to line mode (keys echoed, read only on Enter) or left
+        # raw output behind (GAP-0057, GAP-0065). A new session also has no
+        # controlling terminal, so /dev/tty cannot be opened either.
         result = subprocess.run(
             [binary_path, *(version_args or ("--version",))],
             shell=False,
             timeout=timeout,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
             text=False,
             env=env,
         )
