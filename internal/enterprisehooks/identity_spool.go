@@ -138,6 +138,25 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 	return record, nil
 }
 
+// KeepLastKnownUPN carries the UPN of the account's previous record into a
+// fresh record that resolved none, with the principal it gave. Windows
+// resolves a UPN only while the user is signed in, so without it a signed-out
+// account's record fell back to account@REALM and the account showed two
+// principals (GAP-0284). The SID or uid is the record key, so the previous
+// record is the same account.
+func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord {
+	if record.Facts.UPN != "" || previous.Facts.UPN == "" || !strings.EqualFold(record.Key, previous.Key) {
+		return record
+	}
+	record.Facts.UPN = previous.Facts.UPN
+	record.Facts.Principal = previous.Facts.UPN
+	record.UPNSource = previous.UPNSource
+	if record.Facts.Domain == "" {
+		record.Facts.Domain = previous.Facts.Domain
+	}
+	return record
+}
+
 // MarshalIdentitySpoolRecord serializes a record.
 func MarshalIdentitySpoolRecord(record IdentitySpoolRecord) ([]byte, error) {
 	record.Version = IdentitySpoolRecordVersion
