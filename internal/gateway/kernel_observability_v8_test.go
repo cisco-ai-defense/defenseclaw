@@ -390,16 +390,26 @@ func TestKernelDenialIsAnEnforcementBlockAppliedRecord(t *testing.T) {
 				}
 				return
 			}
+			body := kernelRecordBody(t, record)
+			// OD-5: the file, relative to its home, is in kernel.target (content
+			// class: each destination's profile decides) and nowhere else.
+			target, _ := body["defenseclaw.ai.runtime.kernel.target"].(string)
+			if target != "~alice/.ssh/dccert-block-marker-key" && target != "~/.ssh/dccert-block-marker-key" {
+				t.Errorf("kernel.target = %q", target)
+			}
+			if body["defenseclaw.ai.runtime.process"] != "cat" {
+				t.Errorf("process = %v", body["defenseclaw.ai.runtime.process"])
+			}
 			raw, err := json.Marshal(record)
 			if err != nil {
 				t.Fatal(err)
 			}
+			rest := strings.Replace(string(raw), `"defenseclaw.ai.runtime.kernel.target":"`+target+`"`, "", 1)
 			for _, leaked := range []string{"dccert-block-marker-key", "/home/alice", "exec-1"} {
-				if strings.Contains(string(raw), leaked) {
-					t.Errorf("record leaks %q: %s", leaked, raw)
+				if strings.Contains(rest, leaked) {
+					t.Errorf("record leaks %q outside kernel.target: %s", leaked, raw)
 				}
 			}
-			body := kernelRecordBody(t, record)
 			for key, want := range map[string]any{
 				"defenseclaw.policy.id":                    "defenseclaw-controls-1a2b3c4d",
 				"defenseclaw.policy.version":               "sha256:3f9c2a7d41b0",

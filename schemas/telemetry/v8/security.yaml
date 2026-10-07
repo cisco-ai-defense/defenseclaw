@@ -2463,6 +2463,10 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.runtime.kernel.control
     requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.process
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.target
+    requirement_level: recommended
   - ref: user.id
     requirement_level: recommended
   - ref: defenseclaw.user.id_kind

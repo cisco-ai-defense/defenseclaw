@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	osuser "os/user"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -72,7 +75,7 @@ const (
 var (
 	kernelPolicyEvents = []string{
 		"loaded", "mode_changed", "removed", "operator_override", "paused", "resumed", "orphaned",
-		"reconcile_failed", "ack_stale", "uid_ready", "uid_burnin", "tetragon_restarted", "fallback",
+		"reconcile_failed", "ack_stale", "uid_ready", "uid_burnin", "uid_progress", "tetragon_restarted", "fallback",
 	}
 	kernelPolicyFamilies  = []string{"observe", "connect", "controls", "controls-burnin"}
 	kernelPolicyModes     = []string{"monitor", "enforce"}
@@ -531,11 +534,17 @@ func (adapter *aiRuntimeV8Adapter) emitKernelBlock(
 			DefenseClawAgentIdentityID:            identity.AgentIdentityID,
 			DefenseClawGuardrailRuleID:            runtimeIdentifier(event.RuleID),
 			DefenseClawAIRuntimeKernelControl:     runtimeEnum(event.Control, kernelControls),
-			UserID:                                identity.UserID,
-			DefenseClawUserIDKind:                 identity.IDKind,
-			DefenseClawUserName:                   identity.UserName,
-			DefenseClawUserLoginID:                identity.LoginID,
-			MandatoryEnforcedOutcome:              true,
+			// The process's basename and the file relative to the user's
+			// home (OD-5): an analyst can triage a denial without logging in
+			// to the host; the target is content class, so each
+			// destination's redaction profile decides whether it leaves.
+			DefenseClawAIRuntimeProcess:      runtimeBoundedText(event.Process, kernelProcessMaxBytes),
+			DefenseClawAIRuntimeKernelTarget: runtimeBoundedText(homeRelativeTarget(event.Path, event.UID, event.User), kernelTargetMaxBytes),
+			UserID:                           identity.UserID,
+			DefenseClawUserIDKind:            identity.IDKind,
+			DefenseClawUserName:              identity.UserName,
+			DefenseClawUserLoginID:           identity.LoginID,
+			MandatoryEnforcedOutcome:         true,
 		}
 		identity.Directory.applyTo(&input)
 		return builder.BuildLogEnforcementBlockApplied(input)
@@ -645,18 +654,34 @@ func (adapter *aiRuntimeV8Adapter) emitKernelPolicy(
 			LogLevel: observability.Present(level),
 			Outcome:  outcome,
 
-			DefenseClawAIRuntimeKernelEvent:  change.Event,
-			DefenseClawPolicyID:              runtimeIdentifier(change.Policy),
-			DefenseClawAIRuntimeKernelFamily: runtimeEnum(change.Family, kernelPolicyFamilies),
-			DefenseClawAIRuntimeKernelMode:   runtimeEnum(change.Mode, kernelPolicyModes),
-			DefenseClawAIRuntimeKernelState:  runtimeStateText(change.State),
-			DefenseClawPolicyVersion:         runtimeIdentifier(status.KernelPolicy),
-			UserID:                           aiDiscoveryV8OptionalText(userID),
-			DefenseClawUserIDKind:            v8UserIDKind(discoveryUserIDKind(userID)),
-			DefenseClawAIRuntimeKernelReason: runtimeBoundedText(change.Reason, runtimeReasonMaxBytes),
+			DefenseClawAIRuntimeKernelEvent:        change.Event,
+			DefenseClawPolicyID:                    runtimeIdentifier(change.Policy),
+			DefenseClawAIRuntimeKernelFamily:       runtimeEnum(change.Family, kernelPolicyFamilies),
+			DefenseClawAIRuntimeKernelMode:         runtimeEnum(change.Mode, kernelPolicyModes),
+			DefenseClawAIRuntimeKernelState:        runtimeStateText(change.State),
+			DefenseClawPolicyVersion:               runtimeIdentifier(status.KernelPolicy),
+			UserID:                                 aiDiscoveryV8OptionalText(userID),
+			DefenseClawUserIDKind:                  v8UserIDKind(discoveryUserIDKind(userID)),
+			DefenseClawAIRuntimeKernelReason:       runtimeBoundedText(change.Reason, runtimeReasonMaxBytes),
+			DefenseClawAIRuntimeKernelCoveredHours: kernelHours(change, change.CoveredSeconds),
+			DefenseClawAIRuntimeKernelNeededHours:  kernelHours(change, change.NeededSeconds),
 		})
 	})
 	return err
+}
+
+// kernelHours renders a burn-in progress figure in hours, on the uid
+// changes that carry progress; absent elsewhere.
+func kernelHours(change acquire.KernelChange, seconds int64) observability.Optional[float64] {
+	switch change.Event {
+	case "uid_progress", "uid_burnin", "uid_ready":
+	default:
+		return observability.Absent[float64]()
+	}
+	if change.NeededSeconds <= 0 && change.Event != "uid_progress" {
+		return observability.Absent[float64]()
+	}
+	return observability.Present(math.Round(float64(max(seconds, 0))/36) / 100)
 }
 
 // runtimeStateText keeps Tetragon's state name when it is short enough.
@@ -667,3 +692,383 @@ func runtimeStateText(state string) observability.Optional[string] {
 	}
 	return runtimeIdentifier(state)
 }
+
+// Item 1 of the Tetragon UX spec and its fleet view (section 5.9): one
+// log.ai.runtime.kernel_event record per attributed event of the host's own
+// Tetragon policy, the plane c plane_health fleet fields, the kernel events
+// counter and the kernel state gauge.
+
+const (
+	// maxCustomerEventsPerSnapshot bounds the kernel_event records of one
+	// cycle; the host plane caps a poll's records at the same figure and
+	// counts the rest.
+	maxCustomerEventsPerSnapshot = 256
+	kernelPolicyNameMaxBytes     = 253
+	kernelFunctionMaxBytes       = 128
+	kernelTargetMaxBytes         = 1024
+	kernelMessageMaxBytes        = 256
+	kernelProcessMaxBytes        = 128
+	kernelTagMaxBytes            = 64
+	kernelMaxTags                = 8
+	tetragonVersionMaxBytes      = 32
+	kernelUsersMax               = 1_000_000
+	kernelDeltaMax               = 1_000_000_000
+)
+
+// The closed vocabularies of the kernel_event and fleet fields. A value
+// outside them (a newer helper) is omitted rather than failing the record.
+var (
+	runtimeKernelPolicyOwners = []string{plane.PolicyOwnerDefenseClaw, plane.PolicyOwnerCustomer}
+	runtimeKernelHookTypes    = []string{"kprobe", "lsm"}
+	runtimeKernelActions      = []string{
+		"cleanup_enforcer_notification", "copyfd", "dnslookup", "followfd", "geturl", "nopost", "notify_enforcer",
+		"other", "override", "post", "set", "sigkill", "signal", "tracksock", "unfollowfd", "untracksock",
+	}
+	runtimeKernelPolicyModes = []string{"enforce", "monitor", "unknown"}
+	runtimeHookActions       = []string{"allow", "alert"}
+	kernelHelperModes        = []string{"off", "consume", "observe", "enforce"}
+	kernelApprovals          = []string{"not_needed", "missing", "stale", "approved"}
+	kernelMetricControls     = []string{"kernel.ssh_private_key_read", "kernel.persistence_write", "customer"}
+)
+
+// emitCustomerKernelEvents reports the attributed events of the host's own
+// Tetragon policies since the previous poll, one record each.
+func (adapter *aiRuntimeV8Adapter) emitCustomerKernelEvents(ctx context.Context, snapshot sensor.Snapshot) error {
+	var firstErr error
+	for index, event := range snapshot.CustomerKernelEvents {
+		if index >= maxCustomerEventsPerSnapshot {
+			break
+		}
+		if err := adapter.emitCustomerKernelEvent(ctx, event); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (adapter *aiRuntimeV8Adapter) emitCustomerKernelEvent(ctx context.Context, event sensor.CustomerKernelEvent) error {
+	rawSeverity, level, severity := "INFO", observability.LogLevelInfo, observability.SeverityInfo
+	if event.Outcome == plane.OutcomeBlocked {
+		rawSeverity, level, severity = "WARN", observability.LogLevelWarn, observability.SeverityMedium
+	}
+	metadata, err := adapter.metadata("ai.runtime.kernel_event", rawSeverity)
+	if err != nil {
+		return err
+	}
+	_, err = adapter.runtime.Emit(ctx, metadata, func(
+		emitCtx observabilityruntime.EmitContext, admission observabilityrouter.Admission,
+	) (observability.Record, error) {
+		if admission != observabilityrouter.AdmissionOrdinary || emitCtx.Generation() > math.MaxInt64 {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		policy := runtimeBoundedText(event.Policy, kernelPolicyNameMaxBytes)
+		name, named := policy.Get()
+		if strings.TrimSpace(event.AgentName) == "" || !named {
+			// Only attributed events become records; one without an agent
+			// or a policy should not exist.
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		builder, buildErr := aiDiscoveryV8Builder()
+		if buildErr != nil {
+			return observability.Record{}, buildErr
+		}
+		identity := adapter.identityFields(runtimeIdentity{
+			UserID: uidString(event.UID), LoginID: loginString(event.UID, event.AUID), UserName: event.User,
+			AgentIdentityID: customerAgentIdentityID(event),
+		})
+		envelope := aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "kernel_event")
+		if !event.At.IsZero() {
+			envelope.ObservedAt = observability.Present(event.At.UTC())
+		}
+		input := observability.LogAIRuntimeKernelEventInput{
+			Envelope: envelope,
+			Severity: observability.Present(severity),
+			LogLevel: observability.Present(level),
+			Outcome:  observability.OutcomeCompleted,
+
+			UserID:                                identity.UserID,
+			DefenseClawUserIDKind:                 identity.IDKind,
+			DefenseClawUserName:                   identity.UserName,
+			DefenseClawUserLoginID:                identity.LoginID,
+			DefenseClawAgentIdentityID:            identity.AgentIdentityID,
+			DefenseClawAIRuntimeEventSource:       observability.Present(string(plane.SourceTetragon)),
+			DefenseClawAIRuntimeKernelOutcome:     runtimeEnum(string(event.Outcome), runtimeKernelOutcomes),
+			DefenseClawAIRuntimeAgent:             event.AgentName,
+			DefenseClawAIRuntimeKernelPolicyOwner: plane.PolicyOwnerCustomer,
+			DefenseClawAIRuntimeKernelPolicyName:  name,
+			DefenseClawAIRuntimeProcess:           runtimeBoundedText(event.Process, kernelProcessMaxBytes),
+			DefenseClawAIRuntimeKernelHookType:    runtimeEnum(event.HookType, runtimeKernelHookTypes),
+			DefenseClawAIRuntimeKernelFunction:    runtimeBoundedText(event.Function, kernelFunctionMaxBytes),
+			DefenseClawAIRuntimeKernelAction:      runtimeEnum(event.Action, runtimeKernelActions),
+			DefenseClawAIRuntimeKernelPolicyMode:  runtimeEnum(event.PolicyMode, runtimeKernelPolicyModes),
+			DefenseClawAIRuntimeKernelTags:        aiDiscoveryV8OptionalStrings(kernelTags(event.Tags)),
+			DefenseClawAIRuntimeKernelMessage:     runtimeBoundedText(event.Message, kernelMessageMaxBytes),
+			// Content class: each destination's redaction profile decides
+			// whether the path or peer leaves the host.
+			DefenseClawAIRuntimeKernelTarget: runtimeBoundedText(event.Target, kernelTargetMaxBytes),
+			DefenseClawAIRuntimeKernelCount:  observability.Present(int64(min(max(event.Count, 1), kernelDeltaMax))),
+		}
+		if event.Hook != nil {
+			input.DefenseClawAIRuntimeHookSeen = observability.Present(event.Hook.Seen)
+			if event.Hook.Seen {
+				input.DefenseClawAIRuntimeHookJoin = runtimeEnum(event.Hook.Confidence, runtimeHookJoins)
+				input.DefenseClawAIRuntimeHookAction = runtimeEnum(event.Hook.Action, runtimeHookActions)
+				input.Envelope.Correlation.SessionID = runtimeCorrelationID(event.Hook.SessionID)
+				input.Envelope.Correlation.ToolInvocationID = runtimeCorrelationID(event.Hook.ToolInvocationID)
+			}
+		}
+		identity.Directory.applyTo(&input)
+		return builder.BuildLogAIRuntimeKernelEvent(input)
+	})
+	return err
+}
+
+// kernelTags bounds a policy's tags for the record.
+func kernelTags(tags []string) []string {
+	var out []string
+	for _, tag := range tags {
+		if len(out) == kernelMaxTags {
+			break
+		}
+		if value, ok := runtimeBoundedText(tag, kernelTagMaxBytes).Get(); ok {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// kernelFleet is the plane c plane_health fleet view of the sensor helper's
+// kernel_status: what each host's kernel controls are doing, so a fleet
+// table needs nothing but the latest record per host.
+type kernelFleet struct {
+	present                                      bool
+	helperMode, approval, policy, version        observability.Optional[string]
+	enrolled, enforced, burnIn                   observability.Optional[int64]
+	paused, installed                            observability.Optional[bool]
+	wouldBlockDelta, blockedDelta, customerDelta observability.Optional[int64]
+	// The raw values the kernel state gauge labels.
+	helperModeValue, approvalValue string
+	pausedValue                    bool
+	installedValue                 *bool
+}
+
+// kernelDeltaCursor remembers the helper's counters at the previous cycle,
+// so plane_health reports their growth. Process-wide, like the change
+// cursor: an adapter is built per poll.
+type kernelDeltaCursor struct {
+	mu   sync.Mutex
+	last map[string]int64
+}
+
+var defaultKernelDeltaCursor = &kernelDeltaCursor{}
+
+// deltas returns each counter's growth since the previous call. The first
+// call is a baseline (zero), and a counter that went down (the helper
+// restarted) counts from zero.
+func (cursor *kernelDeltaCursor) deltas(current map[string]int64) map[string]int64 {
+	cursor.mu.Lock()
+	defer cursor.mu.Unlock()
+	out := make(map[string]int64, len(current))
+	for key, value := range current {
+		previous, seen := cursor.last[key]
+		switch {
+		case cursor.last == nil || !seen:
+			out[key] = 0
+		case value < previous:
+			out[key] = value
+		default:
+			out[key] = value - previous
+		}
+	}
+	cursor.last = current
+	return out
+}
+
+// kernelFleetOf is the fleet view of a snapshot; not present without the
+// helper's kernel_status (a gateway that is not a managed Linux one).
+func (adapter *aiRuntimeV8Adapter) kernelFleetOf(snapshot sensor.Snapshot, now time.Time) kernelFleet {
+	if snapshot.Kernel == nil || snapshot.Kernel.FetchedAt.IsZero() {
+		return kernelFleet{}
+	}
+	status := snapshot.Kernel.Status
+	fleet := kernelFleet{present: true}
+	fleet.helperModeValue = firstNonEmpty(status.IntentMode, status.Mode)
+	fleet.approvalValue = status.Approval
+	fleet.helperMode = runtimeEnum(fleet.helperModeValue, kernelHelperModes)
+	fleet.approval = runtimeEnum(fleet.approvalValue, kernelApprovals)
+	fleet.policy = runtimeIdentifier(status.KernelPolicy)
+	var enforced, burnIn int64
+	for _, user := range status.Users {
+		switch {
+		case user.Mode == "enforce":
+			enforced++
+		case user.Mode != "observe_only" && !user.Ready && user.BurnInSeconds > 0:
+			burnIn++
+		}
+	}
+	fleet.enrolled = observability.Present(runtimeCount(int64(len(status.Users)), kernelUsersMax))
+	fleet.enforced = observability.Present(runtimeCount(enforced, kernelUsersMax))
+	fleet.burnIn = observability.Present(runtimeCount(burnIn, kernelUsersMax))
+	if pause := status.Pause; pause != nil {
+		fleet.pausedValue = pause.UntilReboot || pause.UntilUnixNano > now.UnixNano()
+	}
+	fleet.paused = observability.Present(fleet.pausedValue)
+	if tetragon := status.Tetragon; tetragon != nil {
+		fleet.version = runtimeBoundedText(tetragon.Version, tetragonVersionMaxBytes)
+		if tetragon.Installed != nil {
+			installed := *tetragon.Installed
+			fleet.installedValue = &installed
+			fleet.installed = observability.Present(installed)
+		}
+	}
+	current := map[string]int64{
+		"would_block": status.Counters["would_block_total"],
+		"blocked":     status.Counters["blocked_total"],
+	}
+	if status.CustomerEvents != nil {
+		current["customer"] = status.CustomerEvents.Seen
+	}
+	cursor := adapter.kernelDeltas
+	if cursor == nil {
+		cursor = defaultKernelDeltaCursor
+	}
+	deltas := cursor.deltas(current)
+	fleet.wouldBlockDelta = observability.Present(runtimeCount(deltas["would_block"], kernelDeltaMax))
+	fleet.blockedDelta = observability.Present(runtimeCount(deltas["blocked"], kernelDeltaMax))
+	if _, ok := current["customer"]; ok {
+		fleet.customerDelta = observability.Present(runtimeCount(deltas["customer"], kernelDeltaMax))
+	}
+	return fleet
+}
+
+// emitKernelMetrics records the kernel events counter (DefenseClaw's
+// denials and would-blocks, and the attributed events of customer policies)
+// and the kernel state gauge, where the runtime records generated metrics.
+func (adapter *aiRuntimeV8Adapter) emitKernelMetrics(ctx context.Context, snapshot sensor.Snapshot, fleet kernelFleet) error {
+	metrics, ok := adapter.runtime.(otlpGeneratedMetricRuntime)
+	if !ok {
+		return nil
+	}
+	type key struct{ owner, outcome, control string }
+	counts := map[key]int64{}
+	for _, event := range snapshot.KernelEvents {
+		control := event.Control
+		if !runtimeEnum(control, kernelControls).IsPresent() {
+			control = ""
+		}
+		counts[key{plane.PolicyOwnerDefenseClaw, string(event.Outcome), control}]++
+	}
+	for _, event := range snapshot.CustomerKernelEvents {
+		counts[key{plane.PolicyOwnerCustomer, string(event.Outcome), "customer"}] += int64(max(event.Count, 1))
+	}
+	keys := make([]key, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].owner != keys[j].owner {
+			return keys[i].owner < keys[j].owner
+		}
+		if keys[i].outcome != keys[j].outcome {
+			return keys[i].outcome < keys[j].outcome
+		}
+		return keys[i].control < keys[j].control
+	})
+	var firstErr error
+	record := func(family string, build func(*observability.FamilyBuilder, observability.FamilyEnvelopeInput) (observability.Record, error)) {
+		_, err := metrics.RecordGeneratedMetric(ctx, observability.EventName(family), func(
+			emitCtx observabilityruntime.EmitContext,
+		) (observability.Record, error) {
+			if emitCtx.Generation() > math.MaxInt64 {
+				return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+			}
+			builder, buildErr := aiDiscoveryV8Builder()
+			if buildErr != nil {
+				return observability.Record{}, buildErr
+			}
+			return build(builder, aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "metrics"))
+		})
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, k := range keys {
+		k, value := k, counts[k]
+		record(observability.TelemetryInstrumentDefenseClawKernelEvents, func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return builder.BuildMetricDefenseClawKernelEvents(observability.MetricDefenseClawKernelEventsInput{
+				Envelope: envelope, Value: value,
+				DefenseClawAIRuntimeKernelPolicyOwner: runtimeEnum(k.owner, runtimeKernelPolicyOwners),
+				DefenseClawAIRuntimeKernelOutcome:     runtimeEnum(k.outcome, runtimeKernelOutcomes),
+				DefenseClawMetricKernelControl:        runtimeEnum(k.control, kernelMetricControls),
+			})
+		})
+	}
+	if fleet.present {
+		backend := ""
+		for _, health := range snapshot.Planes {
+			if health.Plane == platform.PlaneC && health.Backend != nil {
+				backend = health.Backend.Kind
+			}
+		}
+		input := observability.MetricDefenseClawKernelStateInput{
+			Value:                                 1,
+			DefenseClawAIRuntimeKernelHelperMode:  fleet.helperMode,
+			DefenseClawAIRuntimeKernelApproval:    fleet.approval,
+			DefenseClawAIRuntimeKernelPaused:      fleet.paused,
+			DefenseClawAIRuntimePlaneBackend:      runtimeEnum(backend, runtimePlaneBackends),
+			DefenseClawAIRuntimeTetragonInstalled: fleet.installed,
+		}
+		record(observability.TelemetryInstrumentDefenseClawKernelState, func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			input.Envelope = envelope
+			return builder.BuildMetricDefenseClawKernelState(input)
+		})
+	}
+	return firstErr
+}
+
+// homeRelativeTarget names a file without the account's home directory: ~/...
+// under the home of the process's own uid, ~name/... under another account's
+// conventional home (/home/name, /root), else the path as it was. A denial
+// record names the file a DefenseClaw control covered this way.
+func homeRelativeTarget(path string, uid *int, user string) string {
+	if home := strings.TrimRight(kernelUserHome(uid, user), "/"); home != "" {
+		if rest, ok := strings.CutPrefix(path, home+"/"); ok && rest != "" {
+			return "~/" + rest
+		}
+	}
+	if rest, ok := strings.CutPrefix(path, "/root/"); ok && rest != "" {
+		return "~root/" + rest
+	}
+	if rest, ok := strings.CutPrefix(path, "/home/"); ok {
+		if name, tail, found := strings.Cut(rest, "/"); found && name != "" && tail != "" {
+			return "~" + name + "/" + tail
+		}
+	}
+	return path
+}
+
+// kernelUserHome is the home of a uid (else of a user name) through NSS,
+// cached; "" when neither resolves.
+var kernelUserHome = func(uid *int, user string) string {
+	key := uidString(uid) + "|" + user
+	if cached, ok := kernelHomes.Load(key); ok {
+		return cached.(string)
+	}
+	home := ""
+	if uid != nil {
+		if account, err := osuser.LookupId(strconv.Itoa(*uid)); err == nil {
+			home = account.HomeDir
+		}
+	} else if user != "" && !strings.ContainsAny(user, "/\x00") {
+		if account, err := osuser.Lookup(user); err == nil {
+			home = account.HomeDir
+		}
+	}
+	if home == "/" {
+		home = ""
+	}
+	kernelHomes.Store(key, home)
+	return home
+}
+
+var kernelHomes sync.Map

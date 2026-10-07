@@ -1316,7 +1316,7 @@ attributes:
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.outcome
   type: string
-  brief: What a DefenseClaw kernel control did about the access behind the activity
+  brief: What a kernel policy did about the access behind the record
   examples:
   - would_block
   stability: stable
@@ -1328,7 +1328,7 @@ attributes:
     id: enum-v1
     overrides:
       enum: [observed, would_block, blocked]
-    notes: The strongest outcome seen for the tactic. observed is a file access the observe policy recorded; would_block is a control running in monitor mode that would have denied; blocked is a denial the kernel returned
+    notes: On activity and finding records, the strongest outcome a DefenseClaw kernel control reported for the tactic. On kernel_event records, what the customer's own policy did. observed is an access a policy recorded; would_block is a denying action running in monitor mode; blocked is a denial the kernel returned
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.control
   type: string
@@ -1359,8 +1359,8 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [loaded, mode_changed, removed, operator_override, paused, resumed, orphaned, reconcile_failed, ack_stale, uid_ready, uid_burnin, tetragon_restarted, fallback]
-    notes: One record per state change of the sensor helper's reconciler, never one per kernel event
+      enum: [loaded, mode_changed, removed, operator_override, paused, resumed, orphaned, reconcile_failed, ack_stale, uid_ready, uid_burnin, uid_progress, tetragon_restarted, fallback]
+    notes: One record per state change of the sensor helper's reconciler, never one per kernel event. uid_progress is a user's burn-in progress, every six hours while the user is not ready
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.family
   type: string
@@ -1423,6 +1423,376 @@ attributes:
     id: redacted-content-v1
     overrides: {max_utf8_bytes: 256}
     notes: Short reason code from the reconciler, such as kernel_enforce_ack_stale; never a path or a command
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.policy_owner
+  type: string
+  brief: Whose Tetragon policy produced a kernel event
+  examples:
+  - customer
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [defenseclaw, customer]
+    notes: defenseclaw is a policy the sensor helper recorded loading; customer is every other policy on the host, one named in DefenseClaw's pattern included. DefenseClaw reads the events of customer policies and never adds, changes or deletes one
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.policy_name
+  type: string
+  brief: Name of the Tetragon policy that produced a kernel event
+  examples:
+  - file-sensitive
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 253}
+    notes: The TracingPolicy name as Tetragon reports it, bounded like a Kubernetes object name; a customer policy's name is the customer's own
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.hook_type
+  type: string
+  brief: Kind of kernel hook a policy event came from
+  examples:
+  - lsm
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [kprobe, lsm]
+    notes: Tracepoint, uprobe and USDT events of customer policies are not forwarded
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.function
+  type: string
+  brief: Kernel function or LSM hook a policy event came from
+  examples:
+  - security_file_open
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: The hooked symbol as Tetragon names it (file_open, security_file_open, tcp_connect)
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.action
+  type: string
+  brief: Action of the Tetragon policy selector that matched
+  examples:
+  - override
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [cleanup_enforcer_notification, copyfd, dnslookup, followfd, geturl, nopost, notify_enforcer, other, override, post, set, sigkill, signal, tracksock, unfollowfd, untracksock]
+    notes: Tetragon's KprobeAction in lower case without its prefix; other for one this build does not know. override, sigkill and notify_enforcer deny in enforce mode and would deny in monitor mode
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.policy_mode
+  type: string
+  brief: Mode of the Tetragon policy when the event happened
+  examples:
+  - enforce
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [enforce, monitor, unknown]
+    notes: From the sensor helper's latest listing, every 15 seconds, so an event within one listing of a mode change can carry the old mode. monitor covers Tetragon's monitor and monitor_only
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.tags
+  type: string[]
+  brief: Tags the Tetragon policy gives its events
+  examples:
+  - [files, sensitive]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 520, max_item_utf8_bytes: 64, max_items: 8}
+    notes: The policy's own tags, at most 8 of 64 bytes each, as the policy author wrote them
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.message
+  type: string
+  brief: Message the Tetragon policy gives its events
+  examples:
+  - sensitive file opened
+  stability: stable
+  owner: defenseclaw
+  field_class: reason
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: The policy author's fixed message, not anything the process did
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.target
+  type: string
+  brief: File path or network peer a kernel event concerned
+  examples:
+  - ~/.ssh/id_ed25519
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 1024}
+    notes: Content class on purpose, so each destination's redaction profile decides whether it leaves the host. A customer policy's event carries the first file, path or binprm argument's path, or a socket peer as ip:port; a DefenseClaw control's denial carries the path relative to the user's home (~/...). No other argument of a kernel event is ever read
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.count
+  type: int64
+  brief: How many identical kernel events one record stands for
+  examples: [3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 1000000000}
+    notes: The sensor helper folds repeats of the same policy, process, function, action and target within a minute into one record
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.hook_action
+  type: string
+  brief: Verdict of the managed hook decision joined to the tool call
+  examples:
+  - alert
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [allow, alert]
+    notes: alert is a tool call the hook let run with a finding (an alert, a confirm the user answered, or a would-block of a connector in observe mode); present only when hook_seen is true
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.helper_mode
+  type: string
+  brief: enterprise.tetragon mode the sensor helper runs
+  examples:
+  - observe
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: ['off', consume, observe, enforce]
+    notes: The drop-in's mode with the Plane C cap applied, before the enforce caps (no approval, pause, no BPF LSM) that keep the controls in monitor
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.approval
+  type: string
+  brief: Whether enforce_ack approves this build's kernel controls
+  examples:
+  - approved
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [not_needed, missing, stale, approved]
+    notes: not_needed outside enforce mode; stale is an enforce_ack none of whose digests is this build's, so every user is in monitor until the new digest is approved
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.users_enrolled
+  type: int64
+  brief: Users enrolled for DefenseClaw's kernel controls on the host
+  examples: [3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: From the sensor helper's kernel_status, every cycle
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.users_enforced
+  type: int64
+  brief: Enrolled users whose kernel controls enforce
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Users whose burn-in is complete, with an anchored agent, while enforce runs unpaused and approved
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.users_burn_in
+  type: int64
+  brief: Enrolled users still in burn-in
+  examples: [2]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Users whose controls stay in monitor until their covered agent time completes with no would-block hit
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.paused
+  type: boolean
+  brief: Whether kernel enforcement is paused on the host
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: The host-wide break-glass pause; every user on the host is in monitor while it holds
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.tetragon.version
+  type: string
+  brief: Version of the host's Tetragon agent the sensor helper reads
+  examples:
+  - v1.7.1
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 32}
+    notes: As Tetragon's GetVersion answered it; absent while Tetragon is not reachable
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.tetragon.installed
+  type: boolean
+  brief: Whether Tetragon's discovery file exists on the host
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: So a host without Tetragon on the native Plane C backend is not read as a fallback
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.would_block_delta
+  type: int64
+  brief: Would-block hits of DefenseClaw's kernel controls this cycle
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Growth of the sensor helper's own counter since the previous cycle, every user's, attributed or not
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.blocked_delta
+  type: int64
+  brief: Denials of DefenseClaw's kernel controls this cycle
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Growth of the sensor helper's own counter since the previous cycle, every user's, attributed or not
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.customer_events_delta
+  type: int64
+  brief: Events of the host's own Tetragon policies the sensor helper received this cycle
+  examples: [12]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000000}
+    notes: Growth of the helper's seen count since the previous cycle, below an AI agent or not; the agent ones are also kernel_event records
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.covered_hours
+  type: double
+  brief: Covered agent hours of a user's burn-in
+  examples: [40.5]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0.0, max: 1000000.0}
+    notes: Time an anchored agent of the user ran with the event stream connected and lossless, since the last would-block hit or reset; never wall-clock time
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ai.runtime.kernel.needed_hours
+  type: double
+  brief: Covered agent hours a user's burn-in needs
+  examples: [168]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0.0, max: 1000000.0}
+    notes: enterprise.tetragon.burn_in, in hours
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.metric.kernel_control
+  type: string
+  brief: Kernel control dimension of the kernel events metric
+  examples:
+  - kernel.ssh_private_key_read
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [kernel.ssh_private_key_read, kernel.persistence_write, customer]
+    notes: The DefenseClaw control of a denial or would-block, or customer for an event of the host's own Tetragon policy
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.model.provenance.quantized
   type: boolean
@@ -5673,6 +6043,69 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.runtime.container_events
     requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.helper_mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.approval
+    requirement_level: recommended
+  - ref: defenseclaw.policy.version
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.users_enrolled
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.users_enforced
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.users_burn_in
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.paused
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.tetragon.version
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.tetragon.installed
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.would_block_delta
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.blocked_delta
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.customer_events_delta
+    requirement_level: recommended
+- id: body.ai.runtime.kernel_event
+  type: body_group
+  brief: One event of the host's own Tetragon policy below an AI agent, attributed to the agent, its user and the hook decision.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ai.runtime.identity
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.agent
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.kernel.policy_owner
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.kernel.policy_name
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.process
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.hook_type
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.function
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.action
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.policy_mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.tags
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.message
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.target
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.count
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_seen
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_join
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.hook_action
+    requirement_level: recommended
 - id: body.ai.runtime.kernel_policy
   type: body_group
   brief: One state change of DefenseClaw's kernel policies on a managed Linux host.
@@ -5698,6 +6131,10 @@ groups:
   - ref: defenseclaw.user.id_kind
     requirement_level: recommended
   - ref: defenseclaw.ai.runtime.kernel.reason
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.covered_hours
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.needed_hours
     requirement_level: recommended
 - id: body.ai.discovery.run
   type: body_group
@@ -6774,6 +7211,27 @@ groups:
     allowed_outcomes:
     - completed
     - partial
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ai.runtime.kernel_event
+  type: log
+  brief: One event of the host's own Tetragon policy below an AI agent; DefenseClaw reads these events and never changes the policy.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ai.runtime.kernel_event
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ai.runtime.kernel_event
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
     route_selector: true
     mandatory_floor: []
     compatibility_profiles:
@@ -8510,6 +8968,86 @@ groups:
         label: ai
       - ref: defenseclaw.ide.plugin.enabled
         label: enabled
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.kernel.events
+  type: metric
+  brief: Kernel events of Tetragon policies the gateway recorded, by policy owner, outcome and control.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.ai.runtime.kernel.policy_owner
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.outcome
+    requirement_level: recommended
+  - ref: defenseclaw.metric.kernel_control
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.kernel.events
+    instrument_type: counter
+    value_type: int64
+    unit: '{event}'
+    description: Kernel events of Tetragon policies the gateway recorded, by policy owner, outcome and control.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.ai.runtime.kernel.policy_owner
+        label: owner
+      - ref: defenseclaw.ai.runtime.kernel.outcome
+        label: outcome
+      - ref: defenseclaw.metric.kernel_control
+        label: control
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.kernel.state
+  type: metric
+  brief: The kernel controls' state on this host, one series per state (value 1), every cycle.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.ai.runtime.kernel.helper_mode
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.approval
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.kernel.paused
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.plane_backend
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.tetragon.installed
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.kernel.state
+    instrument_type: gauge
+    value_type: int64
+    unit: '{host}'
+    description: The kernel controls' state on this host, one series per state (value 1), every cycle.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.ai.runtime.kernel.helper_mode
+        label: helper_mode
+      - ref: defenseclaw.ai.runtime.kernel.approval
+        label: approval
+      - ref: defenseclaw.ai.runtime.kernel.paused
+        label: paused
+      - ref: defenseclaw.ai.runtime.plane_backend
+        label: backend
+      - ref: defenseclaw.ai.runtime.tetragon.installed
+        label: tetragon_installed
   x-defenseclaw:
     bucket: ai.discovery
     family_schema_version: 1
@@ -11395,6 +11933,9 @@ producer_identity_sets:
   - event_name: ai.runtime.finding
     bucket: ai.discovery
     family: log.ai.runtime.finding
+  - event_name: ai.runtime.kernel_event
+    bucket: ai.discovery
+    family: log.ai.runtime.kernel_event
   - event_name: ai.runtime.kernel_policy
     bucket: ai.discovery
     family: log.ai.runtime.kernel_policy
