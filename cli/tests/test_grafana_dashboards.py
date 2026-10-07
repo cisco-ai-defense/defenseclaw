@@ -3428,3 +3428,16 @@ def test_identity_assurance_pie_assigns_each_host_user_once() -> None:
     assert 'body_defenseclaw_user_principal_assurance="verified"' in expression
     assert 'body_defenseclaw_user_principal_assurance="claimed"' in expression
     assert "sum by (host_name, user_id, assurance)" in expression
+
+
+def test_user_name_regex_is_case_insensitive_on_filtered_log_panels() -> None:
+    filtered = 0
+    for path in DASHBOARD_DIR.glob("*.json"):
+        dashboard = _dashboard(path.name)
+        for panel in _all_panels(dashboard["panels"]):
+            for target in panel.get("targets", []):
+                expression = target.get("expr", "")
+                if 'body_defenseclaw_user_name=~' in expression:
+                    filtered += 1
+                    assert 'body_defenseclaw_user_name=~"(?i)$user"' in expression, (path.name, panel["title"])
+    assert filtered > 0
