@@ -188,6 +188,11 @@ type InstallWatcher struct {
 	// mcpServers lists the MCP servers admission and the rescan see. Nil
 	// reads the connector config in the gateway's own home.
 	mcpServers func() ([]config.MCPServerEntry, error)
+	// admitNewMCP runs install admission for an MCP server that appears
+	// after the first rescan cycle (set with SetMCPServerSource): a managed
+	// computer has no `mcp set`, so a user adding a server to their agent is
+	// its install.
+	admitNewMCP bool
 
 	// rescanNow asks the rescan loop for a cycle before its interval ends.
 	rescanNow chan struct{}
@@ -249,6 +254,7 @@ func (w *InstallWatcher) SetRootConnectors(roots map[string]string) {
 // servers (a managed gateway reads every enrolled user's). Call it before Run.
 func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEntry, error)) {
 	w.mcpServers = source
+	w.admitNewMCP = source != nil
 }
 
 // RequestRescan runs a rescan cycle soon, without waiting for the interval.

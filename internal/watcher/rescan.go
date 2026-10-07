@@ -631,6 +631,17 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if evt.Type == InstallMCP && w.admitNewMCP && w.startupRescanDone {
+				// A server added to an enrolled user's agent after the
+				// watcher started: admit it as `mcp set` would (GAP-0132).
+				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
+				res := w.runAdmission(ctx, evt)
+				if w.onAdmit != nil {
+					w.onAdmit(res)
+				}
+				w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
+				return rescanScanned
+			}
 			if w.admitsAtStartup(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
