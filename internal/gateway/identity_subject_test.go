@@ -370,6 +370,8 @@ func TestProxyAndACPBindProcessOwnerOverClaimedUser(t *testing.T) {
 	proxyUser := func(p *GuardrailProxy, dcAuth string) (user string) {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		req.RemoteAddr = "127.0.0.1:40000"
+		req.Header.Set("X-User-Id", "4242")
+		req.Header.Set("X-User-Name", "forged")
 		if dcAuth != "" {
 			req.Header.Set("X-DC-Auth", "Bearer "+dcAuth)
 		}
