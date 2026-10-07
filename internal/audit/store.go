@@ -3503,6 +3503,10 @@ func connectorEnforcedAlertSQL() string {
 	)`
 }
 
+// alertEligibilitySQL is the one alert-queue predicate. The legacy finding
+// actions are alerts when their severity is real, whether an older gateway
+// wrote them without a bucket or a current one files them under
+// security.finding with a legacy.audit.* event name (GAP-0187).
 func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	findingTagsPath := `$."defenseclaw.finding.tags"`
 	canonicalOutcome := canonicalAlertOutcomeSQL()
@@ -3550,15 +3554,20 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
 		)
 		OR (
-			event.bucket IS NULL
+			event.action IN (` + legacyActionPlaceholders + `)
+			AND UPPER(COALESCE(event.severity,'')) IN
+				('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
 			AND (
-				(
-					event.action IN (` + legacyActionPlaceholders + `)
-					AND UPPER(COALESCE(event.severity,'')) IN
-						('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+				event.bucket IS NULL
+				OR (
+					event.bucket = 'security.finding'
+					AND event.event_name LIKE 'legacy.audit.%'
 				)
-				OR ` + legacyExplicit + `
 			)
+		)
+		OR (
+			event.bucket IS NULL
+			AND ` + legacyExplicit + `
 		)
 	)`
 }

@@ -1243,8 +1243,13 @@ func validateObservabilityV8ResolvedOTLPEndpoints(
 			if strings.ContainsAny(endpoint, "?#") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 				return fmt.Errorf("%s: OTLP endpoints must not contain query or fragment data", endpointPath)
 			}
-			if (parsed.Scheme == "http") != observabilityV8TransportTLSInsecure(transport) {
-				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree (use https://, or set tls.insecure: true for an http:// endpoint)", endpointPath)
+			// The hint avoids a URL scheme: the annotated config error drops a
+			// rule text that contains one (GAP-0081).
+			if insecure := observabilityV8TransportTLSInsecure(transport); (parsed.Scheme == "http") != insecure {
+				if insecure {
+					return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree (an https endpoint cannot set tls.insecure: true; remove it)", endpointPath)
+				}
+				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree (an http endpoint needs tls.insecure: true; otherwise use an https endpoint)", endpointPath)
 			}
 			if (transport.Protocol == "grpc" || transport.Protocol == "grpc/protobuf") && parsed.EscapedPath() != "" && parsed.EscapedPath() != "/" {
 				return fmt.Errorf("%s: gRPC OTLP endpoints must not contain a path", endpointPath)

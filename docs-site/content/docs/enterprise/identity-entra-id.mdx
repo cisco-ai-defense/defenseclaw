@@ -31,9 +31,9 @@ On a live Entra tenant with a per-user DefenseClaw install and Claude Code:
   Entra user;
 - an Ubuntu 22.04 Azure VM with Entra SSH sign-in (`AADSSHLoginForLinux`).
 
-Not verified yet: a group-based profile decision on a standalone enterprise
-Windows computer with Entra sign-in, delivering the local group membership
-through Intune, hybrid-joined Windows, Entra Kerberos, the himmelblau module,
+Not working yet: the standalone enterprise profile on an Entra-joined Windows
+computer. One live run did not complete; see [Known issues](#known-issues).
+Not tested: delivering the local group membership through Intune, hybrid-joined Windows, Entra Kerberos, the himmelblau module,
 macOS with Platform SSO, the standalone package on an Entra Linux VM, and an
 Entra outage. Each is marked where it comes up.
 </Callout>
@@ -106,8 +106,8 @@ group defenseclaw-ml-team
 Windows shows an Entra group only by this SID. The SID is four 32-bit words of
 the object ID, so `entra_setup.py sid-from-object-id 6f1c9a0e-...` computes it
 without a tenant. On a live tenant the Graph `securityIdentifier` of two groups
-and a user matched both the computed value and the SID in a Windows sign-in
-token.
+and a user matched the computed value, and the SIDs of that user and of her
+group matched the ones in her Windows sign-in token.
 
 ## 2. Windows: Entra-joined computers
 
@@ -159,8 +159,8 @@ computer, or from a platform script, run the script elevated:
 .\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1864145422-1280850733-3047453086-4192786374
 ```
 
-The script adds the SID to the built-in **Users** group with
-`NetLocalGroupAddMembers`, the API the Intune policies use. It is idempotent: it
+The script adds the SID to the built-in **Users** group with the Windows API
+`NetLocalGroupAddMembers`. It is idempotent: it
 reports `Added`, `AlreadyMember`, `Removed` or `NotMember`. `-Remove` undoes it.
 It warns when you name a group other than the six Windows reads, and when you
 name Administrators, because that makes every member of the Entra group a local
@@ -261,7 +261,7 @@ standalone enterprise profile, which reads the machine config.
 | Where | `users` by UPN | `groups` by Entra group |
 | --- | --- | --- |
 | Windows, per-user | Matched in the live test | No: a per-user install has no group list |
-| Windows, standalone enterprise | Expected (the same reader); not run live | By SID, after the local group step. Token facts tested live; a profile decision on a managed computer not yet recorded |
+| Windows, standalone enterprise | Not working yet ([Known issues](#known-issues)) | By SID, after the local group step. Token facts tested live; a profile decision on a managed computer not recorded yet |
 | Linux `aad`, per-user | Matched in the live test | No: the module gives no Entra groups |
 
 Set a strict `default_profile`: a failed lookup lands on it
@@ -284,7 +284,8 @@ defenseclaw guardrail profile explain --connector claudecode
 In the live tests, `profile` named the profile from the `users` assignment and
 `match` said `user`. On the standalone profile use
 `defenseclaw.exe enterprise windows profile-explain --user <SID> --connector claudecode`
-from an elevated prompt.
+from an elevated prompt. For an Entra user it does not give an answer yet; see
+[Known issues](#known-issues).
 
 These are the fields the records carried for an Entra user (the complete table is
 [Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields-as-seen-live)):
@@ -327,6 +328,30 @@ These are the fields the records carried for an Entra user (the complete table i
 | Records have no principal | `ai_discovery.include_user_principal` is off, the default |
 | `az ssh vm` is refused | Microsoft requires the `AADSSHLoginForLinux` extension on the VM and a VM login role for the user. `setup-entra-ssh-linux.sh` without `--apply` lists what is missing |
 | `Add-EntraGroupToLocalGroup.ps1` says to run elevated | It changes a local group. Run it as an administrator or as SYSTEM, or use `-WhatIf` |
+
+## Known issues
+
+One live run of the standalone enterprise profile on an Entra-joined Windows 11
+computer, with Entra users and a `groups` assignment by SID, did not complete.
+It found:
+
+- **An empty connector entry enrolls nobody.** `guardrail.connectors` with
+  `claudecode: {}` is dropped when the config loads, so the enumerator enrolled no
+  user and no Claude Code machine policy was written, while `verify` reported
+  success. Give each connector a key, as `admin-config.windows.example.yaml` does
+  with `enabled: true`.
+- **`enterprise windows profile-explain` cannot look up an Entra SID.** It
+  answers `default_lookup_failed` with "No mapping between account names and
+  security IDs was done". The same SID resolves in a per-user install that runs
+  as the user. Use `Get-DefenseClawEntraIdentity.ps1` to check the token.
+- **Hooks of standard users were refused** with
+  `enterprise_machine_policy_summary_untrusted` on a computer where Setup created
+  `C:\ProgramData\Cisco`, as on a computer with no other Cisco software. The
+  hook could not read the permissions of that folder.
+
+Until these are fixed and the run is repeated, use per-user installs with `users`
+assignments for Entra users on Windows, or test the standalone profile on your own
+computers first.
 
 ## Next steps
 

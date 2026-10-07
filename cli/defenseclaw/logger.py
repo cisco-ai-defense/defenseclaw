@@ -116,7 +116,7 @@ class _GatewayConfigRecorder:
         except requests.RequestException as exc:
             if _is_definite_preconnect_failure(exc):
                 raise CanonicalObservabilityUnavailableError(
-                    "canonical Observability v8 runtime is unavailable"
+                    "the observability runtime is unavailable"
                 ) from exc
             raise
         finally:

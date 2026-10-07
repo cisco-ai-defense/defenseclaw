@@ -126,6 +126,37 @@ VALID_DEPLOYMENT_MODES = {
 class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
+    #: Process exit code when this error stops a command.
+    exit_code = 1
+
+
+class ManagedNotInitializedError(ConfigVersionError):
+    """No per-user config on a managed device: the administrator's config rules."""
+
+    exit_code = 3  # as a refused write on a managed device
+
+
+def not_initialized_error() -> ConfigVersionError:
+    """The error for a missing config.yaml. On a managed standalone device
+    nothing is initialized per user, so it says the device is managed instead
+    of sending the user to ``defenseclaw init``."""
+    from defenseclaw.config_writer import MANAGED_NOT_INITIALIZED, machine_managed_standalone
+
+    if machine_managed_standalone():
+        return ManagedNotInitializedError(MANAGED_NOT_INITIALIZED)
+    return ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+
+
+def first_run_hint() -> str:
+    """What to tell an account that has no config.yaml: run init, except on a
+    managed standalone device, where the admin config rules and there is no
+    per-user setup."""
+    from defenseclaw.config_writer import machine_managed_standalone
+
+    if machine_managed_standalone():
+        return "this device is managed, so DefenseClaw is configured in the admin config, not per user"
+    return "run 'defenseclaw init' or 'defenseclaw quickstart'"
+
 
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
@@ -305,7 +336,7 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
     if version is None and allow_missing:
         return
     if version is None:
-        raise ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+        raise not_initialized_error()
     if version > CURRENT_CONFIG_VERSION:
         raise ConfigVersionError(
             f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
@@ -2905,6 +2936,8 @@ class AIDiscoveryConfig:
     process_interval_s: int = 60
     scan_roots: list[str] = field(default_factory=lambda: ["~"])
     signature_packs: list[str] = field(default_factory=list)
+    # sha256 pin of each signature pack by path; a pack that does not match is not loaded.
+    signature_pack_digests: dict[str, str] = field(default_factory=dict)
     allow_workspace_signatures: bool = False
     disabled_signature_ids: list[str] = field(default_factory=list)
     include_shell_history: bool = True
@@ -3643,6 +3676,7 @@ def locked_config_yaml(path: str):
     """
     from defenseclaw import config_writer
 
+    config_writer.refuse_when_managed(path)
     with config_writer.hold_lock(path, timeout_s=None):
         yield
 
@@ -6335,6 +6369,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),
         scan_roots=list(raw.get("scan_roots", ["~"]) or ["~"]),
         signature_packs=list(raw.get("signature_packs", []) or []),
+        signature_pack_digests={str(k): str(v) for k, v in (raw.get("signature_pack_digests") or {}).items()},
         allow_workspace_signatures=bool(raw.get("allow_workspace_signatures", False)),
         disabled_signature_ids=list(raw.get("disabled_signature_ids", []) or []),
         include_shell_history=bool(raw.get("include_shell_history", True)),

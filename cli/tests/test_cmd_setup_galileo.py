@@ -266,9 +266,9 @@ def test_v8_status_text_is_readable_and_names_next_step_when_failing(tmp_path, m
 @pytest.mark.parametrize(
     ("arguments", "helper", "expected"),
     [
-        (["enable"], "_set_v8_destination_enabled", ("galileo", True, "")),
-        (["disable"], "_set_v8_destination_enabled", ("galileo", False, "")),
-        (["remove", "--yes"], "_remove_v8_destination", ("galileo", "")),
+        (["enable"], "_set_v8_destination_enabled", ("galileo", True)),
+        (["disable"], "_set_v8_destination_enabled", ("galileo", False)),
+        (["remove", "--yes"], "_remove_v8_destination", ("galileo",)),
     ],
 )
 def test_management_dispatches_to_canonical_mutators(

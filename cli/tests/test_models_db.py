@@ -514,6 +514,30 @@ class ModelsDbTests(unittest.TestCase):
                     None,
                     1,
                 ),
+                # A legacy finding action a current gateway files as a compat
+                # row is an alert when its severity is real (GAP-0187).
+                (
+                    "v8-legacy-finding",
+                    now,
+                    "tool-result-pii-alert",
+                    "tool=Bash severity=HIGH entities=1",
+                    "HIGH",
+                    "security.finding",
+                    "legacy.audit.tool.result.pii.alert",
+                    "codex",
+                    None,
+                ),
+                (
+                    "v8-legacy-finding-info",
+                    now,
+                    "tool-result-pii-alert",
+                    "tool=Bash severity=HIGH entities=1",
+                    "INFO",
+                    "security.finding",
+                    "legacy.audit.tool.result.pii.alert",
+                    "codex",
+                    None,
+                ),
             ],
         )
         self.store.db.commit()
@@ -522,6 +546,10 @@ class ModelsDbTests(unittest.TestCase):
         summary_ids = [event.id for event in self.store.list_alert_summaries(10)]
         actionable_ids = [event.id for event in self.store.list_actionable_alert_summaries(10)]
 
+        self.assertIn("v8-legacy-finding", alert_ids)
+        self.assertIn("v8-legacy-finding", summary_ids)
+        self.assertIn("v8-legacy-finding", actionable_ids)
+        self.assertNotIn("v8-legacy-finding-info", alert_ids)
         self.assertIn("v8-finding", alert_ids)
         self.assertIn("v8-finding", summary_ids)
         self.assertIn("v8-finding", actionable_ids)

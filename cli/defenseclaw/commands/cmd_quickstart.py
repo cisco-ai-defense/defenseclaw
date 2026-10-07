@@ -154,13 +154,14 @@ def quickstart_cmd(
     from defenseclaw import config as cfg_mod
     from defenseclaw import platform_support
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
-    from defenseclaw.commands.cmd_init import _render_first_run_report
+    from defenseclaw.commands.cmd_init import _render_first_run_report, refuse_first_run_when_managed
     from defenseclaw.commands.cmd_setup import (
         _detect_installed_connectors,
         _read_picked_connector,
     )
     from defenseclaw.ux import CLIRenderer
 
+    refuse_first_run_when_managed()
     connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name

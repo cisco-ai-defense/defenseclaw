@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -579,6 +580,51 @@ func withACPEnterpriseCredential(ctx context.Context, credential acp.EnterpriseC
 func acpEnterpriseCredentialFromContext(ctx context.Context) (acp.EnterpriseCredential, bool) {
 	credential, ok := ctx.Value(acpEnterpriseCredentialContextKey{}).(acp.EnterpriseCredential)
 	return credential, ok
+}
+
+// attachACPSubject names the account behind an authenticated ACP request.
+// A managed request carries the credential `enterprise acp enroll` issued
+// for one principal (uid:N or sid:S-...): the gateway keeps the record in
+// its protected state and only the bearer copy is in that user's private
+// ACP runtime, so presenting it proves the account as a per-user hook
+// credential does (GAP-0200, GAP-0206). A home: principal names no account
+// and binds none. A per-user gateway's caller is its own account. Under
+// the Secure Client integration identity facts are off and nothing is bound.
+func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
+	ctx = PromoteSessionIfAuthenticated(ctx)
+	credential, enrolled := acpEnterpriseCredentialFromContext(ctx)
+	if !enrolled {
+		return a.attachProcessOwnerSubject(ctx)
+	}
+	identity := acpPrincipalIdentity(credential.Principal)
+	if identity == "" || !identityFactsEnabled.Load() {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	return attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity,
+		sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
+}
+
+// acpPrincipalIdentity is the canonical uid or SID of an enrollment
+// principal (uid:1001, sid:S-1-5-21-...), or "" for any other one, such as
+// the home-directory fallback, which names no account.
+func acpPrincipalIdentity(principal string) string {
+	kind, value, _ := strings.Cut(strings.TrimSpace(principal), ":")
+	identity, ok := connector.CanonicalUserScopedIdentity(value)
+	if !ok {
+		return ""
+	}
+	switch useridentity.KindForID(identity) {
+	case useridentity.KindPOSIXUID:
+		if kind == "uid" {
+			return identity
+		}
+	case useridentity.KindWindowsSID:
+		if kind == "sid" {
+			return identity
+		}
+	}
+	return ""
 }
 
 // authenticateACPToken applies different custody models without widening the

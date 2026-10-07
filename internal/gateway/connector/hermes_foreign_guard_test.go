@@ -44,7 +44,7 @@ func TestHermesHookRendersUnchangedWithoutTheForeignHookGuard(t *testing.T) {
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", TokenFile: ".token"},
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: true, TokenFile: ".token-hermes", ScopedToken: true, ConnectorName: "hermes"},
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: true, TokenFile: ".token-hermes", ScopedToken: true, ConnectorName: "hermes",
-			HookSocketTransportSH: shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461)},
+			HookSocketTransportSH: shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "")},
 	} {
 		want, err := renderTemplate(previous, data)
 		if err != nil {
@@ -185,7 +185,10 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 	if err := os.Mkdir(filepath.Dir(guardBinary), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A managed hook also runs this binary for `hook session-facts` (on macOS
+	// always); that read is not a guard run, so the stub records only guard runs.
 	script := "#!/bin/bash\n" +
+		"[ \"$*\" = \"hook session-facts\" ] && exit 0\n" +
 		"printf '%s' \"$HOME\" > " + shellSingleQuoteForTest(filepath.Join(stub, "home")) + "\n" +
 		"printf '%s' \"$*\" > " + shellSingleQuoteForTest(filepath.Join(stub, "args")) + "\n" +
 		"{ ulimit -S -v; ulimit -H -v; } > " + shellSingleQuoteForTest(filepath.Join(stub, "vlimit")) + "\n" +

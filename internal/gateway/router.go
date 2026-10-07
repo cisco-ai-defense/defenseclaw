@@ -327,6 +327,12 @@ func (r *EventRouter) logStreamAction(sessionKey, action, target, details string
 // Bifrost, skill-over-Bifrost), extend the payload first, then plumb
 // a provider/qualifier pair through here via toolDestinationApp.
 func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, details string) {
+	r.logStreamToolActionSeverity(sessionKey, action, toolName, toolID, details, "INFO")
+}
+
+// logStreamToolActionSeverity is logStreamToolAction for a row that is an
+// alert: the alert views list only rows above INFO.
+func (r *EventRouter) logStreamToolActionSeverity(sessionKey, action, toolName, toolID, details, severity string) {
 	if r == nil || r.logger == nil {
 		return
 	}
@@ -339,7 +345,7 @@ func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, 
 		},
 	)
 	ctx := audit.ContextWithEnvelope(context.Background(), env)
-	_ = r.logger.LogActionCtx(ctx, action, toolName, details)
+	_ = r.logger.LogActionCtxSeverity(ctx, action, toolName, details, severity)
 }
 
 // SetRulePack configures the guardrail rule pack for tool result inspection.
@@ -1487,10 +1493,11 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
 		payload.Tool, verdict.Action, verdict.Severity, entityCount, scrubbedFindings)
-	r.logStreamToolAction(payload.SessionID, string(audit.ActionToolResultPIIAlert), payload.Tool, payload.ID,
+	r.logStreamToolActionSeverity(payload.SessionID, string(audit.ActionToolResultPIIAlert), payload.Tool, payload.ID,
 		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
 			verdict.Severity, entityCount, len(verdict.Findings),
-			stripLogInjectionRunes(verdict.Reason)))
+			stripLogInjectionRunes(verdict.Reason)),
+		toolResultAlertSeverity(verdict.Severity))
 	if r.notify != nil {
 		// SecurityNotification ultimately surfaces in the TUI
 		// and any webhook alert, both of which are operator-

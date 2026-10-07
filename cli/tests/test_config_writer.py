@@ -23,6 +23,7 @@ import stat
 
 import pytest
 from defenseclaw import config_writer
+from defenseclaw.config import locked_config_yaml
 from defenseclaw.config_writer import Change
 
 
@@ -130,9 +131,14 @@ def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, mo
     monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
     with pytest.raises(config_writer.ManagedConfigWriteError):
         config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        with locked_config_yaml(path):
+            pass
     with pytest.raises(FileNotFoundError):
         config_writer.read_generation_state(path)
-    # A refusal leaves the lifecycle's folder as it was: every user's hook reads it.
+    # A refusal leaves nothing behind: no lock file (GAP-0171), and the
+    # lifecycle's folder keeps its mode, because every user's hook reads it.
+    assert not os.path.lexists(path + config_writer.LOCK_SUFFIX)
     if os.name != "nt":
         assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
 
@@ -154,6 +160,30 @@ def test_machine_marker_makes_a_standard_users_writers_managed(tmp_path, monkeyp
     config_writer.apply([Change("guardrail.mode", "action")], config_writer.ACTOR_LIFECYCLE, "t", path=path)
 
 
+def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path, monkeypatch):
+    # GAP-0172: a standard user with no per-user config was sent to init, whose
+    # wizard would create a config the device ignores.
+    from click.testing import CliRunner
+    from defenseclaw import upgrade_shim
+    from defenseclaw.main import cli
+
+    home = tmp_path / ".defenseclaw"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    for argv in (
+        ["skill", "block", "x"], ["guardrail", "protection", "enable", "x"], ["setup", "codex", "--yes"], ["init"], ["quickstart"]
+    ):
+        result = CliRunner().invoke(cli, argv)
+        assert result.exit_code == 3, (argv, result.output)
+        assert "This device is managed" in result.output and "run 'defenseclaw init'" not in result.output
+    # config get names no init step either (it has no write to refuse, so exit 1).
+    result = CliRunner().invoke(cli, ["config", "get", "guardrail.mode", "--effective"])
+    assert "device is managed" in result.output and "defenseclaw init" not in result.output
+    assert not home.exists()
+
+
 def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
     # `config` skips the startup load, so the refusal opens its own logger.
     from unittest.mock import MagicMock
@@ -173,6 +203,50 @@ def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
     audit.log_action.assert_called_once_with(
         "action", "guardrail.mode", "outcome=refused reason=managed_device command=config set"
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the managed gateway hook socket is a Unix socket")
+def test_a_standard_users_refusal_goes_to_the_managed_gateway_hook_socket(monkeypatch):
+    # A standard user holds no gateway token, so its refusal is reported over
+    # the managed gateway hook socket, which names the caller from the kernel.
+    import http.server
+    import json
+    import socketserver
+    import tempfile
+    import threading
+    from unittest.mock import MagicMock
+
+    import click
+    from defenseclaw.enforce import asset_lists
+
+    received = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as folder:
+        path = os.path.join(folder, "hook.sock")
+        server = socketserver.UnixStreamServer(path, Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.setattr(asset_lists, "_managed_hook_socket", lambda: path)
+            logger = MagicMock()
+            with click.Context(click.Command("block"), obj=MagicMock(logger=logger)):
+                asset_lists.audit_managed_refusal("skill-block", "p0-test-skill", "type=skill")
+        finally:
+            server.shutdown()
+            server.server_close()
+    assert received == [
+        (asset_lists.MANAGED_REFUSAL_PATH, {"action": "skill-block", "target": "p0-test-skill", "details": "type=skill"})
+    ]
+    logger.log_action.assert_not_called()
 
 
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
@@ -226,6 +300,10 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the configuration schema and reference")
     assert config_writer.plain_error(pattern) == (
         "guardrail.custom_packs.bad.digest is not in the expected format (sha256: followed by 64 hex digits)."
+    )
+    block_at = V8ConfigError("config.yaml", "$.guardrail.block_at", "pattern", "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)")
+    assert config_writer.plain_error(block_at) == (
+        "guardrail.block_at is not in the expected format. Use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)."
     )
     other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the configuration schema")
     assert "configuration schema" not in config_writer.plain_error(other)
