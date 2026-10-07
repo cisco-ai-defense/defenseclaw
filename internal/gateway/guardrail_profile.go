@@ -519,7 +519,12 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
 			return local, nil
 		}
-		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true}, nil
+		if err == nil {
+			err = fmt.Errorf("the operating system returned no directory facts for %s", id)
+		}
+		// The account is named, so explain shows it with the reason, not a
+		// bare default_lookup_failed.
+		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true}, err
 	}
 	return profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
@@ -1026,7 +1031,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
 		if err != nil {
-			found = profileSubject{UserName: user, LookupFailed: true}
+			if found.UserID == "" {
+				found = profileSubject{UserName: user}
+			}
+			found.LookupFailed = true
 			out["lookup_error"] = err.Error()
 		} else if found.LookupError != "" {
 			out["lookup_error"] = found.LookupError
