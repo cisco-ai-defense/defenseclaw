@@ -13873,7 +13873,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             await self._load_inventory_merged(names, announce=announce)
             return
         self.inventory_model.show_connector_column = False
-        intent = self.inventory_model.load_intent()
+        if names:
+            intent = self.inventory_model.load_intent()
+        else:
+            # IDE inventory is per user and remains useful before any agent is configured.
+            intent = self.inventory_model.load_intent()
+            intent = replace(intent, args=("aibom", "scan", "--json", "--only", "ide_plugins"))
         loading = intent.hint or "Loading inventory..."
         if announce and self.active_panel == "inventory":
             self._set_status(loading)
