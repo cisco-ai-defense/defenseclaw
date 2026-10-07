@@ -72,16 +72,17 @@ rest also reach per-user installs.
 ### Fixed
 
 - **Security: hooks keep the gateway token and the hook payload off process
-  command lines.** The Claude Code, Antigravity, Copilot, Cursor, Devin,
-  Hermes, Kiro and OpenHands shell hooks, the shared `inspect-*` hooks and
-  the OpenClaw and ZeptoClaw PATH shims gave curl the per-user gateway token
-  as `-H "Authorization: Bearer …"`, and the connector hooks also gave it the
-  whole hook payload (prompt or tool input, session id, transcript path, cwd)
-  as `-d`, on Linux and macOS. Other local accounts could read both from the
-  process list (`ps`, `/proc/<pid>/cmdline`), and exec monitors such as
-  auditd, Tetragon and EDR agents recorded them. The enterprise standalone hooks, which send
-  no token over the hook socket, still put the payload there. Every host hook
-  now sends its request through one helper, `defenseclaw_gateway_post` in
+  command lines and out of child environments.** The Claude Code,
+  Antigravity, Copilot, Cursor, Devin, Hermes, Kiro and OpenHands shell
+  hooks, the shared `inspect-*` hooks and the OpenClaw and ZeptoClaw PATH
+  shims gave curl the per-user gateway token as `-H "Authorization: Bearer …"`,
+  and the connector hooks also gave it the whole hook payload (prompt or tool
+  input, session id, transcript path, cwd) as `-d`, on Linux and macOS. Other
+  local accounts could read both from the process list (`ps`,
+  `/proc/<pid>/cmdline`), and exec monitors such as auditd, Tetragon and EDR
+  agents recorded them. The enterprise standalone hooks, which send no token
+  over the hook socket, still put the payload there. Every host hook now
+  sends its request through one helper, `defenseclaw_gateway_post` in
   `hooks/_hardening.sh` (helper schema v8): curl reads the Authorization
   header as a config line and the body from file descriptors that the
   shell's built-in `printf` writes, as the Codex hook already did, so its
@@ -90,12 +91,37 @@ rest also reach per-user installs.
   guard's session report do the same, and `inspect-tool` and
   `inspect-tool-response` give `jq` the tool input or output on standard
   input instead of as an argument, so an input over 128 KiB no longer stops
-  `jq` from starting. A token that contains CR or LF is refused as
-  `invalid gateway token`. Fail modes, timeouts and the OpenShell sandbox
-  hooks (which already sent the token this way) are unchanged. The gateway
-  rewrites the hooks when it starts (on enterprise installs the guardian
-  does), so an upgrade applies the fix. Windows is not affected: its hooks
-  run natively and the PowerShell adapters pass only fixed arguments.
+  `jq` from starting.
+  - The hooks no longer hand the token to the programs they start (curl, jq,
+    or the gateway a hook starts after a reboot) in
+    `DEFENSECLAW_GATEWAY_TOKEN`, which the Codex hook already dropped, and
+    they drop inherited variables named like their own (`PAYLOAD`,
+    `API_TOKEN`, …), which copied the prompt or the token into the
+    environment of every program they started.
+  - The PATH shims keep their own values in private names. When the agent's
+    environment exported `API_TOKEN`, the real npm, pip, curl, wget, ssh or
+    nc, and every process it started, got the DefenseClaw gateway token in
+    place of the user's own value (and the shim's values in place of
+    `API_ADDR`, `ACTION`, `RESULT` and others).
+  - Every gateway request from a hook, a PATH shim or the Codex notify bridge
+    runs `curl -q`, so a `.curlrc` in the agent's `CURL_HOME` or
+    `XDG_CONFIG_HOME` can no longer write the token and the payload to a
+    trace file or turn an HTTP 401 into an allow.
+  - A connector hook refuses a token that contains CR or LF as `invalid
+    gateway token` and handles it like a token the gateway rejects; the
+    `inspect-*` hooks fail closed on it, as on a 401. A PATH shim exits 1
+    with `shim gateway token is malformed — refusing to exec <tool>`.
+  - `defenseclaw doctor` reports Claude Code and Codex hooks rendered before
+    this fix as stale.
+
+  Fail modes and timeouts are otherwise unchanged. In OpenShell sandboxes
+  the token transport is unchanged (it already used a descriptor); sandbox
+  `inspect-tool-response` now also reads the tool output from standard input
+  (no `jq` argument, no 128 KiB limit) and blocks when it cannot build the
+  request body. The gateway rewrites the hooks when it starts (on enterprise
+  installs the guardian does), so an upgrade applies the fix. Windows is not
+  affected: its hooks run natively and the PowerShell adapters pass only
+  fixed arguments.
 - **Amp traces in a built-in mode reach Galileo.** Galileo needs a provider
   on an agent span, and Amp names no model in its built-in modes (such as
   `medium`), so those agent spans were left out of the Galileo export and
