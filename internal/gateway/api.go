@@ -3955,6 +3955,11 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 	secureClient := cfg != nil && cfg.SecureClientIntegration()
 	if secureClient {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
+		// The engine of main needed data.json: without it, main answered from
+		// its fallback even when policy_dir held Rego modules (issue #1092).
+		if policy.SecureClientPolicyLoadError(a.startPolicyDir()) != nil {
+			return policy.EvaluateSecureClientAdmission(input, a.startPolicyDir()), nil
+		}
 	}
 	if a.generationSource != nil || (a.scannerCfg != nil && a.scannerCfg.PolicyDir != "") {
 		if prepared, err := a.preparedPolicy(ctx); err == nil {

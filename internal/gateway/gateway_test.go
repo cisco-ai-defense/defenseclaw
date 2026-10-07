@@ -3817,23 +3817,33 @@ func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
 
 // A Secure Client host keeps the admission fallback of main (GAP-0106,
 // issue #1092): findings that are all severity NONE are a warning, and no
-// scan yet answers "scan required" with no actions. Other profiles keep the
-// fail-closed answer of the compiled admission.
+// scan yet answers "scan required" with no actions, also when policy_dir
+// holds Rego modules but no data.json, which the engine of main needed.
+// Other profiles keep the fail-closed answer of the compiled admission.
 func TestSecureClientAdmissionKeepsTheFallbackOfMain(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: t.TempDir()}
+	for _, module := range []string{"admission.rego", "guardrail.rego"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "policies", "rego", module))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cfg.PolicyDir, module), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	api := &APIServer{scannerCfg: cfg}
 	none := policy.AdmissionInput{TargetType: "skill", TargetName: "s", ScanResult: &policy.ScanResultInput{MaxSeverity: "NONE", TotalFindings: 1}}
-	out, _ := api.evaluateAdmissionPolicy(context.Background(), none)
+	out, _ := api.evaluateAdmissionPolicy(context.Background(), none, "")
 	if *out != (policy.AdmissionOutput{Verdict: "warning", Reason: "findings present (max NONE) — allowed with warning",
 		FileAction: "none", InstallAction: "none", RuntimeAction: "allow"}) {
 		t.Fatalf("Secure Client NONE findings = %+v", out)
 	}
-	out, _ = api.evaluateAdmissionPolicy(context.Background(), policy.AdmissionInput{TargetType: "skill", TargetName: "s"})
+	out, _ = api.evaluateAdmissionPolicy(context.Background(), policy.AdmissionInput{TargetType: "skill", TargetName: "s"}, "")
 	if *out != (policy.AdmissionOutput{Verdict: "scan", Reason: "scan required"}) {
 		t.Fatalf("Secure Client without a scan = %+v", out)
 	}
 	cfg.DeploymentMode = ""
-	if out, _ = api.evaluateAdmissionPolicy(context.Background(), none); out.Verdict != "rejected" {
+	if out, _ = api.evaluateAdmissionPolicy(context.Background(), none, ""); out.Verdict != "rejected" {
 		t.Fatalf("per-user NONE findings = %+v, want the fail-closed rejection", out)
 	}
 }
