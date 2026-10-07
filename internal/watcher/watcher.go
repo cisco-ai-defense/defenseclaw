@@ -1349,7 +1349,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 			plan.QuarantineRoot, pluginCategoryQuarantineDir, connector, filepath.Base(category), physicalName,
 		)
 	}
-	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
+	input := audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,
 		OriginalPath: plan.SourcePath, QuarantinePath: plan.QuarantinePath,
 		ContentHash: plan.ContentHash, Reason: "watcher enforcement",
@@ -1357,7 +1357,16 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		// The physical owner and global action scope are committed together so
 		// either Go or Python restore clears the exact logical file decision.
 		Connectors: []string{connector, ""},
-	})
+	}
+	record, err := w.store.CreateQuarantineRecord(ctx, input)
+	if errors.Is(err, audit.ErrQuarantinePathTaken) {
+		// Another asset of this name (in the folder of another user, or in
+		// another folder) holds the default slot. The refusal left this one
+		// active in its folder (GAP-0413); it gets a slot of its own.
+		plan.QuarantinePath = plan.PerSourceQuarantinePath()
+		input.QuarantinePath = plan.QuarantinePath
+		record, err = w.store.CreateQuarantineRecord(ctx, input)
+	}
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
 		return

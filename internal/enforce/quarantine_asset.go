@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -119,6 +120,30 @@ func NewAssetQuarantinePlan(
 		QuarantineRoot: quarantineRoot, QuarantinePath: destination,
 		ContentHash: contentHash, OwnershipJSON: ownership,
 	}, nil
+}
+
+// perSourceQuarantineDir holds the quarantine copies whose default slot
+// (<type>/<connector>/<name>) already holds a different asset of the same
+// name, for example one skill name in the profiles of two users on a managed
+// Windows computer, where the watcher shares one quarantine (GAP-0413).
+const perSourceQuarantineDir = "per-source"
+
+// PerSourceQuarantinePath is the quarantine destination of plan keyed by its
+// source path and content, for a source whose default slot holds a different
+// asset. The last element stays the asset name, so a restore finds it the
+// same way, and the same source and content always get the same slot.
+func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
+	typeDir, _ := quarantineTypeDir(plan.TargetType)
+	key := filepath.Clean(plan.SourcePath)
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	sum := sha256.Sum256([]byte(key + "\x00" + plan.ContentHash))
+	parts := []string{plan.QuarantineRoot, perSourceQuarantineDir, typeDir}
+	if plan.Connector != "" {
+		parts = append(parts, plan.Connector)
+	}
+	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), plan.TargetName)...)
 }
 
 // ExecuteAssetQuarantine performs copy, hash verification, atomic publication,
