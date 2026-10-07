@@ -67,6 +67,7 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
     "defenseclaw-runtime",
+    "defenseclaw-sandboxes",
     "defenseclaw-scanners",
     "defenseclaw-security",
     "defenseclaw-traffic",
@@ -117,6 +118,26 @@ EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS = [
     },
     {"key": "deployment.environment", "value": "local-dev", "action": "insert"},
 ]
+# Loki filters on structured metadata without parsing the line, so the sandbox
+# name (which the canonical record keeps only inside its JSON body) is copied
+# onto the log record as an attribute. Nothing else about the record changes.
+EXPECTED_SANDBOX_IDENTITY_PROCESSOR = {
+    "error_mode": "ignore",
+    "log_statements": [
+        {
+            "context": "log",
+            "conditions": [
+                'IsString(log.body) and IsMatch(log.body.string, "defenseclaw[.]sandbox[.]name")',
+            ],
+            "statements": [
+                'set(log.cache["record"], ParseJSON(log.body.string))',
+                'set(log.attributes["defenseclaw.sandbox.name"], log.cache["record"]["body"]'
+                '["defenseclaw.sandbox.name"]) where IsString(log.cache["record"]["body"]'
+                '["defenseclaw.sandbox.name"])',
+            ],
+        },
+    ],
+}
 EXPECTED_VOLUMES = {"prometheus-data", "loki-data", "tempo-data", "grafana-data"}
 
 EXPECTED_HISTOGRAM_SHA256 = "000945027326672c0d24e939d7812ccce07174cde37940b1291744b00b2f6fe9"
@@ -153,6 +174,9 @@ LOKI_BUILTIN_FIELDS = {
     # `defenseclaw.event.name` as structured metadata. Loki normalizes dots
     # to underscores, so it is queryable before `| json` under this spelling.
     "defenseclaw_event_name",
+    # The local Collector adds the sandbox name of every record that names
+    # one as structured metadata (processors.transform/sandbox-identity).
+    "defenseclaw_sandbox_name",
     "level",
     "severity_text",
     "service_name",
@@ -644,7 +668,7 @@ def _collector_errors() -> list[str]:
         },
         "logs": {
             "receivers": ["otlp"],
-            "processors": ["resource", "batch"],
+            "processors": ["resource", "transform/sandbox-identity", "batch"],
             "exporters": ["otlphttp/loki", "debug"],
         },
     }
@@ -667,6 +691,11 @@ def _collector_errors() -> list[str]:
     }:
         errors.append(
             "Agent360 canary filter must drop only the exact canonical boolean span attribute",
+        )
+    if collector.get("processors", {}).get("transform/sandbox-identity") != EXPECTED_SANDBOX_IDENTITY_PROCESSOR:
+        errors.append(
+            "transform/sandbox-identity must only copy the sandbox name from the record body onto the "
+            "defenseclaw.sandbox.name log attribute (Loki structured metadata), never change the body",
         )
     resource_actions = collector.get("processors", {}).get("resource", {}).get("attributes")
     if resource_actions != EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS:

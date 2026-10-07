@@ -153,10 +153,33 @@ def test_local_logs_preserve_the_canonical_post_redaction_projection() -> None:
         collector = yaml.safe_load(text)
         assert collector["service"]["pipelines"]["logs"]["processors"] == [
             "resource",
+            "transform/sandbox-identity",
             "batch",
         ]
         assert forbidden_processors.isdisjoint(collector["processors"])
         assert all(mutation not in text for mutation in forbidden_mutations)
+        # The one log statement set only adds an attribute; it never writes the body.
+        assert collector["processors"]["transform/sandbox-identity"] == compat.EXPECTED_SANDBOX_IDENTITY_PROCESSOR
+        statements = collector["processors"]["transform/sandbox-identity"]["log_statements"][0]["statements"]
+        assert not any(statement.startswith(("set(log.body", "set(body")) for statement in statements)
+        assert any(statement.startswith('set(log.attributes["defenseclaw.sandbox.name"]') for statement in statements)
+
+
+def test_collector_rejects_a_sandbox_identity_processor_that_changes_the_body(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
+    collector["processors"]["transform/sandbox-identity"]["log_statements"][0]["statements"].append(
+        'set(log.body, "")',
+    )
+    path = tmp_path / "collector.yaml"
+    path.write_text(yaml.safe_dump(collector), encoding="utf-8")
+    monkeypatch.setattr(compat, "COLLECTOR", path)
+
+    errors = compat._collector_errors()
+
+    assert any("transform/sandbox-identity" in error for error in errors)
 
 
 def test_loki_accepts_canonical_v8_records_without_silent_truncation() -> None:

@@ -51,6 +51,25 @@ processors:
     trace_conditions:
       - 'span.attributes["defenseclaw.telemetry.canary"] == true'
 
+  # Loki keeps every OTLP log-record attribute as structured metadata, which a
+  # query can filter on without parsing the line. DefenseClaw's canonical record
+  # carries the sandbox name only inside the JSON body (body."defenseclaw.sandbox.name"),
+  # so listing or filtering sandboxes meant a `| json` scan of every record.
+  # Copy that one value onto the record as the defenseclaw.sandbox.name
+  # attribute (Loki: defenseclaw_sandbox_name). The body is never changed, only
+  # records that name a sandbox are parsed, and the value is the producer's own
+  # field, never free text from the workload. It is a log attribute only:
+  # sandbox identities stay out of metric labels.
+  transform/sandbox-identity:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        conditions:
+          - 'IsString(log.body) and IsMatch(log.body.string, "defenseclaw[.]sandbox[.]name")'
+        statements:
+          - 'set(log.cache["record"], ParseJSON(log.body.string))'
+          - 'set(log.attributes["defenseclaw.sandbox.name"], log.cache["record"]["body"]["defenseclaw.sandbox.name"]) where IsString(log.cache["record"]["body"]["defenseclaw.sandbox.name"])'
+
   # Defense-in-depth resource enrichment so every signal carries the
   # service.namespace=defenseclaw label even if the sidecar forgets to
   # set it. The `insert` actions keep sidecar-supplied values when present.
@@ -179,5 +198,5 @@ service:
       # DefenseClaw has already applied the selected v8 route and redaction
       # profile. The local Collector must preserve that canonical projection;
       # it performs resource enrichment and batching only.
-      processors: [resource, batch]
+      processors: [resource, transform/sandbox-identity, batch]
       exporters: [otlphttp/loki, debug]
