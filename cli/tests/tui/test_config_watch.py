@@ -544,6 +544,36 @@ async def test_config_editor_save_records_an_audit_event(
 
 
 @pytest.mark.asyncio
+async def test_save_over_an_unparseable_file_keeps_the_file_and_the_draft(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-0370: a save over a config.yaml that no longer parses replaced it
+    # with only the edited fields; it is refused and the draft stays.
+    payload = {**_config_payload(tmp_path, {"claudecode": {}}), "observability": {}}
+    path = _configure_active_path(monkeypatch, tmp_path, payload)
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+    broken = path.read_text(encoding="utf-8") + "\nbroken: [unclosed\n"
+    path.write_text(broken, encoding="utf-8")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "not valid YAML (line" in action.hint and "draft is kept" in action.hint, action.hint
+    assert path.read_text(encoding="utf-8") == broken
+    assert model.has_changes()
+
+
+@pytest.mark.asyncio
 async def test_asset_policy_save_applies_without_a_restart(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

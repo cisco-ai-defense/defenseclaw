@@ -495,44 +495,26 @@ class TestConfigVersion9KeysRoundTrip(unittest.TestCase):
             self.assertEqual(persisted, original)
 
 class TestConfigSaveResilienceContinued(unittest.TestCase):
-    def test_corrupt_yaml_falls_back_to_dataclass_only(self):
-        """Operator with a half-edited YAML must still be able to recover
-        by re-running setup. We log a warning but do NOT raise."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            # Write something yaml.safe_load can't parse.
-            with open(cfg_path, "w") as f:
-                f.write("config_version: 8\nobservability: [unclosed_list\n - {bad: yaml")
+    def test_corrupt_or_non_mapping_yaml_refuses_the_save(self):
+        """A save over a file that no longer parses kept only the changed
+        fields and dropped every other setting (GAP-0370): it is refused,
+        naming the line, and the file is left as it was."""
+        from defenseclaw.config_writer import ConfigUnparseableError
 
-            cfg = _make_cfg(tmpdir)
-            with self.assertLogs("defenseclaw.config", level="WARNING") as logs:
-                cfg.save()
-            self.assertTrue(
-                any("failed to parse" in m for m in logs.output),
-                msg=f"expected parse-failure warning, got {logs.output!r}",
-            )
-
-            # The malformed source is unrecoverable, but the fallback produces
-            # a well-formed, schema-v8 document that setup can repair further.
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-            self.assertEqual(after["data_dir"], tmpdir)
-
-    def test_non_mapping_yaml_falls_back(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            # Top-level YAML list — invalid for our schema.
-            with open(cfg_path, "w") as f:
-                f.write("- not\n- a\n- mapping\n")
-
-            cfg = _make_cfg(tmpdir)
-            with self.assertLogs("defenseclaw.config", level="WARNING"):
-                cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-            self.assertIsInstance(after, dict)
-            self.assertEqual(after["data_dir"], tmpdir)
+        for broken, words in (
+            ("config_version: 9\ngateway:\n  api_port: 19020\nbroken: [unclosed\n", "not valid YAML (line"),
+            ("- not\n- a\n- mapping\n", "not a mapping"),
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg_path = os.path.join(tmpdir, "config.yaml")
+                with open(cfg_path, "w") as f:
+                    f.write(broken)
+                cfg = _make_cfg(tmpdir)
+                with self.assertRaises(ConfigUnparseableError) as refused:
+                    cfg.save()
+                self.assertIn(words, str(refused.exception))
+                with open(cfg_path) as f:
+                    self.assertEqual(f.read(), broken)
 
 
 class TestConfigSaveAtomicity(unittest.TestCase):

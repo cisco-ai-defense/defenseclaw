@@ -138,6 +138,11 @@ class ConfigLockBusyError(ConfigWriteError):
     """Another DefenseClaw process is changing config.yaml."""
 
 
+class ConfigUnparseableError(ConfigWriteError):
+    """config.yaml on disk is not a YAML mapping, so a save that merges into
+    it would keep only the changed fields (GAP-0370); nothing is written."""
+
+
 class ManagedConfigWriteError(ConfigWriteError):
     """This device is managed; policy changes come from the management plane."""
 

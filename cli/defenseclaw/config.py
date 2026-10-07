@@ -3582,6 +3582,17 @@ class Config:
             llm.max_retries = base.effective_max_retries()
         return llm
 
+    def check_saveable(self) -> None:
+        """Raise ConfigUnparseableError when a save would be refused because
+        config.yaml on disk no longer parses (GAP-0370); a missing file is fine."""
+        path = str(config_path_for_data_dir(self.data_dir))
+        try:
+            with open(path, "rb") as handle:
+                current = handle.read()
+        except FileNotFoundError:
+            return
+        _existing_document_for_save(path, current)
+
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
 
@@ -3631,7 +3642,7 @@ class Config:
         dataclass_data = _config_to_dict(self)
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
-            merged = self._merged_document(path, dataclass_data)
+            merged = self._merged_document(path, dataclass_data, current)
             _assert_config_write_allowed(path, merged)
             candidate = config_writer.render_document(current, merged, source_name)
             return candidate, config_writer.diff_documents(current, candidate)
@@ -3648,8 +3659,8 @@ class Config:
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
         return result
 
-    def _merged_document(self, path: str, dataclass_data: dict[str, Any]) -> dict[str, Any]:
-        """The on-disk document with this Config's changed modeled values."""
+    def _merged_document(self, path: str, dataclass_data: dict[str, Any], current: bytes) -> dict[str, Any]:
+        """The on-disk document (``current``) with this Config's changed modeled values."""
 
         version = self._source_config_version
         baseline = self._loaded_v8_modeled_snapshot
@@ -3666,7 +3677,7 @@ class Config:
                 "This configuration was written by an older DefenseClaw"
                 " — run 'defenseclaw migrate' first."
             )
-        existing = _load_existing_config_yaml(path)
+        existing = _existing_document_for_save(path, current)
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
@@ -4208,15 +4219,11 @@ def _serialize_routing(d: dict[str, Any]) -> None:
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
-    """Best-effort read of an existing ``config.yaml`` for round-trip save.
+    """Best-effort read of an existing ``config.yaml`` (the managed check).
 
-    Returns ``{}`` when the file is missing (first save), unreadable, or
-    malformed. On parse failure we log a warning but do NOT raise — the
-    operator's previous file may be partially corrupt and we still want
-    ``cfg.save()`` to succeed so the next setup wizard can rewrite it
-    cleanly. Worst-case the on-disk file is replaced with the
-    dataclass-only view, which is exactly the pre-fix behaviour, so we
-    cannot regress relative to the old serializer.
+    Returns ``{}`` when the file is missing, unreadable, malformed or not a
+    mapping, with a warning for the last three. A save never merges into
+    this: it reads the file with :func:`_existing_document_for_save`.
     """
     try:
         with open(path) as f:
@@ -4224,57 +4231,54 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
     except FileNotFoundError:
         return {}
     except OSError as exc:
-        _log.warning(
-            "config.save: cannot read existing %s (%s); writing dataclass-only view (any unmodelled keys will be lost)",
-            path,
-            exc,
-        )
+        _log.warning("config: cannot read existing %s (%s)", path, exc)
         return {}
     except yaml.YAMLError as exc:
-        backup = _backup_unparseable_config(path)
-        _log.warning(
-            "config.save: existing %s failed to parse (%s); writing dataclass-only view (backup=%s)",
-            path,
-            exc,
-            backup or "unavailable",
-        )
+        _log.warning("config: existing %s failed to parse (%s)", path, exc)
         return {}
     if not isinstance(raw, dict):
-        _log.warning(
-            "config.save: existing %s is not a YAML mapping (got %s); writing dataclass-only view",
-            path,
-            type(raw).__name__,
-        )
+        _log.warning("config: existing %s is not a YAML mapping (got %s)", path, type(raw).__name__)
         return {}
     return raw
 
 
-def _backup_unparseable_config(path: str) -> str:
+def _existing_document_for_save(path: str, current: bytes) -> dict[str, Any]:
+    """The on-disk document a save merges into; ``{}`` for an empty file.
+
+    A file that does not parse, or is not a mapping, is refused as the CLI
+    writer refuses it: a save used to fall back to a document of only the
+    changed fields and replace the file with it, which dropped every other
+    setting (listeners, connectors, pack pins) and the protection with them
+    (GAP-0370). Nothing is written, and the error names the line.
+    """
+    from defenseclaw.config_writer import ConfigUnparseableError
+
     try:
-        with open(path, "rb") as src:
-            data = src.read()
-    except OSError:
-        return ""
-    backup = f"{path}.bak"
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(backup, flags, 0o600)
-    except FileExistsError:
-        backup = f"{path}.bak.{os.getpid()}"
-        try:
-            fd = os.open(backup, flags, 0o600)
-        except OSError:
-            return ""
-    except OSError:
-        return ""
-    try:
-        with os.fdopen(fd, "wb") as dst:
-            dst.write(data)
-            dst.flush()
-            os.fsync(dst.fileno())
-    except OSError:
-        return ""
-    return backup
+        text = current.decode("utf-8")
+        raw = parse_config_yaml(text) if text.strip() else {}
+    except UnicodeDecodeError as exc:
+        raise ConfigUnparseableError(
+            f"{path} is not UTF-8 text (byte {exc.start}); nothing was saved. "
+            "Save it as UTF-8, then run 'defenseclaw config validate'"
+        ) from exc
+    except yaml.YAMLError as exc:
+        from defenseclaw.observability.v8_config import yaml_error_mark
+
+        mark = yaml_error_mark(exc)
+        where = f"line {mark.line + 1}, column {mark.column + 1}: " if mark is not None else ""
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        raise ConfigUnparseableError(
+            f"{path} is not valid YAML ({where}{problem}); nothing was saved. "
+            "Fix that line, then run 'defenseclaw config validate'"
+        ) from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigUnparseableError(
+            f"{path} is a YAML {type(raw).__name__}, not a mapping of settings; nothing was saved. "
+            "Fix the file, then run 'defenseclaw config validate'"
+        )
+    return raw
 
 
 # Dotted YAML paths whose VALUE is a dict[str, str]-style modeled

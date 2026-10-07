@@ -13163,6 +13163,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, hint="No config changes to save.")
         saved_entries = self.setup_model.config_diff()
         restart_keys: list[str] | None = None
+        check_saveable = getattr(self.config, "check_saveable", None)
+        if callable(check_saveable):
+            from defenseclaw.config_writer import ConfigUnparseableError
+
+            try:
+                check_saveable()
+            except ConfigUnparseableError as exc:
+                # Saving would replace the file with only the edited fields
+                # (GAP-0370); the draft stays for a save once the file is fixed.
+                return SetupPanelAction(
+                    True, hint=f"Config not saved: {exc}. Your draft is kept: fix the file and press S again, or r to discard it."
+                )
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
