@@ -312,10 +312,18 @@ def cli(ctx: click.Context) -> None:
             # Doctor's best-effort cache writer.
             app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
             return
-        ux.echo(
-            f"Failed to load config — run 'defenseclaw init' first: {exc}",
-            err=True,
-        )
+        if cfg_mod.config_path().is_file():
+            # GAP-0288: the file is there and refused; `init` would not fix it.
+            ux.echo(
+                f"Failed to load config: {exc}. Fix it in {cfg_mod.config_path()}; "
+                "'defenseclaw config validate' shows the line.",
+                err=True,
+            )
+        else:
+            ux.echo(
+                f"Failed to load config — run 'defenseclaw init' first: {exc}",
+                err=True,
+            )
         raise SystemExit(1)
 
     # Doctor must observe the audit database exactly as it existed at command
