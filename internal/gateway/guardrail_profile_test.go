@@ -52,6 +52,26 @@ func TestSubjectGroupsMatchLikeEqualFold(t *testing.T) {
 	}
 }
 
+// A matched group longer than the attribute allows is left out of the
+// decision records instead of failing them (GAP-0319).
+func TestGuardrailProfileTelemetryBoundsTheMatchedGroup(t *testing.T) {
+	telemetry := func(group string) guardrailProfileTelemetry {
+		return guardrailProfileTelemetryFor(context.WithValue(t.Context(), resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
+			decision: profileDecision{Name: "strict", Digest: "sha256:0", Match: profileMatchGroup, MatchedGroup: group},
+		}))
+	}
+	if got, ok := telemetry(`CORP\Contractors`).MatchedGroup.Get(); !ok || got != `CORP\Contractors` {
+		t.Fatalf("matched group = %q (present %t), want CORP\\Contractors", got, ok)
+	}
+	long := telemetry(`CORP\` + strings.Repeat("組", 90))
+	if got, ok := long.MatchedGroup.Get(); ok {
+		t.Fatalf("a %d-byte matched group was kept", len(got))
+	}
+	if name, _ := long.Name.Get(); name != "strict" {
+		t.Fatalf("profile name = %q, want strict", name)
+	}
+}
+
 type testVerifiedSubjectKey struct{}
 
 // stubProfileSources replaces the verified-identity sources for one test:

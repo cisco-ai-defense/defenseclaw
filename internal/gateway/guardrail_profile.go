@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -961,10 +962,24 @@ func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry
 		out.Name = observability.Present(d.Name)
 		out.Digest = observability.Present(d.Digest)
 	}
-	if d.Match == profileMatchGroup && d.MatchedGroup != "" {
+	if d.Match == profileMatchGroup && profileTelemetryGroupFits(d.MatchedGroup) {
 		out.MatchedGroup = observability.Present(d.MatchedGroup)
 	}
 	return out
+}
+
+// maxProfileMatchedGroupBytes is the registry bound of
+// defenseclaw.guardrail.profile.matched_group.
+const maxProfileMatchedGroupBytes = 256
+
+// profileTelemetryGroupFits reports whether a matched group fits the
+// attribute. An assignment may name a longer group (the config allows 512
+// characters), and a value out of range fails the whole record, which every
+// producer then dropped (GAP-0319). Such a group is left out; the profile and
+// the match still say what selected it, and explain names the group.
+func profileTelemetryGroupFits(group string) bool {
+	return group != "" && len(group) <= maxProfileMatchedGroupBytes && utf8.ValidString(group) &&
+		!strings.ContainsFunc(group, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 // guardrailProfileDigests maps each profile of set to its digest.
