@@ -1736,7 +1736,9 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		return ms
 
 	case InstallPlugin:
-		return scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+		plugin := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+		plugin.Connector = w.eventConnector(evt)
+		return plugin
 	default:
 		return nil
 	}

@@ -1193,6 +1193,7 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
 		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+		ps.Connector = "claudecode"
 		result, err = ps.Scan(scanCtx, target)
 	case "mcp":
 		ms := scanner.NewMCPScannerFromLLM(

@@ -14,7 +14,7 @@
 //
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
 //	defenseclaw-scanners mcp-scan --input-stdin <url>
-//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--include-self]
+//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self]
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
 
@@ -64,13 +64,20 @@ const (
 	consoleEntryPointScript = `import importlib.metadata as m,sys; name=sys.argv[1]; sys.argv=[name,*sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
 
 	pluginScanScript = `import json,sys
+from defenseclaw.config import load
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import PluginScanOptions
-a=sys.argv[1:]; o=PluginScanOptions(); t=None; i=0
+from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
+from defenseclaw.scanner.rulepack import overlay_findings
+a=sys.argv[1:]; o=PluginScanOptions(); t=None; connector=None; i=0
 while i<len(a):
     x=a[i]
-    if x in ("--policy","--profile") and i+1<len(a):
-        setattr(o,x[2:],a[i+1]); i+=2
+    if x in ("--policy","--profile","--connector") and i+1<len(a):
+        if x=="--connector":
+            connector=a[i+1]
+        else:
+            setattr(o,x[2:],a[i+1])
+        i+=2
     elif x=="--include-self":
         o.include_self=True; i+=1
     elif t is None and not x.startswith("--"):
@@ -79,7 +86,18 @@ while i<len(a):
         sys.exit("plugin-scan: unexpected argument "+x)
 if t is None:
     sys.exit("plugin-scan: a plugin directory is required")
-print(json.dumps(scan_plugin(t,o).to_dict()))`
+result=scan_plugin(t,o).to_dict()
+if o.include_self or not is_first_party_self_target(t,trusted_paths=o.trusted_self_paths):
+    existing={(f.get("id"),f.get("location")) for f in result["findings"]}
+    for finding in overlay_findings(load(),connector,path=t):
+        if (finding.id,finding.location) in existing:
+            continue
+        item=finding.to_dict()
+        item["line"]=item.pop("line_number",0)
+        item["tags"]=[*item.get("tags",[]),"analyzer:rule-pack"]
+        item["scanner"]=result["scanner"]
+        result["findings"].append(item)
+print(json.dumps(result))`
 
 	// mcpScanScript reads the config-derived scan input from stdin. Large
 	// pinned rule sets never enter either Windows process command line.
