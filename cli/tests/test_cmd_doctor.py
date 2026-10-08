@@ -3507,3 +3507,49 @@ def test_a_signature_pack_that_fails_its_pin_is_a_doctor_warning(tmp_path):
     cmd_doctor._check_signature_packs(cfg, result)
     [check] = result.checks
     assert check["status"] == "warn" and f"{pack}: file not found" in check["detail"]
+
+
+
+def test_secure_client_config_check_keeps_v8_record(tmp_path):
+    from defenseclaw.commands import cmd_doctor
+
+    config = tmp_path / "config.yaml"
+    config.write_text("config_version: 8\n", encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    result = _DoctorResult()
+    with (
+        patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"),
+        patch("defenseclaw.config_inspect.inspect_v8_config", return_value=SimpleNamespace(valid=True)),
+    ):
+        cmd_doctor._check_config(cfg, result)
+    row = result.checks[-1]
+    assert row["check_id"] == "doctor.config.canonical-v8"
+    assert row["detail"] == f"{config}; canonical schema v8 valid"
+
+    policy_result = _DoctorResult()
+    with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+        cmd_doctor._check_policy_state(
+            SimpleNamespace(deployment_mode="managed_enterprise"),
+            policy_result,
+            live_health={"policy": {"effective_digest": "sha256:" + "a" * 64}},
+        )
+    assert policy_result.checks == []
+
+
+
+
+def test_policy_digest_probe_unavailable_does_not_pass():
+    from defenseclaw.commands import cmd_doctor
+
+    result = _DoctorResult()
+    with (
+        patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value=""),
+        patch.object(cmd_doctor, "_local_policy_digest", return_value=None),
+    ):
+        cmd_doctor._check_policy_state(
+            SimpleNamespace(), result,
+            live_health={"policy": {"effective_digest": "sha256:" + "a" * 64, "generation": 3}},
+        )
+    row = result.checks[-1]
+    assert row["status"] == "warn"
+    assert "comparison" in row["detail"]
