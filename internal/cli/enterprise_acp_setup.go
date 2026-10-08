@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
@@ -294,6 +294,12 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	if err != nil {
 		return result, err
 	}
+	// The lock pins this entry, not the whole file the editor rewrites
+	// (GAP-0708).
+	entryDigest, err := acp.ClientEntrySHA256(clientPath, in.agent)
+	if err != nil {
+		return result, err
+	}
 	agentDigest, err := acpFileSHA256(agentExecutable)
 	if err != nil {
 		return result, err
@@ -306,7 +312,7 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	lock.Version = 1
 	lock.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	lock.Protocol.SchemaVersion, lock.Protocol.SchemaSHA256 = acp.SchemaVersion, acp.SchemaSHA256
-	lock.Client.ID, lock.Client.ConfigPath, lock.Client.ConfigSHA256 = in.client, clientPath, clientDigest
+	lock.Client.ID, lock.Client.ConfigPath, lock.Client.ConfigSHA256 = in.client, clientPath, acp.EntryDigestPrefix+entryDigest
 	// Setup does not run an operator-selected binary to decorate the lock: the
 	// agent is pinned by absolute path and digest.
 	lock.Agent.ID, lock.Agent.Path, lock.Agent.SHA256, lock.Agent.Version = in.agent, agentExecutable, agentDigest, "not-probed"
@@ -348,6 +354,14 @@ func validateEnterpriseACPUserToken(path string) error {
 // with the one the lock names.
 func resolveACPExecutable(value, label string) (string, error) {
 	candidate, err := exec.LookPath(value)
+	if errors.Is(err, exec.ErrDot) {
+		// Windows looks in the current folder first and Go refuses that
+		// match; "was not found" sent the user looking for an install that
+		// was on PATH all along (GAP-0734).
+		where, _ := filepath.Abs(candidate)
+		return "", fmt.Errorf("%s executable %s resolves to %s in the current folder, which DefenseClaw does not run; "+
+			"run setup from another folder, or pass --agent-binary with the full path of the agent", label, value, where)
+	}
 	if err != nil {
 		if !filepath.IsAbs(value) {
 			return "", fmt.Errorf("%s executable was not found: %s", label, value)
@@ -410,9 +424,7 @@ func acpContractLockPath(dataDir, client, agent string) string {
 
 // acpManagedEntryName is the editor entry name for an agent, the one the
 // Python CLI writes and verifies.
-func acpManagedEntryName(agent string) string {
-	return "DefenseClaw · " + strings.ToUpper(agent[:1]) + strings.ToLower(agent[1:])
-}
+func acpManagedEntryName(agent string) string { return acp.ManagedEntryName(agent) }
 
 // acpSiblingLockPaths lists the contract locks of the other agents of the same
 // editor that exist in dataDir.
@@ -454,6 +466,11 @@ func repinACPContractLock(path, client, clientPath, clientDigest string) error {
 	lockClient, _ := document["client"].(map[string]any)
 	if lockClient == nil || lockClient["id"] != client {
 		return fmt.Errorf("managed ACP contract lock identity does not match: %s", path)
+	}
+	if pinned, _ := lockClient["config_sha256"].(string); strings.HasPrefix(pinned, acp.EntryDigestPrefix) &&
+		lockClient["config_path"] == clientPath {
+		// It pins its own entry, which this setup did not change.
+		return nil
 	}
 	lockClient["config_path"], lockClient["config_sha256"] = clientPath, clientDigest
 	body, err := json.MarshalIndent(document, "", "  ")
@@ -504,7 +521,7 @@ func readACPClientConfig(path string) (map[string]any, string, error) {
 	return document, acpLeadingJSONCPrefix(raw), nil
 }
 
-func enterpriseACPNormalizeJSONC(raw []byte) []byte { return enterprisepolicy.StripJSONC(raw) }
+func enterpriseACPNormalizeJSONC(raw []byte) []byte { return jsonc.Strip(raw) }
 
 // acpLeadingJSONCPrefix is the whitespace and comments before the first
 // token of a JSONC document.

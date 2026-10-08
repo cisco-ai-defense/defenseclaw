@@ -7,12 +7,15 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // Seams for tests.
@@ -107,6 +110,25 @@ func repairEnterpriseACPLegacyLock(dataDir string, uid, gid int) error {
 // owner writes the records itself (withEnterpriseACPServiceOwner), with the
 // 0600 and 0700 modes safefile gives them.
 func alignEnterpriseACPCredentialOwner(_, _, _, _, _, _ string) error { return nil }
+
+// enterpriseACPUnknownAccount reports an account name no account database
+// knows.
+func enterpriseACPUnknownAccount(err error) bool {
+	var unknown user.UnknownUserError
+	return errors.As(err, &unknown) || unixidentity.IsNotFound(err)
+}
+
+// enterpriseACPNoAccountText is the refusal for an unknown account name.
+func enterpriseACPNoAccountText(name string) string {
+	return "enterprise acp: no account named " + name + " on this computer"
+}
+
+// enterpriseACPNoHomeText is the refusal for an account whose home does not
+// exist; it was a raw lstat error (GAP-0687).
+func enterpriseACPNoHomeText(who, home, _ string) string {
+	return fmt.Sprintf("enterprise acp: %s has no home directory (%s does not exist), so there is nowhere to publish "+
+		"the ACP token; create the home or enroll another account", who, home)
+}
 
 // configureEnterpriseACPTargetLookup turns on the standalone Unix account
 // rules the enterprise hooks commands use, including the directory lookup

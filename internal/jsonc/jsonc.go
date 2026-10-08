@@ -8,14 +8,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package enterprisepolicy
+package jsonc
 
-// JSONC normalization for agent config files (Devin, OpenCode): line and
-// block comments outside strings are dropped and trailing commas before a
-// closing bracket are removed. Mirrors internal/config's reader.
-
-// StripJSONC drops the comments and trailing commas of a JSONC document.
-func StripJSONC(data []byte) []byte {
+// Strip drops the comments and trailing commas of a JSONC document (agent
+// and editor settings files): line and block comments outside strings go,
+// and so does a trailing comma before a closing bracket. internal/config and
+// internal/enterprisepolicy each kept a copy, and the ACP guard needs it too.
+func Strip(data []byte) []byte {
 	return stripJSONCTrailingCommas(stripJSONCComments(data))
 }
 

@@ -10,12 +10,12 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/user"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -123,6 +123,45 @@ func (a *APIServer) acpCallerAccountRefusal(r *http.Request) string {
 	return ""
 }
 
+// writeACPSignedOtherAccountRefusal answers an ACP request whose valid
+// credential belongs to another account with a refusal signed by that
+// credential.
+func writeACPSignedOtherAccountRefusal(w http.ResponseWriter, r *http.Request, token, nonce string) {
+	body := []byte(`{"error":"unauthorized","code":"` + acp.RefusalOtherAccount + `"}` + "\n")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(acp.AuthResponseMACHeader, acp.HTTPResponseMAC(token, r.Header.Get(acp.AuthKeyIDHeader), nonce, http.StatusUnauthorized, body))
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write(body)
+}
+
+// withRevokedACPCredential names, on an authentication failure row no
+// kernel answer attributed (Windows), the account a revoked managed
+// credential was issued to, by the non-secret key ID the guard presented:
+// the row named no one, so an administrator could not tell who still ran a
+// revoked guard (GAP-0354). Secure Client keeps its rows.
+func (a *APIServer) withRevokedACPCredential(ctx context.Context, r *http.Request) context.Context {
+	if a == nil || a.scannerCfg == nil || !managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) ||
+		a.scannerCfg.SecureClientIntegration() || !identityFactsEnabled.Load() {
+		return ctx
+	}
+	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+		return ctx
+	}
+	revoked, ok := acp.RevokedEnterpriseCredentialForKeyID(a.scannerCfg.DataDir, r.Header.Get(acp.AuthKeyIDHeader))
+	if !ok {
+		return ctx
+	}
+	identity := acpPrincipalIdentity(revoked.Principal)
+	if identity == "" {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	agent := AgentIdentityFromContext(ctx)
+	agent.UserID, agent.UserIDKind = identity, useridentity.KindForID(identity)
+	agent.UserName = sanitizeLLMEventUser(userScopedIdentityName(identity))
+	return ContextWithAgentIdentity(ctx, agent)
+}
+
 // withACPCallerAccount names the kernel-verified account of a refused ACP
 // caller on the authentication failure row, which named no one, so an
 // administrator could not tell who was presenting a revoked or copied
@@ -138,9 +177,10 @@ func (a *APIServer) withACPCallerAccount(ctx context.Context, r *http.Request) c
 	id := strconv.Itoa(uid)
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, id)
 	identity := AgentIdentityFromContext(ctx)
-	identity.UserID, identity.UserIDKind, identity.UserName = id, useridentity.KindPOSIXUID, ""
-	if account, lookupErr := user.LookupId(id); lookupErr == nil {
-		identity.UserName = sanitizeLLMEventUser(account.Username)
-	}
+	// The account database the hook socket uses names directory accounts
+	// too; os/user in this cgo-free build reads only /etc/passwd, so an AD
+	// borrower's row carried only its uid (GAP-0690).
+	identity.UserID, identity.UserIDKind = id, useridentity.KindPOSIXUID
+	identity.UserName = sanitizeLLMEventUser(userScopedIdentityName(id))
 	return ContextWithAgentIdentity(ctx, identity)
 }

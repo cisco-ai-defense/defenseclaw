@@ -43,8 +43,10 @@ func enterpriseACPWindowsTargetError(err error, notLocalSystem bool) error {
 			"enterprise acp: %s has no signed-in session, and the ACP token is written as the signed-in user; "+
 				"run the enrollment again while that user is signed in (nothing retries it)", strings.TrimSpace(session.SID))}
 	case strings.Contains(err.Error(), "refusing non-interactive target SID"):
-		return &enterpriseACPTargetRefusal{err: err, message: "enterprise acp: the target is a system account, not a user (" +
-			err.Error() + "); --user-home alone names the owner of the folder; " + enterpriseACPWindowsEnrollForm}
+		// The hook guardian text named "enterprise hooks" (GAP-0355).
+		_, sid, _ := strings.Cut(err.Error(), "refusing non-interactive target SID ")
+		return &enterpriseACPTargetRefusal{err: err, message: "enterprise acp: the folder is owned by a system account (" +
+			strings.TrimSpace(sid) + "), not by a user, so --user-home alone does not name one; " + enterpriseACPWindowsEnrollForm}
 	}
 	return err
 }

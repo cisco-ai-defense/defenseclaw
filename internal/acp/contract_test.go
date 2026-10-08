@@ -81,4 +81,34 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 		// The settings file is not an executable (GAP-0391).
 		t.Fatalf("changed client configuration error = %v", err)
 	}
+	// A managed lock pins the guarded entry: the editor rewriting the file
+	// around it (a theme change) keeps it valid, an edit of the entry does
+	// not (GAP-0708).
+	entry := `"DefenseClaw · Kiro":{"command":"guard","args":["--agent","kiro"]}`
+	if err := os.WriteFile(clientConfig, []byte(`{"agent_servers":{`+entry+`}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entryDigest, err := ClientEntrySHA256(clientConfig, "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock["client"] = map[string]any{"id": "zed", "config_path": clientConfig, "config_sha256": EntryDigestPrefix + entryDigest}
+	body, _ = json.Marshal(lock)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewritten := "// edited by the editor\n{\n  \"theme\": \"Gruvbox Dark\",\n  \"agent_servers\": {\n    " + entry + ",\n  },\n}\n"
+	if err := os.WriteFile(clientConfig, []byte(rewritten), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
+		t.Fatalf("a rewrite of the settings around the guarded entry was refused: %v", err)
+	}
+	if err := os.WriteFile(clientConfig, []byte(strings.Replace(rewritten, `"kiro"]`, `"kiro","--x"]`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil ||
+		!strings.Contains(err.Error(), "DefenseClaw · Kiro entry") {
+		t.Fatalf("an edited guarded entry: err = %v", err)
+	}
 }

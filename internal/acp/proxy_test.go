@@ -633,6 +633,66 @@ func TestCopyFramesActionForwardsANullIDErrorResponse(t *testing.T) {
 	}
 }
 
+type profileMovedEvaluator struct{}
+
+func (profileMovedEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict{}, &BindingRefusedError{Code: RefusalProfileChanged, Profile: "act", Mode: "action",
+		Message: "ACP profile does not match the configured binding for this client and agent; re-run acp setup"}
+}
+
+// A profile the administrator moved the pair away from ends the session,
+// in observe mode too, and the editor is told the new profile and the
+// command; it ran unchecked (GAP-0723).
+func TestCopyFramesProfileMovedEndsTheSessionAndSaysWhy(t *testing.T) {
+	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}` + "\n"
+	var forwarded, client bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	err := copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeObserve, ClientID: "zed", AgentID: "hermes", Profile: "obs", Evaluator: profileMovedEvaluator{},
+		Managed: true, Stderr: io.Discard,
+		SetupCommandFor: func(profile string, mode Mode) string { return "setup --profile " + profile + " " + string(mode) },
+	}, state, ClientToAgent, strings.NewReader(prompt), &forwarded, &client)
+	if !errors.Is(err, ErrBindingRefused) || forwarded.Len() != 0 {
+		t.Fatalf("err = %v, forwarded = %q; want the session ended before the prompt reached the agent", err, forwarded.String())
+	}
+	for _, text := range []string{err.Error(), client.String()} {
+		if !strings.Contains(text, "from ACP profile obs to act") || !strings.Contains(text, "setup --profile act action") ||
+			strings.Contains(text, "did not answer") {
+			t.Fatalf("the user is not told what changed and what to run: %s", text)
+		}
+	}
+}
+
+// An oversized or broken frame ends an action session in words, without Go
+// package or decoder text, and an observe session passes the oversized frame
+// on (GAP-0685).
+func TestCopyFramesOversizedAndBrokenFramesSayWhy(t *testing.T) {
+	huge := `{"jsonrpc":"2.0","method":"x","params":{"pad":"` + strings.Repeat("a", MaxFrameBytes) + `"}}` + "\n"
+	newState := func() *proxyState {
+		return &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	}
+	for input, want := range map[string]string{
+		huge: "larger than the 1 MiB ACP frame limit",
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":true}\n": "not valid ACP JSON-RPC",
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":7}\n":    `"method" field has the wrong type`,
+		"{\"jsonrpc\":hello}\n":                            "it is not valid JSON",
+	} {
+		err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: AllowEvaluator{}, Stderr: io.Discard},
+			newState(), ClientToAgent, strings.NewReader(input), io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "bufio") ||
+			strings.Contains(err.Error(), "Go struct") || strings.Contains(err.Error(), "invalid character") {
+			t.Errorf("action mode, %.40q: err = %v, want %q", input, err, want)
+		}
+	}
+	var forwarded bytes.Buffer
+	next := `{"jsonrpc":"2.0","method":"initialized"}` + "\n"
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeObserve, Evaluator: AllowEvaluator{}, Stderr: io.Discard},
+		newState(), ClientToAgent, strings.NewReader(huge+next), &forwarded, io.Discard); err != nil ||
+		forwarded.String() != huge+next {
+		t.Fatalf("observe mode did not pass the oversized frame on: err=%v forwarded %d bytes", err, forwarded.Len())
+	}
+}
+
 type rejectingEvaluator struct{}
 
 func (rejectingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
@@ -660,6 +720,18 @@ func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
 		}
 		if mode == ModeObserve && (strings.Count(text, "not checking this session") != 1 || strings.Count(forwarded.String(), "session/prompt") != 2) {
 			t.Fatalf("observe mode: want one notice and both prompts forwarded: client=%s agent=%s", text, forwarded.String())
+		}
+		if mode == ModeObserve {
+			// A new thread of the same running guard is told too (Zed keeps
+			// one guard for every thread).
+			client.Reset()
+			other := strings.NewReader(strings.Replace(strings.Replace(prompt, `"s1"`, `"s2"`, 1), `"id":3`, `"id":5`, 1) + "\n")
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, other, &forwarded, &client); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(client.String(), "not checking this session") {
+				t.Fatalf("a new thread was not told: %s", client.String())
+			}
 		}
 	}
 }

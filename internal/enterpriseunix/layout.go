@@ -104,6 +104,9 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
 		{Path: filepath.Dir(l.ManifestPath), Mode: 0o750, Owner: rootService},
 		{Path: l.DataDir, Mode: 0o700, Owner: service}, // the device identity key requires a private directory
+		// The ACP enrollment records. The hook enumerator unit can write
+		// only paths that exist when it starts (GAP-0697).
+		{Path: filepath.Join(l.DataDir, "acp"), Mode: 0o700, Owner: service},
 		{Path: l.GuardianAuthDir, Mode: 0o750, Owner: rootService},
 		{Path: l.LifecycleDir, Mode: 0o700, Owner: root},
 		{Path: l.LogDir, Mode: 0o750, Owner: service},

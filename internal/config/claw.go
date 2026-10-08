@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
@@ -1694,8 +1695,7 @@ func readJSONObjectJSONC(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data = stripJSONCComments(data)
-	data = stripJSONCTrailingCommas(data)
+	data = jsonc.Strip(data)
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
@@ -1875,89 +1875,6 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("Amp settings source changed during inspection")
 	}
 	return data, nil
-}
-
-func stripJSONCComments(data []byte) []byte {
-	out := make([]byte, 0, len(data))
-	inString := false
-	escaped := false
-	for i := 0; i < len(data); {
-		b := data[i]
-		if inString {
-			out = append(out, b)
-			if escaped {
-				escaped = false
-			} else if b == '\\' {
-				escaped = true
-			} else if b == '"' {
-				inString = false
-			}
-			i++
-			continue
-		}
-		if b == '"' {
-			inString = true
-			out = append(out, b)
-			i++
-			continue
-		}
-		if b == '/' && i+1 < len(data) && data[i+1] == '/' {
-			i += 2
-			for i < len(data) && data[i] != '\n' && data[i] != '\r' {
-				i++
-			}
-			continue
-		}
-		if b == '/' && i+1 < len(data) && data[i+1] == '*' {
-			i += 2
-			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(data) {
-				i += 2
-			}
-			continue
-		}
-		out = append(out, b)
-		i++
-	}
-	return out
-}
-
-func stripJSONCTrailingCommas(data []byte) []byte {
-	out := make([]byte, 0, len(data))
-	inString := false
-	escaped := false
-	for i := 0; i < len(data); i++ {
-		b := data[i]
-		if inString {
-			out = append(out, b)
-			if escaped {
-				escaped = false
-			} else if b == '\\' {
-				escaped = true
-			} else if b == '"' {
-				inString = false
-			}
-			continue
-		}
-		if b == '"' {
-			inString = true
-			out = append(out, b)
-			continue
-		}
-		if b == ',' {
-			j := i + 1
-			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\n' || data[j] == '\r') {
-				j++
-			}
-			if j < len(data) && (data[j] == '}' || data[j] == ']') {
-				continue
-			}
-		}
-		out = append(out, b)
-	}
-	return out
 }
 
 func dedupMCPEntries(entries []MCPServerEntry) []MCPServerEntry {

@@ -25,6 +25,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
 // The foreign-hook guard exists because several agents run every
@@ -1114,7 +1115,7 @@ func decodeGuardDocument(data []byte) (*object, bool, error) {
 	if err == nil {
 		return doc, true, nil
 	}
-	relaxed, relaxedErr := decodeOrderedObject(stripJSONCTrailingCommas(stripJSONCComments(data)))
+	relaxed, relaxedErr := decodeOrderedObject(jsonc.Strip(data))
 	if relaxedErr != nil {
 		return nil, false, err
 	}

@@ -84,6 +84,25 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		return payload
 	}
 
+	// An account with no home is refused in words, not with an lstat error
+	// (GAP-0687).
+	enterpriseACPJSON = false
+	enterpriseACPUserHome, enterpriseACPUserDataDir = filepath.Join(userHome, "missing"), filepath.Join(userHome, "missing", ".defenseclaw")
+	if err := runEnterpriseACPEnroll(&cobra.Command{}, nil); err == nil ||
+		!strings.Contains(err.Error(), "has no home directory") || strings.Contains(err.Error(), "lstat") {
+		t.Fatalf("enroll of an account without a home: %v", err)
+	}
+	// With --json the cause is on stdout once; stderr adds nothing (GAP-0688).
+	enterpriseACPJSON = true
+	var jsonOut bytes.Buffer
+	jsonCommand := &cobra.Command{}
+	jsonCommand.SetOut(&jsonOut)
+	if err := runEnterpriseACPEnroll(jsonCommand, nil); err == nil || !jsonCommand.SilenceErrors ||
+		!strings.Contains(jsonOut.String(), "has no home directory") {
+		t.Fatalf("--json refusal: err=%v silenced=%v stdout=%s", err, jsonCommand.SilenceErrors, jsonOut.String())
+	}
+	enterpriseACPUserHome, enterpriseACPUserDataDir = userHome, userData
+
 	// An enrollment that cannot publish the bearer leaves no credential,
 	// and a failed re-enrollment keeps the working one (GAP-0260).
 	failEnroll := func(why string) {
@@ -128,6 +147,22 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	// names who is enrolled and how far they got (GAP-0400).
 	if verified := run(runEnterpriseACPVerify); verified["setup_done"] != false {
 		t.Fatalf("verify did not report that setup has not run: %v", verified)
+	}
+	// A lock whose editor entry was set up in another home (an account
+	// rename moved the home) is not a done setup (GAP-0693).
+	staleLock := acpContractLockPath(userData, "zed", "kiro")
+	if err := os.MkdirAll(filepath.Dir(staleLock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staleLock, []byte(`{"version":1,"client":{"id":"zed","config_path":"/home/renamed-away/.config/zed/settings.json"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if verified := run(runEnterpriseACPVerify); verified["setup_done"] != false ||
+		!strings.Contains(fmt.Sprint(verified["setup_note"]), "outside the home") {
+		t.Fatalf("verify called a stale editor entry set up: %v", verified)
+	}
+	if err := os.Remove(staleLock); err != nil {
+		t.Fatal(err)
 	}
 	restoreDescribe := enterpriseACPDescribePrincipal
 	t.Cleanup(func() { enterpriseACPDescribePrincipal = restoreDescribe })
@@ -205,6 +240,72 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if again := run(runEnterpriseACPRevoke); again["found"] != false || again["centrally_revoked"] != false {
 		t.Fatalf("revoke of a missing enrollment reported a revocation: %v", again)
 	}
+	// A user copy that cannot be checked does not turn "nothing was revoked"
+	// into "the service record was removed" (GAP-0355).
+	if err := os.Mkdir(tokenPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if again := run(runEnterpriseACPRevoke); again["found"] != false || again["ok"] != true ||
+		!strings.Contains(fmt.Sprint(again["note"]), "not checked") {
+		t.Fatalf("revoke of a missing enrollment with an unreadable user copy: %v", again)
+	}
+}
+
+// Enrolling the same account, editor and agent under another profile
+// replaces the earlier credential: both stayed live and the shared user copy
+// held whichever was enrolled last (GAP-0733).
+func TestEnterpriseACPEnrollReplacesTheOtherProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enrolls the current Unix user")
+	}
+	previousCfg := cfg
+	previous := []string{enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile, enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir}
+	previousJSON, previousUID, previousGID := enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = previous[0], previous[1], previous[2]
+		enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = previous[3], previous[4], previous[5], previous[6]
+		enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = previousJSON, previousUID, previousGID
+	})
+	profiles := map[string]config.ACPProfile{
+		"obs": {Mode: "observe", AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}},
+		"act": {Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}},
+	}
+	pin := func(profile string) {
+		cfg.ACP.Clients = map[string]config.ACPBinding{"zed": {Enabled: true, Profile: profile}}
+		cfg.ACP.Agents = map[string]config.ACPBinding{"hermes": {Enabled: true, Profile: profile}}
+		cfg.ACP.DefaultProfile, enterpriseACPProfile = profile, profile
+	}
+	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise", ACP: config.ACPConfig{Enabled: true, Profiles: profiles}}
+	cfg.Enterprise.Profile = "standalone"
+	userHome := t.TempDir()
+	enterpriseACPClient, enterpriseACPAgent = "zed", "hermes"
+	enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = "", userHome, "", ""
+	enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = true, -1, -1
+	enroll := func() map[string]any {
+		t.Helper()
+		var output bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&output)
+		if err := runEnterpriseACPEnroll(command, nil); err != nil {
+			t.Fatalf("enroll: %v; %s", err, output.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	pin("obs")
+	enroll()
+	pin("act")
+	if replaced := fmt.Sprint(enroll()["replaced"]); replaced != "[obs]" {
+		t.Fatalf("replaced = %s, want [obs]", replaced)
+	}
+	enrollments, _, err := acp.ListEnterpriseEnrollments(cfg.DataDir)
+	if err != nil || len(enrollments) != 1 || enrollments[0].Profile != "act" {
+		t.Fatalf("enrollments = %+v, err = %v; want only the act enrollment", enrollments, err)
+	}
 }
 
 // The Windows refusals named hook mutation and gave no next step; they now
@@ -217,7 +318,8 @@ func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
 		"system owner":    enterpriseACPWindowsTargetError(errors.New("enterprise hooks: refusing non-interactive target SID S-1-5-18"), false),
 	} {
 		message := got.Error()
-		if !strings.HasPrefix(message, "enterprise acp: ") || strings.Contains(message, "hook mutation") {
+		if !strings.HasPrefix(message, "enterprise acp: ") || strings.Contains(message, "hook mutation") ||
+			strings.Contains(message, "enterprise hooks") {
 			t.Errorf("%s: the refusal does not name the ACP enrollment: %q", name, message)
 		}
 		if name != "no session" && (!strings.Contains(message, "LocalSystem") || !strings.Contains(message, "--sid")) {
@@ -265,6 +367,32 @@ func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 	enterpriseACPAgent, enterpriseACPProfile = "hermes", "watch"
 	if _, err := resolveEnterpriseACPEnrollment(true); err == nil || !strings.Contains(err.Error(), `acp.clients.zed.profile is ""`) {
 		t.Fatalf("the refusal does not name the pin that disagrees: %v", err)
+	}
+	// An over-long name is refused with the rule, not echoed whole
+	// (GAP-0688).
+	enterpriseACPProfile = strings.Repeat("p", 300)
+	if _, err := resolveEnterpriseACPEnrollment(true); err == nil || len(err.Error()) > 300 ||
+		!strings.Contains(err.Error(), "at most 64") || !strings.Contains(err.Error(), "locked, watch") {
+		t.Fatalf("over-long profile refusal: %v", err)
+	}
+}
+
+// Redirected Windows output carries an ASCII mark, not a check mark the
+// console code page turns into 0xFB (GAP-0709).
+func TestEnterpriseACPResultMarkIsASCIIWhenRedirected(t *testing.T) {
+	previousCfg, previousASCII, previousJSON := cfg, asciiGlyphs, enterpriseACPJSON
+	t.Cleanup(func() { cfg, asciiGlyphs, enterpriseACPJSON = previousCfg, previousASCII, previousJSON })
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	asciiGlyphs, enterpriseACPJSON = func() bool { return true }, false
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&output)
+	if err := enterpriseACPResult(command, map[string]any{"centrally_revoked": true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "OK managed ACP credential revoked") || strings.Contains(got, "✓") {
+		t.Fatalf("redirected output = %q", got)
 	}
 }
 

@@ -287,6 +287,15 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 		}
 	}
+	if standalone {
+		// A deleted local account's ACP enrollments go with it, as its hook
+		// rows do (GAP-0367).
+		revokeEnterpriseACPEnrollmentsOfDeletedSIDs(cfg.DataDir, windowsEnterpriseAccountDeleted, stderr)
+		// The copies a revoke could not remove while their user was signed
+		// out go at the next cycle the user is signed in for; a sign-in
+		// starts one (GAP-0718).
+		cleanEnterpriseACPUserCopies(cfg.DataDir, removeEnterpriseACPUserCopyAsUser, windowsEnterpriseAccountDeleted, stderr)
+	}
 	// Sibling pass: ensure the CertGateway service SID has Read+Execute on
 	// each enrolled user's inventory dotdirs (~/.claude, ~/.codex, …). The
 	// gateway runs under a virtual service account whose access to user

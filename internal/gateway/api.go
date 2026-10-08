@@ -123,6 +123,7 @@ type APIServer struct {
 	acpReadinessCheckedAt time.Time
 	acpReadinessKey       string
 	acpReadinessValue     bool
+	acpReadinessWindow    time.Duration
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -3624,12 +3625,19 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
-				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
 				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
+				if reason == acpCallerAccountMismatchReason {
+					// The caller holds the credential, so the refusal can be
+					// signed and the guard can tell the borrower whose it is
+					// instead of "revoked" (GAP-0690).
+					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
+					return
+				}
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
