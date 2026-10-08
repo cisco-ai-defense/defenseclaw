@@ -231,6 +231,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// What a standalone hook read in its user's home for asset_policy
 		// (skill names, the MCP server definition): claims, never authority.
 		r = r.WithContext(withClaimedAssetFacts(r.Context(), r.Header))
+		// A standalone hook reporting a call it refused itself (too large to
+		// inspect): recorded, never evaluated. Secure Client hooks send none.
+		r = r.WithContext(withHookSideRefusal(r.Context(), r.Header))
 
 		// Run installs the same ordinary API ceiling globally. Keep the hook
 		// handler bounded as a standalone unit too because connector tests and
@@ -540,7 +543,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// the emit stays BEFORE the evaluator (audit-honest ordering) and
 		// behavior is byte-for-byte unchanged.
 		deferManagedHookEmit := managedEnterpriseActive.Load()
-		if !deferManagedHookEmit && hookLLMEventExportable(req) {
+		if !deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
@@ -624,7 +627,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// still precedes the hook_decision event, preserving the OSS event
 		// ordering. Fails closed to redact when the AID lane returned no
 		// directive (resp.RedactionEnabled == nil).
-		if deferManagedHookEmit && hookLLMEventExportable(req) {
+		if deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
@@ -1361,6 +1364,9 @@ func (a *APIServer) safeEvaluateHook(
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
+	if hookSideRefusal(ctx) && !a.managedAIDOnly() {
+		return a.hookSideRefusalResponse(ctx, connectorName, req), false
+	}
 	if runtime.Evaluate == nil {
 		runtime = defaultHookProfileRuntime(connector.HookProfile{Name: connectorName})
 	}

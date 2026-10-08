@@ -175,6 +175,30 @@ func TestWindowsStandaloneCursorStoppedGatewayDeniesEachToolEvent(t *testing.T) 
 	}
 }
 
+// A standalone hook that refuses an over-cap Claude Code prompt shows the
+// structured prompt block (not a raw stderr line about a "request") and
+// reports the refusal to the gateway with the event and session fields and
+// none of the content, so it has an audit record (GAP-0965, GAP-1042).
+func TestManagedStandaloneOversizedPromptIsBlockedAndReported(t *testing.T) {
+	rt := &stubRT{status: http.StatusOK, body: `{"action":"block"}`}
+	prompt := strings.Repeat("p", 4096)
+	r := run(t, "claudecode", rt, func(o *Options) {
+		o.Event = ""
+		o.ManagedEnterprise, o.ManagedStandalone = true, true
+		o.ManagedUnixSocket, o.ManagedServiceUID = "/run/defenseclaw-hook/hook.sock", 0
+		o.FailMode, o.MaxBody = "closed", 1024
+		o.Stdin = strings.NewReader(`{"session_id":"sess-1","hook_event_name":"UserPromptSubmit","prompt":"` + prompt + `"}`)
+	})
+	want := mustJSONString("DefenseClaw blocked this prompt: it is too large for DefenseClaw to inspect. Make it smaller and try again.")
+	if r.code != 0 || !strings.Contains(r.stdout, `"decision":"block"`) || !strings.Contains(r.stdout, want) || r.stderr != "" {
+		t.Fatalf("refusal = %+v, want the structured prompt block", r)
+	}
+	if rt.requests != 1 || rt.gotReq.Header.Get(HookRefusalHeader) != HookRefusalPayloadTooLarge ||
+		!strings.Contains(string(rt.gotBody), `"session_id":"sess-1"`) || strings.Contains(string(rt.gotBody), "ppp") {
+		t.Fatalf("report: %d request(s), body %q", rt.requests, rt.gotBody)
+	}
+}
+
 // A newly enrolled Windows standalone account can meet a 401 on its first
 // call while the guardian's authorization ledger catches up: the hook sends
 // the call again and it is served. A 401 that stays fails closed with the
