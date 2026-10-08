@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -237,6 +238,18 @@ type Store struct {
 	// publishing two current-state baselines after a runtime restart/reload.
 	findingLifecycleMu      sync.Mutex
 	findingGaugeInitialized map[string]struct{}
+
+	// progress receives the schema upgrade's own lines (each migration
+	// applied, the purged history's reclaim); nil is stderr, which is
+	// gateway.log in the daemon (OpenDaemonStore).
+	progress io.Writer
+}
+
+func (s *Store) progressOut() io.Writer {
+	if s.progress != nil {
+		return s.progress
+	}
+	return os.Stderr
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -1913,7 +1926,7 @@ func (s *Store) Init() error {
 	for i := current; i < len(migrations); i++ {
 		m := migrations[i]
 		ver := i + 1
-		fmt.Fprintf(os.Stderr, "[audit] applying migration %d: %s\n", ver, m.description)
+		fmt.Fprintf(s.progressOut(), "[audit] applying migration %d: %s\n", ver, m.description)
 		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}

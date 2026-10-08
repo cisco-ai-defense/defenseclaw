@@ -10,6 +10,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"os"
 	"sync"
@@ -110,6 +111,26 @@ func stampLog(file, stdout *os.File, now func() time.Time) func() {
 			rawStderrMu.Unlock()
 		})
 	}
+}
+
+// AppendLog appends a launcher's lines to gateway.log, opened as for the
+// gateway child, each stamped like the gateway's own lines (GAP-0363: the
+// audit upgrade start runs before it launches the gateway).
+func (d *Daemon) AppendLog(p []byte) error {
+	if len(p) == 0 {
+		return nil
+	}
+	f, err := d.openLogFileForChild()
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck -- best effort, as the stamper is.
+	if os.Getenv(EnvLogTimestamps) == "0" {
+		_, err = f.Write(p)
+		return err
+	}
+	copyStamped(f, bytes.NewReader(p), time.Now)
+	return nil
 }
 
 // copyStamped writes each line from r to dst with a time prefix. A final

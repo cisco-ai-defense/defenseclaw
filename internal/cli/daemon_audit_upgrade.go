@@ -4,12 +4,14 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // upgradeAuditStoreBeforeStart applies the audit store's pending schema
@@ -20,7 +22,11 @@ import (
 // the gateway mid-migration and setup rolled back the new connectors
 // (GAP-1909). Best effort: on any error the gateway applies the migrations
 // itself as before and reports the failure.
-func upgradeAuditStoreBeforeStart(cfg *config.Config, out, warn io.Writer) {
+//
+// The terminal gets one line; the upgrade's own lines (each migration
+// applied, the purged history's reclaim) go to d's gateway.log,
+// where the gateway writes them when it migrates (GAP-0363).
+func upgradeAuditStoreBeforeStart(cfg *config.Config, out, warn io.Writer, d *daemon.Daemon) {
 	if cfg == nil || strings.TrimSpace(cfg.AuditDB) == "" {
 		return
 	}
@@ -29,7 +35,11 @@ func upgradeAuditStoreBeforeStart(cfg *config.Config, out, warn io.Writer) {
 		return
 	}
 	fmt.Fprintf(out, "Upgrading the audit database (one time; a large history can take a few minutes)... ")
-	store, err := audit.OpenDaemonStore(cfg.AuditDB, warn)
+	var progress bytes.Buffer
+	store, err := audit.OpenDaemonStore(cfg.AuditDB, warn, &progress)
+	if d != nil {
+		_ = d.AppendLog(progress.Bytes())
+	}
 	if err != nil {
 		fmt.Fprintln(out, Style("not finished", "fg=yellow", "bold"))
 		fmt.Fprintf(warn, "  %v\n  The gateway retries the upgrade when it starts.\n", err)
