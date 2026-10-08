@@ -232,6 +232,16 @@ Observe maps the same policy findings to allow plus `would_block` audit state.
 `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept
 only a follow-up message and are not blocking surfaces.
 
+<Callout type="warn" title="Cursor Agent CLI prompt coverage">
+Cursor Agent CLI 2026.10.01-14929f9 did not emit `beforeSubmitPrompt` in a
+managed standalone run, even though `hooks.json` registered it. Prompt text
+therefore reached the model when the DefenseClaw gateway was stopped. Tool
+hooks still ran and blocked; their fail-closed behavior does not protect a
+prompt that never enters a hook. Check `hook_decision` audit rows for
+`beforeSubmitPrompt` before claiming prompt coverage on a particular Agent
+build. DefenseClaw status and enterprise verify warn about this limitation.
+</Callout>
+
 The hook payload's `cursor_version` is the Cursor application version, not the
 Agent CLI version, so DefenseClaw does not use it to pick a contract. The
 contract comes from `agent --version`: Agent `2.4.0` up to `4.0.0`, or the

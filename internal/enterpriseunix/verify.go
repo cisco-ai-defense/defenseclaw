@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -652,6 +653,9 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	sort.SliceStable(r.Services, func(i, j int) bool { return r.Services[i].Name < r.Services[j].Name })
 	if record != nil {
 		r.InstalledVersion = record.ProductVersion
+		if (r.Action == "status" || r.Action == "verify") && slices.Contains(record.MachinePolicyConnectors, "cursor") {
+			r.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
+		}
 	}
 	r.Enrollment = l.enrollmentCounts()
 	if problem := env.rejectedConfigProblem(); problem != "" {
@@ -694,12 +698,22 @@ const codeAIDefenseUnavailable = "ai_defense_unavailable"
 // the directory (a domain controller or SSSD that does not answer).
 const codeDirectoryLookups = "directory_lookups_failing"
 
+const codeProfileAssignments = "profile_assignment_unmatched"
+const codeOptionalDestination = "optional_destination_failing"
+
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
 // that fail: the accounts without cached facts then run under the default
 // guardrail profile, and nothing else in status or verify showed it (GAP-0216).
 func (l *lifecycle) readGatewayPosture(body []byte) {
 	var health struct {
+		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
+		Telemetry                 struct {
+			Details struct {
+				OptionalState  string `json:"optional_destination_state"`
+				FailureSummary string `json:"optional_destination_failure_summary"`
+			} `json:"details"`
+		} `json:"telemetry"`
 		Inspection *struct {
 			Local     string `json:"local"`
 			AIDefense string `json:"ai_defense"`
@@ -718,6 +732,13 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	if health.Inspection != nil {
 		l.result.Inspection.Local = health.Inspection.Local
 		l.result.Inspection.AIDefense = health.Inspection.AIDefense
+	}
+	for _, warning := range health.ProfileAssignmentWarnings {
+		l.result.AddWarning(codeProfileAssignments, warning)
+	}
+	if health.Telemetry.Details.OptionalState == "degraded" {
+		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+
+			"; inspect `defenseclaw-gateway status` or the gateway /health telemetry details")
 	}
 	if d := health.Directory; d != nil && d.Failing > 0 {
 		which := ""

@@ -39,6 +39,32 @@ func getHealthInspection(t *testing.T, api *APIServer) healthInspection {
 	return body
 }
 
+func TestHealthAndStatusShareProfileAssignmentWarnings(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, assignments: []config.ProfileAssignment{{
+		Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"claudcode"}},
+	}}})
+	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
+	for _, endpoint := range []struct {
+		path string
+		call func(http.ResponseWriter, *http.Request)
+	}{
+		{"/health", api.handleHealth}, {"/status", api.handleStatus},
+	} {
+		response := httptest.NewRecorder()
+		endpoint.call(response, httptest.NewRequest(http.MethodGet, endpoint.path, nil))
+		var body struct {
+			Warnings []string `json:"profile_assignment_warnings"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || len(body.Warnings) != 1 ||
+			!strings.Contains(body.Warnings[0], "claudcode") {
+			t.Fatalf("%s warning = %q, error %v", endpoint.path, body.Warnings, err)
+		}
+	}
+}
+
 // TestHealthPublishesTheStandaloneInspectionPosture: status and verify on
 // Linux and macOS read inspection.local and inspection.ai_defense from
 // /health; without them a healthy deployment reported "unknown" for both.

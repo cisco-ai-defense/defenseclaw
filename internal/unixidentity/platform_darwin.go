@@ -27,6 +27,7 @@ func GroupNameLookupDefinitive() bool { return true }
 // QualifiedGroupName has nothing to offer on macOS, whose group names carry
 // no domain.
 func QualifiedGroupName(context.Context, Resolver, string) string { return "" }
+func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
 
 const darwinDSCL = "/usr/bin/dscl"
 

@@ -2392,6 +2392,37 @@ func TestAntigravityTeardownMigratesLegacyBackupAndRestoresExactBytes(t *testing
 	}
 }
 
+func TestAntigravityPerUserTeardownKeepsUserHookAndRemovesOwnedEntries(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hooks.json")
+	previous := AntigravityHooksPathOverride
+	AntigravityHooksPathOverride = path
+	t.Cleanup(func() { AntigravityHooksPathOverride = previous })
+	conn := NewAntigravityConnector()
+	opts := SetupOpts{DataDir: filepath.Join(root, "data"), APIAddr: "127.0.0.1:18970"}
+	if err := patchAntigravityHooks(path, conn.hookCommand(opts)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := readJSONObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc["operator-hook"] = map[string]interface{}{"PreToolUse": []interface{}{map[string]interface{}{"command": "/bin/true"}}}
+	if err := writeJSONObject(path, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	clean, err := readJSONObject(path)
+	if err != nil || clean["operator-hook"] == nil {
+		t.Fatalf("user hook lost: %v %v", clean, err)
+	}
+	if owned, err := AntigravityHooksHoldOwnedEntries(path); err != nil || owned {
+		t.Fatalf("owned hook registrations remain: %v %v", owned, err)
+	}
+}
+
 func TestAntigravityManagedBackupMigrationCollapsesIdenticalRecords(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
 	target := filepath.Join(t.TempDir(), "antigravity-home", "hooks.json")

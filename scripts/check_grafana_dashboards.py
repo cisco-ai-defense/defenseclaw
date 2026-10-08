@@ -73,7 +73,7 @@ PROMETHEUS_METRIC_LABELS = {
         "severity",
         "would_block",
     },
-    "defenseclaw_inventory_ide_plugins": {"ai", "enabled", "ide"},
+    "defenseclaw_inventory_ide_plugins": {"defenseclaw_ide_plugin_ai", "defenseclaw_ide_plugin_enabled", "ide_product"},
     "defenseclaw_guardrail_evaluations_total": {
         "guardrail_action_taken",
         "guardrail_connector",
@@ -85,8 +85,10 @@ PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
 }
 PROMETHEUS_EXACT_LABEL_VALUES = {
-    ("defenseclaw_inventory_ide_plugins", "ai"): {"false", "true"},
-    ("defenseclaw_inventory_ide_plugins", "enabled"): {"client_side_unknown", "disabled", "enabled", "unknown"},
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_ai"): {"false", "true"},
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_enabled"): {
+        "client_side_unknown", "disabled", "enabled", "unknown",
+    },
     ("defenseclaw_approval_lifecycle_total", "surface"): {"chat", "exec", "native"},
     ("defenseclaw_approval_lifecycle_total", "result"): {
         "approved",

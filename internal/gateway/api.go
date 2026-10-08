@@ -1391,6 +1391,11 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		body["agent_identities"] = ledger
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		if !cfg.SecureClientIntegration() {
+			if set := a.guardrailProfileSet(); set != nil {
+				body["profile_assignment_warnings"] = set.assignmentWarnings(true)
+			}
+		}
 		body["acp"] = map[string]interface{}{
 			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
 			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
@@ -1542,6 +1547,11 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// enforcement/observability posture, not just the primary's.
 		"connector_mode":  a.connectorModeSummary(r.Context()),
 		"connector_modes": a.connectorModesSummary(r.Context()),
+	}
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
+		if set := a.guardrailProfileSet(); set != nil {
+			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
+		}
 	}
 
 	if a.client != nil && a.client.Hello() != nil {

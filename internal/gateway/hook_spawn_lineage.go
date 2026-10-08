@@ -419,8 +419,7 @@ func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[s
 		a.noteCopilotSubagentStart(meta, now)
 		return meta
 	case "subagent_stop":
-		a.noteCopilotSubagentStop(meta, firstString(payload, "agentId", "agent_id"), now)
-		return meta
+		return a.noteCopilotSubagentStop(meta, firstString(payload, "agentId", "agent_id"), now)
 	case "session_start":
 		return meta
 	}
@@ -489,7 +488,7 @@ func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, now time.Time) {
 // noteCopilotSubagentStop ends the pending start the child session belongs
 // to and links that session, which agent identities then does not count as a
 // chat.
-func (a *APIServer) noteCopilotSubagentStop(meta llmEventMeta, child string, now time.Time) {
+func (a *APIServer) noteCopilotSubagentStop(meta llmEventMeta, child string, now time.Time) llmEventMeta {
 	child = strings.TrimSpace(child)
 	a.llmPromptMu.Lock()
 	match := -1
@@ -519,7 +518,24 @@ func (a *APIServer) noteCopilotSubagentStop(meta llmEventMeta, child string, now
 	a.llmPromptMu.Unlock()
 	if linked {
 		sharedAgentIdentities.markSubagentSession(meta.AgentIdentityID, child)
+		// Copilot sends subagentStop in the parent's session with agentId
+		// equal to the child's session UUID. Emit the lifecycle row with the
+		// same child node and parent edge as that child's tool rows.
+		meta.SessionID = child
+		meta.AgentID = agentNodeID(meta.AgentIdentityID, "copilot", child, "root")
+		meta.ParentAgentID = parent.AgentID
+		meta.RootAgentID = firstNonEmpty(parent.RootAgentID, parent.AgentID)
+		meta.ParentSessionID = parent.SessionID
+		meta.RootSessionID = firstNonEmpty(parent.RootSessionID, parent.SessionID)
+		meta.AgentDepth = parent.AgentDepth + 1
+		meta.LineageProvenance = "inferred"
+		meta.ParentLineageResolved = true
+		meta.LifecycleID = stableLLMEventID("lifecycle", meta.Source, child, meta.AgentID)
+		if snapshot, ok := a.hookSessionStateSnapshot(meta.Source, child, meta.AgentID); ok {
+			meta.ExecutionID = snapshot.meta.ExecutionID
+		}
 	}
+	return meta
 }
 
 // applyHookChildThreadLineage links a hook of a session that a create_thread

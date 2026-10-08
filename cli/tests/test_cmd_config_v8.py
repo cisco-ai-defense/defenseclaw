@@ -310,6 +310,16 @@ def test_windows_per_user_group_assignment_warning_names_unmatchable_entry() -> 
     assert "cannot match" in warnings[0]
 
 
+def test_config_reference_includes_ai_discovery_inventory_scope() -> None:
+    schema = {"$defs": {"aiDiscovery": {"properties": {"enabled": {"type": "boolean", "default": False},
+        "ide_inventory": {"type": "string", "default": "all", "description": "all | ai_only | off"}}}}}
+    with patch.object(cmd_config, "config_v8_schema", return_value=json.dumps(schema)):
+        result = CliRunner().invoke(cmd_config.config_reference, ["ai_discovery"])
+    assert result.exit_code == 0, result.output
+    assert "ide_inventory: all" in result.output
+    assert "enabled: false" in result.output
+
+
 def test_generic_redaction_profile_refusal_names_unknown_and_defined(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

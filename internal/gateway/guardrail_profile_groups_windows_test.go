@@ -16,3 +16,10 @@ func TestWindowsGroupLookupReportsDefinitiveMissingName(t *testing.T) {
 		t.Fatalf("missing group = %v, %v; want definitive absence", known, err)
 	}
 }
+
+func TestWindowsGroupLookupReportsDeletedSID(t *testing.T) {
+	known, err := profileGroupExists(context.Background(), "S-1-5-21-1-2-3-1104")
+	if err != nil || known {
+		t.Fatalf("deleted SID = %v, %v; want definitive absence", known, err)
+	}
+}

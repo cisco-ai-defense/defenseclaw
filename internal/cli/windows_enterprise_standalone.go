@@ -18,11 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -282,8 +284,33 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	if (action == "status" || action == "verify") && report.Installed {
+		if report.CursorTargetEnabled {
+			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
+		}
+		if report.GatewayReady {
+			if body, err := windowsStandaloneGatewayHealth(); err == nil {
+				appendStandaloneGatewayWarnings(result, body)
+			}
+		}
+	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// The standalone gateway's machine API uses the default loopback port. This
+// advisory read is bounded; the installer has already established readiness.
+func windowsStandaloneGatewayHealth() ([]byte, error) {
+	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", config.DefaultGatewayAPIPort))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway health returned %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 // addWindowsEnterpriseNothingInstalledError fails an install or upgrade

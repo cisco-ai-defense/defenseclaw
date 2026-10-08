@@ -378,6 +378,9 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   Headers, payloads and claimed facts never do.
 - **Local accounts have no directory groups.** A local account has only the
   groups its OS account database lists, no domain and no UPN.
+- **Windows group naming is bounded.** DefenseClaw names at most 128 groups
+  per account within the two-second lookup budget. Remaining groups stay as
+  SIDs, so use the SID in a group assignment when necessary.
 - **Group changes take time.** The gateway caches a user's directory facts for
   15 minutes and refreshes them in the background (2 minutes for an answer with
   a group that has no name, or an SSSD account still waiting for its UPN on

@@ -113,6 +113,7 @@ type identityCacheEntry[T any] struct {
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
 	cache := newIdentityCache(resolve)
 	cache.maxAge = identityDirectoryMaxAge
+	cache.gone = definitiveMissingAccount
 	cache.logf = func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
 	}
