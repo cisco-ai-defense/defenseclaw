@@ -655,10 +655,19 @@ func commandWordCmdline(cmdline string) string {
 	return tactics.BaseName(first) + trimmed[end:]
 }
 
-// isHookLauncher reports a command line that runs a DefenseClaw hook.
+// isHookLauncher reports a command line that runs a DefenseClaw hook. The
+// quotes are ignored: Claude Code starts each hook as
+// sh -c "'/opt/defenseclaw/bin/defenseclaw-hook' hook ...", and that shell,
+// a direct child of the agent, took a tool call's decision by agent and time
+// when the call waited for approval: the PermissionRequest hook's launcher
+// starts a few milliseconds after the PreToolUse decision, before the tool's
+// own shell (GAP-0023).
 func isHookLauncher(cmdline string) bool {
-	return strings.Contains(cmdline, "defenseclaw-hook ") || strings.Contains(cmdline, "/.defenseclaw/hooks/")
+	unquoted := hookLauncherQuotes.Replace(cmdline)
+	return strings.Contains(unquoted, "defenseclaw-hook ") || strings.Contains(unquoted, "/.defenseclaw/hooks/")
 }
+
+var hookLauncherQuotes = strings.NewReplacer(`'`, "", `"`, "", `\`, "")
 
 // firstField is a command line's first word without its quotes.
 func firstField(cmdline string) string {
