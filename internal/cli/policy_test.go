@@ -63,6 +63,28 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 		}
 	})
 
+	t.Run("Secure Client canonical data beats flat modules", func(t *testing.T) {
+		root := t.TempDir()
+		canonical := filepath.Join(root, "rego")
+		if err := os.MkdirAll(canonical, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(canonical, "data.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writePolicyPathTestLayout(t, root)
+		client := &config.Config{PolicyDir: root, DeploymentMode: "managed_enterprise"}
+		client.Enterprise.Profile = "secure_client"
+		setPolicyPathTestConfig(t, client)
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if paths.regoDir != canonical {
+			t.Fatalf("Secure Client regoDir = %q, want %q", paths.regoDir, canonical)
+		}
+	})
+
 	t.Run("legacy flat", func(t *testing.T) {
 		root := t.TempDir()
 		writePolicyPathTestLayout(t, root)

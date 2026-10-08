@@ -962,7 +962,7 @@ def sync_cmd(  # noqa: PLR0913
     prints a one-line notice for each entry it skipped.
     Remote (URL) MCP entries start no local process and are always scanned.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "sync")
 
     callback: ScanCallback | None = (
         _make_scan_callback(app, allow_private=allow_private, scan_stdio=scan_stdio)
