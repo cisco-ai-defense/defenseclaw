@@ -37,6 +37,11 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := unnamedGroupsNote(subject); note != "" {
 		warnings = append(warnings, note)
 	}
+	if subject != nil && subject.cachedFactsAge > 0 {
+		warnings = append(warnings, fmt.Sprintf("the directory does not name %s now: this is the profile its hooks apply from the "+
+			"identity facts cached %s ago, which they keep for up to an hour while lookups fail", subject.UserName,
+			subject.cachedFactsAge.Round(time.Second)))
+	}
 	if runtime.GOOS == "windows" && subject != nil {
 		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
 			warnings = append(warnings, note)

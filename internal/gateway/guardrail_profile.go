@@ -76,6 +76,9 @@ type profileSubject struct {
 	// nameUnconfirmed marks a UserName that kept a domain the directory facts
 	// do not confirm (profileUserName): no users entry matches it by name.
 	nameUnconfirmed bool
+	// cachedFactsAge is set when explain serves an account the directory
+	// cannot name now from the facts its hooks still apply (GAP-0899).
+	cachedFactsAge time.Duration
 }
 
 // The verified subject comes from S1's VerifiedSubject

@@ -16,6 +16,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -283,5 +284,38 @@ func TestManagedHookPeerDirectoryForgetsAReplacedAccount(t *testing.T) {
 	now = now.Add(managedHookPeerHomeTTL + time.Second)
 	if facts, ok := cache.directory(41001, true); !ok || len(facts.Groups) != 1 || facts.Groups[0] != "eli-new-group" {
 		t.Fatalf("facts after the uid changed hands = %+v, %v; want the new account's", facts, ok)
+	}
+}
+
+// GAP-0899: while the directory cannot name an account (SSSD stopped), explain
+// shows the profile its hooks apply from the facts cached for it, with their
+// age, instead of a spelling error.
+func TestProfileExplainDuringOutageServesCachedFacts(t *testing.T) {
+	const uid = 1_870_400_131
+	const name = "dcad-e3a1@dclab.test"
+	accounts := map[int]unixidentity.Account{uid: {Name: name, UID: uid, Home: "/home/" + name}}
+	previous, previousFacts := managedHookPeerHomes, identityFactsEnabled.Load()
+	managedHookPeerHomes = &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver { return &fakePeerHomeResolver{accounts: accounts} },
+		now:         time.Now,
+	}
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { managedHookPeerHomes = previous; setIdentityFactsEnabled(previousFacts) })
+	facts := useridentity.DirectoryFacts{Domain: "dclab.test", Groups: []string{"dc-e3a-ml@dclab.test"}, ResolvedAt: time.Now()}
+	managedHookPeerHomes.directoriesOnce.Do(func() {
+		managedHookPeerHomes.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) { return facts, nil })
+	})
+	if _, ok := managedHookPeerHomes.directory(uid, true); !ok {
+		t.Fatal("the hook path did not cache the facts")
+	}
+	for _, spelled := range []string{name, "DCAD-E3A1@DCLAB.TEST", "1870400131"} {
+		subject, err := profileExplainUnresolved(spelled, unixidentity.ErrNotFound)
+		if err != nil || subject.UserID != "1870400131" || !slices.Equal(subject.Groups, facts.Groups) || subject.cachedFactsAge <= 0 {
+			t.Fatalf("explain %s during the outage = %+v, %v; want the cached facts", spelled, subject, err)
+		}
+		if warnings := profileExplainWarnings(nil, profileDecision{}, &subject); len(warnings) != 1 ||
+			!strings.Contains(warnings[0], "identity facts cached") {
+			t.Fatalf("explain warnings = %q, want the age of the cached facts", warnings)
+		}
 	}
 }

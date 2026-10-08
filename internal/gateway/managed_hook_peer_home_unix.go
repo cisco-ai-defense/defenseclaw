@@ -339,6 +339,22 @@ func (c *managedHookPeerHomeCache) lookup(uid int) string {
 }
 
 // lookupName returns the caller's sanitized account name, or "".
+// cachedHolder returns the uid and name of the account whose cached
+// directory facts were last used under name (compared without regard to
+// case) or under the uid name spells.
+func (c *managedHookPeerHomeCache) cachedHolder(name string) (int, string, bool) {
+	name = strings.TrimSpace(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for uid, holder := range c.holders {
+		holderName, _, _ := strings.Cut(holder, "\x00")
+		if holderName != "" && (useridentity.EqualFold(holderName, name) || strconv.Itoa(uid) == name) {
+			return uid, holderName, true
+		}
+	}
+	return 0, "", false
+}
+
 func (c *managedHookPeerHomeCache) lookupName(uid int) string {
 	account, ok := c.account(uid)
 	if !ok {

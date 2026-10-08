@@ -208,6 +208,8 @@ decides the domain of an SSSD account from its uid, not from its name:
   account's last facts for up to an hour and retries every 15 seconds, instead
   of keeping facts without the realm, principal or groups. With no earlier
   facts, requests get the default profile with `default_lookup_failed`.
+  Meanwhile `profile-explain --user` (by name or uid) shows the profile the
+  hooks apply from those kept facts, with a warning that names their age.
 - **Standalone enterprise.** The root guardian asks InfoPipe which SSSD domain
   holds the uid (`Users.FindByID`, by uid, never by name) and reads the UPN of
   that user (`userPrincipalName`, listed in the `[ifp]` `user_attributes`).
