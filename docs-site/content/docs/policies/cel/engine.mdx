@@ -148,7 +148,9 @@ evidence, partial or invalid projections, and unpinned results remain visible
 as detection-only findings. The gate never removes a finding; it only prevents
 incomplete evidence from authorizing a block. A finding that passes counts
 toward the action through the connector's severity thresholds; a built-in
-owner marked alert-only can raise at most `alert`.
+owner marked alert-only can raise at most `alert` at the rule pack default
+levels, and counts like any other proven finding once you set `block_at`
+yourself (see [Thresholds](/docs/policies/thresholds)).
 
 ### Exact-boundary examples
 

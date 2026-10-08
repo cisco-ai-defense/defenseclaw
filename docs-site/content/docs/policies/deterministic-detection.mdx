@@ -33,7 +33,7 @@ The YAML and Go files linked below remain authoritative if these counts change.
 
 <Flow
   direction="TB"
-  caption="How a tool call earns the right to be blocked. CEL and regex only pick candidates. A block needs a code-owned proof for the same rule ID (and, for chain rules, the earlier steps of a fixed chain in the same session), complete parsing, and a connector that can block before the tool runs. Without that, the finding is still recorded, but it stays detection-only (never changes the action) or alert-only (at most an alert). For proven findings, the active profile or guardrail.block_at maps severity to the action."
+  caption="How a tool call earns the right to be blocked. CEL and regex only pick candidates. A block needs a code-owned proof for the same rule ID (and, for chain rules, the earlier steps of a fixed chain in the same session), complete parsing, and a connector that can block before the tool runs. Without that, the finding is still recorded, but it stays detection-only (never changes the action) or alert-only (at most an alert, until you set block_at yourself). For proven findings, the active profile or guardrail.block_at maps severity to the action."
 >
   <Node id="facts" kind="policy">{`Parse the tool call\ninto ActionFacts`}</Node>
   <Node id="select" kind="policy">{`Rules flag candidates\nCEL and RE2 regex`}</Node>

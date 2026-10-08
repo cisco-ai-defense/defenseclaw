@@ -144,6 +144,8 @@ def test_identity_table_uses_cell_width_and_removes_control_characters() -> None
     from rich.cells import cell_len
 
     assert cell_len(heading[:heading.index("Connector")]) == cell_len(value[:value.index("claudecode")])
+    # GAP-0947: an identity whose account no longer holds its uid says so.
+    assert "o3x (retired)" in cmd_agent._render_agent_identities([{**_ROW, "user_name": "o3x", "retired": True}])
 
 
 def test_ide_inventory_scope_option_and_read_only_log_recovery(monkeypatch: pytest.MonkeyPatch) -> None:

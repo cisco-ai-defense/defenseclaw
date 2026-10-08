@@ -93,7 +93,9 @@ const (
 	findingEnforcementAllowed
 	findingEnforcementDetectionOnly
 	// findingEnforcementAlertOnly preserves a visible runtime alert while
-	// imposing a hard ceiling below confirm/block in every posture profile.
+	// imposing a ceiling below confirm/block at the rule pack levels. Only a
+	// block_at set by the operator lifts it, and only for a proven finding
+	// (provenAlertOnly).
 	findingEnforcementAlertOnly
 )
 
@@ -104,6 +106,16 @@ func (f RuleFinding) contributesToEnforcement() bool {
 
 func (f RuleFinding) contributesToAlertOnly() bool {
 	return f.enforcement == findingEnforcementAlertOnly
+}
+
+// provenAlertOnly reports an alert-only finding whose complete proof, pinned
+// to the same rule, would authorize enforcement: a built-in owner of a
+// dual-use operation (destructive SQL, cloud deletes). An advisory read or a
+// match that no parse can prove (CMD-EVAL) is not proven and never blocks.
+func (f RuleFinding) provenAlertOnly() bool {
+	return f.enforcement == findingEnforcementAlertOnly &&
+		f.disposition != findingDispositionAdvisory &&
+		f.proof.authorizes(f.RuleID)
 }
 
 // ---------------------------------------------------------------------------

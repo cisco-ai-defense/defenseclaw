@@ -90,18 +90,22 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		return agentIdentityFacts{}
 	}
 	machine, machineVerified := agentidentity.HostMachineHash()
+	account := agentIdentityAccount(user)
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
 		// The account as the host names it (an SSSD dcad-alice@dclab.test
 		// stays qualified), so an agent-identities row can be passed back
-		// to the other admin views. defenseclaw.user.name stays bare.
-		UserName:  user.Name,
+		// to the other admin views. defenseclaw.user.name stays bare. The
+		// account the ID is keyed on comes first: the listing tells a
+		// removed account's identity by it (GAP-0947).
+		UserName:  firstNonEmpty(account, user.Name),
 		Connector: connectorName,
 		InstallFP: agentIdentityInstallFP(connectorName, user),
 	}
 	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
-		MachineHash: facts.MachineHash, UserID: facts.UserID, Connector: facts.Connector, InstallFP: facts.InstallFP,
+		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
+		Connector: facts.Connector, InstallFP: facts.InstallFP,
 	})
 	if facts.ID == "" {
 		return agentIdentityFacts{}
@@ -143,6 +147,27 @@ func hookAgentIdentityUser(ctx context.Context) agentIdentityUser {
 		return agentIdentityUser{}
 	}
 	return agentIdentityUser{ID: claimed.UserID, Name: claimed.UserName, Home: userScopedIdentityHome(claimed.UserID)}
+}
+
+// agentIdentityAccount is the account a uid's agent identity is keyed on
+// (agentidentity.Inputs.Account): the name the host's account database
+// gives the uid now, or while it cannot answer the last name it gave, so a
+// uid handed to a new account gets new agent identities and a directory
+// outage moves none (GAP-0314, GAP-0947). A per-user gateway's own account
+// is named once at start, a sandbox's host user by its binding, and a SID's
+// account is not part of its ID. A name the request claims never counts: a
+// hook could pick the identity, a removed account's included.
+func agentIdentityAccount(user agentIdentityUser) string {
+	if user.Self || agentidentity.IsSID(agentidentity.NormalizeUserID(user.ID)) {
+		return user.Name
+	}
+	if name := agentIdentityAccountName(user.ID); name != "" {
+		return name
+	}
+	if user.Sandbox != "" {
+		return user.Name
+	}
+	return ""
 }
 
 var gatewaySelf struct {
@@ -356,10 +381,13 @@ func agentIdentityV8FromContext(ctx context.Context) observability.Optional[stri
 	return agentIdentityV8(id)
 }
 
-// inventoryAgentIdentityID is the agent identity of userID's install of
-// connectorName: the ID the hook path derives for that user's hooks, so an
-// inventory record joins the agent's decisions. "" when it cannot be derived.
-func inventoryAgentIdentityID(connectorName, userID string) string {
+// inventoryAgentIdentityID is the agent identity of the install of
+// connectorName that userID, recorded as userName, owns: the ID the hook
+// path derives for that user's hooks, so an inventory record joins the
+// agent's decisions. "" when it cannot be derived, and for a record of an
+// account whose uid another account holds now: the uid's home is then the
+// new account's, not the install the record is about (GAP-0947).
+func inventoryAgentIdentityID(connectorName, userID, userName string) string {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	if ManagedEnterpriseActive() || connectorName == "" || userID == "" {
 		return ""
@@ -368,9 +396,13 @@ func inventoryAgentIdentityID(connectorName, userID string) string {
 	if self := gatewaySelfUser(); !gatewayRunsAsServiceAccount() && self.ID == userID {
 		user = self
 	}
+	account := agentIdentityAccount(user)
+	if agentidentity.UIDReassigned(userID, userName, account) {
+		return ""
+	}
 	machine, _ := agentidentity.HostMachineHash()
 	return agentidentity.AgentID(agentidentity.Inputs{
-		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID),
+		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID), Account: account,
 		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
 	})
 }
