@@ -317,7 +317,7 @@ config.
 | --- | --- |
 | Jamf Pro: **Computers** > **Policies** > the policy > **Logs** | Status and script output for each computer, truncated after 25 KB ([Viewing and Flushing Logs for a Policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Viewing_and_Flushing_Logs_for_a_Policy)) |
 | The Mac's `jamf.log` | The Jamf agent's own log ([Getting Additional Logging Information](https://learn.jamf.com/r/en-US/technical-articles/Getting_Additional_Logging_Information_on_Packages_and_Policies)) |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state; use the MDM policy or audit log for the uninstall result. `detect.sh` does not log. |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
 

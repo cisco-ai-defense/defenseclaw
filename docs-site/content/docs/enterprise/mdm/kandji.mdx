@@ -294,7 +294,7 @@ exits `0`.
 | Where | What |
 | --- | --- |
 | Iru: the device status or the Library Item status | Audit and remediation output ([Custom Scripts Overview](https://docs.iru.com/en/endpoint/library/library-items-profiles/custom-scripts-overview)) |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state; use the MDM policy or audit log for the uninstall result. `detect.sh` does not log. |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply job, which runs `ensure` when the config, credentials or policies change, and the daily `verify` job |
 

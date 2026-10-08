@@ -248,7 +248,7 @@ it exits `0`.
 | --- | --- |
 | **Scripts** > your script > **Device status** | Intune's run status per Mac (Success for exit `0`) |
 | `/Library/Logs/Microsoft/Intune` | The Intune agent's logs, including script runs |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | The wrapper's steps and every result document (root, `0600`) |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure results (root, `0600`); uninstall removes this log, so use the Intune script output for its result |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The pkg's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | Config-change runs and the daily `verify` |
 

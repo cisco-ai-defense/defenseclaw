@@ -511,7 +511,7 @@ those computers.
 | Windows | `mdm-wrapper.log`, same folder | The wrapper's steps |
 | Windows | `DefenseClaw` event log, source "DefenseClaw Lifecycle" | `100` installed, `101` upgraded, `102` repaired, `110` uninstalled (Application log only), `111` ensure no-op, `112` ensure applied, `120` unhealthy, `130` failed, `140` busy, `150` refused |
 | Windows | Application log, source "DefenseClaw Enterprise" | A legacy copy of each event |
-| Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`) | The wrapper's steps and results |
+| Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`) | Install and ensure results; uninstall removes this log, so use the MDM policy log for its result |
 | Linux | `/var/lib/defenseclaw-enterprise/last-package-result.json` and `last-package-result.log` | The package's own `ensure` |
 | Linux | `journalctl -u defenseclaw-enterprise-apply.service` and `-u defenseclaw-enterprise-verify.service` | Config-change runs and the daily verify |
 | macOS | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, `0600`) | The wrapper's steps and results |

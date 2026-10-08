@@ -392,7 +392,7 @@ true` and `credential: ai-defense-api-key` in the config.
 | Where | What |
 | --- | --- |
 | Workspace ONE: the device's **Scripts** and **Sensors** tabs | Script status and logs, and sensor values |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state; use the MDM policy or audit log for the uninstall result. `detect.sh` does not log. |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
 
