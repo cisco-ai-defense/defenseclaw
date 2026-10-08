@@ -754,10 +754,19 @@ func TestSessionSummary(t *testing.T) {
 				}
 				return nil
 			}
+			// The CLI's relay error came first, raw (GAP-0279): DefenseClaw's
+			// line says what happened.
+			ta.term.stderr = "Error:   × code: The service is currently unavailable, message: exec relay closed before the command reported an exit status\n"
 		}, check: noStop,
 			want: []string{"the connection to " + sbName + " was lost (the OpenShell gateway restarted, for one), which ended Claude Code; " + sbName +
 				" is still running → reattach: defenseclaw sandbox connect " + sbName, "Sandbox " + sbName + " keeps running → reattach"},
-			not: []string{"stopped from outside", "Sandbox kept (stopped)"}},
+			not: []string{"stopped from outside", "Sandbox kept (stopped)", "exec relay closed"}, notLive: []string{"exec relay closed"}},
+		// What else the CLI says on its own standard error comes after the
+		// session, not into the harness's screen (GAP-0279).
+		{name: "the CLI's own messages come after the session", opts: claude, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.stderr = "warning: dccert-cli-note\n"
+		}, live: []string{"warning: dccert-cli-note"}},
 		// GAP-0096: DefenseClaw's own stop for silent hooks is no stop from
 		// outside.
 		{name: "stopped by DefenseClaw for silent hooks", opts: claude, exit: 255, setup: func(ta *testApp) {
@@ -2076,7 +2085,7 @@ func TestDeleteSaysWhereTheWorkWent(t *testing.T) {
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Branch: true}))
 	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
 	release := ta.holdSession("fix-tests")
-	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests"}))
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests", Yes: true}))
 	release()
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))
 	has(t, ta.output(), "(it is not running, so it was not checked; its work was last put on branch dc/fix-tests at "+at+")")

@@ -66,6 +66,9 @@ type session struct {
 	sb   *sandboxapi.Sandbox
 	rm   bool
 	yes  bool
+	// cliErr holds the OpenShell CLI's own standard error of the session's
+	// interactive harness or shell (holdCLIErr).
+	cliErr *heldOutput
 	// autoRm marks an rm the run did not ask for: a headless run's sandbox,
 	// which goes by the rules of --rm unless --keep or
 	// openshell.keep_headless keeps it (App.headlessRm). The end of the
@@ -249,9 +252,71 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	if err != nil {
 		return -1, err
 	}
-	code, err := s.app.Terminal.Run(ctx, inv)
+	code, err := s.app.Terminal.Run(ctx, s.holdCLIErr(inv))
+	if err != nil {
+		s.printCLIErr(false)
+	}
 	s.harnessCode = code
 	return code, err
+}
+
+// maxHeldCLIErr bounds what holdCLIErr keeps of the OpenShell CLI's own
+// standard error during a session.
+const maxHeldCLIErr = 64 << 10
+
+// heldOutput keeps what is written to it, up to maxHeldCLIErr bytes.
+type heldOutput struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (h *heldOutput) Write(p []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if room := maxHeldCLIErr - h.b.Len(); room > 0 {
+		h.b.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (h *heldOutput) take() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := h.b.String()
+	h.b.Reset()
+	return out
+}
+
+// holdCLIErr has the OpenShell CLI's own standard error of an interactive
+// session held until the session ends (printCLIErr): written into the
+// harness's screen it corrupts it, and its relay error when the gateway
+// restarted ("Error: × code: The service is currently unavailable,
+// message: exec relay closed before the command reported an exit status")
+// came before DefenseClaw's account of what ended the session (GAP-0279).
+func (s *session) holdCLIErr(inv openshell.Invocation) openshell.Invocation {
+	s.cliErr = &heldOutput{}
+	inv.Stderr = s.cliErr
+	return inv
+}
+
+// printCLIErr prints what the OpenShell CLI wrote on its own standard
+// error during the session, after DefenseClaw's lines. Its relay error is
+// left out when explained: DefenseClaw said what ended the session.
+func (s *session) printCLIErr(explained bool) {
+	if s.cliErr == nil {
+		return
+	}
+	text := strings.TrimRight(s.cliErr.take(), "\r\n")
+	if text == "" || explained && relayClosed(text) {
+		return
+	}
+	fmt.Fprintln(s.app.IO.Err, terminalText(text))
+}
+
+// relayClosed reports whether the OpenShell CLI's error is its exec relay
+// that closed under the session (the gateway restarted or went away).
+func relayClosed(text string) bool {
+	return strings.Contains(text, "exec relay closed") || strings.Contains(text, "The service is currently unavailable")
 }
 
 // loginShell starts the sandbox user's login shell (bash where the image
@@ -270,6 +335,7 @@ func (s *session) attachShell(ctx context.Context) (int, error) {
 	stop := s.beginSession(ctx)
 	defer stop()
 	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
+	inv = s.holdCLIErr(inv)
 	if err != nil {
 		return -1, err
 	}
@@ -798,6 +864,7 @@ func (s *session) end(ctx context.Context) error {
 		a.println()
 		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() +
 			"; there is nothing left to review, and its undo point went with it")
+		s.printCLIErr(true)
 		return nil
 	}
 	after, err := s.settled(ctx)
@@ -821,6 +888,7 @@ func (s *session) end(ctx context.Context) error {
 	if elsewhere != "" {
 		a.warn(elsewhere)
 	}
+	s.printCLIErr(elsewhere != "")
 	// While the sandbox still runs: the review may stop it.
 	s.diagnoseStart(ctx, after, elsewhere != "")
 	if !s.started && after.Phase == "ready" {

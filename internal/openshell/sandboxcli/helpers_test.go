@@ -494,6 +494,8 @@ type fakeTerminal struct {
 	during   func()
 	hooks    func(argv []string)
 	timeline *timeline
+	// stderr is what the OpenShell CLI writes on its own standard error.
+	stderr string
 }
 
 func (f *fakeTerminal) Run(_ context.Context, inv openshell.Invocation) (int, error) {
@@ -508,6 +510,9 @@ func (f *fakeTerminal) Run(_ context.Context, inv openshell.Invocation) (int, er
 		return -1, startErr
 	}
 	f.timeline.add("attach")
+	if f.stderr != "" && inv.Stderr != nil {
+		_, _ = io.WriteString(inv.Stderr, f.stderr)
+	}
 	if during != nil {
 		during()
 	}
