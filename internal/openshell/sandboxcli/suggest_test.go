@@ -87,10 +87,16 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 	// GAP-0126: written into the project folder (a relative --pack-out run
 	// there), the pack is one a mounted run refuses; the hint said to run
 	// with it anyway.
+	ta.daemon.edit("web", func(sb *sandboxapi.Sandbox) { sb.Project = ta.project })
 	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{PackOut: "recorded.yaml"}))
-	has(t, ta.output(), "is inside the project folder, where a run that mounts the project refuses a pack",
+	has(t, ta.output(), "is inside the project folder "+ta.tildePath(ta.project)+", where a run that mounts the project refuses a pack",
 		"then move it to ", "and lock the project to it: defenseclaw sandbox run --pack recorded (or run with --copy --pack ")
 	lacks(t, ta.output(), "lock a project to it: defenseclaw sandbox run --pack /")
+	// GAP-0357: run from a folder that holds the project (the home folder),
+	// a pack outside the sandbox's project is not inside it.
+	ta.daemon.edit("web", func(sb *sandboxapi.Sandbox) { sb.Project = filepath.Join(ta.project, "web") })
+	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{Sandbox: "web", PackOut: filepath.Join(ta.project, "packs", "web", packs.PackFileName)}))
+	lacks(t, ta.output(), "is inside the project folder")
 
 	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
 		sandboxapi.Setting{Key: "network.mode", Value: "open", Source: "pack", Origin: "profile open"},
@@ -157,6 +163,7 @@ func TestPolicySuggestPackOutPaths(t *testing.T) {
 	ta := newTestApp(t, "", sandboxapi.Sandbox{Name: "web", Harness: "claudecode"})
 	ta.daemon.destinations = map[string]*sandboxapi.Destinations{"web": {Name: "web", Destinations: []sandboxapi.DestinationRow{
 		{Host: "artifacts.example.com", Kind: sandboxapi.DestinationOther, Tunnels: 1}}}}
+	ta.daemon.edit("web", func(sb *sandboxapi.Sandbox) { sb.Project = ta.project })
 	ta.ok(t, ta.PolicySuggest(bg, SuggestOptions{PackOut: "rel/recorded.yaml"}))
 	rel := filepath.Join(ta.project, "rel", "recorded.yaml")
 	has(t, ta.output(), "wrote "+rel+": pack recorded", "--copy --pack "+rel)
