@@ -56,6 +56,15 @@ func manifestSIDs(manifest Manifest) string {
 func TestEnumerateWindowsGroupThatDoesNotResolve(t *testing.T) {
 	stubMachineWinGet(t, nil)
 	stubGroupDirectory(t, map[string]string{}, map[string][]string{})
+	// stubGroupDirectory makes testMachineDomainSID the account domain of this
+	// computer, so the local accounts below must also resolve: the standalone
+	// enumerator revokes a local SID that LookupAccountSid does not map as a
+	// deleted account (GAP-0430).
+	previousLookup := windowsEnrollmentLookupAccountSID
+	t.Cleanup(func() { windowsEnrollmentLookupAccountSID = previousLookup })
+	windowsEnrollmentLookupAccountSID = func(sid string) (string, string, error) {
+		return "user" + sid[strings.LastIndex(sid, "-")+1:], "TESTPC", nil
+	}
 	stubActiveSessions(t, map[string][]string{testLocalUserSID: {"S-1-5-32-545"}})
 	injectWindowsProfileList(t, map[string]string{
 		testLocalUserSID: codexProfile(t, "0.150.0"), // signed in
