@@ -2256,11 +2256,11 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	if l.opts.Purge {
 		args = append(args, "--purge")
 	}
-	out, err := env.runGatewayCLI(ctx, args...)
+	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
 	if err != nil && l.opts.Purge && !json.Valid(out.Stdout) {
 		// An installed binary from before remove-all took --purge: remove
 		// the registrations, which is what the binaries are kept for.
-		out, err = env.runGatewayCLI(ctx, args[:len(args)-1]...)
+		out, err = env.runGatewayCLILong(ctx, removeAllTimeout, args[:len(args)-1]...)
 	}
 	var report struct {
 		Pending     []string `json:"pending"`

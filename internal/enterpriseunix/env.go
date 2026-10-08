@@ -367,6 +367,21 @@ func (e *Env) runGatewayCLI(ctx context.Context, args ...string) (CommandResult,
 	return e.Runner.Run(ctx, gateway, args...)
 }
 
+// removeAllTimeout bounds `enterprise hooks remove-all`, which retries a
+// per-user worker that timed out with a longer deadline (GAP-0517); the
+// default two-minute command bound would cut that retry short.
+const removeAllTimeout = 15 * time.Minute
+
+// runGatewayCLILong is runGatewayCLI with a longer bound for the production
+// runner.
+func (e *Env) runGatewayCLILong(ctx context.Context, timeout time.Duration, args ...string) (CommandResult, error) {
+	if runner, ok := e.Runner.(ExecRunner); ok {
+		runner.Timeout = timeout
+		return runner.RunEnv(ctx, e.serviceEnvironment(), filepath.Join(e.P(e.Layout.BinDir), binGateway), args...)
+	}
+	return e.runGatewayCLI(ctx, args...)
+}
+
 // P maps a canonical layout path onto the rooted filesystem.
 func (e *Env) P(path string) string {
 	if e.Root == "" {

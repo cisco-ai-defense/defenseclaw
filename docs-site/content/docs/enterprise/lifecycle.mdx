@@ -536,7 +536,10 @@ to keep the machine state for a reinstall instead.
   the uninstall stops before it removes the binaries those registrations run:
   the deployment record and state stay. Fix the cause, or remove
   DefenseClaw's entries from that user's agent config, and run the same
-  uninstall again. `ensure` restores the deployment instead.
+  uninstall again. `ensure` restores the deployment instead. A user's worker
+  that runs out of time (60 seconds; a large `~/.defenseclaw` on slow storage
+  after a reboot, say) is retried once with five minutes; one that times out
+  again says what usually holds it up.
 - **Per-user state (Linux and macOS).** `--purge` also removes everything
   DefenseClaw put in each enrolled user's home, as that user. It first stops
   the user's per-user gateway and watchdog, if one runs, and restores the

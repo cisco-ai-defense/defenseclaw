@@ -1460,3 +1460,35 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		t.Fatalf("rows = %+v, want the manifest row and one row for the eligible account without one", rows)
 	}
 }
+
+// GAP-0517: a purge stopped with per_user_hooks_remaining when two
+// per-user workers timed out; a timed-out worker is retried once with a
+// longer deadline, and one that times out again names the likely causes.
+func TestRemoveAllRetriesATimedOutWorkerOnceWithALongerDeadline(t *testing.T) {
+	origRunner := enterpriseHookWorkerRunner
+	t.Cleanup(func() { enterpriseHookWorkerRunner = origRunner })
+	var mu sync.Mutex
+	var retried []int
+	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		mu.Lock()
+		retried = append(retried, request.TimeoutSeconds)
+		mu.Unlock()
+		if account.UID == 1005 {
+			return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, context.DeadlineExceeded)
+		}
+		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion}, nil
+	}
+	timedOut := func(uid int) enterpriseHookWorkerOutcome {
+		return enterpriseHookWorkerOutcome{
+			Job: enterpriseHookWorkerJob{Account: enterpriseHookWorkerAccount{UID: uid, User: fmt.Sprintf("u%d", uid)}},
+			Err: fmt.Errorf("worker for uid %d timed out: %w", uid, context.DeadlineExceeded),
+		}
+	}
+	runs := retryTimedOutWorkers(context.Background(), []enterpriseHookWorkerOutcome{timedOut(1001), timedOut(1005), {Err: errors.New("other failure")}})
+	if runs[0].Err != nil || len(retried) != 2 || retried[0] != int(enterpriseHookWorkerRetryTimeout/time.Second) {
+		t.Fatalf("the timed-out worker was not retried once with the longer deadline: err=%v retried=%v", runs[0].Err, retried)
+	}
+	if runs[1].Err == nil || !strings.Contains(runs[1].Err.Error(), "also when retried") || runs[2].Err.Error() != "other failure" {
+		t.Fatalf("outcomes after the retry: %v / %v", runs[1].Err, runs[2].Err)
+	}
+}

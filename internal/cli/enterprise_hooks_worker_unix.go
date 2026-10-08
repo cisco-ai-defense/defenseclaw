@@ -155,6 +155,9 @@ type enterpriseHookWorkerRequest struct {
 	// foreign_cleanup worker does either; remove-all's apply worker only
 	// removes).
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
+	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
+	// (remove-all's retry of a worker that timed out).
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 }
 
 // enterpriseHookWorkerCopilotVSCode is what the user's home should hold
@@ -270,7 +273,7 @@ var enterpriseHooksApplyTargetCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		// The parent kills the worker's session on timeout, but macOS has
 		// no parent-death signal: never outlive the parent's deadline.
-		time.AfterFunc(enterpriseHookWorkerTimeout+5*time.Second, func() { os.Exit(5) })
+		enterpriseHookWorkerSelfDeadline = time.AfterFunc(enterpriseHookWorkerTimeout+5*time.Second, func() { os.Exit(5) })
 		if code := enterpriseHookWorkerMain(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); code != 0 {
 			return fmt.Errorf("enterprise hooks apply-target: worker failed (exit %d)", code)
 		}
@@ -278,8 +281,51 @@ var enterpriseHooksApplyTargetCmd = &cobra.Command{
 	},
 }
 
+// enterpriseHookWorkerSelfDeadline is the worker process's own deadline; a
+// request with a longer timeout moves it.
+var enterpriseHookWorkerSelfDeadline *time.Timer
+
+// enterpriseHookWorkerRetryTimeout bounds remove-all's single retry of a
+// worker that timed out: deleting a large ~/.defenseclaw on cold storage
+// (the first purge after a reboot) can outlast enterpriseHookWorkerTimeout.
+var enterpriseHookWorkerRetryTimeout = 5 * time.Minute
+
 func init() {
 	enterpriseHooksCmd.AddCommand(enterpriseHooksApplyTargetCmd)
+}
+
+// workerTimeout is the timeout of one worker for request.
+func workerTimeout(request enterpriseHookWorkerRequest) time.Duration {
+	if request.TimeoutSeconds > 0 {
+		return time.Duration(request.TimeoutSeconds) * time.Second
+	}
+	return enterpriseHookWorkerTimeout
+}
+
+// retryTimedOutWorkers runs once more, with enterpriseHookWorkerRetryTimeout,
+// every worker in runs that timed out. A purge stopped with
+// per_user_hooks_remaining for two accounts whose workers timed out, and
+// named no cause (GAP-0517). A worker that times out again says what
+// usually holds it up.
+func retryTimedOutWorkers(ctx context.Context, runs []enterpriseHookWorkerOutcome) []enterpriseHookWorkerOutcome {
+	var retry []enterpriseHookWorkerJob
+	var at []int
+	for i, run := range runs {
+		if run.Err == nil || !errors.Is(run.Err, context.DeadlineExceeded) || ctx.Err() != nil {
+			continue
+		}
+		job := run.Job
+		job.Request.TimeoutSeconds = int(enterpriseHookWorkerRetryTimeout / time.Second)
+		retry, at = append(retry, job), append(at, i)
+	}
+	for n, run := range runEnterpriseHookWorkerPool(ctx, retry, enterpriseHookWorkerParallelism) {
+		if run.Err != nil && errors.Is(run.Err, context.DeadlineExceeded) {
+			run.Err = fmt.Errorf("%w, also when retried with %s: the home may be on slow or unavailable storage, the account's ~/.defenseclaw may be very large, or a process running as %s may hold its files; rerun once the account is idle",
+				run.Err, enterpriseHookWorkerRetryTimeout, run.Job.Account.User)
+		}
+		runs[at[n]] = run
+	}
+	return runs
 }
 
 // enterpriseHookWorkerMain is the worker process body. It returns a process
@@ -306,6 +352,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		return respond(enterpriseHookWorkerResponse{Error: "request is not valid JSON: " + err.Error()}, 3)
+	}
+	if request.TimeoutSeconds > 0 && enterpriseHookWorkerSelfDeadline != nil {
+		enterpriseHookWorkerSelfDeadline.Reset(workerTimeout(request) + 5*time.Second)
 	}
 	if err := validateEnterpriseHookWorkerIdentity(request); err != nil {
 		return respond(enterpriseHookWorkerResponse{Error: err.Error()}, 4)
@@ -716,7 +765,7 @@ func runEnterpriseHookWorker(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, enterpriseHookWorkerTimeout)
+	ctx, cancel := context.WithTimeout(ctx, workerTimeout(request))
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, enterpriseHookWorkerArgs...)
 	cmd.Dir = "/"
