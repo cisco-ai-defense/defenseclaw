@@ -247,7 +247,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if !runtimeDetection.Enabled && cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	probe = a.resolveMCPProbeEndpoint(connector, probe)
+	probe = a.resolveMCPProbeEndpoint(ctx, cfg, connector, probe)
 	input := config.AssetPolicyInput{
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
@@ -301,14 +301,34 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 // this an approved server never matched at runtime and registry-required
 // blocked every MCP tool call (GAP-2488). A server the connector does not
 // list keeps the bare name and matches only name-only rules.
-func (a *APIServer) resolveMCPProbeEndpoint(connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
-	if a == nil || a.scannerCfg == nil || !a.scannerCfg.AssetPolicy.Enabled {
+//
+// The explicit lists apply with asset_policy disabled, so the server is
+// resolved whatever enabled says, and a standalone gateway resolves it in
+// the caller's configuration, not its own service profile: a url rule
+// never matched at the hook of a managed device (GAP-0576). Secure Client
+// keeps main: enabled gates the lookup, which reads the gateway's own home
+// (issue #1092).
+func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
+	if a == nil || cfg == nil {
+		return probe
+	}
+	secureClient := cfg.SecureClientIntegration()
+	if secureClient && (a.scannerCfg == nil || !a.scannerCfg.AssetPolicy.Enabled) {
+		return probe
+	}
+	if !secureClient && !cfg.AssetPolicy.Enabled && !mcpListsPinEndpoint(cfg.AssetPolicy.MCP) {
 		return probe
 	}
 	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
 		return probe
 	}
-	entry, ok := a.scannerCfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	var entry config.MCPServerEntry
+	var ok bool
+	if secureClient {
+		entry, ok = a.scannerCfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	} else {
+		entry, ok = a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
+	}
 	if !ok {
 		return probe
 	}
@@ -317,6 +337,20 @@ func (a *APIServer) resolveMCPProbeEndpoint(connector string, probe mcpRuntimePr
 	probe.Args = entry.Args
 	probe.Transport = strings.TrimSpace(entry.Transport)
 	return probe
+}
+
+// mcpListsPinEndpoint reports whether a denied or allowed MCP rule matches
+// on how a server starts (url, command, args_prefix, transport), which a
+// name-only probe needs resolving for.
+func mcpListsPinEndpoint(p config.AssetTypePolicy) bool {
+	for _, rules := range [][]config.AssetPolicyRule{p.Denied, p.Allowed} {
+		for _, rule := range rules {
+			if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {

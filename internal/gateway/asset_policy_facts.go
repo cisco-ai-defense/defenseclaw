@@ -49,6 +49,21 @@ func claimedAssetFactsFromContext(ctx context.Context) assetfacts.Facts {
 	return facts
 }
 
+// callerHomeForAssets is the home of the user a service-account gateway
+// answers for, when the request names one; ok is false on a per-user
+// gateway, which runs as its user and reads its own home.
+func callerHomeForAssets(ctx context.Context) (string, bool) {
+	_, peer := managedHookPeerFromContext(ctx)
+	if !peer && !serviceAccountGatewayFromContext(ctx) {
+		return "", false
+	}
+	home := trustedActiveHome(ctx)
+	if home == "" || home == unresolvedCallerHome {
+		return "", true
+	}
+	return home, true
+}
+
 // declaredSkillNames lists the names the invoked skill declares in its
 // SKILL.md, read in the caller's skill folders or, where this gateway
 // cannot read them, as the standalone hook reported them. A denied rule
@@ -122,4 +137,27 @@ func (a *APIServer) skillFolderAccessDecision(
 		return decision, true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// lookupCallerMCPServer finds the MCP server name the caller's agent has
+// configured. A per-user gateway reads its own home. A service-account
+// gateway reads the caller's home and, where it may not (Linux and macOS),
+// takes the definition the standalone hook read as the user (GAP-0576).
+func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Config, connector, cwd, name string) (config.MCPServerEntry, bool) {
+	home, serviceAccount := callerHomeForAssets(ctx)
+	if !serviceAccount {
+		return cfg.LookupMCPServerForConnector(connector, cwd, name)
+	}
+	if home != "" {
+		if entry, ok := config.LookupMCPServerUnderHome(connector, home, cwd, name); ok {
+			return entry, true
+		}
+	}
+	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Name == name {
+		return config.MCPServerEntry{
+			Name: server.Name, URL: server.URL, Command: server.Command,
+			Args: append([]string(nil), server.Args...), Transport: server.Transport,
+		}, true
+	}
+	return config.MCPServerEntry{}, false
 }

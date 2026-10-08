@@ -18,8 +18,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 )
 
-// GAP-0570: the standalone hook reports, read as the user, the name an
-// invoked skill folder declares.
+// GAP-0570, GAP-0576: the standalone hook reports, read as the user, the
+// name an invoked skill folder declares and the MCP server a tool call names.
 func TestHookAssetFactsReportWhatTheGatewayCannotRead(t *testing.T) {
 	home := t.TempDir()
 	for _, name := range []string{"HOME", "USERPROFILE"} {
@@ -38,4 +38,12 @@ func TestHookAssetFactsReportWhatTheGatewayCannotRead(t *testing.T) {
 		t.Fatalf("skill facts = %+v (ok=%v)", facts, ok)
 	}
 
+	state := `{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28561/mcp"}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	facts, ok = assetfacts.Decode(hookAssetFacts("claudecode", []byte(`{"tool_name":"mcp__notes__count_words","cwd":"`+filepath.ToSlash(home)+`"}`)))
+	if !ok || facts.MCP == nil || facts.MCP.Name != "notes" || facts.MCP.URL != "http://127.0.0.1:28561/mcp" {
+		t.Fatalf("mcp facts = %+v (ok=%v)", facts, ok)
+	}
 }

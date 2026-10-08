@@ -22,18 +22,20 @@ import (
 
 // hookAssetFacts is the assetfacts.Header value of a standalone managed
 // hook: the names the skill folders this event names or reaches into declare
-// in their SKILL.md, read as the user (GAP-0570). The gateway, a service
-// account, may not read this home.
+// in their SKILL.md, and the definition of the MCP server a tool call names,
+// read as the user (GAP-0570, GAP-0576). The gateway, a service account,
+// may not read this home.
 func hookAssetFacts(connector string, payload []byte) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	if connector != "claudecode" && connector != "codex" {
 		return ""
 	}
 	var event struct {
-		ToolName  string         `json:"tool_name"`
-		ToolInput map[string]any `json:"tool_input"`
-		CWD       string         `json:"cwd"`
-		Prompt    string         `json:"prompt"`
+		ToolName      string         `json:"tool_name"`
+		ToolInput     map[string]any `json:"tool_input"`
+		CWD           string         `json:"cwd"`
+		Prompt        string         `json:"prompt"`
+		MCPServerName string         `json:"mcp_server_name"`
 	}
 	if json.Unmarshal(payload, &event) != nil {
 		return ""
@@ -54,6 +56,13 @@ func hookAssetFacts(connector string, payload []byte) string {
 	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
 		addSkill(ref.Name, ref.Dir)
 	}
+	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" {
+		if entry, ok := (*config.Config)(nil).LookupMCPServerForConnector(connector, event.CWD, server); ok {
+			facts.MCP = &assetfacts.MCPServer{
+				Name: entry.Name, URL: entry.URL, Command: entry.Command, Args: entry.Args, Transport: entry.Transport,
+			}
+		}
+	}
 	return assetfacts.Encode(facts)
 }
 
@@ -71,4 +80,17 @@ func hookInvokedSkillName(toolName string, toolInput map[string]any, prompt stri
 		return ""
 	}
 	return name
+}
+
+// hookMCPServerName is the MCP server a tool call names: mcp__<server>__<tool>
+// or the event's mcp_server_name.
+func hookMCPServerName(toolName, serverName string) string {
+	if server := strings.TrimSpace(serverName); server != "" {
+		return server
+	}
+	parts := strings.Split(strings.TrimSpace(toolName), "__")
+	if len(parts) >= 3 && parts[0] == "mcp" && strings.TrimSpace(parts[1]) != "" {
+		return strings.TrimSpace(parts[1])
+	}
+	return ""
 }

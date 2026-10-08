@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -756,5 +757,38 @@ func TestCodexReadOfDeniedSkillFolderIsBlocked(t *testing.T) {
 	}
 	if decision, matched := read("cat ~/.codex/skills/epa-ok/SKILL.md"); matched {
 		t.Fatalf("an allowed skill folder was refused: %+v", decision)
+	}
+}
+
+// GAP-0576: on a standalone gateway a url rule matches the server the
+// caller's agent configures: read in the caller's home, or, where the
+// gateway may not read it, as the standalone hook reported it.
+func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: "http://127.0.0.1:28561/mcp"}}
+	api := &APIServer{scannerCfg: cfg}
+	home, project := t.TempDir(), t.TempDir()
+	state := `{"projects":{"` + filepath.ToSlash(project) + `":{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28561/mcp"}}}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	call := func(ctx context.Context) bool {
+		_, matched := api.claudeCodeMCPAssetDecision(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", ToolName: "mcp__notes__count_words", CWD: project,
+		})
+		return matched
+	}
+	if !call(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})) {
+		t.Fatal("url deny did not match the server in the caller's home")
+	}
+	reported := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001}),
+		claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: &assetfacts.MCPServer{Name: "notes", URL: "http://127.0.0.1:28561/mcp"}})
+	if !call(reported) {
+		t.Fatal("url deny did not match the server the hook reported")
+	}
+	other := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1003}),
+		claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: &assetfacts.MCPServer{Name: "notes", URL: "http://127.0.0.1:28562/mcp"}})
+	if call(other) {
+		t.Fatal("url deny matched another user's server")
 	}
 }
