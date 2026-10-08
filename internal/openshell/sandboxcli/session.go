@@ -595,6 +595,8 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 		if clause := sandboxapi.LargeUploadReason(ev.Reason); clause != "" {
 			text += " (" + clause + ")"
 		}
+	case hostPortClosedWhy(ev) != "":
+		text += ": " + hostPortClosedWhy(ev)
 	case why != "":
 		text += " (" + sandboxapi.BlockedText(why, ev.Host) + ")"
 	}
