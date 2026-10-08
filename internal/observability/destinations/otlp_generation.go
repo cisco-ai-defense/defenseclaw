@@ -195,8 +195,8 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			if adapterErr != nil {
 				return fail(newError(ErrorAdapterPrepare))
 			}
-			dispatcher, valid := observabilityruntime.CompiledDispatcherConfig(
-				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver,
+			dispatcher, valid := observabilityruntime.CompiledDispatcherConfigForProfile(
+				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver, factory.secureClient,
 			)
 			if !valid {
 				_ = closeGalileoAdapter(adapter)
@@ -238,8 +238,8 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			if adapterErr != nil {
 				return fail(newError(ErrorAdapterPrepare))
 			}
-			dispatcher, valid := observabilityruntime.CompiledDispatcherConfig(
-				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver,
+			dispatcher, valid := observabilityruntime.CompiledDispatcherConfigForProfile(
+				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver, factory.secureClient,
 			)
 			if !valid {
 				_ = closeOTLPCanonicalAdapter(adapter)
@@ -279,8 +279,8 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			if adapterErr != nil {
 				return fail(newError(ErrorAdapterPrepare))
 			}
-			dispatcher, valid := observabilityruntime.CompiledDispatcherConfig(
-				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver,
+			dispatcher, valid := observabilityruntime.CompiledDispatcherConfigForProfile(
+				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver, factory.secureClient,
 			)
 			if !valid {
 				_ = closeOTLPCanonicalAdapter(adapter)

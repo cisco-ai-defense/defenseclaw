@@ -226,7 +226,7 @@ func pruneAgentLedger(ctx context.Context, store *InventoryStore, cutoff time.Ti
 		fmt.Fprintf(os.Stderr, "[%s] inventory history: pruned %d agent identities not seen for %d days\n", tag, agents, days)
 	}
 	// So are the session ids the ledger remembers it counted.
-	if _, err := store.PruneAgentIdentitySessions(ctx, cutoff); err != nil {
+	if _, err := store.PruneAgentIdentitySessions(ctx); err != nil {
 		if ctx.Err() == nil && w.allowDiagnostic("prune-agent-sessions", now) {
 			fmt.Fprintf(os.Stderr, "[%s] agent identity session prune failed: %v\n", tag, err)
 		}

@@ -140,9 +140,41 @@ func TestCorrelationRelationshipContextTakesSessionAgent(t *testing.T) {
 		t.Fatalf("no hook snapshot: agent=%q want conversation root %q", got, root)
 	}
 	api.rememberHookSessionState(t.Context(), llmEventMeta{
-		Source: "codex", SessionID: "session-1", AgentID: "agent-live", LifecycleEvent: "session_start",
+		Source: "codex", SessionID: "session-1", AgentID: "agent-live",
+		AgentIdentityID: nativeSessionAgentScopeV8(sessionOnly, "codex", "session-1"),
+		LifecycleEvent:  "session_start",
 	})
 	if got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(sessionOnly, "codex")).AgentID; got != "agent-live" {
 		t.Fatalf("hook snapshot: agent=%q want agent-live", got)
+	}
+}
+
+// GAP-0755: a native relationship must not inherit another caller's hook agent
+// when two authenticated users report the same conversation ID.
+func TestCorrelationRelationshipContextKeepsAuthenticatedIdentity(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	api := &APIServer{}
+	const session = "shared-conversation"
+	first := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-first", UserID: "1001"})
+	second := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-second", UserID: "1002"})
+	api.rememberHookSessionState(first, llmEventMeta{
+		Source: "codex", SessionID: session, AgentID: "first-agent",
+		AgentIdentityID: "agt-first", UserID: "1001", LifecycleEvent: "session_start",
+	})
+	api.rememberHookSessionState(second, llmEventMeta{
+		Source: "codex", SessionID: session, AgentID: "second-agent",
+		AgentIdentityID: "agt-second", UserID: "1002", LifecycleEvent: "session_start",
+	})
+	for _, tc := range []struct {
+		ctx  context.Context
+		want string
+	}{
+		{first, "first-agent"},
+		{second, "second-agent"},
+	} {
+		ctx := audit.ContextWithEnvelope(tc.ctx, audit.CorrelationEnvelope{SessionID: session})
+		if got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(ctx, "codex")).AgentID; got != tc.want {
+			t.Fatalf("agent=%q want %q", got, tc.want)
+		}
 	}
 }

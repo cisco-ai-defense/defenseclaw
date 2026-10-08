@@ -368,6 +368,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			FailMode:              "closed",
 			StrictAvailability:    true,
 			ManagedEnterprise:     true,
+			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
 		// Marks a failed Unix standalone runtime as the standalone profile's
@@ -474,6 +475,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		AuthenticatedManagedToken: authenticatedManagedToken,
 		StrictAvailability:        hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
 		ManagedEnterprise:         enterpriseManaged,
+		SecureClient:              enterpriseManaged && secureClientHost(),
 		ManagedGatewayServiceName: managedGatewayService,
 		TraceParent: hookFirstNonEmpty(
 			envvars.Getenv("DEFENSECLAW_TRACEPARENT"),

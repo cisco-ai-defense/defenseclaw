@@ -959,16 +959,18 @@ func anyEqualFold(have []string, want string) bool {
 }
 
 // decisionConfig returns the configuration a decision for ctx reads: the
-// derived configuration of the request's profile, or the live generation's
+// derived configuration of the requests profile, or the live generations
 // configuration (a.scannerCfg for an API server without a generation).
 func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 	if a == nil {
 		return nil
 	}
+	// Secure Client keeps the pre-profile startup policy path (issue #1092).
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
+	}
 	base := a.scannerCfg
-	// Secure Client keeps deciding with the start-time configuration
-	// (issue #1092).
-	if g := a.generation(); g != nil && g.Config != nil && !base.SecureClientIntegration() {
+	if g := a.generation(); g != nil && g.Config != nil {
 		base = g.Config
 	}
 	return a.decisionConfigFrom(ctx, base)
@@ -1049,6 +1051,9 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 // agent. It applies only to a request with a verified user-scoped identity;
 // without one (nil) the proxy keeps its own settings.
 func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
+	if ctx != nil && ctx.Value(unverifiedProxyCallerKey{}) == true {
+		return nil
+	}
 	set := liveGuardrailProfiles.Load()
 	if set == nil {
 		return nil
@@ -1081,12 +1086,13 @@ func profileProxyOverride(ctx context.Context, connectorName string) (mode, bloc
 // The proxy scanned every request with the global pack, so a profile's
 // rule_pack_dir never reached OpenClaw or ZeptoClaw traffic (GAP-0313).
 func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
+	connectorName := profileRequestConnector(ctx)
 	if resolved := proxyProfileFor(ctx); resolved != nil {
-		if generation := resolved.ruleGeneration(""); generation != nil {
+		if generation := resolved.ruleGeneration(connectorName); generation != nil {
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration("")
+	return snapshotRulePackGeneration(connectorName)
 }
 
 // proxyGuardrailProfileTelemetryFor describes only a profile actually used

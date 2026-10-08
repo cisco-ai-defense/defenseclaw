@@ -104,5 +104,74 @@ func (s *ContinuousDiscoveryService) macOSTCCSkipped(path string) bool {
 		return false
 	}
 	s.tccSkipped = true
+	if s.tccSkippedPaths == nil {
+		s.tccSkippedPaths = make(map[string]bool)
+	}
+	s.tccSkippedPaths[hashPath(filepath.Clean(path))] = true
+	return true
+}
+
+// notePrivacyEvidencePath keeps only hashes of protected ancestors. It is
+// called as evidence is discovered, including when raw-path storage is off.
+func (s *ContinuousDiscoveryService) notePrivacyEvidencePath(path string) {
+	if s == nil || s.opts.SecureClient || discoveryGOOS != "darwin" {
+		return
+	}
+	if s.privacyEvidencePaths == nil {
+		s.privacyEvidencePaths = make(map[string][]string)
+	}
+	var scopes []string
+	for _, home := range s.homesToScan() {
+		rel, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		dir := filepath.Clean(home)
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			dir = filepath.Join(dir, part)
+			if macOSTCCProtectedPath(dir, []string{home}) {
+				scopes = appendUnique(scopes, hashPath(dir))
+			}
+		}
+	}
+	s.privacyEvidencePaths[hashPath(path)] = scopes
+}
+
+func (s *ContinuousDiscoveryService) privacyScopesForSignal(sig AISignal) []string {
+	if sig.Detector != "package_manifest" && sig.Detector != "model_file" {
+		return nil
+	}
+	var scopes []string
+	for _, ev := range sig.Evidence {
+		for _, scope := range s.privacyEvidencePaths[ev.PathHash] {
+			scopes = appendUnique(scopes, scope)
+		}
+	}
+	return scopes
+}
+
+func (s *ContinuousDiscoveryService) privacySkipAffects(old aiStoredSignal) bool {
+	// Existing 0.8.x snapshots have no scope metadata. Keep them until a
+	// complete scan can replace or conclusively remove them.
+	if !old.PrivacyScopeKnown {
+		return true
+	}
+	for _, scope := range old.PrivacyScopeHashes {
+		if s.tccSkippedPaths[scope] {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *ContinuousDiscoveryService) privacyScopeKnown(sig AISignal) bool {
+	if discoveryGOOS != "darwin" || (sig.Detector != "package_manifest" && sig.Detector != "model_file") || len(sig.Evidence) == 0 {
+		return false
+	}
+	for _, ev := range sig.Evidence {
+		if _, ok := s.privacyEvidencePaths[ev.PathHash]; !ok {
+			return false
+		}
+	}
 	return true
 }

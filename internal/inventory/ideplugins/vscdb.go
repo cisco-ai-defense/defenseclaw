@@ -16,9 +16,9 @@ import (
 )
 
 // readStateDBValue reads one ItemTable value from a VS Code state database.
-// The database is opened read-only and immutable, so the read takes no
-// lock and never writes a journal next to a running editor's file, and the
-// whole read is bounded by timeout.
+// The database is opened read-only so SQLite sees uncheckpointed WAL changes
+// from a running editor without writing to its database. The read is
+// bounded by timeout.
 func readStateDBValue(path, key string, timeout time.Duration) ([]byte, bool) {
 	const maxDBBytes = 64 << 20
 	const maxValueBytes = 4 << 20
@@ -55,12 +55,12 @@ func readStateDBValue(path, key string, timeout time.Duration) ([]byte, bool) {
 	return value, true
 }
 
-// stateDBURI builds a file: URI for path with mode=ro&immutable=1.
+// stateDBURI builds a read-only file: URI that includes live WAL changes.
 func stateDBURI(path string) string {
 	slashed := filepath.ToSlash(path)
 	if !strings.HasPrefix(slashed, "/") {
 		slashed = "/" + slashed // C:/Users/... on Windows
 	}
-	u := url.URL{Scheme: "file", Path: slashed, RawQuery: "mode=ro&immutable=1"}
+	u := url.URL{Scheme: "file", Path: slashed, RawQuery: "mode=ro"}
 	return u.String()
 }

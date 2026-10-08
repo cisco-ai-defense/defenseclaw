@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
@@ -61,7 +62,8 @@ func init() {
 func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
 	rows := append([]enterpriseHookReconcileRow(nil), run.Rows...)
 	manifest := strings.TrimSpace(run.Manifest)
-	if manifest == "" {
+	if manifest == "" || (cfg != nil && cfg.StandaloneEnterprise() &&
+		strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest)) {
 		return rows
 	}
 	accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifest))

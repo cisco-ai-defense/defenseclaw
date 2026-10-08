@@ -273,6 +273,57 @@ func TestQueueOnlyDispatcherSeparatesProjectedQueueBytesFromEncodedWriteBytes(t 
 	}
 }
 
+func TestSecureClientDispatcherKeepsMainRetryAndCircuit(t *testing.T) {
+	destination := config.ObservabilityV8EffectiveDestination{
+		Name: config.ObservabilityV8ManagedAIDDestinationName, Kind: config.ObservabilityV8DestinationOTLP,
+		Enabled: true, SelectedSignals: []observability.Signal{observability.SignalLogs},
+		Transport: config.ObservabilityV8TransportPlan{
+			Batch: &config.ObservabilityV8BatchSource{MaxQueueSize: 8, MaxQueueBytes: 4096},
+		},
+	}
+	legacy, ok := CompiledDispatcherConfigForProfile(destination, 1, observability.SignalLogs, nil, true)
+	if !ok || legacy.Retry.MaxAttempts != 3 || legacy.Retry.InitialBackoff != 100*time.Millisecond ||
+		legacy.Retry.MaxBackoff != 5*time.Second || !legacy.LegacyCircuit {
+		t.Fatalf("secure client dispatcher=%+v, valid=%v", legacy, ok)
+	}
+	current, ok := CompiledDispatcherConfigForProfile(destination, 1, observability.SignalLogs, nil, false)
+	if !ok || current.Retry.MaxAttempts != 24 || current.LegacyCircuit {
+		t.Fatalf("standalone dispatcher=%+v, valid=%v", current, ok)
+	}
+	adapter := newRuntimeRecordingAdapter(1)
+	adapter.outcome = delivery.OutcomeAuthentication
+	dispatcher, err := delivery.NewDispatcher(legacy, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.Activate()
+	payload, err := delivery.NewPayload([]byte("{}"), delivery.RoutingIdentity{
+		RecordID: "first", Bucket: "model.io", Signal: "logs", EventName: "model.response",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dispatcher.Enqueue(payload); !got.Accepted() {
+		t.Fatalf("first enqueue=%+v", got)
+	}
+	deadline := time.Now().Add(time.Second)
+	for dispatcher.DeliveryHealthSnapshot().CircuitState != delivery.CircuitOpen {
+		if time.Now().After(deadline) {
+			t.Fatal("circuit did not open")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := dispatcher.Enqueue(payload); got.Disposition != delivery.EnqueueRejected ||
+		got.Reason != delivery.ReasonCircuitOpen {
+		t.Fatalf("open circuit enqueue=%+v, want legacy rejection", got)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := dispatcher.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeEmitLocalOnlyPersistsWithoutOptionalProjectionOrFanout(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,

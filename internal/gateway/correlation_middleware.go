@@ -393,7 +393,7 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 					// on the authenticated binding; identity headers the
 					// sandbox sends are ignored.
 					id.UserID, id.UserIDKind, id.UserName = sandboxBindingUser(binding)
-				} else if connector.IsLoopback(r) {
+				} else if connector.IsLoopback(r) && ctx.Value(proxyUserClaimsIgnoredKey{}) != true {
 					trustedID := sanitizeLLMEventUser(r.Header.Get(llmEventUserIDHeader))
 					trustedName := localAccountName(sanitizeLLMEventUser(r.Header.Get(llmEventUserNameHeader)))
 					if trustedID != "" || trustedName != "" {

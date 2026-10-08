@@ -244,10 +244,14 @@ def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
 
 
 def _inventory_scan_args(
-    base_args: tuple[str, ...], connector_modes: Sequence[object]
+    base_args: tuple[str, ...], config: object | None
 ) -> tuple[str, ...]:
-    """Only a truly empty connector roster uses the user-scoped IDE scan."""
-    return base_args if connector_modes else ("aibom", "scan", "--json", "--only", "ide_plugins")
+    """Use IDE-only mode only when the runtime has no active connector."""
+    try:
+        connectors = config.active_connectors() if config is not None else ()
+    except (AttributeError, ValueError, RuntimeError):
+        connectors = ()
+    return base_args if connectors else ("aibom", "scan", "--json", "--only", "ide_plugins")
 
 
 def _no_connector_hint(stderr: bytes) -> str:
@@ -13983,11 +13987,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             await self._load_inventory_merged(names, announce=announce)
             return
         self.inventory_model.show_connector_column = False
-        # _active_connector_names() is empty for both zero and one connector.
-        # Only the zero-connector case needs the IDE-only AIBOM path.
-        roster = getattr(self.overview_model.cfg, "connector_modes", ()) if self.overview_model.cfg else ()
+        # The Overview roster is empty for both zero and one connector; use
+        # the runtime config to decide whether an IDE-only scan is needed.
         intent = self.inventory_model.load_intent()
-        intent = replace(intent, args=_inventory_scan_args(intent.args, roster))
+        intent = replace(intent, args=_inventory_scan_args(intent.args, self.config))
         loading = intent.hint or "Loading inventory..."
         if announce and self.active_panel == "inventory":
             self._set_status(loading)

@@ -20,32 +20,14 @@ import (
 // finishes in the background and answers a later call.
 func WindowsDirectoryFacts(sid string, wait time.Duration) DirectoryFacts {
 	return resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
-		func(samName string) string { return adUPNs.lookup(samName, wait) }, time.Now())
+		func(sid, samName string) string { return adUPNs.lookup(sid, samName, wait) }, time.Now())
 }
 
 // WindowsGroupNames renders group SIDs as DOMAIN\name where LookupAccountSid
 // answers, keeping the SID otherwise. At most limit SIDs are looked up and
-// the loop stops when budget elapses, so a slow directory cannot hold up the
-// caller; the remaining SIDs are kept as SIDs.
+// no lookup can hold the caller past the budget. Remaining SIDs stay as SIDs.
 func WindowsGroupNames(sids []string, limit int, budget time.Duration) []string {
-	deadline := time.Now().Add(budget)
-	out := make([]string, 0, len(sids))
-	for i, sid := range sids {
-		name := ""
-		if i < limit && time.Now().Before(deadline) {
-			if account, domain, ok := (osWindowsDirectoryReader{}).LookupAccount(sid); ok && account != "" {
-				name = account
-				if domain != "" {
-					name = domain + `\` + account
-				}
-			}
-		}
-		if name == "" {
-			name = sid
-		}
-		out = append(out, name)
-	}
-	return out
+	return windowsGroupNamesWithLookup(sids, limit, budget, (osWindowsDirectoryReader{}).LookupAccount)
 }
 
 type osWindowsDirectoryReader struct{}

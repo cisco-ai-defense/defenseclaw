@@ -59,6 +59,34 @@ rules:
 	}
 }
 
+// Removing the last profile must leave unmatched hooks on the live base mode.
+func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
+	stubProfileSources(t)
+	startup := &config.Config{}
+	startup.Guardrail.Mode = "observe"
+	startup.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	startup.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, startup)
+	live := startup
+	api.SetGenerationSource(func() *Generation { return &Generation{Config: live} })
+	ctx := api.withGuardrailProfileDecision(t.Context(), "opencode")
+	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "observe" {
+		t.Fatalf("startup unmatched hook mode = %q", got)
+	}
+	reloaded := *startup
+	reloaded.Guardrail = startup.Guardrail
+	reloaded.Guardrail.Mode = "action"
+	reloaded.Guardrail.Profiles = nil
+	reloaded.Guardrail.ProfileAssignments = nil
+	live = &reloaded
+	api.setGuardrailProfiles(nil)
+	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "action" {
+		t.Fatalf("reloaded unmatched hook mode = %q, want action", got)
+	}
+}
+
 // A reload during a request must attribute records to the profile enforced
 // by decisions after the reload.
 func TestGuardrailProfileTelemetryFollowsReloadedSet(t *testing.T) {
@@ -150,6 +178,7 @@ func TestGuardrailProfileTelemetryBoundsTheMatchedGroup(t *testing.T) {
 // profile's rule pack and applies its HILT, as explain says it does
 // (GAP-0313). Its thresholds come from requestThresholds.
 func TestGuardrailProxyAppliesTheProfileRulePackAndHILT(t *testing.T) {
+	stubProfileSources(t)
 	resetConnectorRuleCategories(t)
 	withLocalPatternsRestored(t)
 	previous := liveGuardrailProfiles.Load()
@@ -168,7 +197,9 @@ rules:
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
-		"contractors": {RulePackDir: packDir, HILT: &config.HILTConfig{Enabled: true, MinSeverity: "medium"}},
+		"contractors": {Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"openclaw": {RulePackDir: packDir},
+		}, HILT: &config.HILTConfig{Enabled: true, MinSeverity: "medium"}},
 	}
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
 		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
@@ -176,10 +207,13 @@ rules:
 	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
 	inspector := NewGuardrailInspector("local", nil, nil)
 	inspector.SetHILTConfig(false, "HIGH")
-	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}}
-	ctx := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)).Context()
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}, gatewayToken: "owner-token"}
+	subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(subject)
+	req.Header.Set("X-DC-Auth", "Bearer owner-token")
+	ctx := proxy.withProxyAgent(req).Context()
 	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "contractors" {
-		t.Skip("the gateway's own account is not a verified subject on this host")
+		t.Fatalf("proxy profile = %q, want contractors", name)
 	}
 	// A completion: the prompt surface reports and never blocks. The
 	// profile's HILT (MEDIUM) turns the HIGH finding into a confirm.
@@ -212,6 +246,20 @@ func TestProxyTelemetryOmitsUnappliedProfile(t *testing.T) {
 	meta := proxyLLMEventMeta(proxy, request, &ChatRequest{Model: "test-model"}, "test-provider")
 	if name, present := meta.Profile.Name.Get(); present {
 		t.Fatalf("unapplied profile %q appeared in proxy telemetry", name)
+	}
+	// A provider bearer can authenticate a connector without proving the
+	// caller is the gateway owner. The process owner remains ineligible.
+	processOwnerProfileSubject = func() (profileSubject, bool) {
+		return profileSubject{UserID: "owner"}, true
+	}
+	providerRequest := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	providerRequest.Header.Set("Authorization", "Bearer provider-key")
+	providerRequest = proxy.withProxyAgent(providerRequest)
+	if profile := proxyProfileFor(providerRequest.Context()); profile != nil {
+		t.Fatalf("provider-key request inherited owner profile %+v", profile.decision)
+	}
+	if id, _ := agentIdentityFromContext(providerRequest.Context()); id != "" {
+		t.Fatalf("provider-key request inherited owner agent identity %q", id)
 	}
 }
 

@@ -223,12 +223,17 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	start := time.Now()
 	if reason := standaloneWindowsEnumerateIdleReason(cfg); reason != "" {
 		fmt.Fprintf(stderr, "[hook-enumerator] cycle idle: %s\n", reason)
-		// The administrator's targets still need the gateway's inventory
-		// read access; the pass only adds that grant and never publishes.
+		// The administrator's targets still need gateway inventory access
+		// and group identity facts, but the enumerator never rewrites them.
 		if authored, loadErr := enterprisehooks.LoadManifest(manifestPath); loadErr == nil {
+			if cfg.StandaloneEnterprise() {
+				publishEnterpriseWindowsManifestIdentity(stderr, cfg, manifestPath, authored)
+			}
 			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", !cfg.SecureClientIntegration(), enumerationLoggerForStderr(stderr)); grantErr != nil {
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 			}
+		} else if cfg.StandaloneEnterprise() {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not load administrator targets for identity facts: %v\n", loadErr)
 		}
 		return nil
 	}
@@ -305,6 +310,33 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN cycle exceeded 10 s target: %s\n", elapsed)
 	}
 	return nil
+}
+
+// publishEnterpriseWindowsManifestIdentity refreshes signed-in token groups
+// for administrator selected targets while keeping their manifest untouched.
+func publishEnterpriseWindowsManifestIdentity(stderr io.Writer, cfg *config.Config, manifestPath string, manifest enterprisehooks.Manifest) {
+	cachePath := enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath)
+	cache, err := enterpriseWindowsEnumerateGroupCacheLoader(cachePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN enrollment group cache is unreadable: %v\n", err)
+		cache = enterprisehooks.NewWindowsEnrollmentGroupCache()
+	}
+	refreshed, err := enterpriseWindowsManifestGroupCacheRefresher(manifest, cache)
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN active session groups are unreadable: %v\n", err)
+	}
+	if refreshed == nil {
+		return
+	}
+	if _, err := enterpriseWindowsEnumerateGroupCacheWriter(cachePath, refreshed); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the enrollment group cache: %v\n", err)
+	}
+	identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	if err := enterpriseWindowsIdentitySpoolWriter(identityDir, refreshed, enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+		fmt.Fprintf(stderr, format+"\n", args...)
+	}); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", err)
+	}
 }
 
 // runEnterpriseWindowsEnumerateInterval is the interval-loop entry.
@@ -424,10 +456,11 @@ var (
 	enterpriseWindowsEnumerateManifestWriter    = enterprisehooks.WriteTargetsManifestAtomic
 	// Standalone only: the enrollment group cache and the unprotected-agents
 	// record beside the manifest.
-	enterpriseWindowsEnumerateGroupCacheLoader  = enterprisehooks.LoadWindowsEnrollmentGroupCache
-	enterpriseWindowsEnumerateGroupCacheWriter  = enterprisehooks.SaveWindowsEnrollmentGroupCache
-	enterpriseWindowsIdentitySpoolWriter        = enterprisehooks.WriteWindowsIdentitySpool
-	enterpriseWindowsEnumerateUnprotectedWriter = enterprisehooks.WriteWindowsUnprotectedAgents
+	enterpriseWindowsEnumerateGroupCacheLoader   = enterprisehooks.LoadWindowsEnrollmentGroupCache
+	enterpriseWindowsEnumerateGroupCacheWriter   = enterprisehooks.SaveWindowsEnrollmentGroupCache
+	enterpriseWindowsIdentitySpoolWriter         = enterprisehooks.WriteWindowsIdentitySpool
+	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
+	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
 )
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific

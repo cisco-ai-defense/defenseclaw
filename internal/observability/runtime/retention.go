@@ -65,10 +65,11 @@ type RetentionControllerReporter interface {
 // run waits until Ready is closed or receives a value. Scheduler and Clock have
 // production defaults and are injectable for deterministic tests.
 type RetentionControllerOptions struct {
-	Ready     <-chan struct{}
-	Scheduler audit.RetentionScheduler
-	Clock     func() time.Time
-	Reporter  RetentionControllerReporter
+	SecureClient bool
+	Ready        <-chan struct{}
+	Scheduler    audit.RetentionScheduler
+	Clock        func() time.Time
+	Reporter     RetentionControllerReporter
 }
 
 type retentionReaper interface {
@@ -81,11 +82,12 @@ type retentionReaper interface {
 // Runtime graph activation changes policy through ApplyPolicy; it never swaps
 // or closes the reaper or its stores.
 type RetentionController struct {
-	reaper    retentionReaper
-	ready     <-chan struct{}
-	scheduler audit.RetentionScheduler
-	clock     func() time.Time
-	reporter  RetentionControllerReporter
+	reaper       retentionReaper
+	ready        <-chan struct{}
+	scheduler    audit.RetentionScheduler
+	clock        func() time.Time
+	reporter     RetentionControllerReporter
+	secureClient bool
 
 	lifecycleMu   sync.Mutex
 	started       bool
@@ -135,7 +137,7 @@ func newRetentionController(
 	}
 	controller := &RetentionController{
 		reaper: reaper, ready: options.Ready, scheduler: scheduler,
-		clock: clock, reporter: options.Reporter,
+		clock: clock, reporter: options.Reporter, secureClient: options.SecureClient,
 		done: make(chan struct{}), policyWake: make(chan struct{}, 1),
 		stopRequested: make(chan struct{}),
 	}
@@ -359,7 +361,7 @@ func (controller *RetentionController) run(ctx context.Context) {
 		switch {
 		case controller.reaper.RetentionDays() == 0:
 			interval = 0
-		case controller.backlog.Load():
+		case controller.backlog.Load() && !controller.secureClient:
 			// The last run stopped at a time budget with work left: rows to
 			// delete or free pages to return (GAP-0287).
 			interval = audit.RetentionFollowUpInterval

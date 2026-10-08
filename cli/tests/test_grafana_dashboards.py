@@ -3419,6 +3419,14 @@ def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
     ):
         assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")
 
+def test_verified_principal_share_is_zero_for_claimed_only_activity() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    expression = _panel(dashboard, "Verified principal share")["targets"][0]["expr"]
+    numerator, denominator = expression.split(" / ", 1)
+    assert "or vector(0)" in numerator
+    assert "claimed" in denominator
+
+
 def test_identity_assurance_pie_assigns_each_host_user_once() -> None:
     dashboard = _dashboard("defenseclaw-identity.json")
     panel = _panel(dashboard, "Verified vs claimed identity")

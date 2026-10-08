@@ -91,8 +91,11 @@ const (
 // PlaneHealth is one plane's current state.
 //
 // The local sensor snapshot includes every plane on every tick, including
-// stopped and unselected planes. Optional telemetry exports running planes.
+// stopped and unselected planes. Optional telemetry exports selected planes.
 type PlaneHealth struct {
+	// Selected is the configured plane choice; it is internal bookkeeping,
+	// not part of the public snapshot shape.
+	Selected  bool `json:"-"`
 	Plane     platform.Plane
 	Available bool
 	// Running distinguishes "this platform can do it" from "it is doing it

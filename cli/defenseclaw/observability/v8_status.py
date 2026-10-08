@@ -161,6 +161,9 @@ class V8DestinationHealth:
 
     @property
     def queue_label(self) -> str:
+        return self.queue_label_for(secure_client=False)
+
+    def queue_label_for(self, *, secure_client: bool) -> str:
         parts: list[str] = []
         if self.queue_items is not None:
             value = str(self.queue_items)
@@ -176,7 +179,7 @@ class V8DestinationHealth:
             parts.append(value)
         if self.dropped is not None:
             parts.append(f"{self.dropped} dropped")
-        if self.rejected is not None:
+        if not secure_client and self.rejected is not None:
             parts.append(f"{self.rejected} rejected")
         return ", ".join(parts) or "unavailable"
 
