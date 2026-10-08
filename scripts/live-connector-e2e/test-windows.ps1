@@ -2755,7 +2755,7 @@ threading.Event().wait()
         'native self-test rebinds child-only authority below the Profile Known Folder without weakening the shared guard'
     Assert-True ($nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$DiagnosticsLeaf' -and
         $nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$ArtifactLeaf' -and
-        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 4) `
+        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 3) `
         'shared initializer keeps diagnostics and artifacts under RUNNER_TEMP'
     Assert-True ($nativeHarnessText -match '\$approvedStateBase' -and
         $nativeHarnessText -match 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
