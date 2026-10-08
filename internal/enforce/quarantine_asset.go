@@ -187,6 +187,7 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	if !pathWithin(stage, plan.QuarantineRoot, false) {
 		return fmt.Errorf("enforce: quarantine stage escaped storage")
 	}
+	removeStaleQuarantineStages(plan, stage)
 	if exists, err := assetPathExists(stage); err != nil {
 		return err
 	} else if exists {
@@ -220,6 +221,26 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 		return fmt.Errorf("enforce: remove quarantined source: %w", err)
 	}
 	return nil
+}
+
+// removeStaleQuarantineStages removes the stages an earlier attempt at this
+// destination left: their journal id is another one, and this record owns
+// the destination now. A copy that failed for lack of space left its stage
+// beside the destination when its own clean-up failed too (GAP-0826).
+func removeStaleQuarantineStages(plan AssetQuarantinePlan, stage string) {
+	parent := filepath.Dir(plan.QuarantinePath)
+	prefix := filepath.Base(plan.QuarantinePath) + ".pending-"
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(parent, entry.Name())
+		if !strings.HasPrefix(entry.Name(), prefix) || path == stage || !safePathSegment(entry.Name()) {
+			continue
+		}
+		_ = removeAssetPathIfExists(path, plan.QuarantineRoot)
+	}
 }
 
 // ExecuteAssetRestore copies and verifies quarantine content into a staging

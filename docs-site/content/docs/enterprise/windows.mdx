@@ -662,6 +662,22 @@ per-user install:
   (`deferred: ... removes the folder when that user next signs in`, then
   `removed now that the user is signed in`). Two users with a skill or plugin
   of the same name each get their own quarantine copy.
+- A scan that fails (the scanner exits, or the gateway service cannot read
+  the folder) blocks the asset and disables it at runtime, as a rejected
+  verdict does: a blocked MCP server's tool calls are refused and a blocked
+  skill does not load. A folder moved into a watched folder (`Move-Item` from
+  elsewhere in the profile) keeps the access list of where it came from,
+  which has no entry for the gateway service. The gateway asks the hook
+  guardian for read access, which adds, as the user, the entry the agent
+  folders carry, and scans the folder again.
+- A quarantine that cannot finish, for example because the disk is full,
+  leaves the asset blocked and disabled in place. The copy is staged as
+  `<name>.pending-<id>` beside its quarantine slot, and the stage is removed
+  when the copy fails. The gateway admits such an asset, and one it could not
+  scan, again after 2 minutes, then 4, and so on up to every 30 minutes, until
+  admission finishes. While the folder is still there, `enterprise windows
+  status` and `verify` warn with `asset_not_scanned` or
+  `asset_not_quarantined`, naming the account and the path.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
   user adds goes through admission within about 30 seconds, also while a
