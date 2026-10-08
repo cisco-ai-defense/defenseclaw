@@ -1193,6 +1193,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	case "allowed":
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=%s", targetType, w.allowedAuditReason(out.Reason)))
+		w.releaseAllowListed(evt, out.Reason)
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 		return res
@@ -1808,6 +1809,56 @@ func (w *InstallWatcher) forgetMovedAsset(evt InstallEvent) {
 	if err := w.store.DeleteTargetSnapshot(string(evt.Type), evt.Path); err != nil {
 		fmt.Fprintf(os.Stderr, "[watch] forget baseline of %s: %v\n", evt.Path, err)
 	}
+}
+
+// releaseAllowListed clears the runtime disable and the install block that
+// an earlier verdict left in the journal for a skill or plugin that an allow
+// rule now admits. An administrator who reviewed a blocked skill and added an
+// asset_policy allow rule for it saw the copy admitted while the agent still
+// refused it as runtime-disabled, and a managed computer has no enable
+// command (GAP-0628). Quarantined copies are kept; the Secure Client profile
+// keeps the earlier behaviour.
+func (w *InstallWatcher) releaseAllowListed(evt InstallEvent, reason string) {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) ||
+		w.allowedAuditReason(reason) != "allow-listed" {
+		return
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
+	if err != nil || entry == nil {
+		return
+	}
+	var cleared []string
+	for field, value := range map[string]string{"runtime": entry.Actions.Runtime, "install": entry.Actions.Install} {
+		if value == "" {
+			continue
+		}
+		if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
+			cleared = append(cleared, field+"="+value)
+		}
+	}
+	if len(cleared) > 0 {
+		sort.Strings(cleared)
+		_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+			fmt.Sprintf("type=%s released by an allow rule: cleared %s connector=%s", evt.Type, strings.Join(cleared, " "), scope))
+	}
+}
+
+// allowRuleReleases reports a skill or plugin whose journal still blocks or
+// disables it while an allow rule now admits it, so the rescan admits it
+// again and releases it without a new copy (GAP-0628).
+func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent) bool {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return false
+	}
+	connector := w.eventConnector(evt)
+	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, w.journalScope(connector))
+	if err != nil || entry == nil || (entry.Actions.Runtime == "" && entry.Actions.Install == "") {
+		return false
+	}
+	cfg := w.liveConfig()
+	out := w.evaluateAdmission(ctx, w.admissionInputFor(cfg, evt, string(evt.Type), connector))
+	return out != nil && out.Verdict == "allowed" && w.allowedAuditReason(out.Reason) == "allow-listed"
 }
 
 // quarantinedCopyIsBack reports a skill or plugin at a path that holds an

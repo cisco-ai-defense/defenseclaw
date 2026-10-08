@@ -615,6 +615,38 @@ per-user install:
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
 
+### Release a blocked or quarantined skill
+
+Standard users cannot release an asset on a managed computer, and `skill
+enable` and `skill restore` are not available there. After you review a skill
+or plugin, add an allow rule for it to `asset_policy` in the admin config,
+pinned to the folder of one user or, without `source_path_contains`, for
+every user:
+
+```yaml title="Admin config"
+asset_policy:
+  skill:
+    allowed:
+      - name: epa-high
+        reason: reviewed by security
+        source_path_contains: ["C:\\Users\\dcw-epw1\\.claude\\skills\\epa-high"]
+```
+
+- A blocked skill whose folder is still in place is released at the next
+  periodic rescan (`watch.rescan_interval_min`, 60 minutes by default), or at
+  once when the user copies it in again: admission allows it
+  (`install-allowed reason=allow-listed`) and clears the install block and
+  runtime disable that the earlier verdict recorded, with an `enable` audit
+  row that says `released by an allow rule`. The agent can then use it.
+- A quarantined skill keeps its copy in
+  `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine\skills\<connector>\<name>`
+  (or `...\quarantine\per-source\skills\<connector>\<id>\<name>` when two
+  users had a skill of that name). To give it back, add the allow rule, then
+  copy the folder from there into the skills folder of the user from an
+  elevated prompt; it is admitted as allow-listed. To purge copies you no
+  longer need, delete their folders under `runtime\quarantine` from an
+  elevated prompt.
+
 Standard users have no `skill`, `mcp` or `plugin` commands on a managed
 computer. An administrator scans a folder or a remote MCP server with the
 same scanners, policy and judge from an elevated prompt:

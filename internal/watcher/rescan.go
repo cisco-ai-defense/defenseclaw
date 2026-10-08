@@ -751,6 +751,11 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
+	if !scan && w.allowRuleReleases(ctx, evt) {
+		fmt.Fprintf(os.Stderr, "[rescan] %s %s is allowed by a rule and still blocked; running install admission\n", evt.Type, evt.Name)
+		w.notifyAdmission(w.runAdmission(ctx, evt))
+		return rescanScanned
+	}
 	if !scan && w.quarantinedCopyIsBack(ctx, evt) {
 		// A baseline written before the original was removed (GAP-0551).
 		fmt.Fprintf(os.Stderr, "[rescan] %s %s was quarantined and is back; running install admission\n", evt.Type, evt.Name)

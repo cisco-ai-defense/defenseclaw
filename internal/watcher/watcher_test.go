@@ -1497,3 +1497,38 @@ func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
 		t.Fatalf("the copy put back was not quarantined (lstat err %v)", err)
 	}
 }
+
+// GAP-0628: an administrator who reviewed a blocked skill and added an
+// asset_policy allow rule for it saw it admitted while the agent still
+// refused it as runtime-disabled. An allow rule releases the journal block
+// and runtime disable, at the next admission or rescan, without a new copy.
+func TestAllowRuleReleasesABlockedSkill(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Watch.RescanEnabled = true
+	cfg.Watch.RescanContentGated = true
+	path := filepath.Join(skillDir, "epa-high")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# epa-high\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	w.runRescanCycle(context.Background()) // baseline: unchanged from now on
+	for field, value := range map[string]string{"runtime": "disable", "install": "block"} {
+		if err := store.SetActionFieldForConnector("skill", "epa-high", "claudecode", field, value, "auto-block: watch detected HIGH findings"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "epa-high"}}
+	w.runRescanCycle(context.Background())
+	entry, err := store.GetActionForConnector("skill", "epa-high", "claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry != nil && (entry.Actions.Runtime != "" || entry.Actions.Install != "") {
+		t.Fatalf("journal %+v, want the allow rule to clear the runtime disable and install block", entry.Actions)
+	}
+}
