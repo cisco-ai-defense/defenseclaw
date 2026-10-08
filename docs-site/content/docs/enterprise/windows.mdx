@@ -191,7 +191,8 @@ locked staging folder below; give it its own folder:
 ```powershell
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
-icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
+icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C | Out-Null
 Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
 ```
@@ -209,15 +210,31 @@ before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
 
 Setup accepts the config only from an absolute local path that standard
-users cannot change. Stage it in a folder that only SYSTEM and
-Administrators can write:
+users cannot change. Stage it in a folder that Administrators own and that
+only SYSTEM and Administrators can write:
 
 ```powershell
 $Stage = 'C:\ProgramData\DefenseClaw-Staging'
 New-Item -ItemType Directory -Path $Stage -Force | Out-Null
-icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+icacls $Stage /setowner '*S-1-5-32-544' /T /C | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C | Out-Null
+if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
+    throw "$Stage is not owned by Administrators"
+}
+Get-ChildItem -LiteralPath $Stage -Force   # lists only files you put there
 Copy-Item .\config.yaml "$Stage\config.yaml"
 ```
+
+Take ownership as the snippets do. Any user can create a folder in
+`C:\ProgramData`, so a standard user can create `DefenseClaw-Staging` (or
+`DefenseClaw-RulePacks`) before you do and own it, and the owner of a folder
+can always change its permissions again: `icacls /grant:r` replaces the
+permissions but not the owner. If the folder holds files you did not put
+there, delete it and start again. Setup refuses a config whose file or
+folder a standard user owns or can write, with exit code `1639`, naming
+the account and the `icacls` command that fixes it; nothing checks the
+folder before LocalSystem runs a Setup file from it (see
+[Run Setup as LocalSystem](#run-setup-as-localsystem)).
 
 ### 3. Run Setup
 
@@ -804,6 +821,9 @@ that path as SYSTEM. From an elevated PowerShell session, with `$Stage` as
 in [Write the config](#2-write-the-config):
 
 ```powershell title="Elevated PowerShell"
+if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
+    throw "$Stage is not owned by Administrators; create it as in Write the config"
+}
 Copy-Item .\DefenseClawSetup-Enterprise-Standalone-x64.exe $Stage
 $Setup  = "$Stage\DefenseClawSetup-Enterprise-Standalone-x64.exe"
 $Result = "$Stage\setup-as-system.json"
