@@ -264,6 +264,15 @@ func buildThresholdTable(cfg *config.Config, profiles *guardrailProfileSet) thre
 }
 
 func thresholdConnectorNames(cfg *config.Config) []string {
+	return thresholdConnectorNamesWith(cfg, profileConnectorNames(cfg))
+}
+
+// thresholdConnectorNamesWith is thresholdConnectorNames with the profile
+// connector names (profileConnectorNames) listed by the caller: every profile
+// derived from one configuration shares its guardrail.profiles, and listing
+// them again for each of 1,000 profiles made the generation build quadratic
+// (GAP-0276).
+func thresholdConnectorNamesWith(cfg *config.Config, profileNames []string) []string {
 	seen := map[string]struct{}{}
 	add := func(name string) {
 		if name = config.NormalizeConnectorName(name); name != "" {
@@ -276,7 +285,7 @@ func thresholdConnectorNames(cfg *config.Config) []string {
 	for name := range cfg.Guardrail.Connectors {
 		add(name)
 	}
-	for _, name := range profileConnectorNames(cfg) {
+	for _, name := range profileNames {
 		add(name)
 	}
 	for name := range cfg.ApplicationProtection.Connectors {
