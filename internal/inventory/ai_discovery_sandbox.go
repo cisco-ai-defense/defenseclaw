@@ -334,6 +334,16 @@ func ScanSandboxRoot(ctx context.Context, scan SandboxScan, opts SandboxScanOpti
 		stats.Errors++
 		stats.DetectorErrors["sandbox_scan"] = "signal limit reached"
 	}
+	for detector, note := range sandboxCapNotes(out) {
+		stats.Errors++
+		if prev := stats.DetectorErrors[detector]; prev != "" {
+			note = prev + "; " + note
+		}
+		if len(note) > maxSandboxCollectDetail {
+			note = strings.ToValidUTF8(note[:maxSandboxCollectDetail-3], "") + "..."
+		}
+		stats.DetectorErrors[detector] = note
+	}
 	if len(scan.Problems) > 0 {
 		stats.Errors++
 		// Within what a report may carry (ValidateUserScanReport).
@@ -366,6 +376,31 @@ func ScanSandboxRoot(ctx context.Context, scan SandboxScan, opts SandboxScanOpti
 		summary.Result = "partial"
 	}
 	return AIDiscoveryReport{Summary: summary, Signals: out}, nil
+}
+
+// sandboxCapNotes describes, per detector, each signal cut at its evidence
+// cap: it names only its first entries, so the scan is partial and says whose
+// names stop there (GAP-0293: sandbox discover's 255 skill names, of 604,
+// read as the count).
+func sandboxCapNotes(signals []AISignal) map[string]string {
+	notes := map[string]string{}
+	for _, sig := range signals {
+		if !sig.Partial || sig.CoverageReason != CoverageReasonCapExceeded {
+			continue
+		}
+		named := 0
+		for _, ev := range sig.Evidence {
+			if ev.Type == "mcp_server" || strings.HasSuffix(ev.Type, "_entry") {
+				named++
+			}
+		}
+		note := fmt.Sprintf("%s lists only its first %d names; there are more", sig.Product, named)
+		if prev := notes[sig.Detector]; prev != "" {
+			note = prev + "; " + note
+		}
+		notes[sig.Detector] = note
+	}
+	return notes
 }
 
 // newSandboxScanService is the scanner of one sandbox tree (scan.Root; empty

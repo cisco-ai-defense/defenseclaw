@@ -86,8 +86,8 @@ lists every step in full, including your organization's settings.
 
 ## Network profiles
 
-Every sandbox runs one policy pack. The built-in packs set the network
-profile and more:
+Every sandbox runs one policy pack. The three built-in packs are named after
+the network profile they set, and they set more:
 
 | Setting | Open (default) | Balanced | Strict |
 | --- | --- | --- | --- |
@@ -98,16 +98,22 @@ profile and more:
 | Your project | Mounted live | Mounted live | Copied |
 | Skip-permissions mode | On | On | Off: the harness keeps its prompts |
 
-Pick one for a run:
+Pick a whole pack for a run with `--pack`, or only its network profile with
+`--profile`:
 
 ```bash
-defenseclaw sandbox run claude --profile balanced
+defenseclaw sandbox run claude --pack balanced
 defenseclaw sandbox run claude --profile strict
 ```
 
-Or set it for every run with `openshell.profile` in
-`~/.defenseclaw/config.yaml`. On a Mac every run works on a copy, whichever
-pack it uses.
+`--pack` applies every row of the table. `--profile` changes only the first
+three rows (web access, the banner and connection requests) and keeps the
+rest of the pack the run uses: `--profile balanced` on the default open pack
+keeps its 25 MiB large-upload alert, the live project, skip-permissions mode
+and the open pack's hook-silence alert. The Policy row of `sandbox status NAME`
+shows both, for example `profile balanced, pack open`. Set them for every run with
+`openshell.pack` and `openshell.profile` in `~/.defenseclaw/config.yaml`. On a
+Mac every run works on a copy, whichever pack it uses.
 
 Claude Code's WebFetch asks `api.anthropic.com` whether each URL is safe
 before it fetches it. `balanced` and `strict` refuse that host, so WebFetch
@@ -284,7 +290,9 @@ ordinary site. Shadow AI is code in the sandbox calling a model the harness
 does not use, with keys of its own. Each shadow AI provider raises a
 `shadow_ai` finding and a ⚠ in the feed once a session: LOW the first time
 the policy refuses it, MEDIUM the first time the sandbox reaches it (a
-refusal and then a contact raise one of each).
+refusal and then a contact raise one of each). A vendor's own website (its
+docs, help and status pages, such as `developers.openai.com`) is an ordinary
+site: only its API hosts count as AI.
 
 ```text
 ⚠ shadow AI: reached api.openai.com (OpenAI)

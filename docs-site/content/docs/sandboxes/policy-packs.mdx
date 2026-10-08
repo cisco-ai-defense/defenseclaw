@@ -618,8 +618,9 @@ are not part of a pack.
 Each sandbox has its own large-upload threshold:
 `openshell.egress.large_upload_mb` when it is above 0, else the
 `egress.large_upload_mb` of the pack the sandbox resolved to, including a
-run's `--pack` or `--profile`. So `sandbox run --pack balanced` on an `open`
-configuration reports uploads over 10 MiB. (Under the `strict` profile
+run's `--pack` (`--profile` changes no pack setting). So `sandbox run --pack
+balanced` on an `open` configuration reports uploads over 10 MiB, and
+`sandbox run --profile balanced` keeps the open pack's 25 MiB. (Under the `strict` profile
 traffic doesn't pass the proxy, so there is nothing to report.) A change to
 either key reaches running sandboxes on the next config reload, with the
 rest of their egress policy. The report is an activity event and a finding;

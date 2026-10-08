@@ -143,6 +143,22 @@ func TestInferenceShapedRecognisesUncatalogedEndpoints(t *testing.T) {
 	}
 }
 
+func TestVendorWebsiteIsNoUnknownAIEndpoint(t *testing.T) {
+	t.Parallel()
+	// GAP-0214: a vendor's docs and help sites are no AI endpoint for its
+	// name alone; a host of anyone else with the name, or another sign, is.
+	for _, hostname := range []string{"developers.openai.com", "help.openai.com", "openai.com", "docs.anthropic.com"} {
+		if InferenceShaped(hostname) {
+			t.Errorf("InferenceShaped(%q) = true, want false", hostname)
+		}
+	}
+	for _, hostname := range []string{"x.openai.azure.com", "openai.com.example.net", "inference.openai.com", "chat.openai.com"} {
+		if !InferenceShaped(hostname) {
+			t.Errorf("InferenceShaped(%q) = false, want true", hostname)
+		}
+	}
+}
+
 func TestNormalizeDomainHandlesCatalogWriteStyles(t *testing.T) {
 	t.Parallel()
 	catalog := FromSignatures([]inventory.AISignature{{

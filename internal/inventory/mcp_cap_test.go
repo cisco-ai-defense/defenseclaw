@@ -192,6 +192,29 @@ func TestSignalFromMCPConfigPathReadsHermesTopLevelMCPServers(t *testing.T) {
 	}
 }
 
+// GAP-0269: a ~/.claude.json that declares no MCP server (Claude Code writes
+// one either way) is no mcp_server signal; one that declares a server is.
+func TestDetectMCPPathsSkipsAConfigWithoutServers(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".claude.json")
+	sig := AISignature{ID: "claudecode", Name: "Claude Code", Vendor: "Anthropic", MCPPaths: []string{"~/.claude.json"}}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(tmp, "data"), HomeDir: tmp,
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
+	for body, want := range map[string]int{
+		`{"numStartups": 3, "projects": {"/work": {"mcpServers": {}}}}`: 0,
+		`{"mcpServers": {"dccert-mcp": {"command": "node"}}}`:           1,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := svc.detectMCPPaths(); len(got) != want {
+			t.Fatalf("%s: %d mcp_server signals, want %d", body, len(got), want)
+		}
+	}
+}
+
 // GAP-2337: Antigravity leaves a 0-byte mcp_config.json. An empty or
 // whitespace-only config declares no server: it is complete, not a
 // parse error, so the admin view does not list it as an MCP server.

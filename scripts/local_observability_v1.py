@@ -177,6 +177,11 @@ LOKI_BUILTIN_FIELDS = {
     # The local Collector adds the sandbox name of every record that names
     # one as structured metadata (processors.transform/sandbox-identity).
     "defenseclaw_sandbox_name",
+    # OTLP resource attributes: Loki indexes deployment.environment as a stream
+    # label and keeps host.name as structured metadata (the Sandboxes board's
+    # Environment and Host boxes).
+    "deployment_environment",
+    "host_name",
     "level",
     "severity_text",
     "service_name",
