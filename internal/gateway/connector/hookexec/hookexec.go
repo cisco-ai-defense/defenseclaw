@@ -238,6 +238,8 @@ type Options struct {
 	// deletion of Home or creation of Home\.disabled is tampering, not an
 	// operator-requested no-op, and must therefore fail closed.
 	ManagedEnterprise bool
+	// SecureClient pins the pre-1.0 hook response behavior for that profile.
+	SecureClient bool
 	// AgentHost is the name of the process that started the agent; it is
 	// sent (AgentHostHeader) only with ManagedEnterprise.
 	AgentHost string
@@ -645,7 +647,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// been evaluated, so it is sent again a few times within the hook's own
 	// deadline instead of failing the tool call for a burst the gateway
 	// clears in seconds (GAP-0205).
-	for retry := 0; err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
+	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
 		_ = resp.Body.Close()
 		timer := time.NewTimer(delay)
