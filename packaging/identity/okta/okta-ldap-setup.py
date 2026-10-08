@@ -273,6 +273,9 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
                 report.problem(f"{kind} attribute {name} is missing", "Run: okta-ldap-setup.py posix-schema")
             elif have[name].get("type") != definition["type"]:
                 report.problem(f"{kind} attribute {name} has type {have[name].get('type')}, not {definition['type']}")
+            elif not self_read_only(have[name]):
+                report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
+                               "Change the attribute permission in Okta Profile Editor.")
             else:
                 report.ok(f"{kind} attribute {name}")
 
@@ -432,6 +435,13 @@ def check_group(client: Okta, report: Report, name: str, gid: int | None) -> Non
         report.ok(f"{len(members)} member(s), all with a uidNumber")
 
 
+def self_read_only(attribute: dict[str, Any]) -> bool:
+    permissions = attribute.get("permissions")
+    return (isinstance(permissions, list)
+            and [entry.get("action") for entry in permissions
+                 if isinstance(entry, dict) and entry.get("principal") == "SELF"] == ["READ_ONLY"])
+
+
 def ensure_attributes(client: Okta, report: Report, kind: str, wanted: dict[str, dict[str, Any]]) -> None:
     have = schema_properties(client, kind)
     missing = {name: definition for name, definition in wanted.items() if name not in have}
@@ -439,6 +449,9 @@ def ensure_attributes(client: Okta, report: Report, kind: str, wanted: dict[str,
         if name in have and have[name].get("type") != definition["type"]:
             found = have[name].get("type")
             report.problem(f"{kind} attribute {name} exists with type {found}, not {definition['type']}")
+        elif name in have and not self_read_only(have[name]):
+            report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
+                           "Change the attribute permission in Okta Profile Editor.")
         elif name in have:
             report.ok(f"{kind} attribute {name} exists")
     if not missing:
