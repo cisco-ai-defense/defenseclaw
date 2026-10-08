@@ -22,6 +22,7 @@ export function FirewallSection({
 
   return (
     <div className="space-y-3">
+      <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">Firewall choices are planning notes only. Policy activation does not configure the host firewall or restrict egress.</p>
       <div className="flex flex-col gap-1">
         <span className="text-xs font-medium text-fd-muted-foreground">Default action</span>
         <SegmentedControl

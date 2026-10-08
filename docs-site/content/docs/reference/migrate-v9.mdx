@@ -662,28 +662,27 @@ upgrade started: the version 8 `config.yaml`, `data.json` and `audit.db`
 including the operator block and allow rows. Anything you changed since the
 upgrade stays in `~/.defenseclaw/previous` and returns if you roll forward.
 
-If you reinstall 0.8.x yourself instead, it refuses the migrated file. The
-0.8.x CLI prints:
-
-```text
-Configuration schema v8 is required — run 'defenseclaw upgrade' first.
-```
-
-and the 0.8.x gateway will not load it (`[config_version_unsupported]
-$.config_version: this configuration version is newer than the supported v8
-contract`). Both messages point at `defenseclaw upgrade`, which would take you
-forward again. To stay on 0.8.x, go back by hand:
+If you reinstall 0.8.x yourself instead, restore the configuration that
+belonged to that release **before** starting its gateway. A migrated v9
+`config.yaml` is too new for every 0.8.x release. Releases 0.8.4 and older
+used config version 7; 0.8.5 through 0.8.10 used version 8.
 
 1. Stop the gateway: `defenseclaw-gateway stop`.
-2. Copy `config.yaml.v8.bak` over `config.yaml`.
-3. Rename `policies/rego/data.json.migrated-v9` to `data.json`.
-4. Add back any block and allow entries that were moved out of `audit.db`.
-   `migration-v9.json` lists them as `audit.db` entries under `moved`; this
-   step is why `defenseclaw rollback` is the better way back.
-5. Start the 0.8.x gateway.
+2. Restore `config.yaml` from your **pre-upgrade backup of the original
+   0.8.x install**. For 0.8.4 or older, this must be the original version 7
+   file. `config.yaml.v8.bak` is the intermediate version 8 file produced by
+   the first migration step and cannot substitute for that version 7 file.
+   For 0.8.5 through 0.8.10, `config.yaml.v8.bak` is the version 8
+   pre-migration copy, if no later upgrade replaced it.
+3. Restore the matching pre-upgrade `data.json` and `audit.db` from the
+   same backup. If you have verified that only v9 moved them,
+   `policies/rego/data.json.migrated-v9` contains the retired policy data;
+   `migration-v9.json` lists block and allow rows moved from `audit.db`.
+4. Start the 0.8.x gateway and verify the restored settings.
 
-After step 2 the file says `config_version: 8` again, the only version 0.8.x
-reads.
+If you do not have a matching pre-upgrade backup, use `defenseclaw rollback`
+from the 1.x install instead. It restores the previous binary, config and
+data together.
 
 For a managed host, the older release must be given the version 8 admin config
 explicitly; see [Lifecycle](/docs/enterprise/lifecycle).

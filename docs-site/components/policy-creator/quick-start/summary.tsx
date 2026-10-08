@@ -109,7 +109,7 @@ export function PolicySummaryCard({
         />
         <Row label="Suppressions" value={String(suppressionTotal)} />
         <Row
-          label="Firewall"
+          label="Firewall (not applied)"
           value={`${policy.firewall.default_action} default · ${blockedDestinations} blocked · ${allowedDomains} allowed`}
         />
         <Row label="First-party allow-list" value={String(firstParty)} />

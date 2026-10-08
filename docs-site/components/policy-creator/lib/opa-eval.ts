@@ -124,12 +124,12 @@ export async function evalDomain(
   };
 }
 
-function pickVerdictEntrypoint(domain: string): string {
+export function pickVerdictEntrypoint(domain: string): string {
   switch (domain) {
     case 'admission':
       return 'defenseclaw/admission/verdict';
     case 'guardrail':
-      return 'defenseclaw/guardrail/severity';
+      return 'defenseclaw/guardrail/action';
     default:
       return `defenseclaw/${domain}/verdict`;
   }
