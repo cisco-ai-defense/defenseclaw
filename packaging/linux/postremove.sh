@@ -11,6 +11,18 @@
 # removal to remove those too.
 
 set -u
+# dpkg can invoke the new package's postrm after a failed unpack.
+case "${1:-}" in
+    failed-upgrade|abort-install)
+        if [ -e /run/defenseclaw-enterprise-apply-path.held ]; then
+            if systemctl start defenseclaw-enterprise-apply.path >/dev/null 2>&1; then
+                rm -f /run/defenseclaw-enterprise-apply-path.held
+                systemctl stop defenseclaw-enterprise-apply-recovery.timer >/dev/null 2>&1 || true
+            fi
+        fi
+        exit 0
+        ;;
+esac
 if [ "${1:-}" = purge ]; then
     rm -rf /etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian \
         /var/lib/defenseclaw-enterprise /var/log/defenseclaw

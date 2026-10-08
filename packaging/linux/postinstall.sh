@@ -17,6 +17,15 @@ set -u
 # only stall apt.
 case "${1:-}" in
     abort-remove) exit 0 ;;
+    abort-upgrade|abort-install|abort-deconfigure)
+        if [ -e /run/defenseclaw-enterprise-apply-path.held ]; then
+            if systemctl start defenseclaw-enterprise-apply.path >/dev/null 2>&1; then
+                rm -f /run/defenseclaw-enterprise-apply-path.held
+                systemctl stop defenseclaw-enterprise-apply-recovery.timer >/dev/null 2>&1 || true
+            fi
+        fi
+        exit 0
+        ;;
 esac
 
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
@@ -42,7 +51,6 @@ if systemctl is-active --quiet "$apply_path" >/dev/null 2>&1; then
 fi
 if [ -e "$held" ]; then
     apply_path_was_active=1
-    rm -f "$held"
 fi
 
 systemd-sysusers /usr/lib/sysusers.d/defenseclaw.conf >/dev/null 2>&1 || true
@@ -58,7 +66,10 @@ mkdir -p "$state" && chmod 0700 "$state"
     >"$state/last-package-result.json" 2>"$state/last-package-result.log"
 status=$?
 if [ "$apply_path_was_active" = 1 ]; then
-    systemctl start "$apply_path" >/dev/null 2>&1 || true
+    if systemctl start "$apply_path" >/dev/null 2>&1; then
+        rm -f "$held"
+        systemctl stop defenseclaw-enterprise-apply-recovery.timer >/dev/null 2>&1 || true
+    fi
 fi
 
 # ensure --json writes indented JSON, so join the lines first and allow
