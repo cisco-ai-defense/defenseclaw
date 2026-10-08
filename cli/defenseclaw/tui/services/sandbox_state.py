@@ -173,6 +173,7 @@ REASON_LABELS: dict[str, str] = {
     "harness_background_fetch": "a background fetch of the harness, which it does without",
     "rule_limit": "the sandbox added its limit of rules this session",
     "too_many_pending": "too many approvals are waiting",
+    "model_host_side": "a connection outside the model channel, which stays open; no OpenShell rule allows it",
     "host_local": "this machine",
 }
 

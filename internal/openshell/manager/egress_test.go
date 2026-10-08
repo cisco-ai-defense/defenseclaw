@@ -1236,6 +1236,27 @@ func TestModelProviderEndpointsFollowTheAdminLists(t *testing.T) {
 	wantCode(t, err, sandboxapi.CodeAdminViolation)
 }
 
+// GAP-0361: in a strict session one connection to the model host outside
+// its provider rule was refused, and the feed and the session summary read
+// "x bedrock-mantle... (no OpenShell rule allows this port)", as if strict
+// had cut the model off. The refusal says it was another connection.
+func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "mhbox", LLM: llm})
+	e.ocsf("mhbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> api.anthropic.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_mapping_denied]", time.Now())
+	feed := e.events("mhbox", sandboxapi.ActivityEgressBlocked, "")
+	const want = "✗ api.anthropic.com (a connection outside the model channel, which stays open; no OpenShell rule allows it)"
+	if len(feed) != 1 || feed[0].Message != want || feed[0].Reason != sandboxapi.ReasonModelHostSide {
+		t.Fatalf("feed = %+v, want %q", feed, want)
+	}
+	if n := egressRecords(e, "mhbox", func(r audit.SandboxEgressEvent) bool {
+		return r.Blocked && strings.HasPrefix(r.Reason, "a connection outside the model channel") && strings.HasSuffix(r.Reason, "(transparent_tcp_mapping_denied)")
+	}); n != 1 {
+		t.Fatalf("%d records say the model channel stays open, want 1", n)
+	}
+}
+
 // privatePack is a custom pack whose allow list opens a private address.
 const privatePack = `version: 1
 name: lanpack
