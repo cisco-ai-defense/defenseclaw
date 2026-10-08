@@ -218,6 +218,29 @@ func (r *agentIdentityRecorder) flush(ctx context.Context, store *inventory.Inve
 	return nil
 }
 
+// flushFinal opens its own handle so AI Discovery may close its inventory
+// store first during shutdown without losing the recorder's last batch.
+func (r *agentIdentityRecorder) flushFinal(ctx context.Context) error {
+	if r.pendingCount() == 0 {
+		return nil
+	}
+	r.storeMu.Lock()
+	dataDir := r.dataDir
+	r.storeMu.Unlock()
+	if dataDir != nil {
+		if dir := strings.TrimSpace(dataDir()); dir != "" {
+			store, err := inventory.NewInventoryStoreForProfile(filepath.Join(dir, "inventory.db"), ManagedEnterpriseActive())
+			if err != nil {
+				r.notePersist(err)
+				return err
+			}
+			defer store.Close()
+			return r.flush(ctx, store)
+		}
+	}
+	return r.flush(ctx, r.store())
+}
+
 // notePersist records whether the last write of the ledger succeeded.
 func (r *agentIdentityRecorder) notePersist(err error) {
 	r.persistMu.Lock()
@@ -332,7 +355,11 @@ func (r *agentIdentityRecorder) runFlusher(ctx context.Context, interval time.Du
 		select {
 		case <-ctx.Done():
 			final, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			flush(final)
+			if !ManagedEnterpriseActive() {
+				if err := r.flushFinal(final); err != nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] agent identity final flush failed: %v\n", err)
+				}
+			}
 			cancel()
 			return
 		case <-ticker.C:

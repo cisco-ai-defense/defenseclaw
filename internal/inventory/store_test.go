@@ -65,7 +65,7 @@ func TestInventoryStoreSecureClientKeepsSchema3(t *testing.T) {
 	if _, err := st.PruneAgentIdentities(ctx, now); err != nil {
 		t.Fatalf("prune agent identities: %v", err)
 	}
-	if _, err := st.PruneAgentIdentitySessions(ctx, now); err != nil {
+	if _, err := st.PruneAgentIdentitySessions(ctx); err != nil {
 		t.Fatalf("prune agent identity sessions: %v", err)
 	}
 	if v, _ := st.SchemaVersion(); v != secureClientInventorySchema {
