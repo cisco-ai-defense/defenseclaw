@@ -19,6 +19,23 @@ from tests.test_cmd_keys import _make_app_context
 
 
 class KeysRemoveTests(unittest.TestCase):
+    def test_remove_warns_when_destination_still_references_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            with open(os.path.join(tmp, "config.yaml"), "w", encoding="utf-8") as stream:
+                stream.write(
+                    "config_version: 9\nobservability:\n  destinations:\n"
+                    "    - name: audit-hec\n      kind: splunk_hec\n"
+                    "      token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN\n"
+                )
+            with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as stream:
+                stream.write("DEFENSECLAW_SPLUNK_HEC_TOKEN=test-value\n")
+            result = CliRunner().invoke(
+                keys_cmd, ["remove", "DEFENSECLAW_SPLUNK_HEC_TOKEN", "--yes"], obj=app
+            )
+            self.assertIn("still used by observability destination audit-hec", result.output)
+            self.assertIn("setup observability remove audit-hec --yes", result.output)
+
     def test_remove_drops_only_that_key_and_list_names_unregistered(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)

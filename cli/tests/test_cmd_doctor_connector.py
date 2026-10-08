@@ -3521,6 +3521,17 @@ class TestDetectionStrategyRow(unittest.TestCase):
         _check_connector_inventory(cfg, connector, r)
         return next(c for c in r.checks if c["label"] == "Detection")
 
+    def test_failing_runtime_judge_is_not_reported_active(self):
+        cfg = self._cfg(judge_enabled=True, hook_connectors=["codex"])
+        result = _DoctorResult()
+        _check_connector_inventory(
+            cfg, "codex", result,
+            live_health={"guardrail": {"details": {"judge_state": "failing", "judge_recent_calls": 7}}},
+        )
+        row = next(check for check in result.checks if check["label"] == "Detection")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("judge failing", row["detail"])
+
     def test_strategy_surfaced(self):
         row = self._detection_row(self._cfg(strategy="judge_first"), "codex")
         self.assertIn("strategy=judge_first", row["detail"])

@@ -90,6 +90,17 @@ def test_invalid_config_banner_names_file_line_and_repair() -> None:
     assert len(banner) <= 80
 
 
+def test_invalid_config_banner_uses_yaml_problem_line() -> None:
+    from pathlib import Path
+
+    from defenseclaw.tui.app import _config_error_summary
+
+    detail = 'while parsing a block mapping\n  in "config.yaml", line 1, column 1\nexpected a value\n  in "config.yaml", line 18, column 3'
+    assert _config_error_summary(Path("/home/user/.defenseclaw/config.yaml"), ValueError(detail)) == (
+        "config.yaml line 18 is invalid; run defenseclaw config validate"
+    )
+
+
 def test_overview_keyboard_actions_reach_gateway_and_ai_discovery(tmp_path, monkeypatch) -> None:
     import sys
     from pathlib import Path

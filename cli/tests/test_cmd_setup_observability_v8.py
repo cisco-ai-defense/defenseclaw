@@ -124,6 +124,18 @@ def _stub_canonical_v8_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_add_reserved_destination_name_is_plain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_canonical_v8_gateway(monkeypatch)
+    result = CliRunner().invoke(
+        observability,
+        ["add", "otlp", "--non-interactive", "--name", "local-sqlite", "--endpoint", "https://otel.example.test"],
+        obj=_setup_app(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "local-sqlite is a reserved destination name; pick another name" in result.output
+    assert "$." not in result.output
+
+
 def test_setup_v8_accepts_observability_token_from_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

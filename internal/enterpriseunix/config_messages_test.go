@@ -13,13 +13,56 @@
 package enterpriseunix
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
+
+func TestManagedConfigRefusalsHideDiagnosticCodes(t *testing.T) {
+	h := newTestHost(t, "linux")
+	for _, err := range []error{
+		&config.V8YAMLError{Code: config.V8YAMLErrorDuplicateKey, Path: "$.guardrail.mode", Line: 3, Summary: "duplicate mapping key"},
+		&config.V8YAMLError{Code: config.V8YAMLErrorInvalidUTF8, Path: "$", Summary: "invalid UTF-8"},
+		&config.V8SemanticError{Path: "$.guardrail", Summary: "unknown rule pack"},
+	} {
+		got, ok := h.env.plainConfigProblem(err, "/tmp/admin.yaml", nil)
+		if !ok || !strings.Contains(got, "/tmp/admin.yaml") || strings.Contains(got, "[$") ||
+			strings.Contains(got, "[yaml_") || strings.Contains(got, "[config_") || strings.Contains(got, " $.") {
+			t.Fatalf("managed refusal = %q (handled %t)", got, ok)
+		}
+	}
+}
+
+func TestManagedConfigPatternNamesAllowedFormat(t *testing.T) {
+	h := newTestHost(t, "linux")
+	for _, tc := range []struct{ path, expected string }{
+		{"$.guardrail.rule_pack", "lowercase letters, digits, - or _"},
+		{"$.guardrail.custom_packs.example.digest", "sha256: followed by 64 lowercase hexadecimal"},
+	} {
+		got, ok := h.env.plainConfigProblem(&config.V8SchemaError{Path: tc.path, Keyword: "pattern", Expected: "a value matching the schema-declared pattern"}, "/tmp/admin.yaml", nil)
+		if !ok || !strings.Contains(got, tc.expected) || strings.Contains(got, "schema-declared pattern") {
+			t.Fatalf("%s: %q", tc.path, got)
+		}
+	}
+}
+
+func TestManagedConfigModeAndProfileNameOnlyInstalledChoices(t *testing.T) {
+	h := newTestHost(t, "linux")
+	mode := &config.V8SchemaError{Path: "$.deployment_mode", Keyword: "enum", Expected: `one of ["","managed_enterprise","saas"]`, Value: "standalone"}
+	got, ok := h.env.plainConfigProblem(mode, "/tmp/admin.yaml", nil)
+	if !ok || !strings.Contains(got, "allowed values: managed_enterprise") || strings.Contains(got, "saas") {
+		t.Fatalf("deployment mode = %q", got)
+	}
+	got, ok = h.env.plainConfigProblem(errors.New(`config: enterprise.profile="secure_client" conflicts with immutable DEFENSECLAW_ENTERPRISE_PROFILE="standalone"`), "/tmp/admin.yaml", nil)
+	if !ok || !strings.Contains(got, "fixed to standalone") || strings.Contains(got, "DEFENSECLAW_ENTERPRISE_PROFILE") {
+		t.Fatalf("enterprise profile = %q", got)
+	}
+}
 
 // GAP-1948, GAP-1944: a bad enum value and an unstored credential are
 // reported in plain words, with the value, the line and the fix, and

@@ -360,6 +360,17 @@ Add `--severity` and `--findings` to simulate a scan result:
 defenseclaw-gateway policy evaluate --target-type skill --target-name new-skill --severity HIGH --findings 3
 ```
 
+On a managed Linux or macOS host, run the gateway command as an administrator;
+it reads the managed configuration. On a managed Windows standalone host, use
+an elevated PowerShell prompt and the installed CLI:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' policy evaluate --target-type skill --target-name risky-skill
+```
+
+The managed command reads the administrator's policy. A standard account
+cannot use its own `~/.defenseclaw/config.yaml` to check the managed verdict.
+
 ```text
 {
   "verdict": "rejected",

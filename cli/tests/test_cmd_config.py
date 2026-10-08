@@ -331,6 +331,35 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
         "inspect the canonical v8 schema or generated reference and correct this field"
     )
 
+    def test_retired_registry_auto_sync_is_named_by_config_set(self):
+        from defenseclaw.context import AppContext
+
+        result = CliRunner().invoke(
+            cmd_config.config_cmd,
+            ["set", "registries.sources[0].auto_sync", "true"],
+            obj=AppContext(),
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("auto_sync was retired in config_version 9", result.output)
+
+    def test_config_set_control_character_is_plain(self):
+        from defenseclaw.context import AppContext
+
+        result = CliRunner().invoke(
+            cmd_config.config_cmd, ["set", "guardrail.block_message", "a\x01b"], obj=AppContext()
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("guardrail.block_message contains a control character", result.output)
+        self.assertNotIn("unacceptable character", result.output)
+
+    def test_reference_block_message_names_its_bound(self):
+        schema = '{"$defs":{"guardrail":{"properties":{"block_message":{"$ref":"#/$defs/boundedString"}}}}}'
+        with patch.object(cmd_config, "config_v8_schema", return_value=schema):
+            result = CliRunner().invoke(cmd_config.config_cmd, ["reference", "--format", "json-schema"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        field = json.loads(result.output)["$defs"]["guardrail"]["properties"]["block_message"]
+        self.assertIn("4096", field["description"])
+
     def test_typo_reads_unknown_field_with_suggestion(self):
         raw = b"config_version: 8\nguardrail:\n  mdoe: observe\n"
         self.assertEqual(

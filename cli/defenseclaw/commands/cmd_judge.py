@@ -614,9 +614,13 @@ def judge_list(app: AppContext) -> None:
     not_running = _judge_not_running_reason(app) if judged_prereqs else ""
     if not_running:
         # Configured is not running: the gateway could not start it (GAP-0383).
+        condition = (
+            "the judge is failing" if not_running.startswith("all of its last")
+            else "the gateway is not running the judge"
+        )
         click.echo(
             "  "
-            + ux._style(f"the gateway is not running the judge: {not_running}; ", fg="yellow")
+            + ux._style(f"{condition}: {not_running}; ", fg="yellow")
             + ux._style("every connector below is checked by the rules only (defenseclaw doctor)", fg="yellow")
         )
         click.echo()
@@ -678,7 +682,10 @@ def judge_list(app: AppContext) -> None:
             if gated and nm in observe and nm in hook_enforced:
                 note += " (observe mode: verdicts only alert; setup removes it from the gate)"
         if not_running and state.startswith("judged"):
-            state += ", but the judge is not running"
+            state += (
+                ", but the judge is failing" if not_running.startswith("all of its last")
+                else ", but the judge is not running"
+            )
         click.echo(f"      - {nm}: {ux.accent(state)}{ux.dim(note)}")
     click.echo()
 
@@ -700,6 +707,10 @@ def _judge_not_running_reason(app) -> str:
         return ""
     guardrail = health.get("guardrail") if isinstance(health, dict) else None
     details = guardrail.get("details") if isinstance(guardrail, dict) else None
-    if not isinstance(details, dict) or details.get("judge_state") != "unavailable":
+    if not isinstance(details, dict):
         return ""
-    return str(details.get("judge_unavailable_reason") or "it could not start").strip()
+    if details.get("judge_state") == "unavailable":
+        return str(details.get("judge_unavailable_reason") or "it could not start").strip()
+    if details.get("judge_state") == "failing":
+        return f"all of its last {details.get('judge_recent_calls', 0)} calls failed"
+    return ""

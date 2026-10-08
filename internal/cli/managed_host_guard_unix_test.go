@@ -13,6 +13,8 @@
 package cli
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,6 +44,29 @@ func withUnixManagedHostDescriptor(t *testing.T) string {
 	})
 	t.Setenv(managed.DeploymentModeEnv, "")
 	return descriptor
+}
+
+func TestManagedConfigPermissionErrorNamesAdministrator(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	err := managedWindowsConfigLoadError(nil, fmt.Errorf("read config: %w", fs.ErrPermission))
+	if err == nil || !strings.Contains(err.Error(), "needs administrator access") || strings.Contains(err.Error(), "read v8 config") {
+		t.Fatalf("managed config permission error = %v", err)
+	}
+}
+
+func TestManagedStandardUserPolicyAndStatusRefuseBeforeUserConfig(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	withManagedHostCallerUID(t, 1000)
+	restore := managedHostServiceUID
+	t.Cleanup(func() { managedHostServiceUID = restore })
+	managedHostServiceUID = func(string) (int, bool) { return 991, true }
+	for _, command := range []*cobra.Command{statusCmd, policyShowCmd, policyReloadCmd} {
+		err := command.PersistentPreRunE(command, nil)
+		if err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+			strings.Contains(err.Error(), "move this account's gateway") {
+			t.Fatalf("%s read a per-user deployment: %v", command.Name(), err)
+		}
+	}
 }
 
 // unixPlatformForTest names this OS the way the `enterprise` group does.

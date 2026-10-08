@@ -702,7 +702,7 @@ def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> st
     )
 
 
-def plain_error(exc: BaseException) -> str:
+def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
     """A refused change in plain words: the key and what to do about it.
 
     The validators report a JSON path, a bracketed error code and pointers to
@@ -713,6 +713,17 @@ def plain_error(exc: BaseException) -> str:
     from defenseclaw.config_inspect import ConfigInspectError
     from defenseclaw.observability.v8_config import V8ConfigError
 
+    if isinstance(exc, OSError):
+        import errno
+
+        directory = directory or os.path.dirname(exc.filename or "") or "the configuration directory"
+        reason = {
+            errno.EACCES: "permission denied",
+            errno.EPERM: "permission denied",
+            errno.ENOSPC: "no space left on the device",
+            errno.EFBIG: "not enough space to save the configuration",
+        }.get(exc.errno, exc.strerror or "write failed")
+        return f"cannot write in {directory}: {reason}"
     cause = exc.__cause__ if isinstance(exc.__cause__, (ConfigInspectError, V8ConfigError)) else exc
     if isinstance(cause, ConfigInspectError) and cause.field_path and cause.reason:
         path, reason = cause.field_path, cause.reason
@@ -726,6 +737,8 @@ def plain_error(exc: BaseException) -> str:
     name = name[2:] if name.startswith("$.") else ("config.yaml" if name == "$" else name)
     match = _REASON_CODE.match(reason.strip())
     code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+    if (code == "maxLength" or "maxLength constraint" in text) and isinstance(value, str):
+        return f"{name} is longer than 4096 characters (it has {len(value)})"
     parts = [part.strip() for part in text.split("; ") if part.strip()]
     if code == "config_semantic_invalid" and parts:
         detail = _RULE_PACK_PREFIX.sub("", parts[0])

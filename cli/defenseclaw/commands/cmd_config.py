@@ -630,7 +630,9 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         detail = syntax or "invalid YAML; run defenseclaw config validate to see the line"
         raise click.ClickException(f"config.yaml was not changed: {detail}") from exc
     except (config_writer.ConfigWriteError, V8ConfigError, ValueError, OSError) as exc:
-        raise click.ClickException(f"config.yaml was not changed: {config_writer.plain_error(exc)}") from exc
+        value = changes[0].value if len(changes) == 1 else None
+        detail = config_writer.plain_error(exc, value=value, directory=os.path.dirname(path))
+        raise click.ClickException(f"config.yaml was not changed: {detail}") from exc
     if not result.changed:
         if verb != "unset":
             click.echo(f"{key} already has that value (generation {result.generation}).")
@@ -688,6 +690,8 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
     """
     from defenseclaw.config_writer import Change, parse_path
 
+    if any(ord(char) < 32 and char not in "\t\r\n" for char in value):
+        raise click.ClickException(f"config.yaml was not changed: {key} contains a control character")
     try:
         parts = list(parse_path(key))
         parsed = json.loads(value) if as_json else load_config_value(value)
@@ -695,6 +699,18 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.UsageError(str(exc)) from exc
     _refuse_config_version(parts)
     _refuse_retired_scanner_key(key, parts)
+    if (
+        len(parts) == 4
+        and parts[:2] == ["registries", "sources"]
+        and isinstance(parts[2], int)
+        and parts[3] == "auto_sync"
+    ):
+        from defenseclaw.config_writer import machine_managed_standalone
+
+        if not machine_managed_standalone():
+            raise click.ClickException(
+                f"{key} was retired in config_version 9; config.yaml was not changed."
+            )
     if value == "" and not as_json:
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
@@ -1083,6 +1099,21 @@ def config_reference(section: str, fmt: str, output: Path | None) -> None:
             rendered = config_v8_reference(fmt, section=section.lower())
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
+    if fmt.lower() == "json-schema":
+        schema = json.loads(rendered)
+
+        def describe_block_message(node: object) -> None:
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    if key == "block_message" and isinstance(child, dict):
+                        child.setdefault("description", "At most 4096 characters.")
+                    describe_block_message(child)
+            elif isinstance(node, list):
+                for child in node:
+                    describe_block_message(child)
+
+        describe_block_message(schema)
+        rendered = json.dumps(schema, indent=2)
     if fmt.lower() == "yaml":
         rendered = _strip_generator_header(rendered)
 
@@ -1388,6 +1419,10 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     where = f"line {line}: " if line else ""
     match = _V8_REASON.match(reason.strip())
     code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+    if code in ("pattern", "config_schema_invalid") and (
+        field.endswith(".block_at") or field.endswith(".alert_at")
+    ) and "pattern constraint" in text:
+        return f"{where}{field} must be one of CRITICAL, HIGH, MEDIUM, LOW"
 
     if code == "secret_reference_unresolved" and "protected credential" not in text:
         env = ""

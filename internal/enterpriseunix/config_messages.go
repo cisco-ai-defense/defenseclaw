@@ -41,6 +41,33 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	if where == "" {
 		where = e.Layout.ConfigPath
 	}
+	if strings.Contains(err.Error(), "enterprise.profile=") && strings.Contains(err.Error(), "conflicts with immutable") {
+		return fmt.Sprintf("%s: enterprise.profile is fixed to standalone on this host; change the profile by reinstalling the deployment", where), true
+	}
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) {
+		field := configField(yamlErr.Path)
+		message := yamlErr.Summary
+		switch yamlErr.Code {
+		case config.V8YAMLErrorDuplicateKey:
+			message = field + " appears twice; merge the definitions into one"
+		case config.V8YAMLErrorInvalidUTF8:
+			message = "the file is not valid UTF-8; save it as UTF-8"
+		case config.V8YAMLErrorVersionUnsupported:
+			message = "config_version is not supported by this installation; use config_version 9 or install a matching enterprise package"
+		case config.V8YAMLErrorVersionRequired, config.V8YAMLErrorVersionInvalid:
+			message = "config_version is required; add `config_version: 9` as the first line of the file"
+		case config.V8YAMLErrorVersionUpgrade:
+			message = "the file uses an older config_version; write it in config_version 9 format"
+		case config.V8YAMLErrorLegacyKeyForbidden:
+			message = field + " is a retired key; remove or migrate it in the administrator's config"
+		default:
+			if yamlErr.Action != "" {
+				message += "; " + yamlErr.Action
+			}
+		}
+		return fmt.Sprintf("%s%s: %s", where, lineSuffix(yamlErr.Line), strings.TrimRight(message, ". ")), true
+	}
 	var schemaErr *config.V8SchemaError
 	if errors.As(err, &schemaErr) && schemaErr.Keyword == "enum" && strings.HasPrefix(schemaErr.Expected, "one of ") {
 		var choices []any
@@ -51,12 +78,36 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		for i, choice := range choices {
 			names[i] = fmt.Sprint(choice)
 		}
+		if schemaErr.Path == "$.deployment_mode" {
+			names = []string{"managed_enterprise"}
+		}
 		is := "is not an allowed value"
 		if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
 			is = fmt.Sprintf("is %q", value)
 		}
 		return fmt.Sprintf("%s%s: %s %s; allowed values: %s. The settings reference: %s",
 			where, lineSuffix(schemaErr.Line), configField(schemaErr.Path), is, strings.Join(names, ", "), settingsReferenceURL), true
+	}
+	if errors.As(err, &schemaErr) {
+		field := configField(schemaErr.Path)
+		reason := "has an invalid value"
+		if schemaErr.Keyword == "additionalProperties" {
+			reason = "is an unknown setting"
+		} else if schemaErr.Keyword == "pattern" {
+			switch {
+			case strings.HasSuffix(field, ".rule_pack"), strings.Contains(field, ".custom_packs.") && !strings.HasSuffix(field, ".digest"):
+				reason = "must start with a lowercase letter or digit and use only lowercase letters, digits, - or _ (at most 64 characters)"
+			case strings.HasSuffix(field, ".digest"):
+				reason = "must be sha256: followed by 64 lowercase hexadecimal characters"
+			case strings.HasSuffix(field, ".block_at"), strings.HasSuffix(field, ".alert_at"):
+				reason = "must be one of CRITICAL, HIGH, MEDIUM, LOW"
+			default:
+				reason = "does not match the setting's required format"
+			}
+		} else if schemaErr.Expected != "" {
+			reason = "must be " + schemaErr.Expected
+		}
+		return fmt.Sprintf("%s%s: %s %s. The settings reference: %s", where, lineSuffix(schemaErr.Line), field, reason, settingsReferenceURL), true
 	}
 	var secretErr *config.V8SecretReferenceError
 	var semanticErr *config.V8SemanticError
@@ -78,6 +129,13 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 			" --from-stdin` (or --from-file <root-only file>)"
 		return fmt.Sprintf("%s%s: %s uses protected credential %q, %s; store it with %s, or remove the reference",
 			where, lineSuffix(semanticErr.Line), subject, name, state, store), true
+	}
+	if errors.As(err, &semanticErr) {
+		reason := strings.TrimRight(semanticErr.Summary, ". ")
+		if semanticErr.Action != "" && !strings.Contains(semanticErr.Action, "defenseclaw config reference") {
+			reason += "; " + strings.TrimRight(semanticErr.Action, ". ")
+		}
+		return fmt.Sprintf("%s%s: %s: %s. The settings reference: %s", where, lineSuffix(semanticErr.Line), configField(semanticErr.Path), reason, settingsReferenceURL), true
 	}
 	return "", false
 }
