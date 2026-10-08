@@ -147,9 +147,8 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 		1001: {Account: enterpriseHookWorkerAccount{UID: 1001, GID: 1001, User: "alice", Home: "/home/alice"}},
 		1004: {Account: enterpriseHookWorkerAccount{UID: 1004, GID: 1004, User: "dave", Home: "/home/dave"}},
 	}
-	// A host that protects only machine-policy connectors has no manifest
-	// rows: its eligible accounts (frank, gina) are enrolled too. alice is
-	// in both and is purged once.
+	// Eligible accounts without a manifest row may have only personal state.
+	// The purge must leave frank and gina alone; alice is purged once.
 	accounts := []enterprisehooks.UnixEligibleAccount{
 		{User: "alice", UID: 1001, GID: 1001, Home: "/home/alice"},
 		{User: "frank", UID: 1006, GID: 1006, Home: "/home/frank"},
@@ -161,7 +160,6 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 		"carol: its home is not available; rerun the purge when it is",
 		"dave: its pending hook cleanup failed; the state stays for a retry",
 		"erin: its manifest row has no usable uid",
-		"gina: its home is not available; rerun the purge when it is",
 	}
 	if strings.Join(notPurged, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("not purged:\n%s\nwant:\n%s", strings.Join(notPurged, "\n"), strings.Join(want, "\n"))
@@ -176,10 +174,8 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	if purges != 1 || len(jobs[1004].Request.Targets) != 0 {
 		t.Fatalf("alice purges %d, dave targets %+v", purges, jobs[1004].Request.Targets)
 	}
-	frank := jobs[1006]
-	if frank == nil || len(frank.Request.Targets) != 1 || frank.Request.Targets[0].Mode != enterpriseHookWorkerModePurge ||
-		frank.Request.Targets[0].Options.DataDir != "/home/frank/.defenseclaw" {
-		t.Fatalf("frank, enrolled by the eligible accounts, has no purge of his data directory: %+v", frank)
+	if jobs[1006] != nil || jobs[1007] != nil {
+		t.Fatalf("unmanaged eligible accounts scheduled for purge: frank=%+v gina=%+v", jobs[1006], jobs[1007])
 	}
 }
 
