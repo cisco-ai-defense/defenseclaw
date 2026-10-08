@@ -25,6 +25,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -325,6 +326,11 @@ func TestPlanMountPinsGitStateAndAncestors(t *testing.T) {
 	writeFile(t, e.project, "services/api/.env", "API_KEY=inert-marker\n")
 
 	plan := mustPlan(t, e, "s1", nil)
+	// The banner says why the hooks path is read-only (GAP-0215).
+	if !slices.Contains(plan.Protected, ".githooks (the repository's core.hooksPath: an install script that writes git hooks there fails; "+
+		"npm install --ignore-scripts skips it)") {
+		t.Fatalf("protected = %q", plan.Protected)
+	}
 	for _, rel := range []string{".githooks", "tools/git/project.inc", ".git/worktrees", ".git/modules/lib/config", ".git/modules/lib/hooks",
 		".git/modules/lib/commondir", ".git/modules/vendor/deep/config"} {
 		if m, ok := mountByTarget(plan, "/work/myapp/"+rel); !ok || !m.ReadOnly {
