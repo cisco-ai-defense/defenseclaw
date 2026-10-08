@@ -52,39 +52,45 @@ func TestMapperCountsOverlappingHookCallsApart(t *testing.T) {
 	stageA := proc{pid: 9507, ktime: 3e8 + 5e6, docker: workload, binary: sandboxClaudeHook, args: scriptA.args, parent: &outerA}
 	jqA := proc{pid: 9508, ktime: 3e8 + 6e6, docker: workload, binary: "/usr/bin/jq", args: "-r .hook_event_name", parent: &stageA}
 	curlB := proc{pid: 9509, ktime: 3e8 + 7e6, docker: workload, binary: "/usr/bin/curl", args: "-q -s", parent: &scriptB}
-	run := func(t *testing.T, procs ProcReader) (toolsA, toolsB int) {
+	// After B ended, the substitution runs tail: its parent fork is known by
+	// then, so it takes the call that fork was placed on (TS r5: one tail
+	// was flagged hook_subtree_unexpected under the call that had ended).
+	tailA := proc{pid: 9510, ktime: 3e8 + 9e6, docker: workload, binary: "/usr/bin/tail", args: "-1", parent: &outerA}
+	run := func(t *testing.T, procs ProcReader) (toolsA, toolsB, shown int) {
 		t.Helper()
 		m := NewMapper(MapperConfig{Containers: testContainers(), Proc: procs})
 		ctx := context.Background()
 		for _, p := range []proc{init, agent, launcherA, scriptA, launcherB, scriptB} {
 			m.Map(ctx, execOf(p))
 		}
-		for _, response := range [][]Item{m.Map(ctx, execOf(jqA)), m.Map(ctx, execOf(curlB)),
-			m.Map(ctx, exitOf(jqA, 0, "")), m.Map(ctx, exitOf(stageA, 0, "")), m.Map(ctx, exitOf(outerA, 0, "")), m.Map(ctx, exitOf(curlB, 0, ""))} {
-			if len(response) != 0 {
-				t.Fatalf("a hook process was forwarded: %+v", response)
-			}
-		}
-		count := func(script proc) int {
+		summary := func(script proc) int {
 			got := m.Map(ctx, exitOf(script, 0, ""))
 			if len(got) != 2 || got[0].Frame.Kind != sandboxfeed.FrameExec || !got[1].Frame.Hook {
 				t.Fatalf("summary of %d = %+v", script.pid, got)
 			}
 			return got[1].Frame.HookTools
 		}
-		return count(scriptA), count(scriptB)
+		for _, response := range [][]Item{m.Map(ctx, execOf(jqA)), m.Map(ctx, execOf(curlB)), m.Map(ctx, exitOf(curlB, 0, ""))} {
+			shown += len(response)
+		}
+		toolsB = summary(scriptB)
+		for _, response := range [][]Item{m.Map(ctx, execOf(tailA)), m.Map(ctx, exitOf(tailA, 0, "")),
+			m.Map(ctx, exitOf(jqA, 0, "")), m.Map(ctx, exitOf(stageA, 0, "")), m.Map(ctx, exitOf(outerA, 0, ""))} {
+			shown += len(response)
+		}
+		return summary(scriptA), toolsB, shown
 	}
 	nsOnly := fakeProc{init.pid: {ns: 1, ticks: ticksAt(init.ktime)}}
 	withParents := parentProc{fakeProc: nsOnly, parents: map[int]int{
 		stageA.pid: outerA.pid, outerA.pid: scriptA.pid, scriptA.pid: launcherA.pid, launcherA.pid: agent.pid,
 	}}
-	if a, b := run(t, withParents); a != 1 || b != 1 {
-		t.Fatalf("hook tools: call A %d, call B %d; want 1 each", a, b)
+	if a, b, shown := run(t, withParents); a != 2 || b != 1 || shown != 0 {
+		t.Fatalf("hook tools: call A %d, call B %d, %d frames shown; want 2, 1 and none", a, b, shown)
 	}
-	// The fork ended before /proc was read: the newest call keeps it, and
-	// the sum still holds.
-	if a, b := run(t, nsOnly); a+b != 2 {
-		t.Fatalf("hook tools without /proc: %d + %d", a, b)
+	// The fork ended before /proc was read: the newest call keeps it, and a
+	// later tool of the same fork is shown, the safe direction.
+	if _, _, shown := run(t, nsOnly); shown == 0 {
+		t.Fatal("without /proc a tool under an ended call was folded")
 	}
 }
 
