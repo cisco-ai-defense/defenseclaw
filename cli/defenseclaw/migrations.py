@@ -3564,8 +3564,12 @@ def migrate(
                 raise MigrationError(f"the v8 conversion check failed: {exc}") from exc
         if version >= _FIRST_V8_CONFIG_VERSION and gateway_binary:
             if _V9_STEP_NAME in names:
+                # The staged migration validates the resulting v9 document and
+                # its assets. The original v8 document may still contain keys
+                # that the migration removes, such as update_check.
                 _preview_config_v9(config_path, gateway_binary)
-            _check_staged_gateway_accepts(config_path, data_dir, gateway_binary)
+            else:
+                _check_staged_gateway_accepts(config_path, data_dir, gateway_binary)
         return MigrateResult(version, target, names)
 
     if steps:

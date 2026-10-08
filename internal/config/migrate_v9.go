@@ -262,6 +262,14 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	if err := ValidateCandidate(abs, migrated); err != nil {
 		return nil, fmt.Errorf("config: the migrated config_version 9 document does not validate: %w", err)
 	}
+	// A rebased pack is written only during commit; its digest cannot be
+	// checked on disk during the dry run. Other referenced assets already
+	// exist and can be checked before either a preview or a commit.
+	if len(m.rebasedPacks) == 0 {
+		if err := ValidateCandidateAssets(abs, migrated); err != nil {
+			return nil, fmt.Errorf("config: the migrated config_version 9 assets do not validate: %w", err)
+		}
+	}
 	if in.DryRun || in.InMemory {
 		return result, nil
 	}
