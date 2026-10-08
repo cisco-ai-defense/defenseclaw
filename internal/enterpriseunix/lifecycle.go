@@ -684,6 +684,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err != nil {
 			return nil, &codedError{code: codePayload, err: env.installedPayloadError(err, ChannelPackage)}
 		}
+		if err := l.replacedPackageBinary(record, pay); err != nil {
+			return nil, &codedError{code: codePayload, err: err}
+		}
 		p.payload = pay
 	default:
 		// Repair or ensure without a payload keeps the installed binaries,
@@ -842,6 +845,40 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		sort.Strings(p.stale)
 	}
 	return p, nil
+}
+
+// replacedPackageBinary refuses installed package binaries that differ from
+// the deployment record while the package version is still the recorded one.
+// Only the package's own install run (--reason package) puts new binaries of
+// the same version in place; any other difference is a file replaced after
+// install. Recording it made verify green on a binary the package never
+// shipped: repair, ensure --from-package and the apply trigger re-recorded a
+// hook replaced by /usr/bin/true, and agents ran without enforcement
+// (GAP-0522).
+func (l *lifecycle) replacedPackageBinary(record *Deployment, pay *payload) error {
+	if record == nil || l.opts.Reason == "package" || pay.Version != record.ProductVersion {
+		return nil
+	}
+	recorded := recordBinaries(l.env, record)
+	if len(recorded) == 0 {
+		return nil
+	}
+	for _, name := range append(append([]string{}, requiredBinaries...), optionalBinaries...) {
+		if recorded[name] != pay.Digests[name] {
+			return fmt.Errorf("installed %s does not match the deployment record although the package is still version %s, so it was replaced after install; %s",
+				name, pay.Version, l.env.packageReinstallStep(pay.Version))
+		}
+	}
+	return nil
+}
+
+// packageReinstallStep is how an administrator puts back the binaries of
+// the package version.
+func (e *Env) packageReinstallStep(version string) string {
+	if e.GOOS == "darwin" {
+		return fmt.Sprintf("reinstall the package (sudo installer -pkg defenseclaw-enterprise-%s-darwin-arm64.pkg -target /) to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
+	}
+	return fmt.Sprintf("reinstall the defenseclaw-enterprise %s package with your package manager to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
 }
 
 func recordBinaries(env *Env, record *Deployment) map[string]string {

@@ -208,6 +208,10 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 					continue // one message below, not one per binary
 				}
 			}
+			if record.Channel == ChannelPackage && filepath.Dir(path) == env.Layout.BinDir {
+				add("%s was modified after install; %s", path, env.packageReinstallStep(record.ProductVersion))
+				continue
+			}
 			add("%s was modified after install", path)
 		}
 	}
