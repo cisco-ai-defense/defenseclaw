@@ -646,6 +646,11 @@ The agent runs in skip-permissions mode, but DefenseClaw's hooks still
 check every tool call. A blocked call appears in the feed and counts in the
 end-of-session summary, and the harness shows the reason.
 
+A command you type yourself with Claude Code's `!` prefix (its bash mode)
+is not a tool call: Claude Code runs it without a `PreToolUse` hook, so
+DefenseClaw does not check it. It still runs inside the sandbox, under its
+network policy, hidden secrets and protected git internals.
+
 The sandbox hooks fail closed: a hook that cannot reach DefenseClaw blocks
 the tool call, and its block message, which the harness shows, says the
 daemon on your machine does not answer and to run `defenseclaw-gateway
