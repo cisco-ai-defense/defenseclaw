@@ -6311,12 +6311,15 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
         scanners=ScannersConfig(
             skill_scanner=SkillScannerConfig(
-                use_llm=ss_raw.get("use_llm", True),
+                use_llm=ss_raw.get("use_llm", source_config_version != FIRST_CURRENT_CONFIG_VERSION),
                 use_behavioral=ss_raw.get("use_behavioral", False),
                 enable_meta=ss_raw.get("enable_meta", False),
                 use_trigger=ss_raw.get("use_trigger", False),
                 llm_consensus_runs=ss_raw.get("llm_consensus_runs", 0),
-                policy=ss_raw.get("policy", "quiet"),
+                policy=ss_raw.get(
+                    "policy",
+                    "permissive" if source_config_version == FIRST_CURRENT_CONFIG_VERSION else "quiet",
+                ),
                 lenient=ss_raw.get("lenient", True),
                 llm=_merge_llm(ss_raw.get("llm")),
                 policy_file=_merge_asset_file_ref(ss_raw.get("policy_file")),

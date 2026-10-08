@@ -501,3 +501,16 @@ def test_a_global_mode_change_names_the_connectors_that_keep_their_own_mode(tmp_
     assert out.exit_code == 0, out.output
     assert "keeps its own mode (observe)" in out.output
     assert "defenseclaw guardrail mode action --connector codex" in out.output
+
+
+def test_secure_client_v8_scanner_defaults_stay_on_previous_policy(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\nenterprise: {profile: secure_client}\n"
+        "llm: {model: sample-model}\n"
+    )
+    scanner = config_module.load(data_dir=str(tmp_path)).scanners.skill_scanner
+    assert scanner.use_llm is False
+    assert scanner.policy == "permissive"
