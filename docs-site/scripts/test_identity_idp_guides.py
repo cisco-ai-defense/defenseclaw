@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs/enterprise"
 
 

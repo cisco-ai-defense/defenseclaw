@@ -1309,7 +1309,7 @@ def test_overview_uses_selected_connectors_resolved_profile_mode(monkeypatch) ->
 
     cfg = default_config()
     cfg.guardrail.profiles = {"base": GuardrailProfile(mode="observe"), "strict": GuardrailProfile(mode="action")}
-    monkeypatch.setattr(gateway, "current_profile_account", lambda: ("alice", "alice"))
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
     asked = []
 
     def resolve(self, *, user="", connector="", agent=""):
