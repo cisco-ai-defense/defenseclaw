@@ -75,11 +75,8 @@ def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     # Without --user, explain (also with --connector, GAP-0085) and guardrail
     # status ask about the account running the command, and status names its
     # profile (GAP-0056).
-    monkeypatch.setattr("getpass.getuser", lambda: "alice")
-    if os.name == "nt":
-        # Windows asks for the token SID instead of the login name
-        # (test_explain_on_windows_asks_for_the_token_sid).
-        monkeypatch.setattr("defenseclaw.gateway.current_profile_account", lambda: ("alice", "alice"))
+    # The explicit account is stable across Unix UID and Windows SID lookups.
+    monkeypatch.setattr("defenseclaw.gateway.current_profile_account", lambda **kwargs: ("alice", "alice"))
     app.cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
     mine = runner.invoke(
         cmd_guardrail.guardrail, ["profile", "explain", "--connector", "codex"], obj=app, catch_exceptions=False
@@ -110,6 +107,20 @@ def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     status = runner.invoke(cmd_guardrail.guardrail, ["status"], obj=app, catch_exceptions=False)
     assert asked["probes"] == [("", ""), ("codex", agent_id)]
     assert f"; except pin for Codex agent {agent_id} (by agent)" in status.output
+
+
+def test_unix_current_profile_ignores_environment_account(monkeypatch):
+    if os.name == "nt":
+        pytest.skip("Unix account lookup only")
+    import pwd
+
+    from defenseclaw.gateway import current_profile_account
+
+    monkeypatch.setenv("LOGNAME", "other-account")
+    monkeypatch.setenv("USER", "other-account")
+    account = pwd.getpwuid(os.geteuid()).pw_name
+    assert current_profile_account() == (account, account)
+    assert current_profile_account(secure_client=True) == ("other-account", "other-account")
 
 
 def test_explain_on_windows_asks_for_the_token_sid(monkeypatch):
@@ -150,7 +161,7 @@ def test_profile_timeout_displays_account_name_instead_of_windows_sid(monkeypatc
     app = AppContext()
     app.cfg = default_config()
     app.cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
-    monkeypatch.setattr(gateway, "current_profile_account", lambda: ("S-1-12-1-1-2-3-4", "EntraAlice"))
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("S-1-12-1-1-2-3-4", "EntraAlice"))
 
     def timeout(self, *, user=""):
         assert user == "S-1-12-1-1-2-3-4"
@@ -342,3 +353,37 @@ def test_profile_validation_mirrors_the_gateway(mutate, message):
     mutate(gc)
     with pytest.raises(ValueError, match=message):
         validate_guardrail_profiles(gc)
+
+
+def test_profile_summary_includes_every_scoped_assignment(monkeypatch):
+    from defenseclaw import gateway
+
+    app = AppContext()
+    app.cfg = default_config()
+    app.cfg.guardrail.profiles = {
+        "base": GuardrailProfile(mode="observe"),
+        "pin": GuardrailProfile(mode="action"),
+    }
+    agents = [f"agt-{n:016d}" for n in range(17)]
+    app.cfg.guardrail.profile_assignments = [
+        GuardrailProfileAssignment(profile="pin", match=GuardrailProfileMatch(agents=[agent]))
+        for agent in agents
+    ]
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "agent_identities_all",
+        lambda self, *, user: {"identities": [{"agent_id": agent, "connector": "codex"} for agent in agents]},
+    )
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "guardrail_profile_resolve",
+        lambda self, *, user="", connector="", agent="": {
+            "profile": "pin" if agent else "base",
+            "match": "agent" if agent else "default",
+        },
+    )
+
+    result = gateway.current_user_guardrail_profile(app.cfg)
+    assert len(result["overrides"]) == len(agents)
+    assert agents[-1] in cmd_guardrail.profile_status_text(app.cfg, result)
