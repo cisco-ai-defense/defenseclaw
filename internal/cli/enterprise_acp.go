@@ -365,6 +365,14 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, discardMinted(enterpriseACPRefusal(err)))
 	}
+	if !secureClient {
+		if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+			return acp.SetEnterpriseCredentialUserDataDir(cfg.DataDir, enrollment.principal,
+				enrollment.client, enrollment.agent, enrollment.profile, enrollment.dataDir)
+		}); err != nil {
+			return enterpriseACPResult(cmd, nil, discardMinted(fmt.Errorf("enterprise acp: record user data dir: %w", err)))
+		}
+	}
 	payload := map[string]any{
 		"ok": true, "principal": enrollment.principal, "client": enrollment.client,
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
