@@ -59,6 +59,14 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	} else {
 		runtime = loaded.runtime
 	}
+	// The scanner files the config pins, which a scan loads only when they
+	// match: a wrong pin was applied with no warning and failed every scan
+	// that loads it (GAP-0664).
+	if runtime != nil && !runtime.SecureClientIntegration() {
+		if err := runtime.Scanners.CheckPinnedFiles(); err != nil {
+			return fmt.Errorf("the gateway cannot use a scanner file that %s pins: %v", configPath, err)
+		}
+	}
 	if runtime == nil || !runtime.Guardrail.Enabled {
 		return nil
 	}

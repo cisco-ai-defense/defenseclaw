@@ -167,6 +167,19 @@ The Cisco AI Defense endpoint and key are not scanner keys. They stay in `cisco_
 | `behavioral` | Checks that a tool's description matches how it behaves (dataflow analysis). Off in the recommended setup. | Nothing extra. |
 | `readiness` | Production-readiness heuristics. Off in the recommended setup. | Nothing. |
 
+To add your own YARA rules, list the files in `scanners.mcp_scanner.yara.extra_rules`, each with the `sha256:` digest of the file. A scan loads them next to the bundled rules (set `include_bundled: false` to use only yours), and only from bytes that match the digest:
+
+```yaml title="config.yaml"
+scanners:
+  mcp_scanner:
+    yara:
+      extra_rules:
+        - path: C:\ProgramData\DefenseClaw-RulePacks\marker.yar
+          digest: sha256:<sha256 of the file>
+```
+
+A pin that does not match its file is refused where the config is applied: the managed lifecycle (`ensure`, `install`, `upgrade`, Setup) names the key and changes nothing, and the gateway rejects a reload with `policy_reload_rejected`, keeping the policy it last built. A rule file edited in place under its pin is rejected the same way; until you pin the new digest or restore the file, MCP scans that load it fail closed.
+
 Automatic selection never fails a scan for a missing optional key: a configured cloud model without its key falls back to YARA and prints `warning: LLM analyzer skipped: DEFENSECLAW_LLM_KEY is not configured; continuing with local analyzers`. An explicit list is honored exactly as written.
 
 ```bash

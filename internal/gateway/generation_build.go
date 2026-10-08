@@ -56,6 +56,11 @@ type generationInputs struct {
 	// strictOPA makes a Rego module that fails to load a build error. When
 	// false (boot) the generation has no OPA and the guardrail falls back.
 	strictOPA bool
+	// strictScannerPins makes a pinned scanner file that does not match its
+	// digest a build error, so a reload keeps the previous generation. When
+	// false (boot) the generation records it and the scans that load the
+	// file fail closed.
+	strictScannerPins bool
 }
 
 func buildGeneration(ctx context.Context, in generationInputs) (*Generation, error) {
@@ -127,6 +132,15 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 			if !cfg.SecureClientIntegration() {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy unavailable (guardrail falls back to the resolved thresholds): %v\n", err)
 			}
+		}
+	}
+
+	if !cfg.SecureClientIntegration() {
+		if err := cfg.Scanners.CheckPinnedFiles(); err != nil {
+			if in.strictScannerPins {
+				return nil, fmt.Errorf("generation: %w", err)
+			}
+			g.scannerPinError = err.Error()
 		}
 	}
 
@@ -423,6 +437,8 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 		health.LastReloadError = msg
 	} else if g.opaError != "" {
 		health.LastReloadError = "opa: " + g.opaError
+	} else if g.scannerPinError != "" {
+		health.LastReloadError = g.scannerPinError
 	}
 	return health, true
 }

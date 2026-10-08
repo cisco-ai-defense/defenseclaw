@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -123,6 +124,33 @@ func TestGenerationAssetFilesFollowTheDigestedFiles(t *testing.T) {
 	}
 	if _, ok := assetDigestComponents(cfg)["provider_ca:acme"]; !ok {
 		t.Fatal("the provider CA file is not in the effective digest")
+	}
+}
+
+// GAP-0664: a pinned scanner file that does not match its digest (a wrong
+// pin, or the file edited in place) fails a reload build, so the previous
+// generation stays; a boot build records it for policy.last_reload_error.
+func TestBuildGenerationChecksScannerFilePins(t *testing.T) {
+	rule := filepath.Join(t.TempDir(), "marker.yar")
+	body := []byte("rule marker { condition: false }\n")
+	if err := os.WriteFile(rule, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Scanners.MCPScanner.YARA.ExtraRules = []config.AssetFileRef{{Path: rule, Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(body))}}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, strictScannerPins: true}); err != nil {
+		t.Fatalf("a matching pin: %v", err)
+	}
+	if err := os.WriteFile(rule, append(body, []byte("// edit\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, strictScannerPins: true}); err == nil ||
+		!strings.Contains(err.Error(), "extra_rules[0]") || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("reload build with the file edited under its pin = %v, want it refused", err)
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg})
+	if err != nil || g.scannerPinError == "" {
+		t.Fatalf("boot build = %v, pin error %v; want it built and the mismatch recorded", err, g)
 	}
 }
 

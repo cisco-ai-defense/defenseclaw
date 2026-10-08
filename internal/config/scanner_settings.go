@@ -266,6 +266,33 @@ func (s ScannersConfig) Validate() error {
 	return nil
 }
 
+// CheckPinnedFiles reads every scanner file the config pins, the custom skill
+// scanner policy and the MCP scanner extra YARA rules, and checks it against
+// its digest. A scan loads these files only from bytes that match, so a pin
+// that does not match its file, or a file edited in place under its pin,
+// failed every scan while the config applied with no warning. The managed
+// lifecycle preflight and every gateway reload check it; a reload it refuses
+// keeps the previous generation (GAP-0664).
+func (s ScannersConfig) CheckPinnedFiles() error {
+	check := func(key string, ref AssetFileRef) error {
+		if _, err := ref.ReadVerified(); err != nil {
+			return fmt.Errorf("%s: %v; a scan loads the file only when it matches its digest, so pin the sha256 of the file, or restore the file the digest pins", key, err)
+		}
+		return nil
+	}
+	if strings.TrimSpace(s.SkillScanner.Policy) == SkillScannerPolicyCustom && !s.SkillScanner.PolicyFile.IsZero() {
+		if err := check("scanners.skill_scanner.policy_file", s.SkillScanner.PolicyFile); err != nil {
+			return err
+		}
+	}
+	for index, ref := range s.MCPScanner.YARA.ExtraRules {
+		if err := check(fmt.Sprintf("scanners.mcp_scanner.yara.extra_rules[%d]", index), ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ReadVerified reads the referenced file and checks it against Digest
 // ("sha256:<hex>"). A mismatch, a missing digest or an unreadable file is an
 // error, so callers fail closed.
