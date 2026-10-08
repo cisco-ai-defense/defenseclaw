@@ -129,6 +129,13 @@ Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They
 are not supported on Windows or WSL2, on Intel Macs, in `managed_enterprise`
 deployments, or when you run DefenseClaw as root.
 
+On Windows, DefenseClaw guards your agents through their connector hooks
+instead: Codex, Claude Code and the others run on your machine, and every
+tool call still goes through DefenseClaw's policy. See
+[Windows](/docs/get-started/windows) and
+[platform support](/docs/connectors#platform-support). Run sandboxes on a
+Linux machine or an Apple-silicon Mac.
+
 | Topic | Linux | macOS (Apple silicon) |
 | --- | --- | --- |
 | OpenShell driver | Docker driver: one container per sandbox | MicroVM driver (`vm`): one virtual machine per sandbox, on Apple's Hypervisor. OpenShell calls it experimental. |
