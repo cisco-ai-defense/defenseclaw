@@ -4537,7 +4537,9 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     from defenseclaw.gateway import OrchestratorClient, current_profile_account, gateway_api_client_host
 
     if not user:
-        user = current_profile_account()[0]
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        user = current_profile_account(secure_client=_enterprise_profile(app.cfg) == "secure_client")[0]
         if not (user or connector or agent):
             ux.err("Name at least one of --user, --connector or --agent.")
             raise SystemExit(2)

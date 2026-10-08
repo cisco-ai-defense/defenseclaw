@@ -76,7 +76,9 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     """
     if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
         return None
-    user, label = current_profile_account()
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    user, label = current_profile_account(secure_client=_enterprise_profile(cfg) == "secure_client")
     if not user:
         return {"user": "", "error": "the account name is unknown"}
     try:
@@ -99,14 +101,22 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     return {**result, "user": label, "overrides": overrides}
 
 
-def current_profile_account() -> tuple[str, str]:
+def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
     """The account the gateway resolves for "you", and the name to show for it.
 
-    On Windows the gateway is asked for the process token SID: the login name
-    of an Entra ID account (EntraAlice) is no name Windows can look up, so
-    every Entra user got default_lookup_failed. Elsewhere both are the login
-    name.
+    On Unix the effective UID identifies the process account; LOGNAME and USER
+    can name another account. On Windows the process token SID is authoritative
+    because an Entra ID login name may not be resolvable by Windows.
     """
+    if os.name != "nt" and not secure_client:
+        import pwd
+
+        try:
+            user = pwd.getpwuid(os.geteuid()).pw_name
+        except (KeyError, OSError):
+            return "", ""
+        return user, user
+
     import getpass
 
     try:
@@ -121,9 +131,6 @@ def current_profile_account() -> tuple[str, str]:
         except OSError:
             pass
     return label, label
-
-
-_PROFILE_OVERRIDE_PROBES = 16
 
 
 def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) -> list[dict[str, str]]:
