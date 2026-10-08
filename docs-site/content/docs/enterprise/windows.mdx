@@ -794,19 +794,35 @@ in [Write the config](#2-write-the-config):
 Copy-Item .\DefenseClawSetup-Enterprise-Standalone-x64.exe $Stage
 $Setup  = "$Stage\DefenseClawSetup-Enterprise-Standalone-x64.exe"
 $Result = "$Stage\setup-as-system.json"
+$Log    = "$Stage\setup-as-system.log"
 $Task   = 'DefenseClaw Setup as SYSTEM'
 $Action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" `
-    -Argument "/d /c `"`"$Setup`" /ensure CONFIG=$Stage\config.yaml JSON=1 > `"$Result`"`""
+    -Argument "/d /c `"`"$Setup`" /ensure CONFIG=$Stage\config.yaml JSON=1 > `"$Result`" 2> `"$Log`"`""
 Register-ScheduledTask -TaskName $Task -Action $Action -User 'NT AUTHORITY\SYSTEM' -RunLevel Highest -Force | Out-Null
 Start-ScheduledTask -TaskName $Task
-do { Start-Sleep -Seconds 5 } while ((Get-ScheduledTask -TaskName $Task).State -in 'Queued', 'Running')
+$Shown = 0
+do {
+    Start-Sleep -Seconds 5
+    $Lines = @(Get-Content $Log -ErrorAction SilentlyContinue)
+    $Lines | Select-Object -Skip $Shown
+    $Shown = $Lines.Count
+} while ((Get-ScheduledTask -TaskName $Task).State -in 'Queued', 'Running')
 (Get-ScheduledTaskInfo -TaskName $Task).LastTaskResult
 Unregister-ScheduledTask -TaskName $Task -Confirm:$false
 Get-Content $Result
 ```
 
 `LastTaskResult` is Setup's exit code. For `/uninstall`, replace
-`/ensure CONFIG=$Stage\config.yaml` with `/uninstall`.
+`/ensure CONFIG=$Stage\config.yaml` with `/uninstall`. The loop prints
+Setup's progress from the log as it runs. After the services are back,
+Setup prepares the scanner runtime: it unpacks a new one and checks every
+file of an installed one. That takes from seconds to a few minutes, longer on
+a disk that has not been read since the computer was cloned, and at most 15
+minutes. Setup prints `[scanners]` lines meanwhile, with the time elapsed and
+the bound.
+At the bound it stops the prepare and reports a `scanner_runtime_unavailable`
+warning that says `timed out after 15m0s`; `verify` then fails until a
+`/repair` prepares the runtime.
 
 ## Per-user installs
 

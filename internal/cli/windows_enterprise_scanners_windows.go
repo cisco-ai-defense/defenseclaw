@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -343,10 +345,51 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 	result.Scanners = readWindowsScannerRuntime()
 }
 
+// windowsScannerProgress receives a scanner runtime step progress lines
+// (stderr: the JSON result stays alone on stdout), and the heartbeat paces
+// the still-running lines. Seams for tests.
+var (
+	windowsScannerProgress  io.Writer = os.Stderr
+	windowsScannerHeartbeat           = time.Minute
+)
+
+// runWindowsScannerRuntime runs one scanner runtime step with a bounded wait.
+// Its own messages and a line every heartbeat go to windowsScannerProgress as
+// it runs: a first prepare on a cold disk took 13 minutes with no output, so
+// an administrator could not tell it from a hang (GAP-0642).
 func runWindowsScannerRuntime(executable, step string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), windowsScannerPrepareTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, executable, step).CombinedOutput()
+	progress := &windowsScannerLockedWriter{w: windowsScannerProgress}
+	if step == "prepare" {
+		fmt.Fprintf(progress, "[scanners] preparing the skill, MCP and plugin scanner runtime; a first install takes a few minutes, at most %s\n", windowsScannerPrepareTimeout)
+	}
+	var stdout bytes.Buffer
+	lines := &windowsScannerLineWriter{out: progress}
+	command := exec.CommandContext(ctx, executable, step)
+	command.Stdout, command.Stderr = &stdout, lines
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(windowsScannerHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Fprintf(progress, "[scanners] %s is still running: %s elapsed, stopped after %s\n",
+					step, time.Since(start).Round(time.Second), windowsScannerPrepareTimeout)
+			}
+		}
+	}()
+	err := command.Run()
+	close(done)
+	lines.flush()
+	out := append(stdout.Bytes(), lines.captured.Bytes()...)
+	if err == nil && step == "prepare" {
+		fmt.Fprintf(progress, "[scanners] the scanner runtime is prepared (%s)\n", time.Since(start).Round(time.Second))
+	}
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// GAP-0297: Windows reports a process the deadline killed as a bare
 		// "exit status 1", which hid the cause.
@@ -356,6 +399,51 @@ func runWindowsScannerRuntime(executable, step string) error {
 		return fmt.Errorf("%s the scanner runtime: %v: %s", step, err, windowsEnterpriseBoundedDiagnostic(strings.TrimSpace(string(out))))
 	}
 	return nil
+}
+
+// windowsScannerLockedWriter serializes the step output and the heartbeat.
+type windowsScannerLockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *windowsScannerLockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// windowsScannerLineWriter passes the step stderr on line by line, prefixed,
+// and keeps a bounded copy for the error diagnostic.
+type windowsScannerLineWriter struct {
+	out      io.Writer
+	pending  []byte
+	captured bytes.Buffer
+}
+
+func (l *windowsScannerLineWriter) Write(p []byte) (int, error) {
+	if l.captured.Len() < 64<<10 {
+		l.captured.Write(p)
+	}
+	l.pending = append(l.pending, p...)
+	for {
+		index := bytes.IndexByte(l.pending, '\n')
+		if index < 0 {
+			break
+		}
+		if line := bytes.TrimSpace(l.pending[:index]); len(line) > 0 {
+			fmt.Fprintf(l.out, "[scanners] %s\n", line)
+		}
+		l.pending = l.pending[index+1:]
+	}
+	return len(p), nil
+}
+
+func (l *windowsScannerLineWriter) flush() {
+	if line := bytes.TrimSpace(l.pending); len(line) > 0 {
+		fmt.Fprintf(l.out, "[scanners] %s\n", line)
+	}
+	l.pending = nil
 }
 
 // copyWindowsScannerRuntime copies source next to target, unpacks its

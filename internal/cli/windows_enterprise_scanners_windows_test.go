@@ -163,12 +163,20 @@ func TestWindowsScannerRuntimeTimeoutIsNamed(t *testing.T) {
 		time.Sleep(30 * time.Second)
 		return
 	}
-	seam := windowsScannerPrepareTimeout
-	t.Cleanup(func() { windowsScannerPrepareTimeout = seam })
+	seam, progressSeam, heartbeatSeam := windowsScannerPrepareTimeout, windowsScannerProgress, windowsScannerHeartbeat
+	t.Cleanup(func() {
+		windowsScannerPrepareTimeout, windowsScannerProgress, windowsScannerHeartbeat = seam, progressSeam, heartbeatSeam
+	})
 	windowsScannerPrepareTimeout = 500 * time.Millisecond
+	// GAP-0642: the wait reports itself while it runs.
+	var progress bytes.Buffer
+	windowsScannerProgress, windowsScannerHeartbeat = &progress, 100*time.Millisecond
 	t.Setenv("DC_SCANNER_RUNTIME_HELPER", "sleep")
 	err := runWindowsScannerRuntime(os.Args[0], "-test.run=^TestWindowsScannerRuntimeTimeoutIsNamed$")
 	if err == nil || !strings.Contains(err.Error(), "timed out after 500ms") {
 		t.Fatalf("err = %v, want it to name the timeout", err)
+	}
+	if !strings.Contains(progress.String(), "is still running") || !strings.Contains(progress.String(), "stopped after 500ms") {
+		t.Fatalf("progress = %q, want the elapsed time and the bound while it waits", progress.String())
 	}
 }

@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -127,7 +128,21 @@ func executeEnterpriseSetup(
 	child := processutil.CommandContext(ctx, cliPath, arguments...)
 	child.Dir = stageRoot
 	child.Env = childEnvironment
-	output, runErr := processutil.CombinedOutputTree(child, false)
+	var output []byte
+	var runErr error
+	if opts.Standalone {
+		// The lifecycle reports progress on stderr while it runs (a first
+		// scanner runtime prepare takes minutes); pass it on at once, so an
+		// MDM log or a scheduled task that keeps stderr shows it instead of
+		// minutes of silence (GAP-0642). stdout is the result.
+		var captured bytes.Buffer
+		child.Stdout = &captured
+		child.Stderr = lifecycleProgress{stderr}
+		runErr = processutil.RunTree(child)
+		output = captured.Bytes()
+	} else {
+		output, runErr = processutil.CombinedOutputTree(child, false)
+	}
 	if len(output) > maximumLifecycleOutput {
 		return 0, fmt.Errorf("enterprise lifecycle output exceeded %d bytes", maximumLifecycleOutput)
 	}
@@ -530,4 +545,14 @@ func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {
 		environment = append(environment, key+"="+allowed[key])
 	}
 	return environment, nil
+}
+
+// lifecycleProgress passes the lifecycle stderr on. It is not an *os.File,
+// so the child always gets a pipe: a scheduled task can start Setup with no
+// usable stderr, and a failed write must not end the copy or the lifecycle.
+type lifecycleProgress struct{ w io.Writer }
+
+func (p lifecycleProgress) Write(b []byte) (int, error) {
+	_, _ = p.w.Write(b)
+	return len(b), nil
 }
