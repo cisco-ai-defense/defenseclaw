@@ -2092,7 +2092,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// own permission prompts off, and the host's connector selection and
 	// guardrail mode say nothing about what runs inside a sandbox.
 	mode := sandboxHookMode(ctx, req.ConnectorName, a.agentHookMode(ctx, req.ConnectorName))
-	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, req.ConnectorName) && !a.agentHookEnabled(req.ConnectorName) {
+	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, req.ConnectorName) && !a.agentHookEnabled(ctx, req.ConnectorName) {
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
@@ -2536,8 +2536,16 @@ func (a *APIServer) dispatchAgentHookNotification(ctx context.Context, req agent
 	}
 }
 
-func (a *APIServer) agentHookEnabled(name string) bool {
-	if a.scannerCfg == nil {
+// agentHookEnabled reports whether connector name's hook requests are
+// evaluated. It reads the live generation's configuration, as the decision
+// does: a connector a hot reload added (or disabled) is evaluated (or not)
+// from that reload on. With the start-time configuration a connector added
+// by `enterprise ... ensure` was answered allow without a scan until the
+// gateway restarted, so a CRITICAL tool call matched no rule (GAP-0968).
+// Secure Client keeps the start-time configuration (issue #1092).
+func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
+	cfg := a.hookEnablementConfig(ctx)
+	if cfg == nil {
 		return false
 	}
 	// Per-connector explicit disable wins over every enable signal below:
@@ -2546,13 +2554,13 @@ func (a *APIServer) agentHookEnabled(name string) bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if a.scannerCfg.ManualConnectorConfigured(name) && !a.scannerCfg.Guardrail.EffectiveEnabled(name) {
+	if cfg.ManualConnectorConfigured(name) && !cfg.Guardrail.EffectiveEnabled(name) {
 		return false
 	}
-	if a.scannerCfg.ConnectorHookConfig(name).Enabled {
+	if cfg.ConnectorHookConfig(name).Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled(name) {
+	if a.health != nil && a.health.HasConnectorSource(name, "automatic") && cfg.ApplicationProtection.EffectiveEnabled(name) {
 		return true
 	}
 	// Multi-connector: every member of guardrail.connectors is active
@@ -2560,10 +2568,30 @@ func (a *APIServer) agentHookEnabled(name string) bool {
 	// (not the singular guardrail.connector primary, and with no
 	// explicit connector_hooks flag) would fall through to allow-
 	// without-scan. No-op for single-connector installs (empty map).
-	if a.scannerCfg.Guardrail.HasConnector(name) {
+	if cfg.Guardrail.HasConnector(name) {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), name)
+	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), name)
+}
+
+// hookEnablementConfig is the configuration agentHookEnabled reads: the
+// request's pinned generation, else the live one, else a.scannerCfg. Secure
+// Client keeps a.scannerCfg.
+func (a *APIServer) hookEnablementConfig(ctx context.Context) *config.Config {
+	if a == nil {
+		return nil
+	}
+	if a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
+	}
+	g := pinnedGeneration(ctx)
+	if g == nil {
+		g = a.generation()
+	}
+	if g != nil && g.Config != nil {
+		return g.Config
+	}
+	return a.scannerCfg
 }
 
 // agentHookMode returns the hook mode for a request: the request's guardrail

@@ -1212,13 +1212,13 @@ func TestAgentHookEnabled_MultiConnectorSetMembership(t *testing.T) {
 	}
 	a := &APIServer{scannerCfg: cfg}
 
-	if !a.agentHookEnabled("codex") {
+	if !a.agentHookEnabled(t.Context(), "codex") {
 		t.Errorf("primary connector codex should be enabled")
 	}
-	if !a.agentHookEnabled("cursor") {
+	if !a.agentHookEnabled(t.Context(), "cursor") {
 		t.Errorf("secondary connector cursor (in guardrail.connectors) should be enabled, got allow-without-scan")
 	}
-	if a.agentHookEnabled("devin") {
+	if a.agentHookEnabled(t.Context(), "devin") {
 		t.Errorf("connector not in the active set must not be enabled")
 	}
 }
@@ -1231,10 +1231,10 @@ func TestAgentHookEnabled_SingleConnectorUnchanged(t *testing.T) {
 	cfg.Guardrail.Connector = "codex"
 	a := &APIServer{scannerCfg: cfg}
 
-	if !a.agentHookEnabled("codex") {
+	if !a.agentHookEnabled(t.Context(), "codex") {
 		t.Errorf("single-connector primary codex should be enabled")
 	}
-	if a.agentHookEnabled("cursor") {
+	if a.agentHookEnabled(t.Context(), "cursor") {
 		t.Errorf("non-primary connector must be disabled when guardrail.connectors is empty")
 	}
 }
@@ -1252,12 +1252,12 @@ func TestAgentHookEnabled_AutomaticSourceNotLazyHealthCounter(t *testing.T) {
 	if health.HasConnectorSource("codex", "automatic") {
 		t.Fatal("lazy counter bucket must not masquerade as automatic activation")
 	}
-	if a.agentHookEnabled("codex") {
+	if a.agentHookEnabled(t.Context(), "codex") {
 		t.Fatal("lazy health counter enabled codex without automatic activation")
 	}
 
 	health.RegisterConnectorWithSource("codex", connector.ToolModeBoth, connector.SubprocessNone, "automatic")
-	if !a.agentHookEnabled("codex") {
+	if !a.agentHookEnabled(t.Context(), "codex") {
 		t.Fatal("source=automatic registration should enable automatic codex hook inspection")
 	}
 }
@@ -1277,10 +1277,10 @@ func TestAgentHookEnabled_PerConnectorDisableShortCircuits(t *testing.T) {
 	}
 	a := &APIServer{scannerCfg: cfg}
 
-	if a.agentHookEnabled("codex") {
+	if a.agentHookEnabled(t.Context(), "codex") {
 		t.Errorf("explicitly disabled codex must gate to allow-without-scan despite map membership")
 	}
-	if !a.agentHookEnabled("cursor") {
+	if !a.agentHookEnabled(t.Context(), "cursor") {
 		t.Errorf("sibling cursor should remain enabled when only codex is disabled")
 	}
 }
