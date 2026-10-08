@@ -945,8 +945,8 @@ type WindowsPublicDirDrift struct {
 	// Owner is the folder's owner SID when it is not Administrators,
 	// SYSTEM or TrustedInstaller.
 	Owner string
-	// Extra maps each other principal (BUILTIN\Users included) to the
-	// access beyond read and execute it holds.
+	// Extra maps each other principal (BUILTIN\Users included) that holds
+	// more than read and execute to all the access it holds.
 	Extra map[string]uint32
 	// UsersReadMissing reports that BUILTIN\Users cannot read and execute.
 	UsersReadMissing bool
@@ -1002,14 +1002,14 @@ func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
 			case sid.IsWellKnown(windows.WinBuiltinUsersSid):
 				users |= uint32(ace.Mask)
 			default:
-				if extra := uint32(ace.Mask) &^ readExecute; extra != 0 {
-					drift.Extra[sid.String()] |= extra
+				if uint32(ace.Mask)&^readExecute != 0 {
+					drift.Extra[sid.String()] |= uint32(ace.Mask)
 				}
 			}
 		}
 	}
-	if extra := users &^ readExecute; extra != 0 {
-		drift.Extra[usersSIDStr] = extra
+	if users&^readExecute != 0 {
+		drift.Extra[usersSIDStr] = users
 	}
 	drift.UsersReadMissing = users&readExecute != readExecute
 	return drift, nil
