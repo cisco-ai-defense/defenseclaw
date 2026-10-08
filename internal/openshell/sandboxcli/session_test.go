@@ -1921,6 +1921,23 @@ func TestPullAsksLikeTheSessionEnd(t *testing.T) {
 	lacks(t, ta.output(), "or hold a secret")
 }
 
+// GAP-0237: on a copy, review and the plain pull preview listed the changed
+// files only; the scanner findings and the secret warning showed only at
+// pull --apply or in --output json.
+func TestCopyReviewShowsFindings(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40),
+		Changes: []workspace.TreeChange{{Path: "src/aws.txt", Status: "A"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Findings: []workspace.ScanFinding{{Path: "src/aws.txt", Location: "src/aws.txt:1",
+			Scanner: "clawshield-secrets", Severity: "CRITICAL", RuleID: "CS-SEC-AWS-KEY", Title: "AWS access key"}}}}
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox"}))
+	has(t, ta.output(), "CRITICAL src/aws.txt:1 — clawshield-secrets: AWS access key", "the sandbox wrote what looks like a secret: src/aws.txt",
+		"nothing was applied")
+}
+
 // Manual R2-43: a copy-mode session that found nothing to bring back lets
 // `delete` of the stopped sandbox go without the "may hold work" warning,
 // until the sandbox runs again.

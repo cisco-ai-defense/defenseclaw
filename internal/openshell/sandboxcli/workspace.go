@@ -541,12 +541,7 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 		a.line(a.style(line, ansiYellow))
 	}
 	if r := rev.Report; r != nil {
-		for _, f := range mergeFlags(r.Flags) {
-			a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), f.name, strings.Join(f.details, "; ")))
-		}
-		for _, f := range r.Findings {
-			a.line(findingLine(f))
-		}
+		a.printReviewDetail(r)
 		for _, w := range r.Warnings {
 			a.warn(w)
 		}
@@ -678,6 +673,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	for _, c := range res.Changes {
 		a.line(fmt.Sprintf("  %s %s", c.Status, c.Path))
 	}
+	a.printReviewDetail(&res.Review)
 	for _, d := range res.Dropped {
 		a.warn(d + " is held back from the sandbox; its change is not brought back")
 	}
@@ -1122,14 +1118,29 @@ func notBroughtBack(name string, kind workspace.CopyKind) string {
 // wrote and returns the question that confirms bringing sensitive changes
 // back: the same at a session's end and for `sandbox pull`.
 func (a *App) bringBackQuestion(r *workspace.ReviewReport) string {
-	secrets := r.SecretPaths()
-	if len(secrets) > 0 {
-		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
-		if riskLine(r) == "" {
-			return "Some changes hold what looks like a secret. Bring them back anyway?"
-		}
+	if len(r.SecretPaths()) > 0 && riskLine(r) == "" {
+		return "Some changes hold what looks like a secret. Bring them back anyway?"
 	}
 	return "Some changes can run code on this machine. Bring them back anyway?"
+}
+
+// printReviewDetail prints a review's flag and scanner finding lines and the
+// warning about what looks like a secret the sandbox wrote: the same for a
+// mounted project's review and a copy's review, pull and end of session,
+// where they showed only at `pull --apply` or in --output json (GAP-0237).
+func (a *App) printReviewDetail(r *workspace.ReviewReport) {
+	if r == nil {
+		return
+	}
+	for _, f := range mergeFlags(r.Flags) {
+		a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), f.name, strings.Join(f.details, "; ")))
+	}
+	for _, f := range r.Findings {
+		a.line(findingLine(f))
+	}
+	if secrets := r.SecretPaths(); len(secrets) > 0 {
+		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
+	}
 }
 
 // riskLine is the review's warning about changed files that can run code

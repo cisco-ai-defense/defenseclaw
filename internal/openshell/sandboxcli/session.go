@@ -1537,6 +1537,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}
 	s.printAsks(after)
+	a.printReviewDetail(&pull.Review)
 	for _, b := range pull.Blocking {
 		a.warn(b)
 	}
