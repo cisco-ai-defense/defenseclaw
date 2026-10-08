@@ -268,6 +268,13 @@ dc_usage() {
 }
 
 dc_parse_args() {
+    # Intune's Linux agent invokes sh /proc/self/fd/N /proc/self/fd/N.
+    # The second descriptor is its script argument, not an operator flag.
+    case "${1:-}" in
+        /proc/self/fd/*)
+            case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
+            ;;
+    esac
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --action)
@@ -291,13 +298,6 @@ dc_parse_args() {
             --config-stdin) DC_CONFIG_STDIN=1; shift ;;
             --secret-name) DC_SECRET_NAME=${2:-}; shift 2 ;;
             --secret-file) DC_SECRET_FILE=${2:-}; shift 2 ;;
-    # Intune's Linux agent invokes sh /proc/self/fd/N /proc/self/fd/N.
-    # The second descriptor is its script argument, not an operator flag.
-    case "${1:-}" in
-        /proc/self/fd/*)
-            case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
-            ;;
-    esac
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
             --https-proxy) DC_HTTPS_PROXY=${2:-}; shift 2 ;;
             --log) DC_LOG=${2:-}; shift 2 ;;
@@ -497,7 +497,7 @@ dc_install_package() {
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "dpkg failed: $output"
-                fi
+                done
                 case "$installed" in
                     "install ok installed "*) dc_package_step "$(dc_package_release_version "${installed#install ok installed }")" "$(dc_package_release_version "$version")" ;;
                     *) dc_package_step "" "$(dc_package_release_version "$version")" ;;
@@ -518,7 +518,7 @@ dc_install_package() {
                 previous=""
                 if rpm -q "$DC_LINUX_PACKAGE" >/dev/null 2>&1; then
                     previous=$(dc_package_release_version "$installed")
-                done
+                fi
                 # rpm -U refuses a downgrade, which keeps an older package
                 # from silently replacing a newer deployment.
                 attempt=1
@@ -533,7 +533,7 @@ dc_install_package() {
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "rpm failed: $output"
-                fi
+                done
                 dc_package_step "$previous" "$(dc_package_release_version "$version")"
             fi
             ;;
@@ -554,7 +554,7 @@ dc_install_package() {
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "another installation is running; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "installer failed: $output"
-                done
+                fi
                 dc_package_step "$installed" "$version"
             fi
             ;;
@@ -660,8 +660,24 @@ dc_run_lifecycle() {
     return "$status"
 }
 
+dc_run_lifecycle_retry() {
+    attempt=1
+    while :; do
+        status=0
+        dc_run_lifecycle "$@" || status=$?
+        [ "$status" = 75 ] && [ "$attempt" -lt 3 ] || break
+        dc_log "lifecycle busy; retry $attempt of 2"
+        attempt=$((attempt + 1))
+        sleep 10
+    done
+    return "$status"
+}
+
 dc_main() {
+    dc_layout
+    dc_log "start action=$DC_ACTION"
     dc_parse_args "$@"
+    dc_layout
     platform=$(dc_platform)
     [ "$platform" = "$DC_SCRIPT_OS" ] ||
         dc_fail_result "$DC_EXIT_INVALID" mdm_wrong_platform "this copy of the wrapper is for $DC_SCRIPT_OS, not $platform"
@@ -683,19 +699,6 @@ dc_main() {
         dc_run_lifecycle "$DC_GATEWAY" "$DC_ACTION" || status=$?
         dc_emit_result
         return "$status"
-dc_run_lifecycle_retry() {
-    attempt=1
-    while :; do
-        status=0
-        dc_run_lifecycle "$@" || status=$?
-        [ "$status" = 75 ] && [ "$attempt" -lt 3 ] || break
-        dc_log "lifecycle busy; retry $attempt of 2"
-        attempt=$((attempt + 1))
-        sleep 10
-    done
-    return "$status"
-}
-
     fi
 
     config=""
@@ -723,10 +726,7 @@ dc_run_lifecycle_retry() {
         [ -s "$secret" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
     fi
 
-    dc_layout
-    dc_log "start action=$DC_ACTION"
     DC_CHANNEL_FLAG=""
-    dc_layout
     DC_PAYLOAD_GATEWAY=""
     if [ -n "$DC_SOURCE$DC_SOURCE_URL" ]; then
         dc_stage_source

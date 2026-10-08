@@ -160,11 +160,11 @@ dc_report() { # <detected 0|1> <value> <reason>
         value) printf '%s\n' "$value"; exit 0 ;;
         jamf) printf '<result>%s</result>\n' "$value"; exit 0 ;;
     esac
-    if [ "$detected" = 1 ]; then
     if [ "$value" = busy ]; then
         printf 'defenseclaw detect: lifecycle is busy; retry later\n' >&2
         exit 75
     fi
+    if [ "$detected" = 1 ]; then
         printf 'DefenseClaw Enterprise %s\n' "$value"
         exit 0
     fi
@@ -172,17 +172,17 @@ dc_report() { # <detected 0|1> <value> <reason>
     exit 1
 }
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --min-version) DC_MIN_VERSION=${2:-}; DC_MIN_VERSION_SET=1; shift 2 ;;
-        --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
-        --format) DC_FORMAT=${2:-}; shift 2 ;;
 # Intune's Linux agent may repeat its /proc/self/fd/N script descriptor.
 case "${1:-}" in
     /proc/self/fd/*)
         case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
         ;;
 esac
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --min-version) DC_MIN_VERSION=${2:-}; DC_MIN_VERSION_SET=1; shift 2 ;;
+        --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
+        --format) DC_FORMAT=${2:-}; shift 2 ;;
         -h | --help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'defenseclaw detect: unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
