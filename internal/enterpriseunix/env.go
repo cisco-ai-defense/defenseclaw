@@ -71,6 +71,7 @@ var commandCandidates = map[string][]string{
 	"dpkg":             {"/usr/bin/dpkg", "/bin/dpkg"},
 	"rpm":              {"/usr/bin/rpm", "/bin/rpm"},
 	"restorecon":       {"/usr/sbin/restorecon", "/sbin/restorecon"},
+	"semodule":         {"/usr/sbin/semodule", "/sbin/semodule"},
 	"launchctl":        {"/bin/launchctl"},
 	"dscl":             {"/usr/bin/dscl"},
 	"pkgutil":          {"/usr/sbin/pkgutil"},

@@ -1298,7 +1298,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		l.revokeDeletedAccounts(ctx)
 	}
 	if env.GOOS == "linux" {
-		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
+		// The module labels the hook socket; restorecon then relabels the
+		// socket already in place (GAP-0772).
+		l.ensureSELinuxModule(ctx)
+		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir), env.P(env.Layout.HookSocketDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
 			r.AddWarning("selinux_relabel", err.Error())
 		}
 	}
@@ -2269,6 +2272,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		disableKeptDefinitions()
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	l.removeSELinuxModule(ctx)
 	// Runtime leftovers of the stopped services: the sensor helper's socket
 	// directory and the gateway's plugin cache (its TempDir is /tmp: the
 	// service manager sets no TMPDIR).
@@ -2279,7 +2283,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories.
 	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
-	// The managed OpenCode plugin left with the recorded files above.
+	// The managed OpenCode plugin left with the recorded files above, or
+	// leaves with the deb or rpm that ships it.
 	_ = removeDirIfEmpty(env.P(openCodePluginDir(env.Layout)))
 	_ = removeDirIfEmpty(env.P(filepath.Dir(env.Layout.VendorPolicyDir)))
 	if env.GOOS == "darwin" {

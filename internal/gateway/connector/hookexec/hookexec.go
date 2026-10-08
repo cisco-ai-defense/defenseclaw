@@ -69,7 +69,15 @@ var (
 	// cause is that the managed gateway service is not running (Windows SCM
 	// reports it stopped). The hook still fails closed.
 	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
+	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
+	// where SELinux kept this account from the hook socket.
+	errManagedHookSocketSELinuxDenied = errors.New("SELinux denied this account access to the DefenseClaw hook socket")
 )
+
+// managedHookSocketSELinuxDeniedReason is the hook-failure reason of a Unix
+// standalone hook that SELinux kept from the hook socket (a confined user on
+// a host without the DefenseClaw SELinux module).
+const managedHookSocketSELinuxDeniedReason = "enterprise_managed_hook_socket_selinux_denied"
 
 const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
 
@@ -1701,6 +1709,9 @@ func managedPeerFailureReason(opts Options, err error) string {
 	if (opts.ExplainUnenrolledAccount || managedStandaloneHook(opts)) && errors.Is(err, errManagedGatewayNotRunning) {
 		return managedGatewayNotRunningReason
 	}
+	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketSELinuxDenied) {
+		return managedHookSocketSELinuxDeniedReason
+	}
 	return managedGatewayPeerUnverifiedReason
 }
 
@@ -1785,6 +1796,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 			// The service is also stopped while a lifecycle transaction is
 			// pending, which starting it does not fix (GAP-0509).
 			"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do."
+	case reason == managedHookSocketSELinuxDeniedReason:
+		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
+			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."
 	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":

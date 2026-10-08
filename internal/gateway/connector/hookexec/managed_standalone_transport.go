@@ -63,6 +63,9 @@ func managedStandaloneHTTPClient(
 			// No socket: the gateway service and its socket unit are stopped.
 			return nil, standaloneGatewayStoppedError(err)
 		}
+		if errors.Is(err, os.ErrPermission) && selinuxActive() {
+			return nil, standaloneSELinuxDeniedError(err)
+		}
 		return nil, standalonePeerError("%v", err)
 	}
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
@@ -76,6 +79,9 @@ func managedStandaloneHTTPClient(
 				if err != nil {
 					if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
 						return nil, standaloneGatewayStoppedError(err)
+					}
+					if errors.Is(err, syscall.EACCES) && selinuxActive() {
+						return nil, standaloneSELinuxDeniedError(err)
 					}
 					return nil, err
 				}
@@ -144,6 +150,22 @@ func validateStandaloneHookSocketPath(path string, serviceUID int) error {
 // instead of being sent to socket ownership checks (GAP-0581).
 func standaloneGatewayStoppedError(err error) error {
 	return fmt.Errorf("%w: %w: %v", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning, err)
+}
+
+// selinuxActive reports whether the kernel runs SELinux.
+func selinuxActive() bool {
+	_, err := os.Stat("/sys/fs/selinux/enforce")
+	return err == nil
+}
+
+// standaloneSELinuxDeniedError is a hook socket the account may not stat or
+// connect to while SELinux is on: the account is SELinux-confined (user_u,
+// staff_u) and the DefenseClaw SELinux module is not loaded. Every user may
+// reach the socket otherwise (mode 0666 in a 0755 directory), so the user is
+// told the cause instead of "the gateway is not available" (GAP-0772). The
+// hook still fails closed.
+func standaloneSELinuxDeniedError(err error) error {
+	return fmt.Errorf("%w: %w: %v", errManagedGatewayPeerUnverified, errManagedHookSocketSELinuxDenied, err)
 }
 
 func standalonePeerError(format string, args ...interface{}) error {
