@@ -48,8 +48,10 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 				facts.Realm = RealmOf(principal)
 			}
 		}
-		if len(fields) >= 4 && fields[1] == "NetLogon" && facts.Domain == "" {
-			facts.Domain = strings.TrimSpace(fields[3])
+		// ;NetLogon;bob;CORP names the account's NetBIOS domain: the
+		// DOMAIN\user namespace, not its DNS domain (GAP-0365).
+		if len(fields) >= 4 && fields[1] == "NetLogon" && facts.AccountDomain == "" {
+			facts.AccountDomain = macOSNetBIOSDomain(fields[3])
 		}
 	}
 	node := ""
@@ -64,6 +66,15 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 		// for a forest-wide search node, which names no domain.
 		if parts := strings.Split(node, "/"); len(parts) >= 4 && !strings.ContainsAny(parts[len(parts)-1], " \t") {
 			facts.Domain = parts[len(parts)-1]
+			// The middle part is the NetBIOS name of the domain the Mac is
+			// bound to, so it is the account's DOMAIN\user namespace only
+			// when the account is in that domain: the one macOS lists the
+			// account's groups in (DCLAB\group), and a users entry
+			// DCLAB\user names (GAP-0635). An account of another domain of
+			// the forest keeps none.
+			if facts.AccountDomain == "" && adDomain != "" && strings.EqualFold(facts.Domain, adDomain) {
+				facts.AccountDomain = macOSNetBIOSDomain(parts[2])
+			}
 		}
 	case strings.HasPrefix(node, "/LDAPv3/"):
 		facts.Directory = DirectoryLDAP
@@ -72,7 +83,15 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 		facts.Directory = DirectoryActiveDirectory
 	}
 	if facts.Directory == DirectoryActiveDirectory && facts.Domain == "" {
-		facts.Domain = adDomain
+		// A network account has no original node: its Kerberos realm names
+		// its DNS domain, else the domain the Mac is bound to.
+		facts.Domain = strings.ToLower(facts.Realm)
+		if facts.Domain == "" {
+			facts.Domain = adDomain
+		}
+	}
+	if facts.Directory != DirectoryActiveDirectory {
+		facts.AccountDomain = ""
 	}
 	if upn := platformSSOLoginUPN(attrs["AltSecurityIdentities"]); upn != "" && facts.Directory == "" {
 		facts.Directory = platformSSOProvider(in.AppSSO)
@@ -118,6 +137,21 @@ func parseDSCLAttributes(output string) map[string][]string {
 		attrs[current] = append(attrs[current], strings.Fields(rest)...)
 	}
 	return attrs
+}
+
+// macOSNetBIOSDomain returns name when it can be a NetBIOS domain name (no
+// separators, spaces or controls, at most 15 characters), else "".
+func macOSNetBIOSDomain(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 15 || strings.ContainsAny(name, "\\/@.:;*?\"<>| \t") {
+		return ""
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return name
 }
 
 func parseDSConfigADDomain(output string) string {

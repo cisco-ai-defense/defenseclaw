@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -998,6 +999,18 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 	if userEntryMatches(&subject, `CORP\\alice`) {
 		t.Fatal("a DNS first label selected another account domain")
+	}
+	// macOS: the guardian record carries the NetBIOS domain the AD node
+	// names, so DCLAB\user matches the mobile account (GAP-0635).
+	mac := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "2092147702", UserName: "dcad-w2i-c",
+		Directory: mergeSpoolFacts(useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: time.Now()},
+			enterprisehooks.IdentitySpoolRecord{AccountDomain: "DCLAB", Facts: useridentity.DirectoryFacts{
+				Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test", Principal: "dcad-w2i-c@dclab.test",
+			}}),
+	}, true)
+	if !userEntryMatches(&mac, "DCLAB\\dcad-w2i-c") || userEntryMatches(&mac, "OTHERDOM\\dcad-w2i-c") {
+		t.Fatalf("macOS AD subject %+v: DCLAB\\user must match and OTHERDOM\\user must not", mac)
 	}
 }
 

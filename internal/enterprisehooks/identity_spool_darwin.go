@@ -44,11 +44,13 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	if in.DSCL == "" {
 		return IdentitySpoolRecord{}, errors.New("dscl returned no record")
 	}
+	facts := useridentity.ParseMacOSDirectoryFacts(in, now)
 	return IdentitySpoolRecord{
-		Key:       strconv.Itoa(account.UID),
-		User:      name,
-		UpdatedAt: now,
-		Facts:     useridentity.ParseMacOSDirectoryFacts(in, now),
+		Key:           strconv.Itoa(account.UID),
+		User:          name,
+		UpdatedAt:     now,
+		AccountDomain: facts.AccountDomain,
+		Facts:         facts,
 	}, nil
 }
 
