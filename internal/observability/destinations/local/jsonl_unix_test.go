@@ -430,3 +430,33 @@ func TestSecureMoveNoReplaceNeverClobbersRacedBackup(t *testing.T) {
 		t.Fatalf("source changed: %q, %v", got, err)
 	}
 }
+
+// A file the gateway cannot open yet disables only this destination: the
+// adapter is prepared, deliveries retry the file, and the first delivery
+// after the file becomes writable lands (GAP-0703). Refusing it stopped the
+// whole gateway at start.
+func TestJSONLUnwritableFileAtStartDefersTheOpen(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a read-only file for writing")
+	}
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, nil, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewJSONL(JSONLConfig{Path: path, MaxSizeMB: 1})
+	if err != nil || !adapter.OpenDeferred() {
+		t.Fatalf("NewJSONL on an unwritable file = %v, deferred %v; want a prepared adapter", err, adapter.OpenDeferred())
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := newTestDispatcher(t, "jsonl-deferred", adapter, 8*1024*1024, 4)
+	enqueue(t, dispatcher, "jsonl-deferred-a", `{"index":1}`)
+	drainAndCloseDispatcher(t, dispatcher)
+	if err := adapter.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(path); err != nil || string(body) != "{\"index\":1}\n" {
+		t.Fatalf("file after the open succeeded = %q, %v", body, err)
+	}
+}
