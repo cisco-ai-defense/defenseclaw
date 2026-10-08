@@ -6623,6 +6623,7 @@ def setup_guardrail(
         proxy_active = _guarded_proxy_connector(gc)
         if proxy_active and explicit_connector not in _PROXY_BACKED_CONNECTORS:
             _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
+        _refuse_guardrail_for_connector_not_set_up(gc, explicit_connector)
     elif (
         non_interactive
         and not app.cfg.has_connector_configured()
@@ -12772,6 +12773,31 @@ def _guarded_proxy_connector(gc) -> str:
         return ""
     single = normalize_connector((getattr(gc, "connector", "") or "").strip())
     return single if single in _PROXY_BACKED_CONNECTORS else ""
+
+
+def _refuse_guardrail_for_connector_not_set_up(gc, connector: str) -> None:
+    """Fail when ``setup guardrail --connector X`` names a connector the roster lacks.
+
+    GAP-0371: on an install whose ``guardrail.connectors`` roster held only
+    Codex, ``--connector claudecode`` repointed ``guardrail.connector`` without
+    adding Claude Code to the roster, and the gateway's restart dropped the
+    Codex hook registration while status still listed Codex. ``setup
+    <connector>`` adds a connector to the roster (or replaces it with
+    ``--replace``); this command tunes one that is on it. A single-connector
+    install without a roster keeps its switch, and proxy connectors keep their
+    own rules.
+    """
+    roster = {normalize_connector(name) for name in (getattr(gc, "connectors", None) or {}) if name.strip()}
+    if not roster or connector in roster or connector in _PROXY_BACKED_CONNECTORS:
+        return
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    slug = "claude-code" if connector == "claudecode" else connector
+    raise click.ClickException(
+        f"{label} is not set up here (set up: {', '.join(sorted(roster))}), so setup guardrail has no "
+        f"{label} guardrail to configure. No changes made. Add it next to them with "
+        f"'defenseclaw setup {slug}' (or switch to it with 'defenseclaw setup {slug} --replace'), "
+        "then run this again."
+    )
 
 
 def _refuse_hook_setup_over_proxy_connector(connector: str, proxy: str) -> None:

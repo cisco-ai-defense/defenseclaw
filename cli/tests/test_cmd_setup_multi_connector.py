@@ -981,6 +981,25 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertFalse(os.path.exists(self.cfg_path))
 
+    # GAP-0371: with only Codex on the roster, '--connector claudecode'
+    # repointed guardrail.connector and the restart dropped Codex's hooks.
+    def test_setup_guardrail_for_a_connector_off_the_roster_is_refused(self):
+        self._seed_map("codex")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "action"],
+                obj=self.app,
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Claude Code is not set up here (set up: codex)", result.output)
+        self.assertIn("'defenseclaw setup claude-code'", result.output)
+        restart.assert_not_called()
+        self.assertEqual(sorted(self.app.cfg.guardrail.connectors), ["codex"])
+        self.assertNotEqual(self.app.cfg.guardrail.connector, "claudecode")
+        self.assertFalse(os.path.exists(self.cfg_path))
+
     def test_hook_setup_replace_over_guarded_openclaw_confirms(self):
         self._seed_single("openclaw")
         self.app.cfg.guardrail.enabled = True
