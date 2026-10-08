@@ -1711,6 +1711,10 @@ func TestSandboxModelErrorKeepsTheClassAndStatus(t *testing.T) {
 			"last_assistant_message": "Please run /login · API Error: 401 Invalid bearer token"}, "authentication_failed", 401},
 		{"StopFailure", map[string]interface{}{"error": "Bad class!", "error_details": `API Error: 403 {"Message":"denied"}`}, "unknown", 403},
 		{"StopFailure", map[string]interface{}{"error": "server_error"}, "server_error", 0},
+		// GAP-0354: OpenShell's refusal of a conversation that carries a
+		// credential placeholder is no rejected key.
+		{"StopFailure", map[string]interface{}{"error": "authentication_failed", "last_assistant_message": "Please run /login · API Error: 403 " +
+			"A credential placeholder in the request body cannot be forwarded. Remove the reference from conversation history"}, "credential_placeholder", 403},
 		{"Stop", map[string]interface{}{"error": "authentication_failed", "last_assistant_message": "API Error: 401"}, "", 0},
 	} {
 		class, status := sandboxModelError(agentHookRequest{HookEventName: c.event, Payload: c.payload})

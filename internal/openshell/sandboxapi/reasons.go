@@ -96,8 +96,25 @@ func LookupBlockedText(token, host string) (string, bool) {
 	if metadataOrLinkLocal(host) {
 		return metadataText, true
 	}
+	if PlaceholderRefusal(token) {
+		return placeholderText, true
+	}
 	return LookupReasonText(token)
 }
+
+// PlaceholderRefusal reports OpenShell's refusal of a request whose body
+// carries a credential placeholder, whose reason reads "POST request body
+// credential traffic denied for HOST:PORT". A harness sends its
+// conversation with every model request, and its hooks send parts of it:
+// once the conversation shows a placeholder (an `env` output), OpenShell
+// refuses its requests while the key, the sandbox token and DefenseClaw are
+// fine (GAP-0354, GAP-0355).
+func PlaceholderRefusal(reason string) bool {
+	return strings.Contains(strings.ToLower(reason), "request body credential traffic denied")
+}
+
+// placeholderText is LookupBlockedText's words for a PlaceholderRefusal.
+const placeholderText = "OpenShell forwards no request whose body carries a sandbox credential placeholder"
 
 // BlockedText is LookupBlockedText's words; an unknown token reads with
 // spaces for its underscores.

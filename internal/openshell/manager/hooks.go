@@ -136,11 +136,14 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		if prompt {
 			b.hooks.promptBlocked++
 		}
-		rejected := b.observeModelAnswerLocked(d, m.now())
+		rejected, placeholder := b.observeModelAnswerLocked(d, m.now())
 		m.mu.Unlock()
 		if rejected != "" {
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Event: d.Event,
 				Severity: "MEDIUM", Reason: sandboxapi.ReasonModelKeyRejected, Message: "⚠ " + rejected})
+		}
+		if placeholder {
+			m.feed.Publish(placeholderFinding(d.SandboxName))
 		}
 		if blocked {
 			// A blocked prompt (or other non-tool hook event) is a block

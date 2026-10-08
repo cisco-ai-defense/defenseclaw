@@ -92,6 +92,11 @@ type session struct {
 	// OpenShell gateway restarted under it, for one) while the sandbox
 	// went on running: it is left running for a reattach.
 	lost bool
+	// placeholder is set when OpenShell refused a request of the session's
+	// conversation that carried a credential placeholder
+	// (sandboxapi.PlaceholderRefusal): the conversation cannot go on, so the
+	// end offers a new one instead of --continue (GAP-0354).
+	placeholder bool
 	// diskFull is set when a copy's pull at the end of the session failed
 	// on the sandbox's own full disk (App.ownDiskFull): a MicroVM stopped
 	// like that cannot start again, so it is left running for a pull once
@@ -566,7 +571,9 @@ func (s *session) askNotice(ctx context.Context, ev sandboxapi.ActivityEvent) {
 // apart. Where the port is what is blocked (portBlock), it shows, once per
 // port.
 func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
-	if ev.Host == "" || ev.Reason == harnessFetchReason {
+	// A refusal of a request that carried a credential placeholder blocks no
+	// site: its finding says what it is (GAP-0354).
+	if ev.Host == "" || ev.Reason == harnessFetchReason || sandboxapi.PlaceholderRefusal(ev.Reason) {
 		return
 	}
 	where, key := ev.Host, "block "+ev.Host
@@ -905,6 +912,9 @@ func (s *session) end(ctx context.Context) error {
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
 		a.warn(elsewhere)
+	}
+	if at := after.Hooks.PlaceholderRefusedAt; !at.IsZero() && !s.startedAt.IsZero() && !at.Before(s.startedAt) {
+		s.placeholder = true
 	}
 	s.printCLIErr(elsewhere != "")
 	// While the sandbox still runs: the review may stop it.
@@ -1412,11 +1422,17 @@ func (s *session) continueHint() {
 		// conversation may be there.
 		return
 	}
+	a := s.app
+	if s.placeholder {
+		// --continue would resume the conversation OpenShell refuses.
+		a.line(a.style("→", ansiCyan, ansiBold) + " start a new conversation: " + CommandName + " connect " + s.sb.Name +
+			" (this one holds a sandbox credential placeholder, so OpenShell refuses its requests; --continue would resume it)")
+		return
+	}
 	args, ok := continueArgs[s.spec.Name]
 	if !ok {
 		return
 	}
-	a := s.app
 	line := "continue this conversation: " + CommandName + " connect " + s.sb.Name + " -- " + args
 	if own, ok := ownResumeHint[s.spec.Name]; ok {
 		wrapped := strings.Fields(own)[0] == s.spec.Command && a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name)

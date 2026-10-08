@@ -239,6 +239,9 @@ type hookStats struct {
 	// last rejection (observeModelAnswerLocked).
 	modelRejected   string
 	modelRejectedAt time.Time
+	// placeholderAt is when OpenShell last refused a request whose body
+	// carried a credential placeholder (notePlaceholderLocked).
+	placeholderAt time.Time
 }
 
 // hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
@@ -871,6 +874,9 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
 		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,
 		NoHookYet: !b.reach.since.IsZero() && b.reach.noHookYet,
+	}
+	if b.placeholderInSessionLocked() {
+		v.Hooks.PlaceholderRefusedAt = b.hooks.placeholderAt
 	}
 	for _, a := range m.approvals {
 		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {

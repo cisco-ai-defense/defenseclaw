@@ -311,6 +311,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	if sb.Hooks.ModelKeyRejected != "" {
 		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
 	}
+	if at := sb.Hooks.PlaceholderRefusedAt; !at.IsZero() {
+		row("Conversation", a.style(sandboxapi.PlaceholderConversationText(sb.Name)+" (last refused "+at.Local().Format("15:04:05")+")", ansiRed))
+	}
 	failed := ""
 	if n := sb.Egress.UpstreamFailed; n > 0 {
 		// Allowed, and the host did not take them: an outage, not a block.

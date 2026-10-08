@@ -722,6 +722,12 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.mu.Unlock()
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.HookRequests += 9; sb.Hooks.ToolCalls += 7 })
 		}, want: []string{"Session ended · 7 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
+		// GAP-0354: OpenShell refuses a conversation that holds a credential
+		// placeholder, so the end offers a new one, not --continue.
+		{name: "a conversation that holds a credential placeholder", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.PlaceholderRefusedAt = ta.Now() })
+		}, want: []string{"start a new conversation: defenseclaw sandbox connect " + sbName + " (this one holds a sandbox credential placeholder"},
+			not: []string{cont}},
 		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
 			ta.daemon.mu.Lock()
 			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)

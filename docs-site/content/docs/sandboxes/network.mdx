@@ -20,7 +20,12 @@ watches all three:
   `HTTP_PROXY`. The proxy decides and logs every site.
 - **Model calls** go to the harness's model provider directly through
   OpenShell, which adds the real credential outside the sandbox. The sandbox
-  only ever holds a placeholder. This channel bypasses the egress proxy:
+  only ever holds a placeholder, and OpenShell forwards no request whose
+  body carries one: once a conversation shows a placeholder (the agent ran
+  `env`, say), every later request of that conversation is refused, its
+  model calls and its hooks alike. The key is fine; start a new
+  conversation (`defenseclaw sandbox connect <name>`, without
+  `--continue`). This channel bypasses the egress proxy:
   OpenShell opens the model hosts to the harness's own program only, and
   for an npm or Python harness that program is its `node` or `python`
   interpreter, so a script the agent runs with it reaches the model hosts

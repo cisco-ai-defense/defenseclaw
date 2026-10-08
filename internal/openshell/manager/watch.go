@@ -305,6 +305,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		m.noteSyntheticAddress(b, r.Message)
 	case ocsf.ClassNetwork, ocsf.ClassHTTP:
 		host := m.namedHost(b, triage.NormalizeHost(r.Host), r.Port)
+		if r.Denied() && sandboxapi.PlaceholderRefusal(r.Reason) {
+			m.notePlaceholderRefusal(b)
+		}
 		if host == openshellHostAlias {
 			m.hostAliasEvent(ctx, b, r, at, harnessName)
 			return
@@ -661,6 +664,12 @@ func ownHostName(host, recorded string) bool {
 func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time, harnessName string) {
 	switch r.Port {
 	case m.opts.IngressPort:
+		if r.Denied() && sandboxapi.PlaceholderRefusal(r.Reason) {
+			// The conversation's hook post carried a credential placeholder:
+			// the sandbox's policy allows the ingress, and the token reaches
+			// it (notePlaceholderRefusal says what it is).
+			return
+		}
 		outcome := hookConnAllowed
 		switch {
 		case !r.Denied():

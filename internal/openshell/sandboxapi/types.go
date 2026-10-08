@@ -377,6 +377,11 @@ type HookCoverage struct {
 	// hands it a new key. ModelKeyRejectedAt is the last rejection.
 	ModelKeyRejected   string    `json:"model_key_rejected,omitempty"`
 	ModelKeyRejectedAt time.Time `json:"model_key_rejected_at,omitzero"`
+	// PlaceholderRefusedAt is when OpenShell last refused a request of the
+	// sandbox's session whose body carried a credential placeholder
+	// (PlaceholderRefusal): the conversation that shows one cannot go on
+	// (PlaceholderConversationText). A turn that ends normally clears it.
+	PlaceholderRefusedAt time.Time `json:"placeholder_refused_at,omitzero"`
 	// IngressRefused counts the hook connections and requests to the
 	// DefenseClaw ingress that OpenShell refused (the sandbox's network
 	// policy does not allow its port or path).
@@ -1166,6 +1171,24 @@ const ReasonUpstreamFailed = "upstream_failed"
 // ReasonModelKeyRejected is the Reason of the finding event a sandbox gets
 // when the model API rejected its model credential (HookCoverage.ModelKeyRejected).
 const ReasonModelKeyRejected = "model_credential_rejected"
+
+// ReasonPlaceholderRefused is the Reason of the finding event a sandbox gets
+// when OpenShell refused a request of its conversation that carried a
+// credential placeholder (PlaceholderRefusal, HookCoverage.PlaceholderRefusedAt).
+const ReasonPlaceholderRefused = "credential_placeholder_refused"
+
+// ModelErrorPlaceholder is the model error class of a turn that ended on
+// OpenShell's refusal of a request that carried a credential placeholder
+// (Claude Code shows it as an HTTP 403, like a rejected key).
+const ModelErrorPlaceholder = "credential_placeholder"
+
+// PlaceholderConversationText says what PlaceholderRefusal means for sandbox
+// name's conversation, and what to do.
+func PlaceholderConversationText(name string) string {
+	return "OpenShell refuses this conversation's requests, to the model and to DefenseClaw's hooks: the conversation holds a sandbox " +
+		"credential placeholder (an `env` output shows them), and OpenShell forwards no request whose body carries one. The model key, " +
+		"the sandbox token and DefenseClaw are fine: start a new conversation (`defenseclaw sandbox connect " + name + "`, without --continue)"
+}
 
 // HooksUnreachableWarning opens every warning about hooks that do not
 // reach DefenseClaw; HooksDoctorHint closes it.
