@@ -679,3 +679,65 @@ def test_operator_unblock_loaded_before_concurrent_block(tmp_path, monkeypatch):
 
     persisted = config_module.load(data_dir=str(tmp_path))
     assert not persisted.asset_policy.skill.denied
+
+
+def test_secure_client_v8_scanner_defaults_stay_on_previous_policy(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\nenterprise: {profile: secure_client}\n"
+        "llm: {model: sample-model}\n"
+    )
+    scanner = config_module.load(data_dir=str(tmp_path)).scanners.skill_scanner
+    assert scanner.use_llm is False
+    assert scanner.policy == "permissive"
+
+
+def test_secure_client_v8_plaintext_virustotal_key_is_resolved(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("VIRUSTOTAL_API_KEY", raising=False)
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\nenterprise: {profile: secure_client}\n"
+        "scanners: {skill_scanner: {use_virustotal: true, virustotal_api_key: sample-key}}\n"
+    )
+    scanner = config_module.load(data_dir=str(tmp_path)).scanners.skill_scanner
+    assert scanner.resolved_virustotal_api_key() == "sample-key"
+
+
+def test_empty_plugin_first_party_list_survives_config_save(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path)
+    cfg = config_module.load(data_dir=str(tmp_path))
+    cfg.admission.plugin.first_party_allow_list = []
+    cfg.save()
+    assert yaml.safe_load(open(path, encoding="utf-8"))["admission"]["plugin"]["first_party_allow_list"] == []
+    assert config_module.load(data_dir=str(tmp_path)).admission.plugin.first_party_allow_list == []
+
+
+def test_empty_skill_first_party_list_survives_config_save(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path)
+    cfg = config_module.load(data_dir=str(tmp_path))
+    cfg.admission.skill.first_party_allow_list = []
+    cfg.save()
+    assert yaml.safe_load(open(path, encoding="utf-8"))["admission"]["skill"]["first_party_allow_list"] == []
+    assert config_module.load(data_dir=str(tmp_path)).admission.skill.first_party_allow_list == []
+
+
+def test_config_actor_uses_os_identity_when_environment_is_forged(monkeypatch):
+    if os.name == "nt":
+        expected = config_writer.current_actor().removeprefix("cli:")
+    else:
+        import pwd
+
+        expected = pwd.getpwuid(os.geteuid()).pw_name
+    monkeypatch.setenv("LOGNAME", "pretend")
+    monkeypatch.setenv("USER", "pretend")
+    assert config_writer.current_actor() == f"cli:{expected}"

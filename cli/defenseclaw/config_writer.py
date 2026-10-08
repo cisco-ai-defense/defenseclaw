@@ -40,7 +40,6 @@ actor is :data:`ACTOR_LIFECYCLE` or :data:`ACTOR_MIGRATION`
 
 from __future__ import annotations
 
-import getpass
 import hashlib
 import json
 import logging
@@ -210,8 +209,19 @@ def read_generation_state(config_path: str | os.PathLike[str]) -> GenerationStat
 def current_actor(prefix: str = ACTOR_PREFIX_CLI) -> str:
     """Return ``prefix`` + the OS user (``cli:alice``)."""
     try:
-        name = getpass.getuser()
-    except Exception:  # noqa: BLE001 - no user database entry
+        if os.name == "nt":
+            import ctypes
+
+            name_buffer = ctypes.create_unicode_buffer(256)
+            size = ctypes.c_uint32(len(name_buffer))
+            if not ctypes.windll.advapi32.GetUserNameW(name_buffer, ctypes.byref(size)):
+                raise OSError("GetUserNameW failed")
+            name = name_buffer.value
+        else:
+            import pwd
+
+            name = pwd.getpwuid(os.geteuid()).pw_name
+    except (ImportError, OSError, KeyError, AttributeError):
         name = ""
     return prefix + (name or "unknown")
 

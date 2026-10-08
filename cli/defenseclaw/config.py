@@ -1435,9 +1435,10 @@ class SkillScannerConfig:
     # ``Config.resolve_llm("scanners.skill")``.
     llm: LLMConfig = field(default_factory=LLMConfig)
     # config_version 9 scanner model (empty = unset; see the schema). The v8
-    # keys binary, use_virustotal, use_aidefense and virustotal_api_key[_env]
-    # are not modeled: the loader folds a config_version 8 source's toggles
-    # into ``analyzers`` (see _merge_skill_scanner_analyzers).
+    # keys binary, use_virustotal, use_aidefense and virustotal_api_key_env
+    # are folded into ``analyzers`` for a version 8 source. Keep the literal
+    # v8 key for Secure Client scanning; version 9 never writes it.
+    virustotal_api_key: str = ""
     policy_file: AssetFileRef = field(default_factory=AssetFileRef)
     judge_source: str = ""
     fail_on_severity: str = ""
@@ -1449,7 +1450,10 @@ class SkillScannerConfig:
         """Return the VirusTotal key from the variable ``analyzers.virustotal.api_key_env``
         names; an empty name falls back to ``VIRUSTOTAL_API_KEY``, the gateway's default
         and the name ``defenseclaw keys set`` stores (GAP-1936)."""
-        return os.environ.get(self.analyzers.virustotal.api_key_env or "VIRUSTOTAL_API_KEY", "")
+        return (
+            os.environ.get(self.analyzers.virustotal.api_key_env or "VIRUSTOTAL_API_KEY", "")
+            or self.virustotal_api_key
+        )
 
 
 @dataclass
@@ -3979,6 +3983,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
     _serialize_v9_scanner_keys(scanners)
+    if cfg._source_config_version != FIRST_CURRENT_CONFIG_VERSION:
+        scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
@@ -4091,6 +4097,9 @@ def _prune_unset(value: Any, *, drop_false: bool = False) -> Any:
             pruned = _prune_unset(item, drop_false=drop_false)
             if pruned is not _V8_MISSING:
                 out[key] = pruned
+            elif key == "first_party_allow_list" and item == []:
+                # An explicit empty list disables Go's built-in exemptions.
+                out[key] = []
         return out or _V8_MISSING
     if isinstance(value, list):
         items = [_prune_unset(item, drop_false=drop_false) for item in value]
@@ -6309,6 +6318,8 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("inspect_llm", "api_key", "LLM_API_KEY")
     if cfg.cisco_ai_defense.api_key:
         _warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
+    if cfg.scanners.skill_scanner.virustotal_api_key:
+        _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
 
 
 #: The Linux and macOS managed standalone layouts: config path -> the
@@ -6411,14 +6422,19 @@ def load(
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
         scanners=ScannersConfig(
             skill_scanner=SkillScannerConfig(
-                use_llm=ss_raw.get("use_llm", True),
+                use_llm=ss_raw.get("use_llm", source_config_version != FIRST_CURRENT_CONFIG_VERSION),
                 use_behavioral=ss_raw.get("use_behavioral", False),
                 enable_meta=ss_raw.get("enable_meta", False),
                 use_trigger=ss_raw.get("use_trigger", False),
                 llm_consensus_runs=ss_raw.get("llm_consensus_runs", 0),
-                policy=ss_raw.get("policy", "quiet"),
+                policy=ss_raw.get(
+                    "policy",
+                    "permissive" if source_config_version == FIRST_CURRENT_CONFIG_VERSION else "quiet",
+                ),
                 lenient=ss_raw.get("lenient", True),
                 llm=_merge_llm(ss_raw.get("llm")),
+                virustotal_api_key=ss_raw.get("virustotal_api_key", "")
+                if source_config_version == FIRST_CURRENT_CONFIG_VERSION else "",
                 policy_file=_merge_asset_file_ref(ss_raw.get("policy_file")),
                 judge_source=str(ss_raw.get("judge_source", "") or ""),
                 fail_on_severity=str(ss_raw.get("fail_on_severity", "") or ""),

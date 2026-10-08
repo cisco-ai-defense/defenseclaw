@@ -1655,6 +1655,9 @@ def _config_to_masked_dict(cfg) -> dict:
         return value
 
     raw = _convert(cfg)
+    if getattr(cfg, "_source_config_version", 0) != config_module.FIRST_CURRENT_CONFIG_VERSION:
+        # virustotal_api_key is the literal v8 key a Secure Client config keeps; v9 has none.
+        raw.get("scanners", {}).get("skill_scanner", {}).pop("virustotal_api_key", None)
 
     def _walk(node, key_hint: str = "") -> None:
         if isinstance(node, dict):
