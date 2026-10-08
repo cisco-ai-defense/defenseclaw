@@ -1351,7 +1351,10 @@ def resolve_gateway_binary() -> str | None:
     3. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
        happy path for installed releases and for users whose shell has
        already sourced the updated rc file.
-    4. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
+    4. The directory of the ``defenseclaw`` launcher this process runs as,
+       where the installers put the gateway too: a CI job with a bare
+       ``PATH`` and its own ``HOME`` still finds it.
+    5. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
 
@@ -1372,11 +1375,38 @@ def resolve_gateway_binary() -> str | None:
     if via_path:
         return via_path
 
+    # The installers put both binaries in one directory: a CI job that runs
+    # ~/.local/bin/defenseclaw with a bare PATH (and its own HOME) still
+    # finds the gateway next to it (GAP-0253).
+    sibling = _launcher_sibling_gateway()
+    if sibling:
+        return sibling
+
     canonical = canonical_install_path()
     if _is_runnable_file(canonical):
         return canonical
 
     return None
+
+
+# What the CLI stubs say when no gateway binary resolves: not found is not
+# "not installed", since a CI job's bare PATH misses it too (GAP-0253).
+GATEWAY_NOT_FOUND_MESSAGE = (
+    "defenseclaw-gateway was not found on PATH, next to this defenseclaw or in ~/.local/bin: put the directory "
+    "that holds it on PATH (a CI job's PATH, for one), or install it with 'defenseclaw upgrade' "
+    "(or 'make gateway-install' in a source checkout)"
+)
+
+
+def _launcher_sibling_gateway() -> str | None:
+    """The gateway next to the ``defenseclaw`` launcher this process runs as, or None."""
+
+    launcher = sys.argv[0] if sys.argv else ""
+    name = os.path.basename(launcher).lower().removesuffix(".exe")
+    if name != "defenseclaw":
+        return None
+    candidate = os.path.join(os.path.dirname(os.path.abspath(launcher)), os.path.basename(canonical_install_path()))
+    return candidate if _is_runnable_file(candidate) else None
 
 
 def resolve_trusted_gateway_binary() -> str | None:

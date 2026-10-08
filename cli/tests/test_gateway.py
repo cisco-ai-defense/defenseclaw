@@ -155,6 +155,20 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
         with patch.object(gateway.shutil, "which", return_value=None):
             self.assertEqual(gateway.resolve_gateway_binary(), canonical)
 
+    def test_a_launcher_sibling_is_found_without_path(self):
+        # GAP-0253: a CI job ran ~/.local/bin/defenseclaw with a bare PATH and
+        # its own HOME, and the gateway next to it was "not installed".
+        launcher_dir = os.path.join(self._tmp.name, "launcher")
+        launcher = os.path.join(launcher_dir, "defenseclaw")
+        sibling = os.path.join(launcher_dir, os.path.basename(gateway.canonical_install_path()))
+        self._make_executable(launcher)
+        self._make_executable(sibling)
+        with patch.object(gateway.shutil, "which", return_value=None):
+            with patch.object(gateway.sys, "argv", [launcher, "sandbox", "policy", "test"]):
+                self.assertEqual(gateway.resolve_gateway_binary(), sibling)
+            with patch.object(gateway.sys, "argv", [os.path.join(launcher_dir, "pytest")]):
+                self.assertIsNone(gateway.resolve_gateway_binary())
+
     def test_returns_none_when_nothing_resolves(self):
         # Canonical dir exists (it's the tmpdir) but no binary inside.
         with patch.object(gateway.shutil, "which", return_value=None):

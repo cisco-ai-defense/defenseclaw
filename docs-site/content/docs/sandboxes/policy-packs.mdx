@@ -920,7 +920,9 @@ defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pac
 ```
 
 The command exits 1 when any decision does not match. `rule`, when set,
-must be the deciding rule.
+must be the deciding rule. It needs no `config.yaml` and no running daemon,
+but it runs `defenseclaw-gateway`: a CI job finds it on `PATH` or next to
+the `defenseclaw` it runs (both are in `~/.local/bin` after an install).
 
 ## Admin constraints
 

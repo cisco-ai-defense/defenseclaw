@@ -334,7 +334,7 @@ def test_a_missing_gateway_binary_is_a_plain_error(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: None)
     result = CliRunner().invoke(sandbox, ["doctor"], obj=AppContext())
     assert result.exit_code == 1
-    assert "defenseclaw-gateway is not installed" in result.output
+    assert "defenseclaw-gateway was not found on PATH, next to this defenseclaw or in ~/.local/bin" in result.output
     assert "Traceback" not in result.output
 
 
