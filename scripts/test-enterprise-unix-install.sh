@@ -27,11 +27,11 @@
 #      and the config and the deployment record stay the previous release's
 #   b. ensure --from-package upgrades to this package: verify passes, the
 #      result reports the applied policy from a newer config generation,
-#      migration-v9.json and config.yaml.v8.bak are written, and the secrets
-#      and the guardian ledger are unchanged
+#      migration-v9.json and config.yaml.v8.bak are written for v8 sources,
+#      and the secrets and guardian ledger are unchanged
 #
-# and then runs steps 3-6 on the upgraded deployment. It keeps the v8 config,
-# the upgraded config and the migration record in --results for
+# and then runs steps 3-6 on the upgraded deployment. It keeps the source
+# config, upgraded config and (for v8 sources) migration record in --results for
 # scripts/check_enterprise_upgrade_config.py.
 #
 # Every lifecycle result is saved under --results and checked with
@@ -379,7 +379,11 @@ PY
 }
 
 write_admin_config() {
-    local config_version=${1:-9}
+    local config_version=9 rule_pack='  rule_pack: default'
+    if [ -n "$upgrade_from" ] && [[ "$previous_version" =~ ^v?0[.] ]]; then
+        config_version=8
+        rule_pack='  rule_pack_dir: ""'
+    fi
     cat >"$stage/config.yaml" <<EOF
 config_version: $config_version
 deployment_mode: managed_enterprise
@@ -393,7 +397,7 @@ gateway:
 guardrail:
   enabled: true
   mode: observe
-  rule_pack: default
+$rule_pack
   connectors:
     claudecode: {enabled: true}
     codex: {enabled: true}
@@ -426,12 +430,13 @@ upgrade_lane() {
     "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
         --action ensure --installed --version "$previous_version"
 
-    step "apply the v8 administrator config on the previous release"
-    write_admin_config 8
+    step "apply the administrator config on the previous release"
+    write_admin_config
+    config_version=$(sed -n 's/^config_version: //p' "$stage/config.yaml")
     lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
-    cp "$stage/config.yaml" "$results/config-v8.yaml"
+    cp "$stage/config.yaml" "$results/config-before.yaml"
     lifecycle 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces
@@ -466,11 +471,13 @@ upgrade_lane() {
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready --complete \
         "${policy_checks[@]}" --policy-applied --config-generation-above "$previous_generation"
-    [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
-    [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
-    [ "$(sha256_of "$config.v8.bak")" = "$previous_config_sha" ] || die "$config.v8.bak is not the previous config"
+    if [ "$config_version" = 8 ]; then
+        [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
+        [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
+        [ "$(sha256_of "$config.v8.bak")" = "$previous_config_sha" ] || die "$config.v8.bak is not the previous config"
+        cp "$config_dir/migration-v9.json" "$results/migration-v9.json"
+    fi
     cp "$config" "$results/config-upgraded.yaml"
-    cp "$config_dir/migration-v9.json" "$results/migration-v9.json"
     [ "$(tree_sha "$secrets_dir")" = "$previous_secrets_sha" ] || die "the upgrade changed the secrets under $secrets_dir"
     [ "$([ -f "$guardian_ledger" ] && sha256_of "$guardian_ledger" || echo absent)" = "$previous_ledger_sha" ] ||
         die "the upgrade changed the guardian ledger $guardian_ledger"

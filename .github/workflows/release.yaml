@@ -660,11 +660,13 @@ jobs:
       - name: The upgrade kept the administrator config intent
         if: env.PREVIOUS != ''
         shell: bash
-        run: >-
-          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py
-          --before "$RUNNER_TEMP/lane-results/config-v8.yaml"
-          --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml"
-          --record "$RUNNER_TEMP/lane-results/migration-v9.json"
+        run: |
+          args=(--before "$RUNNER_TEMP/lane-results/config-before.yaml"
+            --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml")
+          if [ -f "$RUNNER_TEMP/lane-results/migration-v9.json" ]; then
+            args+=(--record "$RUNNER_TEMP/lane-results/migration-v9.json")
+          fi
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py "${args[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && env.PREVIOUS != ''
         with:

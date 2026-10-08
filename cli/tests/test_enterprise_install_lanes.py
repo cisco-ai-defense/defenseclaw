@@ -210,13 +210,17 @@ def test_unix_upgrade_lane_applies_v8_to_previous_package(tmp_path: Path) -> Non
     writer = re.search(r"^write_admin_config\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
     upgrade = re.search(r"^upgrade_lane\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
     assert writer and upgrade
-    assert "write_admin_config 8" in upgrade.group(0)
+    assert "write_admin_config" in upgrade.group(0)
     env = {**os.environ, "stage": str(tmp_path), "data_dir": str(tmp_path / "data"),
-           "vendor_policy_dir": str(tmp_path / "policy")}
-    result = subprocess.run(["bash", "-c", writer.group(0) + "\nwrite_admin_config 8"],
-                            env=env, capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "config.yaml").read_text().startswith("config_version: 8\n")
+           "vendor_policy_dir": str(tmp_path / "policy"), "upgrade_from": str(tmp_path / "previous.pkg")}
+    # A 0.8.x package reads only version 8 (GAP-0496); a 1.x one gets version 9 (GAP-0510).
+    for previous, want in (("0.8.10", "config_version: 8\n"), ("1.0.0", "config_version: 9\n")):
+        result = subprocess.run(["bash", "-c", writer.group(0) + "\nwrite_admin_config"],
+                                env={**env, "previous_version": previous}, capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr
+        text = (tmp_path / "config.yaml").read_text()
+        assert text.startswith(want), (previous, text)
+        assert ("rule_pack: default" in text) == (want == "config_version: 9\n"), text
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
