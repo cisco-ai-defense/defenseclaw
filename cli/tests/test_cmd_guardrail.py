@@ -803,6 +803,13 @@ class PerConnectorToggleTests(unittest.TestCase):
         machine = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
         self.assertFalse(json.loads(machine.output)["enabled"])
 
+    def test_status_global_off_suggests_global_enable(self):
+        app = make_multi_ctx({"codex": True, "claudecode": None}, enabled=False)
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("defenseclaw guardrail enable\n", result.output)
+        self.assertNotIn("guardrail enable --connector", result.output)
+
     def test_status_roster_shows_per_connector_rule_pack_and_hilt(self):
         # Each connector can scan against its OWN rule pack AND HILT policy; the
         # roster surfaces both. codex gets a custom pack + per-connector HILT;
@@ -1638,6 +1645,17 @@ class StatusConnectorScopeTests(unittest.TestCase):
         self.assertIn("hermes", result.output)
         self.assertNotIn("Codex", result.output)
         self.assertNotIn("codex", result.output)
+
+    def test_scoped_summary_matches_json(self):
+        app = self._multi()
+        app.cfg.guardrail.effective_enabled = lambda name: name == "hermes"
+        runner = CliRunner()
+        text = runner.invoke(cmd_guardrail.status_cmd, ["--connector", "codex"], obj=app)
+        machine = runner.invoke(cmd_guardrail.status_cmd, ["--connector", "codex", "--json"], obj=app)
+        self.assertEqual(text.exit_code, 0, text.output)
+        self.assertEqual(machine.exit_code, 0, machine.output)
+        self.assertIn("enabled:    no", text.output)
+        self.assertFalse(json.loads(machine.output)["enabled"])
 
     def test_scopes_case_insensitively(self):
         app = self._multi()

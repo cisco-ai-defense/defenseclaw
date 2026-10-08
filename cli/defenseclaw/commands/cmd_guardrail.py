@@ -656,17 +656,6 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
-        # The summary describes actual hook coverage, including connector overrides.
-        summary_connectors = (
-            app.cfg.active_connectors() if hasattr(app.cfg, "active_connectors") else [connector]
-        )
-        all_enabled = gc.enabled and any(
-            gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
-            for name in summary_connectors
-        )
-        enabled_txt = "yes" if all_enabled else "no"
-        enabled_val = ux._style(enabled_txt, fg="green" if all_enabled else "yellow")
-        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
@@ -698,6 +687,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         if as_json:
             _echo_status_json(gc, [], [])
             return
+        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {ux._style('no', fg='yellow')}")
         ux.echo(
             f"  • {ux._style('connectors:', fg='bright_black', bold=True)} "
             f"{ux.dim('(none configured)')}"
@@ -731,6 +721,16 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             ux.subhead("Active connectors: " + ", ".join(actives), indent="    ")
             raise SystemExit(1)
         actives = scoped
+
+    if not as_json:
+        # The summary must describe the same selected rows as --json.
+        all_enabled = gc.enabled and any(
+            gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
+            for name in actives
+        )
+        enabled_txt = "yes" if all_enabled else "no"
+        enabled_val = ux._style(enabled_txt, fg="green" if all_enabled else "yellow")
+        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     from defenseclaw.hook_integrity import setup_command, unrunnable_hook_problem
 
@@ -901,10 +901,9 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     if proxy_in_use:
         ux.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
-    if gc.enabled and any(
-        gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
-        for name in actives
-    ):
+    if not gc.enabled:
+        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
+    elif any(gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True for name in actives):
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
     else:
         click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable --connector <name>")
