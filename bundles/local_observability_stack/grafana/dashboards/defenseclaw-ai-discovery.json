@@ -1163,7 +1163,7 @@
     {
       "type": "stat",
       "title": "IDE plugins installed",
-      "description": "Current count of IDE extensions and plugins across every inventoried user, from the newest `defenseclaw.inventory.ide_plugins` sample per gateway. `ai_discovery.ide_inventory: ai_only` narrows this to AI plugins; `off` reports nothing.",
+      "description": "Current count of IDE extensions and plugins across every inventoried user, from the latest completed scan per gateway. `ai_discovery.ide_inventory: ai_only` narrows this to AI plugins; `off` reports zero after a completed scan.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1176,7 +1176,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins)",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{ide_product=\"\"})",
           "refId": "A",
           "instant": true
         }
