@@ -4590,13 +4590,21 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
     if cache:
-        age = int(cache.get("age_seconds") or 0)
-        lifetime = age + int(cache.get("refresh_after_seconds") or 0)
-        click.echo(
-            f"  cache:   requests use directory facts {_age_text(age)} old "
-            f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')}); "
-            f"the gateway refreshes them after {_age_text(lifetime)}"
-        )
+        cache_decision = f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')})"
+        if cache.get("failing_since"):
+            click.echo(
+                f"  cache:   requests have no cached directory facts {cache_decision}; "
+                "the gateway retries its directory lookup"
+            )
+        elif "age_seconds" in cache and "refresh_after_seconds" in cache:
+            age = int(cache["age_seconds"])
+            lifetime = age + int(cache["refresh_after_seconds"])
+            click.echo(
+                f"  cache:   requests use directory facts {_age_text(age)} old "
+                f"{cache_decision}; the gateway refreshes them after {_age_text(lifetime)}"
+            )
+        else:
+            click.echo(f"  cache:   directory fact age unavailable {cache_decision}")
     if result.get("lookup_error"):
         ux.warn(f"user lookup failed: {result['lookup_error']}")
     for note in result.get("warnings") or []:

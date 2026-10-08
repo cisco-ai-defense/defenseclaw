@@ -213,6 +213,29 @@ def test_explain_match_line_names_default_lookup_failed(monkeypatch):
     assert "default_lookup_failed" in match_line
 
 
+def test_explain_failed_gateway_lookup_has_no_cached_facts(monkeypatch):
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "ml",
+            "match": "group",
+            "subject": {"user_name": "alice", "group_count": 1},
+            "cache": {
+                "failing_since": "2026-10-08T12:00:00Z",
+                "last_error": "directory unavailable",
+                "profile": "watch",
+                "match": "default_lookup_failed",
+                "differs": True,
+            },
+        },
+    )
+    assert "cache:   requests have no cached directory facts" in result.output
+    assert "default_lookup_failed" in result.output
+    assert "facts 0s old" not in result.output
+    assert "refreshes them after 0s" not in result.output
+
+
 def test_explain_blames_a_slow_directory_not_a_stopped_gateway(monkeypatch):
     """GAP-0140: a read timeout is a running gateway still resolving the user."""
     import requests
