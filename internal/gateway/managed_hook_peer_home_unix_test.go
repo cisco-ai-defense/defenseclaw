@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -80,7 +81,8 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 			}
 			return &fakePeerHomeResolver{accounts: accounts}
 		},
-		now: func() time.Time { return now },
+		now:       func() time.Time { return now },
+		homesFile: filepath.Join(t.TempDir(), "managed_peer_homes.json"),
 	}
 	cache.lookup(1001)
 	cache.lookup(1001)
@@ -101,6 +103,12 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	}
 	if home := cache.lookup(1002); home != "" {
 		t.Fatalf("a uid that never resolved got the home %q", home)
+	}
+	// A gateway that starts during the outage reads the homes the last one
+	// persisted, so the agent identity still does not move.
+	restarted := &managedHookPeerHomeCache{newResolver: cache.newResolver, now: cache.now, homesFile: cache.homesFile}
+	if home := restarted.lookup(1001); home != "/home/alice" {
+		t.Fatalf("lookup after a restart during the outage = %q, want /home/alice", home)
 	}
 }
 
