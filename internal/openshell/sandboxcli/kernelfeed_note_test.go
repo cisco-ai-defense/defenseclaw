@@ -32,8 +32,16 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 	procs := []sandboxapi.Process{{PID: 1, Comm: "init"}, {PID: 7, PPID: 1, Comm: "bash", Source: "tetragon", HostPID: 9100}}
 	for name, c := range map[string]struct {
 		kernel      *sandboxapi.ProcessKernelFeed
+		notSent     int64
 		want, never []string
 	}{
+		// GAP-0097: the records over the audit trail's rate are counted.
+		"records not sent": {
+			kernel:  &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "connected", Execs: 17705},
+			notSent: 34390,
+			want: []string{"34390 process records were not sent to the audit trail: it takes\n",
+				"at most 10 a second per sandbox (a burst of 200); the gateway log counts them"},
+		},
 		"connected": {
 			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "connected", Execs: 120, Pinned: 9, Dropped: 2},
 			want:   []string{"source: kernel", "120 so far (9 with their pid in the sandbox)", "lost 2 records"},
@@ -58,9 +66,10 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 			want:   []string{"does not answer (kernel_feed_unavailable); start it:\n", "  sudo systemctl restart defenseclaw-sandbox-feed.service", "sampled every 5s"},
 			never:  []string{"source: kernel"},
 		},
-		"no feed": {want: []string{"sampled every 5s"}, never: []string{"kernel"}},
+		"no feed": {want: []string{"sampled every 5s"}, never: []string{"kernel", "not sent"}},
 	} {
-		app, out := inventoryApp(t, sandboxapi.ProcessList{Name: "box", Enabled: true, IntervalSeconds: 5, Processes: procs, Kernel: c.kernel},
+		app, out := inventoryApp(t, sandboxapi.ProcessList{Name: "box", Enabled: true, IntervalSeconds: 5, Processes: procs, Kernel: c.kernel,
+			RecordsNotSent: c.notSent},
 			sandboxapi.DiscoveryResult{})
 		if err := app.Ps(context.Background(), PsOptions{Name: "box", Tree: true}); err != nil {
 			t.Fatal(err)

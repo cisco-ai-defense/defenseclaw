@@ -129,6 +129,12 @@ func (a *App) Ps(ctx context.Context, o PsOptions) error {
 		a.warn("the last sample stopped at its bound; some processes are not listed")
 	}
 	a.processSourceNote(list)
+	if list.RecordsNotSent > 0 {
+		// GAP-0097: the tree has every process; the audit trail does not.
+		a.warn(fmt.Sprintf("%d process records were not sent to the audit trail: it takes", list.RecordsNotSent))
+		a.note(fmt.Sprintf("at most %d a second per sandbox (a burst of %d); the gateway log counts them",
+			sandboxapi.ProcessRecordRate, sandboxapi.ProcessRecordBurst))
+	}
 	return nil
 }
 

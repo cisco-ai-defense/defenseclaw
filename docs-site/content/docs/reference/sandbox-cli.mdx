@@ -1471,7 +1471,10 @@ the sandbox kernel feed installed
 kernel sees in a docker sandbox is recorded as well, and the listing says
 `source: kernel`. A process the feed reported without its in-sandbox pid is
 listed among the ended ones with its `host_pid`; `--json` has a `kernel` block
-with the feed's state and counters.
+with the feed's state and counters. The `sandbox.process_tree` records are
+capped at 10 a second per sandbox (a burst of 200): past that the tree keeps
+every process, the records are not sent, and `ps` warns with the count
+(`records_not_sent` in `--json`).
 
 ```bash
 defenseclaw sandbox ps myapp-7f3a --tree

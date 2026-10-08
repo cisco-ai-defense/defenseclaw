@@ -59,6 +59,15 @@ type DiscoverySignal struct {
 // MaxExitedProcesses bounds the ended processes a ProcessList carries.
 const MaxExitedProcesses = 256
 
+// ProcessRecordRate and ProcessRecordBurst bound one sandbox's
+// sandbox.process_tree records: at most ProcessRecordBurst at once and
+// ProcessRecordRate a second. The tree keeps every process past them; the
+// records are not sent (ProcessList.RecordsNotSent).
+const (
+	ProcessRecordRate  = 10
+	ProcessRecordBurst = 200
+)
+
 // ProcessList is GET /sandboxes/{name}/processes: a sandbox's process tree,
 // while its process tree is on (observe.process_tree, `sandbox run
 // --process-tree`). Processes are the live ones by pid; Exited the ones that
@@ -77,6 +86,10 @@ type ProcessList struct {
 	Exited          []Process `json:"exited,omitempty"`
 	// Truncated reports a sample that stopped at its bound.
 	Truncated bool `json:"truncated,omitempty"`
+	// RecordsNotSent counts the sandbox.process_tree records not sent
+	// since the daemon started: the sandbox started and ended processes
+	// faster than ProcessRecordRate a second (GAP-0097).
+	RecordsNotSent int64 `json:"records_not_sent,omitempty"`
 	// Kernel is the sandbox kernel feed, on a Linux docker sandbox whose
 	// host has it installed: Tetragon's exec and exit records join the
 	// tree (source tetragon).

@@ -51,7 +51,8 @@ import (
 // bounded (procTreeMaxLive live processes, the procTreeMaxExited most
 // recently ended ones), every process that joins it is recorded once as
 // started and once as exited (sandbox.process_tree, at most
-// processRecordBurst at once and processRecordRate a second per sandbox),
+// sandboxapi.ProcessRecordBurst at once and sandboxapi.ProcessRecordRate a
+// second per sandbox; the list counts the records not sent),
 // and Lineage walks it for the egress destinations. Without the feed its
 // limits are those of sampling: a process that starts and ends between two
 // samples, and that OpenShell does not report, is never seen. Every field
@@ -67,8 +68,6 @@ const (
 	processSampleTimeout = 10 * time.Second
 	procTreeMaxLive      = 4096
 	procTreeMaxExited    = 1024
-	processRecordBurst   = 200
-	processRecordRate    = 10
 	maxLineageDepth      = 32
 	maxCmdlineBytes      = 1024
 	// commBytes is how much of a program's name the kernel keeps as a
@@ -121,9 +120,10 @@ type procTree struct {
 	sampledAt time.Time
 	truncated bool
 	// gate paces the tree's records; heldAt is when the log last said how
-	// many it held back.
-	gate   *rateGate
-	heldAt time.Time
+	// many it held back, notSent how many it held back in all.
+	gate    *rateGate
+	heldAt  time.Time
+	notSent int64
 	// interval is how often the sandbox is sampled now (0 until a sample).
 	interval time.Duration
 	// byExec holds every process the kernel feed reported that is still in
@@ -157,7 +157,7 @@ type kernelCounts struct {
 
 func newProcTree() *procTree {
 	return &procTree{
-		live: map[int]*procNode{}, gate: newRateGate(processRecordBurst, processRecordRate),
+		live: map[int]*procNode{}, gate: newRateGate(sandboxapi.ProcessRecordBurst, sandboxapi.ProcessRecordRate),
 		byExec: map[string]*procNode{}, byHost: map[int]*procNode{},
 	}
 }
@@ -673,7 +673,11 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 		t.mu.Unlock()
 		if t.gate.take(processGateKey, ev.Timestamp) {
 			m.tel.RecordSandboxProcess(ctx, ev)
+			return
 		}
+		t.mu.Lock()
+		t.notSent++
+		t.mu.Unlock()
 	}
 	for _, node := range started {
 		emit(node, audit.SandboxProcessStart)
@@ -692,7 +696,7 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 		return
 	}
 	for _, held := range t.gate.drain(now) {
-		m.logf("sandbox %s: %d process records were not sent: the sandbox starts processes faster than %d a second", id.Name, held.n, processRecordRate)
+		m.logf("sandbox %s: %d process records were not sent: the sandbox starts processes faster than %d a second", id.Name, held.n, sandboxapi.ProcessRecordRate)
 	}
 }
 
@@ -919,7 +923,7 @@ func (m *Manager) Processes(_ context.Context, name string) (*sandboxapi.Process
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out.SampledAt, out.Truncated = t.sampledAt, t.truncated
+	out.SampledAt, out.Truncated, out.RecordsNotSent = t.sampledAt, t.truncated, t.notSent
 	if t.interval > 0 {
 		out.IntervalSeconds = int(t.interval / time.Second)
 	}
