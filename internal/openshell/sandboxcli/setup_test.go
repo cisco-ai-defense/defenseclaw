@@ -1598,6 +1598,24 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 // GAP-0226: with the gateway's user service gone, the Gateway row and the
 // daemon row each printed the raw gRPC dial error, and the summary counted
 // one cause three times. The daemon row now leans on the Gateway row.
+// TestDoctorNamesTheOrganizationConstraints (GAP-0252): the row said
+// "advisory: openshell.admin is enforced but advisory: you own config.yaml"
+// and named none of the constraints. It says whose the block is once, and
+// lists each constraint in force.
+func TestDoctorNamesTheOrganizationConstraints(t *testing.T) {
+	ta := newTestApp(t, "")
+	off := false
+	ta.Cfg.OpenShell.Admin = config.OpenShellAdminConfig{MinProfile: "balanced", AllowedHarnesses: []string{"claudecode", "codex"},
+		AllowYolo: &off, EgressBlock: []string{"paste.example"}, RequireCopyFor: []string{"~/customers/**"},
+		MaxResources: config.OpenShellResourcesConfig{CPU: "4", Memory: "8Gi"}, Locked: []string{"profile"}}
+	c := ta.adminCheck()
+	want := "advisory (you own config.yaml and can change it): profile balanced or stricter, harnesses claudecode, codex only, " +
+		"no skip-permissions, copy mode for ~/customers/**, 1 blocked host, at most 4 CPUs and 8Gi memory, locked: profile"
+	if c.Detail != want {
+		t.Fatalf("detail = %q\nwant     %q", c.Detail, want)
+	}
+}
+
 func TestDoctorCountsADownGatewayOnce(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.status.Available = false

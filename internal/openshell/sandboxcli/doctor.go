@@ -436,11 +436,69 @@ func (a *App) adminCheck() openshell.Check {
 		c.Detail = "no openshell.admin constraints"
 		return c
 	}
-	c.Detail = string(s.Authority)
-	if s.Detail != "" {
-		c.Detail += ": " + s.Detail
+	// What is in force, and once whose it is: the row said "advisory:
+	// openshell.admin is enforced but advisory" and named no constraint
+	// (GAP-0252).
+	whose := "advisory (you own config.yaml and can change it)"
+	if s.Authority == packs.AuthorityAuthoritative {
+		whose = "authoritative (an administrator owns config.yaml)"
 	}
+	c.Detail = whose + ": " + strings.Join(adminConstraints(a.Cfg.OpenShell.Admin), ", ")
 	return c
+}
+
+// adminConstraints names each openshell.admin constraint in force, briefly.
+func adminConstraints(ad config.OpenShellAdminConfig) []string {
+	var out []string
+	no := func(allowed *bool, what string) {
+		if allowed != nil && !*allowed {
+			out = append(out, what)
+		}
+	}
+	if ad.RequiredPack != "" {
+		p := "pack " + ad.RequiredPack + " required"
+		if ad.RequiredPackDigest != "" {
+			p += " (pinned)"
+		}
+		out = append(out, p)
+	}
+	if ad.MinProfile != "" {
+		out = append(out, "profile "+ad.MinProfile+" or stricter")
+	}
+	if len(ad.AllowedHarnesses) > 0 {
+		out = append(out, "harnesses "+strings.Join(ad.AllowedHarnesses, ", ")+" only")
+	}
+	no(ad.AllowYolo, "no skip-permissions")
+	no(ad.AllowMount, "copy mode only")
+	no(ad.AllowHostPorts, "no --host-port")
+	no(ad.AllowUnblock, "no unblocks")
+	no(ad.AllowLearnMode, "no learn mode")
+	if len(ad.RequireCopyFor) > 0 {
+		out = append(out, "copy mode for "+strings.Join(firstN(ad.RequireCopyFor, 2), ", "))
+	}
+	if n := len(ad.EgressBlock); n > 0 {
+		out = append(out, plural(int64(n), "blocked host", "blocked hosts"))
+	}
+	if n := len(ad.EgressAllowOnly); n > 0 {
+		out = append(out, "only "+plural(int64(n), "allowed host", "allowed hosts"))
+	}
+	if ad.BlockLargeUploads {
+		out = append(out, "large uploads blocked")
+	}
+	if r := ad.MaxResources; r != (config.OpenShellResourcesConfig{}) {
+		var caps []string
+		if r.CPU != "" {
+			caps = append(caps, r.CPU+" CPUs")
+		}
+		if r.Memory != "" {
+			caps = append(caps, r.Memory+" memory")
+		}
+		out = append(out, "at most "+strings.Join(caps, " and "))
+	}
+	if len(ad.Locked) > 0 {
+		out = append(out, "locked: "+strings.Join(ad.Locked, ", "))
+	}
+	return out
 }
 
 // Doctor is `sandbox doctor`.
