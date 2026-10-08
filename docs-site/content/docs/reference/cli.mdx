@@ -1238,7 +1238,8 @@ moved keys and the upgrade steps.
 ## Sandbox
 
 Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that
-work on a copy (see [macOS](/docs/sandboxes/guide#macos)). The `sandbox`
+work on a copy (see [macOS](/docs/sandboxes/guide#macos)); Windows and WSL2
+are not supported, and every `sandbox` command exits 3 there. The `sandbox`
 commands run coding agents in NVIDIA OpenShell 0.1 sandboxes. `defenseclaw sandbox` checks the command
 line, then hands it unchanged to `defenseclaw-gateway sandbox`. Every command
 and flag, with an example, is on [Sandbox CLI](/docs/reference/sandbox-cli);

@@ -870,17 +870,19 @@ def _build_group(cmd: _Cmd) -> click.Group:
 
 @click.group()
 def sandbox() -> None:
-    """Run coding agents in NVIDIA OpenShell sandboxes.
+    """Run coding agents in NVIDIA OpenShell sandboxes (Linux and macOS only).
 
-    Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA
-    OpenShell sandbox: the agent sees only your project folder (on Linux live,
-    with secret files masked, git internals read-only and a snapshot for undo;
-    on macOS, where sandboxes are OpenShell MicroVMs, a copy you pull the
-    changes back from), reaches the web through DefenseClaw's egress proxy,
-    and every tool call still goes through DefenseClaw.
+    Sandboxes run on Linux and on macOS with Apple silicon; Windows and WSL2
+    are not supported. Run Claude Code, Codex and other hooks-only harnesses
+    inside an NVIDIA OpenShell sandbox: the agent sees only your project
+    folder (on Linux live, with secret files masked, git internals read-only
+    and a snapshot for undo; on macOS, where sandboxes are OpenShell
+    MicroVMs, a copy you pull the changes back from), reaches the web through
+    DefenseClaw's egress proxy, and every tool call still goes through
+    DefenseClaw.
 
     Start with "defenseclaw sandbox setup", then run "defenseclaw sandbox run
-    claude" in a project folder. Linux, and macOS on Apple silicon, only.
+    claude" in a project folder.
     """
 
 

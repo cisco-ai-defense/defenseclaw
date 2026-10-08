@@ -62,8 +62,9 @@ const sandboxConfigDefault = "defenseclaw.sandbox.config-default"
 
 var sandboxCmd = &cobra.Command{
 	Use:   "sandbox",
-	Short: "Run coding agents in NVIDIA OpenShell sandboxes",
-	Long: `Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA OpenShell
+	Short: "Run coding agents in NVIDIA OpenShell sandboxes (Linux and macOS only)",
+	Long: `Sandboxes run on Linux and on macOS with Apple silicon; Windows and WSL2 are not
+supported. Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA OpenShell
 sandbox: the agent sees only your project folder (on Linux live, with secret files
 masked, git internals read-only and a snapshot for undo; on macOS, where sandboxes
 are OpenShell MicroVMs, a copy you pull the changes back from), reaches the web
