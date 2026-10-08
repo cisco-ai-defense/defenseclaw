@@ -469,6 +469,82 @@ func TestCollectorCommandIsRecognizedByTheFeed(t *testing.T) {
 	}
 }
 
+// TS-r3: short hook tools used to evict the workload from the 256 exited
+// rows and fill the process_tree audit stream after a few tool calls.
+func TestVerifiedHookKeepsWorkloadInExitedList(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the kernel feed is Linux only")
+	}
+	var sample atomic.Pointer[string]
+	e, b, id := kernelBox(t, "hookbox", &sample)
+	ctx := context.Background()
+	at := time.Now().Add(-time.Minute)
+	work := execFrame(id, "work-marker", "", 9300, 70, "/bin/true", "/bin/true", at)
+	e.m.observeKernelFrame(ctx, b, work)
+	e.m.observeKernelFrame(ctx, b, exitFrame(id, "work-marker", 9300, 0, at.Add(time.Millisecond)))
+	for call := range 20 {
+		name := fmt.Sprintf("hook-%d", call)
+		start := at.Add(time.Duration(call+1) * time.Second)
+		hook := execFrame(id, name, "", 9400+call, 80+call,
+			"/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh",
+			"/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh", start)
+		hook.Hook = true
+		e.m.observeKernelFrame(ctx, b, hook)
+		for tool := range 14 {
+			item := execFrame(id, fmt.Sprintf("tool-%d-%d", call, tool), name, 10000+call*14+tool, 0,
+				"/usr/bin/jq", "/usr/bin/jq", start.Add(time.Duration(tool+1)*time.Millisecond))
+			item.HookTool = true
+			e.m.observeKernelFrame(ctx, b, item)
+			exit := exitFrame(id, fmt.Sprintf("tool-%d-%d", call, tool), item.HostPID, 0, start.Add(time.Duration(tool+1)*time.Millisecond))
+			exit.HookTool = true
+			e.m.observeKernelFrame(ctx, b, exit)
+		}
+		exit := exitFrame(id, name, hook.HostPID, 0, start.Add(time.Second))
+		exit.Hook, exit.HookTools = true, 14
+		e.m.observeKernelFrame(ctx, b, exit)
+	}
+	list, err := e.m.Processes(ctx, "hookbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Exited) != 21 {
+		t.Fatalf("exited rows = %d, want 20 hooks and workload", len(list.Exited))
+	}
+	var markers, hooks int
+	for _, p := range list.Exited {
+		switch p.Comm {
+		case "true":
+			markers++
+		case "claude-code-hook.sh":
+			hooks++
+			if !p.Hook || p.HookTools != 14 || !strings.Contains(p.Cmdline, "[hook tools: 14]") {
+				t.Fatalf("hook row = %+v", p)
+			}
+		default:
+			t.Fatalf("unexpected exited process %q", p.Comm)
+		}
+	}
+	if markers != 1 || hooks != 20 {
+		t.Fatalf("markers=%d hooks=%d", markers, hooks)
+	}
+	records := processRecords(e, "hookbox")
+	var hookRecords int
+	for _, rec := range records {
+		if rec.Name == "claude-code-hook.sh" {
+			hookRecords++
+			if rec.Event != audit.SandboxProcessExit || !strings.Contains(rec.CommandLine, "[hook tools: 14]") {
+				t.Fatalf("hook audit record = %+v", rec)
+			}
+		}
+		if rec.Name == "jq" {
+			t.Fatalf("hook tool reached audit: %+v", rec)
+		}
+	}
+	if hookRecords != 20 {
+		t.Fatalf("hook audit records = %d, want 20", hookRecords)
+	}
+}
+
 // The vm driver's guest kernel is not the host's: no feed there.
 func TestKernelFeedAppliesToDockerSandboxesOnly(t *testing.T) {
 	b := &box{}

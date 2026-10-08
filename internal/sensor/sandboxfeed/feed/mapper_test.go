@@ -27,6 +27,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
 	pb "github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon"
@@ -341,6 +342,161 @@ func TestMapperMarksTheCollectorsForkedPipelineStages(t *testing.T) {
 	}
 	if f := one(t, m.Map(ctx, exitOf(agentFork, 0, ""))).Frame; f.Collector {
 		t.Fatalf("a workload fork's exit was taken for the collector's: %+v", f)
+	}
+}
+
+func TestMapperFoldsVerifiedClaudeHookTools(t *testing.T) {
+	const hook = sandboxClaudeHook
+	if connector.SandboxHookDir+"/claude-code-hook.sh" != hook {
+		t.Fatal("feed hook path differs from the image's rendered hook path")
+	}
+	init := proc{pid: 8000, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	agent := proc{pid: 8001, ktime: 2e8, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	launcher := proc{pid: 8002, ktime: 3e8, docker: workload, binary: "/bin/sh", args: "-c " + hook, parent: &agent}
+	script := proc{pid: 8003, ktime: 4e8, docker: workload, binary: hook, args: "-p " + hook, parent: &launcher}
+	fork := proc{pid: 8004, ktime: 5e8, docker: workload, binary: hook, args: script.args, parent: &script}
+	find := proc{pid: 8005, ktime: 6e8, docker: workload, binary: "/usr/bin/find", parent: &script}
+	jq := proc{pid: 8006, ktime: 7e8, docker: workload, binary: "/usr/bin/jq", parent: &fork}
+	work := proc{pid: 8007, ktime: 8e8, docker: workload, binary: "/usr/bin/python3", parent: &agent}
+	unexpected := proc{pid: 8008, ktime: 9e8, docker: workload, binary: "/tmp/find", parent: &script}
+	m := NewMapper(MapperConfig{Containers: testContainers()})
+	ctx := context.Background()
+	m.Map(ctx, execOf(init))
+	m.Map(ctx, execOf(agent))
+	if got := m.Map(ctx, execOf(launcher)); len(got) != 0 {
+		t.Fatalf("hook launcher forwarded before verification: %+v", got)
+	}
+	if got := m.Map(ctx, execOf(script)); len(got) != 0 {
+		t.Fatalf("hook emitted before its subtree was known: %+v", got)
+	}
+	for _, p := range []proc{find, jq} {
+		if got := m.Map(ctx, execOf(p)); len(got) != 0 {
+			t.Fatalf("known hook tool visible: %+v", got)
+		}
+	}
+	if f := one(t, m.Map(ctx, execOf(work))).Frame; f.HookTool || f.Hook {
+		t.Fatalf("workload hidden: %+v", f)
+	}
+	got := m.Map(ctx, exitOf(script, 0, ""))
+	if len(got) != 2 || !got[0].Frame.Hook || !got[1].Frame.Hook || got[1].Frame.HookTools != 2 {
+		t.Fatalf("hook summary = %+v", got)
+	}
+	if got := m.Map(ctx, exitOf(launcher, 0, "")); len(got) != 0 {
+		t.Fatalf("verified launcher exit forwarded: %+v", got)
+	}
+	// A second call with an unexpected executable releases every event
+	// already held for that call, including the launcher and known tool.
+	launcher2 := launcher
+	launcher2.pid, launcher2.ktime = 8012, 13e8
+	script2 := script
+	script2.pid, script2.ktime, script2.parent = 8013, 14e8, &launcher2
+	find2 := find
+	find2.pid, find2.ktime, find2.parent = 8014, 15e8, &script2
+	unexpected.parent = &script2
+	m.Map(ctx, execOf(launcher2))
+	m.Map(ctx, execOf(script2))
+	m.Map(ctx, execOf(find2))
+	got = m.Map(ctx, execOf(unexpected))
+	if len(got) != 4 {
+		t.Fatalf("unexpected subtree released %d events, want launcher, script, tool and child: %+v", len(got), got)
+	}
+	for _, item := range got {
+		if item.Frame.Hook || item.Frame.HookTool {
+			t.Fatalf("unexpected subtree still summarized: %+v", item.Frame)
+		}
+	}
+	if !got[3].Frame.HookUnexpected {
+		t.Fatalf("unexpected child not flagged: %+v", got[3].Frame)
+	}
+}
+
+func TestMapperLeavesHookLookalikesVisible(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, script string
+		toolShell             bool
+	}{
+		{"different path", "-c " + sandboxClaudeHook, "/tmp/claude-code-hook.sh", false},
+		{"environment wrapper", "-c env X=1 " + sandboxClaudeHook, sandboxClaudeHook, false},
+		{"tool shell", "-c " + sandboxClaudeHook, sandboxClaudeHook, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			m := NewMapper(MapperConfig{Containers: testContainers()})
+			init := proc{pid: 8500, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+			agentParent := &init
+			if tc.toolShell {
+				shell := proc{pid: 8501, ktime: 2e8, docker: workload, binary: "/bin/bash", args: "-c claude", parent: &init}
+				m.Map(ctx, execOf(shell))
+				agentParent = &shell
+			}
+			agent := proc{pid: 8502, ktime: 3e8, docker: workload, binary: "/usr/local/bin/claude", parent: agentParent}
+			launcher := proc{pid: 8503, ktime: 4e8, docker: workload, binary: "/bin/sh", args: tc.command, parent: &agent}
+			script := proc{pid: 8504, ktime: 5e8, docker: workload, binary: tc.script, args: "-p " + tc.script, parent: &launcher}
+			m.Map(ctx, execOf(init))
+			m.Map(ctx, execOf(agent))
+			m.Map(ctx, execOf(launcher))
+			if f := one(t, m.Map(ctx, execOf(script))).Frame; f.Hook || f.HookTool {
+				t.Fatalf("lookalike script was summarized: %+v", f)
+			}
+			if got := m.Map(ctx, exitOf(launcher, 0, "")); len(got) == 0 {
+				t.Fatal("lookalike launcher exit was hidden")
+			}
+		})
+	}
+}
+
+func TestMapperReleasesUnfinishedHookOnStreamEnd(t *testing.T) {
+	ctx := context.Background()
+	m := NewMapper(MapperConfig{Containers: testContainers()})
+	init := proc{pid: 8600, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	agent := proc{pid: 8601, ktime: 2e8, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	launcher := proc{pid: 8602, ktime: 3e8, docker: workload, binary: "/bin/sh", args: "-c " + sandboxClaudeHook, parent: &agent}
+	script := proc{pid: 8603, ktime: 4e8, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &launcher}
+	tool := proc{pid: 8604, ktime: 5e8, docker: workload, binary: "/usr/bin/jq", parent: &script}
+	for _, p := range []proc{init, agent, launcher, script, tool} {
+		m.Map(ctx, execOf(p))
+	}
+	got := m.DisableHooks()
+	if len(got) != 3 {
+		t.Fatalf("stream end released %d events, want launcher, script and tool", len(got))
+	}
+	for _, item := range got {
+		if item.Frame.Hook || item.Frame.HookTool || item.Owner != 1000 {
+			t.Fatalf("stream end kept a hidden event: %+v", item)
+		}
+	}
+	if again := m.DisableHooks(); len(again) != 0 {
+		t.Fatalf("stream end duplicated events: %+v", again)
+	}
+	later := proc{pid: 8605, ktime: 6e8, docker: workload, binary: "/usr/bin/find", parent: &script}
+	if f := one(t, m.Map(ctx, execOf(later))).Frame; f.HookTool || f.Hook {
+		t.Fatalf("process after stream loss was hidden: %+v", f)
+	}
+}
+
+func TestMapperReleasesHookBeforeAncestryEviction(t *testing.T) {
+	ctx := context.Background()
+	m := NewMapper(MapperConfig{Containers: testContainers()})
+	init := proc{pid: 8700, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	agent := proc{pid: 8701, ktime: 2e8, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	launcher := proc{pid: 8702, ktime: 3e8, docker: workload, binary: "/bin/sh", args: "-c " + sandboxClaudeHook, parent: &agent}
+	script := proc{pid: 8703, ktime: 4e8, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &launcher}
+	tool := proc{pid: 8704, ktime: 5e8, docker: workload, binary: "/usr/bin/jq", parent: &script}
+	for _, p := range []proc{init, agent, launcher, script, tool} {
+		m.Map(ctx, execOf(p))
+	}
+	for i := len(m.hookProcs.m); i < tracked-1; i++ {
+		m.hookProcs.put(fmt.Sprintf("unrelated-%d", i), &hookProcess{})
+	}
+	work := proc{pid: 8705, ktime: 6e8, docker: workload, binary: "/bin/true", parent: &agent}
+	got := m.Map(ctx, execOf(work))
+	if len(got) != 4 || m.hookTrust {
+		t.Fatalf("capacity fallback released %d events, trust=%v", len(got), m.hookTrust)
+	}
+	for _, item := range got {
+		if item.Frame.Hook || item.Frame.HookTool {
+			t.Fatalf("capacity fallback hid %+v", item.Frame)
+		}
 	}
 }
 

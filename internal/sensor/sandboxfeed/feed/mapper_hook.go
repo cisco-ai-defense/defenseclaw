@@ -1,0 +1,361 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package feed
+
+import (
+	"path"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
+	pb "github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon"
+)
+
+// These are the command rendered into Claude's root-owned managed settings
+// and the script copied into the sandbox image by the connector.
+const sandboxClaudeHook = "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"
+
+type hookRole uint8
+
+const (
+	hookNone hookRole = iota
+	hookLauncher
+	hookVerified
+	hookTool
+	hookUnexpected
+)
+
+type hookProcess struct {
+	binary, args, parentID string
+	uid                    int
+	uidKnown               bool
+	role                   hookRole
+	hook                   *hookProcess
+	tools                  int
+	verified               bool
+	pending                *sandboxfeed.Frame
+	frames                 []Item
+	opened                 time.Time
+	tainted                bool
+	finished               bool
+	owner                  int
+}
+
+func hookInfo(p *pb.Process) *hookProcess {
+	i := &hookProcess{binary: p.GetBinary(), args: p.GetArguments(), parentID: p.GetParentExecId()}
+	if p.GetUid() != nil {
+		i.uid, i.uidKnown = int(p.GetUid().GetValue()), true
+	}
+	return i
+}
+
+func hookSameUID(a, b *hookProcess) bool {
+	return a != nil && b != nil && a.uidKnown && b.uidKnown && a.uid == b.uid
+}
+
+var sandboxHookTools = map[string]bool{
+	"chmod": true, "curl": true, "date": true, "find": true, "head": true,
+	"id": true, "jq": true, "mkdir": true, "mktemp": true, "od": true,
+	"readlink": true, "rm": true, "sed": true, "tail": true, "tr": true,
+}
+
+func sandboxHookTool(binary string) bool {
+	return (path.Dir(binary) == "/usr/bin" || path.Dir(binary) == "/bin" ||
+		path.Dir(binary) == "/usr/sbin" || path.Dir(binary) == "/sbin") && sandboxHookTools[path.Base(binary)]
+}
+
+func sandboxClaudeAgent(binary string) bool {
+	return path.Base(binary) == "claude" && (path.Dir(binary) == "/usr/bin" || path.Dir(binary) == "/usr/local/bin")
+}
+
+func shellCommand(args string) bool {
+	for _, word := range strings.Fields(args) {
+		if !strings.HasPrefix(word, "-") || strings.HasPrefix(word, "--") {
+			return false
+		}
+		if strings.Contains(word, "c") {
+			return true
+		}
+	}
+	return false
+}
+
+func isShell(binary string) bool {
+	switch path.Base(binary) {
+	case "sh", "bash", "dash", "zsh", "ksh", "ash":
+		return true
+	}
+	return false
+}
+
+// agentRoot refuses an agent launched beneath a tool call's command shell.
+// Missing ancestry refuses the optimization, preserving normal visibility.
+func (m *Mapper) agentRoot(agent *hookProcess) bool {
+	if agent == nil || !sandboxClaudeAgent(agent.binary) || agent.parentID == "" {
+		return false
+	}
+	ancestorID := agent.parentID
+	for depth := 0; depth < 16 && ancestorID != ""; depth++ {
+		ancestor, ok := m.hookProcs.get(ancestorID)
+		if !ok {
+			return false
+		}
+		if path.Base(ancestor.binary) == "openshell-sandbox" {
+			return true
+		}
+		if isShell(ancestor.binary) && shellCommand(ancestor.args) {
+			parent, ok := m.hookProcs.get(ancestor.parentID)
+			if !ok || !isShell(parent.binary) {
+				return false
+			}
+		}
+		ancestorID = ancestor.parentID
+	}
+	return ancestorID == ""
+}
+
+// forkOfHook recognizes a fork that never execed by its inherited program
+// and parent exec id. Only a fork of a verified hook or its known tools can
+// carry their mark; an unrelated child remains visible.
+func (m *Mapper) forkOfHook(parent *pb.Process) *hookProcess {
+	if !m.hookTrust {
+		return nil
+	}
+	if parent == nil || parent.GetExecId() == "" {
+		return nil
+	}
+	if existing, ok := m.hookProcs.get(parent.GetExecId()); ok {
+		return existing
+	}
+	ancestor, ok := m.hookProcs.get(parent.GetParentExecId())
+	if !ok || (ancestor.role != hookVerified && ancestor.role != hookTool) || ancestor.binary != parent.GetBinary() {
+		return nil
+	}
+	info := hookInfo(parent)
+	if !hookSameUID(info, ancestor) {
+		return nil
+	}
+	info.role, info.hook = hookTool, ancestor.hook
+	if ancestor.role == hookVerified {
+		info.hook = ancestor
+	}
+	m.hookProcs.put(parent.GetExecId(), info)
+	return info
+}
+
+// The exec-id table can add both a previously unseen fork and its child in
+// one event. Release pending calls before its eviction bound is reached.
+func (m *Mapper) hookCapacity() []Item {
+	if m.hookTrust && len(m.hookProcs.m) > tracked-2 {
+		return m.DisableHooks()
+	}
+	return nil
+}
+
+func (m *Mapper) classifyHook(p, rawParent *pb.Process, frame *sandboxfeed.Frame) {
+	info := hookInfo(p)
+	parent := m.forkOfHook(rawParent)
+	if parent == nil {
+		parent, _ = m.hookProcs.get(p.GetParentExecId())
+	}
+	switch {
+	case !frame.Injected && (p.GetBinary() == "/bin/sh" || p.GetBinary() == "/usr/bin/sh") &&
+		p.GetArguments() == "-c "+sandboxClaudeHook && parent != nil &&
+		m.agentRoot(parent) && hookSameUID(info, parent):
+		info.role = hookLauncher
+	case !frame.Injected && p.GetBinary() == sandboxClaudeHook &&
+		p.GetArguments() == "-p "+sandboxClaudeHook && parent != nil &&
+		parent.role == hookLauncher && hookSameUID(info, parent):
+		parent.verified = true
+		info.role, info.hook = hookVerified, info
+		parent.hook = info
+		info.opened = frame.At
+		if parent.pending != nil {
+			info.frames = append(info.frames, Item{Frame: *parent.pending})
+		}
+		frame.Hook = true
+	case parent != nil && parent.hook != nil:
+		info.hook = parent.hook
+		if !info.hook.finished && parent.role != hookUnexpected && hookSameUID(info, info.hook) && sandboxHookTool(p.GetBinary()) {
+			info.role = hookTool
+			info.hook.tools++
+			frame.HookTool = true
+		} else {
+			info.role = hookUnexpected
+			frame.HookUnexpected = true
+		}
+	}
+	if frame.ExecID != "" {
+		m.hookProcs.put(frame.ExecID, info)
+	}
+}
+
+const (
+	hookFrameLimit = 128
+	hookWaitLimit  = 30 * time.Second
+)
+
+// ordinaryHookFrames releases the original events when a call cannot be
+// summarized. No event from a surprising or long-running subtree is lost.
+func ordinaryHookFrames(hook *hookProcess, owner int) []Item {
+	frames := hook.frames
+	hook.frames = nil
+	for i := range frames {
+		frames[i].Owner = owner
+		frames[i].Frame.Hook = false
+		frames[i].Frame.HookTool = false
+		frames[i].Frame.HookTools = 0
+	}
+	return frames
+}
+
+func (m *Mapper) hookExecItems(info *hookProcess, frame sandboxfeed.Frame, owner int) []Item {
+	item := Item{Frame: frame, Owner: owner}
+	if info == nil || info.hook == nil {
+		return []Item{item}
+	}
+	hook := info.hook
+	hook.owner = owner
+	if hook.finished {
+		item.Frame.HookTool = false
+		return []Item{item}
+	}
+	if hook.tainted {
+		item.Frame.HookTool = false
+		return []Item{item}
+	}
+	if info.role == hookUnexpected {
+		hook.tainted = true
+		return append(ordinaryHookFrames(hook, owner), item)
+	}
+	hook.frames = append(hook.frames, item)
+	if len(hook.frames) > hookFrameLimit {
+		hook.tainted = true
+		return ordinaryHookFrames(hook, owner)
+	}
+	return nil
+}
+
+func (m *Mapper) hookExitItems(info *hookProcess, frame sandboxfeed.Frame, owner int) []Item {
+	item := Item{Frame: frame, Owner: owner}
+	if info == nil || info.hook == nil {
+		return []Item{item}
+	}
+	hook := info.hook
+	if hook.finished {
+		if info.role == hookTool {
+			return nil
+		}
+		item.Frame.Hook = false
+		return []Item{item}
+	}
+	if hook.tainted {
+		item.Frame.Hook = false
+		item.Frame.HookTool = false
+		return []Item{item}
+	}
+	if info.role == hookVerified {
+		var anchor sandboxfeed.Frame
+		for _, buffered := range hook.frames {
+			if buffered.Frame.Hook {
+				anchor = buffered.Frame
+				break
+			}
+		}
+		hook.frames = nil
+		hook.finished = true
+		if anchor.Kind == sandboxfeed.FrameExec {
+			return []Item{{Frame: anchor, Owner: owner}, item}
+		}
+		// A missing anchor means the call cannot be summarized safely.
+		item.Frame.Hook = false
+		return []Item{item}
+	}
+	hook.frames = append(hook.frames, item)
+	if len(hook.frames) > hookFrameLimit {
+		hook.tainted = true
+		return ordinaryHookFrames(hook, owner)
+	}
+	return nil
+}
+
+func (m *Mapper) staleHooks(now time.Time) []Item {
+	var out []Item
+	for _, info := range m.hookProcs.m {
+		if info.role == hookLauncher && !info.verified && info.pending != nil && now.Sub(info.pending.At) >= hookWaitLimit {
+			out = append(out, Item{Frame: *info.pending, Owner: info.owner})
+			info.pending = nil
+			info.role = hookNone
+		}
+		if info.role != hookVerified || info.tainted || info.finished || info.opened.IsZero() || now.Sub(info.opened) < hookWaitLimit {
+			continue
+		}
+		info.tainted = true
+		out = append(out, ordinaryHookFrames(info, info.owner)...)
+	}
+	return out
+}
+
+// FlushHooks releases calls held when the Tetragon stream ends. An exit may
+// have been lost, so retaining them for another stream would hide work.
+func (m *Mapper) FlushHooks() []Item {
+	var out []Item
+	for _, info := range m.hookProcs.m {
+		if info.role == hookLauncher && !info.verified && info.pending != nil {
+			out = append(out, Item{Frame: *info.pending, Owner: info.owner})
+			info.pending = nil
+			info.role = hookNone
+		}
+		if info.role == hookVerified && !info.tainted && !info.finished {
+			info.tainted = true
+			out = append(out, ordinaryHookFrames(info, info.owner)...)
+		}
+	}
+	return out
+}
+
+// DisableHooks releases pending calls and leaves subsequent processes
+// visible: a lost Tetragon event could have been an unexpected child.
+func (m *Mapper) DisableHooks() []Item {
+	m.hookTrust = false
+	return m.FlushHooks()
+}
+
+// ResumeHooks starts a fresh ancestry table with a new complete stream.
+// Processes already running lack verified ancestry and remain visible.
+func (m *Mapper) ResumeHooks() {
+	m.hookProcs = newBoundedMap[string, *hookProcess](tracked)
+	m.hookTrust = true
+}
+
+func (m *Mapper) classifyHookExit(p *pb.Process, frame *sandboxfeed.Frame) {
+	info, ok := m.hookProcs.get(frame.ExecID)
+	if !ok {
+		info = m.forkOfHook(p)
+	}
+	if info == nil {
+		return
+	}
+	switch info.role {
+	case hookVerified:
+		frame.Hook, frame.HookTools = true, info.tools
+	case hookTool:
+		frame.HookTool = true
+	case hookUnexpected:
+		frame.HookUnexpected = true
+	}
+}

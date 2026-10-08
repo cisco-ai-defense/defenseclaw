@@ -82,6 +82,8 @@ type Mapper struct {
 	pinned     boundedMap[string, int]
 	collectors boundedMap[string, bool]
 	images     boundedMap[int, string]
+	hookProcs  boundedMap[string, *hookProcess]
+	hookTrust  bool
 
 	supervisors map[string]*supervisorCount
 
@@ -111,6 +113,8 @@ func NewMapper(config MapperConfig) *Mapper {
 		pinned:      newBoundedMap[string, int](tracked),
 		collectors:  newBoundedMap[string, bool](tracked),
 		images:      newBoundedMap[int, string](tracked),
+		hookProcs:   newBoundedMap[string, *hookProcess](tracked),
+		hookTrust:   true,
 		supervisors: map[string]*supervisorCount{},
 	}
 }
@@ -230,6 +234,10 @@ func (m *Mapper) exec(ctx context.Context, response *pb.GetEventsResponse, exec 
 		}
 	}
 	frame.Collector = m.collector(process, frame)
+	released := m.hookCapacity()
+	if !frame.Collector && m.hookTrust {
+		m.classifyHook(process, parent, &frame)
+	}
 	m.images.put(hostPID, execID)
 	m.count(func(s *MapperStats) {
 		s.Execs++
@@ -237,7 +245,16 @@ func (m *Mapper) exec(ctx context.Context, response *pb.GetEventsResponse, exec 
 			s.Pinned++
 		}
 	})
-	return []Item{{Frame: frame, Owner: container.Owner}}
+	if info, ok := m.hookProcs.get(execID); ok && info.role == hookLauncher {
+		copy := frame
+		info.pending = &copy
+		info.owner = container.Owner
+		return released
+	}
+	if info, ok := m.hookProcs.get(execID); ok && info.hook != nil {
+		return append(released, m.hookExecItems(info, frame, container.Owner)...)
+	}
+	return append(released, Item{Frame: frame, Owner: container.Owner})
 }
 
 // collector reports whether an exec is DefenseClaw's collector or one of its
@@ -340,6 +357,10 @@ func (m *Mapper) exit(ctx context.Context, response *pb.GetEventsResponse, exit 
 		// A fork of the collector that never exec-ed nor started a program.
 		_, frame.Collector = m.forkOfCollector(process)
 	}
+	released := m.hookCapacity()
+	if !frame.Collector && m.hookTrust {
+		m.classifyHookExit(process, &frame)
+	}
 	frame.PID, _ = m.pinned.get(execID)
 	if signal := strings.TrimSpace(exit.GetSignal()); signal != "" {
 		frame.Signal = redaction.TruncateUTF8(signal, 32)
@@ -349,10 +370,33 @@ func (m *Mapper) exit(ctx context.Context, response *pb.GetEventsResponse, exit 
 	}
 	m.pinned.remove(execID)
 	m.collectors.remove(execID)
+	info, _ := m.hookProcs.get(execID)
 	if image, _ := m.images.get(hostPID); image == execID {
 		m.images.remove(hostPID)
 	}
-	return []Item{{Frame: frame, Owner: container.Owner}}
+	if info != nil && info.role == hookLauncher {
+		m.hookProcs.remove(execID)
+		if info.verified && info.hook != nil {
+			if info.hook.tainted {
+				return append(released, Item{Frame: frame, Owner: container.Owner})
+			}
+			if !info.hook.finished {
+				info.hook.frames = append(info.hook.frames, Item{Frame: frame, Owner: container.Owner})
+			}
+			return released
+		}
+		if info.pending != nil {
+			return append(released, Item{Frame: *info.pending, Owner: container.Owner}, Item{Frame: frame, Owner: container.Owner})
+		}
+	}
+	if info != nil && info.hook != nil {
+		items := m.hookExitItems(info, frame, container.Owner)
+		if info.role != hookVerified {
+			m.hookProcs.remove(execID)
+		}
+		return append(released, items...)
+	}
+	return append(released, Item{Frame: frame, Owner: container.Owner})
 }
 
 // countSupervisor counts an exec of a sandbox's supervisor container: its
@@ -378,7 +422,7 @@ func (m *Mapper) countSupervisor(container Container, at time.Time) {
 // Summaries returns one summary frame per sandbox whose supervisor ran
 // anything since the last call, and starts the next window.
 func (m *Mapper) Summaries(now time.Time) []Item {
-	var out []Item
+	out := m.staleHooks(now)
 	for id, count := range m.supervisors {
 		out = append(out, Item{Owner: count.owner, Frame: sandboxfeed.Frame{
 			Kind: sandboxfeed.FrameSummary, At: now, SandboxID: id, SandboxName: count.name, Role: sandboxfeed.RoleSupervisor,

@@ -21,6 +21,7 @@ import (
 	"maps"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +99,9 @@ type procNode struct {
 	// reported. PID is 0 for one whose in-sandbox pid was not captured.
 	ExecID, ParentExecID string
 	HostPID              int
+	Hook                 bool
+	HookTools            int
+	HookUnexpected       bool
 }
 
 // procTree is one sandbox's process tree.
@@ -374,6 +378,9 @@ func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started,
 		t.kernel.collector++
 		return nil, nil
 	}
+	if f.HookTool {
+		return nil, nil
+	}
 	binary := collectText(f.Binary, collectMaxPathBytes)
 	if f.HostPID > 0 {
 		if previous := t.byHost[f.HostPID]; previous != nil {
@@ -402,6 +409,7 @@ func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started,
 		}
 	}
 	node.ExecID, node.ParentExecID, node.HostPID = f.ExecID, f.ParentExecID, max(f.HostPID, 0)
+	node.Hook, node.HookUnexpected = f.Hook, f.HookUnexpected
 	if parent := t.byExec[f.ParentExecID]; f.PPID <= 0 && parent != nil && parent.PID > 0 {
 		node.PPID = parent.PID
 	} else if f.PPID > 0 {
@@ -444,7 +452,7 @@ func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started,
 // kernelExitLocked ends the process an exit names: by its exec id, or the
 // latest image of its host pid. Callers hold t.mu.
 func (t *procTree) kernelExitLocked(f sandboxfeed.Frame, at time.Time) []*procNode {
-	if f.Collector {
+	if f.Collector || f.HookTool {
 		return nil
 	}
 	node := t.byExec[f.ExecID]
@@ -453,6 +461,9 @@ func (t *procTree) kernelExitLocked(f sandboxfeed.Frame, at time.Time) []*procNo
 	}
 	if node == nil || !node.ExitedAt.IsZero() {
 		return nil
+	}
+	if f.Hook {
+		node.Hook, node.HookTools = true, max(f.HookTools, 0)
 	}
 	return []*procNode{t.exitLocked(node, at, f.ExitCode)}
 }
@@ -493,11 +504,17 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 		ev := audit.SandboxProcessEvent{
 			Sandbox: id, Event: event, Source: node.Source, PID: node.PID, ParentPID: node.PPID,
 			HostPID: node.HostPID, ExecID: node.ExecID,
-			Executable: node.Exe, Name: node.name(), CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
+			Executable: node.Exe, Name: node.name(), CommandLine: node.displayCmdline(), WorkingDirectory: node.Cwd,
 			Lineage: t.ancestryLocked(t.parentLocked(node)), Timestamp: node.FirstSeen,
 		}
 		if event == audit.SandboxProcessExit {
 			ev.ExitCode, ev.Timestamp = node.ExitCode, node.ExitedAt
+		}
+		if node.Hook {
+			if event == audit.SandboxProcessStart {
+				t.mu.Unlock()
+				return
+			}
 		}
 		t.mu.Unlock()
 		if t.gate.take(processGateKey, ev.Timestamp) {
@@ -770,6 +787,18 @@ func (n *procNode) view() sandboxapi.Process {
 	return sandboxapi.Process{
 		PID: n.PID, PPID: n.PPID, UID: n.UID, StartedAt: n.Start, ExitedAt: n.ExitedAt, ExitCode: n.ExitCode,
 		Comm: sandboxapi.DisplayText(n.Comm), Exe: sandboxapi.DisplayText(n.Exe), Cwd: sandboxapi.DisplayText(n.Cwd),
-		Cmdline: sandboxapi.DisplayText(n.Cmdline), Source: n.Source, HostPID: n.HostPID,
+		Cmdline: sandboxapi.DisplayText(n.displayCmdline()), Source: n.Source, HostPID: n.HostPID,
+		Hook: n.Hook, HookTools: n.HookTools, HookSubtreeUnexpected: n.HookUnexpected,
 	}
+}
+
+func (n *procNode) displayCmdline() string {
+	line := n.Cmdline
+	if n.Hook {
+		line += " [hook tools: " + strconv.Itoa(n.HookTools) + "]"
+	}
+	if n.HookUnexpected {
+		line += " [hook_subtree_unexpected]"
+	}
+	return line
 }

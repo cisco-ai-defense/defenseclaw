@@ -189,6 +189,13 @@ type Frame struct {
 	// injected, and named defenseclaw-collect. The gateway leaves these out
 	// of the tree, as the sample leaves itself out.
 	Collector bool `json:"collector,omitempty"`
+	// Hook is the verified Claude hook call. HookTool marks one of its known
+	// system tools (or a fork that never execed); the gateway folds those into
+	// the hook row. Unknown children remain visible and are flagged.
+	Hook           bool `json:"hook,omitempty"`
+	HookTool       bool `json:"hook_tool,omitempty"`
+	HookUnexpected bool `json:"hook_subtree_unexpected,omitempty"`
+	HookTools      int  `json:"hook_tools,omitempty"`
 	// ExitCode is the exit status, or Signal the signal that ended it.
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Signal   string `json:"signal,omitempty"`

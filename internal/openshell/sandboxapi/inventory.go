@@ -136,6 +136,10 @@ type Process struct {
 	// HostPID is the host's pid of a process the kernel feed reported. PID
 	// is 0 for one whose in-sandbox pid it could not read.
 	HostPID int `json:"host_pid,omitempty"`
+	// A verified image hook is one row with its known tool exec count.
+	Hook                  bool `json:"hook,omitempty"`
+	HookTools             int  `json:"hook_tools,omitempty"`
+	HookSubtreeUnexpected bool `json:"hook_subtree_unexpected,omitempty"`
 }
 
 // Processes returns a sandbox's process tree.

@@ -144,6 +144,7 @@ func (s *Source) Run(ctx context.Context) {
 			continue
 		}
 		wait = redialFirst
+		s.Mapper.ResumeHooks()
 		s.Hub.SetTetragon(sandboxfeed.TetragonConnected, "")
 		s.Logger.Info("sandbox kernel feed: reading Tetragon's exec stream")
 		err = s.pump(ctx, stream)
@@ -184,16 +185,24 @@ func (s *Source) pump(ctx context.Context, stream EventStream) error {
 	for {
 		select {
 		case <-ctx.Done():
+			s.flushPendingHooks()
 			return ctx.Err()
 		case <-ticker.C:
 			s.flush()
 		case r := <-responses:
 			if r.err != nil {
 				s.flush()
+				s.flushPendingHooks()
 				return r.err
 			}
 			s.handle(ctx, r.response)
 		}
+	}
+}
+
+func (s *Source) flushPendingHooks() {
+	for _, item := range s.Mapper.DisableHooks() {
+		s.Hub.Publish(item)
 	}
 }
 
@@ -202,10 +211,14 @@ func (s *Source) handle(ctx context.Context, response *pb.GetEventsResponse) {
 	case *pb.GetEventsResponse_ProcessThrottle:
 		if event.ProcessThrottle.GetType() == pb.ThrottleType_THROTTLE_START {
 			s.Hub.Lost(1)
+			s.flushPendingHooks()
 		}
 		return
 	case *pb.GetEventsResponse_RateLimitInfo:
 		s.Hub.Lost(int64(event.RateLimitInfo.GetNumberOfDroppedProcessEvents()))
+		if event.RateLimitInfo.GetNumberOfDroppedProcessEvents() > 0 {
+			s.flushPendingHooks()
+		}
 		return
 	}
 	for _, item := range s.Mapper.Map(ctx, response) {
