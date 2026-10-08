@@ -725,7 +725,8 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
-				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted {
+				moved := w.movedByAdmission(evt)
+				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted && !moved {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
 					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
@@ -750,6 +751,13 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
+	if !scan && w.quarantinedCopyIsBack(ctx, evt) {
+		// A baseline written before the original was removed (GAP-0551).
+		fmt.Fprintf(os.Stderr, "[rescan] %s %s was quarantined and is back; running install admission\n", evt.Type, evt.Name)
+		res := w.runAdmission(ctx, evt)
+		w.notifyAdmission(res)
+		return rescanScanned
+	}
 	if !scan {
 		// Nothing changed and the scanner fingerprint matches: skip the
 		// expensive scan entirely. compareSnapshots derives from the same
@@ -869,7 +877,7 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, scanID string) {
-	if snap == nil || scanID == "" {
+	if w.movedByAdmission(evt) || snap == nil || scanID == "" {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {

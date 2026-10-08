@@ -235,6 +235,9 @@ type InstallWatcher struct {
 	admissions   sync.WaitGroup
 	// admitMu serializes onAdmit, which admission workers call.
 	admitMu sync.Mutex
+	// movedOut are the paths whose asset admission quarantined or whose link
+	// it removed: they get no rescan baseline (forgetMovedAsset).
+	movedOut sync.Map
 	// fpMu guards a rescan cycle's fingerprint cache.
 	fpMu sync.Mutex
 
@@ -1783,7 +1786,49 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		fmt.Fprintf(os.Stderr, "[watch] quarantine provenance remains pending for %s: %v\n", evt.Path, err)
 	}
 	w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, plan.QuarantinePath)
+	w.forgetMovedAsset(evt)
 	return nil
+}
+
+// forgetMovedAsset drops the rescan baseline of an asset that admission
+// moved out of its folder, and keeps admission from writing one: on a
+// managed computer the hook guardian removes the original later, so the
+// baseline was written while the folder was still there, and a copy of the
+// same skill put back at that path (by another user, or after the folder
+// was recreated) was skipped as unchanged by the next rescan and stayed
+// active (GAP-0551). The Secure Client profile keeps the earlier behaviour.
+func (w *InstallWatcher) forgetMovedAsset(evt InstallEvent) {
+	if w.secureClientActive() || w.store == nil {
+		return
+	}
+	w.movedOut.Store(evt.Path, struct{}{})
+	if err := w.store.DeleteTargetSnapshot(string(evt.Type), evt.Path); err != nil {
+		fmt.Fprintf(os.Stderr, "[watch] forget baseline of %s: %v\n", evt.Path, err)
+	}
+}
+
+// quarantinedCopyIsBack reports a skill or plugin at a path that holds an
+// active quarantine of it: the original was moved out and a copy is back.
+func (w *InstallWatcher) quarantinedCopyIsBack(ctx context.Context, evt InstallEvent) bool {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return false
+	}
+	records, err := w.store.ListQuarantineRecordsForConnector(ctx, evt.Type.String(), evt.Name, w.eventConnector(evt))
+	if err != nil {
+		return false
+	}
+	for _, record := range records {
+		if record.State == audit.QuarantineStateActive && sameWatcherPath(record.OriginalPath, evt.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// movedByAdmission reports, once, that admission moved evt out.
+func (w *InstallWatcher) movedByAdmission(evt InstallEvent) bool {
+	_, moved := w.movedOut.LoadAndDelete(evt.Path)
+	return moved
 }
 
 // admitsLinkedAsset reports a skill or plugin that is a symlink or Windows
@@ -1826,6 +1871,7 @@ func (w *InstallWatcher) removeLinkedAsset(ctx context.Context, evt InstallEvent
 	if target == "" {
 		target = "an unreadable target"
 	}
+	w.forgetMovedAsset(evt)
 	removed := fmt.Errorf("%w: it pointed to %s; that folder was not changed", errLinkRemoved, target)
 	_ = w.logger.LogEventCtx(ctx, audit.Event{
 		Action:   string(audit.ActionWatcherBlock),

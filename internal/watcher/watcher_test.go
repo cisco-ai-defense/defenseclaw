@@ -1433,3 +1433,67 @@ func TestLinkedSkillIsScannedThroughItsTarget(t *testing.T) {
 		t.Fatalf("the link target was touched: %v", err)
 	}
 }
+
+// GAP-0551: on a managed computer the hook guardian removes a quarantined
+// original after admission, so admission wrote a rescan baseline while the
+// folder was still there; the same skill copied back to that path later was
+// skipped by the rescan as unchanged and stayed active. A quarantined path
+// keeps no baseline, so the copy is admitted again.
+func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the process cannot delete from")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	cfg.Watch.RescanEnabled = true
+	cfg.Watch.RescanContentGated = true
+	scans := &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+		{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
+	}}
+	var verdicts []AdmissionResult
+	watch := func() *InstallWatcher {
+		w := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) { verdicts = append(verdicts, r) })
+		w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+		return w
+	}
+	first := watch()
+	first.runRescanCycle(context.Background()) // the root is covered
+	path := filepath.Join(skillDir, "rvw-crit1")
+	write := func() {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# rvw-crit1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	// The gateway cannot delete the original; the guardian removes it later.
+	if err := os.Chmod(skillDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillDir, 0o700) })
+	enforce.SetQuarantineSourceRemover(func(enforce.AssetQuarantinePlan, string) error { return nil })
+	t.Cleanup(func() { enforce.SetQuarantineSourceRemover(nil) })
+	evt := InstallEvent{Type: InstallSkill, Name: "rvw-crit1", Path: path, Timestamp: time.Now()}
+	snap := first.admissionSnapshot(evt)
+	res := first.runAdmission(context.Background(), evt)
+	first.recordAdmissionBaseline(evt, snap, res.ScanID)
+	// A host upgraded from a build that wrote it still has that baseline.
+	first.persistSnapshot(evt, snap, "scan-before-upgrade", first.scannerFingerprint(evt))
+	if err := os.Chmod(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(path); err != nil { // the guardian removal
+		t.Fatal(err)
+	}
+	write() // the same skill, copied back
+	before := scans.calls
+	watch().runRescanCycle(context.Background())
+	if scans.calls != before+1 || len(verdicts) != 1 || verdicts[0].Event.Path != path || verdicts[0].Verdict == VerdictAllowed {
+		t.Fatalf("rescan scans %d (was %d), verdicts %+v: the copy put back was not admitted", scans.calls, before, verdicts)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("the copy put back was not quarantined (lstat err %v)", err)
+	}
+}
