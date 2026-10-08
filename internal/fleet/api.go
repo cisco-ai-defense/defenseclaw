@@ -35,12 +35,20 @@ type AuditEmitter interface {
 	LogAlert(source, severity, summary string, details map[string]any) error
 }
 
+// MQTTBridge is the narrow interface the fleet API uses to notify the MQTT
+// bridge about decommissioned devices. The bridge's MarkDecommissioned method
+// satisfies this interface.
+type MQTTBridge interface {
+	MarkDecommissioned(fullDeviceID uint64)
+}
+
 // API handles fleet REST endpoints.
 type API struct {
 	manager    *manager.FleetManager
 	cache      *verdict.Cache
 	policy     *policy.Service
 	mqttClient mqtt.Client
+	bridge     MQTTBridge
 	audit      AuditEmitter
 	keyStore   DeviceKeyStore
 	mux        *http.ServeMux
@@ -71,6 +79,15 @@ func WithPolicyService(svc *policy.Service) APIOption {
 func WithMQTTClient(client mqtt.Client) APIOption {
 	return func(a *API) {
 		a.mqttClient = client
+	}
+}
+
+// WithMQTTBridge attaches the MQTT bridge so the API can mark devices as
+// decommissioned in the bridge's in-memory set, causing the bridge to reject
+// any further MQTT messages from those devices.
+func WithMQTTBridge(b MQTTBridge) APIOption {
+	return func(a *API) {
+		a.bridge = b
 	}
 }
 
@@ -707,6 +724,12 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 				if err := a.keyStore.DeleteDeviceKey(fullID); err != nil {
 					log.Printf("[fleet-api] failed to delete device key for %d: %v", fullID, err)
 				}
+			}
+			// Notify the MQTT bridge so it immediately rejects any further
+			// messages (heartbeats, registrations, verdict requests) from
+			// this device without waiting for a process restart.
+			if a.bridge != nil {
+				a.bridge.MarkDecommissioned(fullID)
 			}
 			decommissioned++
 		} else {

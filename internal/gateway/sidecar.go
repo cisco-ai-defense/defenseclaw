@@ -6913,6 +6913,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		policyStore = sqlPS
 	}
 	var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
+	var fleetBridge *fleetmqtt.Bridge    // nil until a real broker is configured
 
 	// Start the MQTT bridge if a broker URL is configured. The bridge
 	// subscribes to heartbeat and verdict-request topics from edge devices
@@ -6925,6 +6926,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		} else {
 			fleetMQTTClient = tcpClient
 			bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+			fleetBridge = bridge
 			// Wire block metric so BLOCK verdicts increment the Prometheus counter
 			bridge.SetOnBlock(func() { fleet.GlobalMetrics.BlocksTotal.Add(1) })
 			// Wire per-device key resolution from the SQLite store so the
@@ -6956,6 +6958,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	fleetOpts := []fleet.APIOption{fleet.WithPolicyService(policySvc)}
 	if fleetMQTTClient != nil {
 		fleetOpts = append(fleetOpts, fleet.WithMQTTClient(fleetMQTTClient))
+	}
+	if fleetBridge != nil {
+		fleetOpts = append(fleetOpts, fleet.WithMQTTBridge(fleetBridge))
 	}
 	if s.logger != nil {
 		fleetOpts = append(fleetOpts, fleet.WithAuditEmitter(s.logger))

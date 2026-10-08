@@ -551,7 +551,7 @@ def test_fleet(
     timeout: int,
     as_json: bool,
 ) -> None:
-    """Test the full edge-connector fleet pipeline.
+    """Test the full edge-connector pipeline.
 
     Checks:\n
       1. Gateway fleet API is reachable (GET /health)\n
@@ -761,7 +761,7 @@ def test_fleet(
     # Summary
     ux.echo()
     if all_ok:
-        ux.ok("All fleet pipeline checks passed.")
+        ux.ok("All edge-connector pipeline checks passed.")
     else:
         ux.warn("Some checks failed. Review the output above.")
         raise SystemExit(1)

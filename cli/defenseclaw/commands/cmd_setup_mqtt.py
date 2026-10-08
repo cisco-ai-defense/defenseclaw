@@ -512,5 +512,5 @@ def mqtt_broker(app, port: int, mode: str) -> None:
         "    The gateway reads DCLAW_MQTT_BROKER_URL from ~/.defenseclaw/.env automatically.\n"
         "\n"
         "  Test the full pipeline:\n"
-        "    defenseclaw fleet test\n"
+        "    defenseclaw edge-connector test\n"
     )

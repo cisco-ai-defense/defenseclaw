@@ -427,6 +427,14 @@ func (b *Bridge) handleRegistration(msg Message) {
 		return
 	}
 
+	// NEW-5 fix: Reject messages from decommissioned devices.
+	fullID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+	if b.isDecommissioned(fullID) {
+		b.logger.Printf("[mqtt-bridge] rejected registration from decommissioned device %d", parts.DeviceID)
+		b.incErrors()
+		return
+	}
+
 	if parts.Suffix != "register" {
 		b.logger.Printf("[mqtt-bridge] unexpected suffix %q for registration handler", parts.Suffix)
 		b.incErrors()
@@ -632,26 +640,6 @@ func (b *Bridge) incErrors() {
 	b.mu.Lock()
 	b.decodeErrors++
 	b.mu.Unlock()
-}
-
-// computeVerdictHMAC computes the 4-byte HMAC tag for a verdict response,
-// matching the C-side compute_verdict_hmac() in verdict_protocol.c.
-//
-// NEW-6 fix: HMAC now covers ALL verdict response fields, not just
-// action + request_id + tool_hash prefix. This prevents an attacker from
-// tampering with severity, TTL, reason, flags, or timestamp fields without
-// invalidating the tag.
-//
-// Input: HMAC-SHA256(deviceKey, sessionID || requestID(2 LE) || action(1) ||
-//
-//	severity(1) || ttl(2 LE) || reason(1) || flags(1) ||
-//	serverTS(4 LE) || toolHash[0:8])
-//
-// Output: first 4 bytes of the HMAC-SHA256 digest.
-func computeVerdictHMAC(deviceKey []byte, sessionID string, requestID uint16, action uint8, toolHash [32]byte) [4]byte {
-	// This is the legacy 3-field HMAC — kept for reference but no longer used.
-	// Use computeVerdictHMACFull instead.
-	return computeVerdictHMACFull(deviceKey, sessionID, requestID, action, 0, 0, 0, 0, 0, toolHash)
 }
 
 // computeVerdictHMACFull computes the 4-byte HMAC tag covering all verdict

@@ -346,7 +346,7 @@ def _register_device_via_api(
     result = subprocess.run(curl_cmd, capture_output=True, text=True)
     if result.returncode != 0:
         ux.warn(f"Device registration API call failed (exit {result.returncode}). "
-                "Register the device manually via: defenseclaw fleet register")
+                "Register the device manually via: defenseclaw edge-connector register")
         return ""
 
     # Split response body from HTTP status code (last line)
@@ -694,7 +694,7 @@ def edge_install(
             ux.echo(f"  Device ID: {device_id}")
             ux.echo(f"  Broker:    {broker_url}")
             ux.echo()
-            ux.echo("  Verify with: defenseclaw fleet test")
+            ux.echo("  Verify with: defenseclaw edge-connector test")
         else:
             ux.section("Install incomplete")
             ux.err(f"Edge connector was built on {target} but the daemon "
