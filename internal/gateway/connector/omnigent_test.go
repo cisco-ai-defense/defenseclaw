@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -680,6 +681,14 @@ print(json.dumps(module.defenseclaw_policy({
 	}
 }
 
+// drainOmnigentTestRequest reads the hook request body before the test
+// gateway answers. urllib sends Connection: close, so Go's server closes the
+// connection without reading an unread body; on Windows the reset that follows
+// can discard the response before Python reads it (WinError 10054 in CI).
+func drainOmnigentTestRequest(r *http.Request) {
+	_, _ = io.Copy(io.Discard, r.Body)
+}
+
 // GAP-0535: a gateway that is taking all the hook calls it can answers 429
 // with Retry-After before it evaluates the call. The bridge waits and sends
 // the call again instead of failing it (owner: live OmniGent run skipped).
@@ -687,6 +696,7 @@ func TestOmnigentPolicyBridgeRetriesBusyGateway(t *testing.T) {
 	python := omnigentTestPython(t)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainOmnigentTestRequest(r)
 		w.Header().Set("Content-Type", "application/json")
 		if calls.Add(1) == 1 {
 			w.Header().Set("Retry-After", "1")
@@ -732,6 +742,7 @@ func TestOmnigentSecureClientPolicyDoesNotRetryBusyGateway(t *testing.T) {
 	python := omnigentTestPython(t)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainOmnigentTestRequest(r)
 		if calls.Add(1) == 1 {
 			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(http.StatusTooManyRequests)
