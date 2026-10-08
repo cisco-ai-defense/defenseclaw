@@ -263,9 +263,9 @@ func watchRootMarkerType(typ InstallType) string { return string(typ) + "_root" 
 
 // baselinedWatchRoots lists, per type, the skill and plugin roots that a
 // completed rescan cycle covered in an earlier run: a root with a marker row,
-// or one holding baselines from a build without markers. A target without a
-// baseline under one of them arrived while the gateway was stopped (GAP-2475),
-// even when the root was empty before. On a first start nothing is listed, so
+// or one holding baselines from a build without markers. A marker also covers
+// a root that was absent during the previous run: a target appearing there
+// while stopped needs admission. On a first start nothing is listed, so
 // the startup rescan only records baselines, as before.
 func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
 	roots := make(map[InstallType][]string)
@@ -295,9 +295,9 @@ func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
 	return roots
 }
 
-// markWatchRoots records, after a completed rescan cycle, that every existing
-// skill and plugin root was covered, so a target added to it while the gateway
-// is stopped is admitted at the next start even if the root was empty.
+// markWatchRoots records, after a completed rescan cycle, every configured
+// skill and plugin root, including absent roots. A target placed in a new
+// root while the gateway is stopped then receives startup admission.
 func (w *InstallWatcher) markWatchRoots() {
 	if w.markedWatchRoots == nil {
 		w.markedWatchRoots = make(map[string]bool)
@@ -309,7 +309,9 @@ func (w *InstallWatcher) markWatchRoots() {
 			if w.markedWatchRoots[key] {
 				continue
 			}
-			if _, err := os.Lstat(dir); err != nil {
+			// Secure Client keeps its existing-root marker behavior.
+			if _, err := os.Lstat(dir); err != nil &&
+				(!errors.Is(err, os.ErrNotExist) || w.secureClientActive()) {
 				continue
 			}
 			if err := w.store.SetTargetSnapshot(markerType, dir, "", "{}", "{}", "[]", "", ""); err != nil {
