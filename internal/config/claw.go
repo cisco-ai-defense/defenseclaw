@@ -1820,6 +1820,19 @@ func ReadMCPServersAMPUnderHome(home string) ([]MCPServerEntry, error) {
 	)
 }
 
+// ReadMCPFromAmpSettings reads the MCP servers of one Amp settings file
+// (settings.json, settings.jsonc or managed-settings.json). Amp keeps them
+// under the flat key amp.mcpServers, where `amp mcp add` writes them; AI
+// Discovery read these files with the Claude Code reader, which looks for a
+// top-level mcpServers, and so listed none of them (GAP-1062).
+func ReadMCPFromAmpSettings(path string) ([]MCPServerEntry, error) {
+	doc, err := readJSONObjectJSONC(path)
+	if err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, []string{"amp.mcpServers"})
+}
+
 func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSettingsPaths []string) ([]MCPServerEntry, error) {
 	var entries []MCPServerEntry
 

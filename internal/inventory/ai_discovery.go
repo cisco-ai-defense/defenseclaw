@@ -2085,7 +2085,7 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	// parse error also propagates because a malformed MCP config
 	// leaves the operator with zero item rows for a real surface,
 	// which downstream must not read as "no MCP servers configured".
-	names, parseErr := readMCPServerNamesWithErr(path)
+	names, parseErr := readMCPServerNamesWithErr(path, sig.SupportedConnector)
 	var partial bool
 	var coverageReason string
 	if parseErr != nil {
@@ -2135,14 +2135,14 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 // readMCPServerNamesWithErr returns the server names an MCP config declares,
 // with the parser's error state so signalFromMCPConfigPath can distinguish
 // "unparseable" from "no servers declared".
-func readMCPServerNamesWithErr(path string) ([]string, error) {
+func readMCPServerNamesWithErr(path, connector string) ([]string, error) {
 	// An empty MCP config declares no server; it is not malformed.
 	// Antigravity leaves a 0-byte mcp_config.json, which read as a
 	// parse error and so as an MCP server row (GAP-2337).
 	if isBlankFile(path) {
 		return nil, nil
 	}
-	entries, err := parseMCPConfigForNames(path)
+	entries, err := parseMCPConfigForNames(path, connector)
 	if err != nil {
 		return nil, err
 	}
@@ -2163,13 +2163,17 @@ func isBlankFile(path string) bool {
 }
 
 // parseMCPConfigForNames dispatches to the right config parser for
-// `path` and returns MCP server entries. Kept alongside the detector
-// so future signature-catalog additions (new MCP config shapes) can
+// `path` and returns MCP server entries. connector is the signature's
+// supported connector: an Amp settings file shares its name with Claude
+// Code's but keeps its servers under amp.mcpServers. Kept alongside the
+// detector so future signature-catalog additions (new MCP config shapes) can
 // extend the switch in one place without changing the caller.
-func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
+func parseMCPConfigForNames(path, connector string) ([]config.MCPServerEntry, error) {
 	lower := strings.ToLower(path)
 	base := strings.ToLower(filepath.Base(path))
 	switch {
+	case normalizeAIID(connector) == "amp" && (strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".jsonc")):
+		return config.ReadMCPFromAmpSettings(path)
 	case strings.HasSuffix(lower, ".toml"):
 		return config.ReadMCPFromCodexConfigTOML(path)
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
