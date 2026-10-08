@@ -1605,7 +1605,7 @@ def _v8_config_path_view(path: str):
     cfg.audit_db = str(
         ((source.get("observability") or {}).get("local") or {}).get("path") or os.path.join(data_dir, "audit.db")
     )
-    cfg.policy_dir = str(source.get("policy_dir") or os.path.join(data_dir, "policies"))
+    cfg.policy_dir = str(source.get("policy_dir") or config_module._default_policy_dir(path, data_dir))
     cfg.plugin_dir = str(source.get("plugin_dir") or os.path.join(data_dir, "plugins"))
     cfg.quarantine_dir = str(source.get("quarantine_dir") or os.path.join(data_dir, "quarantine"))
 

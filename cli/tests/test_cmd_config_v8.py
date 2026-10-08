@@ -411,3 +411,23 @@ def test_unset_validates_every_key_before_writing(tmp_path: Path, monkeypatch) -
     assert mixed.exit_code == 0, mixed.output
     assert "Unset update.check (" in mixed.output
     assert "Unset update.check, update.channel" not in mixed.output
+
+
+def test_config_path_uses_managed_vendor_policy_default(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    data_dir = tmp_path / "data"
+    vendor_dir = tmp_path / "vendor-policies"
+    config_path.write_text(
+        "config_version: 9\n"
+        "deployment_mode: managed_enterprise\n"
+        "enterprise: {profile: standalone}\n"
+        f"data_dir: {data_dir}\n"
+        "observability: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(cmd_config.config_module._STANDALONE_VENDOR_POLICY_DIRS, str(config_path), str(vendor_dir))
+    with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
+        result = CliRunner().invoke(cmd_config.config_cmd, ["path"])
+    assert result.exit_code == 0, result.output
+    assert "policy dir" in result.output and str(vendor_dir) in result.output
+    assert str(data_dir / "policies") not in result.output
