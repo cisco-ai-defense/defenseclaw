@@ -339,6 +339,118 @@ func hookChildThreadKey(meta llmEventMeta) string {
 	return strings.ToLower(strings.TrimSpace(meta.Source)) + "\x00" + strings.TrimSpace(meta.SessionID) + "\x00" + meta.AgentIdentityID
 }
 
+// A thread can hook before the create_thread call that started it returns:
+// Codex starts the thread, then runs the PostToolUse hook of the call. On a
+// managed Linux host the thread SessionStart reached the gateway 100 ms before
+// the call result, so the thread was recorded as a root at depth 0
+// (GAP-0179). A create_thread call in flight is therefore noted at
+// PreToolUse, and the first hook of a Codex session not seen before, of the
+// same agent identity and user, is taken as its thread while every call in
+// flight has one parent. The result, when it arrives first, names the thread.
+const (
+	codexPendingThreadTTL = 2 * time.Minute
+	codexPendingThreadMax = 256
+)
+
+type codexPendingThread struct {
+	toolID    string
+	parent    llmEventMeta
+	child     string
+	createdAt time.Time
+}
+
+// noteCodexThreadCall remembers a create_thread call in flight.
+func (a *APIServer) noteCodexThreadCall(meta llmEventMeta, tool string) {
+	// Secure Client keeps the lineage of main (issue #1092).
+	if a == nil || a.managedAIDOnly() || !isCodexThreadSpawnTool(tool) || meta.AgentIdentityID == "" {
+		return
+	}
+	parent := a.canonicalHookSpawnParent(meta)
+	if strings.TrimSpace(parent.AgentID) == "" || parent.AgentDepth < 0 || parent.AgentDepth >= 64 {
+		return
+	}
+	now := time.Now().UTC()
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	a.pruneCodexPendingThreadsLocked(now)
+	for len(a.codexPendingThreads) >= codexPendingThreadMax {
+		a.codexPendingThreads = a.codexPendingThreads[1:]
+	}
+	a.codexPendingThreads = append(a.codexPendingThreads, codexPendingThread{toolID: meta.ToolID, parent: parent, createdAt: now})
+}
+
+// pruneCodexPendingThreadsLocked drops the expired calls. Caller holds
+// a.llmPromptMu.
+func (a *APIServer) pruneCodexPendingThreadsLocked(now time.Time) {
+	kept := a.codexPendingThreads[:0]
+	for _, pending := range a.codexPendingThreads {
+		if now.Sub(pending.createdAt) <= codexPendingThreadTTL {
+			kept = append(kept, pending)
+		}
+	}
+	a.codexPendingThreads = kept
+}
+
+// finishCodexThreadCallLocked drops the call that returned: the one of its
+// tool call id, or else the oldest of its session. Caller holds a.llmPromptMu.
+func (a *APIServer) finishCodexThreadCallLocked(toolID, session string) {
+	match := -1
+	for i, pending := range a.codexPendingThreads {
+		if pending.parent.SessionID != session {
+			continue
+		}
+		if toolID != "" && pending.toolID == toolID {
+			match = i
+			break
+		}
+		if match < 0 {
+			match = i
+		}
+	}
+	if match >= 0 {
+		a.codexPendingThreads = append(a.codexPendingThreads[:match], a.codexPendingThreads[match+1:]...)
+	}
+}
+
+// claimCodexPendingThread links the first hook of a new Codex session to the
+// create_thread call in flight that started it, when the call result has not
+// named the thread yet.
+func (a *APIServer) claimCodexPendingThread(meta llmEventMeta) llmEventMeta {
+	if a == nil || a.managedAIDOnly() || meta.Source != "codex" || meta.AgentIdentityID == "" ||
+		strings.TrimSpace(meta.SessionID) == "" || meta.LineageProvenance == "reported" || meta.ParentAgentReported ||
+		strings.TrimSpace(meta.ParentAgentID) != "" || strings.TrimSpace(meta.ParentSessionID) != "" || meta.AgentDepth != 0 {
+		return meta
+	}
+	if _, seen := a.hookSessionStateSnapshot(meta.Source, meta.SessionID, ""); seen {
+		return meta
+	}
+	now := time.Now().UTC()
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	if _, linked := a.hookChildThreads[hookChildThreadKey(meta)]; linked {
+		return meta
+	}
+	a.pruneCodexPendingThreadsLocked(now)
+	claimed := -1
+	for i, pending := range a.codexPendingThreads {
+		if pending.child != "" || pending.parent.SessionID == meta.SessionID || !sameHookIdentity(pending.parent, meta) {
+			continue
+		}
+		if claimed >= 0 && (pending.parent.SessionID != a.codexPendingThreads[claimed].parent.SessionID ||
+			pending.parent.AgentID != a.codexPendingThreads[claimed].parent.AgentID) {
+			return meta // calls in flight under two parents: the thread of either
+		}
+		if claimed < 0 {
+			claimed = i
+		}
+	}
+	if claimed >= 0 {
+		a.codexPendingThreads[claimed].child = meta.SessionID
+		a.storeHookChildThreadLocked(meta, a.codexPendingThreads[claimed].parent, now)
+	}
+	return meta
+}
+
 // rememberHookChildThread records the thread a completed create_thread call
 // started, so the first hook of that session is linked to the calling agent.
 func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response string) {
@@ -346,6 +458,9 @@ func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response st
 	if a == nil || a.managedAIDOnly() || !isCodexThreadSpawnTool(tool) {
 		return
 	}
+	a.llmPromptMu.Lock()
+	a.finishCodexThreadCallLocked(meta.ToolID, meta.SessionID)
+	a.llmPromptMu.Unlock()
 	match := codexThreadIDPattern.FindStringSubmatch(response)
 	if match == nil || match[1] == strings.TrimSpace(meta.SessionID) {
 		return

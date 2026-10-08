@@ -434,7 +434,7 @@ local group that carried the membership selected the profile.
 | Attribute | Meaning |
 | --- | --- |
 | `user.id`, `defenseclaw.user.id_kind` | The uid or SID, and `posix_uid` or `windows_sid` |
-| `defenseclaw.user.name` | The OS account name |
+| `defenseclaw.user.name` | The OS account name without its domain (`alice`, also for `alice@corp.example.com`), on every record type |
 | `defenseclaw.user.principal` | The UPN or Kerberos principal. Sent only with `ai_discovery.include_user_principal` |
 | `defenseclaw.user.domain` | The domain or realm, in lower case |
 | `defenseclaw.user.directory` | `local`, `ldap`, `active_directory`, `entra_id`, `okta` or `other` |

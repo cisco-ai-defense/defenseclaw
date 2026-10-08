@@ -119,7 +119,7 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 		if bootstrap {
 			applyStandaloneHookGuardianDefaults(cmd)
 		}
-		configureEnterpriseHooksStandaloneUnix(cmd.Context())
+		configureEnterpriseHooksStandaloneUnix()
 	}
 	return err
 }

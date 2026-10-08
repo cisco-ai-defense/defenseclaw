@@ -6,7 +6,6 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -133,8 +132,8 @@ func enterpriseACPNoHomeText(who, home, _ string) string {
 // configureEnterpriseACPTargetLookup turns on the standalone Unix account
 // rules the enterprise hooks commands use, including the directory lookup
 // for accounts the static gateway cannot find in /etc/passwd (GAP-0269).
-func configureEnterpriseACPTargetLookup(ctx context.Context) {
-	configureEnterpriseHooksStandaloneUnix(ctx)
+func configureEnterpriseACPTargetLookup() {
+	configureEnterpriseHooksStandaloneUnix()
 }
 
 // enterpriseACPTargetError returns err: the Unix refusals already name the

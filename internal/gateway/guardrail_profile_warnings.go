@@ -66,7 +66,7 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 	if checkGroups || runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 		warnings = append(warnings, set.unknownGroupWarnings(wait)...)
 	}
-	return warnings
+	return append(warnings, set.groupSIDs.warnings(set.assignments)...)
 }
 
 // unknownConnectorWarnings points out profile selectors and overrides that

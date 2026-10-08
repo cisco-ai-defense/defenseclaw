@@ -129,6 +129,24 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 2 || pending[identity].LastSessionID != other {
 		t.Fatalf("agent identity counted %+v, want the parent and the stranger, not the thread", pending[identity])
 	}
+
+	// On a managed host the thread hooked 100 ms before the create_thread
+	// result reached the gateway, and its first rows were a root at depth 0.
+	// The call in flight links it from its first hook.
+	const earlyChild = "01a11c2f-0363-7e42-aabb-15f578154171"
+	emit(parentSession, "PreToolUse", "mcp__codex_tui__create_thread", nil)
+	emit(earlyChild, "SessionStart", "", nil)
+	early, ok := api.hookLifecycleSnapshot("codex", earlyChild, agentNodeID(identity, "codex", earlyChild, "root"))
+	if !ok || early.AgentDepth != 1 || early.ParentAgentID != parentAgent || early.ParentSessionID != parentSession {
+		t.Fatalf("a thread that hooks before the call result = %+v (retained %v), want depth 1 under %s", early, ok, parentAgent)
+	}
+	emit(parentSession, "PostToolUse", "mcp__codex_tui__create_thread",
+		map[string]any{"content": `{"threadId":"` + earlyChild + `"}`})
+	const later = "01a11c30-0000-7000-8000-000000000002"
+	emit(later, "SessionStart", "", nil)
+	if root, ok := api.hookLifecycleSnapshot("codex", later, agentNodeID(identity, "codex", later, "root")); !ok || root.AgentDepth != 0 {
+		t.Fatalf("a session started after the call returned = %+v (retained %v), want a root", root, ok)
+	}
 }
 
 // GAP-0371: Copilot CLI runs a task sub-agent in a session of its own whose
