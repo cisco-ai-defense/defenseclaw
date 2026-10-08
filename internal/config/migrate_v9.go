@@ -33,7 +33,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
@@ -106,6 +108,20 @@ type MigrateV9Input struct {
 	// a custom rule_pack_dir pass it; without it such a directory is a
 	// migration error.
 	RulePackDigest func(dir string) (string, error)
+	// RebaseRulePack plans the 1.0 copy of a custom rule-pack directory whose
+	// action rule files are 0.8.x copies of the default pack's, which enforce
+	// nothing in 1.0 (guardrail.PlanRulePackRebase); a nil plan needs none.
+	// Without it such a pack is pinned as it is (GAP-0360).
+	RebaseRulePack func(dir string) (*RulePackRebasePlan, error)
+}
+
+// RulePackRebasePlan is guardrail.RulePackRebase, which this package can not
+// import: the rebased pack's files and FilesDigest, and what changed.
+type RulePackRebasePlan struct {
+	Files                                   map[string][]byte
+	Digest                                  string
+	Updated                                 int
+	Carried, Expressed, AlertOnly, Disabled []string
 }
 
 // MigrateV9Result is the outcome of one migration.
@@ -384,10 +400,18 @@ type v9Migrator struct {
 	// seedPacks maps a missing rule-pack folder to the shipped pack commit
 	// writes there (planShippedPacks).
 	seedPacks map[string]string
+	// rebasedPacks maps a new rule-pack folder to the files commit writes
+	// there, and rebasedFrom a custom pack folder to its rebased copy.
+	rebasedPacks   map[string]map[string][]byte
+	rebasedFrom    map[string]string
+	rebasedDigests map[string]string
 	// globalPackPosture is the posture the gateway gives the global v8
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
 	globalPackPosture string
+	// v9Shaped is set when the config_version 8 source carries keys only
+	// config_version 9 writes (a v9 file relabelled 8 by hand).
+	v9Shaped bool
 }
 
 type v9RegoRefresh struct {
@@ -425,6 +449,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: the config_version 9 migration reads config_version 8, not %d", version)
 	}
 
+	m.v9Shaped = v9ShapedSource(root)
 	data, err := readV9DataJSON(m.in.DataJSONPath)
 	if err != nil {
 		return nil, false, err
@@ -534,10 +559,25 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	var written []string
 	backup := m.configPath + ConfigV8BackupSuffix
-	if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
-		return written, err
+	if earlier, err := os.ReadFile(backup); err == nil && m.v9Shaped && !bytes.Equal(earlier, source) {
+		// A v9 file relabelled config_version 8 is no 0.8.x source: replacing
+		// the backup with it left "going back to 0.8.x" a file 0.8.x refuses
+		// (GAP-0352). The 0.8.x file the backup holds stays.
+		m.note("%s keeps the 0.8.x config it holds: config.yaml said config_version 8 but carries keys only "+
+			"config_version 9 writes", backup)
+	} else {
+		if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
+			return written, err
+		}
+		written = append(written, backup)
 	}
-	written = append(written, backup)
+	// Before the config that pins them.
+	for _, dir := range slices.Sorted(maps.Keys(m.rebasedPacks)) {
+		if err := writeRebasedRulePack(dir, m.rebasedPacks[dir]); err != nil {
+			return written, fmt.Errorf("config: write the rebased rule pack %s: %w", dir, err)
+		}
+		written = append(written, dir)
+	}
 	if m.envKey != "" {
 		envPath := filepath.Join(m.dataDir(), ".env")
 		if err := appendDotEnvKey(envPath, m.envKey, m.envValue); err != nil {
@@ -1791,6 +1831,16 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 	return nil
 }
 
+// v9ShapedSource reports whether a config_version 8 document carries keys
+// only config_version 9 writes: guardrail.custom_packs, a guardrail.rule_pack
+// without rule_pack_dir, or the update block (0.8.x had none of them).
+func v9ShapedSource(root *yaml.Node) bool {
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	return v8YAMLMapValue(guardrail, "custom_packs") != nil ||
+		(v8YAMLMapValue(guardrail, "rule_pack") != nil && v8YAMLMapValue(guardrail, "rule_pack_dir") == nil) ||
+		v8YAMLMapValue(root, "update") != nil
+}
+
 // embeddedPackDropped reports whether dropping an empty rule_pack_dir changes
 // the pack: config_version 9 keeps the embedded packs only for a standalone
 // Windows host without a policy_dir of its own (standaloneRulePackDefault);
@@ -1883,11 +1933,16 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	if m.in.RulePackDigest == nil {
 		return "", nil, fmt.Errorf("custom rule pack %s needs a digest; run `defenseclaw-gateway config migrate`", dir)
 	}
-	digest, err := m.in.RulePackDigest(clean)
+	target, digest, err := m.rebaseRulePack(dir, clean)
 	if err != nil {
-		return "", nil, fmt.Errorf("load custom rule pack %s: %w", dir, err)
+		return "", nil, err
 	}
-	stem := strings.Trim(v9PackNameUnsafe.ReplaceAllString(base, "-"), "-_")
+	if target == clean {
+		if digest, err = m.in.RulePackDigest(clean); err != nil {
+			return "", nil, fmt.Errorf("load custom rule pack %s: %w", dir, err)
+		}
+	}
+	stem := strings.Trim(v9PackNameUnsafe.ReplaceAllString(v9PackNameASCII(base), "-"), "-_")
 	if stem == "" || v9BuiltinPacks[stem] {
 		stem = strings.TrimRight("custom-"+stem, "-")
 	}
@@ -1898,16 +1953,108 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	name := stem
 	for suffix := 2; ; suffix++ {
 		existing := v8YAMLMapValue(packs, name)
-		if existing == nil || yamlScalarValue(v8YAMLMapValue(existing, "path")) == clean {
+		if existing == nil || yamlScalarValue(v8YAMLMapValue(existing, "path")) == target {
 			break
 		}
 		name = fmt.Sprintf("%s-%d", stem, suffix)
 	}
 	if v8YAMLMapValue(packs, name) == nil {
-		v9Set(guardrail, v9Mapping("path", v9Scalar(clean), "digest", v9Scalar("sha256:"+digest)), "custom_packs", name)
-		m.moved("config", "rule_pack_dir", "guardrail.custom_packs."+name, map[string]string{"path": clean, "digest": "sha256:" + digest})
+		v9Set(guardrail, v9Mapping("path", v9Scalar(target), "digest", v9Scalar("sha256:"+digest)), "custom_packs", name)
+		m.moved("config", "rule_pack_dir", "guardrail.custom_packs."+name, map[string]string{"path": target, "digest": "sha256:" + digest})
 	}
 	return name, nil, nil
+}
+
+// rebaseRulePack returns the folder and digest to pin for the custom pack at
+// clean: a 0.8.x copy of the default pack's action rules enforced nothing in
+// 1.0, where such a rule blocks only with an expression, and doctor still
+// said PASS (GAP-0360). Its 1.0 copy goes next to it (commit writes it) and
+// the folder stays for a rollback to 0.8.x. Any other pack is pinned as it is
+// (digest ""). A managed host's packs belong to its administrator.
+func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
+	if target, ok := m.rebasedFrom[clean]; ok {
+		return target, m.rebasedDigests[target], nil
+	}
+	if m.in.RebaseRulePack == nil || m.in.Managed || m.in.InMemory {
+		return clean, "", nil
+	}
+	plan, err := m.in.RebaseRulePack(clean)
+	if err != nil {
+		m.note("%s could not be rebased on the 1.0 default pack (%v): it is pinned as it is, and any 0.8.x copy of a "+
+			"built-in command, path, agent-file or C2 rule in it only records matches; doctor names them", dir, err)
+		return clean, "", nil
+	}
+	if plan == nil {
+		return clean, "", nil
+	}
+	target := clean + "-1.0"
+	for suffix := 2; ; suffix++ {
+		if _, err := os.Lstat(target); errors.Is(err, fs.ErrNotExist) {
+			if _, taken := m.rebasedPacks[target]; !taken {
+				break
+			}
+		}
+		target = fmt.Sprintf("%s-1.0-%d", clean, suffix)
+	}
+	if m.rebasedPacks == nil {
+		m.rebasedPacks, m.rebasedFrom, m.rebasedDigests = map[string]map[string][]byte{}, map[string]string{}, map[string]string{}
+	}
+	m.rebasedPacks[target], m.rebasedFrom[clean], m.rebasedDigests[target] = plan.Files, target, plan.Digest
+	kept := fmt.Sprintf("%d built-in rules are their 1.0 versions", plan.Updated)
+	if len(plan.Disabled) > 0 {
+		kept += fmt.Sprintf(", %s stay off (the copy had removed them)", strings.Join(plan.Disabled, ", "))
+	}
+	if len(plan.Carried) > 0 {
+		kept += fmt.Sprintf("; your own rules were carried over: %s", strings.Join(plan.Carried, ", "))
+	}
+	if len(plan.Expressed) > 0 {
+		kept += fmt.Sprintf("; these got an expression that blocks a command with their pattern as an argument "+
+			"(review it): %s", strings.Join(plan.Expressed, ", "))
+	}
+	m.note("%s is a 0.8.x copy of the default pack's command, path, agent-file or C2 rules, which have no expression; "+
+		"in 1.0 such a rule blocks only with one, so the pack enforced nothing. It was rebased on the 1.0 default "+
+		"pack in %s, which is pinned instead (%s); %s is kept for a rollback to 0.8.x", dir, target, kept, dir)
+	if len(plan.AlertOnly) > 0 {
+		m.note("%s in %s have no expression, so in 1.0 they record matches but never block: give each an expression "+
+			"over the parsed command (see the CEL rule authoring guide)", strings.Join(plan.AlertOnly, ", "), target)
+	}
+	return target, plan.Digest, nil
+}
+
+// writeRebasedRulePack writes a rebased pack to dir, which must not exist:
+// the files go to a sibling folder that is renamed into place.
+func writeRebasedRulePack(dir string, files map[string][]byte) error {
+	staging := dir + ".rebasing"
+	_ = os.RemoveAll(staging)
+	for rel, data := range files {
+		target := filepath.Join(staging, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			_ = os.RemoveAll(staging)
+			return err
+		}
+		if err := cfgtxn.WriteFileDurable(target, data, 0o600); err != nil {
+			_ = os.RemoveAll(staging)
+			return err
+		}
+	}
+	if err := os.Rename(staging, dir); err != nil {
+		_ = os.RemoveAll(staging)
+		return err
+	}
+	return nil
+}
+
+// v9PackNameASCII folds a folder name to the letters a pack name keeps: an
+// accented letter becomes its base letter, so "équipe sécu" is equipe-secu,
+// where the name rule dropped it and left quipe-s-cu (GAP-0390).
+func v9PackNameASCII(name string) string {
+	var folded strings.Builder
+	for _, r := range norm.NFKD.String(name) {
+		if !unicode.Is(unicode.Mn, r) {
+			folded.WriteRune(r)
+		}
+	}
+	return folded.String()
 }
 
 // ---------------------------------------------------------------------------

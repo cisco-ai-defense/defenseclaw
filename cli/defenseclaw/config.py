@@ -6146,7 +6146,9 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 _log.warning("config: ignored malformed dotenv entry from %s", env_path)
                 continue
             if dotenv_key_is_process_control(key):
-                _log.warning("config: ignored unsafe process-control key %s from %s", key, env_path)
+                # Said on every command, with no fix, it was noise; doctor and
+                # the upgrade's migration name it with the replacement (GAP-0387).
+                _log.debug("config: ignored process-control key %s from %s", key, env_path)
                 continue
             # A managed standalone host skips what the registry ignores there.
             if envvars.managed_policy(key) == envvars.MANAGED_IGNORE:
@@ -6172,6 +6174,39 @@ def _load_dotenv_into_os(data_dir: str) -> None:
         pass
     except OSError as exc:
         _log.warning("config: ignoring unreadable or unsafe dotenv %s: %s", env_path, exc)
+
+
+def ignored_dotenv_control_keys(data_dir: str) -> list[str]:
+    """Each process-control key the data dir's .env sets, with what replaces it.
+
+    A .env never sets one of those (dotenv_key_is_process_control): a 0.8.x
+    workaround such as DEFENSECLAW_FAIL_MODE=open there is ignored, and
+    fail-open hooks became fail-closed without a word (GAP-0387).
+    """
+    try:
+        body = read_regular_file_no_follow(os.path.join(data_dir, ".env"), max_bytes=MAX_DOTENV_BYTES)
+    except OSError:
+        return []
+    found: dict[str, str] = {}
+    for raw_line in body.splitlines():
+        raw_key, separator, raw_value = raw_line.strip().partition(b"=")
+        try:
+            key = raw_key.strip().decode("ascii")
+            value = raw_value.strip().decode("utf-8").strip("\"'").strip().lower()
+        except UnicodeError:
+            continue
+        if not separator or not dotenv_key_is_valid(key) or not dotenv_key_is_process_control(key) or key in found:
+            continue
+        if key.upper() == "DEFENSECLAW_FAIL_MODE" and value in ("open", "closed"):
+            found[key] = f"set it in config.yaml instead: defenseclaw guardrail fail-mode {value}"
+        elif key.upper() == "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT":
+            found[key] = (
+                "to accept a newer agent, export it for one restart instead: "
+                "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
+            )
+        else:
+            found[key] = "export it in the shell of the command that needs it instead"
+    return [f"{key} ({fix})" for key, fix in found.items()]
 
 
 def _warn_plaintext_secrets(cfg: Config) -> None:

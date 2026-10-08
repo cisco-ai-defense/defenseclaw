@@ -1635,6 +1635,8 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
             "local_pattern_count": 6,
             "suppression_count": 3,
             "sensitive_tool_count": 5,
+            "stale_rule_count": 0,
+            "alert_only_rule_count": 0,
             "digest": "a" * 64,
             "files_digest": "b" * 64,
         }
@@ -1705,6 +1707,20 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         r = _DoctorResult()
         _check_connector_inventory(cfg, "cursor", r)
         self.assertEqual(next(c for c in r.checks if c["label"] == "Rule pack")["status"], "pass")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_pack_whose_action_rules_cannot_block_warns(self, validate):
+        # GAP-0360: a 0.8.x copy of the default pack showed PASS and blocked nothing.
+        validate.return_value = self._valid(stale_rule_count=26, alert_only_rule_count=1)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("26 are 0.8.x copies of built-in", rp["detail"])
+        self.assertIn("never block", rp["detail"])
+        self.assertIn("guardrail use-pack", rp["remediation"])
 
     @patch(
         "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",

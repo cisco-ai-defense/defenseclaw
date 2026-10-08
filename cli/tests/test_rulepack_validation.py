@@ -25,6 +25,8 @@ def _summary(**overrides: int | str) -> dict[str, int | str]:
         "local_pattern_count": 6,
         "suppression_count": 3,
         "sensitive_tool_count": 5,
+        "stale_rule_count": 0,
+        "alert_only_rule_count": 0,
         "digest": "a" * 64,
         "files_digest": "b" * 64,
     }

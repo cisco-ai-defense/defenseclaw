@@ -275,6 +275,7 @@ class _DoctorResult:
         "list_processes",
         "quiet",
         "gateway_down",
+        "sidecar_unverified",
     )
 
     def __init__(
@@ -306,6 +307,9 @@ class _DoctorResult:
         # account's gateway is not serving the API port; later rows that would
         # only repeat it stay quiet.
         self.gateway_down = ""
+        # True once the Sidecar API row found a listener on the API port that
+        # is not this account's verified gateway (its /health still answers).
+        self.sidecar_unverified = False
 
     @property
     def passive_reason(self) -> str:
@@ -3124,6 +3128,10 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 r=r,
                 remediation=move,
             )
+            # Its effective policy is no evidence about this account's gateway:
+            # Policy compared another account's digest with config.yaml and
+            # failed (GAP-0384).
+            r.sidecar_unverified = True
 
         try:
             health = json.loads(body)
@@ -9064,6 +9072,23 @@ def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
     _emit("skip", label, "no regional provider in use", r=r)
 
 
+def _check_ignored_dotenv_keys(cfg, r: _DoctorResult) -> None:
+    """WARN for a .env line that sets a variable .env may not set (GAP-0387)."""
+    from defenseclaw.config import ignored_dotenv_control_keys
+
+    keys = ignored_dotenv_control_keys(cfg.data_dir)
+    if not keys:
+        return
+    env_path = os.path.join(cfg.data_dir, ".env")
+    _emit(
+        "warn",
+        ".env",
+        f"{env_path} sets variable(s) DefenseClaw does not read from .env: {'; '.join(keys)}",
+        r=r,
+        remediation=f"Do as each one says, then remove those lines from {env_path}",
+    )
+
+
 def _short_policy_digest(digest: str) -> str:
     """``sha256:`` plus the first 12 hex digits, as status and the TUI show it."""
     return digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
@@ -9087,6 +9112,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     label = "Policy"
     if not isinstance(live_health, dict):
         _emit_policy_without_gateway(cfg, r, label, "the gateway is not running")
+        return
+    if r.sidecar_unverified:
+        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
         return
     policy = live_health.get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
@@ -10931,6 +10959,7 @@ def doctor(
 
     r.set_section("configuration")
     _check_config(cfg, r)
+    _check_ignored_dotenv_keys(cfg, r)
     _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
@@ -12993,6 +13022,30 @@ def _emit_rule_pack_row(
     enabled_rule_count = summary.get("enabled_rule_count", 0)
     rule_count = summary.get("rule_count", 0)
     digest = summary.get("digest", "")
+    stale = summary.get("stale_rule_count", 0)
+    alert_only = summary.get("alert_only_rule_count", 0)
+    if stale or alert_only:
+        # GAP-0360: a 0.8.x copy of the default pack enforced nothing in 1.0,
+        # where a command, path, agent-file or C2 rule blocks only with an
+        # expression, and this row said PASS.
+        problems = []
+        if stale:
+            problems.append(f"{stale} are 0.8.x copies of built-in command, path, agent-file or C2 rules")
+        if alert_only:
+            problems.append(f"{alert_only} of your own in those categories")
+        _emit(
+            "warn",
+            "Rule pack",
+            f"{kind} {shown_path}: {enabled_rule_count}/{rule_count} rules enabled, but "
+            f"{' and '.join(problems)} have no expression, so they record matches and never block",
+            r=r,
+            remediation=(
+                "Rebase it on the 1.0 default pack: copy policies/guardrail/default to a new folder, add your own "
+                "rules to its rules/*.yaml with an expression (see the CEL rule authoring guide), then run "
+                "defenseclaw guardrail use-pack <folder>"
+            ),
+        )
+        return
     detail = (
         f"{kind} {shown_path}: "
         f"{enabled_rule_count}/{rule_count} rules enabled"

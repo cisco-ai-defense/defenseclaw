@@ -30,8 +30,10 @@ blocked, so a harmless marker is the reliable way to see a block.
 
 <include>../../snippets/install-commands.mdx</include>
 
-The installer only puts DefenseClaw on disk. Requirements, the macOS app and
-the enterprise packages are on [Download](/docs/get-started/download).
+On a first install the installer asks which agent to guard: type `claudecode`
+(or its number). It puts DefenseClaw on disk and ends with the next command,
+`defenseclaw init --connector claudecode`. Requirements, the macOS app and the
+enterprise packages are on [Download](/docs/get-started/download).
 
 </Step>
 
@@ -40,14 +42,15 @@ the enterprise packages are on [Download](/docs/get-started/download).
 ### Run `defenseclaw init`
 
 ```bash
-defenseclaw init
+defenseclaw init --connector claudecode
 ```
 
-Press Enter through the prompts. `init` finds the agents you have installed,
-selects all of them and sets them up in **observe** mode: DefenseClaw logs what
-the agents do but blocks nothing yet. At **Select connector(s) for action
-enforcement**, leave every box unchecked for now; unchecked agents stay in
-observe. `init` ends by starting the gateway and printing a report like this
+Press Enter through the prompts. `init` sets up Claude Code in **observe**
+mode: DefenseClaw logs what the agent does but blocks nothing yet. At **Select
+connector(s) for action enforcement**, leave the box unchecked for now; an
+unchecked agent stays in observe. Plain `defenseclaw init`, without
+`--connector`, sets up every agent it finds instead (all of them are
+selected). `init` ends by starting the gateway and printing a report like this
 one:
 
 <include>../../snippets/first-run-report.mdx</include>

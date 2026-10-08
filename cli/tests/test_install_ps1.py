@@ -196,6 +196,36 @@ exit $LASTEXITCODE
     assert not (tmp_path / "home").exists()
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [("-Frobnicate", "Unknown option: -Frobnicate"), ("-Connector=bogus", "Invalid -Connector 'bogus'")],
+)
+def test_an_unknown_argument_stops_with_exit_2(tmp_path: Path, argument: str, message: str) -> None:
+    # GAP-0361: an unknown argument (a typo, or the -Name=value form) was
+    # ignored with a warning and the install went on without it.
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), argument],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert message in completed.stdout + completed.stderr
+    assert not (tmp_path / "home").exists()
+
+
 def test_hook_state_matches_what_the_hook_reads() -> None:
     # internal/cli/hook_trusted_state_windows.go accepts a PowerShell install's
     # state only with these values; anything else makes the hook fall back to
