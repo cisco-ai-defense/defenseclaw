@@ -211,3 +211,27 @@ func TestManagedRestartRequiredCountsTheEnterpriseBlockOutsideInspection(t *test
 		t.Fatalf("ManagedRestartRequired = %v, want %s", got, want)
 	}
 }
+
+// A block added or removed whole names its leaves, so the Windows hot path
+// sees an enrollment list and not an unknown enterprise key: the first
+// enterprise.enrollment block took the restart transaction (GAP-0887).
+func TestChangedPathsNamesTheLeavesOfABlockAddedOrRemovedWhole(t *testing.T) {
+	base := []byte("config_version: 9\nguardrail:\n  mode: action\n")
+	added := []byte("config_version: 9\nguardrail:\n  mode: action\nenterprise:\n  enrollment:\n    exclude_users: [svc]\n")
+	for _, tc := range []struct {
+		name          string
+		before, after []byte
+	}{
+		{"added", base, added}, {"removed", added, base},
+	} {
+		got, err := ChangedPaths(tc.before, tc.after)
+		if err != nil || strings.Join(got, ",") != "enterprise.enrollment.exclude_users" {
+			t.Fatalf("%s: ChangedPaths = %v, %v", tc.name, got, err)
+		}
+	}
+	// An empty block has no leaf: it is still a change, of the block.
+	got, err := ChangedPaths(base, append(append([]byte(nil), base...), []byte("  connectors:\n    cursor: {}\n")...))
+	if err != nil || strings.Join(got, ",") != "guardrail.connectors.cursor" {
+		t.Fatalf("empty block: ChangedPaths = %v, %v", got, err)
+	}
+}
