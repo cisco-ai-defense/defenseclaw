@@ -930,7 +930,7 @@ const codeOptionalDestination = "optional_destination_failing"
 
 // codeJudgeFailing names an LLM judge whose recent calls all failed, or that
 // could not start.
-const codeJudgeFailing = "judge_failing"
+const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
 
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
@@ -957,14 +957,7 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		} `json:"directory"`
 		ProfileWarnings []string `json:"profile_warnings"`
 		Guardrail       *struct {
-			Details struct {
-				State       string `json:"judge_state"`
-				Unavailable string `json:"judge_unavailable_reason"`
-				Recent      int    `json:"judge_recent_calls"`
-				Failed      int    `json:"judge_failed_calls"`
-				LastError   string `json:"judge_last_error"`
-				LastFailure string `json:"judge_last_failure_at"`
-			} `json:"details"`
+			Details enterprisestatus.JudgeHealth `json:"details"`
 		} `json:"guardrail"`
 	}
 	if json.Unmarshal(body, &health) != nil {
@@ -973,12 +966,8 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).
 	if g := health.Guardrail; g != nil {
-		switch d := g.Details; d.State {
-		case "failing":
-			l.result.AddWarning(codeJudgeFailing, fmt.Sprintf("the LLM judge failed its last %d calls (last at %s: %s); the rule packs still apply, but the judge's checks do not until it recovers: check the judge's provider credentials and network",
-				d.Failed, d.LastFailure, d.LastError))
-		case "unavailable":
-			l.result.AddWarning(codeJudgeFailing, "the LLM judge is unavailable ("+d.Unavailable+"); the rule packs still apply, but the judge's checks do not: check the judge settings and its provider credentials")
+		if message, failing := g.Details.Warning(); failing {
+			l.result.AddWarning(codeJudgeFailing, message)
 		}
 	}
 	if health.Inspection != nil {
