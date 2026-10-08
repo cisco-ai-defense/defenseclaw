@@ -152,10 +152,12 @@ function Get-OSArchitectureName {
     return $name.ToUpperInvariant()
 }
 
-function Confirm-Step([string]$Prompt) {
+function Confirm-Step([string]$Prompt, [switch]$DefaultNo) {
     if ($Yes) { return $true }
-    try { $answer = Read-Host "  $Prompt [Y/n]" } catch { $answer = "" }
-    return [string]::IsNullOrWhiteSpace($answer) -or $answer -match '^[Yy]'
+    $choices = if ($DefaultNo) { "[y/N]" } else { "[Y/n]" }
+    try { $answer = Read-Host "  $Prompt $choices" } catch { $answer = "" }
+    if ([string]::IsNullOrWhiteSpace($answer)) { return -not $DefaultNo }
+    return $answer -match '^[Yy]'
 }
 
 function Get-Field($Object, [string]$Name) {
@@ -1930,7 +1932,14 @@ function Invoke-Install {
             Write-Warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings $PrevVersion recorded ($auditDb, $auditMb) are deleted when DefenseClaw $Ver first opens its audit database"
             Write-Info "A copy is kept in $(Join-Path $Previous 'data\audit.db'); 'defenseclaw rollback' brings it back, and later upgrades keep it in $(Join-Path $DataDir 'backups')"
         }
-        if (-not (Confirm-Step "Upgrade DefenseClaw $PrevVersion -> ${Ver}?")) { Die "Cancelled; nothing was changed" }
+        if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) {
+            # An older release over a newer one is a downgrade: ask with no as
+            # the answer, and say so even with -Yes (GAP-0287).
+            if ($Yes) { Write-Warn "Downgrading DefenseClaw $PrevVersion -> $Ver (-Yes)" }
+            if (-not (Confirm-Step "Downgrade DefenseClaw $PrevVersion -> ${Ver}? (an older release; 'defenseclaw rollback' undoes it)" -DefaultNo)) {
+                Die "Cancelled; nothing was changed"
+            }
+        } elseif (-not (Confirm-Step "Upgrade DefenseClaw $PrevVersion -> ${Ver}?")) { Die "Cancelled; nothing was changed" }
     }
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
@@ -2024,7 +2033,8 @@ function Invoke-Install {
     if ($Setup) {
         Write-Host "  Replaced DefenseClaw Setup $PrevVersion; your config and data were kept."
     } elseif ($PrevVersion -and $PrevVersion -ne $Ver) {
-        Write-Host "  Upgraded from $PrevVersion. Undo with: defenseclaw rollback"
+        $changed = if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) { "Downgraded" } else { "Upgraded" }
+        Write-Host "  $changed from $PrevVersion. Undo with: defenseclaw rollback"
     }
     if ($PrevVersion -and $configured -and -not (Get-GatewayProcess)) {
         # GAP-1496: it was not running before the upgrade, so it was not started.

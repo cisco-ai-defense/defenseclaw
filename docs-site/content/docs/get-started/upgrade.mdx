@@ -200,6 +200,11 @@ If an upgrade or rollback is interrupted (the terminal closes or the machine
 loses power), run the same command again. The installer first restores the
 install the interrupted run was replacing, then continues.
 
+Running the installer of an older release over a newer one is a downgrade,
+and the installer says so: it asks `Downgrade DefenseClaw <newer> → <older>?`
+with no as the default answer (with `--yes` it warns and goes on), and ends
+with `Downgraded from <newer>`. `defenseclaw rollback` is the usual way back.
+
 ## Migrations
 
 `defenseclaw migrate` brings configuration and data to the current schema. The
