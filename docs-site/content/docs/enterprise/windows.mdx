@@ -178,6 +178,12 @@ connectors protects nothing: `status` warns `no_connectors_enabled` and
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+Choose `gateway.api_port` before the first install. Every user's agent hooks
+and the Cursor machine hooks are bound to the installed port, so Setup
+`/ensure` refuses a config that changes it on an installed computer before
+it stops any service (exit 1639). To move the port, uninstall DefenseClaw and
+install it again with the new value.
+
 Without `guardrail.rule_pack` or `policy_dir`, as here, the gateway uses
 the rule packs built into it. A rule-pack directory you name (a
 `guardrail.custom_packs` entry, or `<policy_dir>/guardrail/<preset>`) must exist, be

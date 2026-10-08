@@ -2286,3 +2286,26 @@ func TestWindowsEnterpriseVerifyJSONCarriesServiceStartModes(t *testing.T) {
 		t.Fatalf("services = %s", body)
 	}
 }
+
+// GAP-0865: a config that moves gateway.api_port of an installed deployment
+// is refused before ensure stops anything, with the installed port and the
+// way to keep it.
+func TestPlanWindowsEnterpriseEnsureRefusesAnAPIPortChange(t *testing.T) {
+	original := windowsEnterpriseConfigAPIPort
+	t.Cleanup(func() { windowsEnterpriseConfigAPIPort = original })
+	windowsEnterpriseConfigAPIPort = func(path string) (int, error) {
+		if path == "" {
+			return 18970, nil
+		}
+		return 18971, nil
+	}
+	opts := windowsEnterpriseLifecycleOptions{
+		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0", configPath: `C:\stage\config.yaml`,
+	}
+	status := windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: "1.4.0"}
+	_, err := planWindowsEnterpriseEnsure(&status, &opts, `C:\stage\install-enterprise.ps1`)
+	if err == nil || !errors.Is(err, errWindowsEnterpriseInvalidArguments) ||
+		!strings.Contains(err.Error(), "gateway.api_port from 18970 to 18971") || !strings.Contains(err.Error(), "no service was stopped") {
+		t.Fatalf("err = %v", err)
+	}
+}

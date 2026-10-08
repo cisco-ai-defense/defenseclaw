@@ -1370,6 +1370,16 @@ var windowsEnterpriseStagedConnectors = windowsEnterpriseConfigConnectors
 // empty) as the guardian loads the installed one and returns the hook
 // connectors it enrols.
 func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+}
+
+// loadWindowsEnterpriseStandaloneConfig loads path (the installed config
+// when empty) the way the guardian loads the installed one.
+func loadWindowsEnterpriseStandaloneConfig(path string) (*config.Config, error) {
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {
 		return nil, err
@@ -1388,11 +1398,44 @@ func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
 		managed.WindowsServiceAccountEnv: layout.ServiceUser,
 	})
 	defer restore()
-	cfg, err := config.LoadManagedFileForLifecycleRecovery(path)
+	return config.LoadManagedFileForLifecycleRecovery(path)
+}
+
+// windowsEnterpriseConfigAPIPort returns the gateway.api_port of path (the
+// installed config when empty); replaceable in tests.
+var windowsEnterpriseConfigAPIPort = func(path string) (int, error) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig(path)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+	return cfg.Gateway.APIPort, nil
+}
+
+// refuseWindowsEnterpriseAPIPortChange refuses, before any service stops, a
+// config that moves gateway.api_port of an installed deployment. Every
+// user's hook registrations and the Cursor machine hooks name the installed
+// port, so the upgrade transaction stopped and restarted every service
+// twice, failed 1603 after about five minutes on the Cursor machine
+// identity and rolled back (GAP-0865). A config either side cannot load is
+// left to the checks that report it.
+func refuseWindowsEnterpriseAPIPortChange(opts *windowsEnterpriseLifecycleOptions) error {
+	path := strings.TrimSpace(opts.configPath)
+	if !windowsEnterpriseStandalone(opts) || path == "" {
+		return nil
+	}
+	staged, err := windowsEnterpriseConfigAPIPort(path)
+	if err != nil || staged == 0 {
+		return nil
+	}
+	installed, err := windowsEnterpriseConfigAPIPort("")
+	if err != nil || installed == 0 || installed == staged {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"%s changes gateway.api_port from %d to %d; the port of an installed managed deployment cannot be changed, "+
+			"because every user's agent hooks and the Cursor machine hooks are bound to it, so nothing was changed and no service was stopped. "+
+			"Keep gateway.api_port: %d in the config, or uninstall DefenseClaw and install it again with the new port",
+		path, installed, staged, installed)
 }
 
 // refuseWindowsEnterpriseConnectorlessConfig refuses, before anything
@@ -2223,6 +2266,9 @@ func planWindowsEnterpriseEnsure(
 	}
 	if status.Installed {
 		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
+			return windowsEnterpriseEnsurePlan{}, err
+		}
+		if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
 			return windowsEnterpriseEnsurePlan{}, err
 		}
 	}
