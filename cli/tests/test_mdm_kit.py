@@ -680,3 +680,18 @@ def test_macos_enterprise_pkg_is_signed_only_with_its_installer_identity(
     assert result.returncode == code, result.stdout + result.stderr
     assert message in result.stdout + result.stderr
     assert (out / "defenseclaw-enterprise-1.2.3-darwin-arm64.pkg").is_file() == (code == 0)
+
+
+def test_remediate_fix_does_not_report_a_missing_scanner_runtime_as_healthy() -> None:
+    """GAP-0631: the installed CLI's ensure succeeds with a
+    scanner_runtime_unavailable warning while verify keeps failing; the
+    remediation reports it as not repaired, exits 1603 and keeps the warning's
+    text, which names Setup /repair."""
+
+    text = (MDM / "intune" / "windows" / "Remediate-Fix.ps1").read_text(encoding="utf-8")
+    branch = text[text.index("$runtime = @($document.warnings)") :]
+    branch = branch[: branch.index("elseif ($document.ok -and $document.noop)")]
+    assert "$_.code -eq 'scanner_runtime_unavailable'" in branch
+    assert "$code = 1603" in branch
+    assert "$($runtime.message)" in branch
+

@@ -6,12 +6,14 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -146,5 +148,23 @@ func TestStandaloneGatewayConfigCheckRefusesAStaleCustomPackPin(t *testing.T) {
 			!strings.Contains(err.Error(), "rulepack validate --dir") {
 			t.Fatalf("stale custom pack pin = %v, want the digest to pin and the command that prints it", err)
 		}
+	}
+}
+
+// GAP-0558: re-running a pack copy onto an existing pack folder nests a copy
+// inside it; the refusal names that folder instead of only an unexpected
+// YAML component deep inside it.
+func TestRulePackNestedCopyHintNamesTheNestedFolder(t *testing.T) {
+	pack := filepath.Join(t.TempDir(), "edkm")
+	if err := os.MkdirAll(filepath.Join(pack, "edkm", "judge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := &guardrail.RulePackError{Path: "edkm/judge/injection.yaml", Code: "inventory_unexpected", Reason: "unexpected YAML component"}
+	if hint := rulePackNestedCopyHint(pack, fmt.Errorf("wrapped: %w", nested)); !strings.Contains(hint, filepath.Join(pack, "edkm")+" is a copy of the pack inside itself") {
+		t.Fatalf("hint = %q", hint)
+	}
+	other := &guardrail.RulePackError{Path: "extra/rules.yaml", Code: "inventory_unexpected", Reason: "unexpected YAML component"}
+	if hint := rulePackNestedCopyHint(pack, other); hint != "" {
+		t.Fatalf("a component that is not a nested copy got hint %q", hint)
 	}
 }

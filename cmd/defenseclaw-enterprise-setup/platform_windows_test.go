@@ -6,12 +6,16 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestEnterpriseLifecycleArgumentsUsePublicMachineTransaction(t *testing.T) {
@@ -110,15 +114,66 @@ func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.
 			t.Fatalf("%q: Secure Client error changed: %v", value, secureClient)
 		}
 	}
-	// An existing input that fails the trust check is a security refusal
-	// (1603), not a command-line error, for either flavor.
+	// An existing input that fails the trust check stays a 1603 security
+	// refusal for the Secure Client Setup. The standalone Setup refuses it
+	// as every config the lifecycle will not take (1639) and names the
+	// account and the icacls fix, not a bare SID (GAP-0528, GAP-0562).
 	untrusted := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(untrusted, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := validateEnterpriseSetupInput(untrusted, "config")
 	var invalid enterpriseSetupInvalidArguments
-	if err == nil || errors.As(standaloneEnterpriseSetupInputError(true, err), &invalid) {
+	if err == nil || errors.As(standaloneEnterpriseSetupInputError(false, err), &invalid) {
 		t.Fatalf("untrusted config: %v", err)
+	}
+	standalone := standaloneEnterpriseSetupInputError(true, err)
+	if !errors.As(standalone, &invalid) || !strings.Contains(standalone.Error(), "icacls \""+filepath.Dir(untrusted)+"\"") ||
+		strings.Contains(standalone.Error(), "access mask") {
+		t.Fatalf("standalone untrusted config error = %v", standalone)
+	}
+}
+
+// GAP-0525: Setup takes the staging folders interrupted runs left once they
+// are old enough, but never one a running Setup holds as its lifecycle's
+// working directory, nor a name that is not a stage capability.
+func TestRemoveStaleEnterpriseSetupStagesSkipsYoungAndBusyFolders(t *testing.T) {
+	programData := t.TempDir()
+	stale := filepath.Join(programData, enterpriseSetupStagePrefix+strings.Repeat("a", 32))
+	busy := filepath.Join(programData, enterpriseSetupStagePrefix+strings.Repeat("b", 32))
+	other := filepath.Join(programData, enterpriseSetupStagePrefix+"notours")
+	for _, dir := range []string{stale, busy, other} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var diagnostics bytes.Buffer
+	removeStaleEnterpriseSetupStages(programData, time.Now(), &diagnostics)
+	for _, dir := range []string{stale, busy, other} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("a young folder was taken: %v", err)
+		}
+	}
+	name, err := windows.UTF16PtrFromString(busy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), &diagnostics)
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stale folder stayed: %v", err)
+	}
+	for _, dir := range []string{busy, other} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("a held or foreign folder was taken: %v", err)
+		}
+	}
+	if !strings.Contains(diagnostics.String(), "an interrupted Setup run left") {
+		t.Fatalf("diagnostics = %q", diagnostics.String())
 	}
 }

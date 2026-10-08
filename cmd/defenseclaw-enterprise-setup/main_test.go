@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -479,5 +480,57 @@ func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// GAP-0562: with JSON=1 the standalone Setup reports a refusal of its own in
+// the lifecycle's schema-2 shape (code, message, exit_code 1639), so an MDM
+// reads one shape whoever refused; the Secure Client Setup keeps schema 1.
+func TestStandaloneSetupFailureUsesTheLifecycleResultShape(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true}
+	refusal := enterpriseSetupInvalidArguments{errors.New("the config C:\\stage\\config.yaml is not protected")}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseInvalidArgsExitCode)
+	var result struct {
+		SchemaVersion int    `json:"schema_version"`
+		Action        string `json:"action"`
+		ExitCode      int    `json:"exit_code"`
+		Errors        []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.SchemaVersion != 2 || result.Action != "ensure" ||
+		result.ExitCode != enterpriseInvalidArgsExitCode || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		result.Errors[0].Message != refusal.Error() {
+		t.Fatalf("standalone failure = %s (%v)", stdout.String(), err)
+	}
+	stdout.Reset()
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, false, enterpriseSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	if !strings.HasPrefix(stdout.String(), `{"schema_version":1,`) {
+		t.Fatalf("Secure Client failure shape changed: %s", stdout.String())
+	}
+}
+
+// GAP-0509: a run Setup stopped at TIMEOUTSECONDS can leave a transaction
+// pending with the services stopped; its result says so and names the
+// LocalSystem /ensure that recovers it.
+func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts,
+		standaloneEnterpriseSetupTimeout(opts, context.DeadlineExceeded), enterpriseFailureExitCode)
+	var result struct {
+		ExitCode int `json:"exit_code"`
+		Errors   []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.ExitCode != enterpriseFailureExitCode ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_timeout" ||
+		!strings.Contains(result.Errors[0].Message, `as LocalSystem with /ensure CONFIG=C:\stage\config.yaml JSON=1`) ||
+		!strings.Contains(result.Errors[0].Message, "TIMEOUTSECONDS=60") {
+		t.Fatalf("timeout result = %s (%v)", stdout.String(), err)
 	}
 }

@@ -192,9 +192,42 @@ locked staging folder below; give it its own folder:
 ```powershell
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
-icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
+icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C | Out-Null
+Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
 ```
+
+The snippet is safe to run again, for example after you fix a permission:
+it replaces the pack folder instead of copying into it. Copying a folder
+onto one that exists nests a copy (`my-pack\my-pack`), which Setup refuses,
+naming the nested folder.
+
+Then name the pack in the config and select it:
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  rule_pack: my-pack
+  custom_packs:
+    my-pack:
+      path: 'C:\ProgramData\DefenseClaw-RulePacks\my-pack'
+      digest: 'sha256:<digest>'
+```
+
+Quote Windows paths with single quotes. In double quotes YAML reads a
+backslash as the start of an escape, so `"C:\ProgramData\..."` does not
+load (`\P` is not an escape); write `\\` for each backslash if you use
+double quotes. Setup refuses such a file with `1639` and names the line.
+
+The digest pins the pack's own files. Before the first install there is no
+`defenseclaw-gateway.exe` on the computer to print it, so put a placeholder
+in the config, such as `sha256:` and 64 zeros, and run Setup: it checks
+the pack before it changes anything and refuses with `1639`, printing the
+pack's digest (`digest sha256:<hex> does not match
+guardrail.custom_packs.my-pack.digest`). Review the pack, put that digest
+in the config and run Setup again. Once DefenseClaw is installed,
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' rulepack validate --dir "$Packs\my-pack"`
+prints it as `custom_packs pin:`, for example when you change the pack.
 
 For an Intune fleet, deliver a custom pack before the DefenseClaw app using a
 dependent Win32 app, or a pinned HTTPS download with a SHA-256 check; see
@@ -208,15 +241,31 @@ before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
 
 Setup accepts the config only from an absolute local path that standard
-users cannot change. Stage it in a folder that only SYSTEM and
-Administrators can write:
+users cannot change. Stage it in a folder that Administrators own and that
+only SYSTEM and Administrators can write:
 
 ```powershell
 $Stage = 'C:\ProgramData\DefenseClaw-Staging'
 New-Item -ItemType Directory -Path $Stage -Force | Out-Null
-icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+icacls $Stage /setowner '*S-1-5-32-544' /T /C | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C | Out-Null
+if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
+    throw "$Stage is not owned by Administrators"
+}
+Get-ChildItem -LiteralPath $Stage -Force   # lists only files you put there
 Copy-Item .\config.yaml "$Stage\config.yaml"
 ```
+
+Take ownership as the snippets do. Any user can create a folder in
+`C:\ProgramData`, so a standard user can create `DefenseClaw-Staging` (or
+`DefenseClaw-RulePacks`) before you do and own it, and the owner of a folder
+can always change its permissions again: `icacls /grant:r` replaces the
+permissions but not the owner. If the folder holds files you did not put
+there, delete it and start again. Setup refuses a config whose file or
+folder a standard user owns or can write, with exit code `1639`, naming
+the account and the `icacls` command that fixes it; nothing checks the
+folder before LocalSystem runs a Setup file from it (see
+[Run Setup as LocalSystem](#run-setup-as-localsystem)).
 
 ### 3. Run Setup
 
@@ -338,7 +387,9 @@ Remove-Item 'C:\ProgramData\DefenseClaw-Staging\llm.key'
 
 The judge and the skill, MCP and plugin scanners all take their key from
 that credential. A missing credential leaves them without a key; they never
-fall back to an environment variable. Store a new key with the same command
+fall back to an environment variable. Until you store it, `status`, `verify`
+and the Setup result warn `credential_missing`, naming the credential and
+the command that stores it (the same holds for the AI Defense key). Store a new key with the same command
 to rotate it. `enterprise windows status` then prints a `Scanners:` line with
 the scanner versions, the skill scanner policy and the judge model. Without
 an `llm:` block it warns `scanner_judge_missing`: the scanners then run their
@@ -371,11 +422,14 @@ for these fields:
 | `enrollment.targets` | The number of entries (one per user and connector) in the target manifest. `0` means nobody is protected yet. |
 | `errors` | Empty |
 
-Windows results carry no `policy` object in this release. To read the
-effective policy digest and the config generation of the installed config, run
-`defenseclaw.exe enterprise policy show`: it prints
-`Effective policy sha256:<12 hex>, config generation N` (and `policy` in
-`--json`). See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+The Setup results (`/ensure`, `/install`, `/upgrade`, `/repair`) and the
+`status` and `verify` results carry a `policy` object, as on Linux and
+macOS: `effective_digest` (the effective policy digest of the installed
+config), `config_generation`, `applied` (the gateway reports the same
+digest), `gateway_reported_digest`, and `last_reload_error` when the
+gateway rejected its last reload. `defenseclaw.exe enterprise policy show`
+prints the same as `Effective policy sha256:<12 hex>, config generation N`.
+See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
 
 On Windows, `security_complete` needs at least one of Codex, Claude Code or
 Cursor enabled, and no agent reported as `agent_unprotected` or
@@ -711,6 +765,11 @@ finish, the transaction stays pending: the result reports
 vendor machine policy the transaction had already published can still point
 at the stopped gateway. `status` shows the state; `verify` refuses until the
 transaction is recovered. The failed result names the command to run next.
+A run that Setup stopped at its `TIMEOUTSECONDS=` limit (error
+`lifecycle_timeout`) can leave a transaction pending too, and its result
+says so. Until the transaction is recovered, users' agents block with
+`enterprise_managed_gateway_not_running`; starting the gateway service by
+hand does not help.
 
 The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
 that it cannot prove DefenseClaw wrote: a file or folder it did not create,
@@ -839,6 +898,9 @@ that path as SYSTEM. From an elevated PowerShell session, with `$Stage` as
 in [Write the config](#2-write-the-config):
 
 ```powershell title="Elevated PowerShell"
+if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
+    throw "$Stage is not owned by Administrators; create it as in Write the config"
+}
 Copy-Item .\DefenseClawSetup-Enterprise-Standalone-x64.exe $Stage
 $Setup  = "$Stage\DefenseClawSetup-Enterprise-Standalone-x64.exe"
 $Result = "$Stage\setup-as-system.json"
@@ -915,9 +977,16 @@ Each user keeps `%USERPROFILE%\.defenseclaw` and the per-user binaries. To
 remove those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
 uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
-parent keys and `C:\Program Files\Cisco` when nothing else is left in them.
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. On a computer without DefenseClaw,
-uninstall succeeds and changes nothing.
+parent keys and `C:\Program Files\Cisco` when nothing else is left in them
+(after a CLI uninstall, once its cleanup finishes).
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. So does the empty,
+administrator-only lock file
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, and with it
+`C:\ProgramData\Cisco`: the lock serializes every lifecycle run, including
+the next install's, so the uninstall keeps it in place. To leave nothing,
+delete `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`, and
+`C:\ProgramData\Cisco` if it is then empty, after the uninstall. On a
+computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
 such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
@@ -984,9 +1053,13 @@ A purge also removes `C:\Program Files\ClaudeCode\managed-settings.d`, and
 then `C:\Program Files\ClaudeCode`, when nothing else is left in them.
 It also removes the folders an interrupted elevated DefenseClaw command
 left: `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>`,
-`C:\ProgramData\DefenseClaw-Installer-<32 hex>` and
-`C:\Windows\Temp\DefenseClaw-Bootstrap-<32 hex>`; every uninstall does this,
-not only a purge. A purge also removes the public policy summary
+`C:\ProgramData\DefenseClaw-Installer-<32 hex>`,
+`C:\Windows\Temp\DefenseClaw-Bootstrap-<32 hex>`, and the staging folder
+`C:\ProgramData\DefenseClaw-Enterprise-Setup-<32 hex>` (the whole payload,
+about 500 MB) of a Setup run that was stopped; every uninstall does this,
+not only a purge. A staging folder goes once it is 30 minutes old and no
+running Setup uses it, and Setup removes such folders on its next run too.
+A purge also removes the public policy summary
 `C:\ProgramData\Cisco\DefenseClaw-HookRuntime\machine-policy.json` and that
 folder once it is empty, the DefenseClaw Claude Code drop-ins
 (`90-defenseclaw.json`, its state and lock, `00-defenseclaw-version-floor.json`)
@@ -996,6 +1069,16 @@ when the uninstall had no deployment record to tear down (for example after
 in `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`. Files that name another
 deployment's hook binary stay. The `machine_state_remaining` warning names
 anything it could not remove, and why.
+
+If `C:\ProgramData\Cisco\DefenseClaw` was deleted by hand, uninstall
+finds no recorded deployment. It still removes the four services, the
+binaries, DefenseClaw's Claude Code files in
+`C:\Program Files\ClaudeCode\managed-settings.d`, the runtime selector
+state and `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, so agents stop
+calling the removed hook. It cannot tell DefenseClaw's files in an
+account's `%USERPROFILE%\.defenseclaw` from the account's own, so with
+`PURGE=1` the `per_user_state_remaining` warning names each such folder
+for you to remove instead.
 
 A purge also removes the managed ACP folder `%USERPROFILE%\.defenseclaw\acp`
 (the account's ACP token copies and editor contract locks) of every account

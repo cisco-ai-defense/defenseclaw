@@ -305,8 +305,13 @@ apply a config the same way. In order, on Linux and macOS:
 4. **Keep the evidence of a migration.** When it migrated a version 8 file, it
    keeps the source as `config.yaml.v8.bak` (root-only) and writes
    `migration-v9.json` next to the config. The record lists every `moved`
-   value, every `conflicts` entry (`kept`, `lost`, `reason`) and the audit
-   rows it did not import (`actions_rows_ignored`). An inline scanner key in
+   value, every `conflicts` entry (`kept`, `lost`, `reason`), the audit rows
+   it imported (`actions_rows_moved`, always `0` on a managed computer) and,
+   when the managed computer's `audit.db` held local block or allow entries,
+   how many it left in place (`actions_rows_ignored`, with the
+   `local_enforcement_entries_ignored` warning). The result's `changes` list
+   names the migration on every OS, and conflicts add a
+   `config_migration_conflicts` warning on Windows. An inline scanner key in
    the version 8 file moves to the service `.env`. A `rego/data.json` left in
    the policy folder is read for the migration and ignored from version 9 on;
    `ensure` leaves the file where it is, so remove it. If your configuration

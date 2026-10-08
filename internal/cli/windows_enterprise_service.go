@@ -113,6 +113,11 @@ type windowsEnterpriseLifecycleOptions struct {
 	// actions_rows_ignored of the migration-v9.json it wrote). The standalone
 	// result reports them as local_enforcement_entries_ignored.
 	localEnforcementEntriesIgnored int
+	// configMigration is the migration-v9.json a config_version 9
+	// migration in this run wrote, and configMigrationPath the config it
+	// migrated; the standalone result reports it in changes (GAP-0472).
+	configMigration     *config.MigrationRecord
+	configMigrationPath string
 	// deploymentTrustMode is the payload trust the deployment records
 	// (deployment.json trust_mode), taken from the installer report the
 	// standalone result was built from. The marker publishes it rather than
