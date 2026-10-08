@@ -25,6 +25,10 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 	var err error
 	if strings.HasPrefix(strings.ToUpper(name), "S-1-") {
 		sid, err = windows.StringToSid(name)
+		if err != nil {
+			// Parsing is local and definitive: a malformed SID cannot match.
+			return false, nil
+		}
 	} else {
 		sid, _, _, err = windows.LookupSID("", name)
 	}

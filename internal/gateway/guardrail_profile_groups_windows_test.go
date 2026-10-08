@@ -23,3 +23,10 @@ func TestWindowsGroupLookupReportsDeletedSID(t *testing.T) {
 		t.Fatalf("deleted SID = %v, %v; want definitive absence", known, err)
 	}
 }
+
+func TestWindowsGroupLookupReportsMalformedSID(t *testing.T) {
+	known, err := profileGroupExists(context.Background(), "S-1-5-bad")
+	if err != nil || known {
+		t.Fatalf("malformed SID = %v, %v; want definitive absence", known, err)
+	}
+}
