@@ -60,6 +60,15 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 				}
 			}
 			channel.ServeOnce(func(request enforce.QuarantineRemovalRequest) error {
+				if request.Kind == enforce.QuarantineRequestReadGrant {
+					err := grantEnrolledAssetRead(current, request, enterprisehooks.GrantGatewayAssetRead)
+					outcome := "granted the gateway read access"
+					if err != nil {
+						outcome = "read grant refused: " + err.Error()
+					}
+					fmt.Fprintf(errOut, "[hook-guardian] %s %s: %s\n", request.TargetType, request.SourcePath, outcome)
+					return err
+				}
 				err := removeEnrolledQuarantinedSource(current, request, enterprisehooks.RemoveEnrolledUserAsset)
 				outcome := "removed"
 				switch {
@@ -110,6 +119,27 @@ func removeEnrolledQuarantinedSource(current *config.Config, request enforce.Qua
 					enforce.ErrQuarantineRemovalDeferred, filepath.Base(root.Home))
 			}
 			return err
+		}
+	}
+	return fmt.Errorf("no enrolled user owns %s", rootDir)
+}
+
+// grantEnrolledAssetRead checks a read grant request against the enrolled
+// users' watched folders and has grant give the gateway service read access
+// to the folder as the user who owns that watched folder (GAP-0825).
+func grantEnrolledAssetRead(current *config.Config, request enforce.QuarantineRemovalRequest, grant func(sid, home, path string) error) error {
+	roots := gateway.EnrolledWatchRoots(current)
+	dirs := make([]string, 0, len(roots))
+	for _, root := range roots {
+		dirs = append(dirs, root.Dir)
+	}
+	source, rootDir, err := enforce.VerifyAssetReadGrant(request, dirs)
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if strings.EqualFold(filepath.Clean(root.Dir), filepath.Clean(rootDir)) {
+			return grant(root.SID, root.Home, source)
 		}
 	}
 	return fmt.Errorf("no enrolled user owns %s", rootDir)

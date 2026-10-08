@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -44,6 +45,48 @@ func RemoveEnrolledUserAsset(sid, home, path string) error {
 		if err != nil && !ran {
 			return fmt.Errorf("%w (%v)", ErrEnrolledUserSignedOut, err)
 		}
+	}
+	return err
+}
+
+// GrantGatewayAssetRead gives the gateway service the read access of the
+// agent folders (inventoryReadACE, inherited) on one skill or plugin folder
+// of an enrolled user, for the hook guardian. A folder moved into a watched
+// folder keeps the access control list of where it came from, which has no
+// entry for the service, so its scan and quarantine copy failed and the
+// asset stayed (GAP-0825). It runs as the user (the session token, else an
+// S4U logon) on a pinned handle that refuses links below the profile, so it
+// changes only what the user could change.
+func GrantGatewayAssetRead(sid, home, path string) error {
+	target, err := windows.StringToSid(sid)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: invalid enrolled user SID %q: %w", sid, err)
+	}
+	home = filepath.Clean(strings.TrimSpace(home))
+	rel, err := filepath.Rel(home, filepath.Clean(path))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) || filepath.IsAbs(rel) {
+		return fmt.Errorf("enterprise hooks: %s is not in the profile of %s", path, sid)
+	}
+	name, err := discoverGatewayServiceName()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: discover gateway service name: %w", err)
+	}
+	if !gatewayServiceNamePattern.MatchString(name) && name != productionGatewayServiceName {
+		return fmt.Errorf("enterprise hooks: refusing untrusted gateway service name %q", name)
+	}
+	gatewaySID, _, _, err := windows.LookupSID("", `NT SERVICE\`+name)
+	if err != nil || !sidIsNTServiceInventory(gatewaySID) {
+		return fmt.Errorf("enterprise hooks: resolve the gateway service account %q: %v", name, err)
+	}
+	ran := false
+	grant := func() error {
+		ran = true
+		_, err := ensureInventoryACEPinned(home, rel, gatewaySID, inventoryReadACE)
+		return err
+	}
+	err = withWindowsEnterpriseTargetImpersonation(target, home, grant)
+	if err != nil && !ran {
+		err = withWindowsEnterpriseS4UTargetImpersonation(target, home, grant)
 	}
 	return err
 }

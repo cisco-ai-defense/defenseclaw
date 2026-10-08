@@ -1297,6 +1297,17 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	if err == nil && !w.secureClientActive() {
 		err = scanner.JudgeFailure(result)
 	}
+	if err != nil && ctx.Err() == nil && !w.secureClientActive() {
+		if retry, unreadable := w.readableAfterGrant(evt); retry {
+			retryCtx, cancelRetry := context.WithTimeout(ctx, w.scanTimeout(evt))
+			defer cancelRetry()
+			if result, err = s.Scan(retryCtx, w.scanTargetFor(evt)); err == nil {
+				err = scanner.JudgeFailure(result)
+			}
+		} else if unreadable != "" {
+			err = fmt.Errorf("%s: %w", unreadable, err)
+		}
+	}
 	if err != nil && ctx.Err() != nil && !w.secureClientActive() {
 		// The watcher itself is stopping (a config reload restarts it, or
 		// the gateway stops), not the scanner failing: the scan was cut off
@@ -1779,6 +1790,64 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	w.enforceBlockWith(ctx, evt, true, "")
+}
+
+// readableAfterGrant looks, after a skill or plugin scan failed, for an
+// entry of the folder the gateway may not read. It asks for read access
+// (enforce.GrantAssetRead: the hook guardian on a managed Windows computer)
+// and reports whether the folder is readable now, so the scan runs again;
+// otherwise it says what stays unreadable (GAP-0825).
+func (w *InstallWatcher) readableAfterGrant(evt InstallEvent) (bool, string) {
+	if (evt.Type != InstallSkill && evt.Type != InstallPlugin) || w.admitsLinkedAsset(evt.Path) {
+		return false, ""
+	}
+	denied := unreadableAssetEntry(addressablePath(evt.Path))
+	if denied == "" {
+		return false, ""
+	}
+	grantErr := enforce.GrantAssetRead(string(evt.Type), evt.Path)
+	if grantErr == nil {
+		if denied = unreadableAssetEntry(addressablePath(evt.Path)); denied == "" {
+			fmt.Fprintf(os.Stderr, "[watch] %s %s: the gateway could not read it; read access granted, scanning again\n", evt.Type, evt.Path)
+			return true, ""
+		}
+	}
+	why := "the gateway service cannot read " + denied +
+		" (a folder moved into a watched folder keeps the access list of where it came from)"
+	if grantErr != nil && !errors.Is(grantErr, enforce.ErrNoAssetReadGranter) {
+		why += "; read grant: " + grantErr.Error()
+	}
+	return false, why
+}
+
+// unreadableAssetEntry returns the first folder or file below root this
+// process may not read, or "" (after at most 4096 entries).
+func unreadableAssetEntry(root string) string {
+	seen, denied := 0, ""
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				denied = path
+				return filepath.SkipAll
+			}
+			return nil
+		}
+		if seen++; seen > 4096 {
+			return filepath.SkipAll
+		}
+		if entry.Type().IsRegular() {
+			file, openErr := os.Open(path)
+			if errors.Is(openErr, fs.ErrPermission) {
+				denied = path
+				return filepath.SkipAll
+			}
+			if openErr == nil {
+				_ = file.Close()
+			}
+		}
+		return nil
+	})
+	return denied
 }
 
 // scanFailureReason leads the journal reason of an asset blocked and

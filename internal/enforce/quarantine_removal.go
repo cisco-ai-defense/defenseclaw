@@ -37,14 +37,24 @@ const (
 
 // QuarantineRemovalRequest is one request file the gateway writes.
 type QuarantineRemovalRequest struct {
-	Version        int    `json:"version"`
-	ID             string `json:"id"`
-	Nonce          string `json:"nonce"`
+	Version int    `json:"version"`
+	ID      string `json:"id"`
+	Nonce   string `json:"nonce"`
+	// Kind is QuarantineRequestReadGrant for a read grant; empty is a
+	// removal.
+	Kind           string `json:"kind,omitempty"`
 	TargetType     string `json:"target_type"`
 	SourcePath     string `json:"source_path"`
 	QuarantinePath string `json:"quarantine_path"`
 	ContentHash    string `json:"content_hash"`
 }
+
+// QuarantineRequestReadGrant asks the guardian to let the gateway read a
+// skill or plugin folder of an enrolled user. A folder moved into a watched
+// folder keeps the access control list it had where it came from, which has
+// no entry for the gateway service: its scan and its quarantine copy failed
+// with access denied and the asset stayed in place (GAP-0825).
+const QuarantineRequestReadGrant = "read-grant"
 
 // QuarantineRemovalResult is the guardian's answer to one request.
 type QuarantineRemovalResult struct {
@@ -120,19 +130,40 @@ func (c QuarantineRemovalChannel) Remover(timeout time.Duration) func(AssetQuara
 	}
 }
 
+// ReadGranter asks the guardian over c to let the gateway read the asset at
+// path, and waits up to timeout for its answer.
+func (c QuarantineRemovalChannel) ReadGranter(timeout time.Duration) func(targetType, path string) error {
+	return func(targetType, path string) error {
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			return err
+		}
+		return c.publish(QuarantineRemovalRequest{
+			ID: "read-" + hex.EncodeToString(id), Kind: QuarantineRequestReadGrant,
+			TargetType: targetType, SourcePath: path,
+		}, timeout)
+	}
+}
+
 func (c QuarantineRemovalChannel) request(plan AssetQuarantinePlan, recordID string, timeout time.Duration) error {
 	if !safePathSegment(recordID) {
 		return fmt.Errorf("invalid quarantine journal id")
 	}
+	return c.publish(QuarantineRemovalRequest{
+		ID: recordID, TargetType: plan.TargetType, SourcePath: plan.SourcePath,
+		QuarantinePath: plan.QuarantinePath, ContentHash: plan.ContentHash,
+	}, timeout)
+}
+
+// publish writes request (with a fresh nonce) for the guardian and waits up
+// to timeout for its answer.
+func (c QuarantineRemovalChannel) publish(request QuarantineRemovalRequest, timeout time.Duration) error {
+	recordID := request.ID
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	request := QuarantineRemovalRequest{
-		Version: quarantineRemovalVersion, ID: recordID, Nonce: hex.EncodeToString(nonce),
-		TargetType: plan.TargetType, SourcePath: plan.SourcePath,
-		QuarantinePath: plan.QuarantinePath, ContentHash: plan.ContentHash,
-	}
+	request.Version, request.Nonce = quarantineRemovalVersion, hex.EncodeToString(nonce)
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -273,6 +304,52 @@ func readQuarantineRemovalFile(path string, out any) error {
 		return err
 	}
 	return json.Unmarshal(payload, out)
+}
+
+var assetReadGranter atomic.Pointer[func(targetType, path string) error]
+
+// SetAssetReadGranter installs what lets this process read an asset folder
+// it may not read (the hook guardian on a managed Windows computer); nil
+// removes it.
+func SetAssetReadGranter(grant func(targetType, path string) error) {
+	if grant == nil {
+		assetReadGranter.Store(nil)
+		return
+	}
+	assetReadGranter.Store(&grant)
+}
+
+// ErrNoAssetReadGranter is GrantAssetRead with no granter installed.
+var ErrNoAssetReadGranter = errors.New("no read grant is available here")
+
+// GrantAssetRead asks the installed granter to let this process read path.
+func GrantAssetRead(targetType, path string) error {
+	grant := assetReadGranter.Load()
+	if grant == nil {
+		return ErrNoAssetReadGranter
+	}
+	return (*grant)(targetType, path)
+}
+
+// VerifyAssetReadGrant is the guardian's check of a read grant request: a
+// skill or plugin folder inside one of sourceRoots (an enrolled user's
+// watched folder) reached without a link. It returns the folder and the
+// root that holds it.
+func VerifyAssetReadGrant(request QuarantineRemovalRequest, sourceRoots []string) (string, string, error) {
+	if request.Version != quarantineRemovalVersion || request.Kind != QuarantineRequestReadGrant || !safePathSegment(request.ID) {
+		return "", "", fmt.Errorf("unsupported read grant request")
+	}
+	if _, err := quarantineTypeDir(request.TargetType); err != nil {
+		return "", "", err
+	}
+	source, sourceRoot, err := pathWithinRoots(request.SourcePath, sourceRoots, false)
+	if err != nil {
+		return "", "", fmt.Errorf("the folder is not in an enrolled user's watched folder: %w", err)
+	}
+	if err := validateContainedAncestors(source, sourceRoot); err != nil {
+		return "", "", fmt.Errorf("folder ancestry: %w", err)
+	}
+	return source, sourceRoot, nil
 }
 
 // VerifyQuarantineRemoval is the guardian's check of one request: the source

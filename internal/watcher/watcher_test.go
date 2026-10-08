@@ -1315,6 +1315,51 @@ func TestScanFailureDisablesTheAssetAtRuntime(t *testing.T) {
 	}
 }
 
+// readingScanner fails a scan of a folder it may not list, as the skill
+// scanner exits 1 on one the gateway service cannot read.
+type readingScanner struct{ countingScanner }
+
+func (s *readingScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	if _, err := os.ReadDir(target); err != nil {
+		return nil, err
+	}
+	return s.countingScanner.Scan(ctx, target)
+}
+
+// GAP-0825: a skill folder moved into a watched folder keeps the access list
+// of where it came from, so the gateway could not read it, the scan failed
+// and the CRITICAL skill stayed. The watcher asks for read access (the hook
+// guardian on a managed Windows computer) and scans again.
+func TestUnreadableSkillIsScannedAfterReadGrant(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions that bind the test user")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &readingScanner{countingScanner{name: "skill-scanner"}} }
+	moved := filepath.Join(skillDir, "moved-in")
+	if err := os.MkdirAll(moved, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(moved, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(moved, 0o700) })
+	grants := 0
+	enforce.SetAssetReadGranter(func(targetType, path string) error {
+		grants++
+		if targetType != "skill" || path != moved {
+			return fmt.Errorf("unexpected grant %s %s", targetType, path)
+		}
+		return os.Chmod(path, 0o700)
+	})
+	t.Cleanup(func() { enforce.SetAssetReadGranter(nil) })
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "moved-in", Path: moved, Timestamp: time.Now()})
+	if grants != 1 || res.Verdict == VerdictBlocked {
+		t.Fatalf("grants=%d result %+v, want one grant and the scan admitted", grants, res)
+	}
+}
+
 // gateScanner holds every scan until release is closed and records the
 // largest number of scans that ran at once.
 type gateScanner struct {

@@ -3596,6 +3596,10 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 // remove a quarantined source in an enrolled user's folder.
 const guardianQuarantineRemovalTimeout = 30 * time.Second
 
+// guardianReadGrantTimeout bounds the wait for the hook guardian to let the
+// gateway read a skill or plugin folder moved into a watched folder.
+const guardianReadGrantTimeout = 15 * time.Second
+
 // runWatcherOnce runs one watcher until ctx ends, or until a managed
 // gateway's set of enrolled users' folders changes (restart is then true).
 func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) {
@@ -3633,9 +3637,13 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 			enrolled = &set
 			// The service reads the users' folders but may not delete in
 			// them: the hook guardian removes a quarantined source (GAP-0202).
-			enforce.SetQuarantineSourceRemover(enforce.QuarantineRemovalChannelFor(
-				cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir),
-			).Remover(guardianQuarantineRemovalTimeout))
+			channel := enforce.QuarantineRemovalChannelFor(cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
+			enforce.SetQuarantineSourceRemover(channel.Remover(guardianQuarantineRemovalTimeout))
+			if runtime.GOOS == "windows" {
+				// It also gives the service read access to a folder moved
+				// in with an access list of its own (GAP-0825).
+				enforce.SetAssetReadGranter(channel.ReadGranter(guardianReadGrantTimeout))
+			}
 			if src.Skill != watcherDirsFromConfig {
 				skillDirs = set.skillDirs
 			}
