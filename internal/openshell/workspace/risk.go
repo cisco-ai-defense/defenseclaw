@@ -50,6 +50,12 @@ var npmLifecycleScripts = map[string]struct{}{
 func classifyChanges(changes []TreeChange, content contentFunc, sensitive []string) []Flag {
 	var flags []Flag
 	add := func(f Flag) { flags = append(flags, f) }
+	changed := map[string]string{}
+	for _, c := range changes {
+		if c.Status != "D" {
+			changed[c.Path] = c.Status
+		}
+	}
 	for _, c := range changes {
 		if c.NewMode == "040000" || c.OldMode == "040000" && c.Status != "T" {
 			continue
@@ -78,6 +84,7 @@ func classifyChanges(changes []TreeChange, content contentFunc, sensitive []stri
 		switch base {
 		case "package.json":
 			flags = append(flags, packageScriptFlags(c, content)...)
+			flags = append(flags, lifecycleScriptFiles(c, content, changed)...)
 		case ".gitattributes":
 			if f, ok := gitattributesFlag(c, content); ok {
 				add(f)
@@ -146,6 +153,57 @@ type packageJSON struct {
 }
 
 var remoteDependencyRE = regexp.MustCompile(`^(git(\+[a-z]+)?:|https?:|file:|link:|[\w.-]+/[\w.-]+(#.*)?$)`)
+
+// lifecycleScriptFiles flags the changed files a changed npm lifecycle
+// script of package.json change c runs ("postinstall": "node
+// scripts/check.js"): the review named the script but not the file that
+// runs on every install (GAP-0217).
+func lifecycleScriptFiles(c TreeChange, content contentFunc, changed map[string]string) []Flag {
+	after, ok := content(c, true)
+	if !ok {
+		return nil
+	}
+	var newPkg, oldPkg packageJSON
+	if json.Unmarshal(after, &newPkg) != nil {
+		return nil
+	}
+	if before, ok := content(c, false); ok {
+		_ = json.Unmarshal(before, &oldPkg)
+	}
+	dir := path.Dir(c.Path)
+	var flags []Flag
+	keys := make([]string, 0, len(newPkg.Scripts))
+	for k := range newPkg.Scripts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if _, lifecycle := npmLifecycleScripts[strings.ToLower(k)]; !lifecycle {
+			continue
+		}
+		for _, tok := range strings.Fields(newPkg.Scripts[k]) {
+			tok = strings.Trim(tok, `"';&|()`)
+			if tok == "" || strings.HasPrefix(tok, "-") || strings.HasPrefix(tok, "/") || !strings.ContainsAny(tok, "./") {
+				continue
+			}
+			p := path.Clean(path.Join(dir, tok))
+			status, ok := changed[p]
+			if !ok || p == c.Path {
+				continue
+			}
+			what := "the session changed it"
+			if status == "A" {
+				what = "the session created it"
+			}
+			if oldPkg.Scripts[k] != newPkg.Scripts[k] {
+				what += ", and the script that runs it"
+			}
+			flags = append(flags, Flag{Path: p, Label: p, Kind: RiskPackageScripts, Severity: SeverityHigh,
+				Detail: "runs automatically on every install from scripts." + k + " of " + c.Path + "; " + what})
+		}
+	}
+	return flags
+}
 
 func packageScriptFlags(c TreeChange, content contentFunc) []Flag {
 	after, ok := content(c, true)

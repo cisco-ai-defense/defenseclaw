@@ -258,6 +258,39 @@ func TestReviewAndUndoPlainFolder(t *testing.T) {
 	}
 }
 
+// TestReviewNamesTheFileALifecycleScriptRuns (GAP-0217): a session added
+// a postinstall script that runs scripts/check.js and created that file;
+// the review named the script but not the file every npm install runs.
+func TestReviewNamesTheFileALifecycleScriptRuns(t *testing.T) {
+	pkg := map[bool]string{false: `{"scripts":{"test":"node test.js"}}`, true: `{"scripts":{"test":"node test.js","postinstall":"node ./scripts/check.js && echo done"}}`}
+	content := func(c TreeChange, after bool) ([]byte, bool) {
+		if c.Path == "app/package.json" {
+			return []byte(pkg[after]), true
+		}
+		return nil, false
+	}
+	flags := classifyChanges([]TreeChange{
+		{Path: "app/package.json", Status: "M", OldMode: "100644", NewMode: "100644"},
+		{Path: "app/scripts/check.js", Status: "A", NewMode: "100644"},
+		{Path: "app/test.js", Status: "A", NewMode: "100644"},
+	}, content, nil)
+	var check, test *Flag
+	for i := range flags {
+		switch flags[i].Label {
+		case "app/scripts/check.js":
+			check = &flags[i]
+		case "app/test.js":
+			test = &flags[i]
+		}
+	}
+	if check == nil || check.Severity != SeverityHigh || check.Detail != "runs automatically on every install from scripts.postinstall of app/package.json; the session created it, and the script that runs it" {
+		t.Fatalf("scripts/check.js flag = %+v (flags %+v)", check, flags)
+	}
+	if test != nil {
+		t.Fatalf("a file only a plain npm script runs was flagged: %+v", test)
+	}
+}
+
 func TestClassifyChangesUnits(t *testing.T) {
 	noContent := func(TreeChange, bool) ([]byte, bool) { return nil, false }
 	flags := classifyChanges([]TreeChange{
