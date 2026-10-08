@@ -171,6 +171,31 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if err := <-finished; err != nil {
 		t.Fatalf("enrollment after transaction release: %v", err)
 	}
+	// Revoke must wait until an enrollment has finished publishing its
+	// user token, then leave the next enrollment free to publish again.
+	if err := withEnterpriseACPServiceOwner(serviceData, func() error {
+		var lockErr error
+		release, lockErr = acp.AcquireEnterpriseCredentialEnrollmentLock(serviceData)
+		return lockErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		command := &cobra.Command{}
+		command.SetOut(&bytes.Buffer{})
+		finished <- runEnterpriseACPRevoke(command, nil)
+	}()
+	select {
+	case err := <-finished:
+		release()
+		t.Fatalf("concurrent revoke passed the active enrollment transaction: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	release()
+	if err := <-finished; err != nil {
+		t.Fatalf("revoke after transaction release: %v", err)
+	}
+	run(runEnterpriseACPEnroll)
 	// verify tells a published token from a completed setup, and list
 	// names who is enrolled and how far they got (GAP-0400).
 	if verified := run(runEnterpriseACPVerify); verified["setup_done"] != false {
