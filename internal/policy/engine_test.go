@@ -192,6 +192,47 @@ func TestPrepareRefusesPre9Modules(t *testing.T) {
 	}
 }
 
+// A helper can hide a removed data.json read from the admission module. The
+// whole bundle must fail to load so the gateway uses the config-driven fallback.
+func TestPrepareRefusesLegacyDataInAdmissionHelper(t *testing.T) {
+	dir := t.TempDir()
+	modules := map[string]string{
+		"admission.rego": `package defenseclaw.admission
+
+import rego.v1
+
+verdict := "allowed" if {
+	not data.defenseclaw.helper.block_high
+}
+`,
+		"helper.rego": `package defenseclaw.helper
+
+import rego.v1
+
+block_high if {
+	input.scan_result.max_severity == "HIGH"
+	data.actions.HIGH.install == "block"
+}
+`,
+	}
+	for name, source := range modules {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Prepare(context.Background(), dir); err == nil {
+		t.Fatal("Prepare accepted a helper that reads removed data.actions")
+	}
+	in := AdmissionInput{
+		TargetType: "skill", TargetName: "custom",
+		ScanResult: &ScanResultInput{MaxSeverity: "HIGH", TotalFindings: 1, ScannerName: "skill-scanner"},
+		Admission:  AdmissionFor(CompileAdmission(config.DefaultConfig()), "skill"),
+	}
+	if got := EvaluateAdmissionFallback(in).Verdict; got != "rejected" {
+		t.Fatalf("config-driven fallback verdict = %q, want rejected", got)
+	}
+}
+
 // TestSecureClientGuardrailThresholdsKeepTheDataJSON: the Secure Client
 // /v1/guardrail/evaluate levels are the 1.0 data.json ones.
 func TestSecureClientGuardrailThresholdsKeepTheDataJSON(t *testing.T) {

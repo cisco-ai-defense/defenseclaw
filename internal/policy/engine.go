@@ -416,30 +416,36 @@ func compileModules(modules map[string]string) error {
 	return nil
 }
 
-// checkNoLegacyData refuses an admission or guardrail module that reads
-// data.* outside data.defenseclaw: a pre-9 module that still expects
-// data.json (data.config, data.actions, data.guardrail, ...). Since 9 every
-// such value is evaluation input, so a stale module would see none of them
-// and fail open (admission "warning", guardrail "allow"); refusing it sends
-// the gateway to the config-driven fallback instead.
+// checkNoLegacyData refuses any loaded module that reads data.* outside
+// data.defenseclaw: a helper can otherwise hide a pre-9 data.json read from
+// admission or guardrail. Since 9 those values are evaluation input, a stale
+// read can fail open; refusing the bundle selects the config-driven fallback.
 func checkNoLegacyData(name string, mod *ast.Module) error {
-	if mod == nil || mod.Package == nil {
-		return nil
-	}
-	pkg := mod.Package.Path.String()
-	if pkg != admissionQuery && pkg != guardrailQuery {
+	if mod == nil {
 		return nil
 	}
 	var legacy string
-	ast.WalkRefs(mod, func(ref ast.Ref) bool {
-		if legacy != "" || len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
-			return legacy != ""
+	var walk *ast.GenericVisitor
+	walk = ast.NewGenericVisitor(func(node any) bool {
+		if legacy != "" {
+			return true
+		}
+		// A with target replaces a document for one test expression; it
+		// does not read that document. Inspect its replacement value only.
+		if with, ok := node.(*ast.With); ok {
+			walk.Walk(with.Value)
+			return true
+		}
+		ref, ok := node.(ast.Ref)
+		if !ok || len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
+			return false
 		}
 		if key, ok := ref[1].Value.(ast.String); ok && string(key) != "defenseclaw" {
 			legacy = "data." + string(key)
 		}
 		return legacy != ""
 	})
+	walk.Walk(mod)
 	if legacy != "" {
 		return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
 			"(the data.json values moved into config.yaml); replace it with the shipped module "+

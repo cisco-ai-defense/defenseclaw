@@ -84,11 +84,11 @@ const (
 )
 
 // SkillTreeSignature is the content signature of the folder at root, the
-// one cli/defenseclaw/codeguard_skill.py computes (_dir_signature with
-// skip_bytecode): SHA-256 over each file's slash-separated relative path and
-// its content with line endings normalized to LF and leading and trailing
-// whitespace removed, in path order, leaving out __pycache__ folders and .pyc
-// files. A link anywhere in the tree is refused.
+// one cli/defenseclaw/codeguard_skill.py computes for a clean shipped
+// skill: SHA-256 over each file's slash-separated relative path and its
+// content with line endings normalized to LF and leading and trailing
+// whitespace removed, in path order. Added bytecode must change the digest
+// because Python can execute it. A link anywhere in the tree is refused.
 func SkillTreeSignature(root string) (string, error) {
 	info, err := os.Lstat(root)
 	if err != nil {
@@ -135,14 +135,8 @@ func SkillTreeSignature(root string) (string, error) {
 			if entries > maxSkillTreeEntries {
 				return fmt.Errorf("policy: skill tree has too many entries")
 			}
-			if info.IsDir() && name == "__pycache__" {
-				continue
-			}
 			if !info.IsDir() && !info.Mode().IsRegular() {
 				return fmt.Errorf("policy: %s is not a regular file", path)
-			}
-			if !info.IsDir() && strings.HasSuffix(name, ".pyc") {
-				continue
 			}
 			if info.IsDir() {
 				if err := walk(path); err != nil {
