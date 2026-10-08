@@ -829,23 +829,6 @@ in `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`. Files that name another
 deployment's hook binary stay. The `machine_state_remaining` warning names
 anything it could not remove, and why.
 
-A purge also removes the managed ACP folder `%USERPROFILE%\.defenseclaw\acp`
-(the account's ACP token copies and editor contract locks) of every account
-that has one, signed in or not, including accounts that were revoked or
-enrolled for ACP only, and accounts whose other per-user state stays for its
-`connector_backups`. The editors' own ACP entries stay (for example the
-DefenseClaw agents under `agent_servers` in Zed's `settings.json` and
-`%USERPROFILE%\.jetbrains\acp.json`); they start the removed
-`defenseclaw-acp.exe` and fail, so remove them in the editor.
-
-An upgrade replaces each binary in place. When an editor still runs the
-previous `defenseclaw-acp.exe` (an open ACP thread), Windows keeps that copy
-as `defenseclaw-acp.exe.backup.<32 hex>` beside the new one until the thread
-ends: the upgrade succeeds, the next lifecycle run removes the copy, and
-Windows deletes it at the next restart. Uninstall removes such copies too;
-if a program still runs one, the uninstall stops before changing anything
-and names it: close that editor thread, or restart, and run it again.
-
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
 `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The
@@ -1009,23 +992,12 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile) |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See
 [Machine policy](/docs/enterprise/machine-policy) and
 [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
-
-### ACP agents in an editor
-
-The [ACP guard](/docs/acp-guard#managed-enterprise-enrollment) runs an agent
-for Zed or JetBrains behind DefenseClaw. Enroll each user as LocalSystem while
-the user is signed in (a disconnected RDP session counts); the user then runs
-the reported `defenseclaw.exe enterprise acp setup ...` command. Before the
-first guarded thread, the user runs the agent once in a terminal: Hermes asks
-its first-run questions there, which the editor cannot show, and Kiro needs
-`kiro-cli login` once. A guard that cannot start shows its reason in the
-editor, not only in `%LOCALAPPDATA%\Zed\logs\Zed.log`.
 
 ## Upgrades and downgrades
 

@@ -35,7 +35,7 @@ Only agents you select in the config are protected; see
 | Hermes (`hermes`) | Per user, with the foreign-hook guard | Per user (hook binary) |
 | Antigravity (`antigravity`) | Per user | Per user (hook binary) |
 | OpenHands (`openhands`), OmniGent (`omnigent`) | Per user | Not managed: the enumerator writes no targets for them, and a manifest row that names one is refused |
-| Kiro (`kiro`) | Per user: each user's global `~/.kiro/hooks/defenseclaw.json` plus the CLI 2.x `defenseclaw` agent; ACP stays optional (see [Kiro](/docs/connectors/kiro#enterprise-standalone-profile)) | Per user: `%USERPROFILE%\.kiro\hooks\defenseclaw.json` plus the CLI 2.x `defenseclaw` agent, through the hook binary; the [ACP guard](/docs/acp-guard) stays optional |
+| Kiro (`kiro`) | Per user: each user's global `~/.kiro/hooks/defenseclaw.json` plus the CLI 2.x `defenseclaw` agent | Per user: `%USERPROFILE%\.kiro\hooks\defenseclaw.json` plus the CLI 2.x `defenseclaw` agent, through the hook binary |
 | OpenClaw (`openclaw`), ZeptoClaw (`zeptoclaw`) | Not managed: they need the guardrail proxy, which a managed host does not run, so the enumerator skips them (route `unsupported`) | Not managed, as for OpenHands |
 
 - **Vendor lock.** A setting in the agent's machine policy that stops user

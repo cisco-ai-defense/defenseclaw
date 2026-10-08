@@ -12,6 +12,8 @@ The ACP guard is a local, protocol-aware security boundary between an editor
 and an agent. It lets Zed, JetBrains, or another ACP client keep its native
 agent UX while every JSON-RPC frame passes through DefenseClaw policy.
 
+ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0. This guide covers the per-user install.
+
 <Flow
   direction="TB"
   caption="The editor starts defenseclaw-acp instead of the agent. Every message between the editor and the agent passes through the guard, which asks the local gateway for a verdict before it forwards the message. An agent entry that the editor launches directly does not pass through the guard."
@@ -70,8 +72,7 @@ For JetBrains, replace `--client zed` with `--client jetbrains`. The command
 preserves unrelated JSON keys and foreign agent entries, but it writes the
 settings file back as plain JSON with two-space indentation and sorted keys:
 the comment block before the opening `{` is kept, while every other comment
-and trailing comma is dropped. Managed `enterprise acp setup` writes the file
-the same way. Keep a copy of a settings file whose comments you want. It writes one
+and trailing comma is dropped. Keep a copy of a settings file whose comments you want. It writes one
 `DefenseClaw · Kiro` entry, a mode-0600 scoped token, and a runtime contract
 lock. A failed config write rolls all three changes back.
 
@@ -227,190 +228,14 @@ Other consequences worth planning around:
   entry in place; removing the entry with
   `defenseclaw acp remove --client zed --agent devin` also reclaims its
   contract lock.
-- **In normal user mode the agents share one scoped token**, the private file
-  named by argv. Managed enterprise enrollment instead mints one credential per
-  principal + client + agent + profile, so two agents in one editor hold two
-  distinct bearers and revoking one leaves the other working.
+- **The agents share one scoped token**, the private file named by argv.
 - **Each binding's digests are pinned separately.** Upgrading the guard rebinds
   every matching user-owned lock in one transaction; a stale digest on one
   binding fails that binding closed without disturbing the other.
 
-## Managed enterprise enrollment
+## Enterprise managed mode
 
-In a managed deployment, the administrator owns ACP policy and credentials,
-in the protected machine data directory. Each enrollment gets its own
-credential for one user, client, agent, and profile, and the gateway refuses a
-request whose client, agent, or profile differs from the enrollment.
-
-An administrator or guardian first provisions the service record and the
-target user's private copy:
-
-```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll \
-  --user alice --client zed --agent kiro --profile kiro-only --json
-```
-
-On Windows only LocalSystem can write the token into a user profile. Run the
-enrollment as LocalSystem (an MDM script or a SYSTEM scheduled task) while the
-user is signed in (a disconnected session, an RDP window closed without
-signing out, counts; `verify`, `revoke` and `list` act on it too), and name the user with `--user` or `--sid` (an Entra ID
-account as `--user AzureAD\name`, resolved like `enterprise policy show
---user`; it needs a profile on the computer). An elevated administrator prompt
-is refused, and `--user-home` alone names the owner of the
-profile folder, which can be SYSTEM:
-
-```powershell
-& "C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" enterprise acp enroll `
-  --user CONTOSO\alice --client zed --agent kiro --profile kiro-only --json
-```
-
-A refused enrollment leaves no credential behind, and a failed re-enrollment
-keeps the working credential.
-
-The JSON result contains a `token_file` and a `next` command, never the token
-value. On a standalone managed computer the user runs the reported
-`defenseclaw-gateway enterprise acp setup ...` command (on Windows the
-installed `defenseclaw.exe enterprise acp setup ...`), as themselves: that
-computer has no other DefenseClaw command. For a profile in action mode the
-command carries `--activate`; an entry set up without it ends its first
-session saying that the profile is in action mode and the entry is set up for
-observe mode, with the command to run. Secure Client reports
-`defenseclaw acp setup --managed ...` instead.
-It writes the guarded editor entry and the executable contract lock in that
-user's own state, from the enrollment alone. It accepts only the guard the
-package installed: a `--guard-binary` outside the administrator-owned install
-(a copy in the home, a symlink, a folder the user can write) is refused. The
-agent is the catalog executable on the user's `PATH`, or the path
-`--agent-binary` names, which must carry the catalog name (for example
-`kiro-cli`); another program is refused. DefenseClaw cannot tell a different
-program installed under that name from the agent, so pair the enrollment with
-application control (see [Configuration](#configuration)). It reads no central configuration,
-so it cannot change policy, and the gateway refuses any request that does not
-match the enrollment. On a Secure Client computer, where the Python CLI is
-allowed, the same files come from `defenseclaw acp setup --managed`, which the
-**ACP Guard → Enroll managed enterprise ACP** panel of the TUI runs; a
-standalone managed computer refuses that CLI.
-
-The contract lock of a managed entry pins the guarded entry itself, not the
-whole editor settings file, so the editor rewriting that file (Zed does on a
-theme, font or settings-UI change) keeps the entry working. The choices Zed
-stores inside the entry from its agent panel (`default_mode`,
-`default_model`, `favorite_models`, `default_config_options`,
-`favorite_config_option_values`) are left out of the pin: Zed sends them to
-the agent over ACP, where the guard checks them, and they cannot change what
-is launched. An edit of anything else in the guarded entry (its command,
-arguments, environment, type or any other key) stops it with "the
-DefenseClaw · Kiro entry in the editor settings file ... changed after setup"
-until the user runs the setup command again, which the guard's error names.
-If a user deletes their token copy, `verify` says it is missing and nothing
-restores it: run `enterprise acp enroll` again with the same selectors, which
-publishes the same credential again. The guard says the same in the editor:
-a missing or unusable copy, or a revoked credential, asks the user to have
-the administrator enroll them again, because setup cannot restore it.
-
-A guard that cannot start answers the editor with its reason and waits for
-the editor to read it, so Zed shows the text under **Failed to Launch**
-instead of only "Server exited with status exit code: 1".
-
-Use the same exact selectors to verify or revoke an enrollment (on Windows,
-the same `defenseclaw.exe` commands as LocalSystem):
-
-
-```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp verify \
-  --user alice --client zed --agent kiro --profile kiro-only
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp revoke \
-  --user alice --client zed --agent kiro --profile kiro-only
-```
-
-`verify` also says whether the user has run setup: a published token alone
-is not a working editor entry. To see every enrollment, with its user,
-editor and agent, profile, enrollment time, token copy and setup state, run:
-
-```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp list
-```
-
-```text
-  3 managed ACP enrollment(s)
-  USER                          CLIENT/AGENT  PROFILE    ENROLLED           TOKEN COPY  SETUP
-  alice (uid:1001)              zed/kiro      kiro-only  2026-10-07 17:20Z  present     done
-  bob (uid:1002)                zed/kiro      kiro-obs   2026-10-07 17:25Z  present     done
-  uid:1051 (account deleted)    zed/kiro      kiro-only  2026-10-07 18:10Z  -           -
-  ! bob zed/kiro (kiro-obs): central ACP policy now binds zed/kiro to profile kiro-only, so the guard refuses this kiro-obs enrollment; enroll the user again with --profile kiro-only
-```
-
-`SETUP` is `done` when the editor entry's contract lock is for the enrolled
-profile and its central mode and the entry points at the user's home; `stale`
-when it is not (the enrollment was replaced, the profile changed mode, or an
-account rename moved the home), and the user runs the setup command again;
-`not run` before the first setup. A note under the table, and `central_note`
-in `verify --json` with a warning in its text output, flag an enrollment the
-central policy no longer admits: ACP switched off, the pair switched off, or
-the pair bound to another profile. An account that does not resolve while
-the directory cannot be confirmed reachable is listed as `(does not resolve)`,
-not as deleted.
-
-Revocation deletes the service-side credential first, so a copied or cached
-token stops working even if the user-side cleanup is interrupted. The user's
-private copy is written as that user. Enrolling again after a revocation
-issues a new credential. On Windows, only a signed-in user's copy can be
-removed: a revoke of a signed-out user exits 0, says the copy stays until the
-next sign-in, and the hook enumerator removes it then (the copy no longer
-works in the meantime).
-
-A user has one enrollment per editor and agent. Enrolling the same user,
-editor and agent under another profile replaces the earlier enrollment and
-says so; its credential stops working, and the user runs the new setup
-command. The setup command of the replaced enrollment is refused (non-zero
-exit) and changes nothing: it says that a newer enrollment exists and prints
-its setup command. `list` shows the pair as `stale` until the user runs it.
-
-An enrollment belongs to the account's uid on Linux and macOS and to its SID
-on Windows, not to its name. Renaming an account keeps its enrollment: run
-the setup command again as the renamed user if the home moved (`list` and
-`verify` show setup as not done until then). `list` reads the default data
-directory of the new home when the enrolled one is outside it, and says so in
-a note until the user has run setup there. Linux and macOS reuse a freed
-uid, often at once, so **revoke the enrollments of an account before its uid
-can be given to a new account** (`enterprise acp revoke --uid <uid> ...`);
-otherwise the new account inherits them.
-
-When an account is deleted, its ACP enrollments go the way of its hook
-enrollments: the hook enumerator revokes them after three cycles in a row find
-the account gone (10 to 15 minutes), and `enterprise linux repair` or
-`enterprise macos repair` revokes them at once. A lookup that fails, or a
-directory that cannot be confirmed reachable, keeps them, and `list`,
-`verify` and `enterprise linux status` say that the account does not resolve
-rather than that it was deleted. On Windows the
-enumerator revokes the enrollments of a deleted local account at its next
-cycle; a domain account deleted in the directory keeps them, because an
-unreachable domain controller looks the same. To revoke one by hand, `--uid`
-alone (Linux, macOS) or `--sid` alone (Windows) is enough for an account that
-no longer exists:
-
-```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp revoke \
-  --uid 1051 --client zed --agent kiro --profile kiro-only
-```
-
-```powershell
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise acp revoke `
-  --sid S-1-5-21-1111111111-2222222222-3333333333-1117 --client zed --agent kiro --profile kiro-only
-```
-
-The managed Windows payload, the macOS managed runtime and the Linux deb, rpm
-and payload archive include `defenseclaw-acp` as a separately hashed and
-protected executable (`/opt/defenseclaw/bin/defenseclaw-acp` on Linux).
-
-| UX and custody | Normal user mode | Managed enterprise mode |
-| --- | --- | --- |
-| Policy owner | User config | Administrator-owned config; runtime mutation denied |
-| Setup | One `defenseclaw acp setup` command or the ACP TUI panel | Admin `enterprise acp enroll`, then the user runs the `enterprise acp setup` command it reports |
-| Credential | One private local ACP token | Unique principal + client + agent + profile credential, with a private per-user copy |
-| Enforcement rollout | Observe by default; `--activate` selects action | Central profile chooses observe/action; the user cannot activate or downgrade it |
-| Revocation | Remove the guarded editor entry | Remove service authority first, then the user copy; stale bearers fail immediately |
-| Readiness | Private local token and configured binding | Every enrollment record valid, and the binding configured |
+ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
 
 ## What is guarded
 
@@ -427,8 +252,7 @@ protected executable (`/opt/defenseclaw/bin/defenseclaw-acp` on Linux).
 In action mode a blocked prompt ends that turn normally: the editor shows the
 reason as an agent message, in the wording the hook connectors use
 ("DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key).
-Do not retry it in another form."; on a managed computer "DefenseClaw blocked
-this action under your organization's policy (rule ...)"), and the next
+Do not retry it in another form."), and the next
 prompt runs. Agent output
 blocked in the middle of a turn ends the turn the same way, and the guard
 cancels the turn in the agent. The guard can only withhold what the agent
@@ -439,15 +263,10 @@ check its effects." To stop such a step before it runs, keep the agent's own
 connector hooks in action mode next to the guard. If the gateway does not answer an evaluation
 (the guard retries once), only that step is refused, with "DefenseClaw could
 not check this step because the gateway did not answer"; the session stays
-open. A credential the gateway no longer accepts, such as a revoked managed
-enrollment, is refused as "the gateway did not accept this editor's ACP
+open. A credential the gateway no longer accepts is refused as "the gateway did not accept this editor's ACP
 credential: your administrator may have revoked your access", and ACP
 checking switched off centrally as "your administrator switched ACP checking
-off"; on a managed computer every such message sends the user to the
-administrator ("ask your administrator to enroll you again" for a revoked
-credential, which setup cannot restore) rather than to a command that
-computer does not have. A pair the administrator switched off is reported as
-switched off, whatever profile it now names. In observe
+off". In observe
 mode the session goes on unchecked, and the guard says so once in the editor:
 "DefenseClaw is not checking this session". On Linux and macOS the gateway's
 authentication-failure audit row names the account (uid) the kernel reports
@@ -465,19 +284,20 @@ and SHA-256 digests, the exact client configuration path and digest, plus ACP
 An upgrade replaces the guard, and the installer then re-pins the new guard in
 every user-owned lock that pinned the guard it replaced (`defenseclaw acp
 refresh --from-sha256 <old digest>`); a rolled-back upgrade restores the old
-locks with the rest of the data. A managed lock is not rewritten by that transaction;
-it instead permits an administrator upgrade to change guard bytes only while
-the complete guard path continues to pass the platform root/Admin ownership,
-no-symlink, and no-untrusted-writer custody checks. Agent and editor
-configuration digests stay exactly pinned in both modes.
+locks with the rest of the data. Agent and editor configuration digests stay exactly pinned.
 If central policy mode and the launched contract mode drift,
 the guard stops the session even when the old contract was observe-only; rerun
 setup to make an observe-to-action promotion explicit. The guard's message
-names the change and the setup command to run (with `--activate` when the
-profile moved to action mode). Zed keeps one guard for every thread of an
-agent: after such an end the guard stays, answers with the same message until
-the user has run the setup command, and then starts the new guard for the
-next thread, so no Retry or editor restart is needed.
+names the profile mode, the mode the entry was set up for, and the setup
+command to run (with `--activate` when the profile is in action mode). Zed
+keeps one guard for every thread of an agent: after such an end the guard
+stays, answers with the same message until you have run the setup command,
+and then starts the new guard for the next thread, so no Retry or editor
+restart is needed.
+
+A guard that cannot start answers the editor with its reason and waits for
+the editor to read it, so Zed shows the text under **Failed to Launch**
+instead of only "Server exited with status exit code: 1".
 
 ## Observability
 
@@ -560,19 +380,10 @@ acp:
 This profile rejects a guard invocation claiming another client or agent. It
 does **not** control an unrelated editor entry that launches an agent directly,
 outside `defenseclaw-acp`. To make “Kiro only” an organization-wide guarantee,
-combine the managed ACP binding with IDE policy/MDM and operating-system
+combine the ACP entry with IDE policy and operating-system
 application control that prevents unapproved agent binaries or configuration.
 DefenseClaw deliberately reports that bypass boundary instead of claiming it
 can govern a process it never receives.
-
-In `managed_enterprise`, `allowed_clients` and `allowed_agents` must explicitly
-name the enrolled pair; an empty wildcard allow-list is deliberately rejected
-by enrollment even though it remains valid for ordinary local profiles.
-Enrollment resolves the pair the way the gateway does: a `bindings` entry for
-the pair (as in [several guarded agents in one editor](#several-guarded-agents-in-one-editor)),
-or else both the client and the agent pin, must name the profile. A refusal
-names each setting that disagrees, for example
-`central ACP policy does not authorize zed/kiro in profile kiro-only: the pair resolves to profile "devin-watch"; acp.agents.kiro.profile is "devin-watch"; set both to "kiro-only", or add acp.bindings.zed/kiro with profile "kiro-only"`.
 
 ## Supported agents
 
@@ -609,14 +420,14 @@ A listed entry point was checked against the vendor's documentation or the
 ACP Registry; that alone does not mean DefenseClaw tested that editor and
 agent together.
 
-Run each agent once in a terminal, as the user, before its first guarded
-thread. Started by the editor, an agent has no terminal: Hermes asks its
-first-run questions there (the telemetry choice, installing its Bedrock
-feature) and waits, so the thread showed only a spinner, and Kiro reports a
-missing sign-in as "dispatch failure" (run `kiro-cli login` once). The guard
-passes an agent's sign-in methods and messages through unchanged. When an
-agent sends nothing for 60 seconds after a prompt, the guard says in the
-thread that it may be waiting for first-run questions in a terminal.
+Run each agent once in a terminal before its first guarded thread. Started by
+the editor, an agent has no terminal: Hermes asks its first-run questions
+there (the telemetry choice, installing its Bedrock feature) and waits, so the
+thread showed only a spinner, and Kiro reports a missing sign-in as "dispatch
+failure" (run `kiro-cli login` once). The guard passes an agent's sign-in
+methods and messages through unchanged. When an agent sends nothing for 60
+seconds after a prompt, the guard says in the thread that it may be waiting
+for first-run questions in a terminal.
 
 Setup uses only the list that ships with DefenseClaw. It never downloads or
 runs commands from the online registry. Every
@@ -633,12 +444,6 @@ it.
 | `GET /v1/acp/catalog` | Compiled client/agent catalog |
 | `GET /v1/acp/profiles` | Effective profile inventory |
 | `GET /health` | ACP enabled/mode/schema/configuration/token readiness |
-
-In managed mode, `scoped_token_ready` is true only when every enrollment
-record is private and valid; one bad record makes it false. There is no limit
-on the number of enrollments. The check reads every record, so the gateway
-reuses its answer for a while: 500 ms for a small fleet, longer for a large one
-(at most 30 seconds).
 
 Use `defenseclaw acp catalog` for the local catalog and
 `defenseclaw acp remove --client zed --agent kiro` for surgical removal.
