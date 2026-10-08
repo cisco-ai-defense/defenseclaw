@@ -13,7 +13,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +46,44 @@ func TestCleanupResultKeepsTheExitCode(t *testing.T) {
 	}
 	if got := exitCode(errors.New("plain")); got != 1 {
 		t.Fatalf("a plain error exits %d", got)
+	}
+}
+
+// GAP-0027: each change of the Tetragon stream is one journal line, with the
+// reason when it is down; a repeat writes nothing; every state still reaches
+// the reconciler.
+func TestStreamJournalLogsEachChangeOnce(t *testing.T) {
+	var out bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&out, nil))
+	var passed []plane.StreamState
+	note := streamJournal(logger, func(state plane.StreamState) { passed = append(passed, state) })
+	ended := "tetragon_unavailable: the event stream ended: EOF"
+	refused := "tetragon_tcp_api: Tetragon serves its API on localhost:54321, not a unix socket"
+	for _, state := range []plane.StreamState{
+		{Connected: true, Version: "v1.7.1", PID: 4242},
+		{Connected: true, Version: "v1.7.1", PID: 4242},
+		{Reason: ended},
+		{Reason: ended},
+		{Reason: refused},
+		{Connected: true, Version: "v1.7.1", PID: 4343},
+		{},
+	} {
+		note(state)
+	}
+	if len(passed) != 7 {
+		t.Fatalf("the reconciler saw %d states, want 7", len(passed))
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("journal lines = %d, want 4:\n%s", len(lines), out.String())
+	}
+	for i, want := range []string{"tetragon_pid=4242", ended, "tetragon_tcp_api", "tetragon_pid=4343"} {
+		if !strings.Contains(lines[i], want) {
+			t.Errorf("line %d = %q, want %q", i, lines[i], want)
+		}
+	}
+	if !strings.Contains(lines[1], "level=WARN") || !strings.Contains(lines[0], "level=INFO") {
+		t.Errorf("levels: %q, %q", lines[0], lines[1])
 	}
 }
 

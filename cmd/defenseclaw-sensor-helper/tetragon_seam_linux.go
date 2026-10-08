@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -72,11 +73,11 @@ func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string,
 			return status, nil
 		},
 		Tap: hitTap(controller),
-		Stream: func(state plane.StreamState) {
+		Stream: streamJournal(logger, func(state plane.StreamState) {
 			controller.NoteStream(kernelpolicy.StreamStatus{
 				Connected: state.Connected, Version: state.Version, PID: state.PID, Reason: state.Reason,
 			})
-		},
+		}),
 	}
 	if intent.Mode != kernelpolicy.ModeOff {
 		config.Dial = tetragon.NewDialer(tetragon.DialerConfig{
@@ -85,6 +86,34 @@ func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string,
 		})
 	}
 	return config
+}
+
+// streamJournal writes each change of the Tetragon event stream to the
+// helper's journal before it hands the state on: connected (Tetragon's
+// version and pid), down with the reason (the stream ended, Tetragon stopped,
+// a TCP API or an untrusted socket refused), and a new reason while it stays
+// down. `tetragon verify` and status send an administrator to `journalctl -u
+// defenseclaw-sensor-helper` for tetragon.stream, so the journal says what
+// happened (GAP-0027). The same state again logs nothing, so a redial loop
+// against a stopped Tetragon writes one line.
+func streamJournal(logger *slog.Logger, next func(plane.StreamState)) func(plane.StreamState) {
+	var mu sync.Mutex
+	var last *plane.StreamState
+	return func(state plane.StreamState) {
+		mu.Lock()
+		changed := last == nil || *last != state
+		seen := state
+		last = &seen
+		mu.Unlock()
+		switch {
+		case !changed:
+		case state.Connected:
+			logger.Info("tetragon event stream connected: process events come from Tetragon", "tetragon_version", state.Version, "tetragon_pid", state.PID)
+		case state.Reason != "":
+			logger.Warn("tetragon event stream down: process events come from cn_proc until it is back", "reason", state.Reason)
+		}
+		next(state)
+	}
 }
 
 // customerSource is the ledger as the reconciler's state reads it.
