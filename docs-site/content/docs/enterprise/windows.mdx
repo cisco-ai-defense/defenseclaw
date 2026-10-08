@@ -192,8 +192,14 @@ locked staging folder below; give it its own folder:
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
 icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
 ```
+
+The snippet is safe to run again, for example after you fix a permission:
+it replaces the pack folder instead of copying into it. Copying a folder
+onto one that exists nests a copy (`my-pack\my-pack`), which Setup refuses,
+naming the nested folder.
 
 Setup checks these permissions for the service account before it changes
 anything, and stops with exit code `1639` naming the folder and the

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -56,16 +57,43 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			return fmt.Errorf("the gateway service cannot read the guardrail rule pack that %s names: %v", configPath, err)
 		}
 		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
-			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v", pack.dir, configPath, err)
+			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v%s",
+				pack.dir, configPath, err, rulePackNestedCopyHint(pack.dir, err))
 		}
 	}
 	// The packs as the gateway builds them at start, custom_packs digest pins
 	// included: a pin the gateway refuses kept it from starting, and the
 	// lifecycle waited out its readiness timeout (GAP-0188).
 	if err := gateway.CheckRulePacks(runtime); err != nil {
-		return fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %v", configPath, err)
+		hint := ""
+		for _, pack := range standaloneGatewayRulePackDirs(runtime) {
+			if hint = rulePackNestedCopyHint(pack.dir, err); hint != "" {
+				break
+			}
+		}
+		return fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %v%s", configPath, err, hint)
 	}
 	return nil
+}
+
+// rulePackNestedCopyHint names a copy of a pack folder inside itself, which
+// copying the pack folder onto an existing one creates (Copy-Item -Recurse,
+// cp -r). The loader reported only an unexpected YAML component deep inside
+// it (GAP-0558).
+func rulePackNestedCopyHint(dir string, err error) string {
+	var packErr *guardrail.RulePackError
+	if !errors.As(err, &packErr) || packErr.Code != "inventory_unexpected" {
+		return ""
+	}
+	first, _, found := strings.Cut(packErr.Path, "/")
+	if !found || !strings.EqualFold(first, filepath.Base(filepath.Clean(dir))) {
+		return ""
+	}
+	nested := filepath.Join(dir, first)
+	if info, statErr := os.Lstat(nested); statErr != nil || !info.IsDir() {
+		return ""
+	}
+	return fmt.Sprintf("; %s is a copy of the pack inside itself (copying the pack folder onto an existing one creates it): remove that folder and run again", nested)
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can
