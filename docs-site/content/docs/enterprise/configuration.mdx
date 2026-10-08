@@ -417,8 +417,11 @@ rules on Linux and macOS:
    ```
 
    The lifecycle refuses a pack that does not exist or whose digest does not
-   match, and restarts the services with the new pack. If the gateway cannot load it, `ensure` fails and the previous
-   config stays in force.
+   match, and applies the new pack in the running gateway, without a restart:
+   adding, replacing or removing a `custom_packs` entry, or switching
+   `rule_pack`, raises the policy generation like any reloadable key. If the
+   gateway cannot load it, `ensure` fails and the previous config stays in
+   force.
 
 To change a pack that is in use, the safest route is the same as for a new
 one: create the edited copy in a new folder (for example
