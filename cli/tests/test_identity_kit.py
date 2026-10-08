@@ -271,21 +271,20 @@ def test_intune_check_hides_windows_only_rows_on_macos(monkeypatch: pytest.Monke
     assert not any("MDM user scope" in row["item"] or "Windows Hello" in row["item"] for row in rows)
 
 
-def test_intune_macos_script_validates_before_graph_calls(tmp_path: Path) -> None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_intune_macos_script_validates_before_graph_calls(tmp_path: Path, newline: str) -> None:
+    # CRLF covers a wrapper saved by a Windows editor; the empty-block check must still run.
     intune = _load(INTUNE)
     script = tmp_path / "wrapper.sh"
-    script.write_text("""#!/bin/sh
-dc_inline_config() {
-    cat <<'DEFENSECLAW_CONFIG'
-DEFENSECLAW_CONFIG
-}
-""")
+    script.write_bytes(
+        "#!/bin/sh\ndc_inline_config() {\n    cat <<'DEFENSECLAW_CONFIG'\nDEFENSECLAW_CONFIG\n}\n"
+        .replace("\n", newline)
+        .encode()
+    )
     args = argparse.Namespace(file=str(script), name="test", frequency="PT1H", retries=3, group=None, apply=False)
     with pytest.raises(SystemExit, match="settings block"):
         intune.cmd_macos_script(object(), args)
-    script.write_text("""#!/bin/sh
-echo ok
-""")
+    script.write_bytes("#!/bin/sh\necho ok\n".replace("\n", newline).encode())
     args.frequency = "bad"
     with pytest.raises(SystemExit, match="frequency"):
         intune.cmd_macos_script(object(), args)
