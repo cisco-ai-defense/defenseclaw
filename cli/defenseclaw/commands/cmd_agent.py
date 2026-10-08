@@ -52,7 +52,36 @@ def _mapping_block(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-@click.group()
+class _AgentGroup(click.Group):
+    """Keep new identity and IDE commands off the Secure Client command tree."""
+
+    def _secure_client(self, ctx: click.Context) -> bool:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        app = ctx.find_object(AppContext)
+        cfg = app.cfg if app is not None else None
+        if cfg is None:
+            # Help is rendered before the root callback loads configuration.
+            from defenseclaw.config import load
+
+            try:
+                cfg = load()
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return _enterprise_profile(cfg) == "secure_client"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = super().list_commands(ctx)
+        return ([name for name in names if name not in {"ide-plugins", "identities"}]
+                if self._secure_client(ctx) else names)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name in {"ide-plugins", "identities"} and self._secure_client(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group(cls=_AgentGroup)
 def agent() -> None:
     """Inspect locally installed agent surfaces."""
 

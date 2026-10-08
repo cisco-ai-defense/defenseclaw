@@ -46,3 +46,24 @@ def test_secure_client_aibom_does_not_stamp_plugin_or_mcp_users() -> None:
         build_claw_aibom(cfg, live=True, categories=set(), connector="codex")
     stamp.assert_not_called()
 
+def test_secure_client_agent_command_tree_hides_new_commands() -> None:
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+            help_result = CliRunner().invoke(agent, ["--help"], obj=app)
+            assert "ide-plugins" not in help_result.output
+            assert "identities" not in help_result.output
+            for name in ("ide-plugins", "identities"):
+                result = CliRunner().invoke(agent, [name], obj=app)
+                assert result.exit_code != 0
+                assert "No such command" in result.output
+            from defenseclaw.main import cli
+
+            with patch("defenseclaw.config.load", return_value=app.cfg):
+                root_help = CliRunner().invoke(cli, ["agent", "--help"])
+            assert root_help.exit_code == 0, root_help.output
+            assert "ide-plugins" not in root_help.output
+            assert "identities" not in root_help.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
