@@ -350,6 +350,7 @@ esac"""
     stubs["df"] = 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/disk3 9000000 8000000 %s 90%% /\\n" "$DC_TEST_FREE"'
     stubs["installer"] = """echo "installer -pkg" >>"$DC_TEST_LOG"
 printf '{"ok":false,"errors":[{"code":"downgrade_refused","message":"DefenseClaw 1.0.3 is installed; refusing to downgrade to 1.0.2"}]}\\n' >"$DC_TEST_RESULT"
+touch -t 203001010000 "$DC_TEST_RESULT"
 echo "installer: The upgrade failed."
 exit 1"""
     bin_dir = tmp_path / "bin"

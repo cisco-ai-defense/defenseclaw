@@ -1166,7 +1166,7 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only bin folder")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
 def test_a_restore_that_stopped_part_way_keeps_the_restored_data(tmp_path: Path) -> None:
     # GAP-0624: a restore that failed on a full disk kept its snapshot; the
     # next run set the data it had put back aside as the failed install and
