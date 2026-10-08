@@ -42,8 +42,8 @@ import (
 // traffic (the enterprise-data category) and rules for tool calls only do not
 // describe files. One difference remains: Python source is matched as plain
 // text here, where Python reads it with comments and docstrings blanked, and a
-// rule about writing a path is not applied to Python source at all, because
-// that needs the call the Python overlay resolves.
+// path-write rules on Python source require a write call using the matched
+// path, as in the CLI overlay.
 
 const (
 	artifactMaxFileBytes = 512 * 1024
@@ -238,10 +238,8 @@ func scanArtifactText(rules []artifactRule, text, location string) []scanner.Fin
 	doc := isArtifactDoc(location)
 	var findings []scanner.Finding
 	for _, rule := range rules {
-		// A rule about writing a path describes a tool call: in Python source
-		// it needs the call, and in documentation a file name is a mention
-		// (COG-MEMORY on docs that explain MEMORY.md, GAP-0364).
-		if (python || doc) && rule.pathWrite {
+		// A path-write rule in documentation is only a mention of a path.
+		if doc && rule.pathWrite {
 			continue
 		}
 		var match []int
@@ -249,6 +247,8 @@ func scanArtifactText(rules []artifactRule, text, location string) []scanner.Fin
 			// A command is one line: a match running across lines joined an
 			// rm -rf in a JSON example to a "/" further down (GAP-0364).
 			match = firstLineMatch(rule.re, text)
+		} else if python && rule.pathWrite {
+			match = pythonPathWriteMatch(rule.re, text)
 		} else {
 			match = rule.re.FindStringIndex(text)
 		}
