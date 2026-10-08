@@ -850,7 +850,7 @@ func TestSessionSummary(t *testing.T) {
 					sb.Hooks = sandboxapi.HookCoverage{ToolCalls: 2, ToolBlocked: 1, LastBlocked: "rm\x1b[1A marker"}
 				})
 			}
-		}, want: []string{"notes\ufffd[2J", "+changed"}, not: []string{"\x1b", "\x07", "\r", "\u202e"}},
+		}, want: []string{`notes\x1b[2J\x1b]0;DCMARKER\a\rx` + "\ufffdtxt.sh", "+changed"}, not: []string{"\x1b", "\x07", "\r", "\u202e"}},
 		{name: "keeping is confirmed and the diff paged", input: "d\ny\n", opts: claude, setup: func(ta *testApp) {
 			ta.App.pager = func(text string) bool {
 				ta.err.WriteString(text)
