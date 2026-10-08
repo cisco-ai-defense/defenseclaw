@@ -24,6 +24,7 @@ const loginDefsPath = "/etc/login.defs"
 
 var (
 	localPasswdPath = "/etc/passwd"
+	localGroupPath  = "/etc/group"
 	nsswitchPath    = "/etc/nsswitch.conf"
 )
 

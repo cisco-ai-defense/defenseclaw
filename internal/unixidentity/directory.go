@@ -31,19 +31,22 @@ import (
 // service named on the passwd line of nsswitch.conf for the uid with
 // `getent -s <service>`; the first that answers owns it, and an account no
 // directory service knows, or one /etc/passwd holds, is local. The domain
-// comes from the fully-qualified name SSSD (alice@corp.example.com) or
-// winbind (CORP\alice) reports, a NetBIOS domain by the DNS name of its
-// realm, and groups from initgroups plus group lookups for all of their
-// ids. initgroups looks the account up by name, so an SSSD account whose
-// name SSSD resolves to another account keeps only its primary group: with
-// short names two SSSD domains may both hold a name (GAP-0563). The realm and directory type of an SSSD or winbind
-// account come from realmd, which any account may ask (realm_linux.go). A
-// bare SSSD name (use_fully_qualified_names = False) gets a realm only when
-// SSSD resolves the name qualified with that realm's domain to the same
-// account (sssdAccountInDomain): SSSD may serve a plain LDAP domain next to
-// the joined one, under the same kind of name. A qualified SSSD name gives
-// the realm of its domain only when SSSD resolves that name to the same
-// account, because a name may only look qualified (GAP-0568).
+// comes from the fully-qualified name winbind (CORP\alice) or another
+// directory module reports, a NetBIOS domain by the DNS name of its realm,
+// and groups from initgroups plus group lookups for all of their ids. The
+// realm and directory type of a winbind account come from realmd, which any
+// account may ask (realm_linux.go).
+//
+// SSSD serves Active Directory, IPA and plain LDAP domains side by side, and
+// the name it gives an account does not say which domain holds it: with
+// use_fully_qualified_names = False every domain names its accounts bare, and
+// a plain LDAP domain may name them by e-mail address (bob@corp.example.com).
+// An SSSD account therefore takes its domain from its SID, which SSSD holds
+// for the uid itself (sssd_nss_linux.go): it gets the domain, realm and
+// principal of a joined realm only when SSSD holds a user of the same name
+// with the same SID in that realm's domain, and groups only inside the
+// domain of its SID. An account without a SID, such as one of a plain LDAP
+// domain, gets no realm and no principal (GAP-0497, GAP-0568, GAP-0605).
 // UPN and mail need SSSD InfoPipe, which only root may call, so the root
 // guardian adds them (enterprisehooks identity spool).
 
@@ -82,7 +85,8 @@ const groupQueryBatch = 64
 // A lookup that does not finish fails as a whole: facts that lack the
 // groups, or take a directory account for a local one, would be cached as
 // resolved (the gateway keeps them for 15 minutes) and select the default
-// profile as though the account had no groups.
+// profile as though the account had no groups. So does an SSSD NSS
+// responder that does not answer, while SSSD is stopped or restarting.
 func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
 	return r.directoryFactsForUID(uid, now, true)
 }
@@ -114,12 +118,13 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 	}
 	_, isLocal := local[account.Name]
 	isLocal = isLocal && local[account.Name] == uid
-	// foreignName marks an SSSD account whose own name SSSD resolves to
-	// another account, or to none: groups looked up by that name are not its
-	// own. unconfirmed marks one whose name is qualified as well: SSSD does
-	// not confirm its domain, so it gets no domain, realm or principal, from
-	// its name or from realmd.
-	foreignName, unconfirmed := false, false
+	// sssd is the connection to the SSSD NSS responder for an SSSD account,
+	// sid the SID SSSD holds for its uid ("" for none) and inDomain the SSSD
+	// domain that holds a user of its name with that SID.
+	var (
+		sssd          *sssdNSS
+		sid, inDomain string
+	)
 	if !isLocal {
 		if data, readErr := readSmallFile(nsswitchPath, 1<<20); readErr == nil {
 			for _, service := range ParseNSSwitchServices(string(data), "passwd") {
@@ -136,32 +141,20 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 					return useridentity.DirectoryFacts{}, lookupErr
 				}
 				facts.Directory, facts.Source = known.directory, known.source
-				if domain, _, qualified := strings.Cut(account.Name, `\`); qualified {
-					facts.AccountDomain = domain
-				}
 				bare, domain := useridentity.SplitQualifiedName(account.Name)
-				qualified := strings.Contains(domain, ".")
-				if known.source == useridentity.SourceSSSD && (qualified || includeGroups) {
-					// SSSD must resolve the account's own name to the account.
-					// With short names (use_fully_qualified_names = False) a
-					// name may carry an e-mail address, as a plain LDAP domain
-					// with ldap_user_name = mail names its accounts: SSSD looks
-					// bob@corp.example.com up in the joined corp.example.com
-					// and finds the AD bob, whose realm and principal this
-					// account must not take (GAP-0568). Two domains may also
-					// hold the same short name, and initgroups by that name
-					// lists the groups of the account SSSD finds first
-					// (GAP-0563). A name SSSD qualifies itself resolves to the
-					// account.
-					same, checkErr := r.sssdResolvesTo(account, account.Name)
-					if checkErr != nil {
-						return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: SSSD lookup of %s: %w", account.Name, checkErr)
-					}
-					foreignName = !same
-					unconfirmed = qualified && foreignName
-				}
 				switch {
-				case domain == "" || unconfirmed:
+				case known.source == useridentity.SourceSSSD:
+					if sssd, err = dialSSSDNSS(r.context()); err != nil {
+						return useridentity.DirectoryFacts{}, err
+					}
+					defer sssd.Close()
+					if sid, err = sssdAccountSID(sssd, uid); err != nil {
+						return useridentity.DirectoryFacts{}, err
+					}
+					if inDomain, err = r.applySSSDDomain(&facts, sssd, account.Name, sid); err != nil {
+						return useridentity.DirectoryFacts{}, err
+					}
+				case domain == "":
 				case known.directory == useridentity.DirectoryEntraID:
 					// The aad module, and Himmelblau with cn_name_mapping =
 					// false, name an Entra ID account by its UPN. It has no
@@ -178,10 +171,10 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 					// no DNS name for; applyRealm gives the DNS name of the
 					// realm a NetBIOS domain names.
 					facts.Domain = strings.ToLower(domain)
-					if qualified {
+					if strings.Contains(domain, ".") {
 						facts.Realm = strings.ToUpper(domain)
-						// sAMAccountName@REALM, the Kerberos principal SSSD
-						// and winbind accounts authenticate as, in the UPN form.
+						// sAMAccountName@REALM, the Kerberos principal winbind
+						// accounts authenticate as, in the UPN form.
 						facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
 					}
 				}
@@ -190,14 +183,12 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		}
 	}
 	if includeGroups {
-		ids := []int{account.GID}
-		// initgroups by a name SSSD resolves to another account lists that
-		// account's groups: the LDAP carol got the groups of the AD carol
-		// (GAP-0563). The primary group comes with the uid's own entry.
-		if !foreignName {
-			if ids, err = r.GroupIDs(account); err != nil {
-				return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
-			}
+		ids, err := r.accountGroupIDs(account, inDomain)
+		if err == nil && sssd != nil {
+			ids, err = sssdGroupsOfDomain(sssd, ids, account.GID, sidDomain(sid))
+		}
+		if err != nil {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
 		}
 		groups, err := r.groupNames(ids)
 		if err != nil {
@@ -205,74 +196,162 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		}
 		facts.Groups = groups
 	}
-	if (facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind) && !unconfirmed {
+	if facts.Source == useridentity.SourceWinbind {
 		realms, realmErr := hostRealms(r.context())
 		if realmErr != nil {
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: realmd lookup: %w", realmErr)
 		}
-		applyRealm(&facts, account.Name, realms, func(domain string) bool {
-			return r.sssdAccountInDomain(account, domain)
-		})
+		applyRealm(&facts, account.Name, realms)
 	}
 	return facts, nil
 }
 
-// sssdDomainCheckTimeout bounds a lookup that confirms the SSSD domain of a
-// name. SSSD answers it from the entry the uid lookup just refreshed.
-const sssdDomainCheckTimeout = 2 * time.Second
-
-// sssdAccountInDomain asks SSSD for the account's name in the SSSD domain
-// named domain (getent -s sss passwd name@domain) and reports whether the
-// answer is this account (sssdResolvesTo). SSSD looks a qualified name up in
-// that domain only, whatever its use_fully_qualified_names, and reports it
-// in the domain's own name form, so an account of another domain that has
-// the same short name answers with another uid, and a name that domain lacks
-// is not found. Any account may ask: the NSS responder needs no privilege,
-// unlike InfoPipe. Every failure confirms nothing.
-func (r *NSSResolver) sssdAccountInDomain(account Account, domain string) bool {
-	bare, _ := useridentity.SplitQualifiedName(account.Name)
-	if bare == "" || domain == "" {
-		return false
+// applySSSDDomain gives an SSSD account the domain, realm, directory type
+// and principal of the joined realm that holds it, and returns the SSSD
+// domain that confirmed it ("" for none). A joined realm holds the account
+// when SSSD holds a SID for the uid and a user of the account's name with
+// that same SID in the realm's domain, asked in the domain\name form, which
+// SSSD looks up in that domain only (sidOfUserInDomain). A qualified name
+// (use_fully_qualified_names = True, what realm join writes) is asked in the
+// domain it names, which may be a trusted domain below a joined realm; a
+// short name in each joined SSSD realm. The same SID is the same account,
+// so the realm, principal and groups of an account never go to another
+// account that only shares its name: a plain LDAP account of the same short
+// name, one named by an e-mail address in the joined domain, or one SSSD
+// finds through a UPN or e-mail search. An account without a SID, or one no
+// joined realm holds, gets no realm, principal or directory type, and no
+// domain from a name that only looks qualified (bob@corp.example.com in a
+// plain LDAP domain).
+func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *sssdNSS, name, sid string) (string, error) {
+	bare, domain := useridentity.SplitQualifiedName(name)
+	if domain != "" && !strings.Contains(domain, ".") {
+		// The SSSD name of a domain with no DNS name, which names no realm.
+		facts.Domain = strings.ToLower(domain)
 	}
-	same, err := r.sssdResolvesTo(account, bare+"@"+domain)
-	return same && err == nil
+	if sidDomain(sid) == "" {
+		return "", nil
+	}
+	realms, err := hostRealms(r.context())
+	if err != nil {
+		return "", fmt.Errorf("unixidentity: realmd lookup: %w", err)
+	}
+	var candidates []string
+	if strings.Contains(domain, ".") {
+		candidates = []string{strings.ToLower(domain)}
+	} else {
+		for _, realm := range realms {
+			if strings.EqualFold(realm.ClientSoftware, "sssd") && realm.Domain != "" {
+				candidates = append(candidates, realm.Domain)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		realm, ok := realmFor(candidate, useridentity.SourceSSSD, realms)
+		if !ok {
+			continue
+		}
+		held, err := sssd.sidOfUserInDomain(candidate, bare)
+		if err != nil {
+			return "", fmt.Errorf("unixidentity: SSSD SID of %s in %s: %w", bare, candidate, err)
+		}
+		if !strings.EqualFold(held, sid) {
+			continue
+		}
+		facts.Domain = candidate
+		facts.Realm = strings.ToUpper(candidate)
+		if candidate == realm.Domain && realm.Name != "" {
+			facts.Realm = realm.Name
+		}
+		facts.Directory = realmDirectory(realm)
+		facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
+		return candidate, nil
+	}
+	return "", nil
 }
 
-// sssdResolvesTo asks SSSD for name (getent -s sss passwd name) and reports
-// whether it answers with this account: the same name, uid, primary group,
-// home and shell. Another account, or none, is false; err is a lookup that
-// failed or ran past sssdDomainCheckTimeout.
-//
-// The lookup skips SSSD's memory cache (SSS_NSS_USE_MEMCACHE=NO), which
-// answers a name with the entry last stored under it: right after the uid
-// lookup that is this account, whichever account the SSSD responder, and so
-// initgroups, resolves the name to. On SSSD 2.9 the cache answered both
-// dcad-carol and dcad-bob@dclab.test with the LDAP accounts while the
-// responder answered with the AD ones.
-func (r *NSSResolver) sssdResolvesTo(account Account, name string) (bool, error) {
-	if validName(name) != nil || strings.HasPrefix(name, "-") {
-		return false, nil
-	}
-	ctx, cancel := context.WithTimeout(withCommandEnv(r.context(), "SSS_NSS_USE_MEMCACHE=NO"), sssdDomainCheckTimeout)
-	defer cancel()
-	result, err := r.runner(ctx, r.path, []string{"-s", "sss", "passwd", name})
+// sssdAccountSID returns the SID SSSD holds for the user with uid, "" for
+// none. A SID that SSSD maps back to another uid is not the account's: a
+// domain that copies the SIDs of another domain holds the uid, not the SID.
+func sssdAccountSID(sssd *sssdNSS, uid int) (string, error) {
+	sid, err := sssd.sidByUID(uid)
 	if err != nil {
-		return false, err
+		return "", fmt.Errorf("unixidentity: SSSD SID of uid %d: %w", uid, err)
 	}
-	switch result.exitCode {
-	case getentExitOK:
-	case getentExitNotFound:
-		return false, nil
-	default:
-		return false, fmt.Errorf("getent -s sss passwd %s exited %d", name, result.exitCode)
+	if sid == "" {
+		return "", nil
 	}
-	lines := nonEmptyLines(string(result.stdout))
-	if len(lines) != 1 {
-		return false, nil
+	mapped, err := sssd.uidOfSID(sid)
+	if err != nil {
+		return "", fmt.Errorf("unixidentity: SSSD uid of %s: %w", sid, err)
 	}
-	found, err := ParsePasswdLine(lines[0])
-	return err == nil && strings.EqualFold(found.Name, account.Name) && found.UID == account.UID &&
-		found.GID == account.GID && found.Home == account.Home && found.Shell == account.Shell, nil
+	if mapped != uid {
+		return "", nil
+	}
+	return sid, nil
+}
+
+// accountGroupIDs lists the groups of account with initgroups. An SSSD
+// account a joined domain confirmed is asked for in the domain\name form,
+// which SSSD looks up in that domain only: by its short name SSSD may find
+// another domain's account of that name and list its groups (GAP-0563).
+func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, error) {
+	bare, _ := useridentity.SplitQualifiedName(account.Name)
+	if inDomain != "" {
+		ids, err := r.GroupIDs(Account{Name: inDomain + `\` + bare, GID: account.GID})
+		if !IsNotFound(err) {
+			return ids, err
+		}
+	}
+	return r.GroupIDs(account)
+}
+
+// sssdGroupsOfDomain keeps the groups of an SSSD account that are inside
+// its own domain, the domain of its SID (domainSID, "" for an account
+// without one): groups SSSD holds a SID for in that domain, and, for an
+// account without a SID, the groups SSSD holds no SID for. initgroups looks
+// the account up by name, and two SSSD domains may hold the same short name,
+// so it may list the other account's groups (GAP-0563). A group of the
+// host's /etc/group counts for every account, and the primary group, which
+// comes with the uid's own entry, always counts. A group SSSD could not
+// answer for fails the lookup.
+func sssdGroupsOfDomain(sssd *sssdNSS, ids []int, primary int, domainSID string) ([]int, error) {
+	local, err := localGroupIDs()
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id == primary {
+			kept = append(kept, id)
+			continue
+		}
+		sid, err := sssd.sidByGID(id)
+		if err != nil {
+			return nil, fmt.Errorf("SSSD SID of gid %d: %w", id, err)
+		}
+		if (sid != "" && domainSID != "" && sidDomain(sid) == domainSID) || (sid == "" && (domainSID == "" || local[id])) {
+			kept = append(kept, id)
+		}
+	}
+	return kept, nil
+}
+
+// localGroupIDs reads the gids /etc/group holds. A missing file holds none.
+func localGroupIDs() (map[int]bool, error) {
+	data, err := readSmallFile(localGroupPath, 16<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	ids := map[int]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if gid, _, ok := parseGroupName(line); ok {
+			ids[gid] = true
+		}
+	}
+	return ids, nil
 }
 
 // groupNames names group ids with getent group calls of groupQueryBatch ids

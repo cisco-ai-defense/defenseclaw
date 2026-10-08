@@ -83,7 +83,7 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 // identityDirectoryRetry, so a sign-in that brings an Entra group shows within
 // about one enumerator cycle, not after the 15 minute lifetime.
 func TestIdentityDirectoryCacheRefreshesPartialGroupsSoon(t *testing.T) {
-	merged := mergeSpoolFacts(useridentity.DirectoryFacts{}, useridentity.DirectoryFacts{Groups: []string{"S-1-1-0"}, GroupsPartial: true})
+	merged := mergeSpoolFacts(useridentity.DirectoryFacts{}, enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Groups: []string{"S-1-1-0"}, GroupsPartial: true}})
 	if !merged.GroupsPartial {
 		t.Fatalf("merged facts = %+v; the spool groups lost their partial mark", merged)
 	}
@@ -268,5 +268,27 @@ func TestIdentitySpoolRecordRequiresCurrentAccountName(t *testing.T) {
 	}
 	if _, ok := readIdentitySpoolFactsForAccount(key, "ALICE@CORP.EXAMPLE.COM", time.Now()); !ok {
 		t.Fatal("case-only account variation was rejected")
+	}
+}
+
+// TestSpoolRecordInAnotherSSSDDomainClearsOwnRealm pins the managed half of
+// GAP-0605: when the guardian's InfoPipe lookup by uid holds the account in
+// another SSSD domain than the realm the gateway's own facts give it, the
+// gateway's domain, realm, principal and directory type go, even where the
+// record has none; its groups stay. A record of the same domain keeps them.
+func TestSpoolRecordInAnotherSSSDDomainClearsOwnRealm(t *testing.T) {
+	own := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "dclab.test", Realm: "DCLAB.TEST",
+		Principal: "dcad-bob@dclab.test", Directory: useridentity.DirectoryActiveDirectory, Groups: []string{"mail-devs"}}
+	merged := mergeSpoolFacts(own, enterprisehooks.IdentitySpoolRecord{SSSDDomain: "ldapmail",
+		Facts: useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Directory: useridentity.DirectoryLDAP}})
+	if merged.Domain != "" || merged.Realm != "" || merged.Principal != "" || merged.Directory != useridentity.DirectoryLDAP ||
+		len(merged.Groups) != 1 {
+		t.Errorf("merged = %+v; want no domain, realm or principal, directory ldap and the own groups", merged)
+	}
+	merged = mergeSpoolFacts(own, enterprisehooks.IdentitySpoolRecord{SSSDDomain: "dclab.test",
+		Facts: useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "dclab.test", Realm: "DCLAB.TEST",
+			Principal: "dcad-bob@dclab.test", Directory: useridentity.DirectoryActiveDirectory}})
+	if merged.Realm != "DCLAB.TEST" || merged.Principal != "dcad-bob@dclab.test" || merged.Domain != "dclab.test" {
+		t.Errorf("merged = %+v; want the realm and principal of the same domain", merged)
 	}
 }
