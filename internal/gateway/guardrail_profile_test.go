@@ -1012,6 +1012,18 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	if !userEntryMatches(&mac, "DCLAB\\dcad-w2i-c") || userEntryMatches(&mac, "OTHERDOM\\dcad-w2i-c") {
 		t.Fatalf("macOS AD subject %+v: DCLAB\\user must match and OTHERDOM\\user must not", mac)
 	}
+	// Windows: a local account by COMPUTER\user or .\user, an Entra ID
+	// account by AzureAD\name (GAP-0636, GAP-0676); .\ never names an Entra
+	// or domain account.
+	local := profileSubjectFromVerified(VerifiedSubject{UserID: "S-1-5-21-9-9-9-1001", UserName: "dcw-ew1",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, AccountDomain: "WS01", ResolvedAt: time.Now()}}, true)
+	entra := profileSubjectFromVerified(VerifiedSubject{UserID: "S-1-12-1-1-2-3-4", UserName: "EntraAlice",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryEntraID, AccountDomain: "AzureAD",
+			Domain: "contoso.example", UPN: "alice@contoso.example", ResolvedAt: time.Now()}}, true)
+	if !userEntryMatches(&local, "WS01\\dcw-ew1") || !userEntryMatches(&local, ".\\dcw-ew1") ||
+		!userEntryMatches(&entra, "AzureAD\\EntraAlice") || userEntryMatches(&entra, ".\\EntraAlice") {
+		t.Fatal("COMPUTER\\user and .\\user must select the local account, AzureAD\\name the Entra ID account, and .\\ no Entra account")
+	}
 }
 
 // Windows LSA facts do not establish group membership until the guardian's

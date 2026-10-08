@@ -851,8 +851,14 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 
 // subjectInDomain compares only verified account namespaces. Guessing a
 // NetBIOS name from a DNS first label can select a different trusted domain.
+// ".\user", the form Windows tools use for an account of this computer,
+// names a local account whose verified namespace is the computer
+// (GAP-0636).
 func subjectInDomain(subject *profileSubject, domain string) bool {
 	domain = strings.TrimSpace(domain)
+	if domain == "." {
+		return subject.Directory == useridentity.DirectoryLocal && subject.AccountDomain != ""
+	}
 	return domain != "" && (useridentity.EqualFold(domain, subject.AccountDomain) ||
 		useridentity.EqualFold(domain, subject.Domain))
 }
