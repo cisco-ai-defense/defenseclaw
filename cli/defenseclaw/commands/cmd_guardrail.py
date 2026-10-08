@@ -592,7 +592,8 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
 
 
 def _echo_status_json(
-    gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str], profile: dict | None = None
+    gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str], profile: dict | None = None,
+    *, secure_client: bool = False,
 ) -> None:
     """Machine-readable ``guardrail status``: the same fields as the table."""
     import json  # noqa: PLC0415
@@ -604,7 +605,11 @@ def _echo_status_json(
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
         connectors.append(item)
     payload = {
-        "enabled": bool(gc.enabled and any(item["state"] == "enabled" for item in connectors)),
+        "enabled": (
+            bool(gc.enabled)
+            if secure_client
+            else bool(gc.enabled and any(item["state"] == "enabled" for item in connectors))
+        ),
         "port": gc.port,
         "connectors": connectors,
         "warnings": warnings,
@@ -676,12 +681,18 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     connector set up, status says so and names the setup command.
     """
     from defenseclaw import policy_catalog
+    from defenseclaw.commands.cmd_status import _enterprise_profile
 
+    secure_client = _enterprise_profile(app.cfg) == "secure_client"
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
+        if secure_client:
+            enabled_txt = "yes" if gc.enabled else "no"
+            enabled_val = ux._style(enabled_txt, fg="green" if gc.enabled else "yellow")
+            ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
@@ -711,9 +722,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     )
     if not actives and not configured:
         if as_json:
-            _echo_status_json(gc, [], [])
+            _echo_status_json(gc, [], [], secure_client=secure_client)
             return
-        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {ux._style('no', fg='yellow')}")
+        if not secure_client:
+            ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {ux._style('no', fg='yellow')}")
         ux.echo(
             f"  • {ux._style('connectors:', fg='bright_black', bold=True)} "
             f"{ux.dim('(none configured)')}"
@@ -748,7 +760,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             raise SystemExit(1)
         actives = scoped
 
-    if not as_json:
+    if not as_json and not secure_client:
         # The summary must describe the same selected rows as --json.
         all_enabled = gc.enabled and any(
             gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
@@ -766,7 +778,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     runtime_limit_rows: list[str] = []
     posture_rows: list[str] = []
     for name in actives:
-        if normalize_connector(name) == "cursor":
+        if not secure_client and normalize_connector(name) == "cursor":
             runtime_limit_rows.append(
                 "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected "
                 "and fail-closed applies only to hook events the CLI sends. "
@@ -823,7 +835,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         else:
             state_raw = "disabled"
             state = ux._style(state_raw, fg="yellow")
-        if gc.enabled and c_enabled:
+        if not secure_client and gc.enabled and c_enabled:
             unrunnable = unrunnable_hook_problem(app.cfg, name)
             if unrunnable:
                 # The agent treats a hook it cannot start as a non-blocking
@@ -895,11 +907,16 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 "judge": (judge_raw, _style_judge_value(judge_raw)),
             }
         )
-    from defenseclaw.gateway import current_user_guardrail_profile
+    profile = None
+    if not secure_client:
+        from defenseclaw.gateway import current_user_guardrail_profile
 
-    profile = current_user_guardrail_profile(app.cfg)
+        profile = current_user_guardrail_profile(app.cfg)
     if as_json:
-        _echo_status_json(gc, rows, posture_rows + runtime_drift_rows + runtime_limit_rows, profile)
+        _echo_status_json(
+            gc, rows, posture_rows + runtime_drift_rows + runtime_limit_rows, profile,
+            secure_client=secure_client,
+        )
         return
     _render_connector_table(rows)
     for posture_row in posture_rows:
@@ -929,7 +946,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     click.echo()
     if not gc.enabled:
         click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
-    elif any(gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True for name in actives):
+    elif secure_client or any(
+        gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
+        for name in actives
+    ):
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
     else:
         click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable --connector <name>")
