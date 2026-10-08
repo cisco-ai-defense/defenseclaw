@@ -105,8 +105,15 @@ var policyValidateCmd = &cobra.Command{
 		}
 
 		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
-			// The managed packages ship no Rego: the admission policy is
-			// compiled from config.yaml alone, so there is nothing to compile.
+			// An existing policy root without Rego is config-only mode, as
+			// the gateway treats it. A missing root is a failed reload.
+			paths, err := resolvePolicyPaths()
+			if err != nil {
+				return err
+			}
+			if _, rootErr := os.Stat(paths.rootDir); rootErr != nil {
+				return fmt.Errorf("policy: compilation failed:\npolicy: read rego directory: %w", statErr)
+			}
 			fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
 		} else {
 			fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)

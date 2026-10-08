@@ -329,6 +329,15 @@ runtime_action := "allow"
 	}
 }
 
+func TestPolicyValidateRejectsDeletedConfiguredDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "deleted-policies")
+	setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+	_, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
+	if err == nil || !strings.Contains(err.Error(), "read rego directory") {
+		t.Fatalf("validate missing directory error = %v", err)
+	}
+}
+
 func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	ownGatewayListener(t)
 	const token = "reload-fixture-value"
