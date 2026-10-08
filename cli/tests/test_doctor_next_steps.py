@@ -910,7 +910,7 @@ def test_network_scanner_and_settings_errors_name_the_cause(tmp_path) -> None:
     settings = tmp_path / "settings.json"
     settings.write_text("{}\n{ broken")
     result = _DoctorResult(passive=True, quiet=True)
-    cmd_doctor._check_claudecode_hooks(SimpleNamespace(), result, config_path=str(settings))
+    cmd_doctor._check_claudecode_hooks(SimpleNamespace(), result, platform_name="posix", config_path=str(settings))
     row = next(row for row in result.checks if row.get("label") == "Claude Code hooks")
     assert "not valid JSON at line 2" in row["detail"]
     assert "restore the settings.json backup" in row["remediation"]

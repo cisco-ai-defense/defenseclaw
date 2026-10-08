@@ -278,8 +278,12 @@ def test_implicit_tui_refuses_legacy_terminal_with_actionable_message() -> None:
         assert main_mod._try_launch_tui() is True
 
     run_tui.assert_not_called()
-    assert "needs UTF-8 output" in stderr.getvalue()
-    assert "terminal or tmux" in stderr.getvalue()
+    if sys.platform == "win32":
+        assert "needs a UTF-8 capable terminal" in stderr.getvalue()
+        assert "Windows Terminal" in stderr.getvalue()
+    else:
+        assert "needs UTF-8 output" in stderr.getvalue()
+        assert "terminal or tmux" in stderr.getvalue() or "Terminal.app" in stderr.getvalue()
 
 
 def test_implicit_tui_launches_on_capable_terminal() -> None:
