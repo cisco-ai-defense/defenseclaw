@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -318,6 +319,50 @@ func (e *Env) stateModeProblems(account Account) []string {
 		}
 	}
 	return problems
+}
+
+// closePrivateDirs removes the permission bits the private folders (the
+// gateway data, the credentials, the hook guardian folders and the lifecycle
+// state) have beyond their managed mode, and those of the config_version 8
+// backup, which can hold a credential. It only takes access away, so a run
+// does it before it waits for the lifecycle lock: after chmod -R a+rX a
+// standard user could read runtime/device.key and runtime/.env until a
+// transaction re-applied the folder modes, and a transaction that rolled
+// back put the loosened modes back from its snapshot (GAP-0747).
+func (e *Env) closePrivateDirs(ctx context.Context) {
+	loadCredential := e.GOOS == "linux" && e.Services.Version(ctx) >= loadCredentialSystemd
+	private := map[string]bool{
+		e.Layout.DataDir: true, e.Layout.SecretsDir: true, filepath.Dir(e.Layout.ManifestPath): true,
+		e.Layout.GuardianAuthDir: true, e.Layout.LifecycleDir: true,
+	}
+	for _, dir := range e.managedDirs(Account{}, loadCredential) {
+		if private[dir.Path] {
+			e.removeExtraModeBits(dir.Path, dir.Mode, true)
+		}
+	}
+	e.removeExtraModeBits(e.Layout.ConfigPath+config.ConfigV8BackupSuffix, 0o600, false)
+}
+
+// removeExtraModeBits clears the bits of a folder or regular file beyond
+// mode, through a descriptor opened without following a link.
+func (e *Env) removeExtraModeBits(canonical string, mode os.FileMode, dir bool) {
+	flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+	if dir {
+		flags |= unix.O_DIRECTORY
+	}
+	fd, err := unix.Open(e.P(canonical), flags, 0)
+	if err != nil {
+		return
+	}
+	f := os.NewFile(uintptr(fd), e.P(canonical))
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() != dir || (!dir && !info.Mode().IsRegular()) {
+		return
+	}
+	if extra := info.Mode().Perm() &^ mode; extra != 0 {
+		_ = f.Chmod(info.Mode().Perm() & mode)
+	}
 }
 
 // examples lists the first three items and how many more there are.

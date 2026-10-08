@@ -233,6 +233,8 @@ func (l *lifecycle) run(ctx context.Context) int {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
+	// Before the lock, which another run can hold for the readiness timeout.
+	env.closePrivateDirs(ctx)
 
 	// A run on a host with no DefenseClaw tree creates the lifecycle folder
 	// (and /opt/cisco/defenseclaw above it) for its lock. A run that commits

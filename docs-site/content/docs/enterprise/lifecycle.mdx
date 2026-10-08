@@ -389,6 +389,10 @@ identity key, the hook tokens, the service `.env`), so a `chown -R` or
 `chmod -R` over the deployment is undone without losing the audit history or
 the device identity. `status` and `verify` name the files that differ. A file
 there with a second name (a hard link) is not changed; the error names it.
+Every lifecycle run first takes away the permission bits the private
+folders (gateway data, credentials, hook guardian folders, lifecycle state)
+have beyond their managed mode, before it waits for another run, and a run
+that rolls back does not open them again.
 
 ```bash title="Linux"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair --json

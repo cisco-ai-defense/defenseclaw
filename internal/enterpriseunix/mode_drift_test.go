@@ -246,3 +246,23 @@ func TestRepairRestoresStateFilesAfterARecursiveChownOrChmod(t *testing.T) {
 		})
 	}
 }
+
+// chmod -R a+rX over the deployment fired the apply trigger, and its
+// transaction rolled back: the rollback put the loosened folder modes back
+// from its snapshot, so runtime stayed 0755 and a standard user could read
+// device.key (GAP-0747). A run closes the private folders before anything
+// else, so no rollback opens them again.
+func TestARolledBackRunLeavesThePrivateFoldersClosed(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	for _, dir := range []string{h.env.Layout.DataDir, h.env.Layout.SecretsDir} {
+		if err := os.Chmod(h.env.P(dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.healthy = false
+	requireError(t, h.run(Options{Action: ActionRepair}), codeActivate)
+	if data, secrets := h.mode(h.env.Layout.DataDir), h.mode(h.env.Layout.SecretsDir); data != 0o700 || secrets != 0o750 {
+		t.Fatalf("after the rolled-back repair runtime is %04o and secrets %04o", data, secrets)
+	}
+}
