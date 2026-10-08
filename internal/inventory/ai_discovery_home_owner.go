@@ -150,15 +150,12 @@ func (s *ContinuousDiscoveryService) stampHomeOwner(sig *AISignal, path string) 
 	}
 }
 
-// attributeProcessOwners gives each process the account whose profile holds
-// its executable. The service cannot open other accounts' processes, so the
-// token owner is unknown, but the image path is not: per-user agents run
-// from the user's profile (~\.local\bin\claude.exe, ~\.codex\...\codex.exe).
-// An agent installed machine-wide (VS Code's copilot-runtime.exe under
-// Program Files) takes the profile owner of its session account, or of the
-// account the sensor helper reads from its token (GAP-2043).
-// A node process outside every profile takes the owner of the nearest
-// attributed ancestor, the agent that launched it.
+// attributeProcessOwners uses the process session SID or a brokered token
+// account for standalone managed Windows signals. The executable path is only
+// evidence of where a binary lives; another user may run it, so it cannot
+// establish the process owner or a verified directory identity. Secure Client
+// keeps origin/main's image-path attribution. Node helpers inherit only an
+// already attributed parent.
 func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo) {
 	if len(s.opts.homeOwners) == 0 {
 		return
@@ -166,9 +163,12 @@ func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo)
 	byPID := make(map[int]int, len(procs))
 	for i := range procs {
 		byPID[procs[i].PID] = i
-		owner, ok := s.homeOwnerForPath(procs[i].Image)
-		if !ok {
-			owner, ok = s.homeOwnerForSID(procs[i].SessionOwnerID)
+		owner, ok := s.homeOwnerForSID(procs[i].SessionOwnerID)
+		if s.opts.SecureClient {
+			owner, ok = s.homeOwnerForPath(procs[i].Image)
+			if !ok {
+				owner, ok = s.homeOwnerForSID(procs[i].SessionOwnerID)
+			}
 		}
 		if ok {
 			procs[i].OwnerID, procs[i].OwnerName = owner.UserID, owner.UserName
