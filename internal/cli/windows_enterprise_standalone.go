@@ -1114,27 +1114,67 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 // installed config enrols, loaded as the guardian loads it; replaceable in
 // tests.
 var windowsEnterpriseEnrolledConnectors = func() ([]string, error) {
+	return windowsEnterpriseConfigConnectors("")
+}
+
+// windowsEnterpriseStagedConnectors returns the hook connectors a config
+// handed to ensure enrols; replaceable in tests.
+var windowsEnterpriseStagedConnectors = windowsEnterpriseConfigConnectors
+
+// windowsEnterpriseConfigConnectors loads path (the installed config when
+// empty) as the guardian loads the installed one and returns the hook
+// connectors it enrols.
+func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(layout.ConfigPath); err != nil {
+	if strings.TrimSpace(path) == "" {
+		path = layout.ConfigPath
+	}
+	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
 	restore := setTemporaryEnvironment(map[string]string{
-		managed.ConfigPathEnv:            layout.ConfigPath,
+		managed.ConfigPathEnv:            path,
 		"DEFENSECLAW_HOME":               layout.DataDir,
 		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
 		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
 		managed.WindowsServiceAccountEnv: layout.ServiceUser,
 	})
 	defer restore()
-	cfg, err := config.LoadManagedFileForLifecycleRecovery(layout.ConfigPath)
+	cfg, err := config.LoadManagedFileForLifecycleRecovery(path)
 	if err != nil {
 		return nil, err
 	}
 	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
 }
+
+// refuseWindowsEnterpriseConnectorlessConfig refuses, before anything
+// changes, a config that enrols no connector for a deployment whose
+// installed config enrols at least one: applying it took DefenseClaw off
+// every agent of every user while the lifecycle and the MDM reported
+// success (GAP-0602). A config that cannot be read here is left to the
+// lifecycle's own validation. Standalone only.
+func refuseWindowsEnterpriseConnectorlessConfig(opts *windowsEnterpriseLifecycleOptions) error {
+	path := strings.TrimSpace(opts.configPath)
+	if !windowsEnterpriseStandalone(opts) || path == "" {
+		return nil
+	}
+	staged, err := windowsEnterpriseStagedConnectors(path)
+	if err != nil || len(staged) != 0 {
+		return nil
+	}
+	installed, err := windowsEnterpriseEnrolledConnectors()
+	if err != nil || len(installed) == 0 {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"%s enrols no connector under guardrail.connectors, so applying it would stop protecting %s for every user; nothing was changed. "+
+			"List the agents to protect (for example guardrail.connectors.claudecode: {}), or uninstall DefenseClaw to remove it",
+		path, strings.Join(installed, ", "))
+}
+
 // applyWindowsEnterpriseEnrolledConnectors reports an installed config that
 // enrols no connector: the enumerator then writes no target, so DefenseClaw
 // protects no agent while every service reads healthy. verify fails on it;
@@ -1845,6 +1885,11 @@ func planWindowsEnterpriseEnsure(
 	}
 	if status.TransactionPending {
 		return windowsEnterpriseEnsurePlan{Action: "repair", Reason: "transaction_pending"}, nil
+	}
+	if status.Installed {
+		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
+			return windowsEnterpriseEnsurePlan{}, err
+		}
 	}
 	if !status.Installed {
 		if strings.TrimSpace(opts.configPath) == "" && strings.TrimSpace(opts.mode) == "" {
