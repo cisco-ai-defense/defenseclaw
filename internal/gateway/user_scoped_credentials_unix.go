@@ -43,3 +43,23 @@ var userScopedIdentityHome = func(identity string) string {
 	}
 	return managedHookPeerHome(uid)
 }
+
+// agentIdentityAccountName names the account that holds a uid for the uid's
+// agent identity: the account database's name, or while a lookup fails (a
+// directory outage) the last name the uid resolved to, which a managed
+// gateway keeps across restarts with the uid's home (GAP-0314). "" for a
+// uid that never resolved.
+var agentIdentityAccountName = func(identity string) string {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return ""
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return ""
+	}
+	if name := userScopedIdentityName(identity); name != "" {
+		managedHookPeerHomes.rememberName(uid, name)
+		return name
+	}
+	return managedHookPeerHomes.lastName(uid)
+}

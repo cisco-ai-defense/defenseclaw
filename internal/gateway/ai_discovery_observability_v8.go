@@ -296,7 +296,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawUserName:   v8UserName(signal.UserName, aiDiscoveryV8OptionalText),
 			// The agent identity of the connector install the signal belongs
 			// to, so discovery joins that agent's decisions.
-			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID)),
+			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID, signal.UserName)),
 		}
 		identity := inventoryIdentity(signal.UserID)
 		identity.applyTo(&base)

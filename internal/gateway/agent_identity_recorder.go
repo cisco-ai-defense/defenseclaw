@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -434,6 +435,11 @@ func (r *agentIdentityRecorder) pendingCount() int {
 type agentIdentityRow struct {
 	inventory.AgentIdentityRecord
 	InstallHint string `json:"install_hint,omitempty"`
+	// Retired marks the identity of an account that no longer holds its
+	// uid: the account was removed and the uid handed to another account,
+	// or renamed. The row keeps the name it was recorded with, and the
+	// uid's account now has agent identities of its own (GAP-0947).
+	Retired bool `json:"retired,omitempty"`
 }
 
 // agentIdentitiesPageLimit is the default and largest page of GET
@@ -636,14 +642,34 @@ func mergeAgentIdentityRows(
 // or SID now, the way a new hook call would record it, so a row an older
 // build stored with another spelling (a bare SSSD name, DOMAIN\user) reads
 // like the rest (GAP-0103). A row whose account no longer resolves keeps its
-// name.
+// name, and so does a row of an account whose uid another account holds now,
+// which is marked retired instead of being listed under that account
+// (GAP-0947).
 func nameAgentIdentityRows(rows []agentIdentityRow) {
 	name := hostAccountNamer()
 	for i := range rows {
-		if n := name(rows[i].UserID); n != "" {
-			rows[i].UserName = n
+		holder := name(rows[i].UserID)
+		switch {
+		case holder == "":
+		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder):
+			rows[i].Retired = true
+		default:
+			rows[i].UserName = holder
 		}
 	}
+}
+
+// agentIdentityHeldByAnother reports whether rec was derived for another
+// account than holder, the account that holds its uid now: holder's account
+// does not derive its ID, and the name it was recorded with is another
+// account's or missing. A SID is never handed on.
+func agentIdentityHeldByAnother(rec inventory.AgentIdentityRecord, holder string) bool {
+	if agentidentity.IsSID(agentidentity.NormalizeUserID(rec.UserID)) || agentidentity.AgentID(agentidentity.Inputs{
+		MachineHash: rec.MachineHash, UserID: rec.UserID, Account: holder, Connector: rec.Connector, InstallFP: rec.InstallFP,
+	}) == rec.AgentID {
+		return false
+	}
+	return rec.UserName == "" || agentidentity.UIDReassigned(rec.UserID, rec.UserName, holder)
 }
 
 // hostAccountNamer names accounts by uid or SID as the host's account
