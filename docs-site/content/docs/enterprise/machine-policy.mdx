@@ -517,9 +517,10 @@ the Claude Code drop-in while that value is set, whatever this setting says.
 
 - **`fail` (default).** The source is recorded as a conflict and the
   connector counts as not covered. `ensure` and `status` report the
-  warning `machine_policy_incomplete`.
-  `defenseclaw-gateway enterprise macos verify` turns it into an error,
-  exits 1 and reports `security_complete: false`. Enrollment continues.
+  warning `machine_policy_incomplete`, which names the source, with
+  `security_complete: false`.
+  `defenseclaw-gateway enterprise macos verify` turns it into an error and
+  exits 1. Enrollment continues.
 - **`warn`.** The source is reported as a note, and the connector can still
   count as covered.
 
