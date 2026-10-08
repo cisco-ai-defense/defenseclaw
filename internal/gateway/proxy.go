@@ -4270,16 +4270,18 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bo
 	return r, true
 }
 
-// dropProxyUserClaims removes the X-DefenseClaw-User-* pair before the
-// correlation middleware reads it. The hook helpers send that pair to the
-// hook routes; no proxy client does, so on the proxy it is only ever a
-// claim. Under the Secure Client integration the headers are left as they
+// dropProxyUserClaims removes user claims before the correlation middleware
+// reads them. The hook helpers send the DefenseClaw pair to hook routes;
+// proxy clients supply no trusted user header, so these are only claims. Under the Secure Client integration the headers are left as they
 // are.
 func dropProxyUserClaims(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if identityFactsEnabled.Load() {
 			r.Header.Del(llmEventUserIDHeader)
 			r.Header.Del(llmEventUserNameHeader)
+			for _, name := range [...]string{"X-User-Id", "X-User-ID", "X-User", "X-User-Name", "X-Username"} {
+				r.Header.Del(name)
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

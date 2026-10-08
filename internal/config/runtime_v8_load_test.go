@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -365,5 +366,69 @@ func TestRuntimeV8LoadersRetainManagedPathTrust(t *testing.T) {
 				t.Fatalf("managed runtime loader error = %v, want authoritative path trust refusal", err)
 			}
 		})
+	}
+}
+
+func TestRuntimeV8LoadersPreserveEmptyProfiles(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw-v8
+guardrail:
+  profiles:
+    baseline: {}
+    nested:
+      connectors:
+        codex: {}
+  profile_assignments:
+    - profile: baseline
+      match: {groups: [admins]}
+observability: {}
+`)
+	for name, load := range map[string]func() (*Config, error){
+		"runtime": func() (*Config, error) { return LoadRuntimeV8FromBytes("config.yaml", raw) },
+		"file":    func() (*Config, error) { return LoadFromBytes("config.yaml", raw) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := cfg.Guardrail.Profiles["baseline"]; !ok {
+				t.Fatal("empty baseline profile disappeared")
+			}
+			if _, ok := cfg.Guardrail.Profiles["nested"].Connectors["codex"]; !ok {
+				t.Fatal("empty connector override disappeared")
+			}
+		})
+	}
+}
+
+// The schema's per-list maximum must fit inside the strict parser's total
+// node budget even for a compact assignment document.
+func TestProfileAssignmentSchemaLimitFitsYAMLNodeBudget(t *testing.T) {
+	raw, err := os.ReadFile("../../schemas/config/v8/defenseclaw-config.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Defs struct {
+			Guardrail struct {
+				Properties struct {
+					ProfileAssignments struct {
+						MaxItems int `json:"maxItems"`
+					} `json:"profile_assignments"`
+				} `json:"properties"`
+			} `json:"guardrail"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	n := schema.Defs.Guardrail.Properties.ProfileAssignments.MaxItems
+	if n == 0 {
+		t.Fatal("missing profile assignment schema maximum")
+	}
+	doc := "config_version: 8\nguardrail:\n  profiles:\n    baseline: {}\n  profile_assignments:\n" + strings.Repeat("    - profile: baseline\n      match: {agents: [agt-0000000000000000]}\n", n)
+	if err := ValidateV8SchemaBytes("config.yaml", []byte(doc)); err != nil {
+		t.Fatalf("%d schema-permitted assignments rejected: %v", n, err)
 	}
 }

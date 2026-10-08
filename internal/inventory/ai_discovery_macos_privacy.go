@@ -99,5 +99,10 @@ func probeMacOSFullDiskAccess() bool {
 // that would raise a privacy prompt, unless Full Disk Access is granted. The
 // probe runs only when a scan reaches such a folder.
 func (s *ContinuousDiscoveryService) macOSTCCSkipped(path string) bool {
-	return discoveryGOOS == "darwin" && macOSTCCProtectedPath(path, s.homesToScan()) && !macOSFullDiskAccess()
+	if s == nil || s.opts.SecureClient || discoveryGOOS != "darwin" ||
+		!macOSTCCProtectedPath(path, s.homesToScan()) || macOSFullDiskAccess() {
+		return false
+	}
+	s.tccSkipped = true
+	return true
 }

@@ -1359,17 +1359,14 @@ defenseclaw_user_identity_args() {
   return 0
 }
 
-# defenseclaw_secure_client_hook reports a hook of the Secure Client profile:
-# an administrator-managed hook installed in the Secure Client layout.
+# The rendered hook pins its profile before sourcing this helper. Do not
+# infer the profile from DEFENSECLAW_HOME: Secure Client hooks live under the
+# target users home, just like per-user hooks.
 defenseclaw_secure_client_hook() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) ;;
+    1|true|TRUE|yes|YES) [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] ;;
     *) return 1 ;;
   esac
-  case "${DEFENSECLAW_HOME:-}" in
-    /opt/cisco/secureclient/*) return 0 ;;
-  esac
-  return 1
 }
 
 # defenseclaw_session_facts_value renders the X-DefenseClaw-Session-Facts

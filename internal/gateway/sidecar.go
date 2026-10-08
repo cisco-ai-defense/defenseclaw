@@ -1923,7 +1923,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		api.setGuardrailProfiles(profileCandidate)
 		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
 		if profileCandidate != nil {
-			profileCandidate.logUnknownGroups()
+			profileCandidate.logProfileWarnings()
 		}
 	}
 	if s.router != nil {
@@ -6917,7 +6917,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
 	if set := api.guardrailProfileSet(); set != nil {
-		set.logUnknownGroups()
+		set.logProfileWarnings()
 	}
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the

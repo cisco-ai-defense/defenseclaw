@@ -59,6 +59,8 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 		put(subject.UserName)
 		put(subject.Principal)
 		put(subject.UPN)
+		put(subject.Domain)
+		put(subject.AccountDomain)
 		if subject.LookupFailed {
 			put("lookup-failed")
 		} else {

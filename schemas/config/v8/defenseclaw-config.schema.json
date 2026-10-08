@@ -1632,7 +1632,7 @@
         },
         "profile_assignments": {
           "type": "array",
-          "maxItems": 10000,
+          "maxItems": 4096,
           "items": {
             "$ref": "#/$defs/guardrailProfileAssignment"
           },

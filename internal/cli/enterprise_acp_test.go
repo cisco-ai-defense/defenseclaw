@@ -214,3 +214,10 @@ func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 		t.Fatal("implicit empty allowlist was accepted for enterprise enrollment")
 	}
 }
+
+func TestEnterpriseACPSetupPathQuotesForPowerShell(t *testing.T) {
+	got := enterpriseACPQuotePath(`C:\Program Files\DefenseClaw\bin\gateway.exe`, true)
+	if got != `'C:\Program Files\DefenseClaw\bin\gateway.exe'` {
+		t.Fatalf("PowerShell path = %q", got)
+	}
+}

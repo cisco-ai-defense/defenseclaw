@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -91,6 +92,16 @@ func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.Identity
 	}
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, key, validateManagedGuardianAuthorization)
 	if err != nil || now.Sub(record.UpdatedAt) > identitySpoolMaxAge {
+		return enterprisehooks.IdentitySpoolRecord{}, false
+	}
+	return record, true
+}
+
+// readIdentitySpoolFactsForAccount rejects a reused uid's old record. A
+// missing name is also unverified; Windows uses the stable SID path above.
+func readIdentitySpoolFactsForAccount(key, accountName string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
+	record, ok := readIdentitySpoolFacts(key, now)
+	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) {
 		return enterprisehooks.IdentitySpoolRecord{}, false
 	}
 	return record, true
