@@ -609,12 +609,25 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	if err != nil {
 		return err
 	}
+	staging := []string(nil)
+	if listed {
+		staging = staleVMStaging(a.vmImageCache(), time.Now())
+	}
 	verb := "removed"
 	if dryRun {
 		verb = "would remove"
 	}
-	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 {
+	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 && len(staging) == 0 {
 		a.ok("nothing to prune")
+	}
+	for _, path := range staging {
+		if dryRun {
+			a.ok("would remove stale MicroVM staging disk " + a.tildePath(path))
+		} else if err := os.RemoveAll(path); err != nil {
+			a.warn("could not remove stale MicroVM staging disk " + a.tildePath(path) + ": " + err.Error())
+		} else {
+			a.ok("removed stale MicroVM staging disk " + a.tildePath(path))
+		}
 	}
 	for _, t := range rep.Removed {
 		a.ok(verb + " " + t)
@@ -654,6 +667,28 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 		}
 	}
 	return nil
+}
+
+// staleVMStaging is limited to old, DefenseClaw-shaped preparation
+// directories. The daemon must have answered its sandbox list before prune
+// calls this, and a new preparation is left alone.
+func staleVMStaging(dir string, now time.Time) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var stale []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !strings.Contains(name, ".staging-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && now.Sub(info.ModTime()) >= 10*time.Minute {
+			stale = append(stale, filepath.Join(dir, name))
+		}
+	}
+	return stale
 }
 
 // ImageRemoveOptions are the `image rm` flags.

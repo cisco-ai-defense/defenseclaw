@@ -631,8 +631,8 @@ func (r *doctorRun) vmDiskCheck() Check {
 	}
 	if n, size := stagingDisks(filepath.Join(dir, "images")); n > 0 {
 		c.Detail += fmt.Sprintf("; %s from interrupted first starts occupy %s under %s; "+
-			"after confirming no sandbox start is running, remove these .staging-* directories",
-			plural(n, "staging MicroVM disk", "staging MicroVM disks"), humanBytes(size), filepath.Join(dir, "images"))
+			"after confirming no sandbox start is running, `%s` removes staging disks older than ten minutes",
+			plural(n, "staging MicroVM disk", "staging MicroVM disks"), humanBytes(size), filepath.Join(dir, "images"), pruneCommand)
 	}
 	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
 		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
