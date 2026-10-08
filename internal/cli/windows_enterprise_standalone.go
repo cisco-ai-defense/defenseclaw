@@ -119,6 +119,9 @@ type windowsEnterpriseInstallerReport struct {
 	// TerminatedServiceProcesses names each service process the lifecycle
 	// ended because it did not answer a stop ("<service> (pid <n>)").
 	TerminatedServiceProcesses []string `json:"terminated_service_processes"`
+	// SquattedRootNotes says what Install did with each standalone root a
+	// standard user created first: a link removed, a folder moved aside.
+	SquattedRootNotes []string `json:"squatted_root_notes"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -955,6 +958,14 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
 				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
 				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
+	for _, note := range report.SquattedRootNotes {
+		// The install used to say only "ensure ran install: root_squatted"
+		// (GAP-0904).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code:    "root_squatted",
+			Message: "a standard user created a DefenseClaw root before the install: " + windowsEnterpriseBoundedDiagnostic(note),
 		})
 	}
 	if len(report.TerminatedServiceProcesses) != 0 {

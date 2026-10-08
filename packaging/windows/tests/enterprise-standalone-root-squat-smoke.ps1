@@ -223,10 +223,18 @@ try {
             New-TestDirectory $vendor 'BA'
             [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $lock -Target $target)
             Assert-TestPaths 'junction lock directory' (Get-TestSquatPaths) @('Cisco\DefenseClaw-Lifecycle')
+            $script:DefenseClawSquattedRootNotes = @()
             Move-DefenseClawStandaloneSquattedRoots -Squatted @(Get-DefenseClawStandaloneSquattedRoots)
             if ([IO.Directory]::Exists($lock) -or
                 -not [IO.File]::Exists([IO.Path]::Combine($target, 'keep.txt'))) {
-                $failures.Add('junction was not renamed as a link, or its target changed')
+                $failures.Add('junction was not removed as a link, or its target changed')
+            }
+            # GAP-0904: the link is removed, not left renamed in ProgramData,
+            # and the result says what it was and where it pointed.
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $vendor -Force -Filter 'DefenseClaw-Lifecycle.untrusted-*').Count -ne 0 -or
+                @($script:DefenseClawSquattedRootNotes).Count -ne 1 -or
+                [string]$script:DefenseClawSquattedRootNotes[0] -notlike "removed the link $lock that *pointed at*junction-target*") {
+                $failures.Add("planted junction left behind or not reported: $(@($script:DefenseClawSquattedRootNotes) -join ' | ')")
             }
             Reset-TestRoots
 

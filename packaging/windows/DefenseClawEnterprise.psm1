@@ -19418,6 +19418,9 @@ function Get-DefenseClawLifecycleStatus {
         if (@($script:DefenseClawQuarantinedRoots).Count -gt 0) {
             $status['quarantined_paths'] = @($script:DefenseClawQuarantinedRoots)
         }
+        if (@($script:DefenseClawSquattedRootNotes).Count -gt 0) {
+            $status['squatted_root_notes'] = [string[]]@($script:DefenseClawSquattedRootNotes)
+        }
         if (@($script:DefenseClawTerminatedServiceProcesses).Count -gt 0) {
             $status['terminated_service_processes'] = [string[]]@($script:DefenseClawTerminatedServiceProcesses)
         }
@@ -25129,6 +25132,43 @@ function Move-DefenseClawStandaloneSquattedRoots {
                 )
             }
         }
+        $planter = Get-DefenseClawSquattedRootPlanter -Path $path
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            # A junction or symbolic link a standard user planted is removed
+            # as a link (rmdir semantics: the reparse point goes, its target
+            # is never opened or followed). It used to be renamed aside and
+            # left in ProgramData with no word to the administrator
+            # (GAP-0904).
+            $target = ''
+            try {
+                $target = [string](@($item.Target) | Microsoft.PowerShell.Utility\Select-Object -First 1)
+            }
+            catch {
+            }
+            try {
+                if ($item.PSIsContainer) {
+                    [IO.Directory]::Delete($path)
+                }
+                else {
+                    [IO.File]::Delete($path)
+                }
+            }
+            catch {
+                throw (
+                    "root_squatted: $path is a link that $planter created, not an administrator, and could not " +
+                    "be removed ($($_.Exception.Message)); an administrator must remove the link (rmdir `"$path`")"
+                )
+            }
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+                throw "root_squatted: $path was re-created while DefenseClaw removed a planted link"
+            }
+            $script:DefenseClawSquattedRootNotes += (
+                "removed the link $path that $planter created; it pointed at " +
+                $(if ([string]::IsNullOrEmpty($target)) { 'an unreadable target' } else { $target }) +
+                ', which was neither followed nor changed'
+            )
+            continue
+        }
         $quarantine = '{0}.untrusted-{1}-{2}' -f $path,
             [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'),
             [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -25151,6 +25191,37 @@ function Move-DefenseClawStandaloneSquattedRoots {
             throw "root_squatted: $path was re-created while DefenseClaw moved an untrusted copy aside"
         }
         $script:DefenseClawQuarantinedRoots += $quarantine
+        $kind = if ($item.PSIsContainer) { 'folder' } else { 'file' }
+        $script:DefenseClawSquattedRootNotes += (
+            "moved the $kind $path that $planter created aside to $quarantine, with its content; " +
+            'review it and remove it (Remove-Item -LiteralPath "' + $quarantine + '" -Recurse -Force)'
+        )
+    }
+}
+
+# What Install did with each squatted root, for the result.
+$script:DefenseClawSquattedRootNotes = @()
+
+function Get-DefenseClawSquattedRootPlanter {
+    # The owner of a squatted path, read without following a link, as an
+    # account name next to its SID.
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $snapshot = $nativeSecurity::GetDirectorySecuritySnapshotNoFollow($Path)
+        $owner = [Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$snapshot.SecurityDescriptor, 0).Owner
+        if ($null -eq $owner) {
+            return 'an unknown account'
+        }
+        try {
+            return '{0} ({1})' -f $owner.Translate([Security.Principal.NTAccount]).Value, $owner.Value
+        }
+        catch {
+            return $owner.Value
+        }
+    }
+    catch {
+        return 'an account DefenseClaw could not read'
     }
 }
 
@@ -25641,6 +25712,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawAdministrator
     }
     $script:DefenseClawQuarantinedRoots = @()
+    $script:DefenseClawSquattedRootNotes = @()
     $script:DefenseClawTerminatedServiceProcesses = @()
     Set-DefenseClawRecoveryGatewayCandidate `
         -GatewayBinary $GatewayBinary `
