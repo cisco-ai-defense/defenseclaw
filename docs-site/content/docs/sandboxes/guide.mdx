@@ -1010,6 +1010,14 @@ the work is reported as done. A branch that holds only the last pull is
 refused before the start too when the stopped sandbox has run since that pull
 (`--branch-name NAME` or `--force` goes on).
 
+The branch starts at the commit your checkout was on when the copy was made
+and holds only what the sandbox changed. A copy made while your folder had
+uncommitted edits (yours, or another live sandbox's) carries those edits,
+but they are not the sandbox's work: the branch leaves them out, they stay
+in your working tree, and the sandbox's own commits come in as one commit
+that lists them. When the sandbox changed one of those edits further, or
+git is older than 2.38, the branch holds the edits too, and `pull` says so.
+
 A copy-mode sandbox changes your folder only through `pull --apply`, so for
 such a sandbox `undo` reverts its last apply, after a preview. Edits you
 made since the apply stay; when they overlap the apply, undo changes nothing

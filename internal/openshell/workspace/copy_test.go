@@ -615,6 +615,49 @@ func TestCopyPullOfAStateAlreadyBroughtBack(t *testing.T) {
 	}
 }
 
+// TestCopyBranchLeavesOutTheFoldersEdits (GAP-0282): a copy made from a
+// folder with uncommitted edits (another live sandbox had made them) put
+// them on its pull's branch as if the sandbox had made them. The branch
+// starts at the copy's HEAD with only the sandbox's changes, and the edits
+// stay in the folder; when the sandbox changed them further, the branch
+// keeps them and says so.
+func TestCopyBranchLeavesOutTheFoldersEdits(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	head := e.git(e.project, "rev-parse", "HEAD")
+	writeFile(t, e.project, "README.md", "hello\nhost edit\n")
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	pull(t, e, fs, "c1")
+	res, err := apply(e, "c1", ApplyBranch, nil)
+	if err != nil || !res.Applied || len(res.Warnings) != 1 ||
+		!strings.Contains(res.Warnings[0], "from when the copy was made (README.md) are not on it, and stay in your working tree") {
+		t.Fatalf("branch: %+v, %v", res, err)
+	}
+	if got := e.git(e.project, "diff", "--name-only", head, "dc/c1"); got != "agent.txt" {
+		t.Fatalf("the branch holds %q, want agent.txt only", got)
+	}
+	if parent := e.git(e.project, "rev-parse", "dc/c1^"); parent != head {
+		t.Fatalf("the branch starts at %s, want the copy's HEAD %s", parent, head)
+	}
+	if got := readFile(t, e.project, "README.md"); got != "hello\nhost edit\n" {
+		t.Fatalf("README.md = %q, want the folder's edit kept", got)
+	}
+	if held, err := CheckApply(bg, ApplyOptions{DataDir: e.data, Name: "c1", Mode: ApplyBranch}); err != nil || !held {
+		t.Fatalf("the branch does not hold the pull: %v, %v", held, err)
+	}
+	fs.write(remoteRepo+"/README.md", "hello\nhost edit, and the agent's\n")
+	pull(t, e, fs, "c1")
+	res, err = apply(e, "c1", ApplyBranch, func(o *ApplyOptions) { o.Branch = "dc/c1-more" })
+	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "branch dc/c1-more also holds your folder's uncommitted edits") ||
+		!strings.Contains(res.Warnings[0], "the sandbox changed README.md further") {
+		t.Fatalf("branch of a further edit: %+v, %v", res, err)
+	}
+	if got := e.git(e.project, "show", "dc/c1-more:README.md"); got != "hello\nhost edit, and the agent's" {
+		t.Fatalf("the branch's README.md = %q", got)
+	}
+}
+
 // TestCopyBranchThatHoldsThePull: `pull --branch` of work its branch
 // already holds (the same pull, or a new one of the same state, whose
 // commit differs) is done, and checked before the sandbox is read; a branch

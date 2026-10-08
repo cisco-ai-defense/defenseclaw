@@ -1207,7 +1207,10 @@ sandbox. Choose one mode to bring the work back:
   alone and exits `4`: the changes go to `<name>.patch` in your folder and,
   in a git project, to branch `dc/<name>`.
 - `--branch` (branch `dc/<name>`) or `--branch-name NAME`. A folder that is
-  not a git repository has no branch mode.
+  not a git repository has no branch mode. The branch starts at the commit
+  the copy was made from, without the folder's uncommitted edits of that
+  time (they stay in your working tree), unless the sandbox changed them
+  further; `pull` says which.
 - `--patch-out FILE`.
 
 Changes that can run code on your machine need your confirmation, or

@@ -771,11 +771,15 @@ func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyO
 		if rec.Kind != CopyGit {
 			return nil, ErrNotGitProject
 		}
-		branch, err := createBranch(ctx, rec, pr, opts, false)
+		branch, note, err := createBranch(ctx, rec, pr, opts, false)
 		if err != nil {
 			return nil, err
 		}
-		return &ApplyResult{Mode: mode, Applied: true, Changes: pr.Changes, Branch: branch}, nil
+		out := &ApplyResult{Mode: mode, Applied: true, Changes: pr.Changes, Branch: branch}
+		if note != "" {
+			out.Warnings = append(out.Warnings, note)
+		}
+		return out, nil
 	case ApplyMerge:
 		return applyMerge(ctx, lay, rec, pr, opts)
 	}
@@ -889,8 +893,99 @@ func branchHolds(ctx context.Context, rec *CopyRecord, branch, effective string)
 	if err != nil || tip == "" {
 		return false
 	}
-	want, err := gitCmd{gitDir: rec.BaseGit}.line(ctx, "rev-parse", "-q", "--verify", effective+"^{tree}")
+	base := gitCmd{gitDir: rec.BaseGit}
+	if whole, err := base.line(ctx, "rev-parse", "-q", "--verify", effective+"^{tree}"); err == nil && whole == tip {
+		// The whole result: a branch an earlier build made, or one that
+		// keeps the folder's edits.
+		return true
+	}
+	want, _, _, err := branchTree(ctx, base, rec, effective, rec.Baseline)
 	return err == nil && want == tip
+}
+
+// branchTree is the tree a branch of rec's work holds, in g (the project,
+// or the copy's base.git) where result is the sandbox's result and base the
+// copy's baseline. It is result's tree, unless the copy was made from a
+// folder with uncommitted edits: those are in the baseline, and so in the
+// result, but they are the folder's and stay in it, not the sandbox's
+// (GAP-0282). The tree is then the copy's HEAD with what the sandbox
+// changed since the copy was made, and edits names the folder's edits.
+// kept says why they stay in the tree all the same (the sandbox changed
+// them further, or git is older than 2.38), "" when they are left out.
+func branchTree(ctx context.Context, g gitCmd, rec *CopyRecord, result, base string) (tree string, edits []string, kept string, err error) {
+	if tree, err = g.line(ctx, "rev-parse", "--verify", result+"^{tree}"); err != nil || rec.Head == "" {
+		return tree, nil, "", err
+	}
+	headTree, err := g.line(ctx, "rev-parse", "--verify", rec.Head+"^{tree}")
+	if err != nil {
+		return "", nil, "", err
+	}
+	baseTree, err := g.line(ctx, "rev-parse", "--verify", base+"^{tree}")
+	if err != nil || baseTree == headTree {
+		return tree, nil, "", err
+	}
+	changes, err := diffTrees(ctx, g, headTree, baseTree)
+	if err != nil {
+		return "", nil, "", err
+	}
+	for _, c := range changes {
+		edits = append(edits, c.Path)
+	}
+	v, err := hostGitVersion(ctx, rec.Project)
+	if err != nil {
+		return "", nil, "", err
+	}
+	if !v.atLeast(2, 38) {
+		return tree, edits, "git " + v.String() + " cannot leave them out (git 2.38+ can)", nil
+	}
+	ours, theirs, err := onMergeBase(ctx, g, base, rec.Head, result, rec.Name)
+	if err != nil {
+		return "", nil, "", err
+	}
+	merged, conflicts, err := mergeTrees(ctx, g, nil, ours, theirs)
+	switch {
+	case err != nil:
+		return "", nil, "", fmt.Errorf("workspace: leave the folder's uncommitted edits out of the branch: %w", err)
+	case len(conflicts) > 0:
+		return tree, edits, "the sandbox changed " + strings.Join(firstN(conflicts, 5), ", ") + " further", nil
+	}
+	return merged, edits, "", nil
+}
+
+// branchCommit is the commit a branch of rec's work points at, in the
+// project where result and base are imported (branchTree): the result
+// itself, or one commit on the copy's HEAD with what the sandbox changed,
+// which names the sandbox's own commits it takes in. note says what the
+// branch holds of the folder's uncommitted edits, when it had any.
+func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, base, branch string) (commit, note string, err error) {
+	tree, edits, kept, err := branchTree(ctx, proj, rec, result, base)
+	if err != nil {
+		return "", "", err
+	}
+	if commit, err = proj.line(ctx, "rev-parse", "--verify", result+"^{commit}"); err != nil || len(edits) == 0 {
+		return commit, "", err
+	}
+	what := "your folder's uncommitted edits from when the copy was made (" + strings.Join(firstN(edits, 5), ", ") + ")"
+	if kept != "" {
+		return commit, "branch " + branch + " also holds " + what + ": " + kept, nil
+	}
+	msg := "defenseclaw: changes made in sandbox " + rec.Name + "\n\nThe folder's uncommitted edits from when the copy was made are left out."
+	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.Head+".."+result); err == nil {
+		var own []string
+		for _, s := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if s != "" && !strings.HasPrefix(s, "defenseclaw: ") {
+				own = append(own, "- "+s)
+			}
+		}
+		if len(own) > 0 {
+			msg += "\n\nThe sandbox's commits it takes in:\n" + strings.Join(firstN(own, 20), "\n")
+		}
+	}
+	if commit, err = proj.line(ctx, "commit-tree", tree, "-p", rec.Head, "-m", msg); err != nil {
+		return "", "", err
+	}
+	return commit, "branch " + branch + " starts at " + shortOID(rec.Head) + " with only the sandbox's changes: " + what +
+		" are not on it, and stay in your working tree", nil
 }
 
 // reusable reports whether a pull can be made from last, the copy's last
@@ -958,11 +1053,13 @@ func CheckApply(ctx context.Context, opts ApplyOptions) (bool, error) {
 	return false, nil
 }
 
-func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyOptions, pickFree bool) (string, error) {
+// createBranch puts the pull's work on a branch (branchCommit) and returns
+// its name and what the branch holds of the folder's uncommitted edits.
+func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyOptions, pickFree bool) (string, string, error) {
 	proj := gitCmd{dir: rec.Project}
 	branch := branchName(rec, opts.Branch)
 	if err := proj.run(ctx, "check-ref-format", "--branch", branch); err != nil {
-		return "", fmt.Errorf("workspace: invalid branch name %q", branch)
+		return "", "", fmt.Errorf("workspace: invalid branch name %q", branch)
 	}
 	ref := "refs/heads/" + branch
 	exists := func(r string) bool {
@@ -980,21 +1077,25 @@ func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts App
 				ref = "refs/heads/" + branch
 			}
 		case !opts.Force:
-			return "", fmt.Errorf("workspace: branch %s already exists", branch)
+			return "", "", fmt.Errorf("workspace: branch %s already exists", branch)
 		}
 	}
 	imported, importedBase, err := importResult(ctx, rec, proj, baselineRef)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() {
 		_ = proj.run(ctx, "update-ref", "-d", imported)
 		_ = proj.run(ctx, "update-ref", "-d", importedBase)
 	}()
-	if err := proj.run(ctx, "update-ref", "-m", "defenseclaw: sandbox "+rec.Name, ref, pr.Effective); err != nil {
-		return "", err
+	tip, note, err := branchCommit(ctx, rec, proj, imported, importedBase, branch)
+	if err != nil {
+		return "", "", err
 	}
-	return branch, nil
+	if err := proj.run(ctx, "update-ref", "-m", "defenseclaw: sandbox "+rec.Name, ref, tip); err != nil {
+		return "", "", err
+	}
+	return branch, note, nil
 }
 
 // applyGit runs git against the working tree Apply and UndoApply change:
@@ -1207,11 +1308,14 @@ func fallback(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, 
 	out.Applied = false
 	out.Conflicts = conflicts
 	if rec.Kind == CopyGit {
-		branch, err := createBranch(ctx, rec, pr, ApplyOptions{Name: opts.Name, Branch: opts.Branch}, true)
+		branch, note, err := createBranch(ctx, rec, pr, ApplyOptions{Name: opts.Name, Branch: opts.Branch}, true)
 		if err != nil {
 			return nil, err
 		}
 		out.Branch = branch
+		if note != "" {
+			out.Warnings = append(out.Warnings, note)
+		}
 	}
 	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
 	patch, err := writeFreePatch(ctx, base, pr.from(), pr.Effective, rec.Project, rec.Name)
