@@ -278,10 +278,10 @@ func SkillFolderRefs(input any, home, cwd string) []FolderRef {
 	for _, value := range values {
 		for _, token := range strings.FieldsFunc(value, isCommandSeparator) {
 			ref, ok := skillFolderRef(token, home, cwd)
-			if !ok || seen[strings.ToLower(ref.Name)] {
+			if !ok || seen[ref.Dir] {
 				continue
 			}
-			seen[strings.ToLower(ref.Name)] = true
+			seen[ref.Dir] = true
 			refs = append(refs, ref)
 		}
 	}
