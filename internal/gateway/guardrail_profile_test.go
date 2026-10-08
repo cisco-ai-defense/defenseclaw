@@ -1187,6 +1187,9 @@ func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
 // account named DCLAB\\dcad-bob that no directory confirms (nslcd, a plain
 // LDAP domain of SSSD) is selected by its uid only (GAP-0456, GAP-0814).
 func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
 	subject := profileSubjectFromVerified(VerifiedSubject{
 		UserID: "1201", UserName: `CONTOSO\alice`,
 		Directory: useridentity.DirectoryFacts{
