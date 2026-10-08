@@ -75,15 +75,23 @@ def _iter_detail_tokens(value: str) -> Iterator[tuple[str, str]]:
 _POST_TOOL_HOOK_EVENTS = frozenset({
     "posttooluse", "posttoolusefailure", "posttoolbatch", "toolresult",
     "aftertool", "aftershellexecution", "aftermcpexecution", "afterfileedit",
+    "post_tool_call",
 })
 
 
 # Hook events that only observe text already on screen: Claude Code runs
 # MessageDisplay async, so a finding there cannot block either (GAP-1531).
-_DISPLAY_HOOK_EVENTS = frozenset({"messagedisplay"})
+_DISPLAY_HOOK_EVENTS = frozenset({"messagedisplay", "post_llm_call"})
+
+# Prompt events an agent gives no veto: in action mode DefenseClaw tells the
+# model not to carry the prompt out instead (agent_hook.go
+# promptNoticeOnlyEvent). Keyed by (connector, event).
+_PROMPT_NOTICE_HOOK_EVENTS = frozenset({("hermes", "pre_llm_call"), ("amp", "agent.start")})
 
 POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
 DISPLAY_DECISION = "detected in the displayed reply (cannot block)"
+PROMPT_NOTICE_DECISION = "agent told not to carry out the prompt (prompts cannot be blocked)"
+OBSERVE_DECISION = "would block (observe mode)"
 
 
 def detection_only_hook_label(event: str) -> str:
@@ -96,6 +104,20 @@ def detection_only_hook_label(event: str) -> str:
     if name in _DISPLAY_HOOK_EVENTS:
         return DISPLAY_DECISION
     return ""
+
+
+def would_block_hook_label(target: str, mode: str) -> str:
+    """Decision label of a would-block finding on a connector:Event target.
+
+    A Hermes or Amp prompt finding in action mode was not observed: the model
+    was told not to carry the prompt out (GAP-0898)."""
+    if label := detection_only_hook_label(target):
+        return label
+    connector, _, name = str(target or "").strip().rpartition(":")
+    prompt_event = (connector.strip().lower(), name.strip().lower())
+    if str(mode or "").strip().lower() == "action" and prompt_event in _PROMPT_NOTICE_HOOK_EVENTS:
+        return PROMPT_NOTICE_DECISION
+    return OBSERVE_DECISION
 
 
 def parse_detail_tokens(value: str) -> dict[str, str]:
