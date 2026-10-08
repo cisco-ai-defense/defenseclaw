@@ -987,6 +987,13 @@ boundary, and says what each one is:
 Each row shows the requests and refusals both boundaries counted, the bytes
 the proxy relayed, and the last binary OpenShell named making the
 connection (a long path is cut from the left, so the program name stays).
+Requests the proxy allowed and the host did not take (it refused or
+dropped the connection, did not answer, or its name did not resolve) count
+as `N failed upstream` (`failed` in `--output json`): an outage, not a
+block. The first one of a host also puts a line on the activity feed
+(`example.org: the connection failed upstream, not blocked by DefenseClaw
+(it refused the connection)`), and the `Egress` line of `sandbox status`
+counts them.
 The binary is what the process in the sandbox claims to be.
 With the [process tree](/docs/sandboxes/policy-packs) on, the binary column
 shows that process and its parents instead (`curl ← bash ← claude`), and

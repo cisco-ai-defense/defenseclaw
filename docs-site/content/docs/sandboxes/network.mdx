@@ -295,8 +295,10 @@ defenseclaw sandbox policy explain
 ```
 
 `activity` is the live feed of sites, blocks, asks and findings. The
-`Egress` row of `status` counts the sites contacted and blocked and the
-bytes sent and received, and sums up the AI sites. `destinations` lists
+`Egress` row of `status` counts the sites contacted and blocked, the
+requests that failed upstream (allowed, and the site refused or dropped
+them, or did not answer: an outage, not a block) and the bytes sent and
+received, and sums up the AI sites. `destinations` lists
 every site with its kind, its requests and refusals, the bytes sent and the
 program that made the connection. `policy explain` shows each effective
 setting and the layer it came from: the pack, your config, a run option or

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -147,7 +148,12 @@ type destRow struct {
 	Connections int64    `json:"connections,omitempty"`
 	Refused     int64    `json:"refused,omitempty"`
 	ModelTurns  int64    `json:"model_turns,omitempty"`
-	Rule        string   `json:"rule,omitempty"`
+	// Failed counts the proxy's allowed tunnels and requests that failed
+	// upstream (destinationFailed); failNoticed is set once the feed showed
+	// the host's first failure of this daemon run.
+	Failed      int64 `json:"failed,omitempty"`
+	failNoticed bool
+	Rule        string `json:"rule,omitempty"`
 	// ProviderRule marks a host OpenShell allowed under a provider rule of
 	// the sandbox's model provider, CredentialRule under one of a
 	// --credential binding (its endpoint).
@@ -711,6 +717,48 @@ func (m *Manager) observeInference(b *box, provider, model string, failed bool, 
 	t.dirty = true
 }
 
+// destinationFailed counts a tunnel or request to host that the egress
+// proxy allowed and could not complete upstream (the sandbox got a 502 or
+// 504: the host refused or reset the connection, did not answer, or its
+// name did not resolve), which the proxy's counter does not count. It
+// reports whether that is the host's first failure since the daemon
+// started, which the feed shows: an outage is not a policy block, and the
+// destination's clean record hid it (GAP-0284).
+func (m *Manager) destinationFailed(name, host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	m.destMu.Lock()
+	defer m.destMu.Unlock()
+	t := m.dests[name]
+	if t == nil || t.rows[host] == nil {
+		return false
+	}
+	r := t.rows[host]
+	r.Failed++
+	t.dirty = true
+	first := !r.failNoticed
+	r.failNoticed = true
+	return first
+}
+
+// upstreamFailure says in a few words why the proxy could not complete a
+// request upstream: its error, or the gateway status the sandbox got.
+func upstreamFailure(e egress.Event) string {
+	why := strings.ToLower(firstNonEmpty(e.Error, e.Reason))
+	switch {
+	case e.Status == http.StatusGatewayTimeout || strings.Contains(why, "timeout") || strings.Contains(why, "deadline"):
+		return "it did not answer in time"
+	case strings.Contains(why, "no such host") || strings.Contains(why, "server misbehaving"):
+		return "its name did not resolve"
+	case strings.Contains(why, "refused"):
+		return "it refused the connection"
+	case strings.Contains(why, "reset") || strings.Contains(why, "broken pipe") || strings.Contains(why, "eof"):
+		return "it dropped the connection"
+	case why != "":
+		return truncate(sandboxapi.DisplayText(firstNonEmpty(e.Error, e.Reason)), 120)
+	}
+	return "it could not be reached"
+}
+
 // touchDestinations marks a sandbox's table changed: the proxy counted
 // more for it.
 func (m *Manager) touchDestinations(name string) {
@@ -852,7 +900,7 @@ func (r *destRow) view(info destinationInfo) sandboxapi.DestinationRow {
 		Host: sandboxapi.DisplayText(r.Host), Ports: slices.Clone(r.Ports), Kind: kind, Provider: sandboxapi.DisplayText(provider),
 		Vendor: sandboxapi.DisplayText(vendor), Category: firstNonEmpty(r.Category, r.Refusal), Rule: sandboxapi.DisplayText(r.Rule),
 		Sources: slices.Clone(r.Sources), Connections: r.Connections, Tunnels: total.Tunnels, Refused: r.Refused, Blocked: total.Blocked,
-		ModelTurns: r.ModelTurns, BytesUp: total.BytesUp, BytesDown: total.BytesDown, PID: r.PID,
+		Failed: r.Failed, ModelTurns: r.ModelTurns, BytesUp: total.BytesUp, BytesDown: total.BytesDown, PID: r.PID,
 		FirstSeen: r.FirstSeen, LastSeen: r.LastSeen,
 	}
 	if v.Sources == nil {
@@ -891,6 +939,7 @@ func (m *Manager) egressSummary(name, harnessName string, live map[string]egress
 			s.Blocked++
 		}
 		s.BlockedRequests += int(total.Blocked + r.Refused)
+		s.UpstreamFailed += int(r.Failed)
 		s.BytesUp += total.BytesUp
 		s.BytesDown += total.BytesDown
 		switch kind, _, _ := r.classify(harnessName); {

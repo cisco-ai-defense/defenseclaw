@@ -146,9 +146,13 @@ func destinationKindText(kind string) string {
 
 // destinationRequests counts a row's requests and refusals.
 func destinationRequests(r sandboxapi.DestinationRow) string {
-	s := strconv.FormatInt(r.Connections+r.Tunnels, 10)
+	s := strconv.FormatInt(r.Connections+r.Tunnels+r.Failed, 10)
 	if refused := r.Refused + r.Blocked; refused > 0 {
 		s += fmt.Sprintf(" (%d refused)", refused)
+	}
+	if r.Failed > 0 {
+		// Allowed, and the host did not take them (GAP-0284).
+		s += fmt.Sprintf(", %d failed upstream", r.Failed)
 	}
 	if r.ModelTurns > 0 {
 		s += fmt.Sprintf(", %d model calls", r.ModelTurns)

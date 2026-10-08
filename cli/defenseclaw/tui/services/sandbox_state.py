@@ -2046,9 +2046,13 @@ def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS
             provider = reason_label(_text(row.get("category")))
         if provider:
             what += f" ({provider})"
-        requests = _int(row.get("connections")) + _int(row.get("tunnels"))
+        # Failed counts what the proxy allowed and the host did not take
+        # (sandboxcli.destinationRequests, GAP-0284).
+        failed = _int(row.get("failed"))
+        requests = _int(row.get("connections")) + _int(row.get("tunnels")) + failed
         refused = _int(row.get("refused")) + _int(row.get("blocked"))
-        parts = [what, _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")]
+        counts = _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")
+        parts = [what, counts + (f", {failed} failed upstream" if failed else "")]
         if program := _destination_program(row):
             parts.append(program)
         pairs.append(("Destination", f"{_text(row.get('host'))} — " + " · ".join(parts)))

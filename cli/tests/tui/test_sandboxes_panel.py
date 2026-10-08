@@ -318,7 +318,7 @@ DESTINATIONS = {
         {"host": "api.anthropic.com", "kind": "model_provider", "provider": "Anthropic", "connections": 5},
         {"host": "pastebin.com", "kind": "blocked", "category": "paste_site", "blocked": 4},
         {"host": "example.net", "kind": "blocked", "category": "not_allowlisted", "blocked": 1},
-        {"host": "pypi.org", "kind": "package_registry", "category": "package_registry", "connections": 2},
+        {"host": "pypi.org", "kind": "package_registry", "category": "package_registry", "connections": 2, "failed": 1},
     ],
     "models": [{"provider": "anthropic", "model": "claude-haiku", "calls": 2, "failed": 1}],
 }
@@ -337,7 +337,7 @@ def test_the_detail_lists_the_destinations() -> None:
         "api.anthropic.com — model provider (Anthropic) · 5 requests",
         "pastebin.com — blocked (paste site) · 0 requests, 4 refused",
         "example.net — blocked (not on the allowlist) · 0 requests, 1 refused",
-        "pypi.org — package registry · 2 requests",
+        "pypi.org — package registry · 3 requests, 1 failed upstream",
     ]
     assert dict(pairs)["Model calls"] == "anthropic claude-haiku: 2 (1 failed)"
     assert (

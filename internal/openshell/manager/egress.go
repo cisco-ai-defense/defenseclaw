@@ -908,8 +908,18 @@ func (m *Manager) egressEnded(ctx context.Context, ident audit.SandboxIdentity, 
 		ev.Reason = truncate(firstNonEmpty(e.Error, e.Reason), 512)
 	}
 	m.tel.RecordSandboxEgress(ctx, ev)
-	// The counter counted it: the destinations view keeps its totals.
-	m.touchDestinations(e.SandboxName)
+	if ev.DecisionCode != "SANDBOX_EGRESS_UPSTREAM_FAILED" {
+		// The counter counted it: the destinations view keeps its totals.
+		m.touchDestinations(e.SandboxName)
+		return
+	}
+	if m.destinationFailed(e.SandboxName, e.Host) {
+		where := sandboxapi.HostPort(e.Host, e.Port)
+		m.publishEgress(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityFinding, Sandbox: e.SandboxName,
+			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, Severity: "INFO", Reason: sandboxapi.ReasonUpstreamFailed,
+			Message: "⚠ " + where + ": the connection failed upstream, not blocked by DefenseClaw (" + upstreamFailure(e) +
+				"); `defenseclaw sandbox destinations " + e.SandboxName + "` counts the failures"})
+	}
 }
 
 // authFailures counts the egress proxy's refusals of invalid credentials

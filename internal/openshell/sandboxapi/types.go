@@ -409,11 +409,14 @@ type Endpoint struct {
 // a sandbox whose feed shows two ✗ destinations reports Blocked 2 however
 // often each was tried. BlockedRequests counts the refused requests.
 type EgressStats struct {
-	Destinations    int   `json:"destinations"`
-	Blocked         int   `json:"blocked"`
-	BlockedRequests int   `json:"blocked_requests"`
-	BytesUp         int64 `json:"bytes_up"`
-	BytesDown       int64 `json:"bytes_down"`
+	Destinations    int `json:"destinations"`
+	Blocked         int `json:"blocked"`
+	BlockedRequests int `json:"blocked_requests"`
+	// UpstreamFailed counts the allowed tunnels and requests the egress
+	// proxy could not complete upstream (DestinationRow.Failed).
+	UpstreamFailed int   `json:"upstream_failed,omitempty"`
+	BytesUp        int64 `json:"bytes_up"`
+	BytesDown      int64 `json:"bytes_down"`
 	// ModelAPIs and ShadowAI count the AI destinations of the sandbox's
 	// destinations view (GET /sandboxes/{name}/destinations): its model
 	// provider and its harness's vendor, and the other AI APIs and
@@ -491,7 +494,11 @@ type DestinationRow struct {
 	Tunnels     int64 `json:"tunnels,omitempty"`
 	Refused     int64 `json:"refused,omitempty"`
 	Blocked     int64 `json:"blocked,omitempty"`
-	ModelTurns  int64 `json:"model_turns,omitempty"`
+	// Failed counts the tunnels and requests the proxy allowed and could
+	// not complete upstream (the host refused or dropped the connection,
+	// did not answer, or did not resolve); Tunnels does not count them.
+	Failed     int64 `json:"failed,omitempty"`
+	ModelTurns int64 `json:"model_turns,omitempty"`
 	// BytesUp and BytesDown are what the proxy relayed.
 	BytesUp   int64 `json:"bytes_up,omitempty"`
 	BytesDown int64 `json:"bytes_down,omitempty"`
@@ -1115,6 +1122,11 @@ const (
 	ReasonHooksUnreachable = "hooks_unreachable"
 	ReasonHooksRestored    = "hooks_restored"
 )
+
+// ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
+// gets the first time the egress proxy could not complete an allowed
+// connection to a host upstream: an outage, not a policy block.
+const ReasonUpstreamFailed = "upstream_failed"
 
 // ReasonModelKeyRejected is the Reason of the finding event a sandbox gets
 // when the model API rejected its model credential (HookCoverage.ModelKeyRejected).

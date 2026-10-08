@@ -273,8 +273,13 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	if sb.Hooks.ModelKeyRejected != "" {
 		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
 	}
-	row("Egress", fmt.Sprintf("%s contacted, %d blocked, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
-		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
+	failed := ""
+	if n := sb.Egress.UpstreamFailed; n > 0 {
+		// Allowed, and the host did not take them: an outage, not a block.
+		failed = fmt.Sprintf(", %d failed upstream", n)
+	}
+	row("Egress", fmt.Sprintf("%s contacted, %d blocked%s, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
+		failed, humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
 	for _, ep := range sb.Endpoints {
 		row("Endpoint", ep.Host+" "+ep.Result)
 	}
