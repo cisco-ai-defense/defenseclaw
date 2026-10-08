@@ -82,7 +82,7 @@ func EvaluateAdmissionFallback(input AdmissionInput) *AdmissionOutput {
 	action := effectiveAction(adm, scan)
 	out := &AdmissionOutput{FileAction: action.File, InstallAction: action.Install, RuntimeAction: action.Runtime}
 	switch {
-	case action.Runtime == "block" || action.Install == "block":
+	case action.Runtime == "block" || action.Install == "block" || action.File == "quarantine":
 		out.Verdict = "rejected"
 		out.Reason = fmt.Sprintf("max severity %s triggers block per policy", scan.MaxSeverity)
 	case action.Verdict == "allowed":

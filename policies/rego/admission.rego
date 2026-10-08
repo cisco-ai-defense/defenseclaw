@@ -266,6 +266,10 @@ _should_reject if {
 	_effective_action.install == "block"
 }
 
+_should_reject if {
+	_effective_action.file == "quarantine"
+}
+
 # --- Structured outputs: file_action, install_action, runtime_action ---
 
 file_action := "quarantine" if {
