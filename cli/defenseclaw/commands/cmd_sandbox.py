@@ -663,7 +663,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "process tree (sandbox run --process-tree): processes that live for milliseconds are recorded too. "
             "It only reads Tetragon (never a policy call), serves members of the docker group, and gives each "
             "of them only their own sandboxes' records; docker-group members can already see every container, "
-            "so that filter is a courtesy, not a boundary. Without it the tree is the 5 s sample, as before."
+            "so that filter is a courtesy, not a boundary: one of them can also add process records, real or made "
+            "up, to another account's sandbox tree. Without it the tree is the 5 s sample, as before."
         ),
     ),
     _Cmd(

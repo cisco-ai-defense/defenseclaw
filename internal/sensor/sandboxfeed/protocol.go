@@ -30,7 +30,10 @@
 // socket only docker-group members reach. Docker-group members are
 // root-equivalent already, so the feed gives them nothing new; the filter
 // to the caller's own sandboxes (the image's io.defenseclaw.uid label) is a
-// courtesy between users of one host, not a security boundary.
+// courtesy between users of one host, not a security boundary. The same
+// holds for integrity: a member can run commands in another account's
+// sandbox, or label a container of its own as that sandbox, and the feed
+// then reports those processes as the sandbox's (GAP-0036).
 //
 // The protocol is newline-delimited JSON on a unix socket: the client sends
 // one Request line, the feed answers one Header line and then Frames until

@@ -412,8 +412,11 @@ sample never sees. It is a small root service
 feed mode). It only reads Tetragon (its version and its exec and exit events,
 never a policy call), serves members of the `docker` group, and gives each of
 them only their own sandboxes' records. Members of the `docker` group can
-already see every container, so that filter is a courtesy between users, not a
-security boundary. A sandbox's process tree must be on (`sandbox run
+already see every container and run commands in it, so that filter is a
+courtesy between users, not a security boundary: one of them can also add
+process records, real or made up, to another account's sandbox tree and its
+`sandbox.process_tree` records (a container labelled as that sandbox is
+enough). Give the group only to accounts that trust each other. A sandbox's process tree must be on (`sandbox run
 --process-tree`, or a pack's `observe.process_tree: true`); `sandbox ps` then
 says `source: kernel`. Without the feed nothing changes. macOS (MicroVM
 sandboxes) and the Linux vm driver are not covered: their guest kernel is not

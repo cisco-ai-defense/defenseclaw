@@ -321,7 +321,7 @@
     "path": "sandbox kernel-feed",
     "use": "kernel-feed",
     "short": "Feed Tetragon's exec records into your docker sandboxes' process trees (Linux, a root service)",
-    "long": "The sandbox kernel feed is a small root service for a Linux host whose administrator runs\nTetragon: it reads Tetragon's exec and exit records of the processes in OpenShell docker sandboxes\nand streams each sandbox's to its owner's DefenseClaw gateway, which adds them to the sandbox's\nprocess tree (sandbox run --process-tree): processes that live for milliseconds are recorded too.\nIt only reads Tetragon (never a policy call), serves members of the docker group, and gives each\nof them only their own sandboxes' records; docker-group members can already see every container,\nso that filter is a courtesy, not a boundary. Without it the tree is the 5 s sample, as before."
+    "long": "The sandbox kernel feed is a small root service for a Linux host whose administrator runs\nTetragon: it reads Tetragon's exec and exit records of the processes in OpenShell docker sandboxes\nand streams each sandbox's to its owner's DefenseClaw gateway, which adds them to the sandbox's\nprocess tree (sandbox run --process-tree): processes that live for milliseconds are recorded too.\nIt only reads Tetragon (never a policy call), serves members of the docker group, and gives each\nof them only their own sandboxes' records; docker-group members can already see every container,\nso that filter is a courtesy, not a boundary: one of them can also add process records, real or made up,\nto another account's sandbox tree. Without it the tree is the 5 s sample, as before."
   },
   {
     "path": "sandbox kernel-feed install",
