@@ -364,6 +364,9 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		}
 	}
 	reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
+	// A connector whose DefenseClaw entries are gone from its vendor file runs
+	// without hooks, so status fails on it as verify does (GAP-0529).
+	var gone []string
 	for index, name := range removed {
 		message := fmt.Sprintf(
 			"vendor machine policy for %s no longer carries the DefenseClaw hooks the last transaction placed, so %s runs without them; run `%s` to restore them",
@@ -372,6 +375,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 			message += " (" + verifyErr.Error() + ")"
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
+		gone = append(gone, message)
 	}
 	// DefenseClaw's entries in place protect nothing when a higher-precedence
 	// source outranks them (a com.anthropic.claudecode or com.openai.codex
@@ -464,7 +468,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 			state.Connector, len(changed), firstPaths(changed)))
 		r.SecurityComplete = false
 	}
-	return drift
+	return append(gone, drift...)
 }
 
 // claudeVersionFloorConflict starts every Claude Code version floor conflict.

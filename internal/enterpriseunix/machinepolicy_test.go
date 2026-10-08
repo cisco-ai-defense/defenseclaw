@@ -252,6 +252,10 @@ func TestVerifyNamesTheConnectorAndFileOfMachinePolicyDrift(t *testing.T) {
 	if !strings.Contains(about[0], "claudecode (") || !strings.Contains(about[0], claudeDropIn) || !strings.Contains(about[0], "`"+repair+"`") {
 		t.Fatalf("the problem does not name the connector, file and repair: %q", about[0])
 	}
+	// status agrees: the agent runs without hooks (GAP-0529).
+	if status := h.run(Options{Action: ActionStatus}); status.OK || status.SecurityComplete {
+		t.Fatalf("status with the drop-in gone: ok=%v security_complete=%v", status.OK, status.SecurityComplete)
+	}
 	requireOK(t, h.run(Options{Action: ActionRepair}))
 	if !exists(h.env.P(claudeDropIn)) {
 		t.Fatal("repair did not restore the Claude drop-in")
