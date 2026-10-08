@@ -4367,3 +4367,12 @@ def test_gateway_lifecycle_progress_names_a_pending_audit_upgrade(tmp_path, caps
     assert out.startswith("\n    Upgrading the audit database (one time; a large history can take a few minutes)...\n")
     assert "    still starting after 0s: upgrading the audit database" in out
     assert out.endswith("  defenseclaw-gateway:")
+
+
+def test_scanner_provider_switch_clears_old_base_url() -> None:
+    from defenseclaw.commands.cmd_setup import _apply_scanner_llm_flags
+
+    llm = SimpleNamespace(provider="openai", model="old", base_url="https://old.example/v1")
+    _apply_scanner_llm_flags(llm, "bedrock", None, None)
+    assert llm.provider == "bedrock"
+    assert llm.base_url == ""

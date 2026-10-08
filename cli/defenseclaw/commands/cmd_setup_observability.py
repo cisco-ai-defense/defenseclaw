@@ -36,6 +36,7 @@ unparseable config and managed-mode writes remain administrator-gated.
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import os
 import re
@@ -548,7 +549,7 @@ def _add_v8_destination(
             )
     elif plaintext:
         raise ValueError("--plaintext applies to OTLP destinations only")
-    authored = _v8_authored_destinations(data_dir)
+    authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
     matches = [
         (index, existing)
         for index, existing in enumerate(authored)
@@ -593,20 +594,22 @@ def _add_v8_destination(
             data_dir=data_dir,
             validator=validator,
             dry_run=dry_run,
+            expected_before_sha256=expected_sha256,
         )
     except BaseException:
         if secret_changed:
             # GAP-0210: a failed add leaves no key behind in .env.
             try:
-                restore_secret(data_dir, preset.token_env, secret_before, environ_before)
+                restore_secret(data_dir, preset.token_env, secret_before, environ_before, stored_secret)
             except Exception as restore_error:  # noqa: BLE001 - the add error is the one to report.
                 # GAP-0374: a hand-made .env whose permissions DefenseClaw did
                 # not write can refuse the restore. Keep the original error,
                 # take the key out of this process, and say what is left.
-                if environ_before is None:
-                    os.environ.pop(preset.token_env, None)
-                else:
-                    os.environ[preset.token_env] = environ_before
+                if os.environ.get(preset.token_env) == stored_secret:
+                    if environ_before is None:
+                        os.environ.pop(preset.token_env, None)
+                    else:
+                        os.environ[preset.token_env] = environ_before
                 dotenv_path = os.path.join(data_dir, ".env")
                 click.echo(
                     f"  Note: {preset.token_env} is still in {dotenv_path}: it could not be "
@@ -656,18 +659,23 @@ def _staged_secret_validator(overrides: dict[str, str]):
     return validate
 
 
-def _v8_authored_destinations(data_dir: str) -> list[dict[str, Any]]:
+def _v8_authored_destination_snapshot(data_dir: str) -> tuple[list[dict[str, Any]], str]:
     from defenseclaw.observability.v8_config import load_validate_v8
 
     path = config_path_for_data_dir(data_dir)
-    source = load_validate_v8(path.read_bytes(), source_name=str(path)).source
+    source_bytes = path.read_bytes()
+    source = load_validate_v8(source_bytes, source_name=str(path)).source
     observability = source.get("observability")
-    if not isinstance(observability, dict):
-        return []
-    destinations = observability.get("destinations")
-    if not isinstance(destinations, list):
-        return []
-    return [dict(value) for value in destinations if isinstance(value, dict)]
+    destinations = observability.get("destinations") if isinstance(observability, dict) else None
+    authored = (
+        [dict(value) for value in destinations if isinstance(value, dict)]
+        if isinstance(destinations, list) else []
+    )
+    return authored, hashlib.sha256(source_bytes).hexdigest()
+
+
+def _v8_authored_destinations(data_dir: str) -> list[dict[str, Any]]:
+    return _v8_authored_destination_snapshot(data_dir)[0]
 
 
 def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[Any]:
@@ -1006,11 +1014,12 @@ def _destination_platform_status(destination) -> str:
     )
 
 
-def _v8_source_destination_index(data_dir: str, name: str) -> int:
+def _v8_source_destination_snapshot(data_dir: str, name: str) -> tuple[int, str, list[dict]]:
     from defenseclaw.observability.v8_config import load_validate_v8
 
     path = config_path_for_data_dir(data_dir)
-    validated = load_validate_v8(path.read_bytes(), source_name=str(path)).source
+    source = path.read_bytes()
+    validated = load_validate_v8(source, source_name=str(path)).source
     observability = validated.get("observability")
     if not isinstance(observability, dict):
         observability = {}
@@ -1036,7 +1045,11 @@ def _v8_source_destination_index(data_dir: str, name: str) -> int:
         raise click.ClickException(
             ux.not_found_message("observability destination", name, known, "defenseclaw setup observability list")
         )
-    return matches[0]
+    return matches[0], hashlib.sha256(source).hexdigest(), destinations
+
+
+def _v8_source_destination_index(data_dir: str, name: str) -> int:
+    return _v8_source_destination_snapshot(data_dir, name)[0]
 
 
 def _set_v8_destination_enabled(
@@ -1047,11 +1060,12 @@ def _set_v8_destination_enabled(
     from defenseclaw.observability.v8_writer import mutate_v8_config
     from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
-    index = _v8_source_destination_index(data_dir, name)
+    index, expected_sha256, _authored = _v8_source_destination_snapshot(data_dir, name)
     result = mutate_v8_config(
         config_path_for_data_dir(data_dir),
         [V8YAMLMutation.set(("observability", "destinations", index, "enabled"), enabled)],
         data_dir=data_dir,
+        expected_before_sha256=expected_sha256,
     )
     state = "enabled" if enabled else "disabled"
     suffix = "" if result.changed else " (already set)"
@@ -1062,15 +1076,12 @@ def _remove_v8_destination(data_dir: str, name: str) -> None:
     from defenseclaw.observability.v8_writer import mutate_v8_config
     from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
-    index = _v8_source_destination_index(data_dir, name)
-    try:
-        authored = _v8_authored_destinations(data_dir)
-    except (OSError, ValueError):
-        authored = []
+    index, expected_sha256, authored = _v8_source_destination_snapshot(data_dir, name)
     mutate_v8_config(
         config_path_for_data_dir(data_dir),
         [V8YAMLMutation.delete(("observability", "destinations", index))],
         data_dir=data_dir,
+        expected_before_sha256=expected_sha256,
     )
     click.echo(f"  {name}: removed")
     # GAP-1892: add wrote the key to .env; say so when nothing else uses it.

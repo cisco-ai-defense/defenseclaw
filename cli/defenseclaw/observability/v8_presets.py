@@ -163,11 +163,15 @@ def apply_secret(
     return [f"{preset.token_env}: written to {path}"]
 
 
-def restore_secret(data_dir: str, key: str, previous: str | None, previous_environ: str | None) -> None:
-    """Put ``key`` back as it was before :func:`apply_secret` (GAP-0210)."""
+def restore_secret(
+    data_dir: str, key: str, previous: str | None, previous_environ: str | None, written: str
+) -> None:
+    """Restore our write only if a newer setup has not replaced its value."""
 
     def merge(payload: bytes) -> bytes:
         existing = _load_dotenv(payload)
+        if existing.get(key) != written:
+            return payload
         if previous is None:
             existing.pop(key, None)
         else:
@@ -175,10 +179,11 @@ def restore_secret(data_dir: str, key: str, previous: str | None, previous_envir
         return _write_dotenv(existing)
 
     update_private_file(os.path.join(data_dir, DOTENV_FILE_NAME), owner_directory=data_dir, transform=merge)
-    if previous_environ is None:
-        os.environ.pop(key, None)
-    else:
-        os.environ[key] = previous_environ
+    if os.environ.get(key) == written:
+        if previous_environ is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous_environ
 
 
 def secret_note_is_info(preset: Preset, message: str) -> bool:

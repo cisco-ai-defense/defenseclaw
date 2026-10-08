@@ -1525,15 +1525,34 @@ def _print_native_delivery_status(summary, *, configured: set[str] | None = None
 
 
 def _scanner_overrides_summary(cfg) -> str:
-    """One-line summary of the per-type admission actions config.yaml sets
-    (N3), the same list the TUI Overview shows, e.g. ``mcp: MEDIUM
-    install=block, file=quarantine``. ``""`` when none are set."""
+    """Summarize v9 admission actions or Secure Client v8 scanner overrides."""
     try:
+        from defenseclaw.enforce import asset_lists
         from defenseclaw.tui.services.overview_state import (
             admission_action_overrides,
             format_scanner_overrides_summary,
         )
 
+        if asset_lists.is_secure_client(cfg):
+            from defenseclaw.enforce.admission import _read_policy_data
+
+            data = _read_policy_data(getattr(cfg, "policy_dir", "") or "")
+            if not isinstance(data, dict):
+                return ""
+            flat: list[tuple[str, str, str, str]] = []
+            overrides = data.get("scanner_overrides", {})
+            if isinstance(overrides, dict):
+                for scanner_type, sevs in overrides.items():
+                    if not isinstance(sevs, dict):
+                        continue
+                    for severity, surface_actions in sevs.items():
+                        if not isinstance(surface_actions, dict):
+                            continue
+                        for surface in ("install", "file", "runtime"):
+                            action = surface_actions.get(surface)
+                            if action:
+                                flat.append((str(scanner_type), str(severity), surface, str(action)))
+            return format_scanner_overrides_summary(tuple(flat))
         return format_scanner_overrides_summary(admission_action_overrides(cfg))
     except Exception:  # noqa: BLE001 — the override line is purely informational.
         return ""
