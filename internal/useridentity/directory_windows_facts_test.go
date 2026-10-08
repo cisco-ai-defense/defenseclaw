@@ -103,6 +103,26 @@ func TestADUPNCacheWaitsAndRetriesFailures(t *testing.T) {
 	}
 }
 
+// A UPN-only rename leaves the SID and sAMAccountName unchanged. The next
+// directory refresh must retranslate instead of selecting the old user profile.
+func TestADUPNCacheRetranslatesBeforeDirectoryRefresh(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	upn := "old@corp.example.com"
+	calls := 0
+	cache := newADUPNCache(func(string) string { calls++; return upn })
+	cache.now = func() time.Time { return now }
+	const sid = "S-1-5-21-1-2-3-1105"
+	const sam = `CORP\alice`
+	if got := cache.lookup(sid, sam, time.Second); got != upn {
+		t.Fatalf("initial UPN = %q", got)
+	}
+	upn = "new@corp.example.com"
+	now = now.Add(15 * time.Minute)
+	if got := cache.lookup(sid, sam, time.Second); got != upn || calls != 2 {
+		t.Fatalf("UPN after directory refresh = %q after %d translations; want %q after 2", got, calls, upn)
+	}
+}
+
 func TestWindowsBuiltInAndServiceSIDsAreLocal(t *testing.T) {
 	reader := fakeWindowsReader{
 		accounts: map[string][2]string{
