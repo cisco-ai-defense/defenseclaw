@@ -13,6 +13,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -110,6 +111,14 @@ func TestForeignHookGuardDeniesWhenGatewaySessionStateIsUnavailable(t *testing.T
 	// remove a hook.
 	if !strings.Contains(decision.ManagedRuntimeFailure, "with its gateway") || strings.Contains(decision.ManagedRuntimeFailure, "unapproved hook") {
 		t.Fatalf("the unavailable-gateway reason must name the gateway, not a hook: %q", decision.ManagedRuntimeFailure)
+	}
+	// GAP-0578: a stopped gateway is no foreign-hook finding; the block uses
+	// the not-running reason every managed hook uses.
+	hookForeignGuardExchange = func(string, string, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+		return enterprisepolicy.GuardDecision{}, fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
+	}
+	if stopped := fixture.runEvent(t, "claudecode", "SessionStart", "session_id", "s-2"); stopped.ManagedRuntimeFailure != hookexec.ManagedGatewayNotRunningReason {
+		t.Fatalf("a stopped gateway must block with the not-running reason: %q", stopped.ManagedRuntimeFailure)
 	}
 }
 

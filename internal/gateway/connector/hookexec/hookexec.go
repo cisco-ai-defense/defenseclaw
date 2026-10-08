@@ -443,7 +443,7 @@ func Run(ctx context.Context, opts Options) int {
 				)
 			}
 			if err != nil {
-				return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+				return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -1412,7 +1412,13 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	if !opts.ManagedEnterprise || sp.connector != "copilot" {
 		return 0, false
 	}
-	message := mustJSONString(managedCopilotDenyMessage(reason))
+	text := managedCopilotDenyMessage(reason)
+	if reason == managedGatewayNotRunningReason {
+		// Only a standalone hook gets this reason (managedPeerFailureReason,
+		// the foreign-hook guard); say the service is stopped and who starts it.
+		text = managedStandaloneFailClosedText(opts.Event, "transport", reason)
+	}
+	message := mustJSONString(text)
 	var body string
 	// Exact reviewed event names only: an unreviewed spelling never reaches
 	// the gateway and never synthesizes enforcement.
@@ -1425,7 +1431,7 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 		if sp.dialect != copilotVSCodeLocalSurface {
 			return 0, false
 		}
-		if body = copilotVSCodeLocalOutput(opts.Event, "block", managedCopilotDenyMessage(reason)); body == "" {
+		if body = copilotVSCodeLocalOutput(opts.Event, "block", text); body == "" {
 			return 0, false
 		}
 	}
@@ -1614,14 +1620,31 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 }
 
 // managedPeerFailureReason is the hook-failure reason of a managed
-// peer-verification failure: a Windows standalone hook says when the gateway
-// service is simply not running; every other hook keeps
+// peer-verification failure: a standalone hook (Windows, or a Unix hook whose
+// socket is missing or refuses the connection) says when the gateway service
+// is simply not running; the Secure Client profile keeps
 // managedGatewayPeerUnverifiedReason.
 func managedPeerFailureReason(opts Options, err error) string {
-	if opts.ExplainUnenrolledAccount && errors.Is(err, errManagedGatewayNotRunning) {
+	if (opts.ExplainUnenrolledAccount || managedStandaloneHook(opts)) && errors.Is(err, errManagedGatewayNotRunning) {
 		return managedGatewayNotRunningReason
 	}
 	return managedGatewayPeerUnverifiedReason
+}
+
+// ManagedGatewayNotRunningReason is the reason code of a managed hook whose
+// gateway service is not running.
+const ManagedGatewayNotRunningReason = managedGatewayNotRunningReason
+
+// ErrManagedGatewayNotRunning is wrapped by every managed hook transport
+// error that means the gateway service is not running.
+var ErrManagedGatewayNotRunning = errManagedGatewayNotRunning
+
+// ManagedGatewayNotRunning reports an error from a managed hook transport
+// (ExchangeForeignHookSession included) that means the gateway service is
+// not running: a stopped Windows service, or a missing or refusing Unix hook
+// socket.
+func ManagedGatewayNotRunning(err error) bool {
+	return errors.Is(err, errManagedGatewayNotRunning)
 }
 
 // failManagedStandaloneClosed delivers a Unix standalone managed hook's

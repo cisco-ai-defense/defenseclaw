@@ -397,6 +397,22 @@ async function deploymentRemoved(): Promise<boolean> {
 	}
 }
 
+// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
+// service is stopped, in the words of the native hook, instead of the
+// runtime's network error (GAP-0639).
+const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
+	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+	"(enterprise_managed_gateway_not_running)"
+
+// gatewayStopped reports a transport failure that means the gateway is not
+// running: its hook socket is missing, or nothing accepts the connection
+// (Node ECONNREFUSED, Bun ConnectionRefused).
+function gatewayStopped(error: unknown): boolean {
+	const failure = error as { code?: unknown; cause?: { code?: unknown } } | null
+	const codes = [failure?.code, failure?.cause?.code]
+	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
+}
+
 function failureResponse(reason: string): GatewayResponse {
 	if (DC_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
@@ -585,6 +601,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
+			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
+				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
+			}
 			return failureResponse(safeError(error))
 		} finally {
 			clearTimeout(timer)

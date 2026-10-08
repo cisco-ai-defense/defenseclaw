@@ -173,6 +173,19 @@ func TestStandaloneHookSocketImpostorGetsZeroBytes(t *testing.T) {
 	}
 }
 
+// GAP-0581: with the gateway service and its socket unit stopped the hook
+// socket is gone. The hook fails closed and says the service is stopped, with
+// the not-running reason code, instead of sending the user to socket
+// ownership checks.
+func TestStandaloneHookSocketMissingSaysGatewayStopped(t *testing.T) {
+	result := standaloneRun(t, filepath.Join(shortSocketDir(t), "hook.sock"), os.Getuid())
+	out := result.stdout + result.stderr
+	if result.code == 0 || !strings.Contains(out, "gateway service is not running") ||
+		!strings.Contains(out, managedGatewayNotRunningReason) || strings.Contains(out, "not owned") {
+		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 func TestValidateStandaloneHookSocketPath(t *testing.T) {
 	dir := shortSocketDir(t)
 	regular := filepath.Join(dir, "file")

@@ -619,12 +619,27 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
     if (DC_FAIL_MODE === "closed") {
+      if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
+// service is stopped, in the words of the native hook (GAP-0578).
+const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
+  "Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+  "(enterprise_managed_gateway_not_running)";
+
+// defenseclawGatewayStopped reports a transport failure that means the
+// gateway is not running: its hook socket is missing, or nothing accepts
+// the connection.
+function defenseclawGatewayStopped(err) {
+  const codes = [err && err.code, err && err.cause && err.cause.code];
+  return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused");
 }
 
 async function defenseclawPostLoadHeartbeat(cwd) {
