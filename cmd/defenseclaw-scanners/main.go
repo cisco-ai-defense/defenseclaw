@@ -148,11 +148,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var scriptArgs []string
 	switch args[0] {
 	case "prepare":
+		fmt.Fprintln(stderr, "defenseclaw-scanners: unpacking and checking the runtime")
 		dir, err := prepareRuntime(manifest)
 		if err != nil {
 			fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
 			return 1
 		}
+		fmt.Fprintln(stderr, "defenseclaw-scanners: compiling the Python files")
 		compileRuntime(dir, stderr)
 		fmt.Fprintln(stdout, dir)
 		return 0

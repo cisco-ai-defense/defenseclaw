@@ -109,9 +109,12 @@ def test_config_show_has_every_section_and_get_reads_one_key(tmp_path: Path) -> 
         patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
         patch.object(cmd_config, "inspect_v8_config", side_effect=AssertionError("observability plan")),
         patch.object(cmd_config, "load_validate_v8", side_effect=AssertionError("full validation")),
+        patch.object(cmd_config.config_module, "load", wraps=cmd_config.config_module.load) as load,
     ):
         fast = CliRunner().invoke(cmd_config.config_cmd, ["get", "asset_policy.enabled"])
     assert fast.exit_code == 0 and fast.output == "true\n", fast.output
+    # ... and the configuration is loaded once, not once per helper.
+    assert load.call_count == 1
 
 
 def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

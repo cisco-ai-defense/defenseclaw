@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -200,5 +201,49 @@ func TestProtectionsComposeOntoAPinnedCustomPackForEveryConnector(t *testing.T) 
 		if !strings.Contains(strings.Join(got.RuleIDs, ","), "impact.cloud_resource_delete") || got.Action != "block" {
 			t.Fatalf("%s: rules=%v action=%q, want a block by impact.cloud_resource_delete", connector, got.RuleIDs, got.Action)
 		}
+	}
+}
+
+// GAP-0276: every profile resolves to the same loaded packs, and the build
+// digests each pack once; it digested one per profile scope, which with
+// 1,000 profiles added seconds to gateway start.
+func TestBuildGenerationDigestsEachRulePackOnce(t *testing.T) {
+	cfg := &config.Config{PolicyDir: repoPolicyDir(t)}
+	cfg.Guardrail.RulePack = "default"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{}
+	for i := 0; i < 40; i++ {
+		cfg.Guardrail.Profiles[fmt.Sprintf("scale-%02d", i)] = config.GuardrailProfile{
+			Mode:       "observe",
+			Connectors: map[string]config.PerConnectorGuardrailConfig{"claudecode": {Mode: "observe"}, "codex": {Mode: "observe"}},
+		}
+	}
+	cache := guardrail.NewRulePackCache()
+	global, err := loadGlobalRulePack(cache, cfg, "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := newGuardrailProfileSet(cfg, cache, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := 0
+	previous := rulePackComponentDigest
+	t.Cleanup(func() { rulePackComponentDigest = previous })
+	rulePackComponentDigest = func(pack *guardrail.RulePack) string {
+		digests++
+		return previous(pack)
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{
+		cfg: cfg, rulePacks: &sidecarRulePackCandidate{global: global, active: global}, profiles: profiles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct := map[*guardrail.RulePack]bool{}
+	for _, pack := range g.RulePacks {
+		distinct[pack] = true
+	}
+	if len(g.RulePacks) <= len(distinct) || digests != len(distinct) {
+		t.Fatalf("%d pack scopes, %d distinct packs, %d digests: want one digest per distinct pack", len(g.RulePacks), len(distinct), digests)
 	}
 }

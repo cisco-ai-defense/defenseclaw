@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -130,7 +131,8 @@ func windowsEnterpriseHotConfigCandidate(opts *windowsEnterpriseLifecycleOptions
 // windowsEnterpriseHotConfigApply applies the supplied config to the running
 // gateway and fills result from a verify of the host. It returns false,
 // with config.yaml as it was, when the change must go through the upgrade
-// transaction.
+// transaction, and then the changed keys the services read only at start,
+// if that is why.
 func windowsEnterpriseHotConfigApply(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -138,38 +140,56 @@ func windowsEnterpriseHotConfigApply(
 	script string,
 	status *windowsEnterpriseInstallerReport,
 	result *enterprisestatus.Result,
-) bool {
+) (bool, []string) {
 	if !windowsEnterpriseHotConfigCandidate(opts, status) {
-		return false
+		return false, nil
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
-		return false
+		return false, nil
 	}
 	// An untrusted source goes to the transaction, which refuses it and
 	// says why.
 	if windowsEnterpriseHotConfigSourceCheck(opts.configPath) != nil {
-		return false
+		return false, nil
 	}
 	next, err := readWindowsEnterpriseBoundedFile(opts.configPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	previous, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil || config.NeedsMigrationV9(next) || config.NeedsMigrationV9(previous) {
-		return false
+		return false, nil
 	}
 	changed, err := configwrite.ChangedPaths(previous, next)
-	if err != nil || bytes.Equal(previous, next) || len(configwrite.ManagedRestartRequired(changed)) > 0 {
-		return false
+	if err != nil || bytes.Equal(previous, next) {
+		return false, nil
+	}
+	// A file that changes no setting (line endings, comments, formatting)
+	// is installed the same way: the gateway reloads it to the same policy
+	// (GAP-0601). Who is enrolled and which connectors are is applied too:
+	// the gateway reads neither at start on Windows, and the targets are
+	// refreshed below (GAP-0716).
+	restart := configwrite.ManagedRestartRequired(changed)
+	refreshTargets := false
+	var startOnly []string
+	for _, path := range restart {
+		if !windowsEnterpriseHotTargetsPath(path) {
+			startOnly = append(startOnly, path)
+			continue
+		}
+		refreshTargets = true
+	}
+	if len(startOnly) > 0 {
+		return false, startOnly
 	}
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 	if err != nil {
-		return false
+		return false, nil
 	}
 	defer release()
 
@@ -182,7 +202,7 @@ func windowsEnterpriseHotConfigApply(
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
 	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, "enterprise windows ensure"); err != nil {
-		return false
+		return false, nil
 	}
 	// Undoing puts the config back. A config the record named is recorded
 	// again as a new generation: the counter never goes back, because the
@@ -200,17 +220,26 @@ func windowsEnterpriseHotConfigApply(
 	}
 	if _, err := windowsEnterpriseHotConfigValidate(layout.ConfigPath, layout.DataDir, layout.ServiceUser, false); err != nil {
 		undo()
-		return false
+		return false, nil
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx) {
 		undo()
-		return false
+		return false, nil
+	}
+	// The enumerator publishes the targets the new config enrolls, as the
+	// upgrade transaction does; the guardian reconciles them with the config
+	// it reloads (enterpriseHookStandaloneConfigRefresh).
+	if refreshTargets {
+		if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
+			undo()
+			return false, nil
+		}
 	}
 	verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
 		windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil || !verifyReport.OK {
 		undo()
-		return false
+		return false, nil
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
 	result.Changes = append(result.Changes, "applied the config change in the running gateway; it was not restarted")
@@ -218,12 +247,50 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+kept)
 	}
 	applyWindowsEnterprisePolicy(ctx, result)
-	changeSummary := strings.Join(changed, ", ")
-	if len(changed) == 0 {
-		changeSummary = "formatting only"
+	applied := strings.Join(changed, ", ")
+	switch {
+	case len(changed) == 0:
+		applied = "no setting changed (line endings, comments or formatting only)"
+	case refreshTargets:
+		result.Changes = append(result.Changes, "refreshed the enrolled targets; the hook guardian registers and removes hooks for them without a restart")
 	}
-	result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+changeSummary)
-	return true
+	result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
+	return true, nil
+}
+
+// windowsEnterpriseHotTargetsPath reports a restart-required change
+// (configwrite.ManagedRestartRequired) that the Windows hot path applies
+// all the same: an enrollment list (enterprise.enrollment include_users,
+// exclude_users, include_groups, exclude_groups, exempt_users) or the
+// connector set (guardrail.connectors.<name>[.enabled]). The gateway reads
+// neither at start here, the enumerator reads config.yaml on every cycle,
+// and the guardian reloads a changed config before it reconciles. Every
+// other enterprise key still goes through the upgrade transaction.
+func windowsEnterpriseHotTargetsPath(path string) bool {
+	switch path {
+	case "enterprise.enrollment.include_users", "enterprise.enrollment.exclude_users",
+		"enterprise.enrollment.include_groups", "enterprise.enrollment.exclude_groups",
+		"enterprise.enrollment.exempt_users":
+		return true
+	}
+	parts := strings.Split(path, ".")
+	return len(parts) >= 3 && len(parts) <= 4 && parts[0] == "guardrail" && parts[1] == "connectors" &&
+		(len(parts) == 3 || parts[3] == "enabled")
+}
+
+// windowsEnterpriseHotConfigRefreshTargets runs one enumerator cycle with
+// the installed CLI under the service pins, as the upgrade transaction does
+// (Invoke-DefenseClawEnumeratorRefresh). A seam for tests.
+var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout managed.StandaloneLayout) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, managedWindowsAdminCLI(),
+		"enterprise", "windows", "enumerate", "--manifest", layout.ManifestPath, "--once")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
+	if out, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("refresh the enrolled targets: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // windowsEnterpriseHotConfigAdopted waits for the gateway to report the

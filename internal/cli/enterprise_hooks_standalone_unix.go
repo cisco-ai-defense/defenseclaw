@@ -1067,6 +1067,11 @@ func enterpriseHookStandaloneConfigChanged(startup string, w io.Writer) bool {
 	return true
 }
 
+// enterpriseHookStandaloneConfigRefresh is the Windows in-place config
+// reload; the Unix guardian exits on a changed config instead
+// (enterpriseHookStandaloneConfigChanged).
+func enterpriseHookStandaloneConfigRefresh(io.Writer) {}
+
 // enterpriseHookStandaloneHookTransport returns the gateway's unix hook socket
 // and service uid from the root-owned runtime descriptor. Per-user hooks and
 // in-agent plugins use only that peer-authorized socket: a descriptor that

@@ -127,11 +127,15 @@ type Sidecar struct {
 	// complete verification/Setup transaction. Config publication takes the
 	// write side, so an older fail-mode Setup cannot finish after a newer
 	// runtime policy becomes authoritative.
-	hookPolicyMu             sync.RWMutex
-	proxyMu                  sync.RWMutex
-	guardrailProxy           *GuardrailProxy
-	apiRestartCh             chan struct{}
-	watcherRestartCh         chan struct{}
+	hookPolicyMu     sync.RWMutex
+	proxyMu          sync.RWMutex
+	guardrailProxy   *GuardrailProxy
+	apiRestartCh     chan struct{}
+	watcherRestartCh chan struct{}
+	// enrolledWatchRoots are the enrolled user folders the previous
+	// watcher of this process watched (runWatcher only); nil before the
+	// first.
+	enrolledWatchRoots       map[string]struct{}
 	guardrailRestartCh       chan struct{}
 	aiRestartCh              chan struct{}
 	aiRuntimeRestartCh       chan struct{}
@@ -3601,6 +3605,12 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
+	if enrolled != nil {
+		// A folder that appeared since the previous watcher (a user made
+		// ~/.claude/skills, or a user was enrolled) holds what was added
+		// meanwhile: admit it at startup (GAP-0571).
+		w.AdmitNewRootsAtStartup(s.newEnrolledWatchRoots(append(append([]string(nil), skillDirs...), pluginDirs...)))
+	}
 	w.SetConfigSource(s.currentConfig)
 	w.SetRulePackSource(installScanRulePack)
 	// Admission evaluates the live generation's prepared OPA, which the

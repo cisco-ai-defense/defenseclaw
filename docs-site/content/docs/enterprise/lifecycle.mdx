@@ -462,14 +462,30 @@ installed one only in such keys: `ensure` replaces `config.yaml` with its
 access control kept, waits up to 30 seconds for the gateway to report the new
 policy, and verifies the deployment. The result lists the change and the
 warning `ensure_config_applied`; no service stops and no agent fails closed.
+Such an `ensure` takes about a minute, most of it the verify.
+
+Two kinds of change take this path on Windows too:
+
+- A file that changes no setting: other line endings (CRLF or LF), comments or
+  formatting. `ensure` installs the new file and the warning says that no
+  setting changed.
+- A change of who is enrolled or which connectors are: the user and group
+  lists of `enterprise.enrollment` (`include_users`, `exclude_users`,
+  `include_groups`, `exclude_groups`, `exempt_users`) and the connector set
+  (`guardrail.connectors.<name>` and its `enabled`). `ensure` also refreshes
+  the enrolled targets, and the hook guardian reloads the config and
+  registers or removes the hooks without a restart, as it does for a new
+  user.
+
 If the gateway does not report the policy in time, or the lifecycle lock is
 busy, `ensure` puts the previous config back and runs the full upgrade, as it
 did for every change before. A change to a process-level key restarts it:
-`gateway.*`, `guardrail.hook_self_heal`, `enterprise.network` and the other
-keys that [Source of truth](/docs/reference/source-of-truth) lists. A
-connector enabled flip (`guardrail.connectors.*.enabled`) also takes the full
-transaction, because the enterprise hook guardian installs and removes the
-hooks.
+`gateway.*`, `guardrail.hook_self_heal`, `enterprise.network`, the other
+`enterprise` keys and the keys that
+[Source of truth](/docs/reference/source-of-truth) lists. That `ensure` stops
+every service for one to three minutes and takes two to six minutes; its
+`ensure_upgrade` warning names the keys that made it restart. Only a new
+release (other binaries or a higher version) runs the upgrade otherwise.
 
 ## Uninstall
 

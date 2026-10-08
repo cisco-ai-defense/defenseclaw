@@ -11,3 +11,6 @@ package scanner
 func resolveScannerRuntime(binary string, _ ...string) string {
 	return binary
 }
+
+// scannerRuntimeProblem is nil: no other OS has a managed scanner runtime.
+var scannerRuntimeProblem = func() error { return nil }

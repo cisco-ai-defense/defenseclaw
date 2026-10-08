@@ -36,6 +36,7 @@ func TestDiffConfigsSeesStandaloneEnterpriseChanges(t *testing.T) {
 		mutate      func(*config.Config)
 		wantChanged string
 		wantRestart bool
+		listsHot    bool
 	}{
 		{
 			name: "ai defense enabled",
@@ -56,8 +57,18 @@ func TestDiffConfigsSeesStandaloneEnterpriseChanges(t *testing.T) {
 			wantChanged: "enterprise",
 			wantRestart: true,
 		},
+		{
+			// GAP-0716: on Windows who is enrolled reloads in place.
+			name:        "exclude_users on windows",
+			mutate:      func(c *config.Config) { c.Enterprise.Enrollment.ExcludeUsers = []string{"dcw-eo5"} },
+			wantChanged: "enterprise.enrollment",
+			listsHot:    true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			previous := standaloneEnrollmentListsHot
+			standaloneEnrollmentListsHot = test.listsHot
+			t.Cleanup(func() { standaloneEnrollmentListsHot = previous })
 			next := cloneConfig(base)
 			test.mutate(next)
 			diff := diffConfigs(base, next)

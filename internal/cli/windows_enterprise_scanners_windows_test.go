@@ -89,6 +89,22 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 			t.Fatalf("%s: errors=%+v warnings=%+v scanners=%+v", action, result.Errors, result.Warnings, result.Scanners)
 		}
 	}
+
+	// GAP-0686: a prepared runtime the gateway service cannot run fails
+	// verify too; before, verify said ok while every rescan failed.
+	readerSeam, checkSeam := windowsScannerRuntimeReader, windowsScannerRuntimeServiceCheck
+	t.Cleanup(func() { windowsScannerRuntimeReader, windowsScannerRuntimeServiceCheck = readerSeam, checkSeam })
+	windowsScannerRuntimeReader = func() *enterprisestatus.ScannerRuntime {
+		return &enterprisestatus.ScannerRuntime{State: "ready", JudgeModel: "judge"}
+	}
+	windowsScannerRuntimeServiceCheck = func() error { return errors.New("the gateway service account cannot read it") }
+	result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	result.Installed = true
+	applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})
+	if len(result.Errors) != 1 || result.Errors[0].Code != "scanner_runtime_unavailable" ||
+		!strings.Contains(result.Errors[0].Message, "cannot read it") {
+		t.Fatalf("a runtime the gateway cannot run: errors=%+v", result.Errors)
+	}
 }
 
 // GAP-0311: the staged scanner executable is admitted like every other
@@ -147,12 +163,20 @@ func TestWindowsScannerRuntimeTimeoutIsNamed(t *testing.T) {
 		time.Sleep(30 * time.Second)
 		return
 	}
-	seam := windowsScannerPrepareTimeout
-	t.Cleanup(func() { windowsScannerPrepareTimeout = seam })
+	seam, progressSeam, heartbeatSeam := windowsScannerPrepareTimeout, windowsScannerProgress, windowsScannerHeartbeat
+	t.Cleanup(func() {
+		windowsScannerPrepareTimeout, windowsScannerProgress, windowsScannerHeartbeat = seam, progressSeam, heartbeatSeam
+	})
 	windowsScannerPrepareTimeout = 500 * time.Millisecond
+	// GAP-0642: the wait reports itself while it runs.
+	var progress bytes.Buffer
+	windowsScannerProgress, windowsScannerHeartbeat = &progress, 100*time.Millisecond
 	t.Setenv("DC_SCANNER_RUNTIME_HELPER", "sleep")
 	err := runWindowsScannerRuntime(os.Args[0], "-test.run=^TestWindowsScannerRuntimeTimeoutIsNamed$")
 	if err == nil || !strings.Contains(err.Error(), "timed out after 500ms") {
 		t.Fatalf("err = %v, want it to name the timeout", err)
+	}
+	if !strings.Contains(progress.String(), "is still running") || !strings.Contains(progress.String(), "stopped after 500ms") {
+		t.Fatalf("progress = %q, want the elapsed time and the bound while it waits", progress.String())
 	}
 }

@@ -87,11 +87,12 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		g.active = rp.active
 	}
 	if in.profiles != nil {
+		tuned := profileConnectorNames(in.profiles.base)
 		for name, derived := range in.profiles.profiles {
 			if pack := in.profiles.packs[globalRulePackScope(derived.Config).key()]; pack != nil {
 				g.RulePacks["prof:"+name] = pack
 			}
-			for _, connector := range thresholdConnectorNames(derived.Config) {
+			for _, connector := range thresholdConnectorNamesWith(derived.Config, tuned) {
 				if pack := in.profiles.packs[effectiveRulePackKey(derived.Config, connector)]; pack != nil {
 					g.RulePacks["prof:"+name+"/"+connector] = pack
 				}
@@ -141,8 +142,17 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		return nil, fmt.Errorf("generation: providers: %w", err)
 	}
 	g.Components["providers"] = g.Providers.digest()
+	// Every profile scope that resolves to a pack points at the same loaded
+	// pack, so each pack is digested once: digesting it per scope cost about
+	// 1.5 s of gateway start with 1,000 profiles (GAP-0276).
+	packDigests := make(map[*guardrail.RulePack]string, 4)
 	for key, pack := range g.RulePacks {
-		g.Components["rule_pack:"+key] = "sha256:" + pack.Summary().Digest
+		digest, done := packDigests[pack]
+		if !done {
+			digest = rulePackComponentDigest(pack)
+			packDigests[pack] = digest
+		}
+		g.Components["rule_pack:"+key] = digest
 	}
 	if g.OPA != nil {
 		g.Components["rego"] = g.OPA.RegoDigest
@@ -158,6 +168,12 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	g.assetDirs = generationAssetDirs(cfg, g)
 	g.assetFiles = generationAssetFiles(cfg)
 	return g, nil
+}
+
+// rulePackComponentDigest is a pack's effective-digest component; a seam
+// for tests.
+var rulePackComponentDigest = func(pack *guardrail.RulePack) string {
+	return "sha256:" + pack.Summary().Digest
 }
 
 // generationAssetFiles lists the single-file assets the effective digest

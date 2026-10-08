@@ -135,9 +135,16 @@ func TestStandaloneGatewayConfigCheckRefusesAStaleCustomPackPin(t *testing.T) {
 	}
 	body := strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
 		`  rule_pack_dir: ""`, "  rule_pack: acme\n  custom_packs:\n    acme:\n      path: '"+pack+"'\n      digest: sha256:"+strings.Repeat("0", 64), 1)
-	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
-	if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") ||
-		!strings.Contains(err.Error(), "rulepack validate --dir") {
-		t.Fatalf("stale custom pack pin = %v, want the digest to pin and the command that prints it", err)
+	// An environment-backed token the check cannot resolve does not skip
+	// the pin check (GAP-0188).
+	withToken := body + "observability:\n  destinations:\n    - name: hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://splunk.example.test\n      token_env: DC_TEST_UNSET_HEC_TOKEN\n"
+	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")
+	for _, config := range []string{body, withToken} {
+		err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, config), t.TempDir(), "")
+		if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") ||
+			!strings.Contains(err.Error(), "rulepack validate --dir") {
+			t.Fatalf("stale custom pack pin = %v, want the digest to pin and the command that prints it", err)
+		}
 	}
 }

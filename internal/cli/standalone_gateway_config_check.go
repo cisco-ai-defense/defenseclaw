@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -33,16 +34,24 @@ import (
 func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string) error {
 	restore := snapshotProcessEnvironment()
 	defer restore()
+	var runtime *config.Config
 	loaded, err := loadConfigV8FileWithCredentials(configPath, dataDir, credentialsDir)
 	if err != nil {
 		var secretError *config.V8SecretReferenceError
-		if errors.As(err, &secretError) && !secretError.Credential {
+		if !errors.As(err, &secretError) || secretError.Credential {
+			failure := configV8ValidationFailure(err)
+			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, failure.Path, failure.Reason)
+		}
+		// The rule packs do not depend on the secret, so they are still
+		// checked. Before, a config with an observability token_env
+		// skipped the pack check, and a stale custom_packs pin stopped the
+		// services and failed only after the readiness wait (GAP-0188).
+		if runtime = standaloneGatewayRuntimeCandidate(configPath); runtime == nil {
 			return nil
 		}
-		failure := configV8ValidationFailure(err)
-		return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, failure.Path, failure.Reason)
+	} else {
+		runtime = loaded.runtime
 	}
-	runtime := loaded.runtime
 	if runtime == nil || !runtime.Guardrail.Enabled {
 		return nil
 	}
@@ -66,6 +75,24 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		return fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %v", configPath, err)
 	}
 	return nil
+}
+
+// standaloneGatewayRuntimeCandidate decodes configPath as the gateway does,
+// without resolving secret references, or returns nil.
+func standaloneGatewayRuntimeCandidate(configPath string) *config.Config {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil
+	}
+	raw, err := readConfigV8Source(absPath)
+	if err != nil {
+		return nil
+	}
+	candidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	if err != nil {
+		return nil
+	}
+	return candidate
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can

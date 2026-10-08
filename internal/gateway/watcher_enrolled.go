@@ -98,6 +98,24 @@ func (e enrolledWatchSet) mcpKey() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// newEnrolledWatchRoots returns the folders in dirs that the previous
+// watcher of this process did not watch, and remembers dirs for the next.
+// The first watcher of a process gets none: at gateway start the root
+// markers decide what the startup rescan admits.
+func (s *Sidecar) newEnrolledWatchRoots(dirs []string) []string {
+	var added []string
+	next := make(map[string]struct{}, len(dirs))
+	for _, dir := range dirs {
+		key := strings.ToLower(filepath.Clean(dir))
+		next[key] = struct{}{}
+		if _, seen := s.enrolledWatchRoots[key]; !seen && s.enrolledWatchRoots != nil {
+			added = append(added, dir)
+		}
+	}
+	s.enrolledWatchRoots = next
+	return added
+}
+
 // resolveEnrolledWatchSet lists, for every user the hook guardian protects,
 // the existing skill and plugin folders of that user's connector and the
 // user's MCP servers. The folders are the connector's ComponentTargets for

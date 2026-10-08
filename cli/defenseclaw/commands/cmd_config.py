@@ -34,6 +34,7 @@ Subcommands:
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import os
@@ -279,7 +280,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             _echo_value(value, fmt)
             return
     if written is not None:
-        view = _merge_defaults(written, _v8_defaults(app))
+        profile_key = parts[:2] in (["guardrail", "profiles"], ["guardrail", "profile_assignments"])
+        view = _merge_defaults(written, _v8_defaults(app, profiles=profile_key))
         if parts == ["guardrail", "hook_self_heal"]:
             view.setdefault("guardrail", {}).setdefault("hook_self_heal", True)
         _resolve_defaults(app, view, written)
@@ -407,10 +409,19 @@ def _resolves_when_unset(parts: list) -> bool:
     )
 
 
+def _loaded_config(app: AppContext):
+    """The configuration, loaded once per command: config get read it in
+    up to three helpers, each a full parse and validation of every profile
+    (GAP-0276)."""
+    if app.cfg is None:
+        app.cfg = config_module.load()
+    return app.cfg
+
+
 def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | None:
     """The resolved value of a guardrail level or admission.<type> key and its
     source, as the gateway resolves them; None for any other key."""
-    cfg = app.cfg if app.cfg is not None else config_module.load()
+    cfg = _loaded_config(app)
     if parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS:
         if len(parts) == 2:
             connector = ""
@@ -857,19 +868,26 @@ def _v8_sections() -> set[str]:
     return {key for key in schema.get("properties") or {} if removed.get(key) is not False}
 
 
-def _v8_defaults(app: AppContext) -> dict:
+def _v8_defaults(app: AppContext, *, profiles: bool = True) -> dict:
     """The masked values the CLI runs with, pruned to v8 schema keys.
 
     They fill the keys config.yaml leaves out, so a fresh install shows
-    asset_policy.enabled and the rest (GAP-2171).
+    asset_policy.enabled and the rest (GAP-2171). Without profiles the
+    guardrail profiles and their assignments are left out: config.yaml holds
+    every one of them, and masking 1,000 of them for a key elsewhere made
+    config get several times slower (GAP-0276).
     """
     schema = _v8_schema()
     if not schema:
         return {}
     try:
-        cfg = app.cfg if app.cfg is not None else config_module.load()
+        cfg = _loaded_config(app)
     except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
         cfg = config_module.default_config()
+    if not profiles and (cfg.guardrail.profiles or cfg.guardrail.profile_assignments):
+        cfg = dataclasses.replace(
+            cfg, guardrail=dataclasses.replace(cfg.guardrail, profiles={}, profile_assignments=[])
+        )
     defs = schema.get("$defs") or {}
 
     def _resolve(node: object) -> object:
@@ -920,7 +938,7 @@ def _resolve_defaults(app: AppContext, view: dict, written: dict) -> None:
     value of its own.
     """
     try:
-        cfg = app.cfg if app.cfg is not None else config_module.load()
+        cfg = _loaded_config(app)
     except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
         cfg = config_module.default_config()
     if isinstance(view.get("admission"), dict):
