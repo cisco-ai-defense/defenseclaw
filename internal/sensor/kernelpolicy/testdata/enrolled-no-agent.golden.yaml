@@ -3,7 +3,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-fa6ed5cf
+  name: defenseclaw-observe-a797d8ad
 spec:
   lsmhooks:
     - hook: file_open
@@ -21,7 +21,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/carol/.aws/config
@@ -49,7 +49,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/carol/.claude/settings.json
@@ -66,7 +66,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /etc/shadow
@@ -80,14 +80,14 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/carol/.bash_profile
                 - /home/carol/.bashrc
                 - /home/carol/.profile
                 - /home/carol/.zshrc
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
@@ -110,7 +110,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/carol/.gnupg/private-keys-v1.d/
@@ -124,7 +124,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/carol/.claude/hooks/
@@ -141,7 +141,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /etc/sudoers.d/
@@ -155,12 +155,12 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/carol/.config/autostart/
                 - /home/carol/.config/systemd/user/
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"

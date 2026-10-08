@@ -3,7 +3,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-383a3d43
+  name: defenseclaw-observe-ff82ab37
 spec:
   lsmhooks:
     - hook: file_open
@@ -21,7 +21,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /etc/shadow
@@ -44,7 +44,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /etc/sudoers.d/
@@ -58,7 +58,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-connect-21000552
+  name: defenseclaw-connect-ca62819b
 spec:
   kprobes:
     - call: tcp_connect
@@ -68,7 +68,7 @@ spec:
           type: sock
       selectors:
         - matchArgs:
-            - index: 0
+            - args: [0]
               operator: NotDAddr
               values:
                 - 127.0.0.0/8

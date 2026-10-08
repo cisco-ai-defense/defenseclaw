@@ -3,7 +3,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-be71bd4b
+  name: defenseclaw-controls-4baa7c7c
 spec:
   options:
     - name: policy-mode
@@ -29,7 +29,7 @@ spec:
                 - /usr/bin/ssh-add
                 - /usr/bin/ssh-keygen
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.ssh/id_dsa
@@ -50,14 +50,14 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.ssh/id_dsa
                 - /home/alice/.ssh/id_ecdsa
                 - /home/alice/.ssh/id_ed25519
                 - /home/alice/.ssh/id_rsa
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"
@@ -77,18 +77,18 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.bash_profile
                 - /home/alice/.bashrc
                 - /home/alice/.profile
                 - /home/alice/.zshrc
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"
@@ -121,16 +121,16 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/alice/.config/autostart/
                 - /home/alice/.config/systemd/user/
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"

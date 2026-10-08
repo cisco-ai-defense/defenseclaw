@@ -28,7 +28,7 @@ func TestMultiUserControlsDoNotCrossMatchNativeBinaries(t *testing.T) {
 			}
 			binarySelectors++
 			for _, arg := range selector.MatchArgs {
-				if arg.Index == 2 && (len(arg.Values) != 1 || arg.Values[0] != "1001") {
+				if arg.position() == 2 && (len(arg.Values) != 1 || arg.Values[0] != "1001") {
 					t.Fatalf("binary selector crosses enrolled uids: %+v", arg.Values)
 				}
 			}

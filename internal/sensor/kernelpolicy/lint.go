@@ -242,20 +242,21 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 		}
 		uidValues := 0
 		for _, arg := range sel.MatchArgs {
+			at := arg.position()
 			if len(arg.Values) == 0 {
-				add(1, h, s, "matchArgs index %d has no value", arg.Index)
+				add(1, h, s, "matchArgs args %v has no value", arg.Args)
 			}
 			if len(arg.Values) > maxValues {
-				add(7, h, s, "matchArgs index %d has %d values", arg.Index, len(arg.Values))
+				add(7, h, s, "matchArgs args %v has %d values", arg.Args, len(arg.Values))
 			}
-			if arg.Index < 0 || arg.Index >= len(args) {
-				add(8, h, s, "matchArgs index %d is outside the hook's %d args", arg.Index, len(args))
+			if at < 0 || at >= len(args) {
+				add(8, h, s, "matchArgs args %v does not name one of the hook's %d args", arg.Args, len(args))
 				continue
 			}
-			if arg.Index == uidIndex && arg.Operator == "Equal" {
+			if at == uidIndex && arg.Operator == "Equal" {
 				uidValues += len(arg.Values)
 			}
-			if arg.Index == pathIndex {
+			if at == pathIndex {
 				lintPaths(h, s, arg, override, opts, add)
 			}
 		}

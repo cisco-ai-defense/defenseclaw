@@ -3,7 +3,7 @@
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-observe-5db54564
+  name: defenseclaw-observe-45a62214
 spec:
   lsmhooks:
     - hook: file_open
@@ -21,7 +21,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.aws/config
@@ -64,7 +64,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.claude/settings.json
@@ -85,7 +85,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /etc/shadow
@@ -99,7 +99,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.bash_profile
@@ -110,7 +110,7 @@ spec:
                 - /home/bob/.bashrc
                 - /home/bob/.profile
                 - /home/bob/.zshrc
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
@@ -133,7 +133,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/alice/.gnupg/private-keys-v1.d/
@@ -148,7 +148,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/alice/.claude/hooks/
@@ -169,7 +169,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /etc/sudoers.d/
@@ -183,14 +183,14 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/alice/.config/autostart/
                 - /home/alice/.config/systemd/user/
                 - /home/bob/.config/autostart/
                 - /home/bob/.config/systemd/user/
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
@@ -204,7 +204,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-connect-21000552
+  name: defenseclaw-connect-ca62819b
 spec:
   kprobes:
     - call: tcp_connect
@@ -214,7 +214,7 @@ spec:
           type: sock
       selectors:
         - matchArgs:
-            - index: 0
+            - args: [0]
               operator: NotDAddr
               values:
                 - 127.0.0.0/8
@@ -229,7 +229,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-cbe1c6df
+  name: defenseclaw-controls-9ec0de3f
 spec:
   options:
     - name: policy-mode
@@ -255,7 +255,7 @@ spec:
                 - /usr/bin/ssh-add
                 - /usr/bin/ssh-keygen
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.ssh/id_dsa
@@ -280,7 +280,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.ssh/id_dsa
@@ -291,7 +291,7 @@ spec:
                 - /home/bob/.ssh/id_ecdsa
                 - /home/bob/.ssh/id_ed25519
                 - /home/bob/.ssh/id_rsa
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"
@@ -313,7 +313,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.ssh/id_dsa
@@ -324,7 +324,7 @@ spec:
                 - /home/bob/.ssh/id_ecdsa
                 - /home/bob/.ssh/id_ed25519
                 - /home/bob/.ssh/id_rsa
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"
@@ -345,7 +345,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.bash_profile
@@ -356,11 +356,11 @@ spec:
                 - /home/bob/.bashrc
                 - /home/bob/.profile
                 - /home/bob/.zshrc
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"
@@ -382,7 +382,7 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Equal
               values:
                 - /home/alice/.bash_profile
@@ -393,11 +393,11 @@ spec:
                 - /home/bob/.bashrc
                 - /home/bob/.profile
                 - /home/bob/.zshrc
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"
@@ -431,18 +431,18 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/alice/.config/autostart/
                 - /home/alice/.config/systemd/user/
                 - /home/bob/.config/autostart/
                 - /home/bob/.config/systemd/user/
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"
@@ -464,18 +464,18 @@ spec:
               values:
                 - host_ns
           matchArgs:
-            - index: 0
+            - args: [0]
               operator: Prefix
               values:
                 - /home/alice/.config/autostart/
                 - /home/alice/.config/systemd/user/
                 - /home/bob/.config/autostart/
                 - /home/bob/.config/systemd/user/
-            - index: 1
+            - args: [1]
               operator: Mask
               values:
                 - "2"
-            - index: 2
+            - args: [2]
               operator: Equal
               values:
                 - "1001"

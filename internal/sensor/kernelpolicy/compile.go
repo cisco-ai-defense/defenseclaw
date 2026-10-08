@@ -410,11 +410,11 @@ func compileObserve(fsys FS, set kernel.Set, homes map[int]string) (tracingPolic
 		selector := func(operator string, values []string) tpSelector {
 			sel := tpSelector{
 				MatchNamespaces: hostNS(),
-				MatchArgs:       []tpMatchArg{{Index: 0, Operator: operator, Values: values}},
+				MatchArgs:       []tpMatchArg{{Args: []int{0}, Operator: operator, Values: values}},
 				MatchActions:    []tpAction{postAction(set.Observe.RateLimit)},
 			}
 			if access == kernel.AccessWrite {
-				sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 1, Operator: "Mask", Values: []string{writeMask}})
+				sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{1}, Operator: "Mask", Values: []string{writeMask}})
 			}
 			return sel
 		}
@@ -440,7 +440,7 @@ func compileConnect(set kernel.Set) tracingPolicy {
 		Syscall: false,
 		Args:    []tpArg{{Index: 0, Type: "sock"}},
 		Selectors: []tpSelector{{
-			MatchArgs:    []tpMatchArg{{Index: 0, Operator: "NotDAddr", Values: append([]string(nil), set.Connect.ExcludeDestinations...)}},
+			MatchArgs:    []tpMatchArg{{Args: []int{0}, Operator: "NotDAddr", Values: append([]string(nil), set.Connect.ExcludeDestinations...)}},
 			MatchActions: []tpAction{postAction(set.Connect.RateLimit)},
 		}},
 	}}
@@ -570,15 +570,15 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		default:
 			sel.MatchPIDs = []tpPIDs{{Operator: "In", FollowForks: true, Values: pids}}
 		}
-		sel.MatchArgs = []tpMatchArg{{Index: 0, Operator: operator, Values: paths}}
+		sel.MatchArgs = []tpMatchArg{{Args: []int{0}, Operator: operator, Values: paths}}
 		if write {
-			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 1, Operator: "Mask", Values: []string{writeMask}})
+			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{1}, Operator: "Mask", Values: []string{writeMask}})
 		}
 		selectorUIDs := uidValues
 		if anchor == "binaries" {
 			selectorUIDs = []string{strconv.Itoa(binaryUID)}
 		}
-		sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 2, Operator: "Equal", Values: selectorUIDs})
+		sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{2}, Operator: "Equal", Values: selectorUIDs})
 		eperm := eperm
 		sel.MatchActions = []tpAction{{Action: "Override", ArgError: &eperm}, {Action: "Post"}}
 		return sel
@@ -606,7 +606,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		// the Override selectors after it (exempt_order.out).
 		exactHook.Selectors = append(exactHook.Selectors, tpSelector{
 			MatchBinaries: []tpBinaries{{Operator: "In", Values: exempt}},
-			MatchArgs:     []tpMatchArg{{Index: 0, Operator: "Equal", Values: sshFiles}},
+			MatchArgs:     []tpMatchArg{{Args: []int{0}, Operator: "Equal", Values: sshFiles}},
 			MatchActions:  []tpAction{{Action: "NoPost"}},
 		})
 	}

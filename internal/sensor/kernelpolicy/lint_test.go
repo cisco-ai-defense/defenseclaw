@@ -263,7 +263,7 @@ func TestLintRules(t *testing.T) {
 		{"a bad mode", 8, func(tp *tracingPolicy) { tp.Spec.Options = []tpOption{{Name: modeOption, Value: "sigkill"}} }},
 		{"index outside the args", 8, func(tp *tracingPolicy) {
 			sel := &tp.Spec.LsmHooks[0].Selectors[selSSHBins]
-			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Index: 9, Operator: "Equal", Values: []string{"1"}})
+			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{9}, Operator: "Equal", Values: []string{"1"}})
 		}},
 	}
 	for _, tc := range cases {

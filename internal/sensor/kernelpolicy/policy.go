@@ -96,10 +96,25 @@ type tpNamespace struct {
 	Values    []string `yaml:"values"`
 }
 
+// tpMatchArg filters on one argument of the hook, named by its position in
+// the hook's args list: args: [N]. It never uses index: N, which Tetragon
+// reads as the hook's own argument number: file_open declares its file, its
+// open mode and the opener's uid all from argument 0, so a filter on index 1
+// or 2 fails to load ("parseMatchArgs error: argFilter for unknown index",
+// GAP-0030).
 type tpMatchArg struct {
-	Index    int      `yaml:"index"`
+	Args     []int    `yaml:"args,flow"`
 	Operator string   `yaml:"operator"`
 	Values   []string `yaml:"values"`
+}
+
+// position is the args-list position the filter reads, or -1 when it names
+// none or several.
+func (a tpMatchArg) position() int {
+	if len(a.Args) != 1 {
+		return -1
+	}
+	return a.Args[0]
 }
 
 type tpAction struct {
