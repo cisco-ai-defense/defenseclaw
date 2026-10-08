@@ -1711,7 +1711,12 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		opts.PatchOut = after.Name + ".patch"
 	}
 	// A branch that holds this work already takes nothing new: nothing to
-	// confirm.
+	// confirm; nor does a branch or a patch file, which change nothing that
+	// runs until merged or applied (GAP-0262, GAP-0267).
+	if sensitive && writesElsewhere(opts.applyMode(), &pull.Review) {
+		a.note(elsewhereNote(opts.applyMode()))
+		opts.AcceptSensitive, sensitive = true, false
+	}
 	if sensitive && !a.branchHolds(ctx, after, opts) {
 		yes, err := a.ask(a.bringBackQuestion(&pull.Review), false, false)
 		if err != nil {

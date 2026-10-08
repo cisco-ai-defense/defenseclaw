@@ -958,6 +958,15 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	if last := ta.copy.apply[len(ta.copy.apply)-1]; last.Mode != workspace.ApplyMerge || !last.AcceptSensitive {
 		t.Fatalf("apply = %+v", last)
 	}
+	// A branch or a patch file runs nothing: no consent, and a note
+	// (GAP-0262, GAP-0267), unless a secret would go into the branch.
+	ta.out.Reset()
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", PatchOut: filepath.Join(t.TempDir(), "x.patch")}))
+	has(t, ta.output(), "nothing of it runs from a branch: review the flagged files before you merge or check out the branch",
+		"nothing of it runs from a patch file: review the flagged files before you apply it")
+	ta.copy.pull.Review.Findings = []workspace.ScanFinding{{Path: ".envrc", Scanner: "clawshield-secrets", Severity: "CRITICAL"}}
+	wantErr(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}), "--accept-sensitive")
 	// Work the folder already has is not "applied 0 changes".
 	ta.out.Reset()
 	ta.copy.pull, ta.copy.applied = nil, &workspace.ApplyResult{Mode: workspace.ApplyMerge, UpToDate: true}

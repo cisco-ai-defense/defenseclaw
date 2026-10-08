@@ -1222,8 +1222,11 @@ sandbox. Choose one mode to bring the work back:
   further; `pull` says which.
 - `--patch-out FILE`.
 
-Changes that can run code on your machine need your confirmation, or
-`--accept-sensitive` without a terminal.
+Changes that can run code on your machine need your confirmation for
+`--apply`, or `--accept-sensitive` without a terminal. `--branch` and
+`--patch-out` print a note to review the flagged files and go on (nothing
+runs from a branch or a patch file), unless a branch would take what looks
+like a secret into the history, which asks too.
 
 **After an apply.** Once an `--apply` (or the apply at a session's end) has
 put the work in your folder:

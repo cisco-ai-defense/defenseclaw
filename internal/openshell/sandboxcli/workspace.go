@@ -721,7 +721,13 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return nil
 	}
 	// A branch that holds this work already takes nothing new, so there is
-	// nothing to confirm.
+	// nothing to confirm; nor does a patch file or a branch, which change
+	// nothing that runs until you apply or merge them (GAP-0262, GAP-0267),
+	// unless a secret would go into the branch's history.
+	if res.Review.Sensitive() && !o.AcceptSensitive && writesElsewhere(o.applyMode(), &res.Review) {
+		a.note(elsewhereNote(o.applyMode()))
+		o.AcceptSensitive = true
+	}
 	if res.Review.Sensitive() && !o.AcceptSensitive && !a.branchHolds(ctx, sb, o) {
 		yes, err := a.ask(a.bringBackQuestion(&res.Review), false, false)
 		if err != nil {
@@ -1124,6 +1130,23 @@ func notBroughtBack(name string, kind workspace.CopyKind) string {
 	}
 	return "not brought back; the changes stay in " + name + ": review them with `" + CommandName + " review " + name +
 		"`, then pull with --accept-sensitive, or " + other
+}
+
+// writesElsewhere reports whether a pull in mode of review r's changes
+// lands where nothing of them runs, so it needs no confirmation: a patch
+// file, or a branch that takes no secret into the history.
+func writesElsewhere(mode workspace.ApplyMode, r *workspace.ReviewReport) bool {
+	return mode == workspace.ApplyPatch || mode == workspace.ApplyBranch && len(r.SecretPaths()) == 0
+}
+
+// elsewhereNote is what a pull of changes that can run code on this
+// machine says instead of asking, when they go to a branch or a patch file
+// (mode) rather than the working tree.
+func elsewhereNote(mode workspace.ApplyMode) string {
+	if mode == workspace.ApplyBranch {
+		return "nothing of it runs from a branch: review the flagged files before you merge or check out the branch"
+	}
+	return "nothing of it runs from a patch file: review the flagged files before you apply it"
 }
 
 // bringBackQuestion warns about what looks like a secret the sandbox
