@@ -1057,7 +1057,7 @@ them first, with the helper that loaded them:
 
 | Action | What happens |
 | --- | --- |
-| `enterprise linux uninstall` (with or without `--purge`), `apt remove`, `dnf remove` | Deletes the recorded `defenseclaw-*` policy names before any file is removed, then removes the state directory and the runtime directory `/run/defenseclaw-sensor` (its socket and an until-reboot pause) |
+| `enterprise linux uninstall` (with or without `--purge`), `apt remove`, `dnf remove` | Deletes the recorded `defenseclaw-*` policy names before any file is removed, then removes the state directory and the runtime directories `/run/defenseclaw-sensor` (its socket) and `/run/defenseclaw-sensor-tetragon` (an until-reboot pause and the policy copies) |
 | A failed or interrupted `ensure` or upgrade that rolls back | Stops the sensor helper, runs the same cleanup with the helper that loaded the policies, then restores the files. The restored helper loads what its own drop-in asks for |
 | Package downgrade to a release before Tetragon support | The package's pre-removal script runs the cleanup with the helper that is still installed; for an older helper that lacks the cleanup, it deletes the recorded names with `tetra` when `tetra` is on root's `PATH`, and otherwise prints the names and tells you to run `systemctl restart tetragon` |
 | `ensure --allow-downgrade` from a payload | Run `enterprise linux tetragon pause`, set `mode: consume` and apply it, or run `sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup` before downgrading below the first release with Tetragon support |
