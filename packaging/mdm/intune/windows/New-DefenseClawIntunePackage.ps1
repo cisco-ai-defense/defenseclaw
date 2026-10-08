@@ -36,6 +36,10 @@ param(
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
+if (-not [IO.Path]::IsPathRooted($OutputDirectory)) {
+    $OutputDirectory = Join-Path (Get-Location).ProviderPath $OutputDirectory
+}
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 
 $setup = (Resolve-Path -LiteralPath $SetupPath).ProviderPath
 $pin = $Sha256.Trim().ToLowerInvariant()
