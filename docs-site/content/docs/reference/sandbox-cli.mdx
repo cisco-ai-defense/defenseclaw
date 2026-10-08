@@ -948,8 +948,10 @@ and workspace events such as an undo or a copy-mode upload. The feed lives
 in the DefenseClaw daemon's memory: after the daemon restarts it starts
 over, and for a sandbox older than that, `activity` says so first (`the
 feed starts when the DefenseClaw daemon last started (HH:MM:SS); what
-happened before is in defenseclaw-gateway audit export …`). The audit store
-keeps every event. A destination
+happened before is in defenseclaw-gateway audit export …`). An empty feed
+says since when too (`no activity since the DefenseClaw daemon last started
+(HH:MM:SS) …`), also for a sandbox deleted before the restart. The audit
+store keeps every event. A destination
 shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
 `example.com:80`, so an HTTPS and an HTTP request refused at the same host
 are two different lines. An IPv6 address with its port is bracketed:

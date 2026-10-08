@@ -61,8 +61,10 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 		}
 		return writeJSON(a.IO.Out, map[string]any{"events": events})
 	}
+	var started time.Time
+	noted := false
 	if o.Output != OutputJSON {
-		a.feedStartNote(ctx, api, o.Sandbox)
+		started, noted = a.feedStartNote(ctx, api, o.Sandbox)
 	}
 	enc := json.NewEncoder(a.IO.Out)
 	enc.SetEscapeHTML(false)
@@ -112,19 +114,35 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 		return apiError(err)
 	}
 	if n == 0 && !o.Follow && o.Output != OutputJSON {
-		a.note("no activity yet")
+		switch {
+		case noted:
+			a.note("no activity since then")
+		case !started.IsZero():
+			// After a restart an empty feed read as nothing happened, where
+			// the sandbox asked about lived and went before it (GAP-0330).
+			a.note("no activity since the DefenseClaw daemon last started (" + a.clock(started) + "); what happened before is in " +
+				feedHistoryText)
+		default:
+			a.note("no activity yet")
+		}
 	}
 	return nil
 }
+
+// feedHistoryText is where the feed's events from before the daemon's
+// last start are.
+const feedHistoryText = "`defenseclaw-gateway audit export` (and Grafana, with observability on)"
 
 // feedStartNote says where the feed starts when it holds less than the
 // sandbox's life (any sandbox's, without name): the feed lives in the
 // daemon's memory, so after a restart its earlier events showed nowhere in
 // `sandbox activity`, and nothing said where they went (GAP-0283).
-func (a *App) feedStartNote(ctx context.Context, api API, name string) {
+// It returns when the daemon started (zero when unknown) and whether it
+// said so.
+func (a *App) feedStartNote(ctx context.Context, api API, name string) (time.Time, bool) {
 	st, err := api.Status(ctx)
 	if err != nil || st.StartedAt.IsZero() {
-		return
+		return time.Time{}, false
 	}
 	older := false
 	if name != "" {
@@ -135,8 +153,9 @@ func (a *App) feedStartNote(ctx context.Context, api API, name string) {
 	}
 	if older {
 		a.note("the feed starts when the DefenseClaw daemon last started (" + a.clock(st.StartedAt) + "); what happened before is in " +
-			"`defenseclaw-gateway audit export` (and Grafana, with observability on)")
+			feedHistoryText)
 	}
+	return st.StartedAt, older
 }
 
 // followRetry bounds how long `activity -f` waits for the daemon to answer

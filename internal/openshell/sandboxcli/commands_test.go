@@ -284,6 +284,12 @@ func TestActivitySaysWhereTheFeedStarts(t *testing.T) {
 	ta.out.Reset()
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "fresh"}))
 	lacks(t, ta.output(), line)
+	// GAP-0330: an empty feed says since when, also for a sandbox that went
+	// before the restart.
+	ta.out.Reset()
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "gone"}))
+	has(t, ta.output(), "no activity since the DefenseClaw daemon last started (", "`defenseclaw-gateway audit export`")
+	lacks(t, ta.output(), "no activity yet")
 }
 
 func TestActivityFollowsTheDaemonsNextFeed(t *testing.T) {
