@@ -46,6 +46,15 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		statusBusy = errors.Is(err, errLockBusy)
 		lock.release()
 	}
+	if l.opts.Action == ActionVerify && env.packageTransactionInProgress() {
+		// The package scripts are replacing the deployment: its own ensure
+		// applies and verifies the new package. A check now compares the new
+		// package with the deployment the old one applied, and its failure
+		// left the daily verify unit failed after a healthy upgrade
+		// (GAP-0585).
+		r.AddError(codeBusy, "a DefenseClaw package install or upgrade is in progress, and its own lifecycle run applies and verifies the new package; this verify run skipped its checks")
+		return enterprisestatus.BusyExitCode(env.GOOS)
+	}
 	if l.opts.Action == ActionVerify {
 		// The daily verify can start while another run changes the
 		// deployment: ensure restarts the timer, and a Persistent timer past
@@ -558,6 +567,21 @@ func (l *lifecycle) ledgerProblem() string {
 		}
 		time.Sleep(env.PollInterval)
 	}
+}
+
+// packageTransactionMarker is what the Linux package preinstall leaves while
+// it holds the config-apply trigger for the transaction; the postinstall
+// removes it after its ensure.
+const packageTransactionMarker = "/run/defenseclaw-enterprise-apply-path.held"
+
+// packageTransactionInProgress reports a package transaction that started
+// less than half an hour ago (an older marker is from an interrupted one).
+func (e *Env) packageTransactionInProgress() bool {
+	if e.GOOS != "linux" {
+		return false
+	}
+	info, err := os.Lstat(e.P(packageTransactionMarker))
+	return err == nil && e.Now().Sub(info.ModTime()) < 30*time.Minute
 }
 
 // guardianCatchUpWindow is how long after targets.yaml changed a guardian
