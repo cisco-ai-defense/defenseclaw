@@ -972,10 +972,6 @@ func enterpriseHookManifestActivationIssue(
 		activation.ManifestSHA256, manifestSHA256), false
 }
 
-// enterpriseHookRemovedAccountNote follows each failure status and verify
-// report as a warning for a deleted account whose profile folder was removed.
-const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
-
 // enterpriseHookRemovedAccountFailures is the number of failed rows in the
 // last reconcile when every one of them belongs to a deleted account whose
 // profile folder was removed (enterpriseHookRemovedAccountRow), and 0

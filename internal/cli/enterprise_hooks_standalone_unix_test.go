@@ -1460,3 +1460,35 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 		t.Fatalf("rows = %+v, want the manifest row and one row for the eligible account without one", rows)
 	}
 }
+
+// GAP-0775: in the enumerator 3-cycle window a leaver, whose account no
+// longer resolves, failed enterprise hooks status with three red lines and
+// exit 1, while enterprise linux status and verify warned. Its failed row is
+// excused (reported as a warning); a failure of an account that still
+// resolves is not.
+func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+	}
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: 4242, GID: 4242},
+	}})
+	state := enterpriseHookGuardianState{FailureCount: 1, Results: []enterpriseHookReconcileRow{
+		{User: "alice", Connector: "claudecode", OK: true},
+		{User: "okta-carol", Connector: "claudecode", Error: `enterprise hooks: target account "okta-carol" does not exist: no such account`},
+	}}
+	if got := enterpriseHookRemovedAccountFailures(state); got != 1 {
+		t.Fatalf("a leaver row: excused = %d, want 1", got)
+	}
+	state.FailureCount = 2
+	state.Results[0] = enterpriseHookReconcileRow{User: "alice", Connector: "codex", Error: "enterprise hooks: hook config is group/other writable"}
+	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+		t.Fatalf("a failure of an account that resolves: excused = %d, want 0", got)
+	}
+}
