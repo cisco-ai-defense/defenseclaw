@@ -470,3 +470,26 @@ func TestAllowPinCaseSibling(t *testing.T) {
 		t.Fatalf("Windows case-insensitive pin did not match: %q", verdict)
 	}
 }
+
+func TestMCPAllowBindsCompleteCommandLine(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Allowed = []AssetPolicyRule{{
+		Name: "reviewed", Command: "npx", ArgsPrefix: []string{"-y", "reviewed-server"},
+	}}
+	for _, tc := range []struct {
+		command string
+		args    []string
+		want    string
+	}{
+		{"npx", []string{"-y", "reviewed-server"}, AssetListAllow},
+		{"/tmp/npx", []string{"-y", "reviewed-server"}, ""},
+		{"npx", []string{"-y", "reviewed-server", "--extra"}, ""},
+	} {
+		verdict, _ := cfg.AssetListDecision(AssetPolicyInput{
+			TargetType: "mcp", Name: "reviewed", Command: tc.command, Args: tc.args,
+		})
+		if verdict != tc.want {
+			t.Fatalf("%q %v: verdict = %q, want %q", tc.command, tc.args, verdict, tc.want)
+		}
+	}
+}

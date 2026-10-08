@@ -93,6 +93,23 @@ class TestEvaluateAdmissionAllowed(_StoreTestBase):
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "manual-allow")
 
+    def test_mcp_allow_binds_complete_command_line(self):
+        from defenseclaw.config import AssetPolicyRule
+        from defenseclaw.enforce.asset_lists import list_decision
+
+        self.cfg.asset_policy.mcp.allowed = [
+            AssetPolicyRule(name="reviewed", command="npx", args_prefix=["-y", "reviewed-server"]),
+        ]
+        for command, args, expected in (
+            ("npx", ["-y", "reviewed-server"], "allow"),
+            ("/tmp/npx", ["-y", "reviewed-server"], ""),
+            ("npx", ["-y", "reviewed-server", "--extra"], ""),
+        ):
+            decision, _ = list_decision(
+                self.cfg.asset_policy, "mcp", "reviewed", command=command, args=args,
+            )
+            self.assertEqual(decision, expected)
+
     def test_path_pinned_allow_does_not_admit_case_sibling(self):
         from defenseclaw.config import AssetPolicyRule
         from defenseclaw.enforce.asset_lists import list_decision

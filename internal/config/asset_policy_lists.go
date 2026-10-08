@@ -61,11 +61,30 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 				if list.verdict == AssetListAllow && !allowPinMatches(rule.SourcePathContains, in.SourcePath) {
 					continue
 				}
+				if list.verdict == AssetListAllow && normalizeAssetToken(in.TargetType) == "mcp" &&
+					rule.Command != "" && !mcpAllowCommandMatches(rule, in) {
+					continue
+				}
 				return list.verdict, rule
 			}
 		}
 	}
 	return "", AssetPolicyRule{}
+}
+
+// mcpAllowCommandMatches binds an operator allow to the reviewed launcher and
+// complete argument list. Denied rules retain their broad basename/prefix scope.
+func mcpAllowCommandMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
+	if strings.TrimSpace(rule.Command) != strings.TrimSpace(in.Command) ||
+		len(rule.ArgsPrefix) != len(in.Args) {
+		return false
+	}
+	for i, want := range rule.ArgsPrefix {
+		if strings.TrimSpace(want) != strings.TrimSpace(in.Args[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // ToolListDecision matches asset_policy.tool.denied and .allowed for a tool

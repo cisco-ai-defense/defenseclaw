@@ -348,6 +348,7 @@ def list_decision(
                 if _find_asset_rule(
                     [rule], name, connector, source_path, url, command, args or [], transport,
                     connector_scope=scope,
+                    strict=verdict == LIST_ALLOW and target_type == "mcp",
                 ) is None:
                     continue
                 if verdict == LIST_ALLOW and not _allow_pin_matches(rule, source_path):
