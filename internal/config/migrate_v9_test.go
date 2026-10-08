@@ -421,6 +421,33 @@ func TestMigrateV9TransliteratesANonASCIIPackFolder(t *testing.T) {
 	}
 }
 
+func TestMigrateV9KeepsTheZeroEightBackupOfARelabelledV9File(t *testing.T) {
+	// GAP-0352: a v9 file hand-edited to config_version 8 replaced the
+	// pristine 0.8.x config.yaml.v8.bak on the next migration.
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	pristine := []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n")
+	if err := os.WriteFile(configPath+ConfigV8BackupSuffix, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relabelled := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack: default\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(relabelled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if kept, _ := os.ReadFile(configPath + ConfigV8BackupSuffix); string(kept) != string(pristine) {
+		t.Errorf("the 0.8.x backup was replaced:\n%s", kept)
+	}
+	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "keeps the 0.8.x config") }) {
+		t.Errorf("no note says the backup was kept: %q", result.Record.Notes)
+	}
+}
+
 func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 	// GAP-0360: a 0.8.x copy of the default pack was pinned as it was and
 	// enforced nothing in 1.0; its rebased copy is written next to it and pinned.

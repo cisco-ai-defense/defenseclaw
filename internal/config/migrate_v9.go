@@ -409,6 +409,9 @@ type v9Migrator struct {
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
 	globalPackPosture string
+	// v9Shaped is set when the config_version 8 source carries keys only
+	// config_version 9 writes (a v9 file relabelled 8 by hand).
+	v9Shaped bool
 }
 
 type v9RegoRefresh struct {
@@ -446,6 +449,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: the config_version 9 migration reads config_version 8, not %d", version)
 	}
 
+	m.v9Shaped = v9ShapedSource(root)
 	data, err := readV9DataJSON(m.in.DataJSONPath)
 	if err != nil {
 		return nil, false, err
@@ -555,10 +559,18 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	var written []string
 	backup := m.configPath + ConfigV8BackupSuffix
-	if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
-		return written, err
+	if earlier, err := os.ReadFile(backup); err == nil && m.v9Shaped && !bytes.Equal(earlier, source) {
+		// A v9 file relabelled config_version 8 is no 0.8.x source: replacing
+		// the backup with it left "going back to 0.8.x" a file 0.8.x refuses
+		// (GAP-0352). The 0.8.x file the backup holds stays.
+		m.note("%s keeps the 0.8.x config it holds: config.yaml said config_version 8 but carries keys only "+
+			"config_version 9 writes", backup)
+	} else {
+		if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
+			return written, err
+		}
+		written = append(written, backup)
 	}
-	written = append(written, backup)
 	// Before the config that pins them.
 	for _, dir := range slices.Sorted(maps.Keys(m.rebasedPacks)) {
 		if err := writeRebasedRulePack(dir, m.rebasedPacks[dir]); err != nil {
@@ -1817,6 +1829,16 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+// v9ShapedSource reports whether a config_version 8 document carries keys
+// only config_version 9 writes: guardrail.custom_packs, a guardrail.rule_pack
+// without rule_pack_dir, or the update block (0.8.x had none of them).
+func v9ShapedSource(root *yaml.Node) bool {
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	return v8YAMLMapValue(guardrail, "custom_packs") != nil ||
+		(v8YAMLMapValue(guardrail, "rule_pack") != nil && v8YAMLMapValue(guardrail, "rule_pack_dir") == nil) ||
+		v8YAMLMapValue(root, "update") != nil
 }
 
 // embeddedPackDropped reports whether dropping an empty rule_pack_dir changes
