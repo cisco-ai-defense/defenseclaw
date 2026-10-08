@@ -852,13 +852,6 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
-	// A skill or plugin rejected while take_action was false is enforced
-	// once it is true again: changing it restarts the watcher (GAP-0774).
-	for _, issue := range w.state.issuesOf(AdmissionNotEnforced) {
-		if evt := w.classifyEvent(issue.Path); w.takeActionFor(evt) {
-			w.queuePending(issue.Path)
-		}
-	}
 	if w.cfg.Watch.RescanEnabled {
 		go w.rescanLoop(ctx)
 	}
@@ -1581,12 +1574,6 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 			fmt.Sprintf("type=%s severity=%s scanner=%s install_action=%s file_action=%s",
 				targetType, result.MaxSeverity(), scannerName, out.InstallAction, out.FileAction))
 
-		if !w.takeActionFor(evt) && !w.secureClientActive() && evt.Type != InstallMCP {
-			// Recorded, so status reports it and the watcher enforces it once
-			// take_action is true again (GAP-0774).
-			w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotEnforced,
-				Detail: fmt.Sprintf("%s findings while gateway.watcher.%s.take_action is false", result.MaxSeverity(), evt.Type)})
-		}
 		if w.takeActionFor(evt) {
 			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
 			if !w.secureClientActive() {
@@ -2465,9 +2452,9 @@ func watcherPathAtOrBelow(path, root string) bool {
 // (GAP-0133).
 // settleAdmissionIssue records what the admission of evt could not finish
 // (its scan failed, or its files could not be moved to quarantine), so the
-// watcher admits it again and status reports it; a finished admission
-// forgets the earlier problem (GAP-0825, GAP-0826). The Secure Client
-// profile records none.
+// watcher admits it again and status reports it, and a rejection take_action
+// left unenforced; a finished admission forgets the earlier problem
+// (GAP-0825, GAP-0826, GAP-0774). The Secure Client profile records none.
 func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionResult) {
 	noted, hasNote := w.admissionNotes.LoadAndDelete(evt.Path)
 	if res.Interrupted || w.secureClientActive() {
@@ -2487,6 +2474,11 @@ func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionRes
 	case hasNote:
 		note, _ := noted.(AdmissionIssue)
 		issue.Kind, issue.Detail = note.Kind, note.Detail
+	case res.Unenforced:
+		// Status reports it until take_action is on again and the rescan
+		// enforces it (GAP-0774).
+		issue.Kind = AdmissionNotEnforced
+		issue.Detail = fmt.Sprintf("%s findings while gateway.watcher.%s.take_action is false", res.MaxSeverity, evt.Type)
 	default:
 		w.state.clearIssue(evt.Path)
 		return

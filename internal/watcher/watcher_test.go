@@ -1410,55 +1410,6 @@ func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
 	}
 }
 
-// GAP-0774: a CRITICAL skill rejected while take_action was false stayed
-// installed and usable after take_action was true again. The rejection is
-// recorded, and the next watcher (changing take_action restarts it) admits
-// the skill again and quarantines it.
-func TestRejectionWithTakeActionOffIsEnforcedWhenItIsBackOn(t *testing.T) {
-	cfg, store, logger, skillDir := setupTestEnv(t)
-	critical := func(InstallEvent) scanner.Scanner {
-		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
-			{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
-		}}
-	}
-	path := filepath.Join(skillDir, "crit-e")
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cfg.Gateway.Watcher.Skill.TakeAction = false
-	off := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
-	off.scannerFactory = critical
-	off.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "crit-e", Path: path, Timestamp: time.Now()})
-	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 1 || issues[0].Kind != AdmissionNotEnforced {
-		t.Fatalf("issues %+v, want the rejection recorded as not enforced", issues)
-	}
-	on := *cfg
-	on.Gateway.Watcher.Skill.TakeAction = true
-	w := New(&on, []string{skillDir}, nil, store, logger, nil, nil)
-	w.scannerFactory = critical
-	w.debounce = 10 * time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			break
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			<-done
-			t.Fatal("the skill rejected with take_action off was not quarantined once it was on")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	cancel()
-	<-done
-	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 0 {
-		t.Fatalf("issues after enforcement: %+v", issues)
-	}
-}
-
 // gateScanner holds every scan until release is closed and records the
 // largest number of scans that ran at once.
 type gateScanner struct {
@@ -1752,9 +1703,16 @@ func TestSkillRejectedWithTakeActionOffIsEnforcedOnceItIsOn(t *testing.T) {
 	if _, err := os.Lstat(path); res.Verdict != VerdictRejected || err != nil || scans.calls != before {
 		t.Fatalf("take_action off: verdict %s, lstat err %v, rescan scans %d (was %d)", res.Verdict, err, scans.calls, before)
 	}
+	// Status reports the unenforced rejection until it is enforced.
+	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 1 || issues[0].Kind != AdmissionNotEnforced {
+		t.Fatalf("take_action off: issues %+v, want the rejection recorded as not enforced", issues)
+	}
 	watch(true).runRescanCycle(ctx)
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("take_action on: the rejected skill was not quarantined (lstat err %v)", err)
+	}
+	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 0 {
+		t.Fatalf("take_action on: issues %+v after enforcement", issues)
 	}
 }
 
