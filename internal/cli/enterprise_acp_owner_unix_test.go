@@ -7,6 +7,7 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 
@@ -68,5 +69,47 @@ func TestEnterpriseACPServiceChangesRunAsTheDataDirOwner(t *testing.T) {
 	}
 	if !ran || len(ranAs) != 2 || ranAs[0] != int(owner.Uid) || ranAs[1] != int(owner.Gid) {
 		t.Fatalf("ran=%v as %v, want the change run as the data_dir owner %d:%d", ran, ranAs, owner.Uid, owner.Gid)
+	}
+}
+
+func TestEnterpriseACPServiceRepairsLegacyRootLock(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to reproduce a legacy lock")
+	}
+	const uid, gid = 65534, 65534
+	dataDir := t.TempDir()
+	if err := os.Chmod(filepath.Dir(dataDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockDir := filepath.Join(dataDir, "acp")
+	if err := os.Mkdir(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(lockDir, ".enterprise-credentials.lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(lockDir, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(dataDir, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	err := withEnterpriseACPServiceOwner(dataDir, func() error {
+		f, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+		if err == nil {
+			err = f.Close()
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("service account could not open legacy lock: %v", err)
+	}
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Sys().(*syscall.Stat_t).Uid; got != uid {
+		t.Fatalf("lock owner=%d", got)
 	}
 }

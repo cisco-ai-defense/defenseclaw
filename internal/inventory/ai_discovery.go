@@ -627,6 +627,8 @@ type ContinuousDiscoveryService struct {
 	lastIDE       *IDEInventory
 	ideBaseline   map[string]IDEPlugin
 	ideRecordedAt time.Time
+	// scanMu guards the per-scan privacy skip observation.
+	tccSkipped bool
 }
 
 type scanResponse struct {
@@ -1115,6 +1117,7 @@ func (s *ContinuousDiscoveryService) runScanSingleFlight(
 
 func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
 	start := time.Now()
+	s.tccSkipped = false
 	scanID := newScanID()
 	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
 		ScanID: scanID, Source: source, PrivacyMode: s.opts.Mode, StartedAt: start,
@@ -1357,6 +1360,7 @@ type scanStats struct {
 	ModelFileConclusive map[string]bool
 	ModelFileAttempted  map[string]bool
 	ModelFileDeferred   map[string]bool
+	TCCSkipped          bool
 }
 
 func (s *ContinuousDiscoveryService) scanSignals(
@@ -1380,7 +1384,8 @@ func (s *ContinuousDiscoveryService) scanSignals(
 				continue
 			}
 			seen[sig.Fingerprint] = true
-			if sig.UserID == "" && s.account.id != "" {
+			if sig.UserID == "" && s.account.id != "" &&
+				(len(s.homesToScan()) == 1 || sig.Detector == "process") {
 				sig.UserID, sig.UserName = s.account.id, s.account.name
 			}
 			signals = append(signals, sig)
@@ -1479,6 +1484,11 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		})
 	}
 
+	if s.tccSkipped {
+		stats.TCCSkipped = true
+		stats.Errors++
+		stats.DetectorErrors["macos_privacy"] = "protected folders were not scanned"
+	}
 	signals = s.dropUnbackedSharedSurfaceSignals(signals)
 	sortAISignals(signals)
 	return signals, stats
@@ -1713,6 +1723,18 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		for _, fp := range prevFingerprints {
 			old := prevMap[fp]
 			if _, ok := current[fp]; ok || replaced[fp] {
+				continue
+			}
+			if stats.TCCSkipped && (old.Detector == "package_manifest" || old.Detector == "model_file") {
+				// A protected subtree was skipped. Its absence is not proof of removal.
+				if old.Detector == "model_file" {
+					if fileCarryRemaining > 0 {
+						carry.persist(fp, old, &fileCarryRemaining)
+					}
+				} else {
+					budget := 1
+					carry.persist(fp, old, &budget)
+				}
 				continue
 			}
 			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
@@ -2775,14 +2797,6 @@ func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
 	return out
 }
 
-// legacyExcludedExtensionIDs are the extension ids the catalog gained with
-// the IDE inventory. The Secure Client profile's historical detector skips
-// them so its output stays as it was.
-var legacyExcludedExtensionIDs = map[string]bool{
-	"anthropic.claude-code": true,
-	"openai.chatgpt":        true,
-}
-
 // detectEditorExtensionsLegacy is the historical detector the Secure Client
 // profile keeps: directory names under the editors' extension and
 // globalStorage folders, matched against the catalog's extension ids.
@@ -2826,9 +2840,6 @@ func (s *ContinuousDiscoveryService) detectEditorExtensionsLegacy() []AISignal {
 	for _, sig := range s.catalog {
 		for _, ext := range sig.ExtensionIDs {
 			ext = strings.ToLower(ext)
-			if legacyExcludedExtensionIDs[ext] {
-				continue
-			}
 			for _, entry := range entries {
 				if editorExtensionNameMatches(entry, ext) {
 					out = append(out, s.signalFromValue(sig, SignalEditorExtension, "editor_extension", ext))

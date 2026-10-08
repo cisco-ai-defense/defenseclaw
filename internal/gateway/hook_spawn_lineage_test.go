@@ -648,3 +648,49 @@ func TestHookSpawnFirstEventEmitterSynthesizesOneStartConcurrently(t *testing.T)
 		t.Fatalf("concurrent inferred lifecycle transitions=%d want=1", transitions)
 	}
 }
+
+func TestSpawnIntentDoesNotCrossAgentIdentity(t *testing.T) {
+	api := &APIServer{}
+	now := time.Now().UTC()
+	parent := hookSpawnTestParent("claudecode", "shared-session", "agent-a", "agent-a", 0, "tool-a")
+	parent.AgentIdentityID, parent.UserID = "agt-a", "1001"
+	child := hookSpawnTestChild("claudecode", "shared-session", "agent-b-child")
+	child.AgentIdentityID, child.UserID = "agt-b", "1002"
+	api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentCompleted, now)
+	got := api.applyHookSpawnIntentLineageAt(child, nil, now)
+	if got.ParentAgentID == parent.AgentID || got.RootAgentID == parent.AgentID || hookSpawnIntentCount(api) != 1 {
+		t.Fatalf("another identity consumed spawn intent: %+v", got)
+	}
+	parent.AgentIdentityID, parent.UserID = "agt-b", "1002"
+	parent.AgentID, parent.RootAgentID, parent.ToolID = "agent-b", "agent-b", "tool-b"
+	api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentCompleted, now)
+	got = api.applyHookSpawnIntentLineageAt(child, nil, now)
+	if got.ParentAgentID != "agent-b" || hookSpawnIntentCount(api) != 1 {
+		t.Fatalf("same identity failed to take its intent: %+v", got)
+	}
+	ctxA := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-a"})
+	ctxB := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-b"})
+	api.rememberHookPromptID(ctxA, "claudecode", "shared-session", "", "prompt-a")
+	if prompt := api.lastHookPromptID(ctxB, "claudecode", "shared-session"); prompt != "" {
+		t.Fatalf("another identity inherited prompt %q", prompt)
+	}
+}
+
+func TestCodexChildThreadRequiresRealToolAndIdentityScope(t *testing.T) {
+	api := &APIServer{}
+	parent := llmEventMeta{Source: "codex", SessionID: "parent-session", AgentID: "agent-a", RootAgentID: "agent-a", AgentIdentityID: "agt-a", UserID: "1001"}
+	child := llmEventMeta{Source: "codex", SessionID: "child-session-0001", AgentID: "agent-b", RootAgentID: "agent-b", AgentIdentityID: "agt-b", UserID: "1001"}
+	response := `{"threadId":"child-session-0001"}`
+	api.rememberHookChildThread(parent, "mcp__thirdparty__codex_tui_create_thread", response)
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != "" {
+		t.Fatalf("lookalike tool linked a child: %+v", got)
+	}
+	api.rememberHookChildThread(parent, "mcp__codex_tui__create_thread", response)
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != "" {
+		t.Fatalf("another identity linked a child: %+v", got)
+	}
+	child.AgentIdentityID = parent.AgentIdentityID
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != parent.AgentID {
+		t.Fatalf("same identity did not link a child: %+v", got)
+	}
+}

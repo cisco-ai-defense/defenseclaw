@@ -341,7 +341,13 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 			GenAIRequestModel:                   facts.model,
 			ConditionSecuritySeverityAvailable:  true,
 		}
-		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(ctx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
@@ -393,9 +399,11 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 	correlation := gatewayGeneratedCorrelation(ctx, facts.routeConnector())
 	correlation.EvaluationID = facts.request.EvaluationID
 	events := make([]observability.TraceEventInput, 0, 1)
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	decisionEvent, err := observability.NewSpanGuardrailApplyGuardrailDecisionEvent(
 		observability.SpanGuardrailApplyGuardrailDecisionEventInput{
 			TimeUnixNano:                        uint64(facts.completedAt.UnixNano()),
+			DefenseClawGuardrailProfileName:     profileTelemetry.Name,
 			DefenseClawEvaluationID:             observability.Present(facts.request.EvaluationID),
 			DefenseClawGuardrailDecision:        observability.Present(facts.decision),
 			DefenseClawGuardrailEffectiveAction: observability.Present(facts.effectiveAction),
@@ -406,7 +414,6 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		return observability.SpanGuardrailApplyInput{}, false
 	}
 	events = append(events, decisionEvent)
-	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
@@ -469,6 +476,12 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		ConditionConnectorKnown:             facts.routeConnector() != "",
 		ConditionOperationTerminal:          true,
 	}
-	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	}
+	caller.Identity.applyTo(&input)
 	return input, true
 }

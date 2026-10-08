@@ -4,6 +4,8 @@
 package ideplugins
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -87,10 +89,11 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 		profiles := user + `\profiles`
 		self(profiles)
 		for _, profile := range windowsSubdirs(home, profiles, vscodeMaxProfiles) {
+			if !safeName(profile) {
+				continue
+			}
 			base := profiles + `\` + profile
-			self(base)
 			self(base + `\extensions.json`)
-			self(base + `\globalStorage`)
 			self(base + `\globalStorage\state.vscdb`)
 		}
 		for _, server := range product.servers {
@@ -103,99 +106,52 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 			}
 		}
 	}
-	const roamingJetBrains = `AppData\Roaming\JetBrains`
-	self(roamingJetBrains)
-	for _, name := range windowsSubdirs(home, roamingJetBrains, jetbrainsMaxProducts) {
-		if jetbrainsProductDir.MatchString(name) {
-			base := roamingJetBrains + `\` + name
-			self(base)
-			self(base + `\disabled_plugins.txt`)
-			tree(base + `\plugins`)
+	for _, vendor := range []struct{ root, prefix string }{
+		{`AppData\Roaming\JetBrains`, ``},
+		{`AppData\Roaming\Google`, "AndroidStudio"},
+	} {
+		self(vendor.root)
+		for _, name := range windowsSubdirs(home, vendor.root, jetbrainsMaxProducts) {
+			if !jetbrainsProductDir.MatchString(name) || !strings.HasPrefix(name, vendor.prefix) {
+				continue
+			}
+			self(vendor.root + `\` + name + `\disabled_plugins.txt`)
+			tree(vendor.root + `\` + name + `\plugins`)
 		}
 	}
-	const localJetBrains = `AppData\Local\JetBrains`
-	self(localJetBrains)
-	for _, name := range windowsSubdirs(home, localJetBrains, jetbrainsMaxProducts) {
-		if jetbrainsProductDir.MatchString(name) {
-			tree(localJetBrains + `\` + name + `\plugins`)
+	for _, vendor := range []struct{ root, prefix string }{
+		{`AppData\Local\JetBrains`, ``},
+		{`AppData\Local\Google`, "AndroidStudio"},
+	} {
+		self(vendor.root)
+		for _, name := range windowsSubdirs(home, vendor.root, jetbrainsMaxProducts) {
+			if jetbrainsProductDir.MatchString(name) && strings.HasPrefix(name, vendor.prefix) {
+				tree(vendor.root + `\` + name + `\plugins`)
+			}
 		}
 	}
-	const remoteDev = localJetBrains + `\RemoteDev\dist`
+	const remoteDev = `AppData\Local\JetBrains\RemoteDev\dist`
 	self(remoteDev)
 	for _, name := range windowsSubdirs(home, remoteDev, jetbrainsMaxRemoteDist) {
 		self(remoteDev + `\` + name + `\product-info.json`)
-	}
-	// Android Studio: the whole config folder in %APPDATA% (it holds
-	// disabled_plugins.txt and the plugins, as for JetBrains' own
-	// products), only the plugins in %LOCALAPPDATA%, where the caches are.
-	for _, google := range []struct{ dir, sub string }{
-		{`AppData\Roaming\Google`, ""},
-		{`AppData\Local\Google`, `\plugins`},
-	} {
-		self(google.dir)
-		for _, name := range windowsSubdirs(home, google.dir, jetbrainsMaxProducts) {
-			if strings.HasPrefix(name, "AndroidStudio") && jetbrainsProductDir.MatchString(name) {
-				base := google.dir + `\` + name
-				if google.sub == "" {
-					self(base)
-					self(base + `\disabled_plugins.txt`)
-					tree(base + `\plugins`)
-				} else {
-					tree(base + google.sub)
-				}
-			}
-		}
 	}
 	const visualStudio = `AppData\Local\Microsoft\VisualStudio`
 	self(visualStudio)
 	for _, name := range windowsSubdirs(home, visualStudio, visualStudioMaxInstances*4) {
 		if visualStudioInstanceDir.MatchString(name) {
-			base := visualStudio + `\` + name
-			self(base)
-			self(base + `\privateregistry.bin`)
-			tree(base + `\Extensions`)
+			self(visualStudio + `\` + name + `\privateregistry.bin`)
+			tree(visualStudio + `\` + name + `\Extensions`)
 		}
 	}
 	tree(`AppData\Local\Zed\extensions\installed`)
-	grantVim := func(root string, data bool) {
-		self(root)
-		if !data {
-			self(root + `\lazy-lock.json`)
-		}
-		pack := root + `\pack`
-		if data {
-			pack = root + `\site\pack`
-		}
-		self(pack)
-		for _, name := range windowsSubdirs(home, pack, vimMaxPacks) {
-			group := pack + `\` + name
-			self(group)
-			for _, kind := range []string{"start", "opt"} {
-				plugins := group + `\` + kind
-				self(plugins)
-				for _, plugin := range windowsSubdirs(home, plugins, vimMaxPlugins) {
-					self(plugins + `\` + plugin)
-				}
-			}
-		}
-		if data {
-			tree(root + `\lazy`)
-			plugged := root + `\plugged`
-			self(plugged)
-			for _, plugin := range windowsSubdirs(home, plugged, vimMaxPlugins) {
-				self(plugged + `\` + plugin)
-			}
-		}
-	}
-	grantVim(`AppData\Local\nvim`, false)
-	grantVim(`AppData\Local\nvim-data`, true)
-	grantVim(`vimfiles`, false)
-	self(`vimfiles\plugged`)
-	for _, plugin := range windowsSubdirs(home, `vimfiles\plugged`, vimMaxPlugins) {
-		self(`vimfiles\plugged\` + plugin)
-	}
-	tree(`.eclipse`)
+	windowsVimGrants(home, `AppData\Local\nvim`, &out)
+	windowsVimGrants(home, `AppData\Local\nvim-data`, &out)
+	windowsVimGrants(home, `vimfiles`, &out)
+	self(`.eclipse`)
 	const bundles = `\configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`
+	for _, name := range windowsSubdirs(home, `.eclipse`, eclipseMaxInstalls) {
+		self(`.eclipse\` + name + bundles)
+	}
 	self(`eclipse`)
 	self(`eclipse` + bundles)
 	for _, name := range windowsSubdirs(home, `eclipse`, eclipseMaxInstalls) {
@@ -220,10 +176,9 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 	return out
 }
 
-// WindowsLegacyBroadGrantPaths names folders older identity builds granted
-// recursively. The enumerator removes those ACEs before applying narrow grants
-// so an upgrade does not retain access to private editor data.
-func WindowsLegacyBroadGrantPaths(home string) []string {
+// WindowsLegacyBroadGrants lists the old inherited grants. The enumerator
+// removes these before applying the narrower WindowsHomeGrants on upgrades.
+func WindowsLegacyBroadGrants(home string) []string {
 	var out []string
 	for _, product := range vscodeProducts {
 		user := `AppData\Roaming\` + product.dataName + `\User`
@@ -232,7 +187,11 @@ func WindowsLegacyBroadGrantPaths(home string) []string {
 	out = append(out,
 		`AppData\Roaming\JetBrains`,
 		`AppData\Local\Microsoft\VisualStudio`,
-		`AppData\Local\nvim`, `AppData\Local\nvim-data`, `vimfiles`)
+		`AppData\Local\nvim`,
+		`AppData\Local\nvim-data`,
+		`vimfiles`,
+		`.eclipse`,
+	)
 	const google = `AppData\Roaming\Google`
 	for _, name := range windowsSubdirs(home, google, jetbrainsMaxProducts) {
 		if strings.HasPrefix(name, "AndroidStudio") && jetbrainsProductDir.MatchString(name) {
@@ -240,6 +199,87 @@ func WindowsLegacyBroadGrantPaths(home string) []string {
 		}
 	}
 	return out
+}
+
+// windowsVimGrants grants the listings and lockfile Scan uses, without
+// granting editor swap, history or plugin content files.
+func windowsVimGrants(home, root string, out *[]WindowsGrant) {
+	self := func(rel string) { *out = append(*out, WindowsGrant{Path: rel}) }
+	self(root)
+	if strings.HasSuffix(root, `\nvim`) {
+		self(root + `\lazy-lock.json`)
+	}
+	if strings.HasSuffix(root, `\nvim-data`) {
+		lazy := root + `\lazy`
+		self(lazy)
+		for _, name := range windowsNvimLockNames(home, `AppData\Local\nvim\lazy-lock.json`) {
+			self(lazy + `\` + name)
+		}
+		for _, name := range windowsSubdirs(home, lazy, vimMaxPlugins) {
+			self(lazy + `\` + name)
+		}
+		plugged := root + `\plugged`
+		self(plugged)
+		for _, name := range windowsSubdirs(home, plugged, vimMaxPlugins) {
+			self(plugged + `\` + name)
+		}
+		root += `\site`
+	}
+	if root == `vimfiles` {
+		plugged := root + `\plugged`
+		self(plugged)
+		for _, name := range windowsSubdirs(home, plugged, vimMaxPlugins) {
+			if safeName(name) && !strings.HasPrefix(name, ".") {
+				self(plugged + `\` + name)
+			}
+		}
+	}
+	packRoot := root + `\pack`
+	self(packRoot)
+	for _, pack := range windowsSubdirs(home, packRoot, vimMaxPacks) {
+		if !safeName(pack) {
+			continue
+		}
+		for _, kind := range []string{"start", "opt"} {
+			dir := packRoot + `\` + pack + `\` + kind
+			self(dir)
+			for _, name := range windowsSubdirs(home, dir, vimMaxPlugins) {
+				if safeName(name) && !strings.HasPrefix(name, ".") {
+					self(dir + `\` + name)
+				}
+			}
+		}
+	}
+}
+
+// windowsNvimLockNames names the plugin folders referenced by the lockfile.
+// Bound the read to the scanner's metadata scale.
+func windowsNvimLockNames(home, rel string) []string {
+	path := filepath.Join(home, filepath.FromSlash(strings.ReplaceAll(rel, `\`, "/")))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	if err != nil {
+		return nil
+	}
+	var lock map[string]json.RawMessage
+	if json.Unmarshal(data, &lock) != nil {
+		return nil
+	}
+	var names []string
+	for name := range lock {
+		if safeName(name) && !strings.HasPrefix(name, ".") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > vimMaxPlugins {
+		names = names[:vimMaxPlugins]
+	}
+	return names
 }
 
 // windowsSubdirs lists up to limit folder names in home\rel, as Scan's

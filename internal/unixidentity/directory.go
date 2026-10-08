@@ -76,6 +76,17 @@ const groupQueryBatch = 64
 // resolved (the gateway keeps them for 15 minutes) and select the default
 // profile as though the account had no groups.
 func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
+	return r.directoryFactsForUID(uid, now, true)
+}
+
+// DirectoryFactsWithoutGroupsForUID is for the guardian spool. The Linux
+// gateway resolves groups itself, so naming them here can consume the time
+// reserved for the privileged InfoPipe UPN lookup.
+func (r *NSSResolver) DirectoryFactsWithoutGroupsForUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
+	return r.directoryFactsForUID(uid, now, false)
+}
+
+func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups bool) (useridentity.DirectoryFacts, error) {
 	account, err := r.LookupUID(uid)
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
@@ -86,67 +97,75 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
 	}
-	if data, readErr := readSmallFile(nsswitchPath, 1<<20); readErr == nil {
-		for _, service := range ParseNSSwitchServices(string(data), "passwd") {
-			known, ok := directoryServices[service]
-			if !ok {
-				continue
-			}
-			if _, lookupErr := r.LookupUIDInService(service, uid); lookupErr != nil {
-				if IsNotFound(lookupErr) {
+	// /etc/passwd is authoritative for a matching local name and uid.
+	// Check it before directory probes so an unavailable backend cannot
+	// make a local account's facts fail.
+	local, localErr := LocalAccounts(r.context())
+	if localErr != nil && !errors.Is(localErr, os.ErrNotExist) {
+		return useridentity.DirectoryFacts{}, localErr
+	}
+	_, isLocal := local[account.Name]
+	isLocal = isLocal && local[account.Name] == uid
+	if !isLocal {
+		if data, readErr := readSmallFile(nsswitchPath, 1<<20); readErr == nil {
+			for _, service := range ParseNSSwitchServices(string(data), "passwd") {
+				known, ok := directoryServices[service]
+				if !ok {
 					continue
 				}
-				// A directory that did not answer is not one that does not
-				// own the account.
-				return useridentity.DirectoryFacts{}, lookupErr
-			}
-			// SSSD's files provider (the implicit files domain of RHEL 8, an
-			// id_provider=files or proxy domain) answers for the accounts of
-			// /etc/passwd as well, and the only realm would then name a local
-			// account as an AD one. An account the files database holds
-			// under its name and uid is local, whichever service answers.
-			local, localErr := LocalAccounts(r.context())
-			if localErr != nil && !errors.Is(localErr, os.ErrNotExist) {
-				return useridentity.DirectoryFacts{}, localErr
-			}
-			if id, ok := local[account.Name]; ok && id == uid {
+				if _, lookupErr := r.LookupUIDInService(service, uid); lookupErr != nil {
+					if IsNotFound(lookupErr) {
+						continue
+					}
+					// A directory that did not answer is not one that does not
+					// own the account.
+					return useridentity.DirectoryFacts{}, lookupErr
+				}
+				facts.Directory, facts.Source = known.directory, known.source
+				if domain, _, qualified := strings.Cut(account.Name, `\`); qualified {
+					facts.AccountDomain = domain
+				}
+				bare, domain := useridentity.SplitQualifiedName(account.Name)
+				if domain != "" && known.directory == useridentity.DirectoryEntraID {
+					// The aad module, and Himmelblau with cn_name_mapping =
+					// false, name an Entra ID account by its UPN. It has no
+					// Kerberos realm, and the UPN is the principal Windows
+					// reports for the same user. Himmelblau's default
+					// (cn_name_mapping = true) names it by the short name, which
+					// carries no domain: such an account has no UPN here
+					// (GAP-0328).
+					facts.Domain = strings.ToLower(domain)
+					facts.UPN = useridentity.NormalizeUPN(account.Name)
+					facts.Principal = facts.UPN
+				} else if domain != "" {
+					// Lower case, as Windows reports a NetBIOS domain it knows
+					// no DNS name for; applyRealm gives the DNS name of the
+					// realm a NetBIOS domain names.
+					facts.Domain = strings.ToLower(domain)
+					if strings.Contains(domain, ".") {
+						facts.Realm = strings.ToUpper(domain)
+						// sAMAccountName@REALM, the Kerberos principal SSSD
+						// and winbind accounts authenticate as, in the UPN form.
+						facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
+					}
+				}
 				break
 			}
-			facts.Directory, facts.Source = known.directory, known.source
-			bare, domain := useridentity.SplitQualifiedName(account.Name)
-			if domain != "" && known.directory == useridentity.DirectoryEntraID {
-				// The aad module, and Himmelblau with cn_name_mapping =
-				// false, name an Entra ID account by its UPN. It has no
-				// Kerberos realm, and the UPN is the principal Windows
-				// reports for the same user. Himmelblau's default
-				// (cn_name_mapping = true) names it by the short name, which
-				// carries no domain: such an account has no UPN here
-				// (GAP-0328).
-				facts.Domain = strings.ToLower(domain)
-				facts.UPN = useridentity.NormalizeUPN(account.Name)
-				facts.Principal = facts.UPN
-			} else if domain != "" {
-				// Lower case, as Windows reports a NetBIOS domain it knows
-				// no DNS name for; applyRealm gives the DNS name of the
-				// realm a NetBIOS domain names.
-				facts.Domain = strings.ToLower(domain)
-				if strings.Contains(domain, ".") {
-					facts.Realm = strings.ToUpper(domain)
-					// sAMAccountName@REALM, the Kerberos principal SSSD
-					// and winbind accounts authenticate as, in the UPN form.
-					facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
-				}
-			}
-			break
 		}
 	}
-	groups, err := r.groupNames(account)
-	if err != nil {
-		return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
+	if includeGroups {
+		groups, err := r.groupNames(account)
+		if err != nil {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
+		}
+		facts.Groups = groups
 	}
-	facts.Groups = groups
 	if facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind {
-		applyRealm(&facts, account.Name, hostRealms(r.context()))
+		realms, realmErr := hostRealms(r.context())
+		if realmErr != nil {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: realmd lookup: %w", realmErr)
+		}
+		applyRealm(&facts, account.Name, realms)
 	}
 	return facts, nil
 }
@@ -270,7 +289,11 @@ func QualifiedGroupName(ctx context.Context, r Resolver, name string) string {
 	if r == nil || name == "" || strings.ContainsAny(name, `@\`) {
 		return ""
 	}
-	for _, realm := range hostRealms(ctx) {
+	realms, err := hostRealms(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, realm := range realms {
 		if realm.Domain == "" {
 			continue
 		}

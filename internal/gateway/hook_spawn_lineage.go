@@ -33,8 +33,6 @@ const (
 type hookSpawnIntent struct {
 	key            string
 	toolKey        string
-	source         string
-	sessionID      string
 	parent         llmEventMeta
 	aliases        map[string]struct{}
 	createdAt      time.Time
@@ -59,11 +57,19 @@ func hookSpawnIntentToolKey(meta llmEventMeta) string {
 	if source == "" || sessionID == "" || toolID == "" {
 		return ""
 	}
-	return strings.Join([]string{source, sessionID, toolID}, "\x00")
+	return strings.Join([]string{source, sessionID, meta.AgentIdentityID, toolID}, "\x00")
 }
 
-func hookSpawnIntentScope(source, sessionID string) string {
-	return strings.ToLower(strings.TrimSpace(source)) + "\x00" + strings.TrimSpace(sessionID)
+func hookSpawnIntentScope(meta llmEventMeta) string {
+	return strings.ToLower(strings.TrimSpace(meta.Source)) + "\x00" + strings.TrimSpace(meta.SessionID) + "\x00" + meta.AgentIdentityID
+}
+
+// Empty identities retain the pre-identity correlation used by Secure Client.
+func sameHookIdentity(parent, child llmEventMeta) bool {
+	if parent.AgentIdentityID != child.AgentIdentityID {
+		return false
+	}
+	return parent.AgentIdentityID == "" || parent.UserID == "" || child.UserID == "" || parent.UserID == child.UserID
 }
 
 func hookSpawnNormalizeAlias(value string) []string {
@@ -225,7 +231,7 @@ func (a *APIServer) rememberHookSpawnIntentAt(
 	parent := a.canonicalHookSpawnParent(meta)
 	aliases := hookSpawnAliasesFromDocuments(documents...)
 	toolKey := hookSpawnIntentToolKey(meta)
-	scope := hookSpawnIntentScope(meta.Source, meta.SessionID)
+	scope := hookSpawnIntentScope(meta)
 
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
@@ -255,8 +261,7 @@ func (a *APIServer) rememberHookSpawnIntentAt(
 			return
 		}
 		a.insertHookSpawnIntentLocked(hookSpawnIntent{
-			key: toolKey, toolKey: toolKey, source: strings.ToLower(strings.TrimSpace(meta.Source)),
-			sessionID: strings.TrimSpace(meta.SessionID), parent: parent, aliases: aliases,
+			key: toolKey, toolKey: toolKey, parent: parent, aliases: aliases,
 			createdAt: now, updatedAt: now, resultObserved: phase == hookSpawnIntentCompleted,
 		})
 		return
@@ -296,8 +301,7 @@ func (a *APIServer) rememberHookSpawnIntentAt(
 		key = stableLLMEventID(key, now.Format(time.RFC3339Nano))
 	}
 	a.insertHookSpawnIntentLocked(hookSpawnIntent{
-		key: key, source: strings.ToLower(strings.TrimSpace(meta.Source)),
-		sessionID: strings.TrimSpace(meta.SessionID), parent: parent, aliases: aliases,
+		key: key, parent: parent, aliases: aliases,
 		createdAt: now, updatedAt: now, resultObserved: phase == hookSpawnIntentCompleted,
 	})
 }
@@ -328,11 +332,11 @@ var codexThreadIDPattern = regexp.MustCompile(`"threadId"\s*:\s*"([A-Za-z0-9][A-
 // hooks as a session with its own id, fires no SubagentStart, and names the
 // child only in this call's result, as {"threadId": "..."} (GAP-0179).
 func isCodexThreadSpawnTool(tool string) bool {
-	return strings.HasSuffix(canonicalEvent(tool), "codextuicreatethread")
+	return strings.EqualFold(strings.TrimSpace(tool), "mcp__codex_tui__create_thread")
 }
 
-func hookChildThreadKey(source, sessionID string) string {
-	return strings.ToLower(strings.TrimSpace(source)) + "\x00" + strings.TrimSpace(sessionID)
+func hookChildThreadKey(meta llmEventMeta) string {
+	return strings.ToLower(strings.TrimSpace(meta.Source)) + "\x00" + strings.TrimSpace(meta.SessionID) + "\x00" + meta.AgentIdentityID
 }
 
 // rememberHookChildThread records the thread a completed create_thread call
@@ -350,15 +354,17 @@ func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response st
 	if strings.TrimSpace(parent.AgentID) == "" || parent.AgentDepth < 0 || parent.AgentDepth >= 64 {
 		return
 	}
+	child := meta
+	child.SessionID = match[1]
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
-	a.storeHookChildThreadLocked(meta.Source, match[1], parent, time.Now().UTC())
+	a.storeHookChildThreadLocked(child, parent, time.Now().UTC())
 }
 
-// storeHookChildThreadLocked records that childSession is a session parent
+// storeHookChildThreadLocked records that child's session is one parent
 // started. Caller holds a.llmPromptMu.
-func (a *APIServer) storeHookChildThreadLocked(source, childSession string, parent llmEventMeta, now time.Time) {
-	key := hookChildThreadKey(source, childSession)
+func (a *APIServer) storeHookChildThreadLocked(child, parent llmEventMeta, now time.Time) {
+	key := hookChildThreadKey(child)
 	if a.hookChildThreads == nil {
 		a.hookChildThreads = make(map[string]hookChildThread)
 	}
@@ -443,7 +449,7 @@ func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[s
 	}
 	if claimed >= 0 {
 		a.copilotSubagents[claimed].child = meta.SessionID
-		a.storeHookChildThreadLocked("copilot", meta.SessionID, a.copilotSubagents[claimed].parent, now)
+		a.storeHookChildThreadLocked(meta, a.copilotSubagents[claimed].parent, now)
 	}
 	a.llmPromptMu.Unlock()
 	if claimed < 0 {
@@ -506,7 +512,9 @@ func (a *APIServer) noteCopilotSubagentStop(meta llmEventMeta, child string, now
 	}
 	linked := match >= 0 && child != "" && child != meta.SessionID
 	if linked {
-		a.storeHookChildThreadLocked("copilot", child, parent, now)
+		childMeta := meta
+		childMeta.SessionID = child
+		a.storeHookChildThreadLocked(childMeta, parent, now)
 	}
 	a.llmPromptMu.Unlock()
 	if linked {
@@ -524,13 +532,13 @@ func (a *APIServer) applyHookChildThreadLineage(meta llmEventMeta) llmEventMeta 
 		return meta
 	}
 	a.llmPromptMu.Lock()
-	link, ok := a.hookChildThreads[hookChildThreadKey(meta.Source, meta.SessionID)]
+	link, ok := a.hookChildThreads[hookChildThreadKey(meta)]
 	a.llmPromptMu.Unlock()
 	if !ok || time.Since(link.createdAt) > hookChildThreadTTL {
 		return meta
 	}
 	parent := link.parent
-	if parent.UserID != "" && meta.UserID != "" && parent.UserID != meta.UserID {
+	if !sameHookIdentity(parent, meta) {
 		return meta
 	}
 	meta.ParentAgentID = parent.AgentID
@@ -560,7 +568,7 @@ func (a *APIServer) hookSpawnIntentCandidatesLocked(
 	candidates := make([]string, 0, 2)
 	for _, key := range a.hookSpawnIntentOrder {
 		intent, ok := a.hookSpawnIntents[key]
-		if !ok || intent.ambiguous || hookSpawnIntentScope(intent.source, intent.sessionID) != scope ||
+		if !ok || intent.ambiguous || hookSpawnIntentScope(intent.parent) != scope ||
 			(parentAgentID != "" && intent.parent.AgentID != parentAgentID) {
 			continue
 		}
@@ -643,7 +651,7 @@ func (a *APIServer) takeHookSpawnIntentAt(
 	if a == nil || strings.TrimSpace(meta.Source) == "" || strings.TrimSpace(meta.SessionID) == "" {
 		return hookSpawnIntent{}, false
 	}
-	scope := hookSpawnIntentScope(meta.Source, meta.SessionID)
+	scope := hookSpawnIntentScope(meta)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 	a.evictHookSpawnIntentsLocked(now)
@@ -651,8 +659,8 @@ func (a *APIServer) takeHookSpawnIntentAt(
 	candidates := make([]scoredHookSpawnIntent, 0, 4)
 	for _, key := range a.hookSpawnIntentOrder {
 		intent, ok := a.hookSpawnIntents[key]
-		if !ok || intent.ambiguous || hookSpawnIntentScope(intent.source, intent.sessionID) != scope ||
-			intent.parent.AgentID == "" || intent.parent.AgentID == meta.AgentID {
+		if !ok || intent.ambiguous || hookSpawnIntentScope(intent.parent) != scope ||
+			intent.parent.AgentID == "" || intent.parent.AgentID == meta.AgentID || !sameHookIdentity(intent.parent, meta) {
 			continue
 		}
 		score := hookSpawnAliasScore(aliases, intent.aliases)
@@ -745,7 +753,7 @@ func (a *APIServer) takeUniqueCompletedHookSpawnIntentForUnseenAgentAt(
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	scope := hookSpawnIntentScope(meta.Source, meta.SessionID)
+	scope := hookSpawnIntentScope(meta)
 	childKey := hookSessionStateKey(meta)
 
 	a.llmPromptMu.Lock()
@@ -762,7 +770,7 @@ func (a *APIServer) takeUniqueCompletedHookSpawnIntentForUnseenAgentAt(
 	for _, key := range a.hookSpawnIntentOrder {
 		intent, ok := a.hookSpawnIntents[key]
 		if !ok || intent.ambiguous || !intent.resultObserved ||
-			hookSpawnIntentScope(intent.source, intent.sessionID) != scope {
+			hookSpawnIntentScope(intent.parent) != scope {
 			continue
 		}
 		if selectedKey != "" {
@@ -854,7 +862,7 @@ func (a *APIServer) clearUnresolvedHookSpawnFallbackAt(meta llmEventMeta, now ti
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	scope := hookSpawnIntentScope(meta.Source, meta.SessionID)
+	scope := hookSpawnIntentScope(meta)
 	childKey := hookSessionStateKey(meta)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
@@ -868,8 +876,8 @@ func (a *APIServer) clearUnresolvedHookSpawnFallbackAt(meta llmEventMeta, now ti
 	hasUnresolvedIntent := false
 	for _, key := range a.hookSpawnIntentOrder {
 		intent, ok := a.hookSpawnIntents[key]
-		if !ok || hookSpawnIntentScope(intent.source, intent.sessionID) != scope ||
-			intent.parent.AgentID == "" || intent.parent.AgentID == meta.AgentID {
+		if !ok || hookSpawnIntentScope(intent.parent) != scope ||
+			intent.parent.AgentID == "" || intent.parent.AgentID == meta.AgentID || !sameHookIdentity(intent.parent, meta) {
 			continue
 		}
 		hasUnresolvedIntent = true

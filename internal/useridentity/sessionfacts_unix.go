@@ -283,20 +283,25 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// openRegularFile opens path for reading if it is a regular file, or returns
-// nil. The path comes from the user's KRB5CCNAME: opened non-blocking, a
-// FIFO with no writer cannot hold the hook, and the type is checked on the
-// open descriptor, so a path swapped after a check cannot either.
+// openRegularFile opens path for reading only if it is a regular file
+// owned by the effective user, or returns nil. The path comes from
+// KRB5CCNAME; opening without blocking avoids waiting on a FIFO. File
+// type and owner are checked on the descriptor after opening.
 func openRegularFile(path string) *os.File {
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil
 	}
-	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+	if info, err := file.Stat(); err != nil || !regularFileOwnedByUID(info, os.Geteuid()) {
 		_ = file.Close()
 		return nil
 	}
 	return file
+}
+
+func regularFileOwnedByUID(info os.FileInfo, uid int) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return info.Mode().IsRegular() && ok && stat.Uid == uint32(uid)
 }
 
 func readFileCCachePrincipal(path string) string {

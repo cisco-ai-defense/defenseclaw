@@ -32,15 +32,17 @@ import (
 // enrolled accounts changed or the refresh interval elapsed, so the gateway
 // can report a verified UPN its sandbox cannot read itself.
 
-// enterpriseHookIdentitySpoolInterval matches the gateway's identity cache
-// lifetime, so the gateway's refresh always finds a current record.
+// Successful passes refresh before the gateway's identity cache expires.
+// Failed passes retry on the guardian's next one-minute reconcile tick.
 const enterpriseHookIdentitySpoolInterval = 15 * time.Minute
+const enterpriseHookIdentitySpoolRetryInterval = time.Minute
 
 var enterpriseHookIdentitySpoolState struct {
 	sync.Mutex
 	running     bool
 	last        time.Time
 	fingerprint string
+	failed      bool
 }
 
 func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
@@ -67,27 +69,37 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	now := time.Now()
 	state := &enterpriseHookIdentitySpoolState
 	state.Lock()
-	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= enterpriseHookIdentitySpoolInterval)
+	interval := enterpriseHookIdentitySpoolInterval
+	if state.failed {
+		interval = enterpriseHookIdentitySpoolRetryInterval
+	}
+	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval)
 	if due {
-		state.running, state.last, state.fingerprint = true, now, fingerprint
+		state.running = true
 	}
 	state.Unlock()
 	if !due {
 		return
 	}
 	go func() {
+		var passErr error
 		defer func() {
 			state.Lock()
 			state.running = false
+			state.last = time.Now()
+			state.fingerprint = fingerprint
+			state.failed = passErr != nil
 			state.Unlock()
 		}()
 		if err := ensureEnterpriseHookStandaloneAuthDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)); err != nil {
+			passErr = err
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", err)
 			return
 		}
 		logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
-		if err := enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
-			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", err)
+		passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf)
+		if passErr != nil {
+			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", passErr)
 		}
 	}()
 }

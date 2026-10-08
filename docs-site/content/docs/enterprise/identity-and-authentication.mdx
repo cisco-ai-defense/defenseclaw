@@ -232,10 +232,11 @@ An agent that runs in an OpenShell sandbox is attributed like a host agent,
 with four differences.
 
 - **The user is the host user on the sandbox binding**, the account that
-  started the sandbox. On a per-user install the gateway verifies it as its
-  own account, so a sandboxed agent gets the same directory facts, groups and
-  guardrail profile as that user's host agents. Identity headers the sandbox
-  sends are ignored.
+  started the sandbox. The binding is attribution, not proof of the calling
+  process, so it supplies no verified directory facts or groups. User, group
+  and agent identity selectors cannot match from that binding; the default
+  guardrail profile or a connector-only assignment applies. Identity headers
+  the sandbox sends are ignored.
 - **Each sandbox has its own `agt-`.** The agent's install is the sandbox, not
   a config directory in the home, so a project run in two sandboxes is two
   agents, and the `agt-` of the host install does not name a sandboxed run.
@@ -244,7 +245,7 @@ with four differences.
 - **Its hooks always enforce.** A sandbox's hooks run in `action` mode
   whatever `guardrail.mode` or the profile's `mode` says, because DefenseClaw
   launched the harness and its hooks are the only gate on the tool calls. The
-  profile's thresholds and rule pack still apply.
+  selected profile's thresholds and rule pack still apply.
 - **Its web egress follows the sandbox's network profile.** The egress proxy
   decides each site by the sandbox's OpenShell profile (`open`, `balanced` or
   `strict`) and its policy pack, not by a guardrail profile. See

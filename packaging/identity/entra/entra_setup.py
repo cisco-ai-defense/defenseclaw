@@ -42,6 +42,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import string
 import struct
 import sys
@@ -373,11 +374,29 @@ def _nickname(name: str) -> str:
 
 
 def _record_password(path: str, upn: str, password: str) -> None:
-    """Append 'upn<TAB>password' to a 0600 file before the user is created."""
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    with os.fdopen(descriptor, "a", encoding="ascii") as handle:
-        handle.write(f"{upn}\t{password}\n")
-    os.chmod(path, 0o600)
+    """Append a generated password only to a private regular file owned by this process."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise SystemExit(f"error: cannot open password file securely: {exc.strerror}") from None
+    try:
+        info = os.fstat(descriptor)
+        owner_ok = not hasattr(os, "geteuid") or info.st_uid == os.geteuid()
+        if not stat.S_ISREG(info.st_mode) or not owner_ok or info.st_nlink != 1 or info.st_mode & 0o077:
+            raise SystemExit("error: password file must be a private regular file owned by the current user")
+        if not hasattr(os, "O_NOFOLLOW"):
+            path_info = os.lstat(path)
+            if stat.S_ISLNK(path_info.st_mode) or (path_info.st_dev, path_info.st_ino) != (
+                info.st_dev, info.st_ino
+            ):
+                raise SystemExit("error: password file must not be a symlink")
+        with os.fdopen(descriptor, "a", encoding="ascii") as handle:
+            descriptor = -1
+            handle.write(f"{upn}\t{password}\n")
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:

@@ -52,16 +52,16 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 
 	entra := resolveWindowsDirectoryFacts(reader, entraSID, nil, now)
 	if entra.Directory != DirectoryEntraID || entra.UPN != "alice@contoso.com" || entra.TenantID != tenant ||
-		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified {
+		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified || entra.AccountDomain != "AzureAD" {
 		t.Fatalf("entra facts = %+v", entra)
 	}
 	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string) string { return "ignored@corp.example.com" }, now)
 	if hybrid.Directory != DirectoryActiveDirectory || hybrid.Domain != "corp.example.com" || hybrid.Realm != "CORP.EXAMPLE.COM" ||
-		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant {
+		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" {
 		t.Fatalf("hybrid AD facts = %+v", hybrid)
 	}
 	local := resolveWindowsDirectoryFacts(reader, localSID, nil, now)
-	if local.Directory != DirectoryLocal || local.Principal != "" || local.UPN != "" {
+	if local.Directory != DirectoryLocal || local.Principal != "" || local.UPN != "" || local.AccountDomain != "WS01" {
 		t.Fatalf("local facts = %+v", local)
 	}
 	// GAP-0417: after a UPN sign-in the LSA names the account in UPN form;
@@ -100,5 +100,28 @@ func TestADUPNCacheWaitsAndRetriesFailures(t *testing.T) {
 	now = now.Add(adUPNTTL)
 	if got := cache.lookup(name, time.Second); got != "alice@corp.example.com" || calls != 3 {
 		t.Fatalf("lookup after a failure = %q after %d calls; want the last good UPN kept", got, calls)
+	}
+}
+
+func TestWindowsBuiltInAndServiceSIDsAreLocal(t *testing.T) {
+	reader := fakeWindowsReader{
+		accounts: map[string][2]string{
+			"S-1-5-18":     {"SYSTEM", "NT AUTHORITY"},
+			"S-1-5-80-123": {"agent", "NT SERVICE"},
+		},
+		computer: "WS01",
+	}
+	lookups := 0
+	for _, sid := range []string{"S-1-5-18", "S-1-5-80-123"} {
+		facts := resolveWindowsDirectoryFacts(reader, sid, func(string) string {
+			lookups++
+			return ""
+		}, time.Unix(1_800_000_000, 0))
+		if facts.Directory != DirectoryLocal || facts.Domain != "" {
+			t.Fatalf("%s resolved as %+v", sid, facts)
+		}
+	}
+	if lookups != 0 {
+		t.Fatalf("service accounts triggered %d AD UPN lookups", lookups)
 	}
 }

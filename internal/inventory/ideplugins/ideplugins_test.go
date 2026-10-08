@@ -267,11 +267,6 @@ func TestScanOtherEditors(t *testing.T) {
 	}
 }
 
-// A managed Windows gateway reads only what the enumerator grants it
-// (WindowsHomeGrants): everything a Windows scan reports, Remote-SSH
-// servers, %LOCALAPPDATA%\JetBrains and Android Studio included, must be
-// granted, while the caches and other data beside those folders and a
-// linked folder are not (GAP-0042).
 func TestWindowsHomeGrantsIncludeTraversalAttributes(t *testing.T) {
 	grants := WindowsHomeGrants(t.TempDir())
 	byPath := make(map[string]WindowsGrant, len(grants))
@@ -298,6 +293,11 @@ func TestVisualStudioEnabledNamesAcceptsShortEnumeration(t *testing.T) {
 	}
 }
 
+// A managed Windows gateway reads only what the enumerator grants it
+// (WindowsHomeGrants): everything a Windows scan reports, Remote-SSH
+// servers, %LOCALAPPDATA%\JetBrains and Android Studio included, must be
+// granted, while the caches and other data beside those folders and a
+// linked folder are not (GAP-0042).
 func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 	home := t.TempDir()
 	local, roaming := filepath.Join(home, "AppData", "Local"), filepath.Join(home, "AppData", "Roaming")

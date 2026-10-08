@@ -199,6 +199,9 @@ func TestProcessOwnerProfileSubjectUsesDirectoryFacts(t *testing.T) {
 		t.Fatalf("subject = %+v, ok %v; want the directory's groups", subject, ok)
 	}
 	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return useridentity.DirectoryFacts{}, false }
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
 	if subject, _ := processOwnerProfileSubject(); !subject.LookupFailed {
 		t.Fatalf("a directory that did not answer must read as a failed lookup: %+v", subject)
 	}
@@ -251,25 +254,21 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 	}
 }
 
-// Sandbox traffic is verified as the binding's host user, the gateway's own
-// account: its records carry that account's directory facts, which come
-// from the refreshed directory cache like host traffic's (GAP-0150). A
-// binding that names another account gets no subject.
-func TestSandboxHostUserIsVerifiedSubject(t *testing.T) {
+// A sandbox binding attributes records to its host user, but its bearer does
+// not prove which local process made the request. Even the gateway owner's
+// binding must not supply a verified subject or process-owner profile.
+func TestSandboxBindingDoesNotVerifyCaller(t *testing.T) {
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(false) })
 	self, _ := localProcessUser()
 	if self == "" {
 		t.Skip("no process owner")
 	}
-	original := managedHookPeerDirectory
-	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) {
-		return useridentity.DirectoryFacts{
-			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
-			Groups: []string{"dc-ml-team@dclab.test"}, ResolvedAt: time.Now(),
-		}, strconv.Itoa(uid) == self
+	previousOwner := processOwnerProfileSubject
+	processOwnerProfileSubject = func() (profileSubject, bool) {
+		return profileSubject{UserID: self, Groups: []string{"owner-group"}}, true
 	}
-	t.Cleanup(func() { managedHookPeerDirectory = original })
+	t.Cleanup(func() { processOwnerProfileSubject = previousOwner })
 
 	f := newSandboxIngressFixture(t)
 	st := f.api.sandboxIngressState()
@@ -293,17 +292,20 @@ func TestSandboxHostUserIsVerifiedSubject(t *testing.T) {
 	if len(next.reqs) != 2 {
 		t.Fatalf("reached mux %d times, want 2", len(next.reqs))
 	}
-	owner, stranger := next.reqs[0].Context(), next.reqs[1].Context()
-	subject, ok := verifiedSubjectFromContext(owner)
-	if !ok || subject.UserID != self || len(subject.Directory.Groups) != 1 {
-		t.Fatalf("host user subject = %+v, %v", subject, ok)
-	}
-	identity := resolveHookUserIdentity(owner, "claudecode", nil).Identity
-	if identity == nil || identity.Directory.Assurance != useridentity.AssuranceVerified || identity.Directory.Domain != "dclab.test" {
-		t.Fatalf("sandbox record identity = %+v, want the verified directory facts", identity)
-	}
-	if _, ok := verifiedSubjectFromContext(stranger); ok {
-		t.Fatal("a binding naming another account got a verified subject")
+	for i, uid := range []string{self, strconv.Itoa(other + 1)} {
+		ctx := next.reqs[i].Context()
+		if got := AgentIdentityFromContext(ctx).UserID; got != uid {
+			t.Fatalf("binding user = %q, want %q", got, uid)
+		}
+		if subject, ok := verifiedSubjectFromContext(ctx); ok {
+			t.Fatalf("binding verified caller as %+v", subject)
+		}
+		if subject, source := profileRequestSubject(ctx); subject != nil || source != "" {
+			t.Fatalf("binding selected process-owner subject = %+v, %q", subject, source)
+		}
+		if identity := requestIdentityFor(ctx, uid); identity != nil && identity.Directory.Assurance == useridentity.AssuranceVerified {
+			t.Fatalf("binding emitted verified directory identity = %+v", identity)
+		}
 	}
 }
 
@@ -370,6 +372,8 @@ func TestProxyAndACPBindProcessOwnerOverClaimedUser(t *testing.T) {
 	proxyUser := func(p *GuardrailProxy, dcAuth string) (user string) {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		req.RemoteAddr = "127.0.0.1:40000"
+		req.Header.Set("X-User-Id", "4242")
+		req.Header.Set("X-User-Name", "forged")
 		if dcAuth != "" {
 			req.Header.Set("X-DC-Auth", "Bearer "+dcAuth)
 		}
@@ -427,5 +431,33 @@ func TestVerifiedSubjectIsNamedFromTheGuardianRecordWhenItsLookupFails(t *testin
 		if id := AgentIdentityFromContext(ctx); id.UserID != uid || id.UserName != want || caller.ID != uid || caller.Name != want {
 			t.Errorf("uid %s: agent identity %+v, audit caller %+v, want the uid and the name %q", uid, id, caller, want)
 		}
+	}
+}
+
+// A process-owner fallback with only connector assignments must not treat a
+// failed optional directory lookup as a profile-selection failure.
+func TestProcessOwnerProfileSubjectKeepsConnectorWithoutIdentityLookup(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(false)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	original := managedHookPeerDirectory
+	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) {
+		return useridentity.DirectoryFacts{}, false
+	}
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+	subject, ok := processOwnerProfileSubject()
+	if !ok || subject.LookupFailed {
+		t.Fatalf("process owner = %+v, ok %v", subject, ok)
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		assignments: []config.ProfileAssignment{
+			{Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
+		},
+	}
+	if got := set.matchUncached(&subject, profileSubjectProcessOwner, "openclaw", ""); got.Match != profileMatchConnector {
+		t.Fatalf("optional lookup selected %+v", got)
 	}
 }

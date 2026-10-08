@@ -35,9 +35,8 @@ import (
 // and in-flight cap. A caller over either gets an immediate 429 with a
 // stable reason; other callers are not affected.
 //
-// The caller limits cap one account, not the host: 200 accounts at 32 requests
-// each are all admitted, the requests share the CPU and the audit writer
-// fairly, and all of them finish together after longer than the hook deadline
+// The caller cap alone does not bound the host: many accounts can still
+// hold more work than the gateway can finish within hook deadlines
 // (600 simultaneous hooks took about 25 s on 8 processors, every client had
 // given up by then, and the gateway still evaluated and audited each one).
 // The gateway therefore also bounds the requests it holds at once across all
@@ -167,6 +166,11 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		return nil, nil, managedHookReasonOverloaded, logNow
 	}
 	rps, burst, inFlight, running := l.limits()
+	if counted {
+		// Keep capacity for at least three other callers even when one
+		// caller fills every request it may hold while queued.
+		inFlight = min(inFlight, max(1, l.globalLimit()/4))
+	}
 	budget := l.callers[caller]
 	if budget == nil {
 		budget = &hookCallerBudget{limiter: rate.NewLimiter(rate.Limit(rps), burst), running: make(chan struct{}, running)}

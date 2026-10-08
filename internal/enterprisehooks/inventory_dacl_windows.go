@@ -162,12 +162,6 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 		// keeps the grants it always made.
 		grants := inventoryDACLAgentGrants(home, guardianOwned[key], ideInventory)
 		if ideInventory {
-			for _, rel := range ideplugins.WindowsLegacyBroadGrantPaths(home) {
-				if err := revokeLegacyIDEReadACE(home, rel, sid); err != nil {
-					failed++
-					logfSafely(logf, target.SID, fmt.Sprintf("inventory-DACL narrow dotdir=%s: %s", rel, sanitizeInventoryDACLError(err)))
-				}
-			}
 			grants = append(grants, inventoryDACLIDEGrants(home)...)
 		}
 		for _, g := range grants {
@@ -257,48 +251,6 @@ func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, re
 	return grants
 }
 
-// revokeLegacyIDEReadACE removes only the old inherited service read grant.
-// The following grant pass restores required self and narrow subtree rights.
-func revokeLegacyIDEReadACE(home, rel string, sid *windows.SID) error {
-	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
-		return err
-	}
-	path := filepath.Join(home, rel)
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return err
-	}
-	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return err
-	}
-	acl, _, err := sd.DACL()
-	if err != nil || acl == nil {
-		return err
-	}
-	if !daclContainsInventoryReadACE(acl, sid) {
-		return nil
-	}
-	entry := windows.EXPLICIT_ACCESS{
-		AccessMode: windows.REVOKE_ACCESS,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  windows.TRUSTEE_IS_USER,
-			TrusteeValue: windows.TrusteeValueFromSID(sid),
-		},
-	}
-	narrowed, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, acl)
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, narrowed, nil)
-}
-
 // inventoryDACLIDEGrants lists the IDE folders and files of one profile that
 // the gateway's IDE plugin inventory reads (ideplugins.WindowsHomeGrants):
 // the same sources a per-user scan reads, Remote-SSH servers,
@@ -312,6 +264,15 @@ func revokeLegacyIDEReadACE(home, rel string, sid *windows.SID) error {
 func inventoryDACLIDEGrants(home string) []inventoryDACLGrant {
 	grants := ideplugins.WindowsHomeGrants(home)
 	out := make([]inventoryDACLGrant, 0, len(grants))
+	for _, rel := range ideplugins.WindowsLegacyBroadGrants(home) {
+		rel := rel
+		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
+			if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+				return inventoryDACLSkippedMissing, err
+			}
+			return revokeInventoryLegacyReadACE(path, sid)
+		}})
+	}
 	for _, g := range grants {
 		ensure := ensureInventorySelfACE
 		if g.Tree {
@@ -493,6 +454,63 @@ func ensureInventoryACE(path string, sid *windows.SID, kind inventoryACE) (inven
 		nil, nil, merged, nil,
 	); err != nil {
 		return inventoryDACLSkippedMissing, fmt.Errorf("set DACL: %w", err)
+	}
+	return inventoryDACLGranted, nil
+}
+
+// revokeInventoryLegacyReadACE removes the service SID's former explicit tree
+// grant. Windows then drops its inherited copies from descendants. An explicit
+// deny for the service SID is left untouched rather than revoked.
+func revokeInventoryLegacyReadACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	fi, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	if !fi.IsDir() {
+		return inventoryDACLSkippedMissing, nil
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	existing, _, err := sd.DACL()
+	if err != nil || existing == nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("inspect legacy IDE DACL: %v", err)
+	}
+	if !daclContainsInventoryReadACE(existing, sid) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	for i := uint16(0); i < existing.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(existing, uint32(i), &ace); err != nil {
+			return inventoryDACLSkippedMissing, err
+		}
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE &&
+			(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
+			return inventoryDACLSkippedMissing, errors.New("service SID has an explicit deny on legacy IDE path")
+		}
+	}
+	entry := windows.EXPLICIT_ACCESS{
+		AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+	narrowed, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, existing)
+	if err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("remove legacy IDE grant: %w", err)
+	}
+	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION, nil, nil, narrowed, nil); err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("set narrow IDE DACL: %w", err)
 	}
 	return inventoryDACLGranted, nil
 }

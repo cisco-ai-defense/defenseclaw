@@ -268,7 +268,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" [$__range])) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -506,7 +506,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
+          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -563,7 +563,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__interval]))",
+          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__interval]))",
           "legendFormat": "{{host}}",
           "refId": "A",
           "datasource": {
@@ -707,7 +707,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (tool_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=\"tool.invocation.completed\" | label_format tool_name=\"{{.body_gen_ai_tool_name}}\" [$__range])))",
+          "expr": "topk(20, sum by (tool_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=\"tool.invocation.completed\" | label_format tool_name=\"{{.body_gen_ai_tool_name}}\" [$__range])))",
           "instant": true,
           "refId": "A",
           "format": "table",
@@ -773,7 +773,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=~\"tool[.]invocation[.].*|finding[.](observed|correlated)|.*failed\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=~\"tool[.]invocation[.].*|finding[.](observed|correlated)|.*failed\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -781,7 +781,7 @@
           }
         },
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)|hook_decision\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)|hook_decision\"",
           "refId": "B",
           "datasource": {
             "type": "loki",
