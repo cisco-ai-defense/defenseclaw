@@ -218,10 +218,24 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile}})
-	if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
-		t.Fatal(err)
+	writeLock := func(profile, mode string) {
+		t.Helper()
+		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile},
+			"profile": profile, "mode": mode})
+		if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
+	// A lock of a replaced enrollment's profile, or of the other mode, is
+	// not a done setup (GAP-0833).
+	for _, stale := range [][2]string{{"replaced", "action"}, {"locked", "observe"}} {
+		writeLock(stale[0], stale[1])
+		listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+		if row, _ := listed[0].(map[string]any); row["setup"] != "stale" {
+			t.Fatalf("list row = %v for a lock of %v, want setup stale", row, stale)
+		}
+	}
+	writeLock("locked", "action")
 	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
 	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "done" {
 		t.Fatalf("list row = %v, want the custom directory token and setup lock", row)
