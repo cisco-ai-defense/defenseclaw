@@ -773,15 +773,33 @@ func evaluate(ctx context.Context, opts ProxyOptions, in Evaluation) (Verdict, e
 }
 
 func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direction Direction, src io.Reader, dst, rejectDst io.Writer) error {
-	scanner := bufio.NewScanner(src)
-	buf := make([]byte, 64<<10)
-	scanner.Buffer(buf, MaxFrameBytes+1)
+	frames := newFrameReader(src, state.peerProtocolFixes)
 	parse := ParseMessage
 	if state.peerProtocolFixes {
 		parse = ParseMessageAllowingNullIDErrors
 	}
-	for scanner.Scan() {
-		frame := append([]byte(nil), scanner.Bytes()...)
+	for {
+		frame, tooLong, readErr := frames.next()
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("read ACP frame: %w", readErr)
+		}
+		if tooLong {
+			// The Go text was "bufio.Scanner: token too long", in both
+			// modes (GAP-0685).
+			if opts.Mode == ModeAction {
+				return &protocolEnded{message: fmt.Sprintf("DefenseClaw ended this ACP session because the %s sent a message "+
+					"larger than the 1 MiB ACP frame limit", acpPeerName(direction))}
+			}
+			logf(opts.Stderr, "[defenseclaw-acp] observe protocol finding: the %s sent a message larger than the 1 MiB ACP frame limit; passed on unchecked\n",
+				acpPeerName(direction))
+			if err := frames.passThrough(frame, dst); err != nil {
+				return err
+			}
+			continue
+		}
 		msg, err := parse(frame)
 		matchedMethod := ""
 		if err == nil {
@@ -792,8 +810,8 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		}
 		if err != nil {
 			if opts.Mode == ModeAction && state.peerProtocolFixes {
-				return fmt.Errorf("DefenseClaw ended this ACP session because the %s sent a message that is not valid ACP JSON-RPC: %w",
-					acpPeerName(direction), err)
+				return &protocolEnded{err: err, message: fmt.Sprintf("DefenseClaw ended this ACP session because the %s sent a message "+
+					"that is not valid ACP JSON-RPC (%s)", acpPeerName(direction), plainProtocolReason(err))}
 			}
 			if opts.Mode == ModeAction {
 				return fmt.Errorf("ACP protocol blocked: %w", err)
@@ -885,10 +903,144 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read ACP frame: %w", err)
+}
+
+// protocolEnded ends a session over a frame that is not valid ACP, in words.
+type protocolEnded struct {
+	message string
+	err     error
+}
+
+func (e *protocolEnded) Error() string { return e.message }
+func (e *protocolEnded) Unwrap() error { return e.err }
+
+// plainProtocolReason says why a frame is not valid ACP JSON-RPC without
+// the Go decoder text ("invalid character 'h' in literal true", "cannot
+// unmarshal number into Go struct field Message.method") (GAP-0685).
+func plainProtocolReason(err error) string {
+	var syntax *json.SyntaxError
+	var mistyped *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syntax):
+		return "it is not valid JSON"
+	case errors.As(err, &mistyped):
+		field := mistyped.Field
+		if dot := strings.LastIndex(field, "."); dot >= 0 {
+			field = field[dot+1:]
+		}
+		if field == "" {
+			return "a value has the wrong type"
+		}
+		return fmt.Sprintf("its %q field has the wrong type", field)
+	case errors.Is(err, ErrBatchUnsupported):
+		return "it is a JSON-RPC batch, which ACP does not use"
 	}
-	return nil
+	text := strings.TrimPrefix(err.Error(), ErrInvalidMessage.Error()+": ")
+	switch {
+	case text == ErrInvalidMessage.Error():
+		return "it is not a JSON-RPC object"
+	case text == "frame size 0":
+		return "it is empty"
+	}
+	return text
+}
+
+// frameReader reads newline-delimited ACP frames. Outside Secure Client a
+// frame larger than MaxFrameBytes is reported instead of ending the read,
+// so observe mode can pass it on; Secure Client keeps the scanner of main.
+type frameReader struct {
+	scanner *bufio.Scanner
+	reader  *bufio.Reader
+	// rest marks a too-long frame whose remaining bytes are still unread.
+	rest bool
+}
+
+func newFrameReader(src io.Reader, report bool) *frameReader {
+	if !report {
+		scanner := bufio.NewScanner(src)
+		scanner.Buffer(make([]byte, 64<<10), MaxFrameBytes+1)
+		return &frameReader{scanner: scanner}
+	}
+	return &frameReader{reader: bufio.NewReaderSize(src, 64<<10)}
+}
+
+// next returns the next frame without its line ending, or io.EOF. A frame
+// longer than MaxFrameBytes comes back as its first bytes with tooLong set.
+func (f *frameReader) next() (frame []byte, tooLong bool, err error) {
+	if f.scanner != nil {
+		if f.scanner.Scan() {
+			return append([]byte(nil), f.scanner.Bytes()...), false, nil
+		}
+		if err := f.scanner.Err(); err != nil {
+			return nil, false, err
+		}
+		return nil, false, io.EOF
+	}
+	if f.rest {
+		if err := f.passThrough(nil, io.Discard); err != nil {
+			return nil, false, err
+		}
+	}
+	var line []byte
+	for {
+		chunk, readErr := f.reader.ReadSlice('\n')
+		line = append(line, chunk...)
+		switch {
+		case readErr == nil:
+			line = trimFrameEnd(line)
+			return line, len(line) > MaxFrameBytes, nil
+		case errors.Is(readErr, bufio.ErrBufferFull):
+			if len(line) > MaxFrameBytes {
+				f.rest = true
+				return line, true, nil
+			}
+		case errors.Is(readErr, io.EOF):
+			if len(line) == 0 {
+				return nil, false, io.EOF
+			}
+			line = trimFrameEnd(line)
+			return line, len(line) > MaxFrameBytes, nil
+		default:
+			return nil, false, readErr
+		}
+	}
+}
+
+// passThrough writes a too-long frame to dst unchanged: what next returned
+// and the rest of its line.
+func (f *frameReader) passThrough(head []byte, dst io.Writer) error {
+	if locked, ok := dst.(*lockedWriter); ok {
+		// One frame: the other direction must not write inside it.
+		locked.mu.Lock()
+		defer locked.mu.Unlock()
+		dst = locked.writer
+	}
+	if _, err := dst.Write(head); err != nil {
+		return err
+	}
+	for f.rest {
+		chunk, err := f.reader.ReadSlice('\n')
+		if _, writeErr := dst.Write(chunk); writeErr != nil {
+			return writeErr
+		}
+		switch {
+		case err == nil, errors.Is(err, io.EOF):
+			f.rest = false
+			if err == nil {
+				return nil
+			}
+		case !errors.Is(err, bufio.ErrBufferFull):
+			return err
+		}
+	}
+	_, err := dst.Write([]byte{'\n'})
+	return err
+}
+
+// trimFrameEnd drops a line ending, as bufio.ScanLines does.
+func trimFrameEnd(line []byte) []byte {
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	return bytes.TrimSuffix(line, []byte{'\r'})
 }
 
 // modeDriftError ends a session whose profile changed mode centrally. Its

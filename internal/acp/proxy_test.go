@@ -663,6 +663,36 @@ func TestCopyFramesProfileMovedEndsTheSessionAndSaysWhy(t *testing.T) {
 	}
 }
 
+// An oversized or broken frame ends an action session in words, without Go
+// package or decoder text, and an observe session passes the oversized frame
+// on (GAP-0685).
+func TestCopyFramesOversizedAndBrokenFramesSayWhy(t *testing.T) {
+	huge := `{"jsonrpc":"2.0","method":"x","params":{"pad":"` + strings.Repeat("a", MaxFrameBytes) + `"}}` + "\n"
+	newState := func() *proxyState {
+		return &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	}
+	for input, want := range map[string]string{
+		huge: "larger than the 1 MiB ACP frame limit",
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":true}\n": "not valid ACP JSON-RPC",
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":7}\n":    `"method" field has the wrong type`,
+		"{\"jsonrpc\":hello}\n":                            "it is not valid JSON",
+	} {
+		err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: AllowEvaluator{}, Stderr: io.Discard},
+			newState(), ClientToAgent, strings.NewReader(input), io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "bufio") ||
+			strings.Contains(err.Error(), "Go struct") || strings.Contains(err.Error(), "invalid character") {
+			t.Errorf("action mode, %.40q: err = %v, want %q", input, err, want)
+		}
+	}
+	var forwarded bytes.Buffer
+	next := `{"jsonrpc":"2.0","method":"initialized"}` + "\n"
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeObserve, Evaluator: AllowEvaluator{}, Stderr: io.Discard},
+		newState(), ClientToAgent, strings.NewReader(huge+next), &forwarded, io.Discard); err != nil ||
+		forwarded.String() != huge+next {
+		t.Fatalf("observe mode did not pass the oversized frame on: err=%v forwarded %d bytes", err, forwarded.Len())
+	}
+}
+
 type rejectingEvaluator struct{}
 
 func (rejectingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
