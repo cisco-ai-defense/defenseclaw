@@ -14,6 +14,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,7 +104,7 @@ func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
 		t.Skip(err)
 	}
 	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
-		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }}, nil
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }, Runner: noHostCommands{}}, nil
 	}
 	t.Cleanup(func() { newUnixLifecycleEnv = previous })
 	platform := "linux"
@@ -111,6 +112,7 @@ func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
 		platform = "macos"
 	}
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context()) // cobra gives every executed command a context
 	out.Reset()
 	cmd.SetOut(&out)
 	runErr := runUnixLifecycle(cmd, platform, "verify", &unixLifecycleOptions{})
@@ -558,4 +560,12 @@ func TestSecretSetStandsDownWhenItsCallerIsGone(t *testing.T) {
 	if err := secretCallerGone(4242, 1); err == nil || !strings.Contains(err.Error(), "credential was not stored") {
 		t.Fatalf("an orphaned secret set stored the credential: %v", err)
 	}
+}
+
+// noHostCommands keeps a lifecycle test off the host's launchctl and
+// systemctl: every command reports that it is not installed.
+type noHostCommands struct{}
+
+func (noHostCommands) Run(context.Context, string, ...string) (enterpriseunix.CommandResult, error) {
+	return enterpriseunix.CommandResult{ExitCode: -1}, enterpriseunix.ErrCommandNotFound
 }
