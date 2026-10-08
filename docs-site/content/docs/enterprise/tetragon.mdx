@@ -274,7 +274,10 @@ nothing from Plane C. A warning never fails the gate.
 
 `defenseclaw-tetragon.yml` installs the package, renders the candidate config
 from `config.yaml.j2` for the ring, runs `ensure` and `verify`, and then gates
-the ring on `tetragon verify`. The play takes one ring at a time and stops at
+the ring on `tetragon verify`. The gate retries for up to two minutes: the
+helper applies a new mode at its first pass after `ensure` restarted it, within
+a minute, and until then `verify` can fail `defenseclaw.policies` and
+`defenseclaw.agents`. The play takes one ring at a time and stops at
 the first computer that fails (`serial` and `any_errors_fatal`). The ring
 variables go in `group_vars`, as the play's header shows.
 
@@ -403,6 +406,12 @@ variables go in `group_vars`, as the play's header shows.
           - --ready-for
           - "{{ defenseclaw_tetragon_mode | default('consume') }}"
       register: defenseclaw_tetragon_ready
+      # ensure restarts the sensor helper into a new mode, and the helper
+      # loads that mode's policies at its first pass, within a minute: the
+      # gate waits for it rather than failing on the first look.
+      until: defenseclaw_tetragon_ready.rc == 0
+      retries: 6
+      delay: 20
       changed_when: false
       failed_when: defenseclaw_tetragon_ready.rc != 0
       when: (defenseclaw_tetragon_mode | default('consume')) != 'off'
@@ -449,7 +458,9 @@ enterprise:
 
 They run the same three commands: `ensure`, `verify` and `tetragon verify`.
 Stage the config file the way the [recipes](/docs/enterprise/mdm/linux-config-management)
-do, and run the commands only when it changes.
+do, and run the commands only when it changes. The readiness check retries for
+up to two minutes, as the play's gate does: the helper applies a new mode at
+its first pass after `ensure` restarted it.
 
 ```puppet
 $gateway = '/opt/defenseclaw/bin/defenseclaw-gateway'
@@ -461,6 +472,8 @@ exec { 'defenseclaw ensure':
 exec { 'defenseclaw tetragon verify':
   command     => "${gateway} enterprise linux tetragon verify --ready-for observe",
   refreshonly => true,
+  tries       => 6,
+  try_sleep   => 20,
   subscribe   => Exec['defenseclaw ensure'],
 }
 ```
@@ -474,6 +487,8 @@ end
 
 execute 'defenseclaw tetragon verify' do
   command '/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe'
+  retries 6
+  retry_delay 20
   action :nothing
   subscribes :run, 'execute[defenseclaw ensure]', :immediately
 end
@@ -489,6 +504,9 @@ defenseclaw-ensure:
 defenseclaw-tetragon-ready:
   cmd.run:
     - name: /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe
+    - retry:
+        attempts: 6
+        interval: 20
     - onchanges:
       - cmd: defenseclaw-ensure
 ```

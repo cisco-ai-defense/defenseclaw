@@ -293,6 +293,17 @@ _FLEET_COUNTS = [
 ]
 
 
+def test_ring_gate_waits_for_the_helpers_first_pass() -> None:
+    # GAP-0058: ensure restarts the sensor helper into the new mode and the
+    # helper loads its policies at its first pass, within a minute; the gate
+    # ran 0.4 s after ensure and failed the first run of the broad ring.
+    play = yaml.safe_load(_text(EXAMPLES / "defenseclaw-tetragon.yml"))[0]
+    gate = next(task for task in play["tasks"] if task["name"] == "Gate the ring on Tetragon readiness for its mode")
+    assert gate["until"] == "defenseclaw_tetragon_ready.rc == 0"
+    assert gate["retries"] * gate["delay"] >= 90, "the gate must wait out the helper's first pass (60 s)"
+    assert gate["failed_when"] == "defenseclaw_tetragon_ready.rc != 0"
+
+
 def test_fleet_play_counts_users_from_verify() -> None:
     jinja2 = pytest.importorskip("jinja2")
     play = yaml.safe_load(_text(EXAMPLES / "fleet-readiness.yml"))[0]

@@ -122,6 +122,12 @@
           - --ready-for
           - "{{ defenseclaw_tetragon_mode | default('consume') }}"
       register: defenseclaw_tetragon_ready
+      # ensure restarts the sensor helper into a new mode, and the helper
+      # loads that mode's policies at its first pass, within a minute: the
+      # gate waits for it rather than failing on the first look.
+      until: defenseclaw_tetragon_ready.rc == 0
+      retries: 6
+      delay: 20
       changed_when: false
       failed_when: defenseclaw_tetragon_ready.rc != 0
       when: (defenseclaw_tetragon_mode | default('consume')) != 'off'
