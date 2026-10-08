@@ -6794,7 +6794,14 @@ def setup_guardrail(
             preselect_guardrail_targets(target_connectors)
 
         if explicit_connector:
-            if not (getattr(gc, "connectors", None) and target_connector in gc.connectors):
+            roster = getattr(gc, "connectors", None) or {}
+            if not (roster and target_connector in roster):
+                gc.connector = target_connector
+            elif normalize_connector((gc.connector or "").strip()) not in {normalize_connector(n) for n in roster}:
+                # GAP-0371: a primary mirror that is not on the roster (an
+                # earlier build's half switch left one) names a connector that
+                # is not set up; the summary, claw.mode and the gateway's
+                # primary must follow the connector this run configures.
                 gc.connector = target_connector
         elif not gc.connector or gc.connector == "openclaw":
             if target_connector:
@@ -9512,13 +9519,18 @@ def _write_connector_identity(
         (getattr(gc, "connector", "") or getattr(cfg.claw, "mode", "") or "").strip()
     )
     if write_mode == "add":
-        if not getattr(gc, "connectors", None):
+        first_add = not getattr(gc, "connectors", None)
+        if first_add:
             gc.connectors = {}
         existing_single = (getattr(gc, "connector", "") or "").strip()
         # Only seed a HOOK-enforced predecessor into the multi map — a
         # proxy-backed connector cannot be a multi-connector peer (D4=A).
+        # Only on the first add: once the roster exists the singular field is
+        # just its mirror, and a stale mirror is not a connector that was set
+        # up (GAP-0371: 'setup codex' enrolled a Claude Code nobody set up).
         if (
-            existing_single
+            first_add
+            and existing_single
             and existing_single != connector
             and existing_single in _HOOK_ENFORCED_CONNECTORS
             and existing_single not in gc.connectors

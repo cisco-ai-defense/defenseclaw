@@ -9070,15 +9070,19 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         return
     local = _local_policy_digest(cfg)
     if local is not None and local.get("effective_digest") != digest:
-        # Name the cause when the writer recorded a later save than the one
-        # the gateway built from: it never applied that change (GAP-0362).
+        # Name the cause on every path (GAP-0362, GAP-0382): a later save than
+        # the one the gateway built from, also when the gateway reports no
+        # config generation (an imported 0.8 install), else an asset change.
         saved = _saved_config_generation(cfg)
-        cause = (
-            f": it has not applied the change saved as config generation {saved} (it enforces generation "
-            f"{config_generation})"
-            if saved > config_generation > 0
-            else ""
-        )
+        if saved > config_generation > 0:
+            cause = (
+                f": it has not applied the change saved as config generation {saved} (it enforces generation "
+                f"{config_generation})"
+            )
+        elif saved > config_generation:
+            cause = f": it has not applied the change saved as config generation {saved}"
+        else:
+            cause = ": it has not applied the current config.yaml and policy assets"
         _emit(
             "fail",
             label,

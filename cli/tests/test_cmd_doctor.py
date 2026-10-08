@@ -87,18 +87,25 @@ class DoctorPolicyStateTests(unittest.TestCase):
             self.assertEqual(result.checks[0]["status"], want, (extra, local, result.checks[0]))
 
     def test_stale_row_names_the_change_the_gateway_did_not_apply(self):
-        # GAP-0362: the row showed only two digests.
+        # GAP-0362: the row showed only two digests. GAP-0382: also when the
+        # gateway reports no config generation (an imported 0.8 install).
         from defenseclaw.commands import cmd_doctor
 
-        policy = {"effective_digest": "sha256:" + "a" * 64, "generation": 3, "config_generation": 2,
-                  "config_generation_recorded": True}
-        result = _DoctorResult()
-        with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": "sha256:" + "b" * 64}), \
-                patch.object(cmd_doctor, "_saved_config_generation", return_value=4):
-            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
-        self.assertIn("it has not applied the change saved as config generation 4 (it enforces generation 2)",
-                      result.checks[0]["detail"])
-        self.assertIn("defenseclaw-gateway restart", result.checks[0]["remediation"])
+        cases = [
+            (2, 4, "it has not applied the change saved as config generation 4 (it enforces generation 2)"),
+            (None, 4, "it has not applied the change saved as config generation 4"),
+            (2, 2, "it has not applied the current config.yaml and policy assets"),
+        ]
+        for config_generation, saved, want in cases:
+            policy = {"effective_digest": "sha256:" + "a" * 64, "generation": 3,
+                      "config_generation": config_generation, "config_generation_recorded": True}
+            result = _DoctorResult()
+            with patch.object(cmd_doctor, "_local_policy_digest",
+                              return_value={"effective_digest": "sha256:" + "b" * 64}), \
+                    patch.object(cmd_doctor, "_saved_config_generation", return_value=saved):
+                cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+            self.assertIn(want, result.checks[0]["detail"], config_generation)
+            self.assertIn("defenseclaw-gateway restart", result.checks[0]["remediation"])
 
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
