@@ -1788,6 +1788,16 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if problems := l.verifyInstalled(ctx, record, false); len(problems) > 0 {
 		return false, ""
 	}
+	if !record.NoStart {
+		// A unit an administrator disabled may still run (the hook socket
+		// starts the gateway again), so verifyInstalled passes; activation
+		// re-enables it (GAP-0530).
+		for _, unit := range env.Services.Units() {
+			if unit.Activate && unitDisabled(ctx, env.Services, unit) {
+				return false, ""
+			}
+		}
+	}
 	if l.machinePolicyDrift(p) {
 		return false, ""
 	}

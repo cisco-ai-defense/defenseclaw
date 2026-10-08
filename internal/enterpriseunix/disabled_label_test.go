@@ -56,3 +56,17 @@ func TestLaunchdDisabledReadsTheOverride(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0530: after `systemctl disable --now defenseclaw-gateway` the hook
+// socket starts the gateway again, so it runs but would not start at boot;
+// the next ensure was a no-op and verify passed.
+func TestEnsureReEnablesADisabledSystemdUnitThatStillRuns(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.disabled = map[string]bool{unitGateway: true}
+	ensure := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")})
+	requireOK(t, ensure)
+	if ensure.Noop || !strings.Contains(strings.Join(ensure.Changes, "\n"), "re-enabled "+unitGateway) {
+		t.Fatalf("ensure noop=%v changes=%q, want the gateway re-enabled", ensure.Noop, ensure.Changes)
+	}
+}

@@ -305,6 +305,13 @@ func (m *systemdManager) Enabled(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "enabled"
 }
 
+// Disabled reports a unit an administrator disabled (systemctl disable). A
+// socket-activated gateway keeps running after `disable --now`, so only the
+// unit file state shows that it would not start at boot (GAP-0530).
+func (m *systemdManager) Disabled(ctx context.Context, unit Unit) bool {
+	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "disabled"
+}
+
 // FragmentPath is the unit file systemd loaded the unit from.
 func (m *systemdManager) FragmentPath(ctx context.Context, unit Unit) string {
 	return m.properties(ctx, unit.Name, "FragmentPath")["FragmentPath"]
