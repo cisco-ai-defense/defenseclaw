@@ -302,8 +302,8 @@ enabled:
   `discovery` view below.
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
-- A user's results turn `gone` when the user leaves the manifest, or three
-  scan intervals after the user's last successful scan.
+- A user's results turn `gone` when the user leaves the manifest, or after the longer of three
+  scan intervals and 15 minutes since the user's last successful scan.
 - `mode`, `include_shell_history`, `include_package_manifests` and
   `store_raw_local_paths` apply as usual.
 - Administrators read the per-user records on the host with
