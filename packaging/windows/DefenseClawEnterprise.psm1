@@ -3757,11 +3757,16 @@ function Initialize-DefenseClawManagedRoot {
         # Never seize a user-controlled tree. First prove the existing owner
         # and all effective write ACEs are already administrator-controlled;
         # only then replace inheritance with the canonical protected DACL.
+        # Standalone: an empty folder an earlier removal left under Program
+        # Files carries the default inherit-only CREATOR OWNER entry, which
+        # grants nothing; refusing it failed /ensure with a raw S-1-3-0
+        # (GAP-0915), so it is taken over like an administrator's folder.
         Assert-DefenseClawPathAcl `
             -Path $Path `
             -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
             -AllowUsersRead:$AllowUsersRead `
-            -AllowInheritance
+            -AllowInheritance `
+            -IgnoreCreatorTemplates:(Test-DefenseClawStandaloneProfile)
     }
     else {
         throw "$Label secure creation did not produce the requested root: $Path"
@@ -4043,7 +4048,11 @@ function Assert-DefenseClawPathAcl {
         ),
         [switch]$AllowUsersRead,
         [switch]$RejectUntrustedRead,
-        [switch]$AllowInheritance
+        [switch]$AllowInheritance,
+        # Skip the inherit-only CREATOR OWNER and CREATOR GROUP templates.
+        # They grant nothing on the folder itself, only to whoever creates a
+        # child, which needs write access this check already limits.
+        [switch]$IgnoreCreatorTemplates
     )
     Assert-DefenseClawNoReparsePath -Path $Path
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
@@ -4070,6 +4079,10 @@ function Assert-DefenseClawPathAcl {
             continue
         }
         $sid = ConvertTo-DefenseClawSID -Identity $rule.IdentityReference
+        if ($IgnoreCreatorTemplates -and $sid -in @('S-1-3-0', 'S-1-3-1') -and
+            ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
+            continue
+        }
         if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0) {
             $currentRights = if ($grantedBySID.ContainsKey($sid)) {
                 [Security.AccessControl.FileSystemRights]$grantedBySID[$sid]
@@ -4359,6 +4372,126 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
     }
 }
 
+# How long the in-use check waits before it looks again, so a hook call that
+# was running at the first look does not block the uninstall.
+$script:InstallTreeUseRecheckMilliseconds = 2000
+
+function Get-DefenseClawProcessImages {
+    # Every process this token can see, with its executable, account and
+    # parent process name where Windows reports them.
+    $parents = @{}
+    try {
+        foreach ($entry in @(CimCmdlets\Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+            $parents[[int]$entry.ProcessId] = [int]$entry.ParentProcessId
+        }
+    }
+    catch {
+    }
+    $processes = try {
+        @(Microsoft.PowerShell.Management\Get-Process -IncludeUserName -ErrorAction Stop)
+    }
+    catch {
+        @(Microsoft.PowerShell.Management\Get-Process -ErrorAction SilentlyContinue)
+    }
+    $names = @{}
+    foreach ($process in $processes) {
+        $names[[int]$process.Id] = [string]$process.ProcessName
+    }
+    foreach ($process in $processes) {
+        $path = try { [string]$process.Path } catch { '' }
+        $account = ''
+        if ($null -ne $process.PSObject.Properties['UserName']) {
+            $account = [string]$process.UserName
+        }
+        $parent = ''
+        if ($parents.ContainsKey([int]$process.Id) -and $names.ContainsKey($parents[[int]$process.Id])) {
+            $parent = [string]$names[$parents[[int]$process.Id]]
+        }
+        [pscustomobject]@{ Id = [int]$process.Id; Path = $path; UserName = $account; Parent = $parent }
+    }
+}
+
+function Assert-DefenseClawStandaloneInstallTreeNotInUse {
+    <#
+        Standalone uninstall refuses, before it changes anything, while a
+        program other than the DefenseClaw services and this lifecycle runs
+        an executable from the install folder. An editor's DefenseClaw ACP
+        thread runs defenseclaw-acp.exe: the uninstall removed all four
+        services and then failed 1603 on that file, leaving the computer half
+        removed (GAP-0942). A process seen only once (a hook call) does not
+        block.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $bin = [IO.Path]::GetFullPath([string]$Layout.BinDirectory).TrimEnd('\') + '\'
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    [void]$excluded.Add([int]$PID)
+    if ($SelfUninstallCallerPID -gt 0) {
+        [void]$excluded.Add([int]$SelfUninstallCallerPID)
+    }
+    foreach ($name in @(
+            $GatewayServiceName,
+            $GuardianServiceName,
+            (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName),
+            (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName)
+        )) {
+        try {
+            if (Test-DefenseClawServiceExists -Name $name) {
+                [void]$excluded.Add([int](Get-DefenseClawServiceProcessId -Name $name))
+            }
+        }
+        catch {
+        }
+    }
+    $users = $null
+    foreach ($pass in 1, 2) {
+        $seen = @{}
+        foreach ($process in @(Get-DefenseClawProcessImages)) {
+            if ([string]::IsNullOrEmpty([string]$process.Path) -or
+                $excluded.Contains([int]$process.Id) -or
+                -not ([IO.Path]::GetFullPath([string]$process.Path)).StartsWith($bin, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $seen[[int]$process.Id] = $process
+        }
+        if ($null -eq $users) {
+            $users = $seen
+            if ($users.Count -eq 0) {
+                return
+            }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:InstallTreeUseRecheckMilliseconds
+            continue
+        }
+        $still = @($users.Keys | Microsoft.PowerShell.Core\Where-Object { $seen.ContainsKey($_) } | Microsoft.PowerShell.Utility\Sort-Object)
+        if ($still.Count -eq 0) {
+            return
+        }
+        $named = @(foreach ($id in $still) {
+                $process = $seen[$id]
+                $text = '{0} (pid {1}' -f [IO.Path]::GetFileName([string]$process.Path), $id
+                if (-not [string]::IsNullOrEmpty([string]$process.UserName)) {
+                    $text += ', account ' + [string]$process.UserName
+                }
+                if (-not [string]::IsNullOrEmpty([string]$process.Parent)) {
+                    $text += ', started by ' + [string]$process.Parent
+                }
+                $text + ')'
+            })
+        throw (
+            'uninstall_in_use: ' + ($named -join '; ') + " runs from $bin, so DefenseClaw cannot remove its files; nothing was changed. " +
+            'Close it first: for defenseclaw-acp.exe, end the editor thread that uses DefenseClaw ACP (the DefenseClaw agent in Zed or a JetBrains IDE) ' +
+            'in that account, or sign the account out; then run the uninstall again'
+        )
+    }
+}
+
 function Write-DefenseClawJsonAtomic {
     param(
         [Parameter(Mandatory)]$Value,
@@ -4436,8 +4569,114 @@ function Stop-DefenseClawService {
         [ServiceProcess.ServiceControllerStatus]::Stopped) {
         return
     }
-    Microsoft.PowerShell.Management\Stop-Service -Name $Name -ErrorAction Stop
-    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        Microsoft.PowerShell.Management\Stop-Service -Name $Name -ErrorAction Stop
+        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        return
+    }
+    # A hung or suspended service process never answers the stop request:
+    # Stop-Service failed after the SCM's own timeout, ensure failed 1603 and
+    # left the guardian and the enumerator stopped with the transaction
+    # pending (GAP-0946). Standalone gives a stop the SCM's 30-second
+    # budget, then ends the service's own process as the SCM does for a
+    # stuck stop, and continues. Every caller has disabled the service first,
+    # so its failure actions cannot restart it.
+    $budget = [TimeSpan]::FromSeconds($script:ServiceStopTimeoutSeconds)
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    $stopError = $null
+    try {
+        Microsoft.PowerShell.Management\Stop-Service -Name $Name -NoWait -ErrorAction Stop
+    }
+    catch {
+        $stopError = $_
+    }
+    if (Wait-DefenseClawServiceStopped -Service $service -Timeout ($budget - $elapsed.Elapsed)) {
+        return
+    }
+    $running = @($service.DependentServices | Microsoft.PowerShell.Core\Where-Object {
+            $_.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped
+        })
+    if ($running.Count -gt 0) {
+        if ($null -ne $stopError) {
+            throw $stopError
+        }
+        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds while $($running[0].ServiceName) depends on it"
+    }
+    Stop-DefenseClawUnresponsiveServiceProcess -Name $Name
+    if (-not (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget)) {
+        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds after its process was ended"
+    }
+}
+
+# How long a standalone stop waits before it ends a service process that
+# does not answer (the SCM's own stop budget).
+$script:ServiceStopTimeoutSeconds = 30
+
+# Each service process a standalone lifecycle ended because it did not
+# answer a stop, as "<service> (pid <n>)", for the result.
+$script:DefenseClawTerminatedServiceProcesses = @()
+
+function Wait-DefenseClawServiceStopped {
+    param(
+        [Parameter(Mandatory)]$Service,
+        [Parameter(Mandatory)][TimeSpan]$Timeout
+    )
+    $deadline = [DateTime]::UtcNow + $Timeout
+    while ($true) {
+        $Service.Refresh()
+        if ($Service.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped) {
+            return $true
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            return $false
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+    }
+}
+
+function Get-DefenseClawServiceProcessId {
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-DefenseClawServiceName -Name $Name
+    $lines = @(Invoke-DefenseClawNative -File $script:ScExe -Arguments @('queryex', $Name) -Capture)
+    $match = [regex]::Match(($lines -join "`n"), '(?m)^\s*PID\s*:\s*([0-9]+)\s*$')
+    if (-not $match.Success) {
+        return [uint32]0
+    }
+    return [uint32]$match.Groups[1].Value
+}
+
+function Stop-DefenseClawUnresponsiveServiceProcess {
+    <#
+        Ends the process of a DefenseClaw service that did not answer a stop
+        request in time, only when it is the service's own executable (its
+        ImagePath); anything else is refused with the process id and image so
+        the administrator can end it. A process TerminateProcess ends while
+        suspended or hung reports the service stopped to the SCM.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    $processId = Get-DefenseClawServiceProcessId -Name $Name
+    if ($processId -eq 0) {
+        return
+    }
+    if ($processId -eq [uint32]$PID) {
+        throw "service $Name did not stop and runs in this lifecycle's own process $processId; not ending it"
+    }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $imagePath = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ImagePath -ErrorAction Stop)
+    $expected = if ($imagePath.StartsWith('"')) {
+        $imagePath.Substring(1, [Math]::Max(0, $imagePath.IndexOf('"', 1) - 1))
+    }
+    else {
+        ($imagePath -split ' ', 2)[0]
+    }
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $image = [string]$nativeSecurity::GetProcessImagePath($processId)
+    if ([string]::IsNullOrWhiteSpace($expected) -or
+        -not [string]::Equals([IO.Path]::GetFullPath($image), [IO.Path]::GetFullPath($expected), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds, and its process $processId runs $image, not the service executable $expected; end process $processId, then run the command again"
+    }
+    Microsoft.PowerShell.Management\Stop-Process -Id ([int]$processId) -Force -ErrorAction Stop
+    $script:DefenseClawTerminatedServiceProcesses += "$Name (pid $processId)"
 }
 
 function Start-DefenseClawService {
@@ -6572,7 +6811,56 @@ function Get-DefenseClawRedactionKeySecurityClass {
             -Expected $brokenExpected) {
         return 'broken_runtime_file'
     }
+    # Standalone: a hardening script or icacls run that removed the gateway
+    # service's entry (or reset the key to inherit) left an access list only
+    # trusted principals hold. Nothing untrusted could read the key, so the
+    # lifecycle records it as found and repair writes the exact contract
+    # again; refusing it wedged every recovery (GAP-0920).
+    if ((Test-DefenseClawStandaloneProfile) -and
+        (Test-DefenseClawRawAclTrustedOnly `
+            -Actual $Actual `
+            -TrustedSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $GatewayServiceSID
+            ))) {
+        return 'trusted_drift'
+    }
     throw 'redaction correlation key has an unrecognized active ACL'
+}
+
+function Test-DefenseClawRawAclTrustedOnly {
+    <#
+        Whether a security descriptor's owner is one of TrustedSIDs and every
+        allow entry that applies to the object grants only those principals.
+        Deny entries and inherit-only entries grant nothing.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [Parameter(Mandatory)][string[]]$TrustedSIDs
+    )
+    if ($null -eq $Actual.Owner -or $Actual.Owner.Value -notin $TrustedSIDs -or
+        $null -eq $Actual.DiscretionaryAcl) {
+        return $false
+    }
+    foreach ($ace in $Actual.DiscretionaryAcl) {
+        if ($ace -isnot [Security.AccessControl.CommonAce]) {
+            return $false
+        }
+        # AceFlags is a byte enum: Windows PowerShell 5.1 cannot compare it
+        # with an integer, so compare the integer values.
+        if ($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessDenied -or
+            ([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
+            continue
+        }
+        if ($ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
+            $ace.SecurityIdentifier.Value -notin $TrustedSIDs) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Get-DefenseClawRedactionKeySecuritySnapshot {
@@ -6628,9 +6916,37 @@ function Get-DefenseClawRedactionKeySecuritySnapshot {
         [byte[]]$captured.SecurityDescriptor,
         0
     )
-    $preimageClass = Get-DefenseClawRedactionKeySecurityClass `
-        -Actual $actual `
-        -GatewayServiceSID $GatewayServiceSID
+    try {
+        $preimageClass = Get-DefenseClawRedactionKeySecurityClass `
+            -Actual $actual `
+            -GatewayServiceSID $GatewayServiceSID
+    }
+    catch {
+        if (-not (Test-DefenseClawStandaloneProfile)) {
+            throw
+        }
+        $holders = @(
+            foreach ($ace in @($actual.DiscretionaryAcl)) {
+                if ($ace -is [Security.AccessControl.CommonAce] -and
+                    $ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and
+                    $ace.SecurityIdentifier.Value -notin @(
+                        $script:SystemSID,
+                        $script:AdministratorsSID,
+                        $script:TrustedInstallerSID,
+                        $GatewayServiceSID
+                    )) {
+                    $ace.SecurityIdentifier.Value
+                }
+            }
+        ) | Microsoft.PowerShell.Utility\Select-Object -Unique
+        $owner = if ($null -ne $actual.Owner) { $actual.Owner.Value } else { 'none' }
+        throw (
+            "untrusted principal $(@($holders + $owner)[0]) can open the redaction correlation key: $path " +
+            "(owner $owner; other principals with access: $(if (@($holders).Count -gt 0) { @($holders) -join ', ' } else { 'none' })). " +
+            'Only SYSTEM, Administrators and NT SERVICE\DefenseClawGateway may hold this key. Remove the other entries ' +
+            "(icacls `"$path`" /setowner *S-1-5-32-544, then icacls `"$path`" /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F), then run the command again"
+        )
+    }
     return [ordered]@{
         schema_version = 2
         path = $path
@@ -6939,6 +7255,15 @@ function Restore-DefenseClawRedactionKeySecuritySnapshot {
     # the exact older three-ACE service-owned compatibility contract.
     $expected = if ([string]$recordedClass -ceq 'broken_runtime_file') {
         New-DefenseClawLegacyRedactionKeyAcl `
+            -GatewayServiceSID $gatewaySID
+    }
+    elseif ([string]$recordedClass -ceq 'trusted_drift') {
+        # The drifted list could not start the gateway either (that is why it
+        # was recorded); roll back to the exact contract, which only grants
+        # the same trusted principals.
+        New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $false `
+            -Kind RuntimeSecretFile `
             -GatewayServiceSID $gatewaySID
     }
     else {
@@ -13370,6 +13695,25 @@ function Recover-DefenseClawQuiescingIntent {
         -Path $Layout.PendingPath `
         -Phase quiesced `
         -ServicesQuiescedAt $recoveryQuiescedAt
+    $priorActiveProperty = $Intent.PSObject.Properties['prior_deployment_active']
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $null -ne $priorActiveProperty -and
+        [bool]$priorActiveProperty.Value -and
+        (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+        # Nothing of the deployment changed before this intent, so its own
+        # access lists are the ones to restart with. An administrator script
+        # that stripped NT SERVICE\DefenseClawGateway from runtime and etc
+        # made every service restart fail here, so the transaction stayed
+        # pending and every repair, ensure and uninstall failed the same way
+        # (GAP-0920). Put the deployment's access back first.
+        $recoveryGatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+        Set-DefenseClawRetainedRuntimeAcls `
+            -RuntimeDirectory $Layout.RuntimeDirectory `
+            -GatewayServiceSID $recoveryGatewaySID
+        Set-DefenseClawManagedCoreAcls `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
     Set-DefenseClawServiceActivationPhase `
         -State $Intent `
         -Path $Layout.PendingPath `
@@ -18739,6 +19083,27 @@ function Get-DefenseClawServiceState {
     return $service.Status.ToString().ToLowerInvariant()
 }
 
+function Get-DefenseClawServiceStartModeName {
+    <#
+        The startup type of a service as status reports it (auto, manual or
+        disabled), or '' when the service is absent or its mode cannot be
+        read. Verify said only "startup mode drift: 4, expected 2", so the
+        Intune Detect line could not say that a stopped guardian was also
+        disabled (GAP-0864).
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        switch (Get-DefenseClawServiceStartMode -Name $Name) {
+            2 { return 'auto' }
+            3 { return 'manual' }
+            4 { return 'disabled' }
+        }
+    }
+    catch {
+    }
+    return ''
+}
+
 function ConvertTo-DefenseClawBoundedDiagnostic {
     param(
         [AllowNull()]$Value,
@@ -18756,6 +19121,32 @@ function ConvertTo-DefenseClawBoundedDiagnostic {
         return $text.Substring(0, $MaxLength - 3) + '...'
     }
     return $text
+}
+
+function Assert-DefenseClawGatewayServiceAccess {
+    <#
+        The access the gateway service needs at start to the folders verify
+        checks for it: its config folder and file, and its runtime folder.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    $gatewayReaders = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID, $gatewaySID)
+    foreach ($check in @(
+        @($Layout.ConfigDirectory, 'ConfigDirectory', $adminWriters),
+        @($Layout.ConfigPath, 'Config', $adminWriters),
+        @($Layout.RuntimeDirectory, 'Runtime', $gatewayReaders)
+    )) {
+        Assert-DefenseClawPathAcl `
+            -Path ([string]$check[0]) `
+            -AllowedWriterSIDs $check[2] `
+            -AllowedReaderSIDs $gatewayReaders `
+            -RequiredRights (New-DefenseClawRequiredRights -Kind ([string]$check[1]) -GatewayServiceSID $gatewaySID) `
+            -RejectUntrustedRead
+    }
 }
 
 function Get-DefenseClawGuardianStatusReport {
@@ -18917,6 +19308,19 @@ function Get-DefenseClawLifecycleStatus {
             )
         }
     }
+    if ((Test-DefenseClawStandaloneProfile) -and $installed -and -not $pending -and
+        (Test-DefenseClawAdministrator)) {
+        # Status said ok while verify failed on the gateway service's access
+        # to runtime and etc, and the gateway could not start (GAP-0920).
+        try {
+            Assert-DefenseClawGatewayServiceAccess `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            $errors.Add($_.Exception.Message)
+        }
+    }
     $brokerHealthyInstalled = (-not $brokerEnabled) -or $brokerState -eq 'running'
     $brokerHealthyAbsent = (-not $brokerEnabled) -or $brokerState -eq 'absent'
     $healthy = if ($installed) {
@@ -18997,6 +19401,14 @@ function Get-DefenseClawLifecycleStatus {
         $status['sensor_helper_service_state'] = Get-DefenseClawServiceState -Name $sensorHelperName
         $status['enumerator_service'] = $enumeratorName
         $status['enumerator_service_state'] = Get-DefenseClawServiceState -Name $enumeratorName
+        $startModes = [ordered]@{}
+        foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorName, $sensorHelperName)) {
+            $mode = Get-DefenseClawServiceStartModeName -Name $name
+            if (-not [string]::IsNullOrEmpty($mode)) {
+                $startModes[$name] = $mode
+            }
+        }
+        $status['service_start_modes'] = [pscustomobject]$startModes
         # The standalone helper derives this log from the fixed layout (the
         # Service Control Manager discards service stderr).
         $status['sensor_helper_log_path'] = [IO.Path]::Combine(
@@ -19020,6 +19432,12 @@ function Get-DefenseClawLifecycleStatus {
         $status['trust_mode'] = $recordedTrust
         if (@($script:DefenseClawQuarantinedRoots).Count -gt 0) {
             $status['quarantined_paths'] = @($script:DefenseClawQuarantinedRoots)
+        }
+        if (@($script:DefenseClawSquattedRootNotes).Count -gt 0) {
+            $status['squatted_root_notes'] = [string[]]@($script:DefenseClawSquattedRootNotes)
+        }
+        if (@($script:DefenseClawTerminatedServiceProcesses).Count -gt 0) {
+            $status['terminated_service_processes'] = [string[]]@($script:DefenseClawTerminatedServiceProcesses)
         }
         # Which gateway this run's pending-transaction recovery ran, and why.
         $recoveryRuns = @(Get-DefenseClawRecoveryGatewayRunRecords)
@@ -24165,6 +24583,11 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GuardianServiceName $GuardianServiceName `
         -AnyStartMode
     Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
+    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
     Assert-DefenseClawManagedInstallTree -Layout $Layout
     Assert-DefenseClawRecordedArtifactHashes `
         -Metadata $metadata `
@@ -24724,6 +25147,43 @@ function Move-DefenseClawStandaloneSquattedRoots {
                 )
             }
         }
+        $planter = Get-DefenseClawSquattedRootPlanter -Path $path
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            # A junction or symbolic link a standard user planted is removed
+            # as a link (rmdir semantics: the reparse point goes, its target
+            # is never opened or followed). It used to be renamed aside and
+            # left in ProgramData with no word to the administrator
+            # (GAP-0904).
+            $target = ''
+            try {
+                $target = [string](@($item.Target) | Microsoft.PowerShell.Utility\Select-Object -First 1)
+            }
+            catch {
+            }
+            try {
+                if ($item.PSIsContainer) {
+                    [IO.Directory]::Delete($path)
+                }
+                else {
+                    [IO.File]::Delete($path)
+                }
+            }
+            catch {
+                throw (
+                    "root_squatted: $path is a link that $planter created, not an administrator, and could not " +
+                    "be removed ($($_.Exception.Message)); an administrator must remove the link (rmdir `"$path`")"
+                )
+            }
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+                throw "root_squatted: $path was re-created while DefenseClaw removed a planted link"
+            }
+            $script:DefenseClawSquattedRootNotes += (
+                "removed the link $path that $planter created; it pointed at " +
+                $(if ([string]::IsNullOrEmpty($target)) { 'an unreadable target' } else { $target }) +
+                ', which was neither followed nor changed'
+            )
+            continue
+        }
         $quarantine = '{0}.untrusted-{1}-{2}' -f $path,
             [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'),
             [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -24746,6 +25206,37 @@ function Move-DefenseClawStandaloneSquattedRoots {
             throw "root_squatted: $path was re-created while DefenseClaw moved an untrusted copy aside"
         }
         $script:DefenseClawQuarantinedRoots += $quarantine
+        $kind = if ($item.PSIsContainer) { 'folder' } else { 'file' }
+        $script:DefenseClawSquattedRootNotes += (
+            "moved the $kind $path that $planter created aside to $quarantine, with its content; " +
+            'review it and remove it (Remove-Item -LiteralPath "' + $quarantine + '" -Recurse -Force)'
+        )
+    }
+}
+
+# What Install did with each squatted root, for the result.
+$script:DefenseClawSquattedRootNotes = @()
+
+function Get-DefenseClawSquattedRootPlanter {
+    # The owner of a squatted path, read without following a link, as an
+    # account name next to its SID.
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $snapshot = $nativeSecurity::GetDirectorySecuritySnapshotNoFollow($Path)
+        $owner = [Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$snapshot.SecurityDescriptor, 0).Owner
+        if ($null -eq $owner) {
+            return 'an unknown account'
+        }
+        try {
+            return '{0} ({1})' -f $owner.Translate([Security.Principal.NTAccount]).Value, $owner.Value
+        }
+        catch {
+            return $owner.Value
+        }
+    }
+    catch {
+        return 'an account DefenseClaw could not read'
     }
 }
 
@@ -25236,6 +25727,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawAdministrator
     }
     $script:DefenseClawQuarantinedRoots = @()
+    $script:DefenseClawSquattedRootNotes = @()
+    $script:DefenseClawTerminatedServiceProcesses = @()
     Set-DefenseClawRecoveryGatewayCandidate `
         -GatewayBinary $GatewayBinary `
         -InstallerSource $InstallerSource `

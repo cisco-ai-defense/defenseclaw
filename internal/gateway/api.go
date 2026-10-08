@@ -71,6 +71,10 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// exemptAuditAt is when each exempt account and connector last got an
+	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
+	exemptAuditMu sync.Mutex
+	exemptAuditAt map[string]time.Time
 	// foreignHookSessionLocks serializes foreign-hook session exchanges per
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
@@ -86,6 +90,9 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// hermesTasks gives a Hermes hook that names only its task the session
+	// of that task.
+	hermesTasks hermesTaskSessions
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -956,12 +963,17 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 
 // NewAPIServer creates the REST API server bound to the given address.
 func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
-	return newAPIServer(nil, addr, health, client, store, logger, cfg...)
+	s := newAPIServer(addr, health, client, store, logger, cfg...)
+	if s.scannerCfg != nil {
+		s.initGuardrailProfiles(s.scannerCfg)
+	}
+	return s
 }
 
-// newAPIServer is NewAPIServer with the rule packs the sidecar already loaded
-// and validated for its guardrail profile set; nil loads them again.
-func newAPIServer(rulePacks *guardrail.RulePackCache, addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
+// newAPIServer is NewAPIServer without the guardrail profile set: the sidecar
+// hands the API the set of its current generation instead of deriving every
+// profile a second time (GAP-0276).
+func newAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
 	s := &APIServer{
 		addr:   addr,
 		health: health,
@@ -971,7 +983,6 @@ func newAPIServer(rulePacks *guardrail.RulePackCache, addr string, health *Sidec
 	}
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
-		s.initGuardrailProfiles(s.scannerCfg, rulePacks)
 	}
 	return s
 }
@@ -1515,7 +1526,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// nobody, and the whole team falls to the default profile:
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
-			if warnings := liveGuardrailProfiles.Load().unknownGroupWarnings(0); len(warnings) > 0 {
+			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
 				body["profile_warnings"] = warnings
 			}
 			// Non-secret fingerprints of the per-user credential keys that

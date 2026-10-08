@@ -76,6 +76,9 @@ type profileSubject struct {
 	// nameUnconfirmed marks a UserName that kept a domain the directory facts
 	// do not confirm (profileUserName): no users entry matches it by name.
 	nameUnconfirmed bool
+	// cachedFactsAge is set when explain serves an account the directory
+	// cannot name now from the facts its hooks still apply (GAP-0899).
+	cachedFactsAge time.Duration
 }
 
 // The verified subject comes from S1's VerifiedSubject
@@ -191,6 +194,9 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 	}
 	sort.Strings(names)
 	tuned := profileConnectorNames(cfg)
+	// Scopes that resolve to the same loaded pack share its compiled rules:
+	// compiling it once per scope key cost a share of every start (GAP-0276).
+	compiledPacks := make(map[*guardrail.RulePack]*compiledRulePackCategories)
 	for _, name := range names {
 		for _, scope := range profileRulePackScopes(derived[name].Config, tuned) {
 			key := scope.key()
@@ -200,7 +206,12 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 			rp, loadErr := loadScopedRulePack(cache, derived[name].Config, scope, "guardrail profile "+name)
 			var compiled *compiledRulePackCategories
 			if loadErr == nil {
-				compiled, loadErr = compileRulePackCategories(rp)
+				if compiled = compiledPacks[rp]; compiled == nil {
+					compiled, loadErr = compileRulePackCategories(rp)
+					if loadErr == nil {
+						compiledPacks[rp] = compiled
+					}
+				}
 			}
 			if loadErr != nil {
 				if strictRules {
@@ -385,8 +396,8 @@ func (a *APIServer) guardrailProfileSet() *guardrailProfileSet {
 }
 
 // initGuardrailProfiles derives the profiles of the start-time config.
-func (a *APIServer) initGuardrailProfiles(cfg *config.Config, cache *guardrail.RulePackCache) {
-	set, err := newGuardrailProfileSet(cfg, cache, false)
+func (a *APIServer) initGuardrailProfiles(cfg *config.Config) {
+	set, err := newGuardrailProfileSet(cfg, nil, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", err)
 		return
@@ -607,12 +618,15 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // The account name is the bare one (alice for alice@corp.example.com and
 // CORP\alice) here, for every caller: a request and `explain --user` both
 // build their subject through this function, so a users entry cannot match
-// one and not the other (GAP-0182). A name whose DNS domain the directory
-// facts do not confirm keeps its domain (profileUserName).
+// one and not the other (GAP-0182). A name whose domain the directory facts
+// do not confirm keeps its domain (profileUserName). The account domain a
+// DOMAIN\user entry matches is the one the directory confirmed (winbind,
+// SSSD by the SID, the LSA, Open Directory); only on Windows, where the LSA
+// names every account DOMAIN\name, does the name itself give it (GAP-0814).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
 	userName, nameUnconfirmed := profileUserName(s.UserName, s.Directory)
 	accountDomain := s.Directory.AccountDomain
-	if accountDomain == "" {
+	if accountDomain == "" && runtime.GOOS == "windows" {
 		if domain, _, qualified := strings.Cut(s.UserName, `\`); qualified {
 			accountDomain = domain
 		}
@@ -895,11 +909,23 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 // the directory facts do not give the account. With short SSSD names a plain
 // LDAP domain may name an account by an e-mail address in the joined domain
 // (dcad-bob@dclab.test, GAP-0596): its bare part is the name of another
-// account, the AD dcad-bob, so no users entry selects it by name.
+// account, the AD dcad-bob, so no users entry selects it by name. A
+// DOMAIN\name outside Windows is unconfirmed the same way unless the facts
+// confirm its domain: nslcd and a plain LDAP domain of SSSD may name an
+// account DCLAB\dcad-bob, which is then selected by its uid only (GAP-0814).
 func profileUserName(name string, facts useridentity.DirectoryFacts) (string, bool) {
 	bare, domain := useridentity.SplitQualifiedName(name)
-	if identityFactsEnabled.Load() && !strings.Contains(name, `\`) && strings.Contains(domain, ".") &&
-		!strings.EqualFold(domain, facts.Domain) {
+	if !identityFactsEnabled.Load() {
+		return bare, false
+	}
+	if strings.Contains(name, `\`) {
+		if runtime.GOOS != "windows" && domain != "" && !useridentity.EqualFold(domain, facts.AccountDomain) &&
+			!useridentity.EqualFold(domain, facts.Domain) {
+			return strings.TrimSpace(name), true
+		}
+		return bare, false
+	}
+	if strings.Contains(domain, ".") && !strings.EqualFold(domain, facts.Domain) {
 		return strings.TrimSpace(name), true
 	}
 	return bare, false
@@ -1344,7 +1370,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	set := a.guardrailProfileSet()
 	if connectorName != "" && !connector.IsKnownBuiltinConnector(connectorName) &&
 		(set == nil || !set.knownConnector(connectorName)) {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown connector %q; use a built-in or configured plugin connector", connectorName)})
+		known := connector.NewDefaultRegistry().Names()
+		if base != nil {
+			for name := range base.Guardrail.Connectors {
+				known = append(known, config.NormalizeConnectorName(name))
+			}
+		}
+		sort.Strings(known)
+		known = slices.Compact(known)
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown connector %q; valid connectors: %s", connectorName, strings.Join(known, ", "))})
 		return
 	}
 	out := map[string]any{

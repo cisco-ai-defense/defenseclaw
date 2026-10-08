@@ -51,6 +51,8 @@ type fakeServices struct {
 	// Result ("success" for a planned restart, "exit-code" for a crash).
 	// PlannedRestart reads it once, and the unit is active again after that.
 	restarting map[string]string
+	// activating units are running a oneshot start (systemd "activating").
+	activating map[string]bool
 	reloads    int
 	inner      ServiceManager // definition paths and unit list
 	env        *Env
@@ -195,6 +197,9 @@ func (f *fakeServices) Status(_ context.Context, u Unit) (enterprisestatus.Servi
 	f.mu.Lock()
 	if f.failed[u.Name] {
 		state = "failed/failed"
+	}
+	if f.activating[u.Name] {
+		state = "activating/start"
 	}
 	f.mu.Unlock()
 	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, Required: u.Required}, nil

@@ -332,6 +332,7 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
 		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"},` +
 			`"directory":{"failing":2,"since":"2026-10-07T00:05:54Z","stale":0,"accounts":["1001","1002"]},` +
+			`"profile_assignment_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"],` +
 			`"profile_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"]}`), nil
 	}
 	status := h.run(Options{Action: ActionStatus})
@@ -344,8 +345,10 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 		t.Fatalf("failing directory lookups must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}
 	// An assignment group the host no longer knows selects nobody (GAP-0704).
-	if got := messagesOf(status.Warnings, codeProfileAssignment); !strings.Contains(got, `group "dc-okta-ml" is not known to this host`) {
-		t.Fatalf("an assignment that selects nobody must warn: %+v", status.Warnings)
+	// It is listed once, though /health repeats it in two lists (GAP-0928).
+	if got := messagesOf(status.Warnings, codeProfileAssignment); !strings.Contains(got, `group "dc-okta-ml" is not known to this host`) ||
+		strings.Count(got, "dc-okta-ml") != 1 {
+		t.Fatalf("an assignment that selects nobody must warn once: %+v", status.Warnings)
 	}
 }
 

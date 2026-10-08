@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"encoding/json"
 	osuser "os/user"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -46,9 +47,19 @@ func TestEnterprisePolicyShowSaysWhyTheUserIsNotEnrolled(t *testing.T) {
 	enterprisePolicyUser = current.Username
 
 	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"someone-else", current.Username}
+	t.Cleanup(func() { enterprisehooks.SetStandaloneUnix(false) })
 	out, _ := runPolicyCommand(t, runEnterprisePolicyShow)
 	if !strings.Contains(out, "\n    enrollment: excluded by enterprise.enrollment.exclude_users: never enrolled") {
 		t.Fatalf("show does not say the account is excluded:\n%s", out)
+	}
+	// The hooks step resolves the target uid with the standalone rules, which
+	// fall back to NSS for a directory account (GAP-0740).
+	if !enterprisehooks.StandaloneUnix() {
+		t.Fatal("policy show --user did not switch the hooks step to the standalone account rules")
+	}
+	// A uid names the account too.
+	if target, err := enterprisePolicyTarget(current.Uid); err != nil || strconv.Itoa(target.UID) != current.Uid {
+		t.Fatalf("policy target by uid %s = %+v, %v", current.Uid, target, err)
 	}
 	enterprisePolicyJSON = true
 	out, _ = runPolicyCommand(t, runEnterprisePolicyShow)

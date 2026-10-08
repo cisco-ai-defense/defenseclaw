@@ -61,6 +61,7 @@ from defenseclaw.observability.v8_config import (
     V8ConfigError,
     load_config_value,
     load_masked_v8,
+    load_masked_v8_with_source,
     load_validate_v8,
     retired_key_replacement,
 )
@@ -260,7 +261,7 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     # written checks of a key outside observability; the observability plan
     # and the full validation of every section are left to config show and
     # config validate (GAP-0276).
-    written = _masked_source(str(config_module.config_path())) if parts[0] != "observability" else None
+    written = _masked_source(str(config_module.config_path()), app) if parts[0] != "observability" else None
     if parts[:2] == ["admission", "defaults"] and not _written_in_source(app, parts, written):
         raise click.ClickException(
             f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
@@ -284,7 +285,7 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         view = _merge_defaults(written, _v8_defaults(app, profiles=profile_key))
         if parts == ["guardrail", "hook_self_heal"]:
             view.setdefault("guardrail", {}).setdefault("hook_self_heal", True)
-        _resolve_defaults(app, view, written)
+        _resolve_defaults(app, view, written, profiles=profile_key)
     else:
         view = _key_view(app, parts)
     found, value = _lookup(view, parts)
@@ -375,13 +376,15 @@ def _destination_not_set(key: str, parts: list, written: dict) -> str:
     )
 
 
-def _masked_source(cfg_path: str) -> dict | None:
+def _masked_source(cfg_path: str, app: AppContext) -> dict | None:
     """config.yaml as written, secrets masked, from one parse without the full
-    validation; None when it is not a v8 or later source (GAP-0276)."""
+    validation; None when it is not a v8 or later source (GAP-0276). The
+    parse also serves the read-only load of _loaded_config without profiles."""
     if not _looks_like_v8_config(cfg_path):
         return None
     try:
-        return load_masked_v8(Path(cfg_path).read_bytes(), source_name=cfg_path)
+        masked, app._config_source = load_masked_v8_with_source(Path(cfg_path).read_bytes(), source_name=cfg_path)
+        return masked
     except OSError as exc:
         raise click.ClickException(f"cannot read configuration source: {exc}") from exc
     except (V8ConfigError, RuntimeError) as exc:
@@ -421,12 +424,23 @@ def _resolves_when_unset(parts: list) -> bool:
     )
 
 
-def _loaded_config(app: AppContext):
+def _loaded_config(app: AppContext, *, profiles: bool = True):
     """The configuration, loaded once per command: config get read it in
     up to three helpers, each a full parse and validation of every profile
-    (GAP-0276)."""
-    if app.cfg is None:
-        app.cfg = config_module.load()
+    (GAP-0276). Without profiles, and no full load yet, it is the read-only
+    load that leaves the guardrail profiles out (config get of a key outside
+    them); that view is never saved and never becomes app.cfg."""
+    if app.cfg is not None:
+        return app.cfg
+    if not profiles:
+        view = getattr(app, "_cfg_without_profiles", None)
+        if view is None:
+            view = config_module.load(
+                without_guardrail_profiles=True, parsed_source=getattr(app, "_config_source", None)
+            )
+            app._cfg_without_profiles = view
+        return view
+    app.cfg = config_module.load()
     return app.cfg
 
 
@@ -917,7 +931,7 @@ def _v8_defaults(app: AppContext, *, profiles: bool = True) -> dict:
     if not schema:
         return {}
     try:
-        cfg = _loaded_config(app)
+        cfg = _loaded_config(app, profiles=profiles)
     except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
         cfg = config_module.default_config()
     if not profiles and (cfg.guardrail.profiles or cfg.guardrail.profile_assignments):
@@ -964,7 +978,7 @@ def _show_effective_scanner_settings(masked: dict) -> None:
         skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
 
 
-def _resolve_defaults(app: AppContext, view: dict, written: dict) -> None:
+def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: bool = True) -> None:
     """Replace the placeholders of admission and update with what the gateway runs with.
 
     The dataclass dump shows an unset admission or update key as null or {}, which
@@ -974,7 +988,7 @@ def _resolve_defaults(app: AppContext, view: dict, written: dict) -> None:
     value of its own.
     """
     try:
-        cfg = _loaded_config(app)
+        cfg = _loaded_config(app, profiles=profiles)
     except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
         cfg = config_module.default_config()
     if isinstance(view.get("admission"), dict):
@@ -1564,6 +1578,11 @@ def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
             raw = stream.read(_MAX_VERSION_PROBE_BYTES)
     except OSError:
         return False
+    # The line probe answers yes for the usual file without composing it: a
+    # yes from either check is the answer, and composing 1,000 guardrail
+    # profiles was a fifth of every config command (GAP-0276).
+    if _V8_VERSION_LINE.search(raw.removeprefix(b"\xef\xbb\xbf")) is not None:
+        return True
     try:
         root = yaml.compose(raw, Loader=config_module.YAML_LOADER)
     except (yaml.YAMLError, RecursionError, OverflowError):
@@ -1581,7 +1600,7 @@ def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
                             return True
                     except yaml.YAMLError:
                         pass
-    return _V8_VERSION_LINE.search(raw.removeprefix(b"\xef\xbb\xbf")) is not None
+    return False
 
 
 def _v8_config_path_view(path: str):

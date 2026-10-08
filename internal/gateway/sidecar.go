@@ -106,10 +106,6 @@ type Sidecar struct {
 	configMgr     *ConfigManager
 	modelRouter   ModelRouter
 
-	// startRulePacks holds the rule packs NewSidecar validated; the first
-	// runAPI hands it to the guardrail profile set and drops it.
-	startRulePacks *guardrail.RulePackCache
-
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
@@ -528,7 +524,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		judgeBodyStore:          judgeBodyStore,
 		judgeBodiesReadyPending: judgeBodiesReadyPending,
 		judgeBodiesReadyDetails: judgeBodiesReadyDetails,
-		startRulePacks:          startRulePacks,
 	}
 	// Commit the already-validated cold-start policy candidate only after every
 	// fallible constructor has succeeded. A rejected candidate must leave the
@@ -7461,12 +7456,18 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
-	api := newAPIServer(s.startRulePacks, addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
-	s.startRulePacks = nil
+	api := newAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 		api.SetGenerationSource(s.Generation)
+	}
+	// The API scans with the profile set of the current generation; deriving
+	// it again here doubled the profile work of every start (GAP-0276).
+	if g := s.Generation(); g != nil {
+		api.setGuardrailProfiles(g.Profiles)
+	} else {
+		api.initGuardrailProfiles(api.scannerCfg)
 	}
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
@@ -7508,9 +7509,6 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetAIRuntimeService(s.aiRuntimeSnapshot())
 	api.SetNotifier(s.osNotifier)
 	api.SetWebhookSource(s.webhooksSnapshot)
-	if g := s.Generation(); g != nil {
-		api.setGuardrailProfiles(g.Profiles)
-	}
 	// /policy/reload rebuilds the generation now (Rego and rule packs are
 	// also watched, so this is a hint for scripts); the watcher's admission
 	// reads the rebuilt generation.

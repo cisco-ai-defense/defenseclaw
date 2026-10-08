@@ -345,6 +345,74 @@ func publishedFileProblem(opts Options, path string) string {
 	return strings.Join(problems, ", ")
 }
 
+// publishedDirs are the directories above a policy file, nearest first, up
+// to the root of the host or of a rooted test tree.
+func publishedDirs(opts Options, path string) []string {
+	stop := "/"
+	if opts.Root != "" {
+		stop = filepath.Clean(opts.Root)
+	}
+	var dirs []string
+	for dir := filepath.Dir(platformPath(opts, path)); dir != stop && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+// publishedDirAccess is the access every user needs on the n-th directory
+// above a published file: to list the file's own directory (Claude Code
+// reads every file in managed-settings.d) and to pass the ones above it.
+func publishedDirAccess(index int) os.FileMode {
+	if index == 0 {
+		return 0o005
+	}
+	return 0o001
+}
+
+// publishedDirProblem names the directories above a policy file DefenseClaw
+// published that users cannot pass. After an administrator hardened
+// /etc/claude-code/managed-settings.d to 0700, Claude Code skipped every
+// managed setting (and offered to continue without them) while verify and
+// status said the deployment was healthy (GAP-0913). "" when users can.
+func publishedDirProblem(opts Options, path string) string {
+	var problems []string
+	for index, dir := range publishedDirs(opts, path) {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if want := publishedDirAccess(index); info.Mode().Perm()&want != want {
+			problems = append(problems, fmt.Sprintf("%s has mode %04o", dir, info.Mode().Perm()))
+		}
+	}
+	return strings.Join(problems, ", ")
+}
+
+// restorePublishedDirs gives the administrator-owned directories above a
+// published policy file that users cannot pass the mode 0755 DefenseClaw
+// creates them with. It returns the directories it changed.
+func restorePublishedDirs(opts Options, path string) ([]string, error) {
+	var restored []string
+	for index, dir := range publishedDirs(opts, path) {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		perm := info.Mode().Perm()
+		if want := publishedDirAccess(index); perm&want == want {
+			continue
+		}
+		if stat, ok := info.Sys().(*syscall.Stat_t); !opts.SkipTrustChecks && (!ok || !trustedOwner(stat.Uid)) {
+			continue
+		}
+		if err := os.Chmod(dir, (perm|0o755)&^0o022); err != nil {
+			return restored, err
+		}
+		restored = append(restored, dir)
+	}
+	return restored, nil
+}
+
 // adminOwnedLink reports a root-owned symbolic link (a link's own mode
 // bits do not matter): a user can replace it only with a link of their own.
 func adminOwnedLink(info os.FileInfo) bool {

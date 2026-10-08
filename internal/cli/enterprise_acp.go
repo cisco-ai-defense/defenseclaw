@@ -153,7 +153,13 @@ func enterpriseACPGoneAccount(enrollment enterpriseACPEnrollment) (what, selecto
 	if sid := strings.TrimSpace(enrollment.target.sid); sid != "" {
 		return enrollment.principal + " has no profile on this computer any more", "--sid " + sid
 	}
-	return enrollment.principal + " no longer exists", fmt.Sprintf("--uid %d", enrollment.target.uid)
+	selector = fmt.Sprintf("--uid %d", enrollment.target.uid)
+	if enterpriseACPUIDMayBeHidden() {
+		// A directory that does not answer gives the same "no such
+		// account" (GAP-0838).
+		return enrollment.principal + " does not resolve (it was deleted, or the directory that holds it does not answer)", selector
+	}
+	return enrollment.principal + " no longer exists", selector
 }
 
 func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnrollment, error) {
@@ -437,6 +443,11 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 		tokenPath, publishErr = acp.PublishEnterpriseUserToken(
 			enrollment.dataDir, enrollment.client, enrollment.agent, credential.Token,
 		)
+		if publishErr == nil && !secureClient {
+			// Best effort: without the note setup only skips the check for a
+			// replaced enrollment (GAP-0733).
+			_ = writeEnterpriseACPUserEnrollment(tokenPath, enrollment.profile, enterpriseACPProfileMode(enrollment.profile))
+		}
 		return publishErr
 	})
 	if err != nil {
@@ -507,10 +518,14 @@ func enterpriseACPClientIDs() []string {
 }
 
 // enterpriseACPWho names the account of an enrollment in a message: the
-// --user given, else the principal.
+// --user given, else the account name of a SID principal, else the
+// principal. A SID alone named nobody the administrator knew (GAP-0835).
 func enterpriseACPWho(enrollment enterpriseACPEnrollment) string {
 	if name := strings.TrimSpace(enterpriseACPUser); name != "" {
 		return name
+	}
+	if strings.HasPrefix(enrollment.principal, "sid:") {
+		return enterpriseACPAccountLabel(strings.TrimPrefix(enrollment.principal, "sid:"))
 	}
 	if strings.HasPrefix(enrollment.principal, "home:") && enrollment.target.home != "" {
 		// A digest of the folder named nothing the administrator typed.
@@ -538,6 +553,9 @@ func enterpriseACPTargetCredentials(enrollment enterpriseACPEnrollment) enterpri
 	return enterprisehooks.TargetCredentials{
 		UserHome: enrollment.target.home, UID: enrollment.target.uid,
 		GID: enrollment.target.gid, SID: enrollment.target.sid,
+		// A user whose RDP window was closed is still signed in (GAP-0835);
+		// Secure Client keeps main's active-session rule.
+		AllowDisconnected: cfg == nil || !cfg.SecureClientIntegration(),
 	}
 }
 
@@ -547,6 +565,45 @@ func enterpriseACPQuotePath(path string, windows bool) string {
 		return "'" + strings.ReplaceAll(path, "'", "''") + "'"
 	}
 	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+}
+
+// enterpriseACPCentralNote says why the central policy no longer admits an
+// enrollment, or "": ACP is off, the pair is switched off, or the pair now
+// resolves to another profile. verify answered OK and list showed setup done
+// for an enrollment the guard refused (GAP-0911).
+func enterpriseACPCentralNote(client, agent, profile string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	if !cfg.ACP.Enabled {
+		return "ACP checking is switched off centrally (acp.enabled is false), so the guard refuses every session"
+	}
+	if disabled := cfg.ACP.ACPPairDisabled(client, agent); disabled != "" {
+		return fmt.Sprintf("central ACP policy switches %s/%s off (%s), so the guard refuses it", client, agent, disabled)
+	}
+	resolved := cfg.ACP.ACPProfileForPair(client, agent)
+	if resolved == "" {
+		resolved = "default"
+	}
+	if resolved != profile {
+		return fmt.Sprintf("central ACP policy now binds %s/%s to profile %s, so the guard refuses this %s enrollment; "+
+			"enroll the user again with --profile %s", client, agent, resolved, profile, resolved)
+	}
+	return ""
+}
+
+// enterpriseACPProfileMode is the mode of profile in the central policy, as
+// the gateway resolves it.
+func enterpriseACPProfileMode(profile string) string {
+	if settings, ok := cfg.ACP.Profiles[profile]; ok {
+		if mode := strings.TrimSpace(settings.Mode); mode == string(acp.ModeObserve) || mode == string(acp.ModeAction) {
+			return mode
+		}
+	}
+	if strings.TrimSpace(cfg.ACP.Mode) == string(acp.ModeAction) {
+		return string(acp.ModeAction)
+	}
+	return string(acp.ModeObserve)
 }
 
 // enterpriseACPSetupCommand is the user-side command an enrollment reports:
@@ -560,14 +617,7 @@ func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath str
 		guard = filepath.Join(filepath.Dir(path), "defenseclaw-acp"+filepath.Ext(path))
 	}
 	activate := ""
-	mode := strings.TrimSpace(cfg.ACP.Mode)
-	if mode == "" {
-		mode = "observe"
-	}
-	if profile, ok := cfg.ACP.Profiles[enrollment.profile]; ok && strings.TrimSpace(profile.Mode) != "" {
-		mode = strings.TrimSpace(profile.Mode)
-	}
-	if mode == "action" {
+	if enterpriseACPProfileMode(enrollment.profile) == string(acp.ModeAction) {
 		activate = " --activate"
 	}
 	if cfg.SecureClientIntegration() {
@@ -617,7 +667,8 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	setupDone, setupMismatch := false, ""
 	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
 		if !cfg.SecureClientIntegration() {
-			setupDone, setupMismatch = enterpriseACPSetupState(enrollment.dataDir, enrollment.target.home, enrollment.client, enrollment.agent)
+			setupDone, setupMismatch = enterpriseACPSetupState(enrollment.dataDir, enrollment.target.home, enrollment.client,
+				enrollment.agent, enrollment.profile, enterpriseACPProfileMode(enrollment.profile))
 		}
 		if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) && !cfg.SecureClientIntegration() {
@@ -653,10 +704,13 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 		payload["setup_note"] = "the user has run setup (the contract lock is present)"
 		switch {
 		case !setupDone && setupMismatch != "":
-			payload["setup_note"] = "the editor entry does not match this home (" + setupMismatch + "); as that user, run: " +
+			payload["setup_note"] = "the editor entry does not match this enrollment (" + setupMismatch + "); as that user, run: " +
 				enterpriseACPSetupCommand(enrollment, tokenPath)
 		case !setupDone:
 			payload["setup_note"] = "the user has not run setup yet; as that user, run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
+		}
+		if note := enterpriseACPCentralNote(enrollment.client, enrollment.agent, enrollment.profile); note != "" {
+			payload["central_note"] = note
 		}
 	}
 	return enterpriseACPResult(cmd, payload, nil)
@@ -849,6 +903,9 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential verified\n", Style(enterpriseACPCheck(), "fg=green", "bold"))
 	if note, _ := payload["setup_note"].(string); note != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", note)
+	}
+	if note, _ := payload["central_note"].(string); note != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), note)
 	}
 	return nil
 }

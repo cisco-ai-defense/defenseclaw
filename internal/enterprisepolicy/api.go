@@ -16,6 +16,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // Result is the aggregate lifecycle outcome.
@@ -224,6 +226,7 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		} else if state.Route == RouteMachinePolicy {
 			verifyPublishedFiles(opts, name, &state)
+			noteVerifyOnlyExport(opts, &state)
 		}
 		result.States = append(result.States, state)
 	}
@@ -238,6 +241,23 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	}
 	result.MachinePolicyConnectors = reconciledConnectors(inPlace)
 	return result, errors.Join(errs...)
+}
+
+// noteVerifyOnlyExport names the fix for a file DefenseClaw only checks
+// (ownership: verify_only) that carries none of its entries: deploy the
+// export. enterprise policy verify listed a conflict per missing entry and
+// never named the export, which a publish run already says (GAP-0918).
+// Windows keeps its report as it is.
+func noteVerifyOnlyExport(opts Options, state *State) {
+	if opts.goos() == "windows" || state.Ownership != config.MachinePolicyOwnershipVerifyOnly || state.OwnedEntries > 0 {
+		return
+	}
+	for _, detail := range state.Details {
+		if strings.HasPrefix(detail, "missing_defenseclaw_hooks:") {
+			return
+		}
+	}
+	state.detail("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only); deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through your policy tool, then run ensure", state.Connector)
 }
 
 // RemoveAll removes DefenseClaw's machine policy for every connector with a

@@ -109,6 +109,10 @@ ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
 ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
 
+# A standalone enterprise hook call from an exempt_users account. Mirrors
+# internal/audit/actions.go::ActionEnterpriseExemptUser.
+ACTION_ENTERPRISE_EXEMPT_USER: Final[str]      = "enterprise-exempt-user"
+
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
 # gateway derives the action key from the payload's `type` field.
@@ -345,6 +349,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_ASSET_POLICY,
     ACTION_CONNECTOR_HOOK_TAMPERED,
     ACTION_CONNECTOR_HOOK_REPAIRED,
+    ACTION_ENTERPRISE_EXEMPT_USER,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,

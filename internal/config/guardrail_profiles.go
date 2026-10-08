@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"strings"
@@ -285,12 +286,27 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("guardrail profile %q is not defined", name)
 	}
-	out, err := copyConfigSharingProfiles(c)
+	base, err := copyConfigSharingProfiles(c)
 	if err != nil {
 		return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 	}
-	applyGuardrailProfile(out, profile)
-	return out, nil
+	return deriveProfileFrom(base, profile), nil
+}
+
+// deriveProfileFrom applies profile to a shallow copy of base, a private
+// copy of the configuration (copyConfigSharingProfiles) that every profile
+// derived from it shares read-only. applyGuardrailProfile writes entries of
+// guardrail.connectors, application_protection.connectors and
+// connector_hooks, so the copy gets its own of those maps. One copy for all
+// profiles instead of one each: with 1,000 profiles the copies took a fifth
+// of the gateway start (GAP-0276).
+func deriveProfileFrom(base *Config, profile GuardrailProfile) *Config {
+	out := *base
+	out.Guardrail.Connectors = maps.Clone(base.Guardrail.Connectors)
+	out.ApplicationProtection.Connectors = maps.Clone(base.ApplicationProtection.Connectors)
+	out.ConnectorHooks = maps.Clone(base.ConnectorHooks)
+	applyGuardrailProfile(&out, profile)
+	return &out
 }
 
 // DerivedGuardrailProfile is one precomputed profile: its derived
@@ -312,12 +328,13 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	base, err := copyConfigSharingProfiles(c)
+	if err != nil {
+		return nil, fmt.Errorf("guardrail profiles: %w", err)
+	}
 	out := make(map[string]DerivedGuardrailProfile, len(names))
 	for _, name := range names {
-		derived, err := c.DerivedForProfile(name)
-		if err != nil {
-			return nil, err
-		}
+		derived := deriveProfileFrom(base, c.Guardrail.Profiles[name])
 		digest, err := GuardrailPolicyDigest(derived)
 		if err != nil {
 			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)

@@ -639,7 +639,7 @@ func TestIDEPluginTotalGaugeCoversEmptyAndOffScans(t *testing.T) {
 	}
 	for _, panel := range parsed.Panels {
 		if panel.Title == "IDE plugins installed" {
-			if len(panel.Targets) != 1 || panel.Targets[0].Expr != `sum(defenseclaw_inventory_ide_plugins{ide_product=""})` {
+			if len(panel.Targets) != 1 || panel.Targets[0].Expr != `sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=""})` {
 				t.Fatalf("installed panel does not select only the current total: %+v", panel.Targets)
 			}
 			return

@@ -189,7 +189,10 @@ class Report:
 
     def finish(self) -> int:
         if self.dry_run:
-            print("\nPlan only: nothing was changed. Add --apply to make these changes.")
+            if self.problems:
+                print("\nPlan only: nothing was changed; nothing can be applied until the FAIL items are fixed.")
+            else:
+                print("\nPlan only: nothing was changed. Add --apply to make these changes.")
         return 1 if self.problems else 0
 
 

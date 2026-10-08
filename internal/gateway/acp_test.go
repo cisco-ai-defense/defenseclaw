@@ -88,7 +88,7 @@ func TestACPEvaluateResolvesTheGuardrailProfileForItsConnector(t *testing.T) {
 	previous := liveGuardrailProfiles.Load()
 	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
 	api.scannerCfg = cfg
-	api.initGuardrailProfiles(cfg, nil)
+	api.initGuardrailProfiles(cfg)
 	payload := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"terminal/create","params":{"sessionId":"s","command":"false","args":[]}}`)
 	body, err := json.Marshal(acp.Evaluation{Profile: "default", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed", Direction: acp.AgentToClient, Surface: acp.SurfaceTerminal, Method: "terminal/create", Payload: payload})
 	if err != nil {
@@ -454,7 +454,7 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 	}
 	cfg.Guardrail.DefaultProfile = "watch"
 	api := &APIServer{scannerCfg: cfg}
-	api.initGuardrailProfiles(cfg, nil)
+	api.initGuardrailProfiles(cfg)
 
 	type seen struct {
 		subject  VerifiedSubject
@@ -980,6 +980,18 @@ func TestACPManagedCredentialMustMatchThePairsResolvedProfile(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &refusal); err != nil || response.Code != http.StatusForbidden ||
 		refusal["code"] != acp.RefusalProfileChanged || refusal["profile"] != "watch" || refusal["mode"] != "action" {
 		t.Errorf("stale guard refusal = %d %s, want 403 naming profile watch", response.Code, response.Body.String())
+	}
+	// Moved and switched off: the answer says it is off, not where it went
+	// (GAP-0834).
+	cfg.ACP.Bindings["zed/kiro"] = config.ACPBinding{Enabled: false, Profile: "watch"}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+	request = request.WithContext(withACPEnterpriseCredential(request.Context(), credential))
+	response = httptest.NewRecorder()
+	(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+	refusal = nil
+	if err := json.Unmarshal(response.Body.Bytes(), &refusal); err != nil || response.Code != http.StatusForbidden ||
+		refusal["code"] != acp.RefusalBinding || !strings.Contains(refusal["error"], "acp.bindings.zed/kiro is disabled") {
+		t.Errorf("moved and disabled pair refusal = %d %s, want the disabled binding", response.Code, response.Body.String())
 	}
 }
 

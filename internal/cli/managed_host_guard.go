@@ -313,6 +313,10 @@ var managedHostCurrentAccount = func() string {
 // cannot find the file" error with the managed-computer answer when a user
 // runs a per-user command (for example `status`) on a managed Windows
 // computer, which never has a per-user config.
+// describeManagedConfigLoadError names the accounts in a managed config
+// trust refusal; set on Windows (GAP-0925), the identity elsewhere.
+var describeManagedConfigLoadError = func(err error) error { return err }
+
 func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 	if err == nil || (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, fs.ErrPermission)) || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return err

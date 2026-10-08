@@ -331,7 +331,7 @@ func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 		if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
 			return answer
 		}
-		return fmt.Errorf("failed to load config: %w", err)
+		return fmt.Errorf("failed to load config: %w", describeManagedConfigLoadError(err))
 	}
 	version.SetBinaryVersion(appVersion)
 
@@ -356,10 +356,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	if err != nil {
 		return nil, nil, err
 	}
-	candidate, err := config.LoadRuntimeV8FromBytes(loaded.source, loaded.raw)
-	if err != nil {
-		return nil, nil, err
-	}
+	candidate := loaded.runtime
 	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
 		return nil, nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}

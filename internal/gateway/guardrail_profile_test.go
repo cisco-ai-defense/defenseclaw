@@ -13,6 +13,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -191,7 +192,7 @@ func TestGuardrailWaitsForAPIProfilePublication(t *testing.T) {
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
 	cfg.Guardrail.DefaultProfile = "strict"
-	api := newAPIServer(nil, "127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
 	s.setAPIServer(api)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -899,6 +900,26 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		!strings.Contains(got[0], `the host knows it as "dc-ml-short@dclab.test"`) {
 		t.Fatalf("short-name warnings = %q, want the qualified name", got)
 	}
+	// GAP-0916: after a switch to short names the qualified group still
+	// resolves, but as dc-ml-team, the name group lists carry: it is warned.
+	switched := func(_ context.Context, name string) string {
+		if name == "dc-ml-team@dclab.test" {
+			return "dc-ml-team"
+		}
+		return ""
+	}
+	qualified := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}}}
+	if got := unknownAssignmentGroupsForOS(context.Background(), qualified, exists, switched, "linux"); len(got) != 1 ||
+		!strings.Contains(got[0], `assignment 1: group "dc-ml-team@dclab.test" is listed by this host as "dc-ml-team"`) ||
+		!strings.Contains(got[0], "use_fully_qualified_names = False") {
+		t.Fatalf("qualified-to-short warnings = %q, want the short spelling named", got)
+	}
+	// GAP-0332: the domain of a seen account group (an SSSD domain realmd
+	// does not list) is offered for the short-name hint.
+	noteGroupDomains([]string{"dc-okta-users@okta", "wheel"})
+	if !slices.Contains(observedGroupDomains.list(), "okta") {
+		t.Fatalf("observed group domains = %q, want okta", observedGroupDomains.list())
+	}
 
 	// The background pass below runs with this host's rules; Windows looks
 	// SIDs up and has no SSSD domain note
@@ -924,6 +945,18 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	if late := set.unknownGroupWarnings(2 * time.Second); len(late) != 2 {
 		t.Fatalf("warnings = %q after the pass finished, want 2", late)
 	}
+	// status and verify read /health right after a gateway restart: it
+	// waits for the first pass as profile-explain does (GAP-0830).
+	slow := make(chan struct{})
+	profileGroupExists = func(ctx context.Context, name string) (bool, error) {
+		<-slow
+		return exists(ctx, name)
+	}
+	set = &guardrailProfileSet{assignments: assignments}
+	time.AfterFunc(50*time.Millisecond, func() { close(slow) })
+	if got := set.healthProfileWarnings(); len(got) != 2 {
+		t.Fatalf("health warnings = %q right after start, want the 2 profile-explain lists", got)
+	}
 
 	// GAP-0229: an SSSD that is offline with a cold cache answers "no such
 	// group" for groups that exist. While lookups fail, or the explained
@@ -942,8 +975,10 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	// GAP-0255: the gateway's own lookups work (a local account, or at start
 	// before the first failure) but no group of dclab.test is known, Domain
 	// Users included: one note, no group reported as renamed or deleted.
-	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not confirm group names written for dclab.test") || strings.Contains(got[0], "SSSD") {
-		t.Fatalf("warnings = %q while the directory does not answer, want one note", got)
+	// The note names each assignment and group it cannot confirm (GAP-0928).
+	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not confirm group names written for dclab.test") ||
+		strings.Contains(got[0], "SSSD") || !strings.Contains(got[0], `assignment 1: group "dc-rename-me@dclab.test"`) {
+		t.Fatalf("warnings = %q while the directory does not answer, want one note naming the groups", got)
 	}
 	profileGroupExists = func(_ context.Context, name string) (bool, error) { return name == "domain users@dclab.test", nil }
 	set = &guardrailProfileSet{assignments: assignments}
@@ -1146,7 +1181,7 @@ func TestProfileExplainFlagsUnknownConnectorAndUnverifiedAgent(t *testing.T) {
 		code  int
 		want  string
 	}{
-		{"?connector=claudcode", http.StatusBadRequest, "unknown connector"},
+		{"?connector=claudcode", http.StatusBadRequest, "valid connectors: amp, antigravity, claudecode, codex"},
 		{"?user=not-a-real-account&connector=codex&agent=agt-0000000000000000", http.StatusOK, "not verified against a host identity record"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve"+check.query, nil)
@@ -1190,21 +1225,38 @@ func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
 	}
 }
 
-// A DOMAIN\\user assignment uses the account domain reported by the verified
-// account name, not the first label of an unrelated DNS realm.
+// A DOMAIN\\user assignment uses the account domain the directory verified,
+// not the first label of an unrelated DNS realm. winbind with use default
+// domain = yes names the account bare and confirms its NetBIOS domain; an
+// account named DCLAB\\dcad-bob that no directory confirms (nslcd, a plain
+// LDAP domain of SSSD) is selected by its uid only (GAP-0456, GAP-0814).
 func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	subject := profileSubjectFromVerified(VerifiedSubject{
-		UserID: "1201", UserName: `CONTOSO\\alice`,
+		UserID: "1201", UserName: `CONTOSO\alice`,
 		Directory: useridentity.DirectoryFacts{
-			Domain: "corp.contoso.com", Principal: "alice@CORP.CONTOSO.COM",
+			Domain: "corp.contoso.com", AccountDomain: "CONTOSO", Principal: "alice@CORP.CONTOSO.COM",
 			ResolvedAt: time.Now(),
 		},
 	}, true)
-	if !userEntryMatches(&subject, `CONTOSO\\alice`) {
+	if !userEntryMatches(&subject, `CONTOSO\alice`) {
 		t.Fatal("the verified NetBIOS account domain did not match")
 	}
-	if userEntryMatches(&subject, `CORP\\alice`) {
+	if userEntryMatches(&subject, `CORP\alice`) {
 		t.Fatal("a DNS first label selected another account domain")
+	}
+	winbind := profileSubjectFromVerified(VerifiedSubject{UserID: "2003913", UserName: "dcad-eli7",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceWinbind, Domain: "dclab.test", AccountDomain: "DCLAB",
+			ResolvedAt: time.Now()}}, true)
+	if !userEntryMatches(&winbind, `DCLAB\dcad-eli7`) || userEntryMatches(&winbind, `OTHER\dcad-eli7`) {
+		t.Fatal("a bare winbind name must match DCLAB\\user of its confirmed NetBIOS domain only")
+	}
+	for _, source := range []string{useridentity.SourceNSSLDAP, useridentity.SourceSSSD} {
+		namesake := profileSubjectFromVerified(VerifiedSubject{UserID: "72001", UserName: `DCLAB\dcad-bob`,
+			Directory: useridentity.DirectoryFacts{Source: source, ResolvedAt: time.Now()}}, true)
+		if runtime.GOOS != "windows" && (userEntryMatches(&namesake, `DCLAB\dcad-bob`) || userEntryMatches(&namesake, "dcad-bob") ||
+			!userEntryMatches(&namesake, "72001")) {
+			t.Fatalf("%s account named DCLAB\\dcad-bob without a confirmed domain must match by uid only: %+v", source, namesake)
+		}
 	}
 	// macOS: the guardian record carries the NetBIOS domain the AD node
 	// names, so DCLAB\user matches the mobile account (GAP-0635).

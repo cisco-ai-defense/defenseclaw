@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
@@ -46,7 +47,19 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	// run stops and starts the services (GAP-2246). It still reports the
 	// recorded deployment below, so detection sees it installed.
 	statusBusy := false
-	if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
+	busyMessage := ""
+	if env.applyTriggerRunning(ctx) {
+		// The apply trigger is applying a changed config.yaml, secret or
+		// policy file: until it commits, the files differ from the record and
+		// the gateway may not read the new file yet. status and verify said
+		// "modified after install ... run repair" for those seconds, and a
+		// repair then fought the apply for the lock (GAP-0919).
+		if l.opts.Action == ActionVerify {
+			r.AddError(codeBusy, applyingConfigChange(ActionVerify))
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+		statusBusy, busyMessage = true, applyingConfigChange(ActionStatus)
+	} else if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
 		lock, err := env.acquireLock(ctx)
 		statusBusy = errors.Is(err, errLockBusy)
 		lock.release()
@@ -94,7 +107,10 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.Installed = true
 			r.InstalledVersion = record.ProductVersion
 		}
-		r.AddError(codeBusy, errLockBusy.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionStatus))
+		if busyMessage == "" {
+			busyMessage = errLockBusy.Error() + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
+		}
+		r.AddError(codeBusy, busyMessage)
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {
@@ -187,6 +203,34 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddError(codeVerify, "a lifecycle transaction is pending; "+l.recoverPendingFromVerify(ctx))
 	}
 	return 0
+}
+
+// applyTriggerRunning reports whether the apply trigger (the run the path
+// unit or launchd job starts after config.yaml, a secret or a policy file
+// changed) is running now.
+func (e *Env) applyTriggerRunning(ctx context.Context) bool {
+	name := unitApplyService
+	if e.GOOS == "darwin" {
+		name = labelApply
+	}
+	if e.SelfUnit == name {
+		return false
+	}
+	status, err := e.Services.Status(ctx, Unit{Name: name})
+	if err != nil {
+		return false
+	}
+	if e.GOOS == "darwin" {
+		return status.State == "running"
+	}
+	return strings.HasPrefix(status.State, "activating")
+}
+
+// applyingConfigChange is the lifecycle_busy message of a status or verify
+// that ran while the apply trigger applied a configuration change.
+func applyingConfigChange(action string) string {
+	return "a configuration change is being applied (the apply trigger runs ensure after config.yaml, a secret or a policy file changed), so " +
+		action + " checked nothing but the installed version; this is not a failure and needs no repair: wait for it to finish (usually under a minute), then rerun " + action
 }
 
 // clearSupersededUnitFailures clears the failed state an earlier lifecycle
@@ -850,6 +894,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
 	l.describeDeletedEnrolledAccounts()
+	l.describeIdentityRecords()
 	if record != nil {
 		l.describePerUserGateways(ctx)
 		l.describeAgentSessionsBeforeActivation(ctx, record)
@@ -964,6 +1009,11 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.AddWarning(codeDirectoryLookups, message+". "+check+"; `"+
 			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
 	}
+	// profile_warnings repeats the group warnings profile_assignment_warnings
+	// already lists; each is listed once (GAP-0928).
+	health.ProfileWarnings = slices.DeleteFunc(health.ProfileWarnings, func(warning string) bool {
+		return slices.Contains(health.ProfileAssignmentWarnings, warning)
+	})
 	for i, warning := range health.ProfileWarnings {
 		if i == profileWarningsMax {
 			l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d more guardrail profile assignment warnings", len(health.ProfileWarnings)-i))
@@ -973,6 +1023,33 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
 		}
 	}
+}
+
+// codeIdentityRecordsStale warns that the guardian identity records look
+// older than the guardian keeps them by the wall clock (GAP-0921).
+const codeIdentityRecordsStale = "identity_records_stale"
+
+// identityRecordsFreshFor is how old the newest guardian identity record may
+// look: the guardian rewrites them every 15 minutes, and within about a
+// minute after a clock step.
+const identityRecordsFreshFor = 30 * time.Minute
+
+// describeIdentityRecords warns while the guardian identity records look
+// stale or are dated in the future: the gateway then ignores those over an
+// hour old, and the accounts a profile assignment selects by UPN get the
+// default profile.
+func (l *lifecycle) describeIdentityRecords() {
+	env := l.env
+	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
+	newest, stale := enterprisehooks.IdentitySpoolStale(dir, env.Now(), identityRecordsFreshFor)
+	if !stale {
+		return
+	}
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's identity records were last written at %s by "+
+		"this host's clock (the clock was stepped, or the guardian has not refreshed them); records over an hour old are "+
+		"ignored, and accounts a guardrail profile assignment selects by UPN then get the default profile. The guardian "+
+		"rewrites them within about a minute of a clock step; if this persists, restart the hook guardian",
+		newest.UTC().Format(time.RFC3339)))
 }
 
 // codeProfileAssignment warns that a guardrail profile assignment selects

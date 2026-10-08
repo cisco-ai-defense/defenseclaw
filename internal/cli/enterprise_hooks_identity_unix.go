@@ -95,7 +95,11 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	if state.failed {
 		interval = enterpriseHookIdentitySpoolRetryInterval
 	}
-	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval)
+	// The interval runs on the monotonic clock, but the gateway trusts a
+	// record by its wall-clock age: after a clock step the records are
+	// rewritten at the next one-minute tick (GAP-0921).
+	_, stepped := enterprisehooks.IdentitySpoolStale(dir, now, enterpriseHookIdentitySpoolInterval+2*enterpriseHookIdentitySpoolRetryInterval)
+	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval || stepped)
 	if due {
 		state.running = true
 	}

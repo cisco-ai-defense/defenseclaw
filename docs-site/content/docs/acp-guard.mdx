@@ -288,8 +288,16 @@ locks with the rest of the data. Agent and editor configuration digests stay exa
 If central policy mode and the launched contract mode drift,
 the guard stops the session even when the old contract was observe-only; rerun
 setup to make an observe-to-action promotion explicit. The guard's message
-names the change and the setup command to run (with `--activate` when the
-profile moved to action mode).
+names the profile mode, the mode the entry was set up for, and the setup
+command to run (with `--activate` when the profile is in action mode). Zed
+keeps one guard for every thread of an agent: after such an end the guard
+stays, answers with the same message until you have run the setup command,
+and then starts the new guard for the next thread, so no Retry or editor
+restart is needed.
+
+A guard that cannot start answers the editor with its reason and waits for
+the editor to read it, so Zed shows the text under **Failed to Launch**
+instead of only "Server exited with status exit code: 1".
 
 ## Observability
 
@@ -411,6 +419,15 @@ reports no ACP claim and is guarded through its native hook surface instead.
 A listed entry point was checked against the vendor's documentation or the
 ACP Registry; that alone does not mean DefenseClaw tested that editor and
 agent together.
+
+Run each agent once in a terminal before its first guarded thread. Started by
+the editor, an agent has no terminal: Hermes asks its first-run questions
+there (the telemetry choice, installing its Bedrock feature) and waits, so the
+thread showed only a spinner, and Kiro reports a missing sign-in as "dispatch
+failure" (run `kiro-cli login` once). The guard passes an agent's sign-in
+methods and messages through unchanged. When an agent sends nothing for 60
+seconds after a prompt, the guard says in the thread that it may be waiting
+for first-run questions in a terminal.
 
 Setup uses only the list that ships with DefenseClaw. It never downloads or
 runs commands from the online registry. Every

@@ -639,6 +639,45 @@ closed until they sign in again. To cut off one Windows user, remove them
 from enrollment as described in
 [Contain an incident](/docs/enterprise/lifecycle#contain-an-incident).
 
+## Golden images and VM templates
+
+A host cloned from an image or VM template that already runs the managed
+deployment (Linux and macOS) starts with a copy of that host's machine
+state:
+
+- the gateway's device key (`/var/lib/defenseclaw/device.key` on Linux,
+  `/opt/cisco/defenseclaw/runtime/device.key` on macOS), so every clone
+  reports the same device in its telemetry;
+- the per-machine key the guardian derives each enrolled user's credentials
+  from, so the same user gets the same credentials on every clone;
+- the machine ID, unless the imaging tool resets it.
+
+Prefer an image without that state: capture the template before you install
+DefenseClaw and install it on each clone at first boot (through your MDM or
+the first-boot script), or run `enterprise linux uninstall --json` (macOS:
+`enterprise macos uninstall --json`) on the template just before you capture
+it. The plain uninstall removes the machine state, the keys included; keep
+`--keep-state` off.
+
+For clones that already run it, on each clone:
+
+1. Give it its own machine ID first. On Linux that is the imaging tool's job
+   (for example `cloud-init clean --machine-id`, or an empty
+   `/etc/machine-id` that systemd fills at the next boot); on EC2, systemd
+   derives the ID from the instance UUID again, so each instance already has
+   its own. Each Mac has its own hardware UUID.
+2. Reinstall: uninstall, then install the same package or payload again. That
+   gives the clone a new device key and a new per-machine key. To keep the
+   deployment instead, run `enterprise linux rotate-credentials --json`
+   (macOS: `enterprise macos rotate-credentials --json`, see
+   [Rotate per-user credentials](#rotate-per-user-credentials)): the users'
+   credentials then differ per clone, but the device key stays shared.
+
+A new machine ID changes every agent ID: an `agt-` ID hashes the machine ID
+([Agent identity](/docs/enterprise/identity-and-authentication#agent-identity)),
+so after the change each agent install gets a new `agt-` ID. Records from
+before keep the old IDs. `status`, `verify` and the hooks are not affected.
+
 ## Logs and events
 
 ### Windows

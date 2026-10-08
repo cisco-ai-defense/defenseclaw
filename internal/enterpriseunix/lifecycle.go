@@ -117,6 +117,9 @@ const (
 	codeState               = "state_unreadable"
 	codeLeftovers           = "unmanaged_leftovers"
 	codeWSL                 = "wsl_distribution"
+	// codeConfigMetadataRestored: an unchanged config.yaml got its managed
+	// mode and owner back without a transaction (GAP-0941).
+	codeConfigMetadataRestored = "config_metadata_restored"
 )
 
 type lifecycle struct {
@@ -352,6 +355,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 		if env.insideWSL() {
 			r.AddWarning(codeWSL, wslDeploymentWarning)
 		}
+		l.restoreUnchangedConfigMetadata(ctx, record)
 		if noop, reason := l.ensureNoop(ctx, record); noop {
 			r.Noop = true
 			r.NoopReason = reason
@@ -1952,6 +1956,40 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	_ = env.clearPending()
 	env.discardSnapshot(snap)
 	return true
+}
+
+// restoreUnchangedConfigMetadata puts back the managed mode and owner of an
+// installed config.yaml whose bytes are the applied config, so the run stays
+// a no-op. Configuration management that installs the same file again
+// (install -o root -g root -m 0640) changed only its group: the run restored
+// it and restarted the gateway to load a change that was none, on every run
+// (GAP-0941). A --config run brings its own bytes and is left alone.
+func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *Deployment) {
+	env := l.env
+	if l.opts.ConfigFile != "" || record == nil {
+		return
+	}
+	path := env.P(env.Layout.ConfigPath)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	raw, err := readBounded(path, maxInputBytes)
+	if err != nil || sha256Bytes(raw) != record.ConfigSHA256 {
+		return
+	}
+	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
+	if err != nil || !ok || account.GID != record.ServiceGID {
+		return
+	}
+	owner := fileOwner{UID: 0, GID: account.GID}
+	if !env.metadataDiffers(path, 0o640, owner) {
+		return
+	}
+	if err := env.fixMetadata(path, 0o640, owner); err == nil {
+		l.result.AddWarning(codeConfigMetadataRestored, fmt.Sprintf(
+			"restored the mode and owner of %s (0640, root and the service group); its content is the applied config, so nothing else changed",
+			env.Layout.ConfigPath))
+	}
 }
 
 // ensureNoop reports whether the installed deployment already matches the

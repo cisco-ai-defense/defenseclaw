@@ -162,7 +162,7 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 		// keeps the grants it always made.
 		grants := inventoryDACLAgentGrants(home, guardianOwned[key], ideInventory)
 		if ideInventory {
-			grants = append(grants, inventoryDACLIDEGrants(home)...)
+			grants = append(grants, inventoryDACLIDEGrants(home, guardianOwned[key])...)
 		}
 		for _, g := range grants {
 			dotdir := g.dir
@@ -257,9 +257,18 @@ func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, re
 // the inherited read ACE; a folder it only lists, or one metadata file it
 // reads, gets a read ACE on that object alone, so the caches and other data
 // beside them stay out of reach. Nothing is granted through a link or other
-// reparse point below the profile.
-func inventoryDACLIDEGrants(home string) []inventoryDACLGrant {
-	grants := ideplugins.WindowsHomeGrants(home)
+// reparse point below the profile, nor on a dotdir the guardian owns there
+// (the .kiro folder of a user enrolled for Kiro): the guardian keeps that
+// folder at its exact protected DACL, so the next ensure removed the grant
+// and the Kiro installation went missing from the inventory until the next
+// cycle (GAP-0897). The scan reads below such a folder without it.
+func inventoryDACLIDEGrants(home string, guardianOwned map[string]struct{}) []inventoryDACLGrant {
+	var grants []ideplugins.WindowsGrant
+	for _, g := range ideplugins.WindowsHomeGrants(home) {
+		if _, owned := guardianOwned[g.Path]; !owned {
+			grants = append(grants, g)
+		}
+	}
 	out := make([]inventoryDACLGrant, 0, len(grants))
 	for _, rel := range ideplugins.WindowsLegacyBroadGrants(home) {
 		rel := rel

@@ -141,8 +141,20 @@ try {
             }
             Assert-TestSddl 'store with a refused link' $linked.Secrets $adminDirectorySddl
 
+            # GAP-0920: a redaction key whose gateway entry a hardening script
+            # removed (only trusted principals left) is recorded as found, so
+            # repair can write the contract again; a key another principal can
+            # open is still refused, and Secure Client keeps the strict check.
+            $driftedKey = [Security.AccessControl.RawSecurityDescriptor]::new("O:$($sid)G:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)")
+            $openKey = [Security.AccessControl.RawSecurityDescriptor]::new("O:$($sid)G:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)")
+            if ((Get-DefenseClawRedactionKeySecurityClass -Actual $driftedKey -GatewayServiceSID $sid) -cne 'trusted_drift') {
+                $failures.Add('a redaction key with only trusted entries was not recorded as trusted_drift')
+            }
+            Test-Refused 'redaction key Users can read' { Get-DefenseClawRedactionKeySecurityClass -Actual $openKey -GatewayServiceSID $sid } 'unrecognized active'
+
             # The Secure Client profile has no standalone credential store.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            Test-Refused 'Secure Client drifted redaction key' { Get-DefenseClawRedactionKeySecurityClass -Actual $driftedKey -GatewayServiceSID $sid } 'unrecognized active'
             $secureClient = New-TestStore 'secure-client'
             Set-DefenseClawPreservedStateAcls -Layout @{ StateRoot = $secureClient.StateRoot } -GatewayServiceSID $sid
             Set-DefenseClawStandaloneSecretsAcls -Layout @{ StateRoot = $secureClient.StateRoot } -GatewayServiceSID $sid

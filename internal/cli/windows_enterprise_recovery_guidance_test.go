@@ -125,3 +125,21 @@ func TestWindowsEnterpriseInstallerBuildMismatchText(t *testing.T) {
 		t.Fatal("an unrelated error was rewritten")
 	}
 }
+
+// GAP-0920: a LocalSystem run whose recovery failed is not told to run the
+// same LocalSystem Setup command again; it is told to correct the named
+// cause first.
+func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing.T) {
+	original := windowsEnterpriseRunningAsLocalSystem
+	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
+	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
+	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil)
+	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
+		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) {
+		t.Fatalf("next step = %q", got)
+	}
+	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
+	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
+		t.Fatalf("an administrator run lost the LocalSystem step: %q", got)
+	}
+}

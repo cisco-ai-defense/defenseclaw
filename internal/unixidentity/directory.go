@@ -212,8 +212,98 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: realmd lookup: %w", realmErr)
 		}
 		applyRealm(&facts, account.Name, realms)
+		facts.AccountDomain = r.winbindAccountDomain(account, realms)
 	}
 	return facts, nil
+}
+
+// winbindAccountDomain is the NetBIOS domain winbind confirms for an
+// account, which a users entry DOMAIN\user names: the domain of the
+// DOMAIN\name winbind reports, or, for the bare name winbind reports with
+// use default domain = yes, the NetBIOS name of its realm that winbind
+// answers with the same uid when asked as NETBIOS\name. A NetBIOS name no
+// directory confirms is not taken: the NetBIOS domain of corp.example.com
+// may be EXAMPLE, and a guess may name a trusted domain (GAP-0456).
+func (r *NSSResolver) winbindAccountDomain(account Account, realms []Realm) string {
+	bare, domain := useridentity.SplitQualifiedName(account.Name)
+	if strings.Contains(account.Name, `\`) {
+		return domain
+	}
+	if domain != "" {
+		return ""
+	}
+	realm, ok := realmFor("", useridentity.SourceWinbind, realms)
+	if !ok {
+		return ""
+	}
+	for _, candidate := range netBIOSCandidates(realm.NetBIOS, realm.Domain) {
+		if held, err := r.LookupUserInService("winbind", candidate+`\`+bare); err == nil && held.UID == account.UID {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// sssdAccountDomain is the NetBIOS (flat) name of the Active Directory
+// domain SSSD confirmed an account in by its SID: a candidate SSSD holds
+// the same SID for when asked as FLAT\name. The candidates are the flat
+// domain of the account own name (full_name_format = %3$s\%1$s), the
+// realm NetBIOS name, the Samba workgroup and the first label of the DNS
+// domain; only the answer of SSSD confirms one (GAP-0456).
+func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string) string {
+	bare, nameDomain := useridentity.SplitQualifiedName(name)
+	var candidates []string
+	if strings.Contains(name, `\`) && !strings.Contains(nameDomain, ".") {
+		candidates = append(candidates, nameDomain)
+	}
+	for _, candidate := range append(candidates, netBIOSCandidates(netBIOS, dnsDomain)...) {
+		if held, err := sssd.sidOfUserInDomain(candidate, bare); err == nil && held != "" && strings.EqualFold(held, sid) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// netBIOSCandidates lists the NetBIOS names a joined domain may have, to be
+// confirmed by its directory: the one realmd reports, the Samba workgroup
+// and the upper-cased first label of the DNS domain.
+func netBIOSCandidates(netBIOS, dnsDomain string) []string {
+	first, _, _ := strings.Cut(dnsDomain, ".")
+	var out []string
+	for _, candidate := range []string{netBIOS, sambaWorkgroup(), strings.ToUpper(first)} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || len(candidate) > 15 || strings.ContainsAny(candidate, `\/@. :,`) ||
+			slices.ContainsFunc(out, func(seen string) bool { return strings.EqualFold(seen, candidate) }) {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+// sambaWorkgroup reads the workgroup of the [global] section of smb.conf,
+// the NetBIOS domain a winbind join writes, or "".
+func sambaWorkgroup() string {
+	data, err := readSmallFile(sambaConfPath, 1<<20)
+	if err != nil {
+		return ""
+	}
+	global := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			global = strings.EqualFold(strings.Trim(line, "[] \t"), "global")
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if global && ok && strings.EqualFold(strings.Join(strings.Fields(key), " "), "workgroup") {
+			return strings.ToUpper(strings.TrimSpace(value))
+		}
+	}
+	return ""
 }
 
 // applySSSDDomain gives an SSSD account the domain, realm, directory type
@@ -235,8 +325,11 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 // plain LDAP domain).
 func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *sssdNSS, name, sid string) (string, error) {
 	bare, domain := useridentity.SplitQualifiedName(name)
-	if domain != "" && !strings.Contains(domain, ".") {
+	if domain != "" && !strings.Contains(domain, ".") && !strings.Contains(name, `\`) {
 		// The SSSD name of a domain with no DNS name, which names no realm.
+		// A DOMAIN\name gets no domain from its name: a plain LDAP domain may
+		// name an account so, as nslcd may (GAP-0814); SSSD confirms the
+		// domain of an AD account by its SID below.
 		facts.Domain = strings.ToLower(domain)
 	}
 	if sidDomain(sid) == "" {
@@ -293,6 +386,7 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 		}
 		facts.Directory = realmDirectory(realm)
 		facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
+		facts.AccountDomain = sssdAccountDomain(sssd, name, candidate, realm.NetBIOS, sid)
 		return candidate, nil
 	}
 	return "", nil
@@ -404,8 +498,11 @@ func localGroupIDs() (map[int]bool, error) {
 }
 
 // localGroupsListing returns the gids of the /etc/group entries whose member
-// list names name, compared as the files module compares them. A missing
-// file holds none.
+// list names name, split and compared as the glibc files module does, so
+// DefenseClaw and id(1) agree: white space before each member is skipped,
+// and only the newline ends the line, so the CR of a CRLF line stays in its
+// last member, which then names no account (GAP-0815). A missing file holds
+// none.
 func localGroupsListing(name string) ([]int, error) {
 	data, err := readSmallFile(localGroupPath, 16<<20)
 	if errors.Is(err, os.ErrNotExist) {
@@ -420,8 +517,10 @@ func localGroupsListing(name string) ([]int, error) {
 		if !ok {
 			continue
 		}
-		members := strings.Split(strings.TrimRight(line, "\r"), ":")[3]
-		if slices.Contains(strings.Split(members, ","), name) {
+		members := strings.Split(line, ":")[3]
+		if slices.ContainsFunc(strings.Split(members, ","), func(member string) bool {
+			return strings.TrimLeft(member, " \t\n\v\f\r") == name
+		}) {
 			ids = append(ids, gid)
 		}
 	}

@@ -54,34 +54,35 @@ type windowsEnterpriseStandaloneRun struct {
 // windowsEnterpriseInstallerReport is the subset of the installer's schema-1
 // status document the standalone result is built from.
 type windowsEnterpriseInstallerReport struct {
-	SchemaVersion                     int      `json:"schema_version"`
-	OK                                bool     `json:"ok"`
-	Action                            string   `json:"action"`
-	Installed                         bool     `json:"installed"`
-	TransactionPending                bool     `json:"transaction_pending"`
-	InstallRoot                       string   `json:"install_root"`
-	StateRoot                         string   `json:"state_root"`
-	GatewayService                    string   `json:"gateway_service"`
-	GuardianService                   string   `json:"guardian_service"`
-	GatewayServiceState               string   `json:"gateway_service_state"`
-	GuardianServiceState              string   `json:"guardian_service_state"`
-	SensorHelperService               string   `json:"sensor_helper_service"`
-	SensorHelperServiceState          string   `json:"sensor_helper_service_state"`
-	EnumeratorService                 string   `json:"enumerator_service"`
-	EnumeratorServiceState            string   `json:"enumerator_service_state"`
-	GatewayReady                      bool     `json:"gateway_ready"`
-	GuardianReady                     bool     `json:"guardian_ready"`
-	CodexMachineRequirementsReady     bool     `json:"codex_machine_requirements_ready"`
-	CodexMachineRequirementsDisposion string   `json:"codex_machine_requirements_disposition"`
-	CodexTargetEnabled                bool     `json:"codex_target_enabled"`
-	CursorTargetEnabled               bool     `json:"cursor_target_enabled"`
-	ClaudeTargetEnabled               bool     `json:"claude_target_enabled"`
-	ClaudeEffectivePolicyVerified     bool     `json:"claude_effective_policy_verified"`
-	SecurityComplete                  bool     `json:"security_complete"`
-	InstalledVersion                  string   `json:"installed_version"`
-	TrustMode                         string   `json:"trust_mode"`
-	Error                             string   `json:"error"`
-	Errors                            []string `json:"errors"`
+	SchemaVersion                     int               `json:"schema_version"`
+	OK                                bool              `json:"ok"`
+	Action                            string            `json:"action"`
+	Installed                         bool              `json:"installed"`
+	TransactionPending                bool              `json:"transaction_pending"`
+	InstallRoot                       string            `json:"install_root"`
+	StateRoot                         string            `json:"state_root"`
+	GatewayService                    string            `json:"gateway_service"`
+	GuardianService                   string            `json:"guardian_service"`
+	GatewayServiceState               string            `json:"gateway_service_state"`
+	GuardianServiceState              string            `json:"guardian_service_state"`
+	SensorHelperService               string            `json:"sensor_helper_service"`
+	SensorHelperServiceState          string            `json:"sensor_helper_service_state"`
+	EnumeratorService                 string            `json:"enumerator_service"`
+	EnumeratorServiceState            string            `json:"enumerator_service_state"`
+	ServiceStartModes                 map[string]string `json:"service_start_modes"`
+	GatewayReady                      bool              `json:"gateway_ready"`
+	GuardianReady                     bool              `json:"guardian_ready"`
+	CodexMachineRequirementsReady     bool              `json:"codex_machine_requirements_ready"`
+	CodexMachineRequirementsDisposion string            `json:"codex_machine_requirements_disposition"`
+	CodexTargetEnabled                bool              `json:"codex_target_enabled"`
+	CursorTargetEnabled               bool              `json:"cursor_target_enabled"`
+	ClaudeTargetEnabled               bool              `json:"claude_target_enabled"`
+	ClaudeEffectivePolicyVerified     bool              `json:"claude_effective_policy_verified"`
+	SecurityComplete                  bool              `json:"security_complete"`
+	InstalledVersion                  string            `json:"installed_version"`
+	TrustMode                         string            `json:"trust_mode"`
+	Error                             string            `json:"error"`
+	Errors                            []string          `json:"errors"`
 	// A committed standalone uninstall reports the DefenseClaw per-user
 	// registrations it could not remove from users' agent configurations.
 	// They are decoded leniently: a malformed value must not hide the
@@ -115,6 +116,12 @@ type windowsEnterpriseInstallerReport struct {
 	// CursorAdapterRestored is set when the lifecycle wrote this release's
 	// Cursor enterprise adapter back over a changed or deleted one (GAP-2480).
 	CursorAdapterRestored bool `json:"cursor_adapter_restored"`
+	// TerminatedServiceProcesses names each service process the lifecycle
+	// ended because it did not answer a stop ("<service> (pid <n>)").
+	TerminatedServiceProcesses []string `json:"terminated_service_processes"`
+	// SquattedRootNotes says what Install did with each standalone root a
+	// standard user created first: a link removed, a folder moved aside.
+	SquattedRootNotes []string `json:"squatted_root_notes"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -142,6 +149,23 @@ var (
 // windowsEnterpriseLifecycleBusyMarker is the installer's lock-contention
 // diagnostic (Enter-DefenseClawLifecycleLock).
 const windowsEnterpriseLifecycleBusyMarker = "holds the protected file lock"
+
+// windowsEnterpriseRemoveReplacementCopies removes the unused replacement
+// copies in the production bin folder; replaceable in tests.
+var windowsEnterpriseRemoveReplacementCopies = func() []string {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		return nil
+	}
+	return removeWindowsReplacementCopies(filepath.Join(roots.InstallRoot, "bin"))
+}
+
+func init() {
+	windowsEnterpriseRunningAsLocalSystem = func() bool {
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		return err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
+	}
+}
 
 func windowsEnterpriseStandaloneRequested(opts *windowsEnterpriseLifecycleOptions) bool {
 	return opts != nil && (windowsEnterpriseStandalone(opts) ||
@@ -254,8 +278,15 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	hookRuntimeRepaired := ""
+	if action == "repair" && windowsEnterpriseIsElevated() {
+		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
+	if hookRuntimeRepaired != "" {
+		result.Changes = append(result.Changes, hookRuntimeRepaired)
+	}
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
@@ -707,10 +738,11 @@ func applyWindowsEnterpriseInstallerReport(
 			continue
 		}
 		result.Services = append(result.Services, enterprisestatus.Service{
-			Name:     service.name,
-			Kind:     service.kind,
-			State:    service.state,
-			Required: true,
+			Name:      service.name,
+			Kind:      service.kind,
+			State:     service.state,
+			StartMode: report.ServiceStartModes[service.name],
+			Required:  true,
 		})
 	}
 	result.Readiness = enterprisestatus.Readiness{
@@ -746,6 +778,9 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseEnrolledConnectors(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
 		applyWindowsEnterpriseAccountFolders(result)
+		if result.Action == "status" || result.Action == "verify" {
+			applyWindowsEnterpriseHookRuntimeAccess(result)
+		}
 	}
 	applyWindowsEnterpriseGatewayStartFailure(result, report)
 	applyWindowsEnterpriseAPIPortHolders(result, report)
@@ -769,6 +804,7 @@ func applyWindowsEnterpriseInstallerReport(
 			message, enumeratorCode = text, specific
 		}
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
+		message = windowsEnterpriseNamePrincipals(message)
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if enumeratorCode != "" {
 			code = enumeratorCode
@@ -785,6 +821,7 @@ func applyWindowsEnterpriseInstallerReport(
 			}
 			message += windowsEnterprisePerUserDataDirNextStep(original, message)
 			message += windowsEnterpriseInvalidRuntimeBundleNextStep(original)
+			message += windowsEnterpriseMissingArtifactNextStep(original, opts != nil && strings.TrimSpace(opts.hookBinary) != "")
 		}
 		result.AddError(code, message)
 	}
@@ -921,6 +958,22 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
 				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
 				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
+	for _, note := range report.SquattedRootNotes {
+		// The install used to say only "ensure ran install: root_squatted"
+		// (GAP-0904).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code:    "root_squatted",
+			Message: "a standard user created a DefenseClaw root before the install: " + windowsEnterpriseBoundedDiagnostic(note),
+		})
+	}
+	if len(report.TerminatedServiceProcesses) != 0 {
+		// A hung or suspended service process held up the stop (GAP-0946).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "service_process_terminated",
+			Message: "these DefenseClaw service processes did not answer a stop request within 30 seconds, so the lifecycle ended them " +
+				"(as Windows does for a stuck stop) and continued: " + windowsEnterpriseBoundedLabels(report.TerminatedServiceProcesses),
 		})
 	}
 	if report.CursorAdapterRestored {
@@ -1368,6 +1421,16 @@ var windowsEnterpriseStagedConnectors = windowsEnterpriseConfigConnectors
 // empty) as the guardian loads the installed one and returns the hook
 // connectors it enrols.
 func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+}
+
+// loadWindowsEnterpriseStandaloneConfig loads path (the installed config
+// when empty) the way the guardian loads the installed one.
+func loadWindowsEnterpriseStandaloneConfig(path string) (*config.Config, error) {
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {
 		return nil, err
@@ -1386,11 +1449,44 @@ func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
 		managed.WindowsServiceAccountEnv: layout.ServiceUser,
 	})
 	defer restore()
-	cfg, err := config.LoadManagedFileForLifecycleRecovery(path)
+	return config.LoadManagedFileForLifecycleRecovery(path)
+}
+
+// windowsEnterpriseConfigAPIPort returns the gateway.api_port of path (the
+// installed config when empty); replaceable in tests.
+var windowsEnterpriseConfigAPIPort = func(path string) (int, error) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig(path)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+	return cfg.Gateway.APIPort, nil
+}
+
+// refuseWindowsEnterpriseAPIPortChange refuses, before any service stops, a
+// config that moves gateway.api_port of an installed deployment. Every
+// user's hook registrations and the Cursor machine hooks name the installed
+// port, so the upgrade transaction stopped and restarted every service
+// twice, failed 1603 after about five minutes on the Cursor machine
+// identity and rolled back (GAP-0865). A config either side cannot load is
+// left to the checks that report it.
+func refuseWindowsEnterpriseAPIPortChange(opts *windowsEnterpriseLifecycleOptions) error {
+	path := strings.TrimSpace(opts.configPath)
+	if !windowsEnterpriseStandalone(opts) || path == "" {
+		return nil
+	}
+	staged, err := windowsEnterpriseConfigAPIPort(path)
+	if err != nil || staged == 0 {
+		return nil
+	}
+	installed, err := windowsEnterpriseConfigAPIPort("")
+	if err != nil || installed == 0 || installed == staged {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"%s changes gateway.api_port from %d to %d; the port of an installed managed deployment cannot be changed, "+
+			"because every user's agent hooks and the Cursor machine hooks are bound to it, so nothing was changed and no service was stopped. "+
+			"Keep gateway.api_port: %d in the config, or uninstall DefenseClaw and install it again with the new port",
+		path, installed, staged, installed)
 }
 
 // refuseWindowsEnterpriseConnectorlessConfig refuses, before anything
@@ -2044,8 +2140,15 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
-		if verifyReport.OK {
+		if _, drifted := windowsEnterpriseHookRuntimeDrift(); verifyReport.OK && drifted == "" {
 			applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
+			if windowsEnterpriseIsElevated() {
+				// A copy an earlier upgrade kept of a binary an editor still
+				// ran goes once nothing runs it (GAP-0934).
+				for _, removed := range windowsEnterpriseRemoveReplacementCopies() {
+					result.Changes = append(result.Changes, "removed "+removed+", which no program runs any more")
+				}
+			}
 			result.Noop = true
 			result.NoopReason = plan.Reason
 			applyWindowsEnterprisePolicy(ctx, result)
@@ -2081,10 +2184,20 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	actionOpts.jsonOutput = true
 	if plan.Action == "repair" {
 		// Repair reapplies ACL, service, and environment invariants from the
-		// installed payload; it takes no sources and records the installed
-		// binaries' version.
-		clearWindowsEnterpriseSources(&actionOpts)
+		// installed payload and records the installed binaries' version. A
+		// repair after a failed verify keeps this run's payload: the planner
+		// found every supplied source byte-identical to the recorded one
+		// (no drift), so it is the installed release, and it is the only
+		// copy of a payload file an antivirus quarantine removed. Without it
+		// ensure refused "recorded managed artifact is missing" where Setup
+		// /repair healed the same host (GAP-0935).
+		if plan.Reason != "verify_failed" {
+			clearWindowsEnterpriseSources(&actionOpts)
+		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
+		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
+			result.Changes = append(result.Changes, repaired)
+		}
 	}
 	var cleanupManifest func()
 	if plan.Action == "install" && strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
@@ -2221,6 +2334,9 @@ func planWindowsEnterpriseEnsure(
 	}
 	if status.Installed {
 		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
+			return windowsEnterpriseEnsurePlan{}, err
+		}
+		if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
 			return windowsEnterpriseEnsurePlan{}, err
 		}
 	}

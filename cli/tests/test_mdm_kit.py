@@ -249,6 +249,23 @@ def test_unix_detect_busy_is_a_retry_signal() -> None:
     assert result.returncode == 75 and "busy" in result.stderr
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_reports_an_interrupted_package_unhealthy(tmp_path: Path) -> None:
+    # A power loss in the postinst left dpkg half-configured while the
+    # services ran, and detect --require-healthy still reported healthy, so
+    # Intune never ran the wrapper and apt stayed blocked (GAP-0930).
+    check = _shell_function(_text(MDM / "linux" / "detect.sh"), "dc_package_interrupted")
+    stub = tmp_path / "dpkg-query"
+    stub.write_text('#!/bin/sh\nprintf "%s" "$DC_TEST_STATUS"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    for status, interrupted in (("install ok half-configured", True), ("install ok installed", False)):
+        env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "DC_TEST_STATUS": status}
+        result = subprocess.run(
+            ["sh", "-c", f"DC_SCRIPT_OS=linux\n{check}\ndc_package_interrupted"], capture_output=True, text=True, env=env
+        )
+        assert result.returncode == 0 and ("half-configured" in result.stdout) == interrupted, (status, result.stdout)
+
+
 _PACKAGE_TOOL_STUBS = {
     # Each stub answers the queries dc_install_package makes and records any
     # install in $DC_TEST_LOG.

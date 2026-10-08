@@ -115,3 +115,48 @@ func disableWindowsProcessPrivilegesForTest(t *testing.T, names ...string) {
 		t.Cleanup(func() { _ = windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil) })
 	}
 }
+
+// GAP-0773: the purge lists the managed ACP folder of an account whose own
+// `enterprise acp setup` run created it (the account owns it), signed out,
+// revoked or ACP-only alike; a per-user install's folder stays.
+func TestWindowsManagedACPUserCopiesListsAccountOwnedManagedFolders(t *testing.T) {
+	previousSubkeys, previousPath := windowsProfileListSubkeyReader, windowsProfileImagePathReader
+	t.Cleanup(func() { windowsProfileListSubkeyReader, windowsProfileImagePathReader = previousSubkeys, previousPath })
+	sid := currentWindowsTestSID(t)
+	for _, tc := range []struct {
+		name  string
+		files []string
+		want  bool
+	}{
+		{"managed token copy and lock", []string{"zed-hermes.token", "zed-hermes.contract-lock.json"}, true},
+		{"locks of a revoked enrollment", []string{"jetbrains-kiro.contract-lock.json"}, true},
+		{"per-user install", []string{".token", "zed-hermes.contract-lock.json"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "home")
+			acpDir := filepath.Join(home, ".defenseclaw", "acp")
+			if err := os.MkdirAll(acpDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range tc.files {
+				if err := os.WriteFile(filepath.Join(acpDir, name), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The account's own setup run owns the folder; an elevated test
+			// session would otherwise give it to Administrators.
+			if err := windows.SetNamedSecurityInfo(acpDir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			windowsProfileListSubkeyReader = func() ([]string, error) { return []string{sid.String()}, nil }
+			windowsProfileImagePathReader = func(string) (string, error) { return home, nil }
+			copies, err := WindowsManagedACPUserCopies()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(copies) == 1 && copies[0].Home == home; got != tc.want {
+				t.Fatalf("copies = %+v, want listed %t", copies, tc.want)
+			}
+		})
+	}
+}

@@ -242,3 +242,34 @@ timeout = 5
 		t.Fatalf("owned path references = %d, want 2", references)
 	}
 }
+
+// GAP-0938: a standalone ensure adopts requirements a purged deployment
+// left with its exact hooks: the preimage is the file without DefenseClaw's
+// changes (nothing, when DefenseClaw created it). Secure Client refuses.
+func TestAdoptWindowsCodexOrphanedRequirements(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	opts.HookContractID = "test-contract"
+	created, _, err := reconcileWindowsCodexRequirements(nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preimage, existed, err := adoptWindowsCodexOrphanedRequirements(created, opts); err != nil || existed || len(preimage) != 0 {
+		t.Fatalf("created by DefenseClaw: %q, %t, %v", preimage, existed, err)
+	}
+	merged, _, err := reconcileWindowsCodexRequirements([]byte("administrator_key = \"preserve\"\n"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preimage, existed, err := adoptWindowsCodexOrphanedRequirements(merged, opts)
+	if err != nil || !existed {
+		t.Fatalf("merged: %t, %v", existed, err)
+	}
+	cfg, err := parseWindowsCodexRequirements(preimage)
+	if err != nil || cfg["administrator_key"] != "preserve" || cfg["hooks"] != nil {
+		t.Fatalf("adopted preimage %q (%v)", preimage, err)
+	}
+	opts.HookContractID = ""
+	if _, _, err := adoptWindowsCodexOrphanedRequirements(merged, opts); err == nil {
+		t.Fatal("Secure Client adopted unowned DefenseClaw hooks")
+	}
+}

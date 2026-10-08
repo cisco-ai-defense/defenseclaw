@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,11 +14,60 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
+// enterpriseACPUserEnrollment is the note an enrollment leaves next to the
+// user's copy of the credential: the profile the copy is enrolled for, and
+// the mode of that profile then. Setup runs as the user, who cannot read the
+// administrator-owned record, and the setup command of an enrollment a newer
+// one replaced overwrote the working entry and lock (GAP-0733). The note is
+// not secret and decides nothing the gateway enforces.
+type enterpriseACPUserEnrollment struct {
+	Version    int    `json:"version"`
+	Profile    string `json:"profile"`
+	Mode       string `json:"mode"`
+	EnrolledAt string `json:"enrolled_at"`
+}
+
+// enterpriseACPUserEnrollmentPath is the note beside the token copy.
+func enterpriseACPUserEnrollmentPath(tokenPath string) string {
+	return strings.TrimSuffix(tokenPath, ".token") + ".enrollment.json"
+}
+
+// writeEnterpriseACPUserEnrollment writes the note; run it as the user.
+func writeEnterpriseACPUserEnrollment(tokenPath, profile, mode string) error {
+	body, err := json.Marshal(enterpriseACPUserEnrollment{
+		Version: 1, Profile: profile, Mode: mode, EnrolledAt: time.Now().UTC().Format("2006-01-02 15:04Z"),
+	})
+	if err != nil {
+		return err
+	}
+	return safefile.WritePrivate(enterpriseACPUserEnrollmentPath(tokenPath), append(body, '\n'))
+}
+
+// readEnterpriseACPUserEnrollment reads the note; ok is false without one
+// (an enrollment older than the note).
+func readEnterpriseACPUserEnrollment(tokenPath string) (note enterpriseACPUserEnrollment, ok bool) {
+	body, err := safefile.ReadRegularFileBounded(enterpriseACPUserEnrollmentPath(tokenPath), 4<<10)
+	if err != nil || json.Unmarshal(body, &note) != nil || strings.TrimSpace(note.Profile) == "" {
+		return enterpriseACPUserEnrollment{}, false
+	}
+	return note, true
+}
+
 // removeEnterpriseACPUserTokenCopy removes a user's copy of an ACP
-// credential; run it as that user. A missing copy is not an error.
+// credential and its enrollment note; run it as that user. A missing copy is
+// not an error.
 func removeEnterpriseACPUserTokenCopy(tokenPath string) error {
+	if cfg == nil || !cfg.SecureClientIntegration() {
+		note := enterpriseACPUserEnrollmentPath(tokenPath)
+		if info, err := os.Lstat(note); err == nil && info.Mode().IsRegular() {
+			if err := os.Remove(note); err != nil {
+				return err
+			}
+		}
+	}
 	info, err := os.Lstat(tokenPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

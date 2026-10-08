@@ -285,15 +285,17 @@ def table(rows: list[list[str]], headers: list[str]) -> str:
 
 
 def read_script(path: str, limit: int) -> bytes:
-    """Read a script to upload. It must be ASCII without a BOM, as the kit's own scripts are."""
+    """Read a UTF-8 script to upload, rejecting byte-order marks."""
     try:
         data = Path(path).read_bytes()
     except OSError as exc:
         raise SystemExit(f"error: cannot read {path}: {exc}") from None
     if data.startswith(b"\xef\xbb\xbf"):
         raise SystemExit(f"error: {path} starts with a byte-order mark; save it as UTF-8 without one")
-    if any(byte >= 0x80 for byte in data):
-        raise SystemExit(f"error: {path} has non-ASCII bytes; the kit's scripts are ASCII")
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SystemExit(f"error: {path} is not valid UTF-8") from None
     if len(data) > limit:
         raise SystemExit(f"error: {path} is {len(data)} bytes; the limit is {limit}")
     return data
@@ -336,7 +338,11 @@ def check_items(graph: Graph, platforms: list[str], groups: list[str]) -> list[d
         add(WARN, "licences", f"cannot read: {err}")
     else:
         enabled = [s for s in skus.get("value", []) if s.get("capabilityStatus") == "Enabled"]
-        plans = {p.get("servicePlanName"): s for s in enabled for p in s.get("servicePlans", [])}
+        plans = {
+            p.get("servicePlanName"): s
+            for s in enabled for p in s.get("servicePlans", [])
+            if p.get("provisioningStatus") == "Success"
+        }
         names = ", ".join(
             f"{s['skuPartNumber']} ({s.get('consumedUnits', 0)}/{s.get('prepaidUnits', {}).get('enabled', 0)})"
             for s in enabled
@@ -346,7 +352,7 @@ def check_items(graph: Graph, platforms: list[str], groups: list[str]) -> list[d
         add(
             PASS if intune else FAIL,
             "Intune licence",
-            "found" if intune else "no enabled SKU has the Intune service plan",
+            "found" if intune else "no enabled SKU has a provisioned Intune service plan",
         )
         entra = sorted(p for p in plans if str(p).startswith("AAD_PREMIUM"))
         add(

@@ -914,6 +914,12 @@ func systemBoundFile(string, os.FileInfo) bool { return false }
 // protected DACL on every write, and mode bits do not apply.
 func publishedFileProblem(Options, string) string { return "" }
 
+// publishedDirProblem and restorePublishedDirs are unix only: a vendor
+// directory's protected DACL already lets every user read it.
+func publishedDirProblem(Options, string) string { return "" }
+
+func restorePublishedDirs(Options, string) ([]string, error) { return nil, nil }
+
 // adminOwnedLink is never true on Windows, where no file is bound by kind
 // only (adminOwnedFile).
 func adminOwnedLink(os.FileInfo) bool { return false }
@@ -936,3 +942,90 @@ func openGuardAppend(path string) (*os.File, error) {
 	}
 	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 }
+
+// WindowsPublicDirDrift is how a DefenseClaw public folder (the hook runtime
+// folder that holds the machine policy summary) differs from the access
+// DefenseClaw sets on it: SYSTEM and Administrators full control and
+// BUILTIN\Users read and execute.
+type WindowsPublicDirDrift struct {
+	// Owner is the folder's owner SID when it is not Administrators,
+	// SYSTEM or TrustedInstaller.
+	Owner string
+	// Extra maps each other principal (BUILTIN\Users included) that holds
+	// more than read and execute to all the access it holds.
+	Extra map[string]uint32
+	// UsersReadMissing reports that BUILTIN\Users cannot read and execute.
+	UsersReadMissing bool
+}
+
+// Drifted reports any difference.
+func (d WindowsPublicDirDrift) Drifted() bool {
+	return d.Owner != "" || len(d.Extra) != 0 || d.UsersReadMissing
+}
+
+// InspectWindowsPublicDir reads dir's owner and access list without
+// following a reparse point and reports how they differ from what
+// DefenseClaw sets. Every user's hook refuses the machine policy summary
+// both when a standard user can write the folder and when Users cannot read
+// it, while status and verify said ok (GAP-0927, GAP-0929).
+func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
+	drift := WindowsPublicDirDrift{Extra: map[string]uint32{}}
+	handle, err := openDirNoFollow(dir, windows.READ_CONTROL)
+	if err != nil {
+		return drift, err
+	}
+	defer windows.CloseHandle(handle)
+	if err := requirePlainDirectory(handle, dir); err != nil {
+		return drift, err
+	}
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return drift, fmt.Errorf("inspect %s: %w", dir, err)
+	}
+	if owner, _, err := sd.Owner(); err == nil && owner != nil &&
+		!owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && !owner.IsWellKnown(windows.WinLocalSystemSid) &&
+		owner.String() != trustedInstallerSIDStr {
+		drift.Owner = owner.String()
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return drift, fmt.Errorf("inspect %s: %w", dir, err)
+	}
+	const readExecute = 0x1200a9
+	var users uint32
+	if dacl != nil {
+		for i := uint16(0); i < dacl.AceCount; i++ {
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+				return drift, fmt.Errorf("inspect %s: %w", dir, err)
+			}
+			if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+				continue
+			}
+			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			switch {
+			case sid.IsWellKnown(windows.WinLocalSystemSid), sid.IsWellKnown(windows.WinBuiltinAdministratorsSid), sid.String() == trustedInstallerSIDStr:
+			case sid.IsWellKnown(windows.WinBuiltinUsersSid):
+				users |= uint32(ace.Mask)
+			default:
+				if uint32(ace.Mask)&^readExecute != 0 {
+					drift.Extra[sid.String()] |= uint32(ace.Mask)
+				}
+			}
+		}
+	}
+	if users&^readExecute != 0 {
+		drift.Extra[usersSIDStr] = users
+	}
+	drift.UsersReadMissing = users&readExecute != readExecute
+	return drift, nil
+}
+
+// RepairWindowsPublicDir writes DefenseClaw's owner and protected access
+// list back on dir, by handle and without following a reparse point.
+func RepairWindowsPublicDir(dir string) error { return reclaimDir(dir) }
+
+const (
+	trustedInstallerSIDStr = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+	usersSIDStr            = "S-1-5-32-545"
+)

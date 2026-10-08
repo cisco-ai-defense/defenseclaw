@@ -583,6 +583,28 @@ def test_intune_check_hides_windows_only_rows_on_macos(monkeypatch: pytest.Monke
     assert not any("MDM user scope" in row["item"] or "Windows Hello" in row["item"] for row in rows)
 
 
+def test_intune_check_requires_provisioned_service_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+    monkeypatch.setattr(intune, "try_get", lambda _graph, path: (
+        {"value": [{"capabilityStatus": "Enabled", "skuPartNumber": "INTUNE_A",
+                    "servicePlans": [{"servicePlanName": "INTUNE_A", "provisioningStatus": "Disabled"}]}]}, None
+    ) if "subscribedSkus" in path else ({}, None))
+    rows = intune.check_items(Graph(), [], [])
+    assert next(row["status"] for row in rows if row["item"] == "Intune licence") == intune.FAIL
+
+
+def test_intune_read_script_accepts_utf8_without_bom(tmp_path: Path) -> None:
+    intune = _load(INTUNE)
+    script = tmp_path / "wrapper.sh"
+    script.write_text("#!/bin/sh\necho '研究'\n", encoding="utf-8")
+    assert intune.read_script(str(script), 1024) == script.read_bytes()
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_intune_macos_script_validates_before_graph_calls(tmp_path: Path, newline: str) -> None:
     # CRLF covers a wrapper saved by a Windows editor; the empty-block check must still run.
@@ -1002,6 +1024,44 @@ restart_sssd
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
+def test_okta_installer_apply_then_dry_run_is_unchanged(tmp_path: Path) -> None:
+    conf = tmp_path / "sssd.conf"
+    conf.write_text("new configuration")
+    timestamp = 1767225600.5  # 2026-01-01 00:00:00.500 UTC
+    os.utime(conf, (timestamp, timestamp))
+    service_time = tmp_path / "service-time"
+    service_time.write_text("Wed 2025-12-31 23:59:59 UTC")
+    source = OKTA_INSTALL.read_text().rsplit('main "$@"', 1)[0]
+    script = tmp_path / "probe.sh"
+    script.write_text(source + f"""
+CONF={conf}
+DOMAIN=okta
+DRY_RUN=0
+CHANGED=0
+systemctl() {{
+  case $1 in
+    is-active|is-enabled) return 0 ;;
+    show) cat {service_time} ;;
+    restart) echo 'Thu 2026-01-01 00:00:00 UTC' > {service_time} ;;
+  esac
+}}
+sss_cache() {{ return 0; }}
+wait_online() {{ return 0; }}
+check_allow_group() {{ return 0; }}
+restart_sssd
+DRY_RUN=1
+CHANGED=0
+restart_sssd
+echo "changed: $CHANGED"
+exit 0
+""")
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "changed: 0" in result.stdout
+    assert "would restart" not in result.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a Linux host script")
 def test_okta_template_filters_local_group_names(tmp_path: Path) -> None:
     out = tmp_path / "sssd.conf"
     result = subprocess.run(
@@ -1096,11 +1156,16 @@ def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]
             if "/assignments" in path:
                 return [{
                     "id": "assignment-1", "intent": "required",
-                    "target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget", "groupId": "group-1"},
+                    "target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget", "groupId": "group-1",
+                               "deviceAndAppManagementAssignmentFilterId": "filter-1"},
                 }]
             return [{"id": "app-1", "publishingState": "published"}]
 
         def request(self, method: str, path: str, body=None):
+            if method == "PATCH":
+                raise AssertionError("Graph rejects PATCH of assignment intent, target and settings")
+            if method == "POST" and body["target"]["@odata.type"].endswith("exclusionGroupAssignmentTarget") and "settings" in body:
+                raise AssertionError("Graph rejects settings on exclusion assignments")
             calls.append((method, path, body))
             return {}
 
@@ -1108,10 +1173,12 @@ def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]
         "assign-app", "--app", "app", "--group", "team", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert len(calls) == 1
-    assert calls[0][0] == "PATCH"
+    assert len(calls) == 2
+    assert calls[0][0] == "DELETE"
     assert calls[0][1].endswith("/assignments/assignment-1")
-    assert calls[0][2]["target"]["@odata.type"] == intune.GROUP_TARGET
+    assert calls[1][0] == "POST"
+    assert calls[1][2]["target"]["@odata.type"] == intune.GROUP_TARGET
+    assert calls[1][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
 
 
 def test_intune_assign_app_updates_existing_intent() -> None:
@@ -1134,6 +1201,8 @@ def test_intune_assign_app_updates_existing_intent() -> None:
             return [{"id": "app-1", "publishingState": "published"}]
 
         def request(self, method: str, path: str, body=None):
+            if method == "PATCH":
+                raise AssertionError("Graph rejects PATCH of assignment intent, target and settings")
             calls.append((method, path, body))
             return {}
 
@@ -1141,10 +1210,39 @@ def test_intune_assign_app_updates_existing_intent() -> None:
         "assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert [call[0] for call in calls] == ["PATCH"]
-    assert calls[0][2]["intent"] == "uninstall"
-    assert calls[0][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
-    assert "settings" in calls[0][2]
+    assert [call[0] for call in calls] == ["DELETE", "POST"]
+    assert calls[1][2]["intent"] == "uninstall"
+    assert calls[1][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
+    assert "settings" in calls[1][2]
+
+
+def test_intune_intent_change_failure_keeps_original_assignment() -> None:
+    intune = _load(INTUNE)
+    calls = []
+    old = {"id": "assignment-1", "intent": "required", "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"}}
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [old]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method: str, path: str, body=None):
+            calls.append((method, body))
+            if method == "POST" and body["intent"] == "available":
+                raise intune.GraphError(400, "BadRequest", "rejected")
+            return {}
+
+    args = intune.build_parser().parse_args([
+        "assign-app", "--app", "app", "--group", "team", "--intent", "available", "--apply",
+    ])
+    with pytest.raises(intune.GraphError):
+        intune.cmd_assign_app(Graph(), args)
+    assert [method for method, _ in calls] == ["DELETE", "POST", "POST"]
+    assert calls[2][1]["intent"] == "required"
+    assert calls[2][1]["target"] == old["target"]
 
 
 def test_intune_groups_reject_dynamic_group() -> None:
@@ -1274,6 +1372,16 @@ def test_okta_assign_posix_names_duplicate_uid_repair(monkeypatch: pytest.Monkey
     args = argparse.Namespace(user=["alice@example.test"], users_from=None, apply=False)
     assert okta.cmd_assign_posix(Client(), args) == 1
     assert "clear uidNumber on one affected user" in capsys.readouterr().out
+
+
+def test_okta_failed_preview_does_not_suggest_apply(capsys: pytest.CaptureFixture[str]) -> None:
+    okta = _load(OKTA)
+    report = okta.Report(dry_run=True)
+    report.problem("gidNumber is shared")
+    assert report.finish() == 1
+    output = capsys.readouterr().out
+    assert "nothing can be applied until" in output
+    assert "Add --apply" not in output
 
 
 def test_okta_bind_role_refusal_does_not_claim_assignment(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1444,29 +1552,3 @@ def test_intune_remove_assignment_preserves_exclusion() -> None:
         ["remove-assignment", "--app", "app", "--group", "team", "--apply"])
     assert intune.cmd_remove_assignment(Graph(), args) == 0
     assert writes == []
-
-
-def test_intune_intent_change_failure_keeps_original_assignment() -> None:
-    intune = _load(INTUNE)
-    writes = []
-
-    class Graph:
-        def get_all(self, path):
-            if "/groups?" in path:
-                return [{"id": "group-1"}]
-            if "/assignments" in path:
-                return [{"id": "assignment-1", "intent": "required",
-                         "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"}}]
-            return [{"id": "app-1", "publishingState": "published"}]
-
-        def request(self, method, path, body=None):
-            writes.append(method)
-            if method != "DELETE":
-                raise intune.GraphError(400, "Rejected", "change rejected")
-            return {}
-
-    args = intune.build_parser().parse_args(
-        ["assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply"])
-    with pytest.raises(intune.GraphError, match="Rejected"):
-        intune.cmd_assign_app(Graph(), args)
-    assert writes == ["PATCH"]

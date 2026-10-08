@@ -103,6 +103,27 @@ func TestClaudeDetectsLaterDropInAndDisableAllHooks(t *testing.T) {
 	}
 }
 
+// A company drop-in saved by a Windows editor (UTF-8 BOM, CRLF) is read as
+// Claude Code reads it: it was refused, verify failed for every user and the
+// error said Claude Code would not start (GAP-0914).
+func TestClaudeReadsACompanyDropInWithBOMAndCRLF(t *testing.T) {
+	withHigherSources(t)
+	opts := testOptions(t)
+	company := "\ufeff{\r\n  \"permissions\": {\"ask\": [\"Bash(curl:*)\"]}\r\n}\r\n"
+	path := filepath.Join(claudeDir(t, opts), "managed-settings.d", "20-company-bom-crlf.json")
+	writeFile(t, path, company)
+	if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	state, err := claudeTarget{}.Verify(opts)
+	if err != nil || !state.Covered {
+		t.Fatalf("a BOM+CRLF company drop-in must not break coverage: %v %+v", err, state.Conflicts)
+	}
+	if readFile(t, path) != company {
+		t.Fatal("the company drop-in changed")
+	}
+}
+
 func TestClaudeHigherPrecedenceSources(t *testing.T) {
 	opts := testOptions(t)
 	withHigherSources(t, higherSource(t, `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`, `{"model": "opus"}`))

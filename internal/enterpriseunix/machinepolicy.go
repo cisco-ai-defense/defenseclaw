@@ -41,6 +41,10 @@ const (
 	// failure: the hooks are in place, and the floor stops no build older
 	// than 2.1.163, which predates the setting.
 	codeClaudeVersionFloorMissing = "claude_version_floor_missing"
+	// codeMachinePolicyOff names an enabled connector whose machine policy
+	// ownership is off: its sessions run without DefenseClaw's hooks. It is
+	// a warning, not a verify failure: the administrator chose it.
+	codeMachinePolicyOff = "machine_policy_off"
 )
 
 // MachinePolicyManager publishes, verifies and removes DefenseClaw's hooks
@@ -186,23 +190,30 @@ func coveredMachinePolicy(intended []string, result enterprisepolicy.Result) []s
 // reportMachinePolicy copies per-connector machine policy states into the
 // lifecycle result and warns for every intended connector that is not
 // covered.
-func reportMachinePolicy(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error) {
-	reportMachinePolicyExcept(r, intended, result, err, nil)
+func (e *Env) reportMachinePolicy(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error) {
+	e.reportMachinePolicyExcept(r, intended, result, err, nil)
 }
 
 // reportMachinePolicyExcept is reportMachinePolicy for callers that report
-// the connectors in skip themselves.
-func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error, skip []string) {
+// the connectors in skip themselves. A connector under ownership: verify_only
+// gets a warning of its own that names the export, so a lifecycle failure
+// made only of those does not end with "run repair", which never writes
+// such a file (GAP-0918).
+func (e *Env) reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error, skip []string) {
 	for _, state := range result.States {
 		if state.Route != enterprisepolicy.RouteMachinePolicy {
 			continue
 		}
 		r.MachinePolicy[state.Connector] = state.ToStatus()
 	}
-	missing := []string{}
+	var missing, exportOnly []string
 	covered := coveredMachinePolicy(intended, result)
 	for _, name := range intended {
-		if !contains(covered, name) && !contains(skip, name) {
+		switch {
+		case contains(covered, name) || contains(skip, name):
+		case e.verifyOnlyExport(name, result) != "":
+			exportOnly = append(exportOnly, name)
+		default:
 			missing = append(missing, machinePolicyLabel(name, result))
 		}
 	}
@@ -211,17 +222,17 @@ func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, re
 		if err != nil {
 			message += ": " + err.Error()
 		}
-		for _, name := range intended {
-			if !contains(covered, name) && !contains(skip, name) {
-				for _, state := range result.States {
-					if state.Connector == name && state.Ownership == config.MachinePolicyOwnershipVerifyOnly {
-						message += fmt.Sprintf("; %s: ownership verify_only, so DefenseClaw never writes it: deploy the output of `enterprise policy export --connector %s` (missing_defenseclaw_hooks), then run ensure", name, name)
-					}
-				}
-			}
+		r.AddWarning(codeMachinePolicyIncomplete, message)
+	}
+	for index, name := range exportOnly {
+		message := fmt.Sprintf("DefenseClaw hooks are not in place in vendor machine policy for %s, so %s runs without them; %s",
+			machinePolicyLabel(name, result), name, e.verifyOnlyExport(name, result))
+		if index == 0 && err != nil && len(missing) == 0 {
+			message += " (" + err.Error() + ")"
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
-	} else if err != nil && len(skip) == 0 {
+	}
+	if len(missing) == 0 && len(exportOnly) == 0 && err != nil && len(skip) == 0 {
 		r.AddWarning(codeMachinePolicyIncomplete, err.Error())
 	}
 }
@@ -272,7 +283,7 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return err
 	}
 	l.machinePolicyErr = err
-	reportMachinePolicy(r, p.intended, result, err)
+	env.reportMachinePolicy(r, p.intended, result, err)
 	for _, state := range result.States {
 		if state.Changed {
 			l.noteChange("rewrote DefenseClaw's %s machine policy entries", state.Connector)
@@ -376,7 +387,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 			}
 		}
 	}
-	reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
+	env.reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
 	// A connector whose DefenseClaw entries are gone from its vendor file runs
 	// without hooks, so status fails on it as verify does (GAP-0529).
 	var gone []string
@@ -384,6 +395,12 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		message := fmt.Sprintf(
 			"vendor machine policy for %s no longer carries the DefenseClaw hooks the last transaction placed, so %s runs without them; run `%s` to restore them",
 			machinePolicyLabel(name, result), name, env.lifecycleCommand("repair"))
+		if drift := driftConflicts(name, result); len(drift) > 0 {
+			// The entries are in place, but agents cannot use them (a
+			// directory users cannot read, a file mode) (GAP-0913).
+			message = fmt.Sprintf("DefenseClaw hooks are in place in vendor machine policy for %s but do not protect %s: %s; run `%s` to restore them",
+				machinePolicyLabel(name, result), name, strings.Join(drift, "; "), env.lifecycleCommand("repair"))
+		}
 		if export := env.verifyOnlyExport(name, result); export != "" {
 			// repair never writes a file the administrator owns (GAP-0536).
 			message = fmt.Sprintf("vendor machine policy for %s no longer carries the DefenseClaw hooks, so %s runs without them; %s",
@@ -435,6 +452,19 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
 			"DefenseClaw hooks are in place in vendor machine policy for %s but do not protect %s: %s",
 			machinePolicyLabel(state.Connector, result), state.Connector, strings.Join(reasons, "; ")))
+	}
+	// ownership: off for a connector guardrail.connectors still enables
+	// left status and verify fully green while its sessions ran without
+	// DefenseClaw's hooks; only policy show said so (GAP-0922). OpenCode
+	// keeps its per-user plugin under ownership: off.
+	for _, state := range result.States {
+		if state.Ownership != config.MachinePolicyOwnershipOff || state.Connector == enterprisepolicy.ConnectorOpenCode ||
+			enterprisepolicy.RouteFor(state.Connector, env.GOOS) != enterprisepolicy.RouteMachinePolicy {
+			continue
+		}
+		r.AddWarning(codeMachinePolicyOff, fmt.Sprintf(
+			"guardrail.connectors enables %s, but enterprise.machine_policy.connectors.%s.ownership is off: DefenseClaw neither writes nor checks its machine policy and installs no per-user hooks for it, so %s sessions run without DefenseClaw's hooks; set ownership to merge or verify_only to protect it, or disable the connector",
+			state.Connector, state.Connector, state.Connector))
 	}
 	for _, name := range unwanted {
 		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
@@ -499,6 +529,17 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		r.SecurityComplete = false
 	}
 	return append(gone, drift...)
+}
+
+// driftConflicts are the conflicts of a connector whose DefenseClaw entries
+// are in its vendor file but drifted from what a publish writes.
+func driftConflicts(connector string, result enterprisepolicy.Result) []string {
+	for _, state := range result.States {
+		if state.Connector == connector && state.Drift && state.OwnedEntries > 0 {
+			return state.Conflicts
+		}
+	}
+	return nil
 }
 
 // claudeVersionFloorConflict starts every Claude Code version floor conflict.
@@ -646,7 +687,7 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 		r.AddWarning(codeMachinePolicy, publishErr.Error())
 		return
 	}
-	reportMachinePolicy(r, intended, result, publishErr)
+	env.reportMachinePolicy(r, intended, result, publishErr)
 	if record != nil && record.MachinePolicyConnectors != nil &&
 		!sameStrings(coveredMachinePolicy(intended, result), intersectSorted(record.MachinePolicyConnectors, intended)) {
 		r.AddWarning(codeMachinePolicyIncomplete, "the machine-policy connectors in place differ from the runtime descriptor; run ensure")
