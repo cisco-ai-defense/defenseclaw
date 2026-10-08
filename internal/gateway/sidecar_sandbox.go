@@ -227,6 +227,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 				Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
 				SessionID: d.SessionID, ToolInput: d.ToolInput, ResultStatus: d.ResultStatus,
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
+				ModelError: d.ModelError, ModelStatus: d.ModelStatus,
 			})
 		},
 		OnHookFailure: func(f SandboxHookFailure) {

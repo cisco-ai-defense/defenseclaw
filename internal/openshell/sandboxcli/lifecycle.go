@@ -270,6 +270,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		}
 		row("Hook error", last+" (the hook failed closed)")
 	}
+	if sb.Hooks.ModelKeyRejected != "" {
+		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
+	}
 	row("Egress", fmt.Sprintf("%s contacted, %d blocked, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
 		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
 	for _, ep := range sb.Endpoints {

@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -192,6 +193,12 @@ type SandboxHookDecision struct {
 	// Reason is the plain reason the agent was given (see
 	// sandboxVerdictReason): rule metadata, never matched content.
 	Reason string
+	// ModelError and ModelStatus are the model API failure a turn-ending
+	// hook event reports (sandboxModelError): the error class of Claude
+	// Code's StopFailure ("authentication_failed") and the HTTP status its
+	// message names. Empty for every other event.
+	ModelError  string
+	ModelStatus int
 }
 
 // SandboxHookFailure is one authenticated sandbox hook or inspect post the
@@ -869,13 +876,45 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 	if st == nil || st.onHookDecision == nil {
 		return
 	}
+	modelError, modelStatus := sandboxModelError(req)
 	st.onHookDecision(SandboxHookDecision{
 		BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
 		Event: req.HookEventName, Tool: req.ToolName, ToolUseID: req.ToolInvocationID,
 		SessionID: req.SessionID, ToolInput: sandboxDecisionToolInput(req),
 		ResultStatus: strings.TrimSpace(payloadString(req.Payload, "status")),
 		Action:       resp.Action, WouldBlock: resp.WouldBlock, Severity: resp.Severity, Reason: resp.Reason,
+		ModelError: modelError, ModelStatus: modelStatus,
 	})
+}
+
+// sandboxModelStatus finds the HTTP status in Claude Code's "API Error: 401
+// ..." text; sandboxModelErrorClass matches the error classes its
+// StopFailure names (authentication_failed, rate_limit, ...).
+var (
+	sandboxModelStatus     = regexp.MustCompile(`API Error: ([45][0-9]{2})\b`)
+	sandboxModelErrorClass = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
+)
+
+// sandboxModelError is the model API failure a StopFailure hook reports
+// (Claude Code fires it when a turn ends on a model API error): the error
+// class and the HTTP status the message it showed names. The message itself
+// goes no further. Both are empty for every other event.
+func sandboxModelError(req agentHookRequest) (string, int) {
+	if canonicalEvent(req.HookEventName) != "stopfailure" {
+		return "", 0
+	}
+	class := strings.TrimSpace(payloadString(req.Payload, "error"))
+	if !sandboxModelErrorClass.MatchString(class) {
+		class = "unknown"
+	}
+	status := 0
+	for _, key := range []string{"error_details", "last_assistant_message"} {
+		if m := sandboxModelStatus.FindStringSubmatch(payloadString(req.Payload, key)); m != nil {
+			status, _ = strconv.Atoi(m[1])
+			break
+		}
+	}
+	return class, status
 }
 
 // sandboxDecisionToolInput is the tool input a hook event carries, or nil.

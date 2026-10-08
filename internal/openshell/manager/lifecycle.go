@@ -545,6 +545,8 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if digest != rec.LLMDigest {
 		m.mu.Lock()
 		b.rec.LLMDigest = digest
+		// The rejection was of the old key.
+		b.hooks.forgetModelRejection()
 		m.mu.Unlock()
 		if err := m.saveRecord(b); err != nil {
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)

@@ -361,6 +361,12 @@ type HookCoverage struct {
 	HookFailed        int64     `json:"hook_failed,omitempty"`
 	LastHookFailure   string    `json:"last_hook_failure,omitempty"`
 	LastHookFailureAt time.Time `json:"last_hook_failure_at,omitzero"`
+	// ModelKeyRejected says the model API rejected the sandbox's model
+	// credential (Claude Code's StopFailure hook reported it) and how to
+	// hand the sandbox a fresh key, until a turn ends normally or a start
+	// hands it a new key. ModelKeyRejectedAt is the last rejection.
+	ModelKeyRejected   string    `json:"model_key_rejected,omitempty"`
+	ModelKeyRejectedAt time.Time `json:"model_key_rejected_at,omitzero"`
 	// IngressRefused counts the hook connections and requests to the
 	// DefenseClaw ingress that OpenShell refused (the sandbox's network
 	// policy does not allow its port or path).
@@ -1109,6 +1115,10 @@ const (
 	ReasonHooksUnreachable = "hooks_unreachable"
 	ReasonHooksRestored    = "hooks_restored"
 )
+
+// ReasonModelKeyRejected is the Reason of the finding event a sandbox gets
+// when the model API rejected its model credential (HookCoverage.ModelKeyRejected).
+const ReasonModelKeyRejected = "model_credential_rejected"
 
 // HooksUnreachableWarning opens every warning about hooks that do not
 // reach DefenseClaw; HooksDoctorHint closes it.

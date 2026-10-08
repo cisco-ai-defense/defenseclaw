@@ -231,6 +231,11 @@ type hookStats struct {
 	lastFailureAt   time.Time
 	failureNoticeAt time.Time
 	unnoticed       int64
+	// modelRejected says the model API rejected the sandbox's model
+	// credential, and how to hand it a fresh one; modelRejectedAt is the
+	// last rejection (observeModelAnswerLocked).
+	modelRejected   string
+	modelRejectedAt time.Time
 }
 
 // hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
@@ -755,6 +760,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
+		ModelKeyRejected: b.hooks.modelRejected, ModelKeyRejectedAt: b.hooks.modelRejectedAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
 		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,

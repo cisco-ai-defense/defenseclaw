@@ -1159,6 +1159,20 @@ picks another.
 A login you do inside a kept sandbox stays in it; the sandbox's files are
 readable by the agent, so prefer an API key where you can.
 
+When the model provider rejects the key a Claude Code sandbox was given
+(a short-term Bedrock key that expired, a revoked key), Claude Code retries
+for a few minutes and then suggests `/login`, which does not apply to a
+shared key. DefenseClaw says what happened in the activity feed, in
+`defenseclaw sandbox status` (a **Model key** row) and in the
+end-of-session summary:
+
+```text
+⚠ Amazon Bedrock rejected the sandbox's model credential (HTTP 401), so Claude Code gets no answers: put a fresh AWS_BEARER_TOKEN_BEDROCK in your shell, end the session (`defenseclaw sandbox stop myapp-claude` for a detached run), then run `defenseclaw sandbox connect myapp-claude` from that shell, which hands the sandbox the new key
+```
+
+A start hands the sandbox the key your environment holds then, so the
+session after `connect` works with the new key.
+
 The harness starts with its own home inside the sandbox. Your user-level
 harness settings are not copied in; your MCP servers are the exception
 ([below](#mcp-servers)).
@@ -1732,6 +1746,7 @@ which runs NVIDIA's installer and sets up the service.
 | On Linux, setup marks ``⚠ OpenShell 0.1.1 has no openshell-gateway user service``, then ``⚠ Gateway service: openshell-gateway is not installed; …`` | OpenShell was installed without NVIDIA's installer. See [a gateway run another way on Linux](#a-gateway-run-another-way-on-linux). |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
+| ``… rejected the sandbox's model credential (HTTP 401), so Claude Code gets no answers`` | The model provider refused the key the sandbox was given, for example an expired short-term Bedrock key. Put a fresh key in your shell, end the session, and run `defenseclaw sandbox connect <name>` from that shell; see [Choose the model credential](#choose-the-model-credential). |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
 | ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start) | The check after ready found the sandbox other than DefenseClaw prepared it, on any compute driver, and the reason follows the message: the workload runs as another uid or holds capabilities, a hook, launcher or managed-settings file is missing, changed, not root-owned or writable, or (Linux) a per-run settings file is not on a read-only mount. Nothing of the sandbox kept running. Rebuild the harness image (`defenseclaw sandbox image build <harness> --force`) and run again; on a Mac, a uid mismatch is fixed by `defenseclaw sandbox doctor --fix`. If it repeats, keep the reason for a bug report. |
 | ``<name> is in OpenShell's error state`` (start, stop or connect), or the session ended with ``<name>'s container stopped under the session`` | The sandbox's container stopped while it ran (a Docker restart stops every one, or the workload failed), and OpenShell holds it in its error state, where it can be neither stopped nor started. `defenseclaw sandbox doctor` names it under **Sandbox hooks**. Delete it and run again: `defenseclaw sandbox delete <name> --keep-snapshot` keeps a mounted project's undo point (the folder keeps its changes); a copy's work that was not pulled cannot be read any more. |
