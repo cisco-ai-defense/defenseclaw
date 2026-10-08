@@ -368,6 +368,9 @@ func TestParseV8YAMLSharesTheParseOfOneSource(t *testing.T) {
 	}
 }
 
+// TestSecureClientV9SourceRejected keeps the Secure Client parser, schema
+// preflight and runtime loader on the v8 contract while other profiles can
+// use v9.
 func TestSecureClientV9SourceRejected(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
@@ -375,6 +378,11 @@ func TestSecureClientV9SourceRejected(t *testing.T) {
 	err := requireV8YAMLError(t, raw, V8YAMLErrorVersionUnsupported)
 	if err.Path != "$.config_version" {
 		t.Fatalf("error path = %q, want $.config_version", err.Path)
+	}
+	var schemaErr *V8YAMLError
+	if err := ValidateV8SchemaBytes("config.yaml", raw); !errors.As(err, &schemaErr) ||
+		schemaErr.Code != V8YAMLErrorVersionUnsupported {
+		t.Fatalf("schema preflight error = %v, want unsupported version", err)
 	}
 	if err := checkRuntimeConfigVersion(9, true); err == nil {
 		t.Fatal("runtime version check accepted Secure Client v9")
