@@ -384,14 +384,16 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (" + openShellDenialText(r.Reason, host, r.Port) + ")",
 				Replayed: replayed}
 		}
-		if ev.Blocked && ev.Severity == "" && !replayed && m.sink != nil && m.sink.foldOpenShell(name, ev, feed) {
-			// A repeat of an alerted refusal: counted, then recorded once.
-			return
+		recordFolded, lineFolded := false, false
+		if ev.Blocked && ev.Severity == "" && !replayed && m.sink != nil {
+			recordFolded, lineFolded = m.sink.foldOpenShell(name, ev, feed)
 		}
-		if !m.connectionRequest(b, r, host, at) {
+		// A repeat of an alerted refusal is counted, then recorded once; a
+		// repeat of its feed line, by any program, likewise (GAP-0329).
+		if !recordFolded && !m.connectionRequest(b, r, host, at) {
 			m.tel.RecordSandboxEgress(ctx, ev)
 		}
-		if feed != nil {
+		if feed != nil && !lineFolded {
 			m.publishEgress(*feed)
 		}
 	case ocsf.ClassProcess:

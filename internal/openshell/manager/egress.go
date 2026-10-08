@@ -483,8 +483,9 @@ type egressSink struct {
 	// heldAt is when flush last reported what the pacing held back.
 	heldAt time.Time
 	// openshell folds OpenShell's own refusals like recent folds the
-	// proxy's (foldOpenShell).
-	openshell map[openshellRefusalKey]*openshellRefusal
+	// proxy's (foldOpenShell), and openshellLines their feed lines.
+	openshell      map[openshellRefusalKey]*openshellRefusal
+	openshellLines map[openshellLineKey]*openshellLine
 }
 
 // openshellRefusalKey is what makes OpenShell's refusals repeats of one
@@ -495,12 +496,28 @@ type openshellRefusalKey struct {
 }
 
 // openshellRefusal is the fold of one openshellRefusalKey's repeats since
-// its first record and feed line: the last repeat stands for them all.
+// its first record: the last repeat stands for them all.
 type openshellRefusal struct {
 	since   time.Time
 	repeats int
 	last    audit.SandboxEgressEvent
-	feed    *sandboxapi.ActivityEvent
+}
+
+// openshellLineKey is what makes OpenShell refusals' feed lines repeats of
+// one another: the sandbox and the line, which names neither the program
+// nor a web port. Folded by the record's key, one retry loop's refusals by
+// two programs (or of a host's address and its name) printed identical
+// lines in pairs (GAP-0329).
+type openshellLineKey struct {
+	sandbox, message string
+}
+
+// openshellLine is the fold of one openshellLineKey's repeats since its
+// first line.
+type openshellLine struct {
+	since   time.Time
+	repeats int
+	last    sandboxapi.ActivityEvent
 }
 
 // maxOpenShellRefusals bounds the refusals foldOpenShell keeps windows for.
@@ -511,29 +528,48 @@ const maxOpenShellRefusals = 4096
 // blockCoalesceWindow: then it only counts, and flush records the count in
 // one record and one feed line. A retry loop refused seven times in seven
 // seconds made seven MEDIUM alerts and seven feed lines (GAP-0199).
-func (s *egressSink) foldOpenShell(sandbox string, ev audit.SandboxEgressEvent, feed *sandboxapi.ActivityEvent) bool {
+//
+// The record folds by destination and program, the feed line by its text
+// (openshellLineKey): record and line report whether each only counted.
+func (s *egressSink) foldOpenShell(sandbox string, ev audit.SandboxEgressEvent, feed *sandboxapi.ActivityEvent) (record, line bool) {
 	now := s.m.now()
 	k := openshellRefusalKey{sandbox: sandbox, host: ev.Host, binary: ev.Executable, port: ev.Port}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r := s.openshell[k]; r != nil && now.Sub(r.since) < blockCoalesceWindow {
 		r.repeats++
-		r.last, r.feed = ev, feed
-		return true
+		r.last, record = ev, true
+	} else {
+		if s.openshell == nil {
+			s.openshell = map[openshellRefusalKey]*openshellRefusal{}
+		}
+		if len(s.openshell) < maxOpenShellRefusals {
+			s.openshell[k] = &openshellRefusal{since: now}
+		}
 	}
-	if s.openshell == nil {
-		s.openshell = map[openshellRefusalKey]*openshellRefusal{}
+	if feed == nil {
+		return record, false
 	}
-	if len(s.openshell) < maxOpenShellRefusals {
-		s.openshell[k] = &openshellRefusal{since: now}
+	lk := openshellLineKey{sandbox: sandbox, message: feed.Message}
+	if l := s.openshellLines[lk]; l != nil && now.Sub(l.since) < blockCoalesceWindow {
+		l.repeats++
+		l.last, line = *feed, true
+	} else {
+		if s.openshellLines == nil {
+			s.openshellLines = map[openshellLineKey]*openshellLine{}
+		}
+		if len(s.openshellLines) < maxOpenShellRefusals {
+			s.openshellLines[lk] = &openshellLine{since: now}
+		}
 	}
-	return false
+	return record, line
 }
 
 // flushOpenShell records, for each OpenShell refusal whose window ended,
 // the repeats folded into it, and forgets the ended windows.
 func (s *egressSink) flushOpenShell(ctx context.Context, now time.Time) {
 	var folded []*openshellRefusal
+	var lines []*openshellLine
 	s.mu.Lock()
 	for k, r := range s.openshell {
 		if now.Sub(r.since) < blockCoalesceWindow {
@@ -544,21 +580,32 @@ func (s *egressSink) flushOpenShell(ctx context.Context, now time.Time) {
 		}
 		delete(s.openshell, k)
 	}
+	for k, l := range s.openshellLines {
+		if now.Sub(l.since) < blockCoalesceWindow {
+			continue
+		}
+		if l.repeats > 0 {
+			lines = append(lines, l)
+		}
+		delete(s.openshellLines, k)
+	}
 	s.mu.Unlock()
 	sort.Slice(folded, func(i, j int) bool { return folded[i].last.Timestamp.Before(folded[j].last.Timestamp) })
 	for _, r := range folded {
-		ev, more := r.last, ""
+		ev := r.last
 		if r.repeats > 1 {
-			more = fmt.Sprintf(" (and %d more like it)", r.repeats-1)
+			ev.Reason = truncate(ev.Reason+fmt.Sprintf(" (and %d more like it)", r.repeats-1), 512)
 		}
-		ev.Reason = truncate(ev.Reason+more, 512)
 		s.m.tel.RecordSandboxEgress(ctx, ev)
-		if r.feed != nil {
-			line := *r.feed
-			line.Message += more
-			line.Repeats = max(r.repeats-1, 0)
-			s.m.publishEgress(line)
+	}
+	sort.Slice(lines, func(i, j int) bool { return lines[i].last.Time.Before(lines[j].last.Time) })
+	for _, l := range lines {
+		line := l.last
+		if l.repeats > 1 {
+			line.Message += fmt.Sprintf(" (and %d more like it)", l.repeats-1)
+			line.Repeats = l.repeats - 1
 		}
+		s.m.publishEgress(line)
 	}
 }
 

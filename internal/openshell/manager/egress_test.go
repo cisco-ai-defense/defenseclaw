@@ -923,10 +923,40 @@ func TestRepeatedRefusalsAreFolded(t *testing.T) {
 	}
 }
 
+// GAP-0329: a retry loop's refusals of one destination fold under several
+// keys (its DNS refusals and its connections', or two programs'), whose
+// folded lines read the same: the feed shows one, counting them all.
+func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
+	fastFlush(t)
+	e := liveEnv(t, "pairbox", nil)
+	now := time.Now()
+	for range 3 {
+		e.ocsf("pairbox", "NET:REFUSE [MED] DENIED registry.npmjs.org [reason:policy_dns_ineligible]", now)
+		e.ocsf("pairbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+		e.ocsf("pairbox", "NET:OPEN [MED] DENIED /usr/bin/npm(43) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+	}
+	first := len(e.events("pairbox", sandboxapi.ActivityEgressBlocked, ""))
+	eventually(t, "the folded lines", func() bool {
+		e.m.sink.flushOpenShell(t.Context(), time.Now())
+		return len(e.events("pairbox", sandboxapi.ActivityEgressBlocked, "")) > first
+	})
+	time.Sleep(50 * time.Millisecond)
+	e.m.sink.flushOpenShell(t.Context(), time.Now())
+	feed := e.events("pairbox", sandboxapi.ActivityEgressBlocked, "")
+	var msgs []string
+	for _, l := range feed {
+		msgs = append(msgs, l.Message)
+	}
+	if n := len(feed) - first; n != 1 || feed[len(feed)-1].Repeats < 1 {
+		t.Fatalf("first %d lines, then %d folded: %q", first, n, msgs)
+	}
+}
+
 // GAP-0199: a pip retry loop OpenShell refused seven times in seven seconds
 // made seven MEDIUM alerts and seven feed lines. Repeats of one refusal (the
-// destination and the program) fold into the first record and line, and one
-// more names their count; another program's refusal is its own.
+// destination and the program) fold into the first record, and one more
+// names their count; another program's refusal is its own record. The feed
+// line names no program, so its repeats fold by the line (GAP-0329).
 func TestRepeatedOpenShellRefusalsAreFolded(t *testing.T) {
 	fastFlush(t)
 	e := liveEnv(t, "retrybox", nil)
@@ -940,19 +970,19 @@ func TestRepeatedOpenShellRefusalsAreFolded(t *testing.T) {
 			return r.Blocked && r.Host == "pypi.org" && (match == nil || match(r))
 		})
 	}
-	if n, feed := refused(nil), len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")); n != 2 || feed != 2 {
-		t.Fatalf("%d records and %d feed lines for 7 repeats and one other program, want 2 each", n, feed)
+	if n, feed := refused(nil), len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")); n != 2 || feed != 1 {
+		t.Fatalf("%d records and %d feed lines for 7 repeats and one other program, want 2 and 1", n, feed)
 	}
 	// The folded repeats are recorded before they are published to the feed.
 	eventually(t, "the folded repeats", func() bool {
 		e.m.sink.flushOpenShell(t.Context(), time.Now())
 		return refused(func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "(and 5 more like it)") }) == 1 &&
-			len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")) == 3
+			len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")) == 2
 	})
 	// The folded line says how many it stands for, in the words of the
 	// first (GAP-0309).
-	if n, feed := refused(nil), e.events("retrybox", sandboxapi.ActivityEgressBlocked, ""); n != 3 || len(feed) != 3 ||
-		feed[2].Message != "✗ pypi.org (no OpenShell rule allows it) (and 5 more like it)" || feed[2].Repeats != 5 ||
+	if n, feed := refused(nil), e.events("retrybox", sandboxapi.ActivityEgressBlocked, ""); n != 3 || len(feed) != 2 ||
+		feed[1].Message != "✗ pypi.org (no OpenShell rule allows it) (and 6 more like it)" || feed[1].Repeats != 6 ||
 		feed[0].Message != "✗ pypi.org (no OpenShell rule allows it)" || feed[0].Repeats != 0 {
 		t.Fatalf("%d records, feed %+v", n, feed)
 	}
