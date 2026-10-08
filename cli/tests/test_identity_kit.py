@@ -558,3 +558,27 @@ def test_intune_macos_script_defaults_to_daily_frequency() -> None:
         "macos-script", "--name", "script", "--file", "script.sh",
     ])
     assert args.frequency == "P1D"
+
+
+def test_intune_app_status_fetches_every_report_page(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            return [{"id": "app-1"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append(body)
+            skip = body.get("skip", 0)
+            return {
+                "Schema": [{"Column": "DeviceName"}],
+                "Values": [[f"device-{skip}"]],
+                "TotalRowCount": 2,
+            }
+
+    args = intune.build_parser().parse_args(["status", "--app", "app"])
+    assert intune.cmd_status(Graph(), args) == 0
+    assert [body.get("skip", 0) for body in calls] == [0, 1]
+    output = capsys.readouterr().out
+    assert "device-0" in output and "device-1" in output

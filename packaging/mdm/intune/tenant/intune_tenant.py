@@ -479,16 +479,20 @@ def cmd_status(graph: Graph, args: argparse.Namespace) -> int:
         app = one_by_name(graph, f"{BETA}/deviceAppManagement/mobileApps", args.app, "app")
         # Graph no longer serves mobileApps/{id}/deviceStatuses ("Resource not found for the
         # segment"); the per-device install state comes from the report the admin center shows.
-        report = graph.request(
-            "POST",
-            f"{BETA}/deviceManagement/reports/retrieveDeviceAppInstallationStatusReport",
-            {"filter": f"(ApplicationId eq '{app['id']}')", "top": STATUS_REPORT_ROWS},
-        )
+        path = f"{BETA}/deviceManagement/reports/retrieveDeviceAppInstallationStatusReport"
+        query = {"filter": f"(ApplicationId eq '{app['id']}')", "top": STATUS_REPORT_ROWS, "skip": 0}
+        report = graph.request("POST", path, dict(query))
         columns = [str(c.get("Column", "")) for c in report.get("Schema", [])]
         states = [dict(zip(columns, values)) for values in report.get("Values", [])]
         total = int(report.get("TotalRowCount") or len(states))
-        shown = "" if total <= len(states) else f" (the first {len(states)} shown)"
-        print(f"app {args.app}: {total} device(s) reported{shown}")
+        while len(states) < total:
+            query["skip"] = len(states)
+            report = graph.request("POST", path, dict(query))
+            values = report.get("Values", [])
+            if not values:
+                raise GraphError(502, "IncompleteReport", f"app status stopped after {len(states)} of {total} rows")
+            states.extend(dict(zip(columns, row)) for row in values)
+        print(f"app {args.app}: {len(states)} device(s) reported")
         rows = [
             [
                 str(s.get("DeviceName") or ""),
