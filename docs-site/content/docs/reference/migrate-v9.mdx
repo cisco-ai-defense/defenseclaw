@@ -512,13 +512,19 @@ managed host the administrator owns `policy_dir`, so the migration only
 records a note, and the gateway refuses the old module and uses the
 config-driven policy.
 
-### Custom providers (not part of this migration)
+### Custom providers
 
-The migration does not touch `custom-providers.json`. A hand-written file from
-0.8.x keeps working. The next `defenseclaw setup provider add` or `remove`
-moves its entries into `llm_providers.custom` and `llm_providers.ollama_ports`
-in `config.yaml`, and from then on `custom-providers.json` is derived from them
-and never read back. See
+The v9 migration imports an ordinary 0.8.x `custom-providers.json` into
+`llm_providers.custom` and `llm_providers.ollama_ports` in `config.yaml`,
+then retires the legacy overlay. A subsequently rendered file marked
+`_derived_from` is derived output and is not read back.
+
+If any legacy provider has `request_overrides`, which `llm_providers` cannot
+hold, migration records a note and leaves the entire unmarked overlay as a
+**live input**. The gateway continues to merge it even after changes to
+`llm_providers`. Preserve and review that file until the overrides are no
+longer needed. Managed hosts do not import local provider overlays into their
+admin config. See
 [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
 
 ### Keys that no longer exist

@@ -182,9 +182,15 @@ doctor reports the drift.
 | Derived file | Rendered from | Drift shows as | Regenerate with |
 | --- | --- | --- | --- |
 | Hook scripts, `~/.defenseclaw/hooks/<connector>-hook.sh`, and the Windows `.hookcfg` | `guardrail.hook_fail_mode`, the connector set and the gateway address. Each script carries a `# defenseclaw-derived:` header | Doctor warns `stale generated script` for the connector | `defenseclaw-gateway restart`, or `defenseclaw setup <connector>` |
-| `~/.defenseclaw/custom-providers.json` | `llm_providers` | Doctor fails `Custom-provider overlay` when the file was edited by hand or no longer matches | `defenseclaw doctor --fix` |
+| `~/.defenseclaw/custom-providers.json` marked `_derived_from` | `llm_providers` | Doctor fails `Custom-provider overlay` when the derived file was edited by hand or no longer matches | `defenseclaw doctor --fix` |
 | Enterprise machine policy (for example the Codex requirements file and the Claude Code managed settings) | The administrator config, inside `ensure` | `enterprise policy show` and `status` report drift | `ensure` or `repair` |
 | Composed rule packs, compiled `admission:`, the threshold table | `guardrail.rules`, `rule_pack`, `admission`, `block_at`, `alert_at` | Not on disk. They live in the generation and are rebuilt on every reload | Nothing to do |
+
+A legacy 0.8.x provider overlay is imported during v9 migration when its
+fields fit `llm_providers`. If it contains `request_overrides`, migration
+leaves the unmarked file as a live input; see
+[Custom providers](/docs/reference/migrate-v9#custom-providers). It is not a
+derived file.
 
 Older releases wrote composed protection packs to
 `~/.defenseclaw/policies/guardrail/protected-<scope>/`, and policy YAML to

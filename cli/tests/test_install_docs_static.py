@@ -1016,3 +1016,26 @@ def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
     back = migrate.split("## Going back to 0.8.x", 1)[1]
     assert "Configuration schema v8 is required" in back  # what the 0.8.x CLI prints
     assert "reads up to 8" not in migrate and "migrate --check` on" not in back  # 0.8.x has `migrations`, not `migrate`
+
+def test_admission_docs_explain_take_action_false_limits() -> None:
+    text = (ROOT / "docs-site/content/docs/policies/admission.mdx").read_text(encoding="utf-8")
+    section = text.split("Where it runs:", 1)[1].split("## The admission block", 1)[0]
+    assert "take_action" in section
+    assert "denied" in section and "scanner" in section and "quarantin" in section
+    assert "nothing else" not in section
+
+
+def test_profile_docs_apply_levels_to_content_decisions() -> None:
+    text = (ROOT / "docs-site/content/docs/guardrail/user-and-group-policies.mdx").read_text(encoding="utf-8")
+    section = text.split("| `block_at`, `alert_at` |", 1)[1].split("| `hilt` |", 1)[0]
+    assert "prompt" in section and "response" in section and "proxy" in section
+    assert "Secure Client" in section
+    assert "tool-call decisions" not in section
+
+
+def test_provider_docs_explain_legacy_overlay_migration() -> None:
+    text = (ROOT / "docs-site/content/docs/guardrail/unified-llm-key.mdx").read_text(encoding="utf-8")
+    section = text.split("Manage the entries with", 1)[1].split("```bash", 1)[0]
+    assert "migration" in section and "request_overrides" in section
+    assert "live input" in section and "0.8.x" in section
+    assert "next `setup provider add` or `remove`" not in section
