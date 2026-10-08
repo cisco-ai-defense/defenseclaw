@@ -878,3 +878,27 @@ def test_intune_app_status_fetches_every_report_page(capsys: pytest.CaptureFixtu
     assert [body.get("skip", 0) for body in calls] == [0, 1]
     output = capsys.readouterr().out
     assert "device-0" in output and "device-1" in output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["add", "--group", "admin", "--user", "bob"],
+        ["add", "--group", "wheel", "--user", "bob"],
+        ["add", "--group", "com.apple.access_ssh", "--user", "bob"],
+        ["add", "--group", "_www", "--user", "bob"],
+        ["add", "--group", "-x", "--user", "bob"],
+        ["add", "--group", "a" * 300, "--user", "bob"],
+        ["add", "--group", "ml-team", "--user", ""],
+        ["add", "--group", "ml-team", "--user", "-v"],
+    ],
+)
+def test_macos_bridge_refuses_unsafe_names_before_touching_the_mac(args: list[str]) -> None:
+    """GAP-0644, GAP-0645: privileged groups, option-like or overlong names and an empty --user are usage errors."""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not installed")
+    script = ENTRA.parent / "macos-entra-group-bridge.sh"
+    result = subprocess.run([bash, str(script), *args], capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 2, result
+    assert result.stderr.startswith("error: ")
