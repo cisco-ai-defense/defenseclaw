@@ -1291,7 +1291,7 @@ warning and never fails `verify` or `security_complete`.
 | --- | --- | --- |
 | Helper drop-in, written only when the settings are not the defaults | `/etc/systemd/system/defenseclaw-sensor-helper.service.d/30-defenseclaw-tetragon.conf` | `root`, `0644` |
 | Helper state | `/var/lib/defenseclaw-sensor/`: `tetragon-loaded` (the policy names DefenseClaw loaded), `tetragon-state.json`, `burnin.json`, `tetragon-pause` | `root`, `0700` |
-| Rendered policy copies | `/run/defenseclaw-sensor/tetragon/` | `root` |
+| Until-reboot pause and rendered policy copies | `/run/defenseclaw-sensor-tetragon/`: `tetragon-pause`, `tetragon/` | `root` |
 | Helper unit | `defenseclaw-sensor-helper.service`, started after `tetragon.service` | `root` |
 
 `verify` tracks the drop-in and reports drift. Do not edit the helper's

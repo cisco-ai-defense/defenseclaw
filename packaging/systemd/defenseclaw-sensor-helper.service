@@ -42,11 +42,16 @@ Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone
 ExecStart=/opt/defenseclaw/bin/defenseclaw-sensor-helper --managed-enterprise --service-account defenseclaw --home-dirs-from-manifest /etc/defenseclaw/hook-guardian/targets.yaml
 Restart=always
 RestartSec=5s
-RuntimeDirectory=defenseclaw-sensor
+# defenseclaw-sensor holds only the socket: the helper gives it to the
+# gateway's group, and on the next start systemd chowns such a directory back
+# recursively and fails on any regular file in it (233/RUNTIME_DIRECTORY).
+# defenseclaw-sensor-tetragon holds the until-reboot break-glass pause and the
+# copies of the policies the helper loaded; it stays root's.
+RuntimeDirectory=defenseclaw-sensor defenseclaw-sensor-tetragon
 RuntimeDirectoryMode=0750
-# The until-reboot break-glass pause lives in the runtime directory: it must
-# outlive helper restarts and stops (ensure, repair, upgrades) and go only
-# with a reboot. The helper replaces a stale socket itself.
+# The until-reboot pause must outlive helper restarts and stops (ensure,
+# repair, upgrades) and go only with a reboot. The helper replaces a stale
+# socket itself.
 RuntimeDirectoryPreserve=yes
 StateDirectory=defenseclaw-sensor
 StateDirectoryMode=0700

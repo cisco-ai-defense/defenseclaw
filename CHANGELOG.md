@@ -171,10 +171,11 @@ says otherwise. Per-user installs never connect to Tetragon.
 ### Changed
 
 - The sensor helper's unit starts after `tetragon.service`, has a private
-  state directory, `/var/lib/defenseclaw-sensor`, and keeps its runtime
-  directory `/run/defenseclaw-sensor` across stops
-  (`RuntimeDirectoryPreserve=yes`, for the until-reboot pause); uninstall
-  removes both. The first `ensure` or `repair` of this release applies them.
+  state directory, `/var/lib/defenseclaw-sensor`, and a second runtime
+  directory, `/run/defenseclaw-sensor-tetragon` (the until-reboot pause and
+  the copies of its loaded policies), and keeps its runtime directories
+  across stops (`RuntimeDirectoryPreserve=yes`, for the until-reboot pause);
+  uninstall removes them. The first `ensure` or `repair` of this release applies them.
   A host that sets no `enterprise.tetragon` gets no new drop-in.
 - The per-user Linux install ships `defenseclaw-sensor-helper` in
   `~/.local/bin` (used only by the sandbox kernel feed);

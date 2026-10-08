@@ -340,11 +340,12 @@ func kernelPolicyChange(removed []string) string {
 
 // removeSensorState removes the helper's state directory with the rest of
 // the machine state, unless it still records policies that may be loaded:
-// those names are what lets a later helper remove them. Its runtime
-// directory goes in either case: the unit keeps it across stops
+// those names are what lets a later helper remove them. Its kernel-policy
+// runtime directory goes in either case: the unit keeps it across stops
 // (RuntimeDirectoryPreserve, for the until-reboot pause), so with the unit
-// gone it would otherwise hold a stale socket and the pause until the next
-// reboot, and a reinstall in the same boot would start paused.
+// gone it would otherwise hold the pause until the next reboot, and a
+// reinstall in the same boot would start paused. The socket's directory goes
+// with the other runtime leftovers of the stopped services.
 func (e *Env) removeSensorState() error {
 	if e.GOOS != "linux" {
 		return nil

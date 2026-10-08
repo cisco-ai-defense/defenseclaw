@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
@@ -1004,6 +1005,7 @@ func TestSensorHelperUnitKeepsTetragonState(t *testing.T) {
 	}
 	lines := strings.Split(string(data), "\n")
 	for _, want := range []string{"After=tetragon.service", "StateDirectory=defenseclaw-sensor", "StateDirectoryMode=0700", "RuntimeDirectoryPreserve=yes",
+		"RuntimeDirectory=defenseclaw-sensor " + filepath.Base(kernelpolicy.DefaultRunDir),
 		"CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_RAW CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_CHOWN CAP_FOWNER"} {
 		if !contains(lines, want) {
 			t.Fatalf("the sensor helper unit lacks %q", want)
@@ -1014,6 +1016,22 @@ func TestSensorHelperUnitKeepsTetragonState(t *testing.T) {
 			if strings.Contains(line, "tetragon") {
 				t.Fatalf("the unit must not pull Tetragon in: %q", line)
 			}
+		}
+	}
+	// GAP-0031: the helper's regular runtime files (the until-reboot pause,
+	// the policy copies) never sit in the socket's directory. The helper
+	// gives that directory to the gateway's group, and systemd 252 then
+	// chowns it back recursively at the next start and fails on any regular
+	// file in it, so the helper could not restart after observe or a pause.
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketDir := layout.SensorSocketDir
+	dirs := kernelpolicy.DefaultDirs()
+	for _, path := range []string{dirs.Run, dirs.RuntimePause(), dirs.PolicyCopies()} {
+		if path == socketDir || strings.HasPrefix(path, socketDir+"/") {
+			t.Fatalf("%s is inside the socket's runtime directory %s", path, socketDir)
 		}
 	}
 }

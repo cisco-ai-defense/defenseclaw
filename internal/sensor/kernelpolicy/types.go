@@ -248,11 +248,21 @@ type Dirs struct {
 	Run   string
 }
 
-// Default directory names: the helper's systemd StateDirectory and
-// RuntimeDirectory.
+// Default directory names: the helper's systemd StateDirectory and the
+// RuntimeDirectory of its kernel-policy files (the until-reboot pause and the
+// policy copies).
+//
+// The run directory is not the socket's /run/defenseclaw-sensor. The helper
+// gives that one to the gateway's group so the gateway can reach the socket,
+// and at the next start systemd 252 (RHEL 9) chowns a RuntimeDirectory whose
+// owner differs back to the unit's, recursively, and fails on any regular
+// file in it ("Failed to set up special execution directory in /run:
+// Permission denied", status 233/RUNTIME_DIRECTORY): every restart after
+// observe (its policy copies) or a pause failed (GAP-0031). This directory
+// stays as systemd made it, root:root, so systemd never walks it.
 const (
 	DefaultStateDir = "/var/lib/defenseclaw-sensor"
-	DefaultRunDir   = "/run/defenseclaw-sensor"
+	DefaultRunDir   = "/run/defenseclaw-sensor-tetragon"
 )
 
 // DefaultDirs returns the production locations.
