@@ -139,7 +139,8 @@ says otherwise. Per-user installs never connect to Tetragon.
   to Tetragon; `defenseclaw doctor` has a **Kernel sensor (Tetragon)** row that
   warns when Tetragon serves its API on TCP and, on Linux with the sandbox
   kernel feed installed, a **Sandbox kernel feed** row that prints the update
-  command; `defenseclaw config get --effective` lists `enterprise.tetragon.*`.
+  command and warns while the feed's Tetragon stream is down;
+  `defenseclaw config get --effective` lists `enterprise.tetragon.*`.
   `agent discovery runtime status`, the TUI Runtime panel and doctor's managed
   rows have the same Tetragon lines, but they do not show them in this release:
   only a managed gateway reports Tetragon, and no `defenseclaw` command line
