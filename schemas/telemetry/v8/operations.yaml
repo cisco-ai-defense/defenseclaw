@@ -7894,7 +7894,7 @@ groups:
     - profile: local-observability-v1
       mappings:
       - ref: defenseclaw.ide.product
-        label: ide_product
+        label: defenseclaw_ide_product
       - ref: defenseclaw.ide.plugin.ai
         label: defenseclaw_ide_plugin_ai
       - ref: defenseclaw.ide.plugin.enabled

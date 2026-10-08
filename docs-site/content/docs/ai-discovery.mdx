@@ -810,9 +810,10 @@ The local observability stack ships the **AI Agent Usage & Detection** board
 - Prometheus: `defenseclaw_ai_discovery_signals_total` (labels `state`,
   `signal_category`, `ai_vendor`, `ai_product`, `detector`), the active-signal
   gauge and the IDE plugin gauge `defenseclaw_inventory_ide_plugins` (labels
-  `ide_product`, `defenseclaw_ide_plugin_ai`, and
-  `defenseclaw_ide_plugin_enabled`). The board queries the exported label
-  names directly, including for a plain `otlp` destination.
+  `defenseclaw_ide_product`, `defenseclaw_ide_plugin_ai`, and
+  `defenseclaw_ide_plugin_enabled`; the sample without labels is the current
+  total). The board queries the exported label names directly, including for
+  a plain `otlp` destination.
 - Loki: the `ai.discovery.completed`, `ai_component.*` and `ide.plugin.*`
   records.
 - Tempo: the discovery scan traces.
