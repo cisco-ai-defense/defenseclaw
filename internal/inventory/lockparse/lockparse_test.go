@@ -31,6 +31,15 @@ func writeLockFile(t *testing.T, dir, name, body string) string {
 	return path
 }
 
+func parsePath(t *testing.T, path string) ([]Component, error) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return Parse(filepath.Base(path), body)
+}
+
 func find(t *testing.T, components []Component, name string) Component {
 	t.Helper()
 	for _, c := range components {
@@ -51,7 +60,7 @@ func TestParsePackageJSON_extractsAllDependencyGroups(t *testing.T) {
   "peerDependencies": {"react": "*"},
   "optionalDependencies": {"sharp": "0.33.5"}
 }`)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -80,7 +89,7 @@ func TestParsePackageLockJSON_v3layout(t *testing.T) {
     "node_modules/openai/node_modules/@types/node": {"version": "20.0.0"}
   }
 }`)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -109,7 +118,7 @@ some_pkg==2.0.0; python_version >= "3.10"
 -e ./local-package
 -r other-requirements.txt
 `)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -160,7 +169,7 @@ python = "^3.10"
 llama-index = "^0.10.0"
 crewai = { version = "0.30.0", optional = true }
 `)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -192,7 +201,7 @@ dependencies = [
   "httpx[socks]>=0.27",
 ]
 `)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -219,7 +228,7 @@ version = "0.2.16"
 [metadata]
 lock-version = "2.0"
 `)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -242,7 +251,7 @@ version = "0.25.0"
 name = "rig-core"
 version = "0.6.0"
 `)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -271,7 +280,7 @@ require (
 
 require github.com/tmc/langchaingo v0.1.10
 `)
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -289,30 +298,12 @@ require github.com/tmc/langchaingo v0.1.10
 func TestParse_unknownExtensionReturnsNoError(t *testing.T) {
 	dir := t.TempDir()
 	path := writeLockFile(t, dir, "exotic.lock", "totally unknown\n")
-	out, err := Parse(path, MaxFileBytes)
+	out, err := parsePath(t, path)
 	if err != nil {
 		t.Fatalf("unknown file should not error, got %v", err)
 	}
 	if len(out) != 0 {
 		t.Fatalf("unknown file should yield 0 components, got %+v", out)
-	}
-}
-
-func TestParse_oversizedFilesAreSkippedNotErrored(t *testing.T) {
-	dir := t.TempDir()
-	// Build a 1 KB body so we can set maxBytes lower than the file
-	// size but higher than 0 to trigger the "file too large" branch.
-	body := make([]byte, 1024)
-	for i := range body {
-		body[i] = '\n'
-	}
-	path := writeLockFile(t, dir, "package.json", string(body))
-	out, err := Parse(path, 256)
-	if err != nil {
-		t.Fatalf("oversized file should not error, got %v", err)
-	}
-	if len(out) != 0 {
-		t.Fatalf("oversized file should yield 0 components, got %d", len(out))
 	}
 }
 

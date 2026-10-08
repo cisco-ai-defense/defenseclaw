@@ -1425,6 +1425,50 @@ func TestStandaloneAIDiscoveryPassSpoolsEachScanAsItsAccount(t *testing.T) {
 	}
 }
 
+// A home whose scan keeps failing pauses after three failed passes in a
+// row, so the guardian stops starting a worker for it on every pass
+// (GAP-0694); the pass after the pause tries again and a good scan closes
+// the breaker.
+func TestStandaloneAIDiscoveryPassPausesAHomeWhoseScanKeepsFailing(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	cfg.AIDiscovery.Enabled = true
+	dir := inventory.UserScanDirForConfig(cfg)
+	previous := enterpriseHookAIDiscoveryBreaker
+	t.Cleanup(func() { enterpriseHookAIDiscoveryBreaker = previous })
+	enterpriseHookAIDiscoveryBreaker = newEnterpriseHookScanBreaker(3, time.Hour, 24*time.Hour)
+	workers, fail := 0, true
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		workers++
+		if fail {
+			return enterpriseHookWorkerResponse{}, errors.New("worker for uid timed out: context deadline exceeded")
+		}
+		report := inventory.ScanUserHome(ctx, account.Home, account.User, account.UID, request.AIDiscovery.Options, request.AIDiscovery.Catalog)
+		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion, AIDiscovery: &report}, nil
+	}
+	pass := func() {
+		runEnterpriseHookAIDiscoveryPass(context.Background(), io.Discard, dir, []enterpriseHookReconcileRow{
+			{User: "alice", UserHome: alice, Connector: "codex", OK: true, UID: uid},
+		})
+	}
+	for range 4 {
+		pass()
+	}
+	if workers != 3 {
+		t.Fatalf("workers = %d, want 3: the fourth pass must skip the paused home", workers)
+	}
+	enterpriseHookAIDiscoveryBreaker.accounts[uid].until = time.Now().Add(-time.Second)
+	fail = false
+	pass()
+	pass()
+	if workers != 5 || len(enterpriseHookAIDiscoveryBreaker.accounts) != 0 {
+		t.Fatalf("workers = %d, breaker = %+v: after the pause a good scan closes the breaker", workers, enterpriseHookAIDiscoveryBreaker.accounts)
+	}
+}
+
 // A worker error ends with its cause. The remove-all report cut it at 256
 // bytes, in the middle of a path, so the uninstall never said why a
 // registration stayed. An oversized error keeps its start and its cause.

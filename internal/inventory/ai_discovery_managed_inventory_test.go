@@ -289,3 +289,24 @@ func TestSignalGainingItsAccountIsReportedOnceAsNew(t *testing.T) {
 		t.Fatalf("second scan state = %q", report.Signals[0].State)
 	}
 }
+
+// A managed gateway reads the profile list again at every full scan, so an
+// account created after it started is scanned without a restart (GAP-0707).
+func TestManagedDiscoveryRereadsTheProfileListEachFullScan(t *testing.T) {
+	root := t.TempDir()
+	owners := []discoveryHomeOwner{{Home: filepath.Join(root, "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return owners }
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, DataDir: filepath.Join(root, "data"),
+	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
+	owners = append(owners, discoveryHomeOwner{Home: filepath.Join(root, "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob"})
+	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if homes := svc.homesToScan(); len(homes) != 2 || homes[1] != owners[1].Home {
+		t.Fatalf("homes = %v, want the profile created after the gateway started", homes)
+	}
+}

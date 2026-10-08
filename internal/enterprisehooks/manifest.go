@@ -46,6 +46,26 @@ type ManifestTarget struct {
 
 const enterpriseHookManifestMaxBytes int64 = 4 << 20
 
+// ManifestHomesDropped returns the targets of previous whose profile current
+// no longer lists, one per profile.
+func ManifestHomesDropped(previous, current Manifest) Manifest {
+	key := func(home string) string { return strings.ToLower(filepath.Clean(strings.TrimSpace(home))) }
+	kept := map[string]bool{}
+	for _, target := range current.Targets {
+		kept[key(target.UserHome)] = true
+	}
+	var dropped Manifest
+	for _, target := range previous.Targets {
+		home := key(target.UserHome)
+		if strings.TrimSpace(target.UserHome) == "" || kept[home] {
+			continue
+		}
+		kept[home] = true
+		dropped.Targets = append(dropped.Targets, target)
+	}
+	return dropped
+}
+
 func LoadManifest(path string) (Manifest, error) {
 	manifest, _, err := LoadManifestWithSHA256(path)
 	return manifest, err

@@ -570,6 +570,10 @@ var enterpriseHooksWindowsConfigLoader = func() (*config.Config, error) {
 	return config.LoadFromFile(config.ConfigPath())
 }
 
+// refuseEnterpriseIdentityViewForStandardUser is a no-op on Windows: the
+// views run from an elevated prompt, and the gateway refuses others.
+func refuseEnterpriseIdentityViewForStandardUser(*cobra.Command) error { return nil }
+
 func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) error {
 	if enterpriseHooksRuntimeGOOS() != "windows" {
 		if cmd == enterpriseHooksStatusCmd {

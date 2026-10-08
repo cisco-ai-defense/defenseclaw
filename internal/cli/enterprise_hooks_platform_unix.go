@@ -151,6 +151,13 @@ func refuseEnterpriseHooksForStandardUserOnManagedHost(cmd *cobra.Command) error
 		layout.DescriptorPath, command, managedHostGatewayCommand(), command)
 }
 
+// refuseEnterpriseIdentityViewForStandardUser gives the read-only identity
+// views (ide-plugins, agent-identities, profile-explain) the same answer for
+// a standard user on a standalone managed host.
+func refuseEnterpriseIdentityViewForStandardUser(cmd *cobra.Command) error {
+	return refuseEnterpriseHooksForStandardUserOnManagedHost(cmd)
+}
+
 // applyStandaloneHookGuardianDefaults fills in the guardian paths of this
 // OS's standalone layout for a standalone deployment's config when the
 // caller left them unset: the manifest (the flag default is the Linux

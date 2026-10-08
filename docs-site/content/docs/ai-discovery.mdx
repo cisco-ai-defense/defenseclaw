@@ -480,13 +480,26 @@ remote server, and a hash of its path.
 
 Not collected: the contents or source of any extension, settings, tokens or
 credentials, workspace and project files, chat or editor history, or the
-extension's own data. The only database read is the one key
+extension's own data. Each text field (a display name, a publisher) is kept
+to one printable line of at most 256 bytes: format characters such as
+right-to-left overrides are dropped and control characters become a space, so
+a planted name cannot render differently in a table or a dashboard. The only
+database read is the one key
 `extensionsIdentifiers/disabled` in a VS Code `state.vscdb`, opened read-only
 and immutable with a 2-second limit. Paths leave the host only as hashes.
 
 Every scan is bounded: at most 4,096 plugins per IDE installation, 16,384
 files and 64 MiB of metadata per home, and 1 MiB per file. An IDE that
 exceeds a bound is reported as a partial installation rather than read further.
+
+The scan reads regular files only: it skips a FIFO, a device, a socket or a
+folder it cannot open without waiting on it, and a manifest it walks to is read
+as the file itself, never through a link. On a managed Linux host, each
+user's scan runs in a worker with a 1 GiB memory ceiling, so a home that
+defeats these bounds ends that user's worker, not the host. On managed Linux
+and macOS, when a user's scan fails three passes in a row, the guardian
+pauses that home for an hour (then two, up to a day) and keeps the user's
+last inventory meanwhile.
 
 Most IDE rows describe plugin data found in each user profile; Windows Visual
 Studio also has machine-wide rows. Removing an IDE
@@ -552,7 +565,11 @@ enterprise macos ide-plugins`) prints the managed gateway's inventory as
 JSON, with the `--user`, `--ide`, `--ai-only` and `--cursor` filters. On a
 managed Windows computer, `defenseclaw.exe enterprise windows ide-plugins`
 does the same from an elevated prompt. These commands print the counts of the
-whole machine next to the filtered rows.
+whole machine next to the filtered rows. An answer without an inventory
+carries a `reason`: on a managed computer whose config leaves AI discovery
+off, it says to set `ai_discovery.enabled: true` in the managed config (the
+file Setup, the package or the MDM delivers); `agent discovery enable` is a
+per-user command.
 
 - **API.** `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's
   plugins, filtered by `user` (account name or ID), `ide` (product or family)

@@ -187,6 +187,9 @@ type AIDiscoveryOptions struct {
 	// platform enumerated them for a service-context scan (managed Windows).
 	// Signals found under a profile carry its account.
 	homeOwners []discoveryHomeOwner
+	// platformHomes marks HomeDirs as the platform's profile list, which
+	// every full scan reads again (refreshPlatformHomes).
+	platformHomes bool
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -827,7 +830,8 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// developer running a local build does not silently start reading
 	// their coworkers' dotdirs on a shared workstation.
 	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
-		if owners := platformDiscoveryHomeOwners(opts.StandaloneEnterprise); len(owners) > 0 {
+		opts.platformHomes = true
+		if owners := discoveryHomeOwnersLookup(opts.StandaloneEnterprise); len(owners) > 0 {
 			platformHomes := make([]string, 0, len(owners))
 			for _, owner := range owners {
 				platformHomes = append(platformHomes, owner.Home)
@@ -932,6 +936,30 @@ func (s *ContinuousDiscoveryService) Close() error {
 // walk. Never empty when HomeDir was resolvable (normalizeAIDiscoveryOptions
 // always includes HomeDir in HomeDirs); callers can iterate without a
 // separate fallback.
+// discoveryHomeOwnersLookup lists the platform's profiles; replaceable in
+// tests.
+var discoveryHomeOwnersLookup = platformDiscoveryHomeOwners
+
+// refreshPlatformHomes reads the platform's profile list again, so a managed
+// Windows gateway scans an account created after it started from the next
+// full scan on, not after a restart (GAP-0707), and stops reading a profile
+// that is gone. It runs under scanMu, like every reader of the list. An
+// empty answer (the registry unreadable) keeps the last list.
+func (s *ContinuousDiscoveryService) refreshPlatformHomes() {
+	if !s.opts.platformHomes {
+		return
+	}
+	owners := discoveryHomeOwnersLookup(s.opts.StandaloneEnterprise)
+	if len(owners) == 0 {
+		return
+	}
+	homes := make([]string, 0, len(owners))
+	for _, owner := range owners {
+		homes = append(homes, owner.Home)
+	}
+	s.opts.HomeDirs, s.opts.HomeDir, s.opts.homeOwners = homes, homes[0], owners
+}
+
 func (s *ContinuousDiscoveryService) homesToScan() []string {
 	if s == nil {
 		return nil
@@ -1131,6 +1159,9 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 	})
 	defer scanObservation.abort()
 
+	if full {
+		s.refreshPlatformHomes()
+	}
 	prev, prevErr := s.store.Load()
 	if prevErr != nil {
 		// Loading the previous-scan snapshot is best-effort — a
@@ -2090,10 +2121,9 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	return out
 }
 
-// readMCPServerNamesWithErr wraps readMCPServerNames with the parser's
-// error state so signalFromMCPConfigPath can distinguish
-// "unparseable" from "no servers declared". The plain readMCPServerNames
-// remains for callers that don't need the reason.
+// readMCPServerNamesWithErr returns the server names an MCP config declares,
+// with the parser's error state so signalFromMCPConfigPath can distinguish
+// "unparseable" from "no servers declared".
 func readMCPServerNamesWithErr(path string) ([]string, error) {
 	// An empty MCP config declares no server; it is not malformed.
 	// Antigravity leaves a 0-byte mcp_config.json, which read as a
@@ -2117,33 +2147,8 @@ func readMCPServerNamesWithErr(path string) ([]string, error) {
 
 // isBlankFile reports a small regular file holding only whitespace.
 func isBlankFile(path string) bool {
-	st, err := os.Stat(path)
-	if err != nil || !st.Mode().IsRegular() || st.Size() > 4096 {
-		return false
-	}
-	if st.Size() == 0 {
-		return true
-	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- catalog MCP config path
+	raw, err := readBoundedRegularFile(path, 4096)
 	return err == nil && strings.TrimSpace(string(raw)) == ""
-}
-
-// readMCPServerNames parses `path` with the appropriate format-specific
-// reader and returns the declared MCP server names. Best-effort: an
-// unreadable/unparseable/format-unknown file yields nil.
-func readMCPServerNames(path string) []string {
-	entries, err := parseMCPConfigForNames(path)
-	if err != nil || len(entries) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		name := strings.TrimSpace(e.Name)
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
 }
 
 // parseMCPConfigForNames dispatches to the right config parser for
@@ -3140,10 +3145,13 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return nil
 			}
 			files++
-			body, ok := readBoundedText(path, s.opts.MaxFileBytes)
-			if !ok {
+			// The file the walk found, never what a link there points
+			// at, and never a device, FIFO or oversized file (GAP-0694).
+			raw, readErr := readBoundedRegularFileNoFollow(path, s.opts.MaxFileBytes)
+			if readErr != nil {
 				return nil
 			}
+			body := string(raw)
 			// wsHash is the PROJECT ROOT hash, not the
 			// manifest's immediate dir. This is the big
 			// dedup lever: every `node_modules/<dep>/package.json`
@@ -3162,7 +3170,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				wsHash:    hashPath(projectRootForManifest(path)),
 				ecosystem: lockparse.Ecosystem(filepath.Base(path)),
 			}
-			comps, _ := lockparse.Parse(path, s.opts.MaxFileBytes)
+			comps, _ := lockparse.Parse(filepath.Base(path), raw)
 			entry.parsedComponents = indexParsedManifestComponents(comps, entry.ecosystem)
 			dir := filepath.Dir(path)
 			dirEntries[dir] = append(dirEntries[dir], entry)
@@ -3532,12 +3540,12 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 	var out []AISignal
 	files := 0
 	for _, path := range paths {
-		body, ok := readBoundedTail(path, s.opts.MaxFileBytes)
-		if !ok {
+		raw, err := readRegularFileTail(path, s.opts.MaxFileBytes)
+		if err != nil {
 			continue
 		}
 		files++
-		lower := strings.ToLower(body)
+		lower := strings.ToLower(string(raw))
 		for _, sig := range s.catalog {
 			for _, pattern := range sig.HistoryPatterns {
 				pattern = strings.ToLower(strings.TrimSpace(pattern))
@@ -4674,42 +4682,6 @@ func isProjectPackageManifest(name string) bool {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func readBoundedText(path string, maxBytes int64) (string, bool) {
-	st, err := os.Stat(path)
-	if err != nil || st.IsDir() || st.Size() > maxBytes {
-		return "", false
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-	return string(raw), true
-}
-
-func readBoundedTail(path string, maxBytes int64) (string, bool) {
-	fh, err := os.Open(path)
-	if err != nil {
-		return "", false
-	}
-	defer fh.Close()
-	st, err := fh.Stat()
-	if err != nil || st.IsDir() {
-		return "", false
-	}
-	offset := int64(0)
-	if st.Size() > maxBytes {
-		offset = st.Size() - maxBytes
-	}
-	if _, err := fh.Seek(offset, io.SeekStart); err != nil {
-		return "", false
-	}
-	raw, err := io.ReadAll(io.LimitReader(fh, maxBytes))
-	if err != nil {
-		return "", false
-	}
-	return string(raw), true
 }
 
 // projectRootForManifest walks UP from a manifest file path to the
