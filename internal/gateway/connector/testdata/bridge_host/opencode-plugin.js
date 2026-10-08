@@ -300,6 +300,7 @@ async function defenseclawSocketRequest(path, init) {
         resolve({
           ok: res.statusCode >= 200 && res.statusCode < 300,
           status: res.statusCode,
+          headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
           json: async () => JSON.parse(text),
         });
       });
@@ -353,6 +354,27 @@ async function defenseclawFetch(path, init, token) {
   await defenseclawVerifyHookSocket();
   if (globalThis.Bun) return fetch("http://localhost" + path, { ...init, unix: DC_HOOK_SOCKET });
   return defenseclawSocketRequest(path, init);
+}
+
+// defenseclawRetryBusy sends the call again while the gateway answers 429: it
+// is taking all the hook calls it can, or this account is over its budget,
+// and has not evaluated the call. It waits the Retry-After the gateway asks
+// for (1 to 3 s) at most 3 times; the caller's abort signal keeps the whole
+// exchange inside the plugin timeout. The native hook runner does the same
+// (GAP-0205); without it a short burst failed the tool call (GAP-0535).
+async function defenseclawRetryBusy(send, signal) {
+  let res = await send();
+  for (let retry = 0; retry < 3 && res && res.status === 429; retry++) {
+    const asked = Number.parseInt(String((res.headers && res.headers.get("retry-after")) || ""), 10);
+    const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000;
+    await new Promise((resolve, reject) => {
+      if (signal && signal.aborted) return reject(new Error("DefenseClaw gateway busy"));
+      const timer = setTimeout(resolve, delay);
+      if (signal) signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("DefenseClaw gateway busy")); }, { once: true });
+    });
+    res = await send();
+  }
+  return res;
 }
 
 // defenseclawForeignHookCheck asks the administrator-owned hook binary for
@@ -505,12 +527,12 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       payload.tool_response = toolResult;
       payload.tool_result = toolResult;
     }
-    const res = await defenseclawFetch("/api/v1/opencode/hook", {
+    const res = await defenseclawRetryBusy(() => defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
       signal: controller.signal,
-    }, token);
+    }, token), controller.signal);
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode.
       if (DC_FAIL_MODE === "closed") {
@@ -529,12 +551,27 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
     if (DC_FAIL_MODE === "closed") {
+      if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
+// service is stopped, in the words of the native hook (GAP-0578).
+const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
+  "Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+  "(enterprise_managed_gateway_not_running)";
+
+// defenseclawGatewayStopped reports a transport failure that means the
+// gateway is not running: its hook socket is missing, or nothing accepts
+// the connection.
+function defenseclawGatewayStopped(err) {
+  const codes = [err && err.code, err && err.cause && err.cause.code];
+  return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused");
 }
 
 async function defenseclawPostLoadHeartbeat(cwd) {

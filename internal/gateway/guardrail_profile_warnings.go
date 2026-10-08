@@ -527,13 +527,20 @@ var directoryCacheHealth = func() identityCacheHealth { return peerDirectoryCach
 
 // directoryHealthSummary is the "directory" object of the unauthenticated
 // /health document on the standalone profile: how many accounts fail since
-// when, and no reason or account, because the reason can name one. The Linux
-// and macOS lifecycle turns it into a warning of status and verify (GAP-0216).
-func directoryHealthSummary(h identityCacheHealth) map[string]any {
+// when, and no reason, because the reason can name an account. The Linux
+// and macOS lifecycle turns it into a warning of status and verify
+// (GAP-0216); it asks over the hook socket as root, and only then (withIDs)
+// gets the uids of the failing accounts, so the warning can name them
+// (GAP-0696).
+func directoryHealthSummary(h identityCacheHealth, withIDs bool) map[string]any {
 	if h.Failing == 0 {
 		return nil
 	}
-	return map[string]any{"failing": h.Failing, "since": h.Since.UTC().Format(time.RFC3339), "stale": h.Stale}
+	summary := map[string]any{"failing": h.Failing, "since": h.Since.UTC().Format(time.RFC3339), "stale": h.Stale}
+	if withIDs && len(h.Accounts) > 0 {
+		summary["accounts"] = h.Accounts
+	}
+	return summary
 }
 
 // directoryHealthView returns the "directory" object of the resolve answer

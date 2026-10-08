@@ -7,7 +7,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -95,4 +98,53 @@ func mustReadClaudeSettingsForTest(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// GAP-0542: after an account rename or a home move the registered hook path
+// is gone and the shell exits 127, which Claude Code treats as non-blocking,
+// so tool calls ran unguarded. The per-user command blocks (exit 2) with one
+// sentence when its script cannot start, passes the script exit through
+// otherwise, and an old-home guarded entry is still claimed for repair.
+func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, ".defenseclaw", "hooks", "claude-code-hook.sh")
+	command, _ := claudeCodeHookInvocation(SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw")}, script)
+	if !strings.HasPrefix(command, script+" ") {
+		t.Fatalf("command %q does not start with the hook script", command)
+	}
+	run := func() (int, string) {
+		cmd := exec.Command("/bin/sh", "-c", command)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode(), stderr.String()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return 0, stderr.String()
+	}
+	if code, stderr := run(); code != 2 || !strings.Contains(stderr, "Rerun the DefenseClaw installer") {
+		t.Fatalf("missing script: exit %d stderr %q, want a block (2) that names the repair", code, stderr)
+	}
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []int{0, 2, 3} {
+		if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\nexit %d\n", want)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if code, stderr := run(); code != want || stderr != "" {
+			t.Fatalf("script exit %d: command exit %d stderr %q", want, code, stderr)
+		}
+	}
+	oldHome, _ := claudeCodeHookInvocation(SetupOpts{}, "/home/old/.defenseclaw/hooks/claude-code-hook.sh")
+	if !hookUsesForeignDefenseClawClaudeCodeScript(map[string]interface{}{"command": oldHome}) {
+		t.Fatalf("an old-home guarded entry %q is not claimed for repair", oldHome)
+	}
 }

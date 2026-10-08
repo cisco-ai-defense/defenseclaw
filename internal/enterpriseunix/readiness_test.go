@@ -296,14 +296,15 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
 		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"},` +
-			`"directory":{"failing":2,"since":"2026-10-07T00:05:54Z","stale":0},` +
+			`"directory":{"failing":2,"since":"2026-10-07T00:05:54Z","stale":0,"accounts":["1001","1002"]},` +
 			`"profile_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"]}`), nil
 	}
 	status := h.run(Options{Action: ActionStatus})
 	if !status.OK || !strings.Contains(messagesOf(status.Warnings, codeAIDefenseUnavailable), "unavailable:auth_failed") {
 		t.Fatalf("an unavailable AI Defense must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}
-	if got := messagesOf(status.Warnings, codeDirectoryLookups); !strings.Contains(got, "failing for 2 account(s) since 2026-10-07T00:05:54Z") ||
+	// The warning names the failing accounts (GAP-0696).
+	if got := messagesOf(status.Warnings, codeDirectoryLookups); !strings.Contains(got, "failing for 2 account(s) (uid 1001, uid 1002) since 2026-10-07T00:05:54Z") ||
 		!strings.Contains(got, "enterprise linux profile-explain --user") {
 		t.Fatalf("failing directory lookups must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}

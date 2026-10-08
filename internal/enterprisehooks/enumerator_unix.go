@@ -1347,6 +1347,19 @@ func loadPreviousUnixRows(path string) (map[string]ManifestTarget, error) {
 	return previous, nil
 }
 
+// UnixMissConfirmed reports whether the enumerator state confirms that the
+// account of a (user, connector) row is gone: it counted a definitive miss
+// for the row, or the account was last seen in the local account database,
+// where "no such user" is definitive. A directory account it could not
+// confirm is not: an unreachable directory gives the same answer (GAP-0593).
+func UnixMissConfirmed(state *UnixEnumeratorState, user, connector string) bool {
+	if state == nil {
+		return false
+	}
+	user = strings.TrimSpace(user)
+	return state.Misses[unixRowKey(user, connector)] > 0 || state.Sources[user] == unixSourceFiles
+}
+
 func unixRowKey(user, conn string) string {
 	user = strings.TrimSpace(user)
 	conn = strings.ToLower(strings.TrimSpace(conn))
