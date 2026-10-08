@@ -159,11 +159,15 @@ func newHookCmd() *cobra.Command {
 // transit or the macOS klist timed out).
 func newHookSessionFactsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:    "session-facts",
-		Short:  "Print this session's claimed session facts (invoked by the shell hooks)",
-		Hidden: true,
-		Args:   cobra.NoArgs,
+		Use:         "session-facts",
+		Short:       "Print this session's claimed session facts (invoked by the shell hooks)",
+		Hidden:      true,
+		Annotations: map[string]string{secureClientAbsentAnnotation: "session-facts"},
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if secureClientHost() {
+				return fmt.Errorf("unknown command %q for %q", "session-facts", "hook")
+			}
 			_, err := io.WriteString(cmd.OutOrStdout(), useridentity.CurrentSessionFactsHeader())
 			return err
 		},
