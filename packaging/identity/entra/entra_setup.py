@@ -173,7 +173,7 @@ class Graph:
 
     def wait_for_named_object(self, path: str) -> list:
         """Before creating by name, allow a previous run's Graph index to catch up."""
-        for _ in range(15):
+        for _ in range(21):
             found = self.get_all(path)
             if found:
                 return found
@@ -191,7 +191,7 @@ class Graph:
                 time.sleep(3)
         raise GraphError(404, "NotFound", "still not readable 45 seconds after it was created: " + path)
 
-    def add_member(self, group_id: str, object_id: str) -> bool:
+    def add_member(self, group_id: str, object_id: str, group_name: str = "") -> bool:
         """Add a directory object to a group; False when it already was a member.
 
         The members list lags a fresh add by seconds, so a rerun can repeat an
@@ -199,16 +199,19 @@ class Graph:
         already exist", which is the result asked for.
         """
         ref = {"@odata.id": f"{GRAPH}/v1.0/directoryObjects/{object_id}"}
-        for attempt in range(16):
+        for attempt in range(11):
             try:
                 self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
                 return True
             except GraphError as exc:
                 if exc.status == 400 and "already exist" in str(exc):
                     return False
-                if exc.status != 404 or attempt == 15:
+                if exc.status != 404:
                     raise
-                time.sleep(3)
+                if attempt == 10:
+                    raise GraphError(404, exc.code, f"adding member to group {group_name or group_id}: "
+                                     "Graph still cannot find the new group after about a minute") from None
+                time.sleep(min(2**attempt, 8))
         raise AssertionError("unreachable")
 
 
@@ -382,9 +385,15 @@ def _load_plan(path: str) -> dict:
         if not isinstance(group, dict) or not isinstance(group.get("name"), str) or not group["name"]:
             raise SystemExit("error: every entry of 'groups' needs a 'name'")
         _nickname(group["name"])
+    seen_users: set[str] = set()
     for user in users:
         if not isinstance(user, dict) or not NICKNAME_RE.match(str(user.get("name", ""))):
             raise SystemExit("error: every entry of 'users' needs a 'name' of letters, digits, '-' and '_'")
+        user["name"] = user["name"].lower()
+        if user["name"] in seen_users:
+            print(f"error: duplicate user name {user['name']!r} in the plan", file=sys.stderr)
+            raise SystemExit(2)
+        seen_users.add(user["name"])
         if not isinstance(user.get("groups", []), list):
             raise SystemExit("error: each user's groups must be a list")
         for group in user.get("groups", []):
@@ -534,7 +543,7 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
                 print(f"{tag}{upn} is in {group_name}")
             elif not apply:
                 print(f"{tag}add {upn} to {group_name}: would add")
-            elif graph.add_member(group["id"], user["id"]):
+            elif graph.add_member(group["id"], user["id"], group_name):
                 print(f"added {upn} to {group_name}")
             else:
                 print(f"{upn} is in {group_name}")

@@ -55,7 +55,7 @@ Print one JSON document instead of text.
 .\Get-DefenseClawEntraIdentity.ps1
 
 .EXAMPLE
-.\Get-DefenseClawEntraIdentity.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4444444444 -AsJson
+.\Get-DefenseClawEntraIdentity.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4000000000 -AsJson
 #>
 [CmdletBinding()]
 param(
@@ -68,6 +68,11 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    Write-Output 'error: Constrained Language Mode prevents this script from reading the Windows identity APIs. Run it in an approved FullLanguage session.'
+    exit 1
+}
 
 function Exit-WithError {
     param([string]$Message)
@@ -134,6 +139,7 @@ function Get-JoinState {
     param([string]$Path)
     if ($Path) {
         $lines = Get-Content -LiteralPath $Path
+        if (-not $lines) { return [ordered]@{ Error = "the dsregcmd status file is empty: $Path" } }
     }
     else {
         $directory = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
@@ -296,9 +302,17 @@ if ($cliMode -ne 'none') {
         if ($User) { $arguments += @('--user', $User) }
     }
     $explain.Command = 'defenseclaw ' + ($arguments -join ' ')
-    $output = & $cliPath @arguments 2>&1 | Out-String
-    $explain.ExitCode = $LASTEXITCODE
+    # Windows PowerShell turns a native program's stderr into NativeCommandError
+    # when the script preference is Stop. Capture the command's own exit result.
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $output = & $cliPath @arguments 2>&1 | Out-String; $nativeExit = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $savedPreference }
+    $explain.ExitCode = $nativeExit
     $explain.Output = $output.Trim()
+    if ($cliMode -eq 'enterprise' -and $nativeExit -ne 0 -and $output -match 'elevated Administrator prompt|MDM agent') {
+        $explain.Output = 'The managed identity view requires an elevated Administrator prompt or the MDM agent. The join and sign-in token facts above remain available to this user.'
+    }
 }
 
 $report = [ordered]@{
