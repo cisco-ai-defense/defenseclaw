@@ -60,8 +60,6 @@ type IDEInventory struct {
 	// at least every ideRecordInterval so retention pruning never drops
 	// the last recorded inventory.
 	persist bool
-	// savedPlugins includes baseline rows retained from partial installations.
-	savedPlugins []IDEPlugin
 }
 
 // ideRecordInterval is how long an unchanged IDE inventory goes without
@@ -261,12 +259,12 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 			limits.RoamingAppData, limits.LocalAppData = platformIDEAppData(home)
 		}
 		installs := ideplugins.Scan(home, runtime.GOOS, limits)
-		signals = append(signals, s.ideSignals(installs, index)...)
+		signals = append(signals, s.ideSignals(installs, index, serviceContext)...)
 		inv.add(installs, s.ideOwnerForHome(home, serviceContext), index, now)
 	}
 	if runtime.GOOS == "windows" {
 		machine := ideplugins.ScanMachine(runtime.GOOS, ideplugins.Limits{ProgramFiles: programFilesDirs()})
-		signals = append(signals, s.ideSignals(machine, index)...)
+		signals = append(signals, s.ideSignals(machine, index, true)...)
 		inv.add(machine, ideOwner{}, index, now)
 	}
 	if inv.Scope == config.IDEInventoryOff {
@@ -280,11 +278,16 @@ func (s *ContinuousDiscoveryService) ideInventoryScope() string {
 	return config.AIDiscoveryConfig{IDEInventory: s.opts.IDEInventory}.EffectiveIDEInventory()
 }
 
-// ideSignals turns AI plugins into editor_extension signals. The evidence
-// is the installation's extensions directory, so a version update keeps
-// the signal's fingerprint and its owner is the home that holds it.
-func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, index ideAIIndex) []AISignal {
+// ideSignals turns AI plugins into editor_extension signals. A scan of one
+// home keys each signal on the matched extension id, as 0.8.x and 1.0.0 did,
+// so an upgrade keeps every fingerprint (GAP-0297) and a version update or a
+// second IDE with the same extension changes nothing. A service-context scan
+// reads many homes, so it keys each signal on the installation's extensions
+// directory: the same extension in two accounts' homes is two signals, each
+// owned by the home that holds it.
+func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, index ideAIIndex, serviceContext bool) []AISignal {
 	var out []AISignal
+	seenValue := map[string]bool{}
 	for _, inst := range installs {
 		seen := map[string]bool{}
 		for _, p := range inst.Plugins {
@@ -292,8 +295,23 @@ func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, i
 			if !ok || seen[sig.ID] || inst.Root == "" {
 				continue
 			}
-			seen[sig.ID] = true
-			out = append(out, s.signalFromPath(sig, SignalEditorExtension, "editor_extension", inst.Root))
+			if serviceContext {
+				seen[sig.ID] = true
+				out = append(out, s.signalFromPath(sig, SignalEditorExtension, "editor_extension", inst.Root))
+				continue
+			}
+			value := strings.ToLower(strings.TrimSpace(p.ID))
+			if seenValue[sig.ID+"\x00"+value] {
+				continue
+			}
+			seenValue[sig.ID+"\x00"+value] = true
+			signal := s.signalFromValue(sig, SignalEditorExtension, "editor_extension", value)
+			s.stampHomeOwner(&signal, inst.Root)
+			if st, err := os.Stat(inst.Root); err == nil {
+				mt := st.ModTime().UTC()
+				signal.LastActiveAt = &mt
+			}
+			out = append(out, signal)
 		}
 	}
 	return out
@@ -302,8 +320,8 @@ func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, i
 // legacyEditorExtensionRows matches the editor-extension rows of 0.8.x and
 // 1.0.0 to the signals that replace them. Those builds keyed a signal on the
 // matched extension id (signalFromValue, as detectEditorExtensionsLegacy
-// still does for Secure Client); ideSignals keys it on the installation. A
-// full scan's editor-extension signal with no stored row takes the oldest
+// still does for Secure Client); a service-context scan now keys it on the
+// installation. A full scan's editor-extension signal with no stored row takes the oldest
 // stored row of its signature's extension ids as its predecessor, and those
 // rows are replaced rather than gone: an upgrade keeps first-seen times and
 // reports no removal of a tool that is still installed. Remove once
@@ -539,18 +557,26 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 		}
 		current[p.Fingerprint] = *p
 	}
+	retained := false
 	for fp, prev := range s.ideBaseline {
 		if _, ok := current[fp]; ok {
 			continue
 		}
 		if partial[prev.InstallID] {
-			// A limit cut this installation short; keep the row rather
-			// than report a removal the scan cannot prove.
+			// A limit cut this installation short; keep the row, in the
+			// published inventory as well, rather than report a removal
+			// the scan cannot prove (GAP-0594: the CLI showed none).
+			prev.State = AIStateSeen
 			current[fp] = prev
+			inv.Plugins = append(inv.Plugins, prev)
+			retained = true
 			continue
 		}
 		prev.State = AIStateGone
 		inv.Removed = append(inv.Removed, prev)
+	}
+	if retained {
+		inv.sort()
 	}
 	sort.Slice(inv.Removed, func(i, j int) bool { return inv.Removed[i].Fingerprint < inv.Removed[j].Fingerprint })
 	inv.ScannedAt = now
@@ -560,13 +586,6 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 	}
 	if changed || now.Sub(s.ideRecordedAt) >= ideRecordInterval {
 		inv.persist = true
-		inv.savedPlugins = make([]IDEPlugin, 0, len(current))
-		for _, p := range current {
-			inv.savedPlugins = append(inv.savedPlugins, p)
-		}
-		sort.Slice(inv.savedPlugins, func(i, j int) bool {
-			return inv.savedPlugins[i].Fingerprint < inv.savedPlugins[j].Fingerprint
-		})
 	}
 	s.ideBaseline = current
 	return inv

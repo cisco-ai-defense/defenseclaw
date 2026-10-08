@@ -5,7 +5,11 @@ package connector
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -69,5 +73,28 @@ func TestOpenCodePluginSecureClientRenderKeepsItsText(t *testing.T) {
 	lines := runOpenCodePluginAssetHarness(t, secureClientPluginAssets["opencode-plugin.js"], data, 2)
 	if len(lines) != 3 || lines[0] != "block:matched: TEST-MARKER" || lines[1] != "allow" || lines[2] != "toasts:[]" {
 		t.Fatalf("harness output = %q", lines)
+	}
+}
+
+// GAP-0535: a gateway that is taking all the hook calls it can answers 429
+// with Retry-After before it evaluates the call. The plugin waits and sends
+// the call again instead of failing it closed.
+func TestOpenCodePluginRetriesBusyGateway(t *testing.T) {
+	var busy atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), `"tool.execute.before"`) && !busy.Swap(true) {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":"rate_limited"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"action":"allow","mode":"action"}`)
+	}))
+	t.Cleanup(server.Close)
+	lines := runOpenCodePluginHarness(t, openCodePluginTestData(t, server), 1)
+	if len(lines) == 0 || lines[0] != "allow" {
+		t.Fatalf("busy gateway: harness output = %q, want one retry and an allow", lines)
 	}
 }

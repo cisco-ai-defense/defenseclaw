@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestParsePasswdLine(t *testing.T) {
@@ -309,4 +311,75 @@ func FuzzParseInitgroups(f *testing.F) {
 			}
 		}
 	})
+}
+
+// spellingResolver answers getent passwd like winbind and SSSD: a key in
+// another spelling (or a UPN search) answers the account it finds.
+type spellingResolver struct {
+	Resolver
+	answers map[string]Account
+}
+
+func (s spellingResolver) LookupUser(name string) (Account, error) {
+	account, ok := s.answers[name]
+	switch {
+	case !ok:
+		return Account{}, ErrNotFound
+	case account.Name != name:
+		return Account{}, &NameMismatchError{Key: name, Answered: account}
+	}
+	return account, nil
+}
+
+func (s spellingResolver) LookupUID(uid int) (Account, error) {
+	for _, account := range s.answers {
+		if account.UID == uid {
+			return account, nil
+		}
+	}
+	return Account{}, ErrNotFound
+}
+
+// GAP-0711, GAP-0740: profile-explain and policy --user take the spellings
+// getent takes for the same account, and never another account a UPN or
+// e-mail search answers.
+func TestLookupAccountSpelling(t *testing.T) {
+	eli6 := Account{Name: `DCLAB\dcad-eli6`, UID: 2003912}
+	eli7 := Account{Name: "dcad-eli7", UID: 2003913}
+	ldap := Account{Name: "ldapcarol", UID: 4001}
+	r := spellingResolver{answers: map[string]Account{
+		`DCLAB\dcad-eli6`: eli6, "dcad-eli6@dclab.test": eli6, "dcad-eli6": eli6,
+		"dcad-eli7": eli7, `DCLAB\dcad-eli7`: eli7, "eli7.alt@alt.dclab.test": eli7,
+		"carol@dclab.test": ldap,
+	}}
+	facts := func(uid int) (useridentity.DirectoryFacts, bool) {
+		switch uid {
+		case eli6.UID:
+			return useridentity.DirectoryFacts{Domain: "dclab.test", Realm: "DCLAB.TEST"}, true
+		case eli7.UID:
+			return useridentity.DirectoryFacts{Domain: "dclab.test", UPN: "eli7.alt@alt.dclab.test"}, true
+		}
+		return useridentity.DirectoryFacts{Domain: "dclab.test"}, true
+	}
+	for _, tt := range []struct {
+		name  string
+		facts bool
+		want  int
+	}{
+		{"dcad-eli6@dclab.test", true, eli6.UID},
+		{"dcad-eli6@dclab.test", false, -1},
+		{"dcad-eli6", false, eli6.UID},
+		{`DCLAB\dcad-eli7`, false, eli7.UID},
+		{"eli7.alt@alt.dclab.test", true, eli7.UID},
+		{"carol@dclab.test", true, -1},
+	} {
+		lookupFacts := facts
+		if !tt.facts {
+			lookupFacts = nil
+		}
+		got, err := LookupAccountSpelling(r, tt.name, lookupFacts)
+		if tt.want < 0 && err == nil || tt.want >= 0 && (err != nil || got.UID != tt.want) {
+			t.Fatalf("LookupAccountSpelling(%q, facts=%v) = %+v, %v; want uid %d", tt.name, tt.facts, got, err, tt.want)
+		}
+	}
 }

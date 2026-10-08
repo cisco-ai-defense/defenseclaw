@@ -667,9 +667,18 @@ func validateActivationSurfaces(
 
 func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRepair bool) error {
 	if !allowMissing && !allowRepair {
+		if err := validateExistingUserParentPrefix(home, path, uid, "hook config"); err != nil {
+			return err
+		}
+		if err := tightenLooseUserHookConfig(path, uid); err != nil {
+			return err
+		}
 		return validateExistingUserFile(home, path, uid, "hook config")
 	}
 	if err := validateOptionalUserPathPrefix(home, path, uid, "hook config", false); err != nil {
+		return err
+	}
+	if err := tightenLooseUserHookConfig(path, uid); err != nil {
 		return err
 	}
 	info, err := os.Lstat(path)
@@ -692,13 +701,11 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRe
 		return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", path)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		if allowRepair {
-			if ok, actual := fileOwnerMatches(path, uid); !ok {
-				return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
-			}
-			return chmodOwnedPath(path, 0o600)
+		// tightenLooseUserHookConfig already fixed a file the account owns.
+		if ok, actual := fileOwnerMatches(path, uid); !ok {
+			return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d; make the account own it (chown) and retry", path, actual, uid)
 		}
-		return fmt.Errorf("enterprise hooks: hook config %s is group/other writable", path)
+		return fmt.Errorf("enterprise hooks: hook config %s is group/other writable; as that account, run: chmod go-w %s", path, path)
 	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
 		return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
@@ -737,11 +744,11 @@ func validateExistingUserFile(home, path string, uid int, label string) error {
 	if info.IsDir() {
 		return fmt.Errorf("enterprise hooks: %s path is a directory: %s", label, path)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("enterprise hooks: %s %s is group/other writable", label, path)
-	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
-		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d; make the account own it (chown) and retry", label, path, actual, uid)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("enterprise hooks: %s %s is group/other writable; as that account, run: chmod go-w %s", label, path, path)
 	}
 	return nil
 }

@@ -171,3 +171,30 @@ func TestAnApplyRunOfTheInstalledOlderBinaryDoesNotStandDown(t *testing.T) {
 		t.Fatalf("the binary mismatch is not reported: %+v", r)
 	}
 }
+
+// GAP-0585: a package upgrade that lands while the daily verify runs must
+// not leave the verify unit failed. The change leaves a waiting verify run
+// alone, clears a verify failure from before it, and a verify run during the
+// package transaction skips its checks (exit 75, a success for the unit).
+func TestAPackageUpgradeDoesNotLeaveTheDailyVerifyFailed(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.active[unitVerifyService] = true
+	h.services.failed[unitVerifyService] = true
+	h.env.ProductVersion = "1.0.1"
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")}))
+	if !h.services.active[unitVerifyService] {
+		t.Fatalf("the upgrade stopped the waiting verify run: %v", h.services.calls)
+	}
+	if !strings.Contains(strings.Join(h.runner.calls, "\n"), "systemctl reset-failed "+unitVerifyService) {
+		t.Fatalf("the verify failure from before the upgrade is kept: %v", h.runner.calls)
+	}
+	marker := h.env.P(packageTransactionMarker)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireError(t, h.run(Options{Action: ActionVerify}), codeBusy)
+}

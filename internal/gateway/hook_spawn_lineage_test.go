@@ -162,7 +162,7 @@ func TestCopilotSubagentSessionLinksToItsParent(t *testing.T) {
 
 	child, ok := api.hookLifecycleSnapshot("copilot", childSession, agentNodeID(identity, "copilot", childSession, "root"))
 	if !ok || child.AgentDepth != 1 || child.ParentAgentID != parentAgent || child.ParentSessionID != parentSession ||
-		child.RootSessionID != parentSession {
+		child.RootSessionID != parentSession || child.LifecycleEvent != "subagent_stop" {
 		t.Fatalf("Copilot sub-agent session lineage = %+v (retained %v), want depth 1 under %s", child, ok, parentAgent)
 	}
 	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 1 ||

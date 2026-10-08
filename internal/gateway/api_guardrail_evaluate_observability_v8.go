@@ -346,7 +346,7 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 		if !ManagedEnterpriseActive() {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
 		}
 		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
@@ -484,7 +484,7 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 	if !ManagedEnterpriseActive() {
 		input.UserID = hookV8OptionalIdentifier(caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
 	}
 	caller.Identity.applyTo(&input)
 	return input, true

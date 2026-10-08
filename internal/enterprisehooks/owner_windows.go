@@ -56,6 +56,8 @@ func chmodOwnedPath(path string, mode os.FileMode) error {
 	return errEnterpriseHooksUnsupportedWindows
 }
 
+func tightenLooseUserHookConfig(string, int) error { return nil }
+
 func lchownInstallFootprint(_, _ int, _ string, _ connector.AgentPaths, _ []string) error {
 	return errEnterpriseHooksUnsupportedWindows
 }

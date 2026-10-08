@@ -336,6 +336,13 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 			shipped := filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default")
 			return fmt.Errorf("config %s %q does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release (installed hosts also have it at %s), or set it to %s, which the deployment installs", label, dir, shipped, shipped)
 		}
+		// The gateway loads every pack, profile packs included, only from an
+		// administrator-controlled directory and refuses to start otherwise.
+		// Refuse here, before anything is activated, instead of failing the
+		// activation and rolling back (GAP-0301).
+		if err := e.Trust(e.P(clean), TrustRuntimeDir); err != nil {
+			return fmt.Errorf("config %s %q is not administrator-controlled, so the gateway would refuse to start with it: %w; make the directory and its parents owned by root and not writable by group or others, then retry", label, dir, err)
+		}
 	}
 	return nil
 }

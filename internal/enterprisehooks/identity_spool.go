@@ -74,8 +74,12 @@ type IdentitySpoolRecord struct {
 	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
 	// Users.FindByID (Linux): the gateway drops a domain, realm and
 	// principal of its own that name another domain (mergeSpoolFacts).
-	SSSDDomain string                      `json:"sssd_domain,omitempty"`
-	Facts      useridentity.DirectoryFacts `json:"facts"`
+	SSSDDomain string `json:"sssd_domain,omitempty"`
+	// AccountDomain is the account's DOMAIN\user namespace (its NetBIOS
+	// domain, macOS), which DirectoryFacts never serializes: profile
+	// matching alone reads it (GAP-0635).
+	AccountDomain string                      `json:"account_domain,omitempty"`
+	Facts         useridentity.DirectoryFacts `json:"facts"`
 }
 
 // IdentitySpoolDir is the spool directory for a guardian authorization

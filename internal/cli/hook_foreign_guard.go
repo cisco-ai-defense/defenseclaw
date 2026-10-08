@@ -153,7 +153,10 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 		// The block never reaches the gateway, and the managed hook's own
 		// failure log is not user-writable: leave a record in the user's
 		// data directory for the guardian to report (best effort).
-		_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
+		// A stopped gateway is not a foreign-hook block, so it leaves none.
+		if strings.HasPrefix(decision.Reason, hookexec.ForeignHookBlockedReasonPrefix) {
+			_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
+		}
 		return
 	}
 	stderr := opts.Stderr
@@ -423,9 +426,19 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		// is blocked in every fail mode, and the reason must not suggest an
 		// unapproved hook that may not exist (the usual cause is a gateway
 		// that is stopped or restarting).
+		reason := foreignHookSessionUnavailableReason
+		if update.Decision.Deny {
+			// This scan found the unapproved hook itself: name it.
+			reason = update.Decision.Reason
+		} else if hookexec.ManagedGatewayNotRunning(err) {
+			// A stopped gateway is not a foreign-hook finding: the hook
+			// says so in the words, and with the reason code, every other
+			// managed hook uses (GAP-0578, GAP-0639).
+			reason = hookexec.ManagedGatewayNotRunningReason
+		}
 		decision = enterprisepolicy.GuardDecision{
 			Deny:     true,
-			Reason:   foreignHookSessionUnavailableReason,
+			Reason:   reason,
 			Findings: update.Decision.Findings,
 		}
 	}

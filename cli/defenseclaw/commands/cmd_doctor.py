@@ -2306,6 +2306,13 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "one and keeps the block/allow lists; or stop the gateway and restore "
                 f"{db_path} from a trusted backup"
             )
+            try:
+                free = shutil.disk_usage(os.path.dirname(db_path)).free
+            except OSError:
+                free = -1
+            if free == 0:
+                detail = f"the disk holding {db_path} is full (0 MiB free)"
+                remediation = "free space on that disk, then rerun 'defenseclaw doctor'"
         elif reason == "audit-db-changed-during-inspection":
             detail = f"read-only integrity check failed ({reason})"
             remediation = (
@@ -7307,7 +7314,11 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
                     return None  # python -m hermes_cli may be a host
                 return False
             if flag == "c":
-                return None if "hermes" in value.lower() else False
+                # `ps -o args` loses the shell quoting around Python's one
+                # code argument. Its `-c import os, ... import hermes_bootstrap`
+                # therefore arrives as several tokens here.
+                code = " ".join([value, *args[index + 1 :]]).lower()
+                return None if "hermes_bootstrap" in code or "hermes_cli" in code else False
             break  # -W / -X take one value
         index += 1
     if index < len(args) and args[index] == "--":
@@ -14349,6 +14360,20 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
             full = os.path.join(data_dir, filename)
             if os.path.isfile(full):
                 found.append((name, full))
+
+    if "antigravity" in inactive:
+        hooks = os.path.join(connector_home("antigravity"), "hooks.json")
+        if os.path.isfile(hooks) and not os.path.islink(hooks):
+            try:
+                if os.path.getsize(hooks) <= 1024 * 1024:
+                    with open(hooks, encoding="utf-8") as stream:
+                        document = json.load(stream)
+                    if isinstance(document, dict) and any(
+                        key.startswith("defenseclaw-antigravity-") for key in document
+                    ):
+                        found.append(("antigravity", hooks))
+            except (OSError, ValueError):
+                pass
 
     # OpenClaw's pristine backup is its only residue marker and lives
     # next to openclaw.json, not under data_dir. Only flag it when

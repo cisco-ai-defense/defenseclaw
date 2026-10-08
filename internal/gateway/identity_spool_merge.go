@@ -140,6 +140,9 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	if spool.Domain != "" && merged.Domain == "" {
 		merged.Domain = spool.Domain
 	}
+	if record.AccountDomain != "" && merged.AccountDomain == "" && !strings.ContainsAny(record.AccountDomain, `\/@ `) {
+		merged.AccountDomain = record.AccountDomain
+	}
 	if spool.Directory != "" {
 		merged.Directory = spool.Directory
 	}

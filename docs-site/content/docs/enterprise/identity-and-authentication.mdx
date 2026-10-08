@@ -31,8 +31,10 @@ profile applied and why.
   group, user, connector or agent, and check the result with
   `defenseclaw guardrail profile list|show|explain`. See
   [User- and group-based policies](/docs/guardrail/user-and-group-policies).
-- **Agent identity.** Every agent install gets a stable `agt-` ID, every chat
-  a stable `ais-` ID, listed by `defenseclaw agent identities`. See
+- **Agent identity.** Every agent install gets a stable `agt-` ID, listed by
+  `defenseclaw agent identities` (one row per install, user and connector),
+  and every chat and sub-agent a stable `ais-` ID, which its records carry
+  with the lineage and the user's principal. See
   [Agent identity](#agent-identity).
 - **IDE and plugin inventory.** Every extension and plugin in VS Code and its
   forks, JetBrains IDEs, Visual Studio, Zed, Eclipse and Neovim, per user,
@@ -88,7 +90,7 @@ the standalone enterprise profile with its root guardian or SYSTEM enumerator.
 | --- | --- | --- | --- |
 | Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | uid, name and groups from Open Directory, reported as `local` (verified), also per-user |
 | LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name, the groups from `initgroups` and, for an SSSD account, the directory type of the realmd realm that serves its domain (verified), also per-user. Enterprise adds the UPN from SSSD InfoPipe (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified, enterprise) |
-| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
+| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@realm`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
 | Entra ID | With the `aad` NSS module or Himmelblau, reported as `entra_id` (verified), also per-user, with the UPN as principal (Himmelblau: with `cn_name_mapping = false`). The `aad` module gives no Entra groups; Himmelblau gives the user's Entra groups by name. Joined to Microsoft Entra Domain Services, the account is an AD account with the synced Entra groups (see the row above). Tested live: [Entra on Linux](/docs/enterprise/identity-entra-id#3-linux) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified), also per-user. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists (verified, enterprise only; see [Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)) | Platform SSO with Company Portal: an account registered with Platform SSO is `entra_id` with its login UPN from `AltSecurityIdentities` (verified, enterprise). No Entra groups reach the Mac (tested live: [Entra on macOS](/docs/enterprise/identity-entra-id#4-macos-platform-sso)) |
 | Okta | Through the Okta LDAP Interface and SSSD: the uid, name and Okta groups (verified), also per-user; standalone enterprise adds directory `ldap`, and the UPN when SSSD maps the Okta login to it. Tested live on RHEL 9. Or the AD account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: a registered account's SSO provider and login UPN (verified, enterprise; not tested live). As AD or LDAP when synced |
 
@@ -102,7 +104,7 @@ What differs between platforms and installs, as exercised on real hosts:
 - **Linux per-user and enterprise.** Both resolve the account, domain, groups
   and source through NSS, and the directory type from realmd, which any
   account may ask. Only enterprise adds the UPN from InfoPipe, so on a
-  per-user install an SSSD account's principal is `account@REALM`. An SSSD
+  per-user install an SSSD account's principal is `account@realm`. An SSSD
   domain that no joined realm covers, such as plain LDAP or the Okta LDAP
   Interface, has no `defenseclaw.user.directory` on a per-user install;
   standalone enterprise reads its type, `ldap`, from InfoPipe.
@@ -497,7 +499,7 @@ none of these facts.
 | Symptom | Check |
 | --- | --- |
 | No principal, only `user.id` | `ai_discovery.include_user_principal` is off, which is the default; the domain and directory still appear when they resolved. With it on, the account is local or the directory lookup failed. On Linux run `getent passwd alice@corp.example.com`; on SSSD, check InfoPipe as in the AD guide. |
-| No UPN, the principal reads `account@REALM` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
+| No UPN, the principal reads `account@realm` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
 | No `defenseclaw.user.directory` for an SSSD account | The directory type comes from realmd: run `realm list` as that user. It is expected to be missing when the account's domain is not a joined realm or a child domain of one (a plain LDAP domain, for example), or when the host has several realms and the account name carries no DNS domain. The gateway refreshes directory facts every 15 minutes. The domain and groups are still verified. |
 | First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
 | `doctor` or `guardrail status` warns "directory lookups are failing" (on a managed host, `enterprise linux status` and `verify` warn `directory_lookups_failing`) | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Users without cached facts get the default profile (`default_lookup_failed`); users with cached facts keep them for at most an hour, then fall back the same way. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Their audit rows carry no principal or directory but always `user.id`; on a managed Linux or macOS host `defenseclaw.user.name` is the name the guardian recorded for the uid when the account lookup itself failed (a record up to an hour old). Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |

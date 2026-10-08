@@ -21,3 +21,7 @@ var userScopedIdentityName = useridentity.NameForID
 // userScopedIdentityHome is the profile directory of the account a per-user
 // credential is bound to (the SID's ProfileList entry on Windows), or "".
 var userScopedIdentityHome = useridentity.HomeForID
+
+// setManagedHookPeerHomeStore persists nothing on Windows: a profile path
+// comes from the SID's ProfileList entry, not from a directory lookup.
+func setManagedHookPeerHomeStore(string) {}

@@ -863,6 +863,9 @@ func (r *doctorRun) dockerAccessFix(msg string) *Fix {
 		}
 		return &Fix{Summary: "start the Docker daemon", Command: "sudo systemctl enable --now docker", Sudo: true}
 	}
+	if r.GOOS == "darwin" {
+		return &Fix{Summary: "Docker Desktop denied access to its socket; start Docker Desktop as this account and check the Docker context and socket permissions, then retry"}
+	}
 	member, inSession, err := r.DockerGroup()
 	if err == nil && member && !inSession {
 		return &Fix{Summary: "you are in the docker group, but this login session predates it; log out and back in (or run `newgrp docker`)"}

@@ -2613,6 +2613,13 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 	if code := failUnreachable(opts, sp, "closed", "x"); code != 0 || stdout.Len() != 0 {
 		t.Fatalf("sessionStart = %d %q", code, stdout.String())
 	}
+	// GAP-0578: a stopped gateway service is named, not a vague outage.
+	stdout.Reset()
+	opts.Event = "preToolUse"
+	if code := failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason); code != 0 ||
+		!strings.Contains(stdout.String(), "ask your administrator to start the DefenseClaw gateway service") {
+		t.Fatalf("stopped gateway preToolUse = %d %q", code, stdout.String())
+	}
 }
 
 // A per-user hook names the next step after "gateway unreachable" instead of

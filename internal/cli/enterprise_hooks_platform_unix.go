@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/spf13/cobra"
 )
 
@@ -28,9 +29,26 @@ func enterpriseHookDeferredTargetSessionAvailable(
 	return false, fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
 }
 
-// enterpriseHookRemovedAccountRow is the Windows standalone deleted-account
-// check; no unix row is excused.
-var enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
+// enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
+// a guardian row whose account does not resolve: deleted (the enumerator
+// removes its rows after its definitive misses) or a directory that does not
+// answer for it. No one can start an agent as such an account, so status
+// reports the row as a warning instead of failing the host for the 3-cycle
+// window, as enterprise linux status and verify do (GAP-0775). Tests
+// replace it.
+var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
+	user := strings.TrimSpace(row.User)
+	if cfg == nil || !cfg.StandaloneEnterprise() || user == "" {
+		return false
+	}
+	_, err := enterprisehooks.StandaloneResolver().LookupUser(user)
+	return unixidentity.IsNotFound(err)
+}
+
+// enterpriseHookRemovedAccountNote follows each failure status and verify
+// report as a warning for an account that does not resolve.
+const enterpriseHookRemovedAccountNote = " (the account does not resolve: it was deleted, or the directory does not answer for it; " +
+	"the enumerator removes a deleted account's targets after 3 enumeration cycles and keeps them while the directory is unreachable)"
 
 // enterpriseHookSignedOutAccount is the Windows standalone signed-out
 // account check; no unix row names one.
@@ -131,6 +149,13 @@ func refuseEnterpriseHooksForStandardUserOnManagedHost(cmd *cobra.Command) error
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s); "+
 		"`%s` reads the administrator-owned deployment, so an administrator runs it: `sudo %s %s`",
 		layout.DescriptorPath, command, managedHostGatewayCommand(), command)
+}
+
+// refuseEnterpriseIdentityViewForStandardUser gives the read-only identity
+// views (ide-plugins, agent-identities, profile-explain) the same answer for
+// a standard user on a standalone managed host.
+func refuseEnterpriseIdentityViewForStandardUser(cmd *cobra.Command) error {
+	return refuseEnterpriseHooksForStandardUserOnManagedHost(cmd)
 }
 
 // applyStandaloneHookGuardianDefaults fills in the guardian paths of this

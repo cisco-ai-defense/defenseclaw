@@ -13,7 +13,10 @@ package local
 import (
 	"errors"
 	"io"
+	"syscall"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
 
 type shortJSONLFile struct {
@@ -53,5 +56,12 @@ func TestAppendJSONLLineReportsUnrecoverableFragment(t *testing.T) {
 	}
 	if size != 41+int64(file.written) || file.truncateTo != 41 {
 		t.Fatalf("failed rollback size=%d truncateTo=%d", size, file.truncateTo)
+	}
+}
+
+func TestJSONLDiskFullFailureHasBoundedCode(t *testing.T) {
+	result := localFileFailure(syscall.ENOSPC, false)
+	if result.Outcome != delivery.OutcomeTransient || result.FailureCode != delivery.FailureCodeNoSpace {
+		t.Fatalf("disk-full delivery = %+v", result)
 	}
 }

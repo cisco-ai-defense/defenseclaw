@@ -52,6 +52,8 @@ in the trusted PowerShell 7, never inside the Intune host.
 - **Config**: write `config.yaml` as described in
   [Configuration](/docs/enterprise/configuration#settings-reference). Keep the
   AI Defense key out of it.
+  Set `ai_discovery.enabled: true` if you expect `agent ide-plugins` to report
+  installed AI extensions; discovery is off when the key is omitted.
 - **Workstation**: PowerShell 7.4 or later and Microsoft's
   `IntuneWinAppUtil.exe` (the Win32 Content Prep Tool).
 - **Remediations** (optional) need Windows Enterprise E3 or E5, Education A3
@@ -176,9 +178,19 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
 - `Remediate-Detect.ps1` runs the installed CLI's
   `enterprise windows verify --profile standalone --json`. It exits `0` on a
   healthy host, and also on a host without the deployment, because installing
-  is the Win32 app's job. Otherwise it exits `1`, which starts the remediation.
-- `Remediate-Fix.ps1` runs `enterprise windows ensure --profile standalone --json`,
-  which verifies and repairs from the installed payload, or does nothing. It
+  is the Win32 app's job, and while another DefenseClaw lifecycle run holds
+  the lock (the next scheduled run checks again). Otherwise it exits `1`,
+  which starts the remediation. Its line names the failing check: each
+  DefenseClaw service that is not running, with its start mode, or else the
+  first error.
+- `Remediate-Fix.ps1` first checks the same way. When the only problem is a
+  stopped or disabled hook guardian or enumerator while the gateway runs, it
+  sets that service back to automatic start, starts it and verifies again,
+  without touching the gateway. Otherwise it runs
+  `enterprise windows ensure --profile standalone --json`, which verifies
+  and repairs from the installed payload, or does nothing. A repair
+  re-applies the deployment and stops every DefenseClaw service, so the
+  gateway is down for one to two minutes and hooks fail closed meanwhile. It
   exits with the lifecycle's code.
 
 Both print one short line, because Intune keeps 2,048 characters of output.
@@ -234,11 +246,44 @@ and a digest prefix, never the value. The same wrapper options,
 
 ## 6. Change the config, upgrade and roll back
 
+**Custom rule pack before the first install.** If `guardrail.rule_pack_dir`
+names a custom pack, deliver it before assigning the DefenseClaw Win32 app.
+The simplest route is a separate Intune Win32 app containing the pack archive,
+with a detection rule for the unpacked pack and a dependency from the
+DefenseClaw app. Avoid embedding a large encoded pack in a platform script:
+Defender can block that script before it runs. If the pack is hosted on HTTPS,
+the pack app's SYSTEM install script can download an archive and verify its
+published SHA-256 before extraction:
+
+```powershell
+$archive = 'C:\ProgramData\Cisco\DefenseClaw\custom-pack.zip'
+$destination = 'C:\ProgramData\DefenseClaw-RulePacks'
+$expectedSha256 = '<64 lowercase hex characters from the approved pack release>'
+New-Item -ItemType Directory -Force -Path (Split-Path $archive), $destination | Out-Null
+Invoke-WebRequest -Uri 'https://downloads.example.com/defenseclaw/custom-pack.zip' -OutFile $archive
+if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha256) {
+    throw 'custom rule pack SHA-256 mismatch'
+}
+Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+```
+
+Keep the archive's structure such that the config points to the extracted
+rule-pack directory, set the gateway's read permissions as in
+[Windows rule packs](/docs/enterprise/windows), and test the pack before
+assignment. Make the pack app a dependency of the install, upgrade and config
+apps.
+
 **Upgrade.** Build a package from the new Setup with
 `New-DefenseClawIntunePackage.ps1`, create it as a new Win32 app, set its
 detection rule to the new version, and make it supersede the previous app with
 **Uninstall previous version**: **No**. Devices below the new version run the
 launcher, and `/ensure` upgrades them in place.
+After each Intune upgrade, an administrator must verify an enrolled user's
+Claude Code hook policy and run the documented repair with
+`--attest-claude-effective-policy`. Until that attestation, `status` can report
+`ok=true` with `security_complete=false` and `security_incomplete`. Intune
+supersedence alone cannot perform the attestation; deliver a separate elevated
+script or Remediation for each upgraded build.
 
 **Change the config.** Setup applies a new config when it runs `/ensure` with a
 config that differs from the installed one. The registry rule detects by
@@ -284,7 +329,11 @@ Follow [Roll back](/docs/enterprise/lifecycle#roll-back).
 
 ## 7. Remove DefenseClaw
 
-Assign the Win32 app as **Uninstall** to the device group. Intune runs the
+First remove every **Required** assignment of the install, upgrade and config
+apps from the target device group. For each app, preview and apply
+`intune_tenant.py remove-assignment --app NAME --group GROUP [--apply]`, or
+remove the assignment in Intune admin center. Then assign the uninstall app as
+**Uninstall** to that group. Intune runs the
 uninstall command, `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall
 JSON=1`, which stops and deletes the services, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), and removes the

@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -25,7 +26,12 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
 	resolver := unixidentity.Default(ctx)
-	account, err := resolver.LookupUser(name)
+	// name@domain and DOMAIN\name resolve as getent resolves them, when the
+	// answer is the same account (GAP-0711).
+	account, err := unixidentity.LookupAccountSpelling(resolver, name, func(uid int) (useridentity.DirectoryFacts, bool) {
+		facts, err := profileExplainDirectoryFacts(strconv.Itoa(uid))
+		return facts, err == nil
+	})
 	if err != nil {
 		uid, convErr := strconv.Atoi(name)
 		if convErr != nil {
@@ -40,8 +46,20 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 
 // profileExplainUnresolved resolves an account the platform resolver cannot
 // name through the OS account database (os/user), with its error.
+var profileExplainQualifiedName = func(ctx context.Context, name string) string {
+	return unixidentity.QualifiedUserName(ctx, unixidentity.Default(ctx), name)
+}
+
 func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
-	return lookupLocalProfileSubject(name)
+	if local, err := lookupLocalProfileSubject(name); err == nil {
+		return local, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
+	defer cancel()
+	if qualified := profileExplainQualifiedName(ctx, name); qualified != "" {
+		return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; getent passwd knows %q: use that spelling or its uid", name, qualified)
+	}
+	return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; check the current spelling with getent passwd or use the account uid", name)
 }
 
 // profileExplainDirectoryFacts resolves the facts a verified request from

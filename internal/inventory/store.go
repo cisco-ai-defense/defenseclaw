@@ -826,11 +826,7 @@ func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDE
 			return fmt.Errorf("inventory store: insert ide installation: %w", err)
 		}
 	}
-	plugins := inv.Plugins
-	if inv.savedPlugins != nil {
-		plugins = inv.savedPlugins
-	}
-	for _, p := range plugins {
+	for _, p := range inv.Plugins {
 		var installed sql.NullTime
 		if p.InstalledAt != nil {
 			installed = sql.NullTime{Time: p.InstalledAt.UTC(), Valid: true}

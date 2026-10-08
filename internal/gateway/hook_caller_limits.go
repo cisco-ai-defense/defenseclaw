@@ -257,10 +257,13 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Retry-After", "1")
 	w.WriteHeader(http.StatusTooManyRequests)
+	// retry_after_seconds mirrors Retry-After for the shell hooks, whose
+	// curl call keeps only the body and the status.
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":   "rate_limited",
-		"reason":  refusal,
-		"message": message,
+		"error":               "rate_limited",
+		"reason":              refusal,
+		"message":             message,
+		"retry_after_seconds": "1",
 	})
 	return r, nil
 }

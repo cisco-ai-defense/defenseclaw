@@ -104,17 +104,18 @@ func enterprisePolicyLiveAvailable() error { return nil }
 // listing of policy show; Linux and macOS status and verify report them.
 var enterprisePolicyUnprotectedAgents = func(string) []enterprisehooks.UnprotectedAgent { return nil }
 
+// enterprisePolicyTarget resolves the account through the platform resolver
+// profile-explain uses (NSS on Linux, Open Directory on macOS): os/user in
+// the static binary reads only /etc/passwd, so no SSSD, Okta or AD account
+// resolved (GAP-0740).
 func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, error) {
-	account, err := user.Lookup(name)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	account, err := unixidentity.LookupAccountSpelling(unixidentity.Default(ctx), name, unixidentity.DirectoryFactsFunc(ctx))
 	if err != nil {
 		return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
 	}
-	uid, uidErr := strconv.Atoi(account.Uid)
-	gid, gidErr := strconv.Atoi(account.Gid)
-	if uidErr != nil || gidErr != nil {
-		return enterprisehooks.TargetCredentials{}, fmt.Errorf("user %q has a non-numeric uid/gid", name)
-	}
-	return enterprisehooks.TargetCredentials{UserHome: account.HomeDir, UID: uid, GID: gid, Username: account.Username}, nil
+	return enterprisehooks.TargetCredentials{UserHome: account.Home, UID: account.UID, GID: account.GID, Username: account.Name}, nil
 }
 
 // runAsEnterprisePolicyTarget reads the user's files with the user's own

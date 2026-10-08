@@ -176,6 +176,10 @@ type UnixEnumerationReport struct {
 	// machine-policy connectors (no manifest rows). The guardian runs the
 	// per-user foreign-hook cleanup for them.
 	EligibleAccounts []UnixEligibleAccount `json:"-"`
+	// IdentityAccounts are the accounts that pass every enrollment filter
+	// but whose home is untrusted, so they are not enrolled. The guardian
+	// still keeps their identity record (GAP-0714).
+	IdentityAccounts []UnixEligibleAccount `json:"-"`
 	// DirectoryAnswered is set when a directory account resolved in this
 	// cycle, which makes another directory account's "no such user"
 	// definitive.
@@ -508,6 +512,12 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		check := checkHome(home, account.UID)
 		if check.State == HomeUntrusted {
+			// The mode of a home is the user's to change: it must not
+			// change the identity, and so the profile, the gateway gives
+			// him (GAP-0714).
+			report.IdentityAccounts = append(report.IdentityAccounts, UnixEligibleAccount{
+				User: name, UID: account.UID, GID: account.GID, Home: home,
+			})
 			if _, enrolled := previousUsers[name]; enrolled {
 				// A user must not unenroll themselves by loosening their
 				// own home's mode: keep the rows so the guardian reports
@@ -518,8 +528,18 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			}
 			skip(check.Reason)
 			// Nor may a user hide the agents they run by loosening their
-			// home before they are first enrolled: report them.
-			report.Unprotected = append(report.Unprotected, unixUntrustedHomeAgents(ctx, opts, account, perUser, machinePolicy, check)...)
+			// home before they are first enrolled: report them, or the
+			// account itself when no agent is found, so status and verify
+			// name it (GAP-0646).
+			agents := unixUntrustedHomeAgents(ctx, opts, account, perUser, machinePolicy, check)
+			if len(agents) == 0 {
+				agents = append(agents, UnprotectedAgent{
+					User: name, UID: intPointer(account.UID), Code: UnprotectedCodeHomeUntrusted,
+					Reason: check.Reason + "; DefenseClaw does not enroll this account, so it gets no hooks, IDE " +
+						"inventory or discovery until group and other write are removed from the home",
+				})
+			}
+			report.Unprotected = append(report.Unprotected, agents...)
 			continue
 		}
 		report.Eligible++
@@ -1325,6 +1345,19 @@ func loadPreviousUnixRows(path string) (map[string]ManifestTarget, error) {
 		}
 	}
 	return previous, nil
+}
+
+// UnixMissConfirmed reports whether the enumerator state confirms that the
+// account of a (user, connector) row is gone: it counted a definitive miss
+// for the row, or the account was last seen in the local account database,
+// where "no such user" is definitive. A directory account it could not
+// confirm is not: an unreachable directory gives the same answer (GAP-0593).
+func UnixMissConfirmed(state *UnixEnumeratorState, user, connector string) bool {
+	if state == nil {
+		return false
+	}
+	user = strings.TrimSpace(user)
+	return state.Misses[unixRowKey(user, connector)] > 0 || state.Sources[user] == unixSourceFiles
 }
 
 func unixRowKey(user, conn string) string {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -747,6 +748,26 @@ func TestExplainNamesEntraIDAccountsThroughTheLSA(t *testing.T) {
 	if _, _, err := resolveWindowsExplainAccount("entra-bob@contoso.example", bySID, byName); err == nil || !strings.Contains(err.Error(), noMapping.Error()) {
 		t.Errorf("unknown account: err = %v; want an error with the LSA's reason", err)
 	}
+	// An AD UPN with an alternate suffix resolves through its
+	// DOMAIN\sAMAccountName, as the live decision names it (GAP-0609).
+	previous := windowsSAMNameForUPN
+	windowsSAMNameForUPN = func(upn string) string {
+		if strings.EqualFold(upn, "ew3.contract@alt.dclab.test") {
+			return `DCLAB\dcad-ew3`
+		}
+		return ""
+	}
+	t.Cleanup(func() { windowsSAMNameForUPN = previous })
+	ew3 := windowsAccount{SID: "S-1-5-21-1-2-3-1203", Name: "dcad-ew3", User: true}
+	adByName := func(name string) (windowsAccount, error) {
+		if strings.EqualFold(name, `DCLAB\dcad-ew3`) {
+			return ew3, nil
+		}
+		return byName(name)
+	}
+	if id, user, err := resolveWindowsExplainAccount("ew3.contract@alt.dclab.test", bySID, adByName); err != nil || id != ew3.SID || user != "dcad-ew3" {
+		t.Errorf("alternate-suffix UPN = %q, %q, %v; want %s, dcad-ew3", id, user, err, ew3.SID)
+	}
 }
 
 // TestExplainReportsGroupsThatCannotBeListed pins GAP-0201: an account whose
@@ -871,13 +892,29 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	// GAP-0255: the gateway's own lookups work (a local account, or at start
 	// before the first failure) but no group of dclab.test is known, Domain
 	// Users included: one note, no group reported as renamed or deleted.
-	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not check the groups of dclab.test") {
+	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not confirm group names written for dclab.test") || strings.Contains(got[0], "SSSD") {
 		t.Fatalf("warnings = %q while the directory does not answer, want one note", got)
 	}
 	profileGroupExists = func(_ context.Context, name string) (bool, error) { return name == "domain users@dclab.test", nil }
 	set = &guardrailProfileSet{assignments: assignments}
 	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 4 {
 		t.Fatalf("warnings = %q once the directory answers, want the 4 absent groups", got)
+	}
+}
+
+func TestWindowsUnknownAssignmentChecksQualifiedNamesAndOldSIDs(t *testing.T) {
+	assignments := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{
+		`CORP\renamed-team`, "S-1-5-21-1-2-3-1104", `CORP\active-team`,
+	}}}}
+	var looked []string
+	exists := func(_ context.Context, name string) (bool, error) {
+		looked = append(looked, name)
+		return name == `CORP\active-team`, nil
+	}
+	warnings := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, "windows")
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "renamed-team") ||
+		!strings.Contains(warnings[1], "S-1-5-21-1-2-3-1104") || len(looked) != 3 {
+		t.Fatalf("warnings=%q lookups=%q", warnings, looked)
 	}
 }
 
@@ -1048,6 +1085,61 @@ func TestProfileExplainWarnsUnknownConnectorNames(t *testing.T) {
 	}
 }
 
+func TestProfileExplainFlagsUnknownConnectorAndUnverifiedAgent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, profiles: map[string]config.DerivedGuardrailProfile{}, defaultProfile: "strict"})
+	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
+	for _, check := range []struct {
+		query string
+		code  int
+		want  string
+	}{
+		{"?connector=claudcode", http.StatusBadRequest, "unknown connector"},
+		{"?user=not-a-real-account&connector=codex&agent=agt-0000000000000000", http.StatusOK, "not verified against a host identity record"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve"+check.query, nil)
+		req.RemoteAddr = "127.0.0.1:40000"
+		response := httptest.NewRecorder()
+		api.handleGuardrailProfileResolve(response, req)
+		if response.Code != check.code || !strings.Contains(response.Body.String(), check.want) {
+			t.Fatalf("%s = %d %s", check.query, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
+	previous := profileExplainSubjectLookup
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubject{UserID: "1201", UserName: "alice", Groups: []string{"team"}}, nil
+	}
+	t.Cleanup(func() { profileExplainSubjectLookup = previous })
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, profiles: map[string]config.DerivedGuardrailProfile{},
+		assignments: []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"team"}}}}})
+	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=alice", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	response := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(response, req)
+	if !strings.Contains(response.Body.String(), "previous profile for up to 15 minutes") {
+		t.Fatalf("explain omitted hook cache window: %s", response.Body.String())
+	}
+}
+
+func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
+	note := shortNameGroupNote(profileDecision{Match: profileMatchGroup, MatchedGroup: "dc-ew-twin", Assignment: 1})
+	if !strings.Contains(note, "same-named group in another domain") || !strings.Contains(note, `DOMAIN\name`) {
+		t.Fatalf("bare group warning = %q", note)
+	}
+	if qualified := shortNameGroupNote(profileDecision{Match: profileMatchGroup, MatchedGroup: `DCLAB\dc-ew-twin`, Assignment: 1}); qualified != "" {
+		t.Fatalf("qualified group warning = %q", qualified)
+	}
+}
+
 // A DOMAIN\\user assignment uses the account domain reported by the verified
 // account name, not the first label of an unrelated DNS realm.
 func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
@@ -1063,6 +1155,30 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 	if userEntryMatches(&subject, `CORP\\alice`) {
 		t.Fatal("a DNS first label selected another account domain")
+	}
+	// macOS: the guardian record carries the NetBIOS domain the AD node
+	// names, so DCLAB\user matches the mobile account (GAP-0635).
+	mac := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "2092147702", UserName: "dcad-w2i-c",
+		Directory: mergeSpoolFacts(useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: time.Now()},
+			enterprisehooks.IdentitySpoolRecord{AccountDomain: "DCLAB", Facts: useridentity.DirectoryFacts{
+				Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test", Principal: "dcad-w2i-c@dclab.test",
+			}}),
+	}, true)
+	if !userEntryMatches(&mac, "DCLAB\\dcad-w2i-c") || userEntryMatches(&mac, "OTHERDOM\\dcad-w2i-c") {
+		t.Fatalf("macOS AD subject %+v: DCLAB\\user must match and OTHERDOM\\user must not", mac)
+	}
+	// Windows: a local account by COMPUTER\user or .\user, an Entra ID
+	// account by AzureAD\name (GAP-0636, GAP-0676); .\ never names an Entra
+	// or domain account.
+	local := profileSubjectFromVerified(VerifiedSubject{UserID: "S-1-5-21-9-9-9-1001", UserName: "dcw-ew1",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, AccountDomain: "WS01", ResolvedAt: time.Now()}}, true)
+	entra := profileSubjectFromVerified(VerifiedSubject{UserID: "S-1-12-1-1-2-3-4", UserName: "EntraAlice",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryEntraID, AccountDomain: "AzureAD",
+			Domain: "contoso.example", UPN: "alice@contoso.example", ResolvedAt: time.Now()}}, true)
+	if !userEntryMatches(&local, "WS01\\dcw-ew1") || !userEntryMatches(&local, ".\\dcw-ew1") ||
+		!userEntryMatches(&entra, "AzureAD\\EntraAlice") || userEntryMatches(&entra, ".\\EntraAlice") {
+		t.Fatal("COMPUTER\\user and .\\user must select the local account, AzureAD\\name the Entra ID account, and .\\ no Entra account")
 	}
 }
 

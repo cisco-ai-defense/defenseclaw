@@ -44,6 +44,25 @@ type ProxyOptions struct {
 	Managed bool
 	// SetupCommand writes this editor entry again ("" when unknown).
 	SetupCommand string
+	// SetupCommandFor is SetupCommand for another profile or mode, nil
+	// when unknown.
+	SetupCommandFor func(profile string, mode Mode) string
+}
+
+// setupCommandFor is the command that sets this editor entry up for profile
+// in mode.
+func (o ProxyOptions) setupCommandFor(profile string, mode Mode) string {
+	if o.SetupCommandFor != nil {
+		return o.SetupCommandFor(profile, mode)
+	}
+	command := strings.TrimSuffix(o.SetupCommand, " --activate")
+	if command != "" && profile != o.Profile {
+		command = strings.Replace(command, " --profile "+o.Profile, " --profile "+profile, 1)
+	}
+	if command != "" && mode == ModeAction {
+		command += " --activate"
+	}
+	return command
 }
 
 // Run starts an ACP agent without a shell and mediates every NDJSON frame in
@@ -142,9 +161,21 @@ type proxyState struct {
 	// the guard ends without internals (GAP-0351). Off on a Secure Client
 	// host, which keeps the guard of main (issue #1092).
 	peerProtocolFixes bool
-	// uncheckedNoticeSent records that an observe-mode user was told once
-	// that nothing is being checked (GAP-0354).
-	uncheckedNoticeSent bool
+	// uncheckedNotified holds the sessions an observe-mode user was told
+	// that nothing is being checked, until checking works again. One flag
+	// for the whole guard told only the first thread: an editor that keeps
+	// one guard for every thread (Zed) showed nothing in a new thread after
+	// a revoke (GAP-0354).
+	uncheckedNotified map[string]bool
+}
+
+// checkingResumed re-arms the unchecked notice after an evaluation worked.
+func (s *proxyState) checkingResumed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.uncheckedNotified) > 0 {
+		s.uncheckedNotified = nil
+	}
 }
 
 // errAbortedTurnFrame marks a frame of a turn the guard already ended. It is
@@ -524,6 +555,9 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 	case errors.Is(err, ErrACPDisabled):
 		return prefix + "the ACP guard is turned off (acp.enabled is false), so it was not delivered. " +
 			"Turn it on again with defenseclaw acp setup, or remove this editor entry."
+	case errors.Is(err, ErrCredentialOtherAccount):
+		return prefix + "the ACP credential this editor entry uses was issued to another account, not to you, " +
+			"so it was not delivered. Ask your administrator to enroll you for this editor and agent."
 	case errors.Is(err, ErrCredentialRejected) && opts.Managed:
 		return prefix + "the gateway did not accept this editor's ACP credential: your administrator may have revoked " +
 			"your access. It was not delivered. Contact your administrator."
@@ -548,26 +582,41 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 // after the refusal with an agent message in that prompt's session.
 func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg Message, err error, client io.Writer) {
 	if !s.peerProtocolFixes || direction != ClientToAgent || msg.Method != "session/prompt" ||
-		!(errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrACPDisabled)) {
+		!(errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrACPDisabled) || errors.Is(err, ErrCredentialOtherAccount)) {
 		return
 	}
 	session := promptSessionID(msg)
+	if session == "" {
+		return
+	}
 	s.mu.Lock()
-	sent := s.uncheckedNoticeSent
-	s.uncheckedNoticeSent = sent || session != ""
+	sent := s.uncheckedNotified[session]
+	if !sent {
+		if s.uncheckedNotified == nil {
+			s.uncheckedNotified = map[string]bool{}
+		}
+		if len(s.uncheckedNotified) < MaxPendingIDs {
+			s.uncheckedNotified[session] = true
+		}
+	}
 	s.mu.Unlock()
-	if sent || session == "" {
+	if sent {
 		return
 	}
 	why := "the gateway did not accept the ACP token"
 	switch {
 	case errors.Is(err, ErrACPDisabled):
 		why = "ACP checking is switched off"
+	case errors.Is(err, ErrCredentialOtherAccount):
+		why = "the ACP credential this editor entry uses was issued to another account"
 	case opts.Managed:
 		why = "the gateway did not accept this editor's ACP credential (your administrator may have revoked your access)"
 	}
 	next := "Contact your administrator."
-	if !opts.Managed && opts.SetupCommand != "" {
+	switch {
+	case errors.Is(err, ErrCredentialOtherAccount):
+		next = "Ask your administrator to enroll you for this editor and agent."
+	case !opts.Managed && opts.SetupCommand != "":
 		next = "Run '" + opts.SetupCommand + "' again."
 	}
 	_, _ = client.Write(agentMessageChunk(session, "DefenseClaw is not checking this session: "+why+
@@ -707,7 +756,8 @@ func logf(w io.Writer, format string, args ...any) {
 // timeout on a busy host) ended the whole agent session (GAP-1834).
 func evaluate(ctx context.Context, opts ProxyOptions, in Evaluation) (Verdict, error) {
 	verdict, err := opts.Evaluator.Evaluate(ctx, in)
-	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || ctx.Err() != nil {
+	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || errors.Is(err, ErrBindingRefused) ||
+		errors.Is(err, ErrCredentialOtherAccount) || ctx.Err() != nil {
 		return verdict, err
 	}
 	if errors.Is(err, ErrGatewayNotReady) {
@@ -723,15 +773,33 @@ func evaluate(ctx context.Context, opts ProxyOptions, in Evaluation) (Verdict, e
 }
 
 func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direction Direction, src io.Reader, dst, rejectDst io.Writer) error {
-	scanner := bufio.NewScanner(src)
-	buf := make([]byte, 64<<10)
-	scanner.Buffer(buf, MaxFrameBytes+1)
+	frames := newFrameReader(src, state.peerProtocolFixes)
 	parse := ParseMessage
 	if state.peerProtocolFixes {
 		parse = ParseMessageAllowingNullIDErrors
 	}
-	for scanner.Scan() {
-		frame := append([]byte(nil), scanner.Bytes()...)
+	for {
+		frame, tooLong, readErr := frames.next()
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("read ACP frame: %w", readErr)
+		}
+		if tooLong {
+			// The Go text was "bufio.Scanner: token too long", in both
+			// modes (GAP-0685).
+			if opts.Mode == ModeAction {
+				return &protocolEnded{message: fmt.Sprintf("DefenseClaw ended this ACP session because the %s sent a message "+
+					"larger than the 1 MiB ACP frame limit", acpPeerName(direction))}
+			}
+			logf(opts.Stderr, "[defenseclaw-acp] observe protocol finding: the %s sent a message larger than the 1 MiB ACP frame limit; passed on unchecked\n",
+				acpPeerName(direction))
+			if err := frames.passThrough(frame, dst); err != nil {
+				return err
+			}
+			continue
+		}
 		msg, err := parse(frame)
 		matchedMethod := ""
 		if err == nil {
@@ -742,8 +810,8 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		}
 		if err != nil {
 			if opts.Mode == ModeAction && state.peerProtocolFixes {
-				return fmt.Errorf("DefenseClaw ended this ACP session because the %s sent a message that is not valid ACP JSON-RPC: %w",
-					acpPeerName(direction), err)
+				return &protocolEnded{err: err, message: fmt.Sprintf("DefenseClaw ended this ACP session because the %s sent a message "+
+					"that is not valid ACP JSON-RPC (%s)", acpPeerName(direction), plainProtocolReason(err))}
 			}
 			if opts.Mode == ModeAction {
 				return fmt.Errorf("ACP protocol blocked: %w", err)
@@ -763,9 +831,15 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			// is not a gateway problem to report (GAP-0351).
 			return nil
 		}
+		if evalErr == nil && state.peerProtocolFixes {
+			state.checkingResumed()
+		}
 		if evalErr != nil {
+			if errors.Is(evalErr, ErrBindingRefused) && state.peerProtocolFixes {
+				return endSessionTelling(direction, msg, bindingRefusedError(opts, evalErr), rejectDst)
+			}
 			if errors.Is(evalErr, ErrModeMismatch) && state.peerProtocolFixes {
-				return modeDriftError(opts)
+				return endSessionTelling(direction, msg, modeDriftError(opts), rejectDst)
 			}
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
@@ -801,6 +875,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					Payload: aggregate, Aggregate: true,
 				})
 				if turnErr != nil {
+					if errors.Is(turnErr, ErrBindingRefused) && state.peerProtocolFixes {
+						return bindingRefusedError(opts, turnErr)
+					}
 					if errors.Is(turnErr, ErrModeMismatch) && state.peerProtocolFixes {
 						return modeDriftError(opts)
 					}
@@ -826,10 +903,144 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read ACP frame: %w", err)
+}
+
+// protocolEnded ends a session over a frame that is not valid ACP, in words.
+type protocolEnded struct {
+	message string
+	err     error
+}
+
+func (e *protocolEnded) Error() string { return e.message }
+func (e *protocolEnded) Unwrap() error { return e.err }
+
+// plainProtocolReason says why a frame is not valid ACP JSON-RPC without
+// the Go decoder text ("invalid character 'h' in literal true", "cannot
+// unmarshal number into Go struct field Message.method") (GAP-0685).
+func plainProtocolReason(err error) string {
+	var syntax *json.SyntaxError
+	var mistyped *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syntax):
+		return "it is not valid JSON"
+	case errors.As(err, &mistyped):
+		field := mistyped.Field
+		if dot := strings.LastIndex(field, "."); dot >= 0 {
+			field = field[dot+1:]
+		}
+		if field == "" {
+			return "a value has the wrong type"
+		}
+		return fmt.Sprintf("its %q field has the wrong type", field)
+	case errors.Is(err, ErrBatchUnsupported):
+		return "it is a JSON-RPC batch, which ACP does not use"
 	}
-	return nil
+	text := strings.TrimPrefix(err.Error(), ErrInvalidMessage.Error()+": ")
+	switch {
+	case text == ErrInvalidMessage.Error():
+		return "it is not a JSON-RPC object"
+	case text == "frame size 0":
+		return "it is empty"
+	}
+	return text
+}
+
+// frameReader reads newline-delimited ACP frames. Outside Secure Client a
+// frame larger than MaxFrameBytes is reported instead of ending the read,
+// so observe mode can pass it on; Secure Client keeps the scanner of main.
+type frameReader struct {
+	scanner *bufio.Scanner
+	reader  *bufio.Reader
+	// rest marks a too-long frame whose remaining bytes are still unread.
+	rest bool
+}
+
+func newFrameReader(src io.Reader, report bool) *frameReader {
+	if !report {
+		scanner := bufio.NewScanner(src)
+		scanner.Buffer(make([]byte, 64<<10), MaxFrameBytes+1)
+		return &frameReader{scanner: scanner}
+	}
+	return &frameReader{reader: bufio.NewReaderSize(src, 64<<10)}
+}
+
+// next returns the next frame without its line ending, or io.EOF. A frame
+// longer than MaxFrameBytes comes back as its first bytes with tooLong set.
+func (f *frameReader) next() (frame []byte, tooLong bool, err error) {
+	if f.scanner != nil {
+		if f.scanner.Scan() {
+			return append([]byte(nil), f.scanner.Bytes()...), false, nil
+		}
+		if err := f.scanner.Err(); err != nil {
+			return nil, false, err
+		}
+		return nil, false, io.EOF
+	}
+	if f.rest {
+		if err := f.passThrough(nil, io.Discard); err != nil {
+			return nil, false, err
+		}
+	}
+	var line []byte
+	for {
+		chunk, readErr := f.reader.ReadSlice('\n')
+		line = append(line, chunk...)
+		switch {
+		case readErr == nil:
+			line = trimFrameEnd(line)
+			return line, len(line) > MaxFrameBytes, nil
+		case errors.Is(readErr, bufio.ErrBufferFull):
+			if len(line) > MaxFrameBytes {
+				f.rest = true
+				return line, true, nil
+			}
+		case errors.Is(readErr, io.EOF):
+			if len(line) == 0 {
+				return nil, false, io.EOF
+			}
+			line = trimFrameEnd(line)
+			return line, len(line) > MaxFrameBytes, nil
+		default:
+			return nil, false, readErr
+		}
+	}
+}
+
+// passThrough writes a too-long frame to dst unchanged: what next returned
+// and the rest of its line.
+func (f *frameReader) passThrough(head []byte, dst io.Writer) error {
+	if locked, ok := dst.(*lockedWriter); ok {
+		// One frame: the other direction must not write inside it.
+		locked.mu.Lock()
+		defer locked.mu.Unlock()
+		dst = locked.writer
+	}
+	if _, err := dst.Write(head); err != nil {
+		return err
+	}
+	for f.rest {
+		chunk, err := f.reader.ReadSlice('\n')
+		if _, writeErr := dst.Write(chunk); writeErr != nil {
+			return writeErr
+		}
+		switch {
+		case err == nil, errors.Is(err, io.EOF):
+			f.rest = false
+			if err == nil {
+				return nil
+			}
+		case !errors.Is(err, bufio.ErrBufferFull):
+			return err
+		}
+	}
+	_, err := dst.Write([]byte{'\n'})
+	return err
+}
+
+// trimFrameEnd drops a line ending, as bufio.ScanLines does.
+func trimFrameEnd(line []byte) []byte {
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	return bytes.TrimSuffix(line, []byte{'\r'})
 }
 
 // modeDriftError ends a session whose profile changed mode centrally. Its
@@ -837,9 +1048,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 // only "Agent failed to run" (GAP-0355): it now names the setup command to
 // run, with --activate when the profile moved to action mode.
 func modeDriftError(opts ProxyOptions) error {
-	now, command := "action", strings.TrimSuffix(opts.SetupCommand, " --activate")+" --activate"
+	now, command := "action", opts.setupCommandFor(opts.Profile, ModeAction)
 	if opts.Mode == ModeAction {
-		now, command = "observe", strings.TrimSuffix(opts.SetupCommand, " --activate")
+		now, command = "observe", opts.setupCommandFor(opts.Profile, ModeObserve)
 	}
 	who := "the ACP mode of profile " + opts.Profile + " changed to " + now
 	if opts.Managed {
@@ -857,6 +1068,81 @@ type modeDrift struct{ message string }
 
 func (e *modeDrift) Error() string { return e.message }
 func (e *modeDrift) Unwrap() error { return ErrModeMismatch }
+
+// bindingRefused is ErrBindingRefused in words for the user.
+type bindingRefused struct{ message string }
+
+func (e *bindingRefused) Error() string { return e.message }
+func (e *bindingRefused) Unwrap() error { return ErrBindingRefused }
+
+// bindingRefusedError ends a session whose editor entry the gateway no
+// longer admits, in both modes: observe mode kept running unchecked, and
+// action mode said the gateway did not answer (GAP-0723, GAP-0354).
+func bindingRefusedError(opts ProxyOptions, err error) error {
+	refusal := &BindingRefusedError{Code: RefusalBinding}
+	errors.As(err, &refusal)
+	pair := opts.ClientID + "/" + opts.AgentID
+	command := func(profile string, mode Mode) string {
+		if text := opts.setupCommandFor(profile, mode); text != "" {
+			return "'" + text + "'"
+		}
+		return "the setup command of this editor entry"
+	}
+	const prefix = "DefenseClaw ended this ACP session because "
+	switch {
+	case refusal.Code == RefusalProfileChanged && refusal.Profile != "":
+		mode := Mode(refusal.Mode)
+		if mode == "" {
+			mode = opts.Mode
+		}
+		if opts.Managed {
+			return &bindingRefused{message: fmt.Sprintf("%syour administrator moved %s from ACP profile %s to %s (%s mode). "+
+				"Once they enroll you for %s, run %s", prefix, pair, opts.Profile, refusal.Profile, mode, refusal.Profile, command(refusal.Profile, mode))}
+		}
+		return &bindingRefused{message: fmt.Sprintf("%s%s now uses ACP profile %s (%s mode), not %s; run %s",
+			prefix, pair, refusal.Profile, mode, opts.Profile, command(refusal.Profile, mode))}
+	case refusal.Code == RefusalCredentialBinding && refusal.CredentialProfile != "":
+		return &bindingRefused{message: fmt.Sprintf("%sthe ACP credential of this editor entry is enrolled for profile %s, not %s. "+
+			"Ask your administrator to enroll you for %s, then run %s",
+			prefix, refusal.CredentialProfile, opts.Profile, opts.Profile, command(opts.Profile, opts.Mode))}
+	case opts.Managed:
+		return &bindingRefused{message: fmt.Sprintf("%sthe gateway refused this editor entry for %s (%s). Contact your administrator.",
+			prefix, pair, strings.TrimSuffix(refusal.Message, "; re-run acp setup"))}
+	}
+	return &bindingRefused{message: fmt.Sprintf("%sthe gateway refused this editor entry for %s (%s); run %s",
+		prefix, pair, strings.TrimSuffix(refusal.Message, "; re-run acp setup"), command(opts.Profile, opts.Mode))}
+}
+
+// maxSessionEndNoticeBytes bounds the reason a session-ending notice shows.
+const maxSessionEndNoticeBytes = 2048
+
+// endSessionTelling answers the editor request that ended the session with
+// the reason, so the editor shows it, and returns the reason: an editor
+// shows the agent's stderr only in its log.
+func endSessionTelling(direction Direction, msg Message, reason error, client io.Writer) error {
+	if direction != ClientToAgent || !msg.IsRequest() {
+		return reason
+	}
+	text := reason.Error()
+	if len(text) > maxSessionEndNoticeBytes {
+		text = strings.ToValidUTF8(text[:maxSessionEndNoticeBytes], "") + "..."
+	}
+	if session := promptSessionID(msg); msg.Method == "session/prompt" && session != "" {
+		result, _ := json.Marshal(struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Result  struct {
+				StopReason string `json:"stopReason"`
+			} `json:"result"`
+		}{JSONRPC: "2.0", ID: msg.ID, Result: struct {
+			StopReason string `json:"stopReason"`
+		}{StopReason: "end_turn"}})
+		_, _ = client.Write(append(agentMessageChunk(session, text), append(result, '\n')...))
+		return reason
+	}
+	_, _ = client.Write(append(ErrorResponse(msg.ID, -32001, text), '\n'))
+	return reason
+}
 
 // acpPeerName names the peer that sent a frame travelling in direction.
 func acpPeerName(direction Direction) string {

@@ -175,6 +175,31 @@ func TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce(t *testing.T) {
 	}
 }
 
+// GAP-0696: a deleted account that keeps sending hook calls is reported as a
+// failing lookup, by uid, only until the directory answers for another
+// account: then its "no such account" is an answer, not a failure.
+func TestIdentityDirectoryCacheDropsAGoneAccountOnceTheDirectoryAnswers(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	gone := errors.New("no such account")
+	cache := newIdentityCache(func(key string) (useridentity.DirectoryFacts, error) {
+		if key == "1001" {
+			return useridentity.DirectoryFacts{}, gone
+		}
+		return useridentity.DirectoryFacts{ResolvedAt: now}, nil
+	})
+	cache.gone = func(err error) bool { return errors.Is(err, gone) }
+	cache.now = func() time.Time { return now }
+	cache.get("1001", true)
+	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1001" {
+		t.Fatalf("before the directory answers: %+v, want uid 1001 failing", h)
+	}
+	now = now.Add(time.Second)
+	cache.get("1002", true)
+	if h := cache.health(); h.Failing != 0 {
+		t.Fatalf("after the directory answered for another account: %+v, want nothing failing", h)
+	}
+}
+
 // TestIdentityDirectoryCacheDropsFactsItCannotRefresh pins GAP-0145: facts
 // whose refresh keeps failing are served for the stale-while-revalidate
 // window and then dropped, so a removed user does not keep a group profile

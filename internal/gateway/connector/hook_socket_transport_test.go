@@ -255,6 +255,17 @@ func TestManagedStandaloneShellHookUsesOnlyTheVerifiedHookSocket(t *testing.T) {
 	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "hook socket") {
 		t.Fatalf("untrusted socket directory: exit %d stdout=%q stderr=%q, want a closed failure", code, stdout, stderr)
 	}
+	// GAP-0581: a stopped gateway (no socket) is named as such, not as a
+	// socket ownership problem.
+	if err := os.Chmod(f.runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.socket); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := run(); code != 2 || !strings.Contains(stderr, "gateway service is not running") || strings.Contains(stderr, "not owned") {
+		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q, want the gateway-stopped sentence", code, stdout, stderr)
+	}
 	f.requireOnlyTheTrustedRequest(t, "/api/v1/openhands/hook")
 }
 

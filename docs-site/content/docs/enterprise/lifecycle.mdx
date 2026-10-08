@@ -631,7 +631,11 @@ sessions started before the deployment was activated, with the
 - **Revoke ACP credentials.** If the user has an ACP enrollment, revoke it
   with `enterprise acp revoke` and the same selectors you enrolled with. On
   Linux and macOS, deleting the account is enough: the hook enumerator
-  revokes its ACP enrollments after three cycles, and repair at once. See
+  revokes its ACP enrollments after three cycles, and repair at once; on
+  Windows the enumerator revokes those of a deleted local account at its next
+  cycle. An enrollment follows the uid (Windows: the SID), and Linux and
+  macOS give a freed uid to the next new account, so revoke before the uid
+  can be reused (`enterprise acp revoke --uid <uid> ...`). See
   [ACP guard](/docs/acp-guard#managed-enterprise-enrollment).
 - **Treat root or administrator compromise as an endpoint incident.** The
   deployment's protections assume that the administrator boundary holds (see

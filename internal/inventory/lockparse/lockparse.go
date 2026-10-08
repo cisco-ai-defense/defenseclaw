@@ -26,8 +26,8 @@
 // "for this package name, what version was last installed/declared".
 //
 // Security:
-//   - All parsers use line-bounded scanning and reject inputs above
-//     the caller-supplied byte cap to bound CPU/memory.
+//   - All parsers use line-bounded scanning over the bytes the caller
+//     read within its own bound; this package never opens a file.
 //   - We never execute the underlying ecosystem's package manager.
 //   - JSON parsers reject unknown structures gracefully (no panics on
 //     adversarial inputs), and YAML parsers walk the document with a
@@ -36,12 +36,10 @@ package lockparse
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -52,11 +50,6 @@ type Component struct {
 	Version   string
 	Source    string // basename of the manifest/lockfile that produced this entry
 }
-
-// MaxFileBytes caps how much of any one file we will read. Anything
-// larger is treated as "not parseable" — discovery should not block on
-// a single oversized lockfile. The caller can override.
-const MaxFileBytes int64 = 4 * 1024 * 1024
 
 // Ecosystem returns the canonical ecosystem string for a manifest or
 // lockfile basename, or "" when the basename is not recognised.
@@ -88,75 +81,56 @@ func Ecosystem(basename string) string {
 	return ""
 }
 
-// Parse dispatches to the right per-ecosystem parser by basename and
-// reads from `path` (with size cap). Unknown formats return (nil, nil).
-func Parse(path string, maxBytes int64) ([]Component, error) {
-	if maxBytes <= 0 {
-		maxBytes = MaxFileBytes
-	}
-	base := filepath.Base(path)
-	switch strings.ToLower(base) {
+// Parse dispatches to the right per-ecosystem parser by basename and parses
+// body, the manifest or lockfile the caller read within its own bounds (the
+// caller owns the file access, so this package never opens a path). Unknown
+// formats return (nil, nil).
+func Parse(basename string, body []byte) ([]Component, error) {
+	var fn func(io.Reader) ([]Component, error)
+	switch strings.ToLower(basename) {
 	case "package.json":
-		return parseFile(path, maxBytes, parsePackageJSON)
+		fn = parsePackageJSON
 	case "package-lock.json":
-		return parseFile(path, maxBytes, parsePackageLockJSON)
+		fn = parsePackageLockJSON
 	case "pnpm-lock.yaml":
-		return parseFile(path, maxBytes, parsePnpmLock)
+		fn = parsePnpmLock
 	case "yarn.lock":
-		return parseFile(path, maxBytes, parseYarnLock)
+		fn = parseYarnLock
 	case "bun.lock":
-		return parseFile(path, maxBytes, parseBunLock)
+		fn = parseBunLock
 	case "requirements.txt", "requirements-dev.txt", "requirements.in", "constraints.txt":
-		return parseFile(path, maxBytes, parseRequirementsTxt)
+		fn = parseRequirementsTxt
 	case "pyproject.toml":
-		return parseFile(path, maxBytes, parsePyprojectToml)
+		fn = parsePyprojectToml
 	case "poetry.lock", "uv.lock":
-		return parseFile(path, maxBytes, func(r io.Reader) ([]Component, error) {
+		fn = func(r io.Reader) ([]Component, error) {
 			return parsePoetryStyleLock(r, "pypi")
-		})
+		}
 	case "pipfile.lock":
-		return parseFile(path, maxBytes, parsePipfileLock)
+		fn = parsePipfileLock
 	case "cargo.toml":
-		return parseFile(path, maxBytes, parseCargoToml)
+		fn = parseCargoToml
 	case "cargo.lock":
-		return parseFile(path, maxBytes, func(r io.Reader) ([]Component, error) {
+		fn = func(r io.Reader) ([]Component, error) {
 			return parsePoetryStyleLock(r, "cargo")
-		}) // shares the [[package]] / name / version pattern
+		} // shares the [[package]] / name / version pattern
 	case "go.mod":
-		return parseFile(path, maxBytes, parseGoMod)
+		fn = parseGoMod
 	case "go.sum":
-		return parseFile(path, maxBytes, parseGoSum)
+		fn = parseGoSum
 	case "gemfile.lock":
-		return parseFile(path, maxBytes, parseGemfileLock)
+		fn = parseGemfileLock
 	case "composer.lock":
-		return parseFile(path, maxBytes, parseComposerLock)
-	}
-	return nil, nil
-}
-
-func parseFile(path string, maxBytes int64, fn func(io.Reader) ([]Component, error)) ([]Component, error) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if st.IsDir() {
-		return nil, errors.New("lockparse: input is a directory")
-	}
-	if st.Size() > maxBytes {
+		fn = parseComposerLock
+	default:
 		return nil, nil
 	}
-	fh, err := os.Open(path)
+	out, err := fn(bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	defer fh.Close()
-	out, err := fn(io.LimitReader(fh, maxBytes))
-	if err != nil {
-		return nil, err
-	}
-	source := filepath.Base(path)
 	for i := range out {
-		out[i].Source = source
+		out[i].Source = basename
 		out[i].Name = strings.TrimSpace(out[i].Name)
 		out[i].Version = strings.TrimSpace(out[i].Version)
 	}

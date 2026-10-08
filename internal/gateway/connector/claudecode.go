@@ -1133,8 +1133,11 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return codexValueMatches(args, expectedArgs)
 	}
 	command, _ := handler["command"].(string)
-	expected, _ := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
-	return command == expected
+	expected := posixHookCommandWord(hookInvocationCommand(
+		"claudecode",
+		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
+	))
+	return claudeCodeUnguardedHookCommand(command) == expected
 }
 
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original
@@ -1150,7 +1153,47 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		}
 		return executable, []string{"hook", "--connector", "claudecode"}
 	}
-	return posixHookCommandWord(hookCommand), nil
+	command := posixHookCommandWord(hookCommand)
+	if shellHookSecureClientProfile(opts) {
+		return command, nil
+	}
+	return claudeCodeMissingHookGuard(command), nil
+}
+
+// claudeCodeMissingHookGuardSeparator starts the clause that
+// claudeCodeMissingHookGuard appends to a Unix hook command.
+const claudeCodeMissingHookGuardSeparator = " || { rc=$?; "
+
+// claudeCodeMissingHookGuardMessage is what Claude Code shows when its
+// hook script cannot start. It must not name the script file:
+// doctor finds the registered script by that name in the command.
+const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook could not start " +
+	"(the script is missing; was this account renamed or its home moved?). " +
+	"Rerun the DefenseClaw installer to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json."
+
+// claudeCodeMissingHookGuard makes a Unix hook command fail closed
+// when the shell cannot start its script. Claude Code treats any exit other
+// than 2 as a non-blocking error, so after an account rename or a home move
+// the shell's 127 for the old path let every tool call run unguarded
+// (GAP-0542). The script's own exits pass through unchanged; only 126 and
+// 127, "cannot run" and "not found", become a block with one plain sentence.
+// The script path stays the first shell word, so ownership checks and doctor
+// still find it.
+func claudeCodeMissingHookGuard(command string) string {
+	return command + claudeCodeMissingHookGuardSeparator +
+		`[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; ` +
+		"echo '" + claudeCodeMissingHookGuardMessage + "' >&2; exit 2; }"
+}
+
+// claudeCodeUnguardedHookCommand returns the hook command without the clause
+// claudeCodeMissingHookGuard appends, so a guarded registration of another
+// (old) data directory is recognized like the bare path earlier releases wrote.
+func claudeCodeUnguardedHookCommand(command string) string {
+	index := strings.Index(command, claudeCodeMissingHookGuardSeparator)
+	if index <= 0 || !strings.HasSuffix(command, "; exit 2; }") {
+		return command
+	}
+	return command[:index]
 }
 
 func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string, []string) {
@@ -2396,7 +2439,7 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if command == "" {
 		return false
 	}
-	command = posixHookCommandUnquoted(command)
+	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}
@@ -2710,6 +2753,7 @@ func hookUsesForeignDefenseClawClaudeCodeScript(rawHook interface{}) bool {
 		return false
 	}
 	command, _ := hook["command"].(string)
+	command = claudeCodeUnguardedHookCommand(command)
 	if command == "" || strings.ContainsAny(command, " \t\"'") {
 		return false
 	}

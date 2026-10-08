@@ -326,3 +326,24 @@ def test_validate_signature_pack_rejects_duplicate_ids(tmp_path):
 
     with pytest.raises(SignaturePackError, match="duplicate"):
         validate_signature_pack(source)
+
+
+def test_pre_upgrade_operator_pack_keeps_its_builtin_id(tmp_path):
+    # An operator pack installed before 1.0 added the builtin jetbrains-ai
+    # signature still loads after the upgrade, and its signature wins (GAP-0584).
+    packs = tmp_path / "signature-packs"
+    packs.mkdir()
+    (packs / "operator-jetbrains.json").write_text(
+        json.dumps({
+            "version": 1,
+            "signatures": [
+                {"id": "jetbrains-ai", "name": "Operator JetBrains", "vendor": "Example",
+                 "category": "ai_cli", "confidence": 0.7},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    signatures = [sig for sig in load_ai_signatures(data_dir=tmp_path) if sig.id == "jetbrains-ai"]
+
+    assert [sig.name for sig in signatures] == ["Operator JetBrains"]

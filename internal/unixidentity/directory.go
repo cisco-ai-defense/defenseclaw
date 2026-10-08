@@ -553,6 +553,29 @@ func QualifiedGroupName(ctx context.Context, r Resolver, name string) string {
 	return ""
 }
 
+// QualifiedUserName finds the spelling NSS accepts for a short account name
+// on a joined host configured to require fully qualified names.
+func QualifiedUserName(ctx context.Context, r Resolver, name string) string {
+	if r == nil || name == "" || strings.ContainsAny(name, `@\`) {
+		return ""
+	}
+	realms, err := hostRealms(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, realm := range realms {
+		for _, candidate := range []string{name + "@" + realm.Domain, realm.NetBIOS + `\` + name} {
+			if candidate == name+"@" || strings.HasPrefix(candidate, `\`) {
+				continue
+			}
+			if _, err := r.LookupUser(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
 // parseGroupName reads the name and gid of a group(5) line. Unlike
 // ParseGroupLine it accepts the spaces directory group names carry ("domain
 // users@corp.example.com"): the name is only reported, never used to

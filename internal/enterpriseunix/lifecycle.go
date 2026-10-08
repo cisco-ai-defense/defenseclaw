@@ -925,7 +925,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		code := errorCode(err, codeApply)
 		r.AddError(code, err.Error())
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
-			l.revertRejectedConfig(record, committedConfig, nil)
+			l.revertRejectedConfig(record, committedConfig, nil, err.Error())
 		}
 		if record != nil {
 			// Refused before any change: the running deployment is untouched,
@@ -1044,7 +1044,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// The snapshot of an in-place edit holds the edited bytes; the
 			// previous deployment's config is the last applied copy. It goes
 			// back before the services restart.
-			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw) }
+			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, revertConfig)
 		if newerConfig != nil {
@@ -1245,6 +1245,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			l.noteRepairedTargets(activationStarted)
 		}
 	}
+	l.clearStaleVerifyFailure(ctx)
 	l.describe(ctx, newRecord, false)
 	// The change that leaves the eligible users without a connector says so
 	// at once, as on Windows, not only at the next status (GAP-0266).
@@ -1269,6 +1270,26 @@ func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]b
 	}
 }
 
+// clearStaleVerifyFailure resets a failed daily verify run once a change has
+// been applied and checked: that failure (often a run a package upgrade
+// interrupted) describes the deployment before this change, and it left
+// unit_failed in every status until the timer fired again a day later
+// (GAP-0585).
+func (l *lifecycle) clearStaleVerifyFailure(ctx context.Context) {
+	env := l.env
+	if env.GOOS != "linux" {
+		return
+	}
+	for _, unit := range env.Services.Units() {
+		if unit.Name != unitVerifyService {
+			continue
+		}
+		if status, _ := env.Services.Status(ctx, unit); strings.HasPrefix(status.State, "failed") {
+			_, _ = env.Runner.Run(ctx, "systemctl", "reset-failed", unitVerifyService)
+		}
+	}
+}
+
 // keepRunningDuringChange lists the config-apply entry points a transaction
 // leaves alone. A run of the apply service (Linux) or job (macOS) that is
 // waiting for the lifecycle lock was started by a change to config.yaml, a
@@ -1284,6 +1305,10 @@ func (l *lifecycle) keepRunningDuringChange(p *plan) map[string]bool {
 	switch env.GOOS {
 	case "linux":
 		keep[unitApplyService] = true
+		// A daily verify run waiting for the lock: stopping it killed it
+		// (status=15/TERM) and left the unit failed after a healthy package
+		// upgrade (GAP-0585). Left alone it verifies the changed deployment.
+		keep[unitVerifyService] = true
 	case "darwin":
 		unit := Unit{Name: labelApply}
 		path := env.Services.DefinitionPath(unit, p.channel)

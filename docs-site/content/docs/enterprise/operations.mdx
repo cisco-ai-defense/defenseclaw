@@ -707,6 +707,15 @@ To forward records to a SIEM, add `observability.destinations` to the managed
 config that you deploy. Destination kinds include OTLP, Splunk HEC, HTTP
 JSONL, and JSONL files. See [Observability](/docs/observability).
 
+`enterprise linux status --profile standalone`, `enterprise linux verify
+--profile standalone`, and their macOS and Windows equivalents warn when an
+optional destination is failing. For the destination name, circuit state,
+last failure code and rejected count, run `defenseclaw-gateway status` on the
+managed host or inspect its loopback `/health` `telemetry.details.destinations`
+object. A failed optional destination does not stop the local audit store or
+sibling destinations. `no_space` means a JSONL file destination's volume is
+full; free space there and let its retry resume.
+
 Two rules apply on a managed host:
 
 - **Credentials come from protected storage, not the environment.** The

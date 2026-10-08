@@ -152,7 +152,9 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 		}}, nil
 	}
 	enterpriseHooksEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return true, nil }
-	enterpriseHooksEnumerateEligibleWriter = func(string, []enterprisehooks.UnixEligibleAccount) error { return nil }
+	enterpriseHooksEnumerateEligibleWriter = func(string, []enterprisehooks.UnixEligibleAccount, []enterprisehooks.UnixEligibleAccount) error {
+		return nil
+	}
 	var recordPath string
 	var recorded []enterprisehooks.UnprotectedAgent
 	enterpriseHooksEnumerateUnprotectedWriter = func(path string, agents []enterprisehooks.UnprotectedAgent) error {

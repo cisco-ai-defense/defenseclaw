@@ -63,7 +63,7 @@ the layouts of the common Node version managers and package managers:
 | OS | Also searched |
 | --- | --- |
 | Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes`. The extended search runs only in the worker that runs as the user, never as root. |
-| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. The Codex app from the Microsoft Store (MSIX) is reported, not enrolled; see [Desktop apps and editor extensions](#desktop-apps-and-editor-extensions). |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`, whose version is the build Claude Code records in `%USERPROFILE%\.local\share\claude\versions`; a `claude.exe` copied in without that record is enrolled after the user first starts Claude Code, and until then `status` lists the account as unprotected and says what is missing), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. The Codex app from the Microsoft Store (MSIX) is reported, not enrolled; see [Desktop apps and editor extensions](#desktop-apps-and-editor-extensions). |
 
 An agent CLI installed anywhere else in a user's home (a custom `NVM_DIR`,
 `XDG_DATA_HOME` or `PNPM_HOME`, an `npm --prefix` given on the command line,
@@ -122,6 +122,7 @@ the record itself is unreadable, or when an app or editor extension that
 | `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract |
 | `surface_unverified` | A desktop app or editor extension has no engine version that selects a hook contract, or its hook delivery is not live-verified and `unverified_versions` is `refuse` |
 | `agent_unprotected` | The agent's version could not be read, it is below the platform minimum, its user's home is untrusted (Linux and macOS), its signed-in user's enrollment is pending (Windows), a Claude Code change to an older hook contract was not followed (Windows), or (Windows) it is not installed where the guardian can manage it |
+| `home_untrusted` | Linux and macOS: an eligible account whose home is untrusted and that has no agent the enumerator could list. It names the account and the reason: the account gets no hooks, IDE inventory or discovery until the home is fixed |
 
 A per-user agent in this state runs without DefenseClaw hooks. A
 machine-policy agent refuses the unenrolled user on Windows, and on Linux
@@ -134,7 +135,11 @@ On Linux and macOS a user who has never been enrolled and whose home is
 untrusted (group- or other-writable, a symlink, owned by another account, or
 covered by a user mount) gets no rows. The enumerator still lists the agents
 installed for them, as that user and without running anything in that home
-(package metadata and the presence of the agent CLIs), and reports each one.
+(package metadata and the presence of the agent CLIs), and reports each one,
+or the account itself (`home_untrusted`) when it finds none. The mode of a
+home never changes the profile applied to its user: the guardian keeps the
+account's identity record (its UPN and directory facts) either way, so an
+assignment by UPN or group keeps selecting it.
 Remove group and other write from the home to enroll the user. An enrolled
 user who loosens their home keeps their rows, and their worker removes group
 and other write again before the next repair.
@@ -457,9 +462,11 @@ avoid lookups.
   10 to 15 minutes after the account is deleted, or sooner when the
   enumerator restarts, because it runs a cycle when it starts. Until then
   the guardian reports the user's targets as pending (the home is gone) or
-  as `target account "<name>" does not exist`. `status`, `verify` and
-  `reconcile` show the second as the warning `guardian_target_account_removed`
-  and do not fail on it, and `security_complete` stays true. To remove the
+  as `target account "<name>" does not exist`. Once the enumerator has
+  counted a definitive miss (at once for a local account), `status`, `verify`,
+  `reconcile` and `enterprise hooks status` show either as the warning
+  `guardian_target_account_removed` and do not fail on it, and
+  `security_complete` stays true. To remove the
   targets at once, run
   `enterprise linux repair` or `enterprise macos repair` as root. Repair
   removes the targets of accounts that no longer exist and lists them in its

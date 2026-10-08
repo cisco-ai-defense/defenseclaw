@@ -138,6 +138,13 @@ class RefusedPack:
     pinned: str = ""
 
 
+# Builtin ids added in 1.0 that an operator pack installed by an older build
+# may already use; the operator's signature keeps precedence after the upgrade
+# (internal/inventory/ai_catalog.go keeps the same list). Remove once upgrades
+# from packs written by 0.8.x and early 1.0 builds are no longer supported.
+_OPERATOR_KEEPS_IDS = frozenset({"jetbrains-ai"})
+
+
 def load_ai_signatures(
     *,
     signature_packs: list[str] | tuple[str, ...] = (),
@@ -195,9 +202,16 @@ def load_ai_signature_catalog(
             if sig.id in disabled:
                 continue
             if sig.id in seen:
-                raise SignaturePackError(
-                    f"duplicate signature id {sig.id!r} in {pack_path} (already defined in {seen[sig.id]})"
-                )
+                if sig.id not in _OPERATOR_KEEPS_IDS or seen[sig.id] != "builtin":
+                    raise SignaturePackError(
+                        f"duplicate signature id {sig.id!r} in {pack_path} (already defined in {seen[sig.id]})"
+                    )
+                # An id the 1.0 builtin catalog added that an older operator pack
+                # already used: the operator's signature replaces the builtin, as
+                # the gateway's loader does (GAP-0584).
+                merged = [sig if existing.id == sig.id else existing for existing in merged]
+                seen[sig.id] = sig.source
+                continue
             merged.append(sig)
             seen[sig.id] = sig.source
     return merged, refused

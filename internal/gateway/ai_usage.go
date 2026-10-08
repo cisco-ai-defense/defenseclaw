@@ -173,6 +173,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 		"plugins":       []inventory.IDEPlugin{},
 	}
 	if inv == nil {
+		resp["reason"] = ideInventoryEmptyReason(discovery != nil, scope)
 		a.writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -215,6 +216,22 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 		resp["scan_id"] = snap.Summary.ScanID
 	}
 	a.writeJSON(w, http.StatusOK, resp)
+}
+
+// ideInventoryEmptyReason says why an IDE plugin answer has no inventory and
+// what turns it on. A managed computer has no per-user CLI, so its hint is
+// the administrator config key (GAP-0611).
+func ideInventoryEmptyReason(enabled bool, scope string) string {
+	switch {
+	case !enabled && ManagedEnterpriseActive():
+		return "AI discovery is off on this computer; an administrator sets ai_discovery.enabled: true in the managed DefenseClaw config to collect the IDE plugin inventory"
+	case !enabled:
+		return "AI discovery is off; turn it on with: defenseclaw agent discovery enable"
+	case scope == config.IDEInventoryOff:
+		return "the IDE plugin inventory is turned off (ai_discovery.ide_inventory: off)"
+	default:
+		return "the first full AI discovery scan has not finished yet"
+	}
 }
 
 func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {

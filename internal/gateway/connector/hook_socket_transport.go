@@ -61,12 +61,24 @@ defenseclaw_hook_socket_trusted() {
 // managedPluginHookSocket). fail_unreachable is already defined at that
 // point and fails closed for managed hooks. The rendered TCP hook contains
 // none of this.
-const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `if ! defenseclaw_hook_socket_trusted; then
-  fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account"
+const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
+  fail_unreachable "` + shellManagedGatewayStoppedText + `"
+fi
+if ! defenseclaw_hook_socket_trusted; then
+  fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
 fi
 API_TOKEN=
 @FACTS@
 `
+
+// shellManagedGatewayStoppedText is what a standalone shell hook says when
+// its hook socket is missing (the gateway service and its socket unit are
+// stopped), in the words the native hook uses for a stopped gateway service.
+// The socket-ownership text is only for a socket that exists with the wrong
+// owner (GAP-0581).
+const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not running on this computer. " +
+	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+	"(enterprise_managed_gateway_not_running)"
 
 // shellHookSocketTransport renders shellHookSocketTransportBlock for the
 // socket path and the gateway service uid trusted beside root. The path is

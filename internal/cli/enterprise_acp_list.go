@@ -25,9 +25,11 @@ var enterpriseACPListCmd = &cobra.Command{
 	Long: `List every managed ACP enrollment in the protected machine state: the account
 it was issued to, the editor and agent, the profile, when it was enrolled,
 whether the user's private copy of the credential is present and whether the
-user has run setup (the editor entry's contract lock exists). The user's
-files are read as that user, in the enrolled data directory
-(or <home>/.defenseclaw for older enrollments).`,
+user has run setup: "done" when the editor entry's contract lock exists and
+the entry points at this home, "stale" when it points elsewhere (an account
+rename moved the home; the user runs setup again). The user's files are read
+as that user, in the enrolled data directory (or <home>/.defenseclaw for
+older enrollments).`,
 	Args: cobra.NoArgs,
 	// Secure Client keeps the command tree of main (issue #1092).
 	Annotations: map[string]string{secureClientAbsentAnnotation: "true"},
@@ -133,7 +135,6 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 	if err != nil {
 		return row
 	}
-	lockPath := acpContractLockPath(dataDir, enrollment.ClientID, enrollment.AgentID)
 	_ = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
 		UserHome: account.home, UID: account.uid, GID: account.gid, SID: account.sid,
 	}, func() error {
@@ -141,8 +142,12 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 		if info, statErr := os.Lstat(tokenPath); statErr == nil && info.Mode().IsRegular() {
 			row.TokenCopy = "present"
 		}
-		if info, statErr := os.Lstat(lockPath); statErr == nil && info.Mode().IsRegular() {
+		if done, mismatch := enterpriseACPSetupState(dataDir, account.home, enrollment.ClientID, enrollment.AgentID); done {
 			row.Setup = "done"
+		} else if mismatch != "" {
+			// A lock whose entry points elsewhere (an account rename moved
+			// the home) is not a done setup (GAP-0693).
+			row.Setup = "stale"
 		}
 		return nil
 	})

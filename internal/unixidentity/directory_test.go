@@ -21,6 +21,24 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+func TestQualifiedUserNameUsesSpellingNSSKnows(t *testing.T) {
+	previous := hostRealms
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: "corp.example.com", NetBIOS: "CORP"}}, nil
+	}
+	t.Cleanup(func() { hostRealms = previous })
+	user := "CORP\\alice:*:1001:1001::/home/alice:/bin/bash\n"
+	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
+		`passwd CORP\alice`: {stdout: []byte(user)},
+	}})
+	if got := QualifiedUserName(context.Background(), r, "alice"); got != `CORP\alice` {
+		t.Fatalf("qualified account = %q", got)
+	}
+	if got := QualifiedUserName(context.Background(), r, `CORP\alice`); got != "" {
+		t.Fatalf("already-qualified account changed to %q", got)
+	}
+}
+
 // TestDirectoryFactsFailAsAWholeNotInPart: a getent that timed out for the
 // groups, or for the directory service that owns the account, used to
 // leave facts without groups (or taking the account for a local one) that

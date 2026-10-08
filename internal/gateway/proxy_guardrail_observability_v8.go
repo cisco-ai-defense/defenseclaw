@@ -824,7 +824,7 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 	if !ManagedEnterpriseActive() {
 		input.UserID = hookV8OptionalIdentifier(caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
 	}
 	caller.Identity.applyTo(&input)
 	return input, true
@@ -896,7 +896,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 		if !ManagedEnterpriseActive() {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
 		}
 		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)

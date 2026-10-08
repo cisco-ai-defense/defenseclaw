@@ -17,6 +17,7 @@ Commands (add --help after a command for its options):
   status        read-only: install state of the DefenseClaw app, run state of a Remediations package
   groups        create static security groups and add devices to them
   assign-app    assign an app you uploaded in the admin center to a group
+  remove-assignment  remove an app assignment from a group
   remediation   create or update a Windows Remediations package from the kit's scripts, assign it
   macos-script  create or update a macOS shell script from a file, assign it
 
@@ -38,10 +39,9 @@ Not everything can be read or set with an app-only token. The automatic enrollme
 scope, the Windows Hello for Business default and the Apple push certificate upload are
 admin-center steps; check reports what it can read and says so for the rest.
 
-Validation status: check, devices and the preview mode of every command were run against a test
-tenant (see README.md). The create, update and assign calls, and status, follow Microsoft's Graph
-documentation and have not been run against a live tenant yet; the MDM certification round
-exercises them first.
+Validation status: check, devices, groups, assign-app, remediation, macos-script and status
+were run against a test tenant with throwaway objects (see README.md). Delivery of the
+DefenseClaw packages through Intune is tracked separately in the MDM certification round.
 
 Exit codes: 0 success, 1 a check failed or a Graph call failed, 2 bad usage, input or credentials.
 Only the Python standard library is used.
@@ -184,7 +184,7 @@ class Graph:
 
     def wait_for_named_object(self, path: str) -> list:
         """Before creating by name, allow a previous run's Graph index to catch up."""
-        for _ in range(15):
+        for _ in range(21):
             found = self.get_all(path)
             if found:
                 return found
@@ -202,7 +202,7 @@ class Graph:
                 time.sleep(3)
         raise GraphError(404, "NotFound", "still not readable 45 seconds after it was created: " + path)
 
-    def add_member(self, group_id: str, object_id: str) -> bool:
+    def add_member(self, group_id: str, object_id: str, group_name: str = "") -> bool:
         """Add a directory object to a group; False when it already was a member.
 
         The members list lags a fresh add by seconds, so a rerun can repeat an
@@ -210,16 +210,19 @@ class Graph:
         already exist", which is the result asked for.
         """
         ref = {"@odata.id": f"{GRAPH}/v1.0/directoryObjects/{object_id}"}
-        for attempt in range(16):
+        for attempt in range(11):
             try:
                 self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
                 return True
             except GraphError as exc:
                 if exc.status == 400 and "already exist" in str(exc):
                     return False
-                if exc.status != 404 or attempt == 15:
+                if exc.status != 404:
                     raise
-                time.sleep(3)
+                if attempt == 10:
+                    raise GraphError(404, exc.code, f"adding member to group {group_name or group_id}: "
+                                     "Graph still cannot find the new group after about a minute") from None
+                time.sleep(min(2**attempt, 8))
         raise AssertionError("unreachable")
 
 
@@ -234,7 +237,8 @@ BETA = "/beta"
 V1 = "/v1.0"
 PLATFORMS = ("windows", "macos", "linux")
 HEALTH_SCRIPT_MAX_BYTES = 200 * 1024
-SHELL_SCRIPT_MAX_BYTES = 1024 * 1024
+SHELL_SCRIPT_MAX_BYTES = HEALTH_SCRIPT_MAX_BYTES
+GROUP_NAME_MAX_CHARS = 256
 GROUP_TARGET = "#microsoft.graph.groupAssignmentTarget"
 STATUS_REPORT_ROWS = 1000
 
@@ -549,6 +553,8 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
     tag = plan_tag(args.apply)
     known_groups: dict[str, dict] = {}
     for name in args.name:
+        if len(name) > GROUP_NAME_MAX_CHARS:
+            raise SystemExit(f"error: group name is {len(name)} characters; the limit is {GROUP_NAME_MAX_CHARS}")
         path = f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,securityEnabled,groupTypes"
         found = graph.get_all(path)
         if not found and args.apply:
@@ -604,7 +610,7 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
             print(f"{tag}{device_name} is in {group_name}")
         elif not args.apply:
             print(f"{tag}add {device_name} to {group_name}: would add")
-        elif graph.add_member(found[0]["id"], devices[0]["id"]):
+        elif graph.add_member(found[0]["id"], devices[0]["id"], group_name):
             print(f"added {device_name} to {group_name}")
         else:
             print(f"{device_name} is in {group_name}")
@@ -637,7 +643,7 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if included and assignment.get("intent") == args.intent:
         print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
         return 0
-    action = "update" if included else "replace exclusion" if assignment else "assign"
+    action = "delete the existing assignment and create a new one" if assignment else "assign"
     if not args.apply:
         print(f"[plan] would {action} app {args.app} for group {args.group} with intent {args.intent}")
         print("Nothing was changed. Run again with --apply to make this change.")
@@ -652,17 +658,34 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if assignment:
         if "settings" in assignment:
             body["settings"] = assignment["settings"]
-        graph.request("PATCH", f"{collection}/{assignment['id']}", body)
-    else:
-        graph.request("POST", collection, body)
+        graph.request("DELETE", f"{collection}/{assignment['id']}")
+    graph.request("POST", collection, body)
     print(f"app {args.app}: {action} completed for group {args.group} as {args.intent}")
+    return 0
+
+
+def cmd_remove_assignment(graph: Graph, args: argparse.Namespace) -> int:
+    app = one_by_name(graph, f"{BETA}/deviceAppManagement/mobileApps", args.app, "app")
+    group = group_by_name(graph, args.group)
+    collection = f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments"
+    matching = [a for a in graph.get_all(collection) if (a.get("target") or {}).get("groupId") == group["id"]]
+    if not matching:
+        print(f"app {args.app}: no assignment to {args.group}")
+        return 0
+    for assignment in matching:
+        if not args.apply:
+            print(f"[plan] would remove {assignment.get('intent', 'unknown')} assignment of {args.app} to {args.group}")
+        else:
+            graph.request("DELETE", f"{collection}/{assignment['id']}")
+            print(f"removed {assignment.get('intent', 'unknown')} assignment of {args.app} to {args.group}")
     return 0
 
 
 # ---------------------------------------------------------------- remediation and macos-script
 
 
-def _upsert(graph: Graph, collection: str, name: str, body: dict, apply: bool, what: str) -> str | None:
+def _upsert(graph: Graph, collection: str, name: str, body: dict, apply: bool, what: str,
+            create_body: dict | None = None) -> str | None:
     """Create or update an object by display name. Returns its id (None in a preview that would create)."""
     found = graph.get_all(f"{collection}?$filter={odata_eq('displayName', name)}&$select=id,displayName")
     if len(found) > 1:
@@ -671,24 +694,32 @@ def _upsert(graph: Graph, collection: str, name: str, body: dict, apply: bool, w
         if not apply:
             print(f"[plan] would create {what} {name!r}")
             return None
-        made = graph.request("POST", collection, body)
+        made = graph.request("POST", collection, create_body or body)
         print(f"created {what} {name!r}")
         return str(made["id"])
+    object_id = str(found[0]["id"])
+    current = graph.get(f"{collection}/{object_id}") if body else {}
+    changes = {key: value for key, value in body.items() if key != "@odata.type" and current.get(key) != value}
+    if not changes:
+        print(f"{what} {name!r}: unchanged")
+        return object_id
     if not apply:
-        print(f"[plan] would update {what} {name!r} with the current script content")
-        return str(found[0]["id"])
-    graph.request("PATCH", f"{collection}/{found[0]['id']}", body)
-    print(f"updated {what} {name!r}")
-    return str(found[0]["id"])
+        print(f"[plan] would update {what} {name!r}: {', '.join(sorted(changes))}")
+        return object_id
+    graph.request("PATCH", f"{collection}/{object_id}", changes)
+    print(f"updated {what} {name!r}: {', '.join(sorted(changes))}")
+    return object_id
 
 
 def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
-    detect = read_script(args.detect, HEALTH_SCRIPT_MAX_BYTES)
-    remediate = read_script(args.remediate, HEALTH_SCRIPT_MAX_BYTES)
-    for label, path, data in (("detection", args.detect, detect), ("remediation", args.remediate, remediate)):
+    detect_path = args.detect or kit_script("Remediate-Detect.ps1")
+    remediate_path = args.remediate or kit_script("Remediate-Fix.ps1")
+    detect = read_script(detect_path, HEALTH_SCRIPT_MAX_BYTES)
+    remediate = read_script(remediate_path, HEALTH_SCRIPT_MAX_BYTES)
+    for label, path, data in (("detection", detect_path, detect), ("remediation", remediate_path, remediate)):
         digest = hashlib.sha256(data).hexdigest()[:16]
         print(f"{label} script: {path} ({len(data)} bytes, sha256 {digest}...)")
-    body = {
+    create_body = {
         "@odata.type": "#microsoft.graph.deviceHealthScript",
         "displayName": args.name,
         "description": "DefenseClaw standalone enterprise: verify and repair from the installed payload",
@@ -699,18 +730,28 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
         "detectionScriptContent": b64(detect),
         "remediationScriptContent": b64(remediate),
     }
+    body = {}
+    if args.detect is not None:
+        body["detectionScriptContent"] = b64(detect)
+    if args.remediate is not None:
+        body["remediationScriptContent"] = b64(remediate)
     collection = f"{BETA}/deviceManagement/deviceHealthScripts"
     group = group_by_name(graph, args.group) if args.group else None
-    script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package")
+    script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package", create_body)
     if group:
         existing = graph.get_all(f"{collection}/{script_id}/assignments") if script_id else []
         kept = [a for a in existing if a.get("target", {}).get("groupId") != group["id"]]
-        if len(kept) != len(existing):
-            print(f"{plan_tag(args.apply)}{args.name} is already assigned to {args.group}; the schedule is reset")
+        matching = [a for a in existing if a.get("target", {}).get("groupId") == group["id"]]
+        if len(matching) > 1:
+            raise SystemExit(f"error: {len(matching)} assignments target {args.group!r}; resolve them in Intune")
+        if matching and args.daily_at is None:
+            print(f"{args.name} assignment to {args.group}: unchanged")
+            return 0
+        at = args.daily_at or "02:00"
         schedule = {
             "@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
             "interval": 1,
-            "time": args.daily_at + ":00",
+            "time": at + ":00",
             "useUtc": False,
         }
         wanted = {
@@ -718,20 +759,24 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             "runRemediationScript": True,
             "runSchedule": schedule,
         }
-        if not args.apply or script_id is None:
-            print(f"[plan] would assign {args.name!r} to group {args.group}, daily at {args.daily_at}")
+        if matching and matching[0].get("runSchedule") == schedule:
+            print(f"{args.name} assignment to {args.group}: unchanged")
+        elif not args.apply or script_id is None:
+            print(f"[plan] would assign {args.name!r} to group {args.group}, daily at {at}")
         else:
             keep = [{k: a[k] for k in ("target", "runRemediationScript", "runSchedule") if k in a} for a in kept]
             graph.request(
                 "POST", f"{collection}/{script_id}/assign", {"deviceHealthScriptAssignments": keep + [wanted]}
             )
-            print(f"assigned {args.name!r} to group {args.group}, daily at {args.daily_at}")
+            print(f"assigned {args.name!r} to group {args.group}, daily at {at}")
     if not args.apply:
         print("Nothing was changed. Run again with --apply to make these changes.")
     return 0
 
 
 def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
+    if args.retries is not None and not 0 <= args.retries <= 3:
+        raise SystemExit("error: --retries must be between 0 and 3")
     content = read_script(args.file, SHELL_SCRIPT_MAX_BYTES)
     if not content.startswith(b"#!"):
         raise SystemExit("error: macOS script must start with a #! interpreter line")
@@ -742,23 +787,28 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
     )
     if settings is not None and not settings.group(1).strip():
         raise SystemExit("error: fill in the macOS wrapper settings block before upload")
-    if not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
+    if args.frequency is not None and not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
         raise SystemExit("error: --frequency must be an ISO 8601 duration such as P1D, PT1H or PT0S")
     print(f"script: {args.file} ({len(content)} bytes, sha256 {hashlib.sha256(content).hexdigest()[:16]}...)")
-    body = {
+    create_body = {
         "@odata.type": "#microsoft.graph.deviceShellScript",
         "displayName": args.name,
         "description": "DefenseClaw standalone enterprise: install or re-apply with the kit wrapper",
         "scriptContent": b64(content),
         "runAsAccount": "system",
         "fileName": Path(args.file).name,
-        "retryCount": args.retries,
         "blockExecutionNotifications": True,
-        "executionFrequency": args.frequency,
     }
     collection = f"{BETA}/deviceManagement/deviceShellScripts"
     group = group_by_name(graph, args.group) if args.group else None
-    script_id = _upsert(graph, collection, args.name, body, args.apply, "macOS shell script")
+    create_body["retryCount"] = args.retries if args.retries is not None else 3
+    create_body["executionFrequency"] = args.frequency or "P1D"
+    body = {"scriptContent": b64(content)}
+    if args.retries is not None:
+        body["retryCount"] = args.retries
+    if args.frequency is not None:
+        body["executionFrequency"] = args.frequency
+    script_id = _upsert(graph, collection, args.name, body, args.apply, "macOS shell script", create_body)
     if group:
         existing = graph.get_all(f"{collection}/{script_id}/groupAssignments") if script_id else []
         if any(a.get("targetGroupId") == group["id"] for a in existing):
@@ -836,6 +886,12 @@ def build_parser() -> argparse.ArgumentParser:
     _mutating(groups)
     groups.set_defaults(func=cmd_groups)
 
+    remove = sub.add_parser("remove-assignment", help="remove an app assignment from a group (preview unless --apply)")
+    remove.add_argument("--app", required=True, metavar="NAME")
+    remove.add_argument("--group", required=True, metavar="NAME")
+    _mutating(remove)
+    remove.set_defaults(func=cmd_remove_assignment)
+
     assign = sub.add_parser("assign-app", help="assign an uploaded app to a group (preview unless --apply)")
     assign.add_argument("--app", required=True, metavar="NAME", help="display name of the app")
     assign.add_argument("--group", required=True, metavar="NAME", help="group to assign it to")
@@ -848,14 +904,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remediation.add_argument("--name", default="DefenseClaw Enterprise health", metavar="NAME")
     remediation.add_argument(
-        "--detect", default=kit_script("Remediate-Detect.ps1"), metavar="FILE", help="detection script"
+        "--detect", metavar="FILE", help="detection script (kit default on create)"
     )
     remediation.add_argument(
-        "--remediate", default=kit_script("Remediate-Fix.ps1"), metavar="FILE", help="remediation script"
+        "--remediate", metavar="FILE", help="remediation script (kit default on create)"
     )
     remediation.add_argument("--group", metavar="NAME", help="assign it to this group")
     remediation.add_argument(
-        "--daily-at", type=_time, default="02:00", metavar="HH:MM", help="daily schedule, device local time"
+        "--daily-at", type=_time, metavar="HH:MM", help="daily schedule, device local time (default 02:00 on create)"
     )
     _mutating(remediation)
     remediation.set_defaults(func=cmd_remediation)
@@ -865,9 +921,9 @@ def build_parser() -> argparse.ArgumentParser:
     macos.add_argument("--file", required=True, metavar="FILE", help="the script, with its settings block filled in")
     macos.add_argument("--group", metavar="NAME", help="assign it to this group")
     macos.add_argument(
-        "--frequency", default="P1D", metavar="ISO8601", help="how often it runs; PT0S runs once (default P1D)"
+        "--frequency", metavar="ISO8601", help="how often it runs; PT0S runs once (default P1D on create)"
     )
-    macos.add_argument("--retries", type=int, default=3, help="retries after a failure (default 3)")
+    macos.add_argument("--retries", type=int, help="retries after a failure, 0 to 3 (default 3 on create)")
     _mutating(macos)
     macos.set_defaults(func=cmd_macos_script)
     return parser

@@ -56,12 +56,12 @@ func parseMessage(frame []byte, allowNullIDError bool) (Message, error) {
 		return Message{}, ErrInvalidMessage
 	}
 	if err := rejectDuplicateJSONKeys(frame); err != nil {
-		return Message{}, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+		return Message{}, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(frame))
 	var msg Message
 	if err := decoder.Decode(&msg); err != nil {
-		return Message{}, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+		return Message{}, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {

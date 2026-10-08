@@ -38,6 +38,18 @@ func TestParseFileCCachePrincipal(t *testing.T) {
 	if _, err := ParseFileCCachePrincipal(bytes.NewReader([]byte{5, 1, 0, 0})); err == nil {
 		t.Fatal("format version 1 parsed")
 	}
+	// A component count far past the limit is refused before it sizes an
+	// allocation (GAP-0364).
+	var huge bytes.Buffer
+	huge.Write([]byte{5, 4, 0, 0, 0, 0, 0, 1})
+	_ = binary.Write(&huge, binary.BigEndian, uint32(1<<24))
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err = ParseFileCCachePrincipal(&huge)
+	runtime.ReadMemStats(&after)
+	if err == nil || after.TotalAlloc-before.TotalAlloc > 1<<20 {
+		t.Fatalf("component count 1<<24: err %v, allocated %d bytes", err, after.TotalAlloc-before.TotalAlloc)
+	}
 }
 
 // fakeKCM answers the two read-only KCM operations like sssd-kcm.

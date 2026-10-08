@@ -204,14 +204,46 @@ def test_graph_add_member_retries_new_group_404(monkeypatch: pytest.MonkeyPatch)
 
     def request(*_args):
         attempts.append(1)
-        if len(attempts) == 1:
+        if len(attempts) < 11:
             raise intune.GraphError(404, "Request_ResourceNotFound", "group is replicating")
         return {}
 
     graph.request = request
     monkeypatch.setattr(intune.time, "sleep", lambda _seconds: None)
-    assert graph.add_member("group", "device")
-    assert len(attempts) == 2
+    assert graph.add_member("group", "device", "Example group")
+    assert len(attempts) == 11
+
+
+def test_graph_add_member_names_the_step_after_retry_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    graph = intune.Graph("token")
+    graph.request = lambda *_args: (_ for _ in ()).throw(intune.GraphError(404, "notFound", "missing"))
+    monkeypatch.setattr(intune.time, "sleep", lambda _seconds: None)
+    with pytest.raises(intune.GraphError, match="adding member to group Example group"):
+        graph.add_member("group", "device", "Example group")
+
+
+def test_okta_group_verifier_uses_complete_case_insensitive_name(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, source in {
+        "systemctl": "#!/bin/sh\nexit 0\n",
+        "id": "#!/bin/sh\ncase $1 in -Gn) echo 'dc-kit ML Research';; -G) echo 2001;; esac\n",
+        "getent": "#!/bin/sh\ncase $1 in passwd) echo 'alice:x:2001:2001::/home/alice:/bin/bash';; group) echo 'dc-kit ML Research:x:2001:alice';; esac\n",
+    }.items():
+        target = bin_dir / name
+        target.write_text(source, encoding="ascii")
+        target.chmod(0o755)
+    rules = tmp_path / "rules.ini"
+    rules.write_text("option = ldap_use_ppolicy\n", encoding="ascii")
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "OKTA_KIT_SSSD_CFG_RULES": str(rules)}
+    script = OKTA.parent / "verify-okta-identity.sh"
+    partial = subprocess.run(["bash", str(script), "--skip-defenseclaw", "--user", "alice",
+                              "--expect-group", "ML"], env=env, capture_output=True, text=True)
+    full = subprocess.run(["bash", str(script), "--skip-defenseclaw", "--user", "alice",
+                           "--expect-group", "DC-KIT ml research"], env=env, capture_output=True, text=True)
+    assert partial.returncode == 1 and "does not list ML" in partial.stdout
+    assert full.returncode == 0 and "lists DC-KIT ml research" in full.stdout
 
 
 def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) -> None:
@@ -328,10 +360,10 @@ def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatc
         return {"id": "group-id"}
 
     graph.request = request
-    graph.add_member = lambda group, device: posts.append((group, device)) or True
+    graph.add_member = lambda group, device, name: posts.append((group, device, name)) or True
     args = argparse.Namespace(name=["new-group"], add_device=["device:new-group"], apply=True)
     assert intune.cmd_groups(graph, args) == 0
-    assert ("group-id", "device-id") in posts
+    assert ("group-id", "device-id", "new-group") in posts
 
 
 def test_okta_group_name_with_spaces_and_admin_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -839,7 +871,7 @@ def test_entra_apply_checks_verified_domain_before_mutation(tmp_path: Path) -> N
                 return [{"verifiedDomains": [{"name": "example.test"}]}]
             return []
 
-        def request(self, method: str, path: str, body):
+        def request(self, method: str, path: str, body=None):
             calls.append((method, path))
             raise AssertionError("group creation must not be attempted")
 
@@ -881,7 +913,7 @@ def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]
                 }]
             return [{"id": "app-1", "publishingState": "published"}]
 
-        def request(self, method: str, path: str, body):
+        def request(self, method: str, path: str, body=None):
             calls.append((method, path, body))
             return {}
 
@@ -889,10 +921,11 @@ def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]
         "assign-app", "--app", "app", "--group", "team", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert len(calls) == 1
-    assert calls[0][0] == "PATCH"
+    assert len(calls) == 2
+    assert calls[0][0] == "DELETE"
     assert calls[0][1].endswith("/assignments/assignment-1")
-    assert calls[0][2]["target"]["@odata.type"] == intune.GROUP_TARGET
+    assert calls[1][0] == "POST"
+    assert calls[1][2]["target"]["@odata.type"] == intune.GROUP_TARGET
 
 
 def test_intune_assign_app_updates_existing_intent() -> None:
@@ -914,7 +947,7 @@ def test_intune_assign_app_updates_existing_intent() -> None:
                 }]
             return [{"id": "app-1", "publishingState": "published"}]
 
-        def request(self, method: str, path: str, body):
+        def request(self, method: str, path: str, body=None):
             calls.append((method, path, body))
             return {}
 
@@ -922,11 +955,10 @@ def test_intune_assign_app_updates_existing_intent() -> None:
         "assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert len(calls) == 1
-    assert calls[0][0] == "PATCH"
-    assert calls[0][2]["intent"] == "uninstall"
-    assert calls[0][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
-    assert "settings" in calls[0][2]
+    assert [call[0] for call in calls] == ["DELETE", "POST"]
+    assert calls[1][2]["intent"] == "uninstall"
+    assert calls[1][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
+    assert "settings" in calls[1][2]
 
 
 def test_intune_groups_reject_dynamic_group() -> None:
@@ -941,12 +973,147 @@ def test_intune_groups_reject_dynamic_group() -> None:
         intune.cmd_groups(Graph(), args)
 
 
-def test_intune_macos_script_defaults_to_daily_frequency() -> None:
+def test_intune_macos_script_preserves_unspecified_frequency() -> None:
     intune = _load(INTUNE)
     args = intune.build_parser().parse_args([
         "macos-script", "--name", "script", "--file", "script.sh",
     ])
-    assert args.frequency == "P1D"
+    assert args.frequency is None
+
+
+def test_entra_plan_deduplicates_users_and_normalizes_case(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.test", "users": [{"name": "Alice"}, {"name": "alice"}]}))
+
+    class Graph:
+        def get_all(self, path: str):
+            if path.startswith("/v1.0/organization"):
+                return [{"verifiedDomains": [{"name": "example.test"}]}]
+            return []
+
+        def get(self, _path: str):
+            raise entra.GraphError(404, "NotFound", "scratch user is absent")
+
+    args = argparse.Namespace(config=str(plan), apply=False, password_file=None)
+    assert entra.cmd_apply(Graph(), args) == 0
+    output = capsys.readouterr().out
+    assert output.count("user alice@example.test: would create") == 1
+    plan.write_text(json.dumps({"domain": "example.test", "users": [
+        {"name": "Alice", "display_name": "Alice"}, {"name": "alice", "display_name": "Other"}]}))
+    with pytest.raises(SystemExit, match="conflicting display_name"):
+        entra._load_plan(str(plan))
+
+
+def test_intune_remove_assignment_deletes_only_target_group() -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "target"}]
+            if "/assignments" in path:
+                return [{"id": "one", "target": {"groupId": "target"}},
+                        {"id": "two", "target": {"groupId": "other"}}]
+            return [{"id": "app", "publishingState": "published"}]
+
+        def request(self, method, path, body=None):
+            calls.append((method, path))
+
+    args = intune.build_parser().parse_args(["remove-assignment", "--app", "app", "--group", "team", "--apply"])
+    assert intune.cmd_remove_assignment(Graph(), args) == 0
+    assert calls == [("DELETE", "/beta/deviceAppManagement/mobileApps/app/assignments/one")]
+
+
+def test_intune_rejects_invalid_script_retry_size_and_group_name(tmp_path: Path) -> None:
+    intune = _load(INTUNE)
+    script = tmp_path / "script.sh"
+    script.write_text("#!/bin/sh\necho ok\n", encoding="ascii")
+    args = intune.build_parser().parse_args(["macos-script", "--name", "test", "--file", str(script),
+                                             "--retries", "99"])
+    with pytest.raises(SystemExit, match="--retries"):
+        intune.cmd_macos_script(object(), args)
+    script.write_bytes(b"#!/bin/sh\n" + b"a" * (intune.HEALTH_SCRIPT_MAX_BYTES + 1))
+    args.retries = 3
+    with pytest.raises(SystemExit, match="limit is 204800"):
+        intune.cmd_macos_script(object(), args)
+    group_args = intune.build_parser().parse_args(["groups", "--name", "x" * 300])
+    with pytest.raises(SystemExit, match="group name is 300 characters"):
+        intune.cmd_groups(object(), group_args)
+
+
+def test_intune_upsert_skips_identical_script_and_keeps_unspecified_fields(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, _path):
+            return [{"id": "script"}]
+
+        def get(self, _path):
+            return {"scriptContent": "same", "retryCount": 2, "executionFrequency": "PT1H"}
+
+        def request(self, method, path, body):
+            writes.append((method, body))
+
+    body = {"@odata.type": "#microsoft.graph.deviceShellScript", "scriptContent": "same"}
+    assert intune._upsert(Graph(), "/beta/deviceManagement/deviceShellScripts", "example", body,
+                          True, "macOS shell script") == "script"
+    assert writes == []
+    assert "unchanged" in capsys.readouterr().out
+
+
+def test_okta_usage_errors_return_two_without_plan(monkeypatch: pytest.MonkeyPatch,
+                                                  capsys: pytest.CaptureFixture[str]) -> None:
+    okta = _load(OKTA)
+    monkeypatch.delenv("OKTA_ORG_URL", raising=False)
+    assert okta.main(["check"]) == 2
+    assert "Plan only" not in capsys.readouterr().out
+    assert okta.main(["assign-posix"]) == 2
+    assert "Plan only" not in capsys.readouterr().out
+
+
+def test_okta_assign_posix_names_duplicate_uid_repair(monkeypatch: pytest.MonkeyPatch,
+                                                    capsys: pytest.CaptureFixture[str]) -> None:
+    okta = _load(OKTA)
+    user = {"id": "one", "profile": {"login": "alice@example.test", "uidNumber": 1710000}}
+    other = {"id": "two", "profile": {"login": "bob@example.test", "uidNumber": 1710000}}
+    monkeypatch.setattr(okta, "collect_users", lambda *_args: [user])
+
+    class Client:
+        def get_all(self, _path):
+            return [user, other]
+
+    args = argparse.Namespace(user=["alice@example.test"], users_from=None, apply=False)
+    assert okta.cmd_assign_posix(Client(), args) == 1
+    assert "clear uidNumber on one affected user" in capsys.readouterr().out
+
+
+def test_okta_bind_role_refusal_does_not_claim_assignment(capsys: pytest.CaptureFixture[str]) -> None:
+    okta = _load(OKTA)
+    calls = []
+
+    class Client:
+        def call(self, *_args):
+            return 200, {"id": "user"}, {}
+
+        def must(self, method, path, body=None):
+            calls.append((method, path))
+            if path.endswith("/roles"):
+                return []
+            return {"permissions": [{"label": "okta.users.manage"}]}
+
+        def get_all(self, path, key=None):
+            return [{"id": "role", "label": "read-role"}]
+
+    args = argparse.Namespace(apply=True, bind_login="bind@example.test", role_label="read-role",
+                              resource_set_label="all-users")
+    assert okta.cmd_bind_role(Client(), args) == 1
+    output = capsys.readouterr().out
+    assert "role not assigned" in output
+    assert "done    assign the role" not in output
+    assert all(method != "POST" for method, _path in calls)
 
 
 def test_intune_app_status_fetches_every_report_page(capsys: pytest.CaptureFixture[str]) -> None:
@@ -971,3 +1138,27 @@ def test_intune_app_status_fetches_every_report_page(capsys: pytest.CaptureFixtu
     assert [body.get("skip", 0) for body in calls] == [0, 1]
     output = capsys.readouterr().out
     assert "device-0" in output and "device-1" in output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["add", "--group", "admin", "--user", "bob"],
+        ["add", "--group", "wheel", "--user", "bob"],
+        ["add", "--group", "com.apple.access_ssh", "--user", "bob"],
+        ["add", "--group", "_www", "--user", "bob"],
+        ["add", "--group", "-x", "--user", "bob"],
+        ["add", "--group", "a" * 300, "--user", "bob"],
+        ["add", "--group", "ml-team", "--user", ""],
+        ["add", "--group", "ml-team", "--user", "-v"],
+    ],
+)
+def test_macos_bridge_refuses_unsafe_names_before_touching_the_mac(args: list[str]) -> None:
+    """GAP-0644, GAP-0645: privileged groups, option-like or overlong names and an empty --user are usage errors."""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not installed")
+    script = ENTRA.parent / "macos-entra-group-bridge.sh"
+    result = subprocess.run([bash, str(script), *args], capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 2, result
+    assert result.stderr.startswith("error: ")

@@ -134,7 +134,7 @@ install does, never falls back to its own account.
 | Domain | For SSSD, the joined domain that holds the account by its SID ([When Linux attributes a principal](#when-linux-attributes-a-principal)). For winbind, the domain its name reports (`CORP\alice`), in lower case: a NetBIOS domain is reported by the DNS name of its realm (realmd gives the NetBIOS name in the login format `CORP\%U`), as Windows reports it; the NetBIOS domain of a trusted domain is reported as is. An `nss_ldap` (nslcd) account has none: nslcd names an account by its uid attribute, which may be an e-mail address (the Okta login) | Verified |
 | Groups | `initgroups` plus a group lookup through NSS. An SSSD account keeps only the groups inside the domain of its SID, its local groups and its primary group ([When Linux attributes a principal](#when-linux-attributes-a-principal)) | Verified |
 | Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, the winbind realm whose NetBIOS name the domain is, the only winbind realm for an unqualified winbind name. An SSSD account gets the joined realm whose domain holds a user of its name with the SID of its uid ([When Linux attributes a principal](#when-linux-attributes-a-principal)). A winbind realm never takes another NetBIOS domain, which is a trusted domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
-| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `Users.FindByID` for the SSSD domain that holds the uid and the `userPrincipalName` of that user, and, when realmd names no realm for the account, the id provider of that domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@REALM`. An Entra ID account the `aad` module names, or Himmelblau with `cn_name_mapping = false`, is named by its UPN, which is reported as its UPN and principal on every install. Himmelblau's default (`cn_name_mapping = true`) names it by the short name, which carries no UPN or domain | Verified |
+| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `Users.FindByID` for the SSSD domain that holds the uid and the `userPrincipalName` of that user, and, when realmd names no realm for the account, the id provider of that domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@realm`: the account name and the Kerberos realm in lower case (`alice@corp.example.com` for realm `CORP.EXAMPLE.COM`, which `defenseclaw.user.realm` reports in upper case), compared without regard to case. A winbind host has no InfoPipe, so its accounts have no UPN: a users entry by a UPN in another suffix never matches there; name the account by its name, `DOMAIN\user` or `account@realm`. An Entra ID account the `aad` module names, or Himmelblau with `cn_name_mapping = false`, is named by its UPN, which is reported as its UPN and principal on every install. Himmelblau's default (`cn_name_mapping = true`) names it by the short name, which carries no UPN or domain | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
 | Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
 
@@ -168,7 +168,7 @@ decides the domain of an SSSD account from its uid, not from its name:
   LDAP domain has none.
 - **The joined domain confirms it.** The account gets the realm of a joined
   domain (realmd, client `sssd`), the directory type of that realm and the
-  principal `account@REALM` only when that domain holds a user of the
+  principal `account@realm` only when that domain holds a user of the
   account's name with the same SID, and SSSD maps the SID back to the same uid.
   The name is asked in the `domain\account` form, which SSSD looks up in that
   domain only. With fully qualified names (`alice@corp.example.com`, what
@@ -216,12 +216,12 @@ decides the domain of an SSSD account from its uid, not from its name:
   gateway drop that domain, realm and principal. An account without a SID
   that InfoPipe holds in an AD or IPA domain (`id_provider = ad` or `ipa`) of
   a joined realm, such as one of an IPA domain without an AD trust, gets that
-  realm and `account@REALM` on standalone enterprise only. Two SSSD domains
+  realm and `account@realm` on standalone enterprise only. Two SSSD domains
   that hold the same SID confuse SSSD itself: a per-user install then takes the
   account the first domain SSSD searches answers with, while standalone
   enterprise drops a realm that InfoPipe places in another domain. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing from
   `services` in `sssd.conf`) the principal of a confirmed account is
-  `account@REALM`. Standalone enterprise keeps the facts of an SSSD account
+  `account@realm`. Standalone enterprise keeps the facts of an SSSD account
   that has no UPN for 2 minutes, then asks again.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
@@ -246,8 +246,10 @@ LDAP account of that name.
 | SSH session | `SSH_CONNECTION` | Claimed |
 
 Windows groups follow the sign-in token. A user added to or removed from a
-group gets the new profile only after signing out and back in, and then within
-the 15-minute cache.
+group gets a new token after signing out and back in; a new Entra group SID may
+also need `dsregcmd /refreshprt` followed by another sign-out and sign-in.
+Live hooks can keep the old profile until the gateway's 15-minute directory
+cache expires. `profile-explain` can show the new profile before live hooks use it.
 
 ### macOS
 
@@ -258,7 +260,7 @@ the 15-minute cache.
 | Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
 | AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
 | Device SSO provider (Entra or Okta) | `app-sso platform -s` (JSON on macOS 15, a property list on older releases): Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
-| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account and only root reads. It is the account's UPN and principal; only an account that carries it is reported with the SSO provider's directory, so local accounts that never registered stay `local`. Standalone enterprise only | Verified |
+| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account. Local users can read this directory attribute; only privileged code can write it. The product trusts the controlled write, not the secrecy of the value. It is the account's UPN and principal; accounts that never registered stay `local`. Standalone enterprise only | Verified |
 | Entra or Okta groups through Platform SSO | None reach the macOS group database (macOS 15.8, Company Portal, live) | None |
 | Kerberos principal of the session | The default principal of the default `API:` cache, from `/usr/bin/klist --json` at most once per 5 minutes, or of a `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` | Claimed |
 | SSH session | `SSH_CONNECTION` | Claimed |
@@ -307,7 +309,10 @@ machine.
 An Entra-joined computer puts an Entra group's SID into a user's sign-in
 token only when one of the built-in local groups lists that group:
 Administrators, Users, Guests, Power Users, Remote Desktop Users or Remote
-Management Users. Windows evaluates at most 20 Entra groups this way.
+Management Users. A Windows 11 Enterprise 24H2 live check with 21 different
+Entra group SIDs in the built-in Users group showed all 21 in the signed-in
+user's token. Do not rely on a 20-group ceiling to limit access; verify the
+actual token on the devices and accounts you deploy.
 Membership in any other Entra group never reaches the computer, so a `groups`
 assignment or an enrollment `include_groups` or `exclude_groups` entry that
 names such a group matches no one: its members get the default profile, and
@@ -378,11 +383,18 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   Headers, payloads and claimed facts never do.
 - **Local accounts have no directory groups.** A local account has only the
   groups its OS account database lists, no domain and no UPN.
+- **Windows group naming is bounded.** DefenseClaw names at most 128 groups
+  per account within the two-second lookup budget. Remaining groups stay as
+  SIDs, so use the SID in a group assignment when necessary.
 - **Group changes take time.** The gateway caches a user's directory facts for
   15 minutes and refreshes them in the background (2 minutes for an answer with
   a group that has no name, or an SSSD account still waiting for its UPN on
   standalone enterprise). A Windows user must also sign out and back in, and
-  Himmelblau and SSSD add their own caches.
+  Himmelblau and SSSD add their own caches. On Linux and macOS the facts belong
+  to the account that held the uid when they were read: a new account given
+  the uid of a removed one gets its own facts within 5 minutes (when the
+  gateway next resolves the uid's account), never the old holder's for the
+  full 15.
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
   take seconds. The first request waits up to two seconds, then the default
   profile applies for 15 seconds until the lookup is retried.

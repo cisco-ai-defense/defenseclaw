@@ -2033,6 +2033,7 @@ class TestCheckHookHealth(unittest.TestCase):
             # GAP-1804: arguments of another Python program are its own.
             ("/u/.defenseclaw/.venv/bin/python -m defenseclaw.main plugin list --json --connector hermes", False),
             ("python3 -c import --connector hermes", False),
+            ("/home/u/.hermes/tools/python-3.14/bin/python3 -I -c import os, re, sys import hermes_bootstrap from hermes_cli.main import main", None),
             ("python3 -u /u/.local/bin/hermes chat", True),
             ("python3 -Wignore -m hermes_cli", None),
             ("/u/.hermes/hermes-agent/venv/bin/python -m gateway.run", None),

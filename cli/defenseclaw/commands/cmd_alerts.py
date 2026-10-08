@@ -671,6 +671,8 @@ _DELIVERY_FAILURE_REASONS = {
     "request_canceled": "the export was canceled (usually a gateway restart)",
     "acknowledgement_lost": "the export was sent but no reply arrived",
     "transport_failed": "a network error interrupted the export",
+    "file_write_failed": "the destination file could not be written",
+    "no_space": "the destination disk is full",
     "endpoint_prohibited": "the endpoint is blocked by the egress policy",
     "queue_full": "the export queue was full, so records were dropped",
 }

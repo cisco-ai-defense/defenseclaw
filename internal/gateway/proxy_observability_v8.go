@@ -494,7 +494,7 @@ func applyProxyV8FactsToAgent(input *observability.SpanAgentInvokeInput, facts p
 	if !ManagedEnterpriseActive() {
 		input.UserID = hookV8OptionalIdentifier(facts.caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(facts.caller.IDKind)
-		input.DefenseClawUserName = hookV8OptionalIdentifier(facts.caller.Name)
+		input.DefenseClawUserName = v8UserName(facts.caller.Name, hookV8OptionalIdentifier)
 	}
 	facts.caller.Identity.applyTo(input)
 	input.DefenseClawAgentRootID = proxyV8OptionalID(facts.agentID)
@@ -525,7 +525,7 @@ func applyProxyV8FactsToModel(input *observability.SpanModelChatInput, facts pro
 	if !ManagedEnterpriseActive() {
 		input.UserID = hookV8OptionalIdentifier(facts.caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(facts.caller.IDKind)
-		input.DefenseClawUserName = hookV8OptionalIdentifier(facts.caller.Name)
+		input.DefenseClawUserName = v8UserName(facts.caller.Name, hookV8OptionalIdentifier)
 	}
 	facts.caller.Identity.applyTo(input)
 	input.DefenseClawAgentRootID = proxyV8OptionalID(facts.agentID)

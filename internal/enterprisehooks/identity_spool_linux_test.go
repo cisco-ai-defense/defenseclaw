@@ -34,3 +34,16 @@ func TestSSSDProviderDirectory(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0583: InfoPipe is not asked (which would D-Bus-activate sssd-ifp)
+// while systemd reports sssd.service other than active; a host whose systemd
+// does not answer keeps asking.
+func TestInfoPipeWaitsForAnActiveSSSD(t *testing.T) {
+	for _, tc := range []struct {
+		active, known, refused bool
+	}{{false, true, true}, {true, true, false}, {false, false, false}} {
+		if err := infoPipeGate(tc.active, tc.known); (err != nil) != tc.refused {
+			t.Errorf("infoPipeGate(active=%v, known=%v) = %v, want refused=%v", tc.active, tc.known, err, tc.refused)
+		}
+	}
+}

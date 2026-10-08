@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
 // A managed user runs the setup the enrollment reports, on a host with no
@@ -22,6 +22,23 @@ import (
 // (JSONC, other entries and the leading comment kept) and a contract lock the
 // guard accepts, and a second entry of the same editor re-pins the first
 // lock, whose settings digest it changed (GAP-0254).
+// A program of that name in the current folder is refused in words, not as
+// "not found" (GAP-0734).
+func TestResolveACPExecutableNamesTheCurrentFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH lookup of the current folder differs on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "dcfakeagent"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("PATH", ".")
+	if _, err := resolveACPExecutable("dcfakeagent", "Fake Agent"); err == nil || !strings.Contains(err.Error(), "current folder") {
+		t.Fatalf("err = %v, want the current-folder refusal", err)
+	}
+}
+
 func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Windows editor settings path is covered by the live managed run")
@@ -96,7 +113,7 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 		Theme   string                    `json:"theme"`
 		Servers map[string]map[string]any `json:"agent_servers"`
 	}
-	if err := json.Unmarshal(enterprisepolicy.StripJSONC(body), &document); err != nil {
+	if err := json.Unmarshal(jsonc.Strip(body), &document); err != nil {
 		t.Fatalf("the rewritten settings are not valid: %v\n%s", err, body)
 	}
 	entry := document.Servers["DefenseClaw · Kiro"]

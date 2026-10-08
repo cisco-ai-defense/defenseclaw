@@ -461,3 +461,37 @@ func TestEnterpriseHooksTellAStandardUserThatAnAdministratorRunsThem(t *testing.
 		t.Fatalf("the per-user worker was refused: %v", err)
 	}
 }
+
+// A standard user's `enterprise linux ide-plugins` on a managed host gets
+// the managed-host sentence with the administrator command, as status and
+// audit export do, not a raw config permission error (GAP-0610).
+func TestEnterpriseIDEPluginsTellAStandardUserThatAnAdministratorRunsIt(t *testing.T) {
+	withManagedStandaloneDeployment(t, 991)
+	withManagedHostCallerUID(t, 1000)
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	asked := false
+	enterpriseIdentityViewGet = func(string, any) (string, error) { asked = true; return "", nil }
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	group := &cobra.Command{Use: "enterprise"}
+	parent := &cobra.Command{Use: platform}
+	root.AddCommand(group)
+	group.AddCommand(parent)
+	parent.AddCommand(newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[2]))
+	root.SetArgs([]string{"enterprise", platform, "ide-plugins", "--user", "eob"})
+	root.SetOut(new(strings.Builder))
+	root.SetErr(new(strings.Builder))
+	err := root.Execute()
+	if err == nil || asked {
+		t.Fatalf("err = %v, asked the gateway = %t: a standard user must be refused first", err, asked)
+	}
+	for _, want := range []string{"managed by your organization", "`sudo ", "/defenseclaw-gateway enterprise " + platform + " ide-plugins`"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want %q", err, want)
+		}
+	}
+}

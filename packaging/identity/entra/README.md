@@ -34,7 +34,7 @@ applies to a Secure Client computer.
 | `Get-DefenseClawEntraIdentity.ps1` | Windows | no | Show the join state, Entra accounts, token groups and what DefenseClaw answers |
 | `setup-himmelblau.sh` | Ubuntu 24.04, as root | with `--apply` only | Install Himmelblau, write `himmelblau.conf` (UPN account names, allowed groups), restart it safely, `check` |
 | `join-entra-domain-services.sh` | RHEL 9, as root | with `--apply` only | Join an Entra Domain Services managed domain with realmd and SSSD, switch short or qualified names, flush the SSSD cache, `check` |
-| `macos-entra-group-bridge.sh` | macOS, as root (an Intune shell script) | with `--apply` (or `APPLY=yes`) only | Add the signed-in user to, or remove them from, the local group that stands for an Entra group |
+| `macos-entra-group-bridge.sh` | macOS, as root (an Intune shell script) | with `--apply` (or `APPLY=yes`) only | Add a user to, or remove them from, the local group that stands for an Entra group. An Intune copy names the account (`USER_NAME`) and adds it only while it is in front at the console; one signed-in Entra user per Mac |
 | `macos-platform-sso.settings-catalog.example.json` | | | The Intune settings catalog body (Graph `POST /beta/deviceManagement/configurationPolicies`) for Platform SSO with Company Portal |
 | `tenant.example.json` | | | Input for `entra_setup.py apply` |
 | `admin-config.windows.example.yaml` | | | Standalone enterprise config with profiles by Entra group SID and by user |
@@ -146,7 +146,7 @@ ran:
 | Entra Domain Services with realmd and SSSD on RHEL 9.8 | Ran live, per-user and standalone: a group assignment matched, with qualified and short names |
 | `join-entra-domain-services.sh` | `check` and `names qualified|short --apply` ran on that VM; `join` and `flush` in plan mode only (the join was typed by hand with the same `realm join` command) |
 | macOS 15.8 with Platform SSO (Company Portal) | Ran live: no Entra group reaches the Mac; a local group membership matched, per-user and standalone |
-| `macos-entra-group-bridge.sh` | `check`, `add` and `remove` (plan and `--apply`) ran as root on that Mac, and a copy with the settings block filled in ran with no console user (no-op). Intune delivery not tested |
+| `macos-entra-group-bridge.sh` | `check`, `add` and `remove` (plan and `--apply`) ran as root on that Mac, and a copy with the settings block filled in ran at the login window (exit 1, nothing changed) and without `USER_NAME` (exit 2). Intune delivery not tested |
 | `macos-platform-sso.settings-catalog.example.json` | The body of the policy created through Graph and delivered by Intune in the live test (names replaced) |
 | Intune delivery of the local group (Windows) or of the bridge script (macOS), hybrid join, Entra Kerberos | Not tested |
 

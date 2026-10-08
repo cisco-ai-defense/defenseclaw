@@ -860,8 +860,14 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 
 // subjectInDomain compares only verified account namespaces. Guessing a
 // NetBIOS name from a DNS first label can select a different trusted domain.
+// ".\user", the form Windows tools use for an account of this computer,
+// names a local account whose verified namespace is the computer
+// (GAP-0636).
 func subjectInDomain(subject *profileSubject, domain string) bool {
 	domain = strings.TrimSpace(domain)
+	if domain == "." {
+		return subject.Directory == useridentity.DirectoryLocal && subject.AccountDomain != ""
+	}
 	return domain != "" && (useridentity.EqualFold(domain, subject.AccountDomain) ||
 		useridentity.EqualFold(domain, subject.Domain))
 }
@@ -1265,6 +1271,11 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	agent := strings.TrimSpace(query.Get("agent"))
 
 	set := a.guardrailProfileSet()
+	if connectorName != "" && !connector.IsKnownBuiltinConnector(connectorName) &&
+		(set == nil || !set.knownConnector(connectorName)) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown connector %q; use a built-in or configured plugin connector", connectorName)})
+		return
+	}
 	out := map[string]any{
 		"profiles_configured": set != nil,
 		"user":                user,
@@ -1312,12 +1323,18 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
+	if agent != "" {
+		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
+	}
 	if source == profileSubjectLookup {
 		if view, warning := explainCacheView(set, subject, decision, connectorName, agent, time.Now()); view != nil {
 			out["cache"] = view
 			if warning != "" {
 				warnings = append(warnings, warning)
 			}
+		}
+		if subject != nil && !subject.LookupFailed && slices.ContainsFunc(set.assignments, func(a config.ProfileAssignment) bool { return len(a.Match.Groups) > 0 }) {
+			warnings = append(warnings, "after a group membership change, hooks can use the previous profile for up to 15 minutes while the gateway refreshes cached identity facts; restart the gateway to refresh sooner")
 		}
 	}
 	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {

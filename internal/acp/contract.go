@@ -4,6 +4,7 @@
 package acp
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,11 +16,57 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const MaxContractLockBytes = 64 << 10
+
+// EntryDigestPrefix marks a contract lock that pins the guarded editor
+// entry rather than the whole editor settings file. An editor that rewrote
+// its settings (Zed on a theme change) stopped every guarded entry until
+// setup ran again (GAP-0708). enterprise acp setup writes it; an older
+// guard reads such a lock as a changed settings file and asks for setup.
+const EntryDigestPrefix = "entry-sha256:"
+
+// maxClientConfigBytes bounds an editor settings file the guard reads.
+const maxClientConfigBytes = 4 << 20
+
+// ManagedEntryName is the editor entry name of an agent's guarded entry.
+func ManagedEntryName(agent string) string {
+	if agent == "" {
+		return "DefenseClaw"
+	}
+	return "DefenseClaw · " + strings.ToUpper(agent[:1]) + strings.ToLower(agent[1:])
+}
+
+// ClientEntrySHA256 is the digest of agent's guarded entry in the editor
+// settings file at path: its JSON with sorted keys, so that the editor
+// rewriting the file around it, or reformatting it, leaves it unchanged.
+func ClientEntrySHA256(path, agentID string) (string, error) {
+	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
+	if err != nil {
+		return "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(jsonc.Strip(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")))))
+	decoder.UseNumber()
+	var document map[string]any
+	if err := decoder.Decode(&document); err != nil {
+		return "", err
+	}
+	servers, _ := document["agent_servers"].(map[string]any)
+	entry, ok := servers[ManagedEntryName(agentID)]
+	if !ok {
+		return "", fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
+	}
+	canonical, err := json.Marshal(entry)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(canonical)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // ErrRuntimeContractMissing means the binding's contract lock file does not
 // exist: the editor entry outlived `defenseclaw acp remove` (or was copied
@@ -110,6 +157,14 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		{clientConfigPath, lock.Client.ConfigSHA256, "client configuration"},
 		{agentPath, lock.Agent.SHA256, "agent"},
 	} {
+		if pinned, entry := strings.CutPrefix(item.expected, EntryDigestPrefix); entry && item.label == "client configuration" && !secureClientHost() {
+			observed, digestErr := ClientEntrySHA256(item.path, agentID)
+			if digestErr != nil || !strings.EqualFold(observed, pinned) {
+				return fmt.Errorf("the %s entry in the editor settings file %s changed after setup (the contract lock pins it), "+
+					"so it must be set up again", ManagedEntryName(agentID), clientConfigPath)
+			}
+			continue
+		}
 		observed, digestErr := fileSHA256(item.path)
 		if digestErr != nil || !strings.EqualFold(observed, item.expected) {
 			if item.label == "client configuration" && !secureClientHost() {

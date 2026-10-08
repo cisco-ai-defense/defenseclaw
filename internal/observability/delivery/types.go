@@ -105,6 +105,8 @@ const (
 	FailureCodeRequestTimeout       FailureCode = "request_timeout"
 	FailureCodeAcknowledgementLost  FailureCode = "acknowledgement_lost"
 	FailureCodeTransportFailed      FailureCode = "transport_failed"
+	FailureCodeFileWriteFailed      FailureCode = "file_write_failed"
+	FailureCodeNoSpace              FailureCode = "no_space"
 	FailureCodeHTTPAuthentication   FailureCode = "http_authentication"
 	FailureCodeHTTPRetryable        FailureCode = "http_retryable"
 	FailureCodeHTTPRejected         FailureCode = "http_rejected"
@@ -138,6 +140,8 @@ func IsFailureCode(code FailureCode) bool {
 		FailureCodeRequestTimeout,
 		FailureCodeAcknowledgementLost,
 		FailureCodeTransportFailed,
+		FailureCodeFileWriteFailed,
+		FailureCodeNoSpace,
 		FailureCodeHTTPAuthentication,
 		FailureCodeHTTPRetryable,
 		FailureCodeHTTPRejected,

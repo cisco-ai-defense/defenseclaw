@@ -90,7 +90,7 @@ PowerShell script supports `-WhatIf`.
 | `Get-DefenseClawEntraIdentity.ps1` | Read-only: show the join state, the Entra accounts, the token's groups and what DefenseClaw answers |
 | `setup-himmelblau.sh` | Install Himmelblau on Ubuntu 24.04, write `himmelblau.conf` (UPN account names, the groups allowed to sign in) and restart it safely; `check` is read-only |
 | `join-entra-domain-services.sh` | Join a Linux host to an Entra Domain Services managed domain with realmd and SSSD, switch between qualified and short names, clear the SSSD cache; `check` is read-only |
-| `macos-entra-group-bridge.sh` | Add the signed-in Mac user to, or remove them from, the local group that stands for an Entra group (an Intune shell script, or by hand) |
+| `macos-entra-group-bridge.sh` | Add a Mac user to, or remove them from, the local group that stands for an Entra group (an Intune shell script that names the account, or by hand) |
 | `macos-platform-sso.settings-catalog.example.json` | The Intune settings catalog body for Platform SSO with Company Portal that the live test used |
 | `admin-config.windows.example.yaml`, `per-user-profiles.example.yaml`, `tenant.example.json` | Starting points for the standalone config, a per-user config and the tenant setup file |
 
@@ -487,13 +487,31 @@ sudo ./macos-entra-group-bridge.sh add --group ml-team --user alice --apply
 ./macos-entra-group-bridge.sh check --group ml-team --user alice
 ```
 
-For a fleet, let Intune decide who is in the group: fill in the script's
-settings block (`ACTION=add`, `GROUP_NAME=ml-team`, `APPLY=yes`) and assign it
-as a macOS shell script to the Entra group, and assign a copy with
-`ACTION=remove` to the users who are not in it. That delivery was not tested;
-the membership itself was: the member got the group profile on a per-user
-install and on standalone enterprise, the other user got `default_profile`,
-and removing the membership moved her back to the default.
+For a fleet, let Intune decide who is in the group, with one signed-in Entra
+user per Mac, who is also the Mac's primary user. Intune evaluates a user
+assignment for the primary user and runs the script as root, not as that user,
+so the script cannot tell who the assignment is for:
+
+- Fill in the settings block of a copy (`ACTION=add`, `GROUP_NAME=ml-team`,
+  `USER_NAME=<the Mac account of the Entra user>`, `APPLY=yes`) and assign it
+  to the Entra group, and a copy with `ACTION=remove` to the users who are not
+  in it (all users, with the Entra group excluded).
+- An Intune copy without `USER_NAME` stops with exit 2. An `add` copy changes
+  the named account only while that account is in front at the console; with
+  another user in front (fast user switching) or the login window showing it
+  changes nothing and exits 1, so Intune runs it again later. A `remove` copy
+  acts on the named account at any time.
+- The script refuses built-in and privileged groups (`admin`, `wheel`,
+  `staff`, `com.apple.*`, any group with an id below 500) unless
+  `--allow-system-group` (`ALLOW_SYSTEM_GROUP=yes`) is given, and names that
+  start with a dash or exceed 64 characters. `remove` leaves the group in
+  place; delete it with `dseditgroup -o delete <group>` when no assignment
+  uses it.
+
+That delivery was not tested; the membership itself was: the member got the
+group profile on a per-user install and on standalone enterprise, the other
+user got `default_profile`, and removing the membership moved her back to the
+default.
 
 **What DefenseClaw records.** Platform SSO stores each registered account's
 Entra UPN in its record (`AltSecurityIdentities`, `PlatformSSO:<upn>`), which
@@ -538,7 +556,7 @@ standalone enterprise profile, which reads the machine config.
 | Where | `users` by UPN | `groups` by Entra group |
 | --- | --- | --- |
 | Windows, per-user | Matched in the live test | No: a per-user install has no group list |
-| Windows, standalone enterprise | Not tested live | By SID, after the local group step. Matched in the live test |
+| Windows, standalone enterprise | Matched before a lane-owned account's UPN rename and stopped matching after it; the account SID stayed the same | By SID, after the local group step. Matched in the live test |
 | Linux `aad`, per-user | Matched in the live test | No: the module gives no Entra groups |
 | Linux Himmelblau, per-user and standalone | With `cn_name_mapping = false` | By name, as `id` shows it. Matched in the live test |
 | Linux Entra Domain Services, per-user and standalone | By the UPN on standalone enterprise | `ml-team@domain`, or `ml-team` with short names. Matched in the live test |
@@ -554,8 +572,10 @@ Ask the gateway which profile a user gets. On Windows, name an Entra user by
 SID, as `AzureAD\Name`, by the bare name or by the UPN.
 
 ```powershell
-defenseclaw guardrail profile explain --user AzureAD\Alice --connector claudecode
-defenseclaw guardrail profile explain --connector claudecode    # the account that runs it
+# Standalone enterprise: run in an elevated Administrator prompt.
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user 'AzureAD\Alice' --connector claudecode
+# Per-user install:
+defenseclaw guardrail profile explain --connector claudecode
 ```
 
 ```bash
@@ -585,11 +605,22 @@ These are the fields the records carried for an Entra user (the complete table i
 
 ## 7. What to expect in operation
 
+On a Mac, a new Platform SSO account can enter the full macOS Setup Assistant
+at first login before it reaches a desktop. Sign demonstration users in once
+before a timed run, or deploy an approved Setup Assistant skip payload.
+
 - **A group change on Windows** reaches DefenseClaw when the user signs in
   again: the token is fixed at sign-in. The enumerator decides a signed-out
   user from the token it saw at the last sign-in, and `profile explain` then
   says that the profile is not final. After a sign-in the enumerator reads the
-  new token about 15 seconds later, and hooks use it within about a minute.
+  new token about 15 seconds later. `profile-explain` can already show the new
+  profile while live hooks still use directory facts cached from the previous
+  lookup. That gateway cache lasts up to 15 minutes. In live Entra add and
+  removal tests, the token changed at the next sign-in (two to three minutes
+  after the tenant change), while the hook decision changed about 13 minutes
+  after sign-in. An AD group addition first changed a live hook decision about
+  14 minutes after the new record. Check `profile-explain` for the cached fact
+  age and remaining time before deciding a rollout has failed.
   Microsoft documents that a
   new token can take up to 4 hours to carry a change; that was not measured
   here.
@@ -601,9 +632,12 @@ These are the fields the records carried for an Entra user (the complete table i
   a Windows computer has no account there yet, so there is no SID to match. On
   the Azure Linux VM, the module resolved such a user by name but not by uid,
   and `profile explain` said `unixidentity: not found`.
-- **An Entra outage or a computer with no network** was not tested. DefenseClaw
-  does not contact Entra: on Windows it reads the identity store, the join state
-  and the token on the computer. On Linux, a lookup that fails falls back to
+- **An Entra outage or a computer with no network.** In a nine-minute Windows
+  sign-in endpoint outage test, open sessions kept the same hook decisions,
+  including after a gateway restart: DefenseClaw reads the identity store,
+  join state and token locally. Windows refused a new password sign-in while
+  the endpoint was unavailable, so no fresh offline token was tested. On Linux,
+  a lookup that fails falls back to
   `default_profile` with the reason `default_lookup_failed`, after the gateway's
   cached answer expires (up to an hour); see the
   [lookup rules](/docs/guardrail/user-and-group-policies#only-verified-facts-select-a-profile).

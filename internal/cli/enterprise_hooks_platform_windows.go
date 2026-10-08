@@ -33,6 +33,10 @@ var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEn
 var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
 var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
 
+// enterpriseHookRemovedAccountNote follows each failure status and verify
+// report as a warning for a deleted account whose profile folder was removed.
+const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
+
 // enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
 // a guardian row of a local account that was deleted: no one can sign in as
 // it, and the enumerator drops its rows at its next pass, also when its
@@ -565,6 +569,10 @@ var enterpriseHooksWindowsConfigLoader = func() (*config.Config, error) {
 	// skips rootPersistentPreRunE's runtime .env load and runtime migration.
 	return config.LoadFromFile(config.ConfigPath())
 }
+
+// refuseEnterpriseIdentityViewForStandardUser is a no-op on Windows: the
+// views run from an elevated prompt, and the gateway refuses others.
+func refuseEnterpriseIdentityViewForStandardUser(*cobra.Command) error { return nil }
 
 func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) error {
 	if enterpriseHooksRuntimeGOOS() != "windows" {

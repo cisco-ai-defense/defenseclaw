@@ -387,23 +387,36 @@ func (s *scanner) readFileLimit(path string, limit int64) ([]byte, bool) {
 }
 
 // clean bounds a metadata value: printable, single line, at most
-// maxFieldLen bytes.
+// maxFieldLen bytes. Format characters (Unicode Cf: the bidi overrides and
+// isolates, zero-width characters) are dropped, so a display name such as
+// "safe <U+202E>gnp.exe" cannot render reversed in a table or a board, and
+// every other control character (a newline, a tab, ESC) becomes one space
+// (GAP-0670).
 func clean(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
 	var b strings.Builder
+	space := false
 	for _, r := range value {
-		if r == utf8.RuneError || unicode.IsControl(r) {
+		if r == utf8.RuneError || unicode.Is(unicode.Cf, r) {
 			continue
 		}
-		if b.Len()+utf8.RuneLen(r) > maxFieldLen {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		width := utf8.RuneLen(r)
+		if space {
+			width++
+		}
+		if b.Len()+width > maxFieldLen {
 			break
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
 		}
 		b.WriteRune(r)
 	}
-	return strings.TrimSpace(b.String())
+	return b.String()
 }
 
 // safeName reports whether name is a single path element.

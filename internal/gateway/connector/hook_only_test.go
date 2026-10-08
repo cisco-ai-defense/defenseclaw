@@ -2392,6 +2392,37 @@ func TestAntigravityTeardownMigratesLegacyBackupAndRestoresExactBytes(t *testing
 	}
 }
 
+func TestAntigravityPerUserTeardownKeepsUserHookAndRemovesOwnedEntries(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hooks.json")
+	previous := AntigravityHooksPathOverride
+	AntigravityHooksPathOverride = path
+	t.Cleanup(func() { AntigravityHooksPathOverride = previous })
+	conn := NewAntigravityConnector()
+	opts := SetupOpts{DataDir: filepath.Join(root, "data"), APIAddr: "127.0.0.1:18970"}
+	if err := patchAntigravityHooks(path, conn.hookCommand(opts)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := readJSONObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc["operator-hook"] = map[string]interface{}{"PreToolUse": []interface{}{map[string]interface{}{"command": "/bin/true"}}}
+	if err := writeJSONObject(path, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	clean, err := readJSONObject(path)
+	if err != nil || clean["operator-hook"] == nil {
+		t.Fatalf("user hook lost: %v %v", clean, err)
+	}
+	if owned, err := AntigravityHooksHoldOwnedEntries(path); err != nil || owned {
+		t.Fatalf("owned hook registrations remain: %v %v", owned, err)
+	}
+}
+
 func TestAntigravityManagedBackupMigrationCollapsesIdenticalRecords(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
 	target := filepath.Join(t.TempDir(), "antigravity-home", "hooks.json")
@@ -3724,6 +3755,38 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"decision":"deny"`) {
 		t.Fatalf("OpenHands deny hook did not print decision JSON; output=%s", string(out))
+	}
+}
+
+// GAP-0535: a gateway that is taking all the hook calls it can answers 429
+// with Retry-After before it evaluates the call. The shell hook waits and
+// sends the same call again instead of failing the tool call.
+func TestOpenHandsHookScript_RetriesBusyGateway(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited","retry_after_seconds":"1"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "tok-test", HookFailMode: "closed"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, NewOpenHandsConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "openhands-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"date"}}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+t.TempDir())
+	if out, err := cmd.CombinedOutput(); err != nil || calls.Load() != 2 {
+		t.Fatalf("busy gateway: err=%v calls=%d output=%s, want one retry and an allow", err, calls.Load(), out)
 	}
 }
 

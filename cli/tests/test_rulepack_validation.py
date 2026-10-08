@@ -508,9 +508,11 @@ def test_validate_pack_accepts_discovered_bare_name(tmp_path) -> None:
     pack.mkdir()
     valid = rulepack_validation.RulePackValidationResult(wire_version=1, kind="validation", valid=True, summary=_summary())
     with (
+        patch("defenseclaw.config.load", return_value=object()) as load_config,
         patch("defenseclaw.policy_catalog.discover_rule_packs", return_value=[SimpleNamespace(name="team", path=str(pack))]),
         patch.object(rulepack_validation, "validate_rule_pack", return_value=valid) as validator,
     ):
-        result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["team"], obj=SimpleNamespace(cfg=object()))
+        result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["team"])
+    load_config.assert_called_once_with()
     assert result.exit_code == 0, result.output
     validator.assert_called_once_with(str(pack))

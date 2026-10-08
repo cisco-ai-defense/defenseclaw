@@ -127,6 +127,7 @@ type APIServer struct {
 	acpReadinessCheckedAt time.Time
 	acpReadinessKey       string
 	acpReadinessValue     bool
+	acpReadinessWindow    time.Duration
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -1471,6 +1472,11 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		body["agent_identities"] = ledger
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		if !cfg.SecureClientIntegration() {
+			if set := a.guardrailProfileSet(); set != nil {
+				body["profile_assignment_warnings"] = set.assignmentWarnings(true)
+			}
+		}
 		body["acp"] = map[string]interface{}{
 			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
 			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
@@ -1479,8 +1485,17 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
-			if directory := directoryHealthSummary(directoryCacheHealth()); directory != nil {
+			peer, viaHookSocket := managedHookPeerFromContext(r.Context())
+			if directory := directoryHealthSummary(directoryCacheHealth(), viaHookSocket && peer.UID == 0); directory != nil {
 				body["directory"] = directory
+			}
+			// An assignment group the host does not know (renamed, deleted,
+			// or spelled another way after an SSSD naming switch) selects
+			// nobody, and the whole team falls to the default profile:
+			// status and verify report it (GAP-0704). The last check is
+			// served; a stale one is refreshed in the background.
+			if warnings := liveGuardrailProfiles.Load().unknownGroupWarnings(0); len(warnings) > 0 {
+				body["profile_warnings"] = warnings
 			}
 			// Non-secret fingerprints of the per-user credential keys that
 			// authenticate right now (a rotation's staged key included).
@@ -1613,6 +1628,11 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// enforcement/observability posture, not just the primary's.
 		"connector_mode":  a.connectorModeSummary(r.Context()),
 		"connector_modes": a.connectorModesSummary(r.Context()),
+	}
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
+		if set := a.guardrailProfileSet(); set != nil {
+			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
+		}
 	}
 
 	if policy, ok := CurrentPolicyHealth(); ok {
@@ -3588,12 +3608,19 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
-				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
 				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
+				if reason == acpCallerAccountMismatchReason {
+					// The caller holds the credential, so the refusal can be
+					// signed and the guard can tell the borrower whose it is
+					// instead of "revoked" (GAP-0690).
+					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
+					return
+				}
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}

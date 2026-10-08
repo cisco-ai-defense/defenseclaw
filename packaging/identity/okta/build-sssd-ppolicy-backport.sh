@@ -141,7 +141,11 @@ log "built"
 find "$T/RPMS" -name '*.rpm' -not -name '*debuginfo*' -not -name '*debugsource*' -not -name '*-devel-*' | sort
 cat << NEXT
 
-Nothing was installed. To use the packages on this host, as root:
+Build tools (including rpm-build and gcc) and SSSD build dependencies were installed with dnf;
+on a stock RHEL 9.8 host this can add roughly 370 packages. No rebuilt SSSD package was
+installed. Build on a separate host or container if the target must stay free of build
+dependencies; copy the RPMs from $T/RPMS to the target, then install them there.
+To use the packages on this host, as root:
   1. Install the ones that match what is installed (same names), newer than the stock build:
        rpm -Uvh --oldpackage \$(for p in \$(rpm -qa 'sssd*' 'libsss_*' 'python3-sss*' 'libipa_hbac*' 'python3-libipa_hbac*'); do
          ls $T/RPMS/*/"\$(rpm -q --qf '%{NAME}' "\$p")"-2.9.8-4.el9.1.okta1.*.rpm; done)

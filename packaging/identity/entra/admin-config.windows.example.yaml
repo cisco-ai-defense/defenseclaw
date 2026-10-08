@@ -25,6 +25,7 @@ gateway:
   api_bind: 127.0.0.1
   api_port: 18970
 ai_discovery:
+  enabled: true                  # agents, MCP servers, skills and the IDE plugin inventory; off by default
   include_user_principal: true   # put the UPN in records; off by default
 guardrail:
   enabled: true

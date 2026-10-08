@@ -248,6 +248,38 @@ function ConvertTo-DefenseClawResultJson {
 }
 # endregion DefenseClaw MDM shared helpers
 
+function Format-DefenseClawVerifyFailure {
+    # The one line Intune shows for a failed verify: the error codes, then
+    # each required service that is not running (with its start mode), or
+    # the first error message when every service runs (GAP-0574). Returns
+    # $null for a verify that only found another lifecycle run in progress.
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Json)
+    $codes = ''
+    $detail = ''
+    try {
+        $document = $Json | ConvertFrom-Json
+        $errors = @($document.errors)
+        $codes = (@($errors | ForEach-Object { [string]$_.code }) -join ',')
+        if ($errors.Count -gt 0 -and @($errors | Where-Object { [string]$_.code -ne 'lifecycle_busy' }).Count -eq 0) {
+            return $null
+        }
+        $down = @(@($document.services) | Where-Object { $_.required -and [string]$_.state -ne 'running' } | ForEach-Object {
+                $mode = $_.PSObject.Properties['start_mode']
+                $text = [string]$_.name + ' is ' + [string]$_.state
+                if ($null -ne $mode -and [string]$mode.Value) { $text += ' (start ' + [string]$mode.Value + ')' }
+                $text
+            })
+        if ($down.Count -gt 0) {
+            $detail = $down -join '; '
+        } elseif ($errors.Count -gt 0) {
+            $detail = [string]$errors[0].message
+        }
+    } catch { $null = $_ }
+    $line = "verify failed ($codes)"
+    if ($detail) { $line += ': ' + $detail }
+    return $line
+}
+
 try {
     $deployment = Get-DefenseClawInstalledDeployment
 } catch {
@@ -269,10 +301,14 @@ if ($run.ExitCode -eq 0) {
     [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): healthy")
     exit 0
 }
-$summary = ''
-try {
-    $document = $run.StdOut | ConvertFrom-Json
-    $summary = (@($document.errors) | ForEach-Object { $_.code }) -join ','
-} catch { $null = $_ }
-[Console]::Out.WriteLine("DefenseClaw $($deployment.Version): verify failed ($summary)")
+$summary = Format-DefenseClawVerifyFailure -Json ([string]$run.StdOut)
+if ($null -eq $summary) {
+    # Another lifecycle run holds the lock; failing here would only start a
+    # Fix that waits on the same lock. The next scheduled run checks again.
+    [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): another DefenseClaw lifecycle run is in progress; checked again at the next run")
+    exit 0
+}
+$line = "DefenseClaw $($deployment.Version): $summary"
+if ($line.Length -gt 2000) { $line = $line.Substring(0, 2000) }
+[Console]::Out.WriteLine($line)
 exit 1

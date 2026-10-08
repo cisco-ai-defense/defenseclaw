@@ -225,7 +225,7 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
     applies the assignment order; an agent is attributed to its connector
     through the user's agent identities, and agents of other users are skipped.
     """
-    from defenseclaw.connector_paths import normalize
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, normalize
 
     assignments = getattr(cfg.guardrail, "profile_assignments", None) or []
     scoped = [a for a in assignments if a.match.connectors or a.match.agents]
@@ -240,7 +240,13 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
             owners = None
     probes: list[tuple[str, str]] = []
     for assignment in scoped:
-        connectors = [normalize(c) for c in assignment.match.connectors]
+        configured = getattr(cfg.guardrail, "connectors", {}) or {}
+        connectors = [
+            normalized for name in assignment.match.connectors
+            if (normalized := normalize(name)) in KNOWN_CONNECTORS or normalized in configured
+        ]
+        if assignment.match.connectors and not connectors:
+            continue
         for agent in assignment.match.agents or [""]:
             if agent and owners is not None and agent not in owners:
                 continue

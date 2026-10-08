@@ -258,6 +258,30 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 	return fetch(`http://localhost${path}`, { ...init, unix: DC_HOOK_SOCKET } as RequestInit)
 }
 
+// retryBusy sends the call again while the gateway answers 429: it is taking
+// all the hook calls it can, or this account is over its budget, and has not
+// evaluated the call. It waits the Retry-After the gateway asks for (1 to
+// 3 s) at most 3 times; the caller's abort signal keeps the whole exchange
+// inside the plugin timeout. The native hook runner does the same
+// (GAP-0205); without it a short burst failed the tool call (GAP-0535).
+async function retryBusy(send: () => Promise<Response>, signal: AbortSignal): Promise<Response> {
+	let response = await send()
+	for (let retry = 0; retry < 3 && response.status === 429; retry++) {
+		const asked = Number.parseInt(response.headers.get("retry-after") || "", 10)
+		const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000
+		await new Promise<void>((resolve, reject) => {
+			if (signal.aborted) return reject(new Error("DefenseClaw gateway busy"))
+			const timer = setTimeout(resolve, delay)
+			signal.addEventListener("abort", () => {
+				clearTimeout(timer)
+				reject(new Error("DefenseClaw gateway busy"))
+			}, { once: true })
+		})
+		response = await send()
+	}
+	return response
+}
+
 async function scopedHookToken(): Promise<string> {
 	const runtime = (globalThis as typeof globalThis & { Bun?: BunFileRuntime }).Bun
 	if (!runtime) throw new Error("scoped hook credential reader unavailable")
@@ -371,6 +395,22 @@ async function deploymentRemoved(): Promise<boolean> {
 	} catch (error) {
 		return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
 	}
+}
+
+// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
+// service is stopped, in the words of the native hook, instead of the
+// runtime's network error (GAP-0639).
+const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
+	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+	"(enterprise_managed_gateway_not_running)"
+
+// gatewayStopped reports a transport failure that means the gateway is not
+// running: its hook socket is missing, or nothing accepts the connection
+// (Node ECONNREFUSED, Bun ConnectionRefused).
+function gatewayStopped(error: unknown): boolean {
+	const failure = error as { code?: unknown; cause?: { code?: unknown } } | null
+	const codes = [failure?.code, failure?.cause?.code]
+	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
 function failureResponse(reason: string): GatewayResponse {
@@ -546,12 +586,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		if (token) headers.Authorization = `Bearer ${token}`
 
 		try {
-			const response = await gatewayFetch("/api/v1/amp/hook", {
+			const response = await retryBusy(() => gatewayFetch("/api/v1/amp/hook", {
 				method: "POST",
 				headers,
 				body,
 				signal: controller.signal,
-			}, token)
+			}, token), controller.signal)
 			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 
 			const data = await response.json() as GatewayResponse
@@ -561,6 +601,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
+			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
+				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
+			}
 			return failureResponse(safeError(error))
 		} finally {
 			clearTimeout(timer)

@@ -356,6 +356,9 @@ if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ] &&
   CURL_STATUS=0
   codex_gateway_post || CURL_STATUS=$?
 fi
+if [ "$CURL_STATUS" -eq 0 ]; then
+  defenseclaw_retry_busy codex_gateway_post || CURL_STATUS=$?
+fi
 _DC_CURL_CONFIG_TOKEN=
 _DC_HOOK_PAYLOAD=
 unset _DC_CURL_CONFIG_TOKEN _DC_HOOK_PAYLOAD

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -45,6 +46,15 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		lock, err := env.acquireLock(ctx)
 		statusBusy = errors.Is(err, errLockBusy)
 		lock.release()
+	}
+	if l.opts.Action == ActionVerify && env.packageTransactionInProgress() {
+		// The package scripts are replacing the deployment: its own ensure
+		// applies and verifies the new package. A check now compares the new
+		// package with the deployment the old one applied, and its failure
+		// left the daily verify unit failed after a healthy upgrade
+		// (GAP-0585).
+		r.AddError(codeBusy, "a DefenseClaw package install or upgrade is in progress, and its own lifecycle run applies and verifies the new package; this verify run skipped its checks")
+		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if l.opts.Action == ActionVerify {
 		// The daily verify can start while another run changes the
@@ -608,11 +618,66 @@ func (l *lifecycle) ledgerProblem() string {
 			}
 		}
 		problem, torn := env.attestationProblem(data)
+		if torn && attempt == 5 && problem == guardianManifestNotReconciled && l.manifestJustChanged() {
+			// An apply, ensure or enumerator cycle has just rewritten
+			// targets.yaml, and the guardian reconciles it within about a
+			// minute while it keeps enforcing the targets it last reconciled.
+			// That is a wait, not a failure an automation should page for
+			// (GAP-0691); a guardian that stays behind fails again later.
+			l.noteGuardianCatchingUp()
+			return ""
+		}
 		if !torn || attempt == 5 {
 			return problem
 		}
 		time.Sleep(env.PollInterval)
 	}
+}
+
+// packageTransactionMarker is what the Linux package preinstall leaves while
+// it holds the config-apply trigger for the transaction; the postinstall
+// removes it after its ensure.
+const packageTransactionMarker = "/run/defenseclaw-enterprise-apply-path.held"
+
+// packageTransactionInProgress reports a package transaction that started
+// less than half an hour ago (an older marker is from an interrupted one).
+func (e *Env) packageTransactionInProgress() bool {
+	if e.GOOS != "linux" {
+		return false
+	}
+	info, err := os.Lstat(e.P(packageTransactionMarker))
+	return err == nil && e.Now().Sub(info.ModTime()) < 30*time.Minute
+}
+
+// guardianCatchUpWindow is how long after targets.yaml changed a guardian
+// that has not reconciled it yet is waited for rather than failed: it
+// reconciles each minute.
+const guardianCatchUpWindow = 3 * time.Minute
+
+// codeGuardianReconcilePending warns that the guardian has not reconciled
+// a targets.yaml that changed moments ago.
+const codeGuardianReconcilePending = "guardian_reconcile_pending"
+
+// manifestJustChanged reports a targets.yaml written within
+// guardianCatchUpWindow.
+func (l *lifecycle) manifestJustChanged() bool {
+	info, err := os.Stat(l.env.P(l.env.Layout.ManifestPath))
+	if err != nil {
+		return false
+	}
+	age := l.env.Now().Sub(info.ModTime())
+	return age >= -time.Minute && age < guardianCatchUpWindow
+}
+
+// noteGuardianCatchingUp adds the guardian_reconcile_pending warning once.
+func (l *lifecycle) noteGuardianCatchingUp() {
+	for _, warning := range l.result.Warnings {
+		if warning.Code == codeGuardianReconcilePending {
+			return
+		}
+	}
+	l.result.AddWarning(codeGuardianReconcilePending, "targets.yaml changed moments ago and the hook guardian has not reconciled it yet; "+
+		"it does within about a minute and until then enforces the targets it last reconciled. No repair is needed: run verify again in a minute to confirm the new targets")
 }
 
 // describe fills the result's services, readiness and enrollment.
@@ -654,6 +719,9 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	sort.SliceStable(r.Services, func(i, j int) bool { return r.Services[i].Name < r.Services[j].Name })
 	if record != nil {
 		r.InstalledVersion = record.ProductVersion
+		if (r.Action == "status" || r.Action == "verify") && slices.Contains(record.MachinePolicyConnectors, "cursor") {
+			r.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
+		}
 	}
 	r.Enrollment = l.enrollmentCounts()
 	l.describePolicy(ctx, reportedPolicy, reloadError)
@@ -698,21 +766,33 @@ const codeAIDefenseUnavailable = "ai_defense_unavailable"
 // the directory (a domain controller or SSSD that does not answer).
 const codeDirectoryLookups = "directory_lookups_failing"
 
+const codeProfileAssignments = "profile_assignment_unmatched"
+const codeOptionalDestination = "optional_destination_failing"
+
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
 // that fail: the accounts without cached facts then run under the default
 // guardrail profile, and nothing else in status or verify showed it (GAP-0216).
 func (l *lifecycle) readGatewayPosture(body []byte) {
 	var health struct {
+		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
+		Telemetry                 struct {
+			Details struct {
+				OptionalState  string `json:"optional_destination_state"`
+				FailureSummary string `json:"optional_destination_failure_summary"`
+			} `json:"details"`
+		} `json:"telemetry"`
 		Inspection *struct {
 			Local     string `json:"local"`
 			AIDefense string `json:"ai_defense"`
 		} `json:"inspection"`
 		Directory *struct {
-			Failing int    `json:"failing"`
-			Since   string `json:"since"`
-			Stale   int    `json:"stale"`
+			Failing  int      `json:"failing"`
+			Since    string   `json:"since"`
+			Stale    int      `json:"stale"`
+			Accounts []string `json:"accounts"`
 		} `json:"directory"`
+		ProfileWarnings []string `json:"profile_warnings"`
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
@@ -721,15 +801,61 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.Inspection.Local = health.Inspection.Local
 		l.result.Inspection.AIDefense = health.Inspection.AIDefense
 	}
+	for _, warning := range health.ProfileAssignmentWarnings {
+		l.result.AddWarning(codeProfileAssignments, warning)
+	}
+	if health.Telemetry.Details.OptionalState == "degraded" {
+		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+
+			"; inspect `defenseclaw-gateway status` or the gateway /health telemetry details")
+	}
 	if d := health.Directory; d != nil && d.Failing > 0 {
-		message := fmt.Sprintf("directory lookups are failing for %d account(s) since %s; accounts without cached facts get the "+
-			"default guardrail profile (default_lookup_failed)", d.Failing, d.Since)
+		which := ""
+		if ids := directoryLookupAccounts(d.Accounts); ids != "" {
+			which = " (" + ids + ")"
+		}
+		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; accounts without cached facts get the "+
+			"default guardrail profile (default_lookup_failed)", d.Failing, which, d.Since)
 		if d.Stale > 0 {
 			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
 		}
-		l.result.AddWarning(codeDirectoryLookups, message+". Check SSSD or the domain controller; `"+
+		check := "Check SSSD or the domain controller"
+		if l.env.GOOS == "darwin" {
+			check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller"
+		}
+		l.result.AddWarning(codeDirectoryLookups, message+". "+check+"; `"+
 			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
 	}
+	for i, warning := range health.ProfileWarnings {
+		if i == profileWarningsMax {
+			l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d more guardrail profile assignment warnings", len(health.ProfileWarnings)-i))
+			break
+		}
+		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
+			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
+		}
+	}
+}
+
+// codeProfileAssignment warns that a guardrail profile assignment selects
+// nobody: a group the host does not know (renamed, deleted, or spelled
+// another way after an SSSD naming switch), so its members get the default
+// profile (GAP-0704).
+const codeProfileAssignment = "profile_assignment_unmatched"
+
+// profileWarningsMax bounds the assignment warnings status and verify list.
+const profileWarningsMax = 20
+
+// directoryLookupAccounts names the failing accounts the gateway reported by
+// uid ("uid 1001, uid 1002"); anything that is not a plain uid is dropped.
+func directoryLookupAccounts(ids []string) string {
+	named := []string{}
+	for _, id := range ids {
+		if id == "" || len(id) > 10 || strings.Trim(id, "0123456789") != "" {
+			continue
+		}
+		named = append(named, "uid "+id)
+	}
+	return strings.Join(named, ", ")
 }
 
 // enrollmentCounts summarizes the guardian authorization ledger; detailed

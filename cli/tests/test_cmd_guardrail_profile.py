@@ -407,3 +407,37 @@ def test_profile_summary_includes_every_scoped_assignment(monkeypatch):
     result = gateway.current_user_guardrail_profile(app.cfg)
     assert len(result["overrides"]) == len(agents)
     assert agents[-1] in cmd_guardrail.profile_status_text(app.cfg, result)
+
+
+def test_profile_status_does_not_present_unknown_connector_as_active(monkeypatch):
+    from defenseclaw import gateway
+
+    cfg = default_config()
+    cfg.guardrail.profiles = {"base": GuardrailProfile(mode="observe"), "pin": GuardrailProfile(mode="action")}
+    cfg.guardrail.profile_assignments = [
+        GuardrailProfileAssignment(profile="pin", match=GuardrailProfileMatch(connectors=["claudcode"]))
+    ]
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+    probes = []
+
+    def resolve(self, *, user="", connector="", agent=""):
+        probes.append(connector)
+        return {"profile": "pin" if connector else "base", "match": "connector" if connector else "default"}
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "guardrail_profile_resolve", resolve)
+    answer = gateway.current_user_guardrail_profile(cfg)
+    assert answer["overrides"] == []
+    assert probes == [""]
+
+
+def test_cursor_status_names_missing_prompt_hook(monkeypatch):
+    from defenseclaw import gateway
+
+    app = AppContext()
+    app.cfg = default_config()
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["cursor"])
+    monkeypatch.setattr(app.cfg, "has_connector_configured", lambda: True)
+    monkeypatch.setattr(gateway, "current_user_guardrail_profile", lambda cfg: None)
+    result = CliRunner().invoke(cmd_guardrail.guardrail, ["status", "--json"], obj=app, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert "beforeSubmitPrompt" in json.loads(result.output)["warnings"][-1]

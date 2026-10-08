@@ -147,6 +147,9 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
 	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
+		remaining, purged := windowsManagedHooksStandaloneACPUserState()
+		report.UserStateRemaining = append(report.UserStateRemaining, remaining...)
+		report.UserStatePurged = append(report.UserStatePurged, purged...)
 		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
@@ -159,6 +162,40 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 		}
 	}
 }
+
+// windowsManagedHooksStandaloneACPUserState removes, with purge, the managed
+// ACP folder (token copies and editor contract locks) of every account that
+// still has one: signed out, revoked, ACP-only or kept for its
+// connector_backups (GAP-0773). It returns what stays ("SID: path: reason")
+// and what went ("SID: path").
+func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
+	if err := enterpriseHookWindowsUserCleanupIdentity(); err != nil {
+		return nil, nil
+	}
+	copies, err := windowsManagedHooksStandaloneACPUserCopies()
+	if err != nil {
+		return []string{"managed ACP user copies: " + boundedEnterpriseHookUserCleanupText(err.Error())}, nil
+	}
+	var remaining, purged []string
+	for _, copy := range copies {
+		label := copy.SID + ": " + filepath.Join(copy.Home, ".defenseclaw", "acp")
+		if err := windowsManagedHooksStandaloneACPUserPurger(copy.Home, copy.SID); err != nil {
+			remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+			continue
+		}
+		purged = append(purged, label)
+	}
+	sort.Strings(remaining)
+	sort.Strings(purged)
+	return remaining, purged
+}
+
+// windowsManagedHooksStandaloneACPUserCopies and
+// windowsManagedHooksStandaloneACPUserPurger are replaceable in tests.
+var (
+	windowsManagedHooksStandaloneACPUserCopies = enterprisehooks.WindowsManagedACPUserCopies
+	windowsManagedHooksStandaloneACPUserPurger = enterprisehooks.PurgeWindowsACPUserState
+)
 
 // windowsManagedHooksStandaloneCursorTombstonePurger is replaceable in tests.
 var windowsManagedHooksStandaloneCursorTombstonePurger = enterprisehooks.PurgeWindowsCursorManagedTombstone
