@@ -31,6 +31,11 @@ detection and logs.
 
 ## Before you start
 
+After the first install or a reinstall, ask users to restart agent sessions
+that were already open. Those sessions keep running without DefenseClaw until
+restarted. `status` and `ensure` report `agent_sessions_restart_required`
+while they remain open.
+
 - **Tenant**: licences and device groups are in place; see
   [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). Intune has no Linux enrollment setting.
 - **Devices**: a distribution and version on Microsoft's list of Intune-supported

@@ -657,6 +657,11 @@ on one channel.
 ## Check health
 
 | Check | Command or file |
+After the first install or a reinstall, ask users to restart agent sessions
+that were already open. Those sessions keep running without DefenseClaw until
+restarted. `status` and `ensure` report `agent_sessions_restart_required`
+while they remain open.
+
 | --- | --- |
 | Verify, read-only | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json` (exit `1` on a problem) |
 | Status, read-only | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json` |
