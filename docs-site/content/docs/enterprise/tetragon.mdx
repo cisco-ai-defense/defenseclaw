@@ -1394,7 +1394,12 @@ limits of this release follow:
 - **A process ID never denies.** An agent session the helper matches only by
   its process ID (a script-hosted agent, such as an npm install that `node`
   runs) is monitored, not denied, because a process ID can be reused between
-  two passes. Its would-block hits still count. Status warns
+  two passes. Its would-block hits still count, with one exception: a
+  script-hosted session of the user the controls deny is in no controls
+  policy in `enforce`. Its opens are recorded only by the observe policy
+  (`defenseclaw-observe`, as file activity of the agent) and by your own
+  policies, and never count as would-block hits, so its reads of the
+  protected paths do not show in that user's burn-in. Status warns
   `kernel_pid_anchor_monitor_only`, and a user whose agents are all of this
   kind stays in monitor with that reason after its burn-in.
 - **One user per computer is denied.** The controls policy carries the native

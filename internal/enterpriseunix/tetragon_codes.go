@@ -361,7 +361,8 @@ var tetragonCodes = map[string]tetragonCodeText{
 	kernelpolicy.WarnPIDMonitorOnly: {Message: func(tetragonFacts) string {
 		return "agent sessions matched only by their process id, such as a script-hosted agent run by node, are monitored in enforce mode" +
 			" (a process id can be reused between two passes, so it never denies; only a native agent binary is a deny anchor);" +
-			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
+			" nothing to do: their would-block hits are still counted, except for a script-hosted session of the user the controls deny," +
+			" which only the observe policy records; the Tetragon guide lists this limit"
 	}},
 	kernelpolicy.WarnSessionsPredateControls: {Message: func(f tetragonFacts) string {
 		return defaultStr(f.Detail, "some") + " agent session(s) of enforced users started before the kernel controls loaded" +
