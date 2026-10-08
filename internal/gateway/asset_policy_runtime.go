@@ -94,6 +94,9 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	if !probe.Matched {
+		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
+	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
@@ -211,6 +214,9 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	if !probe.Matched {
+		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
+	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }

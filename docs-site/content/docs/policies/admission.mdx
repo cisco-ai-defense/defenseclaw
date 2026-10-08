@@ -472,6 +472,25 @@ approved-catalog rules.
 agent hook still refuses a skill, plugin command or MCP server on the `denied`
 list; only the default, registry and approval rules are skipped at the hook.
 
+### Where a denied skill is refused
+
+An agent hook refuses a denied skill when the agent selects it: Claude Code's
+Skill tool and slash commands, and Codex's `$name` selection. Codex has no hook
+on its own skill loading, so asked for a skill in plain words it reads the
+skill's `SKILL.md` with a shell command and follows it. The Claude Code and
+Codex hooks therefore also refuse any tool call that reaches into the folder of
+a denied skill: a `.../skills/<name>/...` path in a command, a file path or a
+working folder. Two things stay out of reach of a hook:
+
+- the skill's name and description, which Codex lists to the model from its
+  own skill index before any hook runs;
+- a command that builds the path at run time, for example from a variable, a
+  glob, or a `cd` into the skills folder followed by a relative path.
+
+Take a denied skill off the device to remove it from that index: where the
+install watcher runs (per-user installs and managed Windows) it quarantines the
+skill; on other managed devices remove it with your device management tool.
+
 ### Tool lists
 
 `asset_policy.tool.denied` and `asset_policy.tool.allowed` hold rules with a

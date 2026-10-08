@@ -87,3 +87,39 @@ func (a *APIServer) declaredSkillNames(ctx context.Context, connector, cwd strin
 	}
 	return names
 }
+
+// skillFolderAccessDecision blocks a tool call that reaches into the folder
+// of a denied skill. Asked for a skill in plain words, Codex reads its
+// SKILL.md with a shell command and follows it, and no skill selection hook
+// sees that (GAP-0569). Only the denied list applies: reading any other skill
+// folder is not an asset load. Secure Client keeps main (issue #1092).
+func (a *APIServer) skillFolderAccessDecision(
+	ctx context.Context, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
+) (config.AssetPolicyDecision, bool) {
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() || len(cfg.AssetPolicy.Skill.Denied) == 0 || !runtimeAssetCanEnforce(hookEvent) {
+		return config.AssetPolicyDecision{}, false
+	}
+	facts := claimedAssetFactsFromContext(ctx)
+	for _, ref := range assetfacts.SkillFolderRefs(toolInput, hookActiveHome(ctx), cwd) {
+		declared := facts.DeclaredFor(ref.Name)
+		if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
+			declared = append(declared, name)
+		}
+		input := config.AssetPolicyInput{
+			TargetType: "skill", Name: ref.Name, DeclaredNames: declared,
+			Connector: connector, SourcePath: ref.Dir, RuntimeSurface: "skill_folder",
+		}
+		if verdict, _ := cfg.AssetListDecision(input); verdict != config.AssetListDeny {
+			continue
+		}
+		decision := cfg.EvaluateAssetPolicy(input)
+		probe := skillRuntimeProbe{
+			TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
+			SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+		}
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+		return decision, true
+	}
+	return config.AssetPolicyDecision{}, false
+}

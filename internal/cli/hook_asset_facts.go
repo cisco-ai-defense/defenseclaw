@@ -21,7 +21,7 @@ import (
 )
 
 // hookAssetFacts is the assetfacts.Header value of a standalone managed
-// hook: the names the skill folder this event invokes declares
+// hook: the names the skill folders this event names or reaches into declare
 // in their SKILL.md, read as the user (GAP-0570). The gateway, a service
 // account, may not read this home.
 func hookAssetFacts(connector string, payload []byte) string {
@@ -50,6 +50,9 @@ func hookAssetFacts(connector string, payload []byte) string {
 		for _, root := range assetfacts.SkillRoots(connector, home, event.CWD) {
 			addSkill(name, filepath.Join(root, name))
 		}
+	}
+	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
+		addSkill(ref.Name, ref.Dir)
 	}
 	return assetfacts.Encode(facts)
 }

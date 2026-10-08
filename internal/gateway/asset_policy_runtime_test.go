@@ -737,3 +737,24 @@ func TestClaudeCodeSkillDeniedByDeclaredName(t *testing.T) {
 		t.Fatalf("matched=%v decision=%+v, want the declared name not to admit epa-alias", matched, decision)
 	}
 }
+
+// GAP-0569: Codex asked for a denied skill in plain words reads its SKILL.md
+// with a shell command; the read is refused, other skill folders are not.
+func TestCodexReadOfDeniedSkillFolderIsBlocked(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-two", Connector: "codex"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: t.TempDir()})
+	read := func(command string) (config.AssetPolicyDecision, bool) {
+		return api.codexSkillAssetDecision(ctx, codexHookRequest{
+			HookEventName: "PreToolUse", ToolName: "Bash",
+			ToolInput: map[string]interface{}{"command": []interface{}{"bash", "-lc", command}},
+		})
+	}
+	if decision, matched := read("sed -n 1,200p ~/.codex/skills/epa-two/SKILL.md"); !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+		t.Fatalf("matched=%v decision=%+v, want the denied skill folder refused", matched, decision)
+	}
+	if decision, matched := read("cat ~/.codex/skills/epa-ok/SKILL.md"); matched {
+		t.Fatalf("an allowed skill folder was refused: %+v", decision)
+	}
+}
