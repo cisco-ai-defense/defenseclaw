@@ -233,6 +233,21 @@ func (c ACPConfig) ACPPairBindingRefusals(client, agent, profile string) []strin
 	return refusals
 }
 
+// ACPPairDisabled names the central switch that turns the pair off: a
+// disabled client, agent or per-pair binding. It is "" when none is off.
+func (c ACPConfig) ACPPairDisabled(client, agent string) string {
+	if binding, ok := c.Clients[client]; ok && !binding.Enabled {
+		return fmt.Sprintf("acp.clients.%s is disabled", client)
+	}
+	if binding, ok := c.Agents[agent]; ok && !binding.Enabled {
+		return fmt.Sprintf("acp.agents.%s is disabled", agent)
+	}
+	if pair, ok := c.ACPBindingFor(client, agent); ok && !pair.Enabled {
+		return fmt.Sprintf("acp.bindings.%s is disabled", ACPBindingKey(client, agent))
+	}
+	return ""
+}
+
 type ACPBinding struct {
 	Enabled bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`

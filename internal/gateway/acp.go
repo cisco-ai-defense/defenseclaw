@@ -144,6 +144,15 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusForbidden, body)
 	}
 	profileName, profile, ok, matched := resolveACPProfileForPair(cfg.ACP, req.ClientID, req.AgentID, req.Profile)
+	if !matched && !cfg.SecureClientIntegration() {
+		// A pair switched off is reported as off, whatever profile it names
+		// now: the moved answer told the user to enroll and run setup for a
+		// pair that cannot run (GAP-0834).
+		if disabled := cfg.ACP.ACPPairDisabled(req.ClientID, req.AgentID); disabled != "" {
+			refuse("ACP pair is disabled centrally: "+disabled, acp.RefusalBinding, nil)
+			return
+		}
+	}
 	if !matched {
 		// Distinguishable on purpose: a stale guard argv and an undefined
 		// profile need different fixes, and "not configured" sent operators
