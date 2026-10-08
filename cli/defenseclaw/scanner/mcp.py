@@ -42,7 +42,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
 from defenseclaw.config import (
@@ -522,6 +522,21 @@ def _is_trusted_codex_node_repl(command: str) -> bool:
     return False
 
 
+# GAP-0385: on Windows the npx and uvx launchers are the files npx.cmd and
+# uvx.exe; a command written with the extension names the same launcher and
+# goes through the same trusted-path resolution as the bare name.
+_WINDOWS_LAUNCHER_FILES = {"npx.cmd": "npx", "uvx.exe": "uvx"}
+
+
+def _bare_stdio_launcher(cmd: str) -> str:
+    """The launcher name of a bare stdio command, lower-cased: ``npx.cmd``
+    and ``uvx.exe`` are ``npx`` and ``uvx`` on Windows."""
+    lowered = cmd.strip().lower()
+    if os.name == "nt":
+        return _WINDOWS_LAUNCHER_FILES.get(lowered, lowered)
+    return lowered
+
+
 def _stdio_path_command_error(cmd: str) -> str:
     """Refusal text for a stdio command given as a path (GAP-2640).
 
@@ -570,8 +585,15 @@ def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
     # design, so "/opt/homebrew/bin/npx" does not read as "npx is not allowed".
     if "/" in cmd or "\\" in cmd or os.sep in cmd or (os.altsep and os.altsep in cmd):
         return _stdio_path_command_error(cmd)
-    if cmd.lower() not in _SAFE_STDIO_LAUNCHERS:
-        return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
+    if _bare_stdio_launcher(cmd) not in _SAFE_STDIO_LAUNCHERS:
+        # GAP-0406: never widen what a scan starts. Name the allowlist and the
+        # supported ways to add such a server instead.
+        return (
+            f"command {cmd!r} is not an allowlisted stdio launcher (allowed: npx, uvx): "
+            "a scan starts only npm or PyPI packages through npx or uvx, never another program. "
+            "Start the server with npx or uvx, serve it over HTTP and use its URL, or review it "
+            "and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+        )
 
     if not isinstance(argv, (list, tuple)):
         return f"launcher {cmd!r} arguments must be a list"
@@ -657,9 +679,12 @@ def _resolve_trusted_windows_launcher(
     from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
 
     if not _is_trusted_binary_path(canonical):
+        # GAP-0385: name the file and the way to trust its folder.
+        folder = ntpath.dirname(canonical)
         raise MCPStdioLaunchError(
             f"local MCP launcher {launcher!r} resolved to an untrusted Windows path "
-            "or failed owner/DACL validation"
+            f"or failed owner/DACL validation: {canonical}. If only administrators can "
+            f"change that folder, trust it with: defenseclaw setup trusted-paths add \"{folder}\""
         )
     return canonical
 
@@ -700,7 +725,7 @@ def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
     env = _safe_subprocess_env(entry.env)
     args = list(entry.args or [])
     command = (entry.command or "").strip()
-    lowered = command.lower()
+    lowered = _bare_stdio_launcher(command)
 
     if _is_trusted_codex_node_repl(command):
         resolved = _canonical_windows_file(command)
@@ -767,7 +792,7 @@ def _classify_windows_stdio_error(
     leaves = list(_exception_leaves(exc))
     leaf_text = " ".join(str(item).lower() for item in leaves)
     stderr_note = (
-        "; launcher stderr was captured and withheld"
+        "; the server's stderr is printed above and not stored"
         if stderr_size
         else ""
     )
@@ -807,6 +832,24 @@ def _classify_windows_stdio_error(
         f"MCP stdio protocol failure for launcher {plan.launcher!r} during "
         f"initialize/initialized/tools/list{stderr_note}"
     )
+
+
+def _echo_server_stderr_tail(errlog: Any, launcher: str, max_lines: int = 8) -> None:
+    """Print the last stderr lines of a server that failed to start (GAP-0385).
+
+    On Linux and macOS the server's stderr reaches the terminal directly; on
+    Windows it goes to a temporary file, so a missing folder or an unknown
+    package showed only "exited before completing initialize". The lines go
+    to this process's stderr, not into the error text, which is stored with
+    the scan result and sent to the audit sinks.
+    """
+    try:
+        errlog.seek(0)
+        lines = [line.rstrip() for line in errlog.read()[-4096:].splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return
+    for line in lines[-max_lines:]:
+        print(f"[{launcher} stderr] {line[:300]}", file=sys.stderr)
 
 
 async def _scan_windows_stdio_tools(
@@ -877,6 +920,7 @@ async def _scan_windows_stdio_tools(
             errlog.flush()
             stderr_size = errlog.tell()
             setattr(exc, "_defenseclaw_stderr_size", stderr_size)
+            _echo_server_stderr_tail(errlog, plan.launcher)
             raise
 
     _trace_windows_stdio_lifecycle(

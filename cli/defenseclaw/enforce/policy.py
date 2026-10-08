@@ -121,8 +121,9 @@ class PolicyEngine:
 
     def allow(
         self, target_type: str, name: str, reason: str, source_path: str = "", *, clear_journal: bool = True,
+        pins: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.allow_for_connector(target_type, name, "", reason, source_path, clear_journal=clear_journal)
+        self.allow_for_connector(target_type, name, "", reason, source_path, clear_journal=clear_journal, pins=pins)
 
     def allow_for_connector(
         self,
@@ -133,9 +134,11 @@ class PolicyEngine:
         source_path: str = "",
         *,
         clear_journal: bool = True,
+        pins: list[dict[str, Any]] | None = None,
     ) -> None:
         """Add an operator allow (asset_policy.<type>.allowed, pinned to
-        ``source_path`` when given) and, with ``clear_journal``, clear the
+        ``source_path`` when given, and an MCP allow to each server
+        definition in ``pins``) and, with ``clear_journal``, clear the
         residual quarantine and runtime-disable journal state so the allow
         takes full effect."""
         if self._legacy_rows():
@@ -144,7 +147,7 @@ class PolicyEngine:
         else:
             asset_lists.write_operator_decision(
                 self.cfg, op=asset_lists.OP_ALLOW, target_type=target_type, name=name,
-                connector=connector, reason=reason, source_path=source_path,
+                connector=connector, reason=reason, source_path=source_path, pins=pins,
             )
         if self.store and clear_journal:
             self.store.clear_action_field(target_type, name, "file", connector)

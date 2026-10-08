@@ -1177,10 +1177,10 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		result *scanner.ScanResult
 		err    error
 	)
-	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
 	// The live config: scanner and llm edits reload hot.
 	cfg := a.liveConfig()
+	scanCtx, cancel := context.WithTimeout(ctx, componentScanTimeout(cfg, component))
+	defer cancel()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
@@ -1198,6 +1198,7 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 			cfg.ResolveLLM("scanners.mcp"),
 			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "claudecode")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		rulesDir := ""

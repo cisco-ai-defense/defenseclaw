@@ -4077,10 +4077,10 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 		result *scanner.ScanResult
 		err    error
 	)
-	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
 	// The live config: scanner and llm edits reload hot.
 	cfg := a.liveConfig()
+	scanCtx, cancel := context.WithTimeout(ctx, componentScanTimeout(cfg, component))
+	defer cancel()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
@@ -4098,6 +4098,7 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 			cfg.ResolveLLM("scanners.mcp"),
 			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "codex")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		// Agent, rule, and memory targets participate in inventory/discovery,

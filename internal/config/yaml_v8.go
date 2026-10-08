@@ -215,6 +215,9 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if err := rejectV9RemovedKeys(source, root); err != nil {
 		return nil, err
 	}
+	if !v9SecureClientDocument(root) {
+		dropRetiredScannerKeys(root)
+	}
 	plainValue, err := projectV8YAML(source, root, "$")
 	if err != nil {
 		return nil, err
@@ -435,6 +438,36 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+// retiredScannerKeys are scanner keys that no scan path ever read and that
+// config_version 9 dropped (GAP-0295, GAP-0301). 1.0 pre-release builds
+// accepted and wrote them, so a source that still holds one loads with the
+// key ignored, and the next write leaves it out. A Secure Client document
+// keeps the closed schema of main (issue #1092), which never had them.
+// Remove this after 1.1, when no pre-release config is left to load.
+var retiredScannerKeys = [][]string{
+	{"scanners", "mcp_scanner", "api"},
+	{"scanners", "mcp_scanner", "timeouts"},
+	{"scanners", "skill_scanner", "timeouts", "llm_s"},
+}
+
+func dropRetiredScannerKeys(root *yaml.Node) {
+	for _, path := range retiredScannerKeys {
+		parent := root
+		for _, key := range path[:len(path)-1] {
+			parent = v8YAMLMapValue(parent, key)
+		}
+		if parent == nil || parent.Kind != yaml.MappingNode {
+			continue
+		}
+		for index := 0; index+1 < len(parent.Content); index += 2 {
+			if parent.Content[index].Value == path[len(path)-1] {
+				parent.Content = append(parent.Content[:index], parent.Content[index+2:]...)
+				break
+			}
+		}
+	}
 }
 
 func rejectV9RulePackDir(source string, scope *yaml.Node, path string) error {

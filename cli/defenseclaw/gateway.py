@@ -772,16 +772,18 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
-    def scan_skill(self, target: str, name: str = "") -> dict[str, Any]:
+    def scan_skill(self, target: str, name: str = "", timeout: float = 120) -> dict[str, Any]:
         """Request a skill scan on the remote sidecar host.
 
         The sidecar runs the skill-scanner locally against the target path
-        on that machine and returns the ScanResult JSON.
+        on that machine and returns the ScanResult JSON. The gateway bounds
+        the scan by scanners.skill_scanner.timeouts.scan_s, so the caller
+        passes a timeout a little longer than that.
         """
         resp = self._session.post(
             f"{self.base_url}/v1/skill/scan",
             json={"target": target, "name": name},
-            timeout=120,
+            timeout=timeout,
             allow_redirects=False,
         )
         resp.raise_for_status()

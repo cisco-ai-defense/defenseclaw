@@ -1344,26 +1344,12 @@ class SkillScannerAnalyzers:
 @dataclass
 class SkillScannerTimeouts:
     scan_s: int = 0
-    llm_s: int = 0
-
-
-@dataclass
-class MCPScannerAPIConfig:
-    endpoint: str = ""
-    api_key_env: str = ""
 
 
 @dataclass
 class MCPScannerYARAConfig:
     include_bundled: bool | None = None
     extra_rules: list[AssetFileRef] = field(default_factory=list)
-
-
-@dataclass
-class MCPScannerTimeouts:
-    stdio_s: int = 0
-    remote_s: int = 0
-    llm_s: int = 0
 
 
 @dataclass
@@ -1410,9 +1396,7 @@ class MCPScannerConfig:
     # config_version 9 keys (empty = unset). ``analyzers`` stays the v8
     # comma-separated string here; a v9 list loads joined with commas.
     judge_source: str = ""
-    api: MCPScannerAPIConfig = field(default_factory=MCPScannerAPIConfig)
     yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
-    timeouts: MCPScannerTimeouts = field(default_factory=MCPScannerTimeouts)
 
 
 @dataclass
@@ -4079,8 +4063,7 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
     if isinstance(mcp, dict):
         if not mcp.get("judge_source"):
             mcp.pop("judge_source", None)
-        for key in ("api", "virustotal", "timeouts"):
-            _prune_v9_block(mcp, key, drop_false=True)
+        _prune_v9_block(mcp, "virustotal", drop_false=True)
         _prune_v9_block(mcp, "yara")
 
 
@@ -4246,6 +4229,10 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
             type(raw).__name__,
         )
         return {}
+    from defenseclaw.observability.v8_config import drop_retired_scanner_keys
+
+    # A save leaves out the scanner keys no scan read (GAP-0295, GAP-0301).
+    drop_retired_scanner_keys(raw)
     return raw
 
 
@@ -5457,9 +5444,7 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
             scan_instructions=raw.get("scan_instructions", False),
             llm=_merge_llm(raw.get("llm")),
             judge_source=str(raw.get("judge_source", "") or ""),
-            api=_merge_mcp_scanner_api(raw.get("api")),
             yara=_merge_mcp_scanner_yara(raw.get("yara")),
-            timeouts=_merge_mcp_scanner_timeouts(raw.get("timeouts")),
         )
     return MCPScannerConfig()
 
@@ -5665,7 +5650,7 @@ def _merge_skill_scanner_analyzers(skill_raw: Any) -> SkillScannerAnalyzers:
 
 def _merge_skill_scanner_timeouts(raw: Any) -> SkillScannerTimeouts:
     raw = _mapping(raw)
-    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")), llm_s=_int_or_zero(raw.get("llm_s")))
+    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")))
 
 
 def _mcp_analyzers_text(raw: Any) -> str:
@@ -5675,27 +5660,11 @@ def _mcp_analyzers_text(raw: Any) -> str:
     return str(raw) if raw is not None else ""
 
 
-def _merge_mcp_scanner_api(raw: Any) -> MCPScannerAPIConfig:
-    raw = _mapping(raw)
-    return MCPScannerAPIConfig(
-        endpoint=str(raw.get("endpoint", "") or ""), api_key_env=str(raw.get("api_key_env", "") or "")
-    )
-
-
 def _merge_mcp_scanner_yara(raw: Any) -> MCPScannerYARAConfig:
     raw = _mapping(raw)
     return MCPScannerYARAConfig(
         include_bundled=_optional_bool(raw.get("include_bundled")),
         extra_rules=[_merge_asset_file_ref(entry) for entry in raw.get("extra_rules") or [] if isinstance(entry, dict)],
-    )
-
-
-def _merge_mcp_scanner_timeouts(raw: Any) -> MCPScannerTimeouts:
-    raw = _mapping(raw)
-    return MCPScannerTimeouts(
-        stdio_s=_int_or_zero(raw.get("stdio_s")),
-        remote_s=_int_or_zero(raw.get("remote_s")),
-        llm_s=_int_or_zero(raw.get("llm_s")),
     )
 
 

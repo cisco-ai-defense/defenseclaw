@@ -581,6 +581,19 @@ def standalone_managed(current: bytes) -> bool:
     return managed and _standalone_profile(document)
 
 
+def secure_client_document(document: Any) -> bool:
+    """Whether a parsed config (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describes a
+    managed device on the Secure Client profile, as Go v9SecureClientDocument."""
+    from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
+
+    if not isinstance(document, dict) or machine_managed_standalone():
+        return False
+    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
+        str(document.get("deployment_mode") or "")
+    )
+    return managed and not _standalone_profile(document)
+
+
 def secure_client_managed(current: bytes) -> bool:
     """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
     managed device on the Secure Client profile."""

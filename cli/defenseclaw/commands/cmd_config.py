@@ -662,7 +662,20 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
     _refuse_config_version(parts)
+    _refuse_retired_scanner_key(key, parts)
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
+
+
+def _refuse_retired_scanner_key(key: str, parts: list) -> None:
+    """A load ignores the scanner keys no scan read (GAP-0295, GAP-0301), so
+    setting one must fail instead of writing a value that does nothing."""
+    from defenseclaw.observability.v8_config import _RETIRED_SCANNER_KEYS
+
+    if any(tuple(parts[: len(retired)]) == retired for retired in _RETIRED_SCANNER_KEYS):
+        raise click.ClickException(
+            f"{key} is not a configuration key: it was removed because no scan read it; "
+            "config.yaml was not changed."
+        )
 
 
 @config_cmd.command("unset")

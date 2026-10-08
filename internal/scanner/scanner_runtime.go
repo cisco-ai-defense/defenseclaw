@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -89,4 +90,48 @@ func (s *MCPScanner) runtimeEnv() []string {
 		}
 	}
 	return env
+}
+
+// MCPRulePack is the guardrail rule pack an MCP scan lays over the server
+// definition, as `defenseclaw mcp scan` does with rulepack.maybe_wrap: the
+// effective pack directory and the guardrail.rules layers that change its
+// rules (GAP-0296).
+type MCPRulePack struct {
+	Dir   string
+	Rules []config.GuardrailRulesConfig
+}
+
+// MCPRulePackFor resolves the rule pack for connector the way the Python CLI
+// does: the connector's effective pack, else the global one; guardrail.rules
+// alone act on the default pack. A Secure Client host has none: Cisco AI
+// Defense decides there and local regex detection is off.
+func MCPRulePackFor(cfg *config.Config, connector string) MCPRulePack {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return MCPRulePack{}
+	}
+	layers := cfg.EffectiveRulesForConnector(connector)
+	dir := cfg.EffectiveRulePackDirForConnector(connector)
+	if dir == "" && len(layers) > 0 {
+		dir = cfg.ResolveRulePackDir(config.RulePackRef{Name: "default"})
+	}
+	return MCPRulePack{Dir: dir, Rules: layers}
+}
+
+// runtimeArg is the pack as JSON with config.yaml's keys, which the
+// runtime's mcp-scan turns into the CLI's rule-pack overlay.
+func (p MCPRulePack) runtimeArg() (string, error) {
+	rules := make([]map[string]any, 0, len(p.Rules))
+	for _, layer := range p.Rules {
+		encoded, err := yaml.Marshal(layer)
+		if err != nil {
+			return "", err
+		}
+		var block map[string]any
+		if err := yaml.Unmarshal(encoded, &block); err != nil {
+			return "", err
+		}
+		rules = append(rules, block)
+	}
+	out, err := json.Marshal(map[string]any{"dir": p.Dir, "rules": rules})
+	return string(out), err
 }

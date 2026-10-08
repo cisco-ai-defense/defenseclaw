@@ -677,14 +677,13 @@ which combination to recommend.
 | `scanners.skill_scanner.review_queue_min` | `MEDIUM` | The review (warn) band starts here. It must not be above `fail_on_severity`. |
 | `scanners.skill_scanner.analyzers.virustotal` | off | `{enabled, api_key_env, upload_files}`. The key is read from the variable `api_key_env` names (`VIRUSTOTAL_API_KEY` when empty), never from `config.yaml`. |
 | `scanners.skill_scanner.analyzers.aidefense.enabled`, `analyzers.osv.enabled` | `false` | Cisco AI Defense and OSV dependency checks. |
-| `scanners.skill_scanner.timeouts.scan_s` | `300` | Seconds one install-watcher or rescan skill scan may run. `0` uses the default. The REST scan endpoint and hook-started scans stop at two minutes, and `defenseclaw skill scan` has no time limit. |
-| `scanners.skill_scanner.timeouts.llm_s` | `60` | Accepted but not read in this release: the skill scanner has no judge-timeout input. |
+| `scanners.skill_scanner.timeouts.scan_s` | `300` | Seconds one skill scan the gateway starts may run: the install watcher and its rescans, the REST scan endpoint and the scans an agent hook starts. `0` uses the default. `defenseclaw skill scan` has no time limit. |
 | `scanners.mcp_scanner.analyzers` | `[]` | A list of `api`, `yara`, `llm`, `behavioral` and `readiness`. `[]` is automatic: YARA, plus the LLM analyzer when its model and key are ready. |
 | `scanners.mcp_scanner.scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan prompts, resources or server instructions. |
 | `scanners.mcp_scanner.judge_source`, `llm` | `inherit` | As for the skill scanner. |
-| `scanners.mcp_scanner.api` | inherits | `{endpoint, api_key_env}`. Empty values inherit `cisco_ai_defense.endpoint` and `api_key_env`. |
 | `scanners.mcp_scanner.yara` | bundled rules | `include_bundled` (default `true`) and `extra_rules`, a list of `{path, digest}` files pinned by digest. |
-| `scanners.mcp_scanner.timeouts.stdio_s`, `remote_s`, `llm_s` | `60`, `120`, `30` | Seconds. `0` uses the default. |
+
+The MCP scanner's `api` and `timeouts` blocks and the skill scanner's `timeouts.llm_s` were removed: no scan read them. The `api` analyzer uses `cisco_ai_defense`. A file that still holds them loads with them ignored, and `config set` refuses them.
 
 `defenseclaw setup skill-scanner` and `defenseclaw setup` write these keys.
 Because a scanner policy file and extra YARA rules are pinned by digest, a
