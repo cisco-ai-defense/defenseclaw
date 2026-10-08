@@ -1125,8 +1125,8 @@ error: This device is managed: change config.yaml in the admin config (MDM or ma
 ```
 
 `skill`, `mcp`, `plugin` and `tool` `block`, `allow` and `unblock` are refused
-the same way, with the message `This device is managed: add it to asset_policy
-in the admin config (MDM or management plane)`, and exit `3`.
+the same way, with a message that the `asset_policy` block and allow lists are
+set in the admin config (MDM or management plane), and exit `3`.
 A standard user with no per-user config on a managed device is not sent to
 `defenseclaw init`: `init`, `quickstart` and every command that needs a config print `This
 device is managed: DefenseClaw is configured by your administrator (MDM or

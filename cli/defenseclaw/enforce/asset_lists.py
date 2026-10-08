@@ -52,7 +52,7 @@ OP_CLEAR = "clear"
 TARGET_TYPES = ("skill", "mcp", "plugin", "tool")
 
 MANAGED_REFUSAL = (
-    "This device is managed: add it to asset_policy in the admin config "
+    "This device is managed: the asset_policy block and allow lists are set in the admin config "
     "(MDM or management plane)"
 )
 
