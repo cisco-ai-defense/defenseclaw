@@ -250,6 +250,23 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		t.Fatalf("a moved pair is not flagged: list %v, verify %v", row, verified)
 	}
 	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "locked"}, config.ACPBinding{Enabled: true, Profile: "locked"}
+	// After an account rename the recorded data directory names the old
+	// home; list reads the default one of the new home (GAP-0869).
+	renamedHome := t.TempDir()
+	enterpriseACPDescribePrincipal = func(string) (enterpriseACPAccount, error) {
+		return enterpriseACPAccount{exists: true, name: "alice2", home: renamedHome, uid: -1, gid: -1}, nil
+	}
+	if _, err := acp.PublishEnterpriseUserToken(filepath.Join(renamedHome, ".defenseclaw"), "zed", "kiro", strings.Repeat("ab", 32)); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "not run" ||
+		!strings.Contains(fmt.Sprint(row["note"]), "outside the home") {
+		t.Fatalf("list row after a rename = %v, want the copy found in the new home and a note", row)
+	}
+	enterpriseACPDescribePrincipal = func(string) (enterpriseACPAccount, error) {
+		return enterpriseACPAccount{exists: true, name: "alice", home: userHome, uid: -1, gid: -1}, nil
+	}
 
 	enrollment, err := resolveEnterpriseACPEnrollment(true)
 	if err != nil {

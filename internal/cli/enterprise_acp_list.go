@@ -140,9 +140,14 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 	if err != nil {
 		return row
 	}
-	relative, err := filepath.Rel(home, dataDir)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return row
+	movedFrom := ""
+	if relative, relErr := filepath.Rel(home, dataDir); relErr != nil || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		// An account rename moved the home, and the user's files with it,
+		// so the recorded data directory names the old home: look in the
+		// default one of the current home. List showed unknown even after
+		// the user ran setup there (GAP-0869).
+		movedFrom, dataDir = dataDir, filepath.Join(home, ".defenseclaw")
 	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, enrollment.ClientID, enrollment.AgentID)
 	if err != nil {
@@ -166,6 +171,10 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 		}
 		return nil
 	})
+	if movedFrom != "" && (row.TokenCopy != "present" || row.Setup != "done") && row.Note == "" {
+		row.Note = fmt.Sprintf("the enrolled data directory %s is outside the home %s (was the account renamed?); "+
+			"have the user run setup in %s, or enroll the user again", movedFrom, account.home, dataDir)
+	}
 	return row
 }
 
