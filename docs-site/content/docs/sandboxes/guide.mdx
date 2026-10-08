@@ -651,6 +651,14 @@ is not a tool call: Claude Code runs it without a `PreToolUse` hook, so
 DefenseClaw does not check it. It still runs inside the sandbox, under its
 network policy, hidden secrets and protected git internals.
 
+A block keeps a secret out of the agent's next step, not out of the
+records. With the default redaction profile (`none`), the local audit store
+(`defenseclaw-gateway audit export`) and every telemetry destination keep
+prompts, model replies and tool arguments and results as they were, so a
+secret the hooks blocked (a pasted key the `SEC-STRIPE` rule caught, say)
+is in them verbatim. To mask secrets there, apply the `sensitive` or
+`strict` profile, as [Redaction](/docs/observability/redaction) describes.
+
 The sandbox hooks fail closed: a hook that cannot reach DefenseClaw blocks
 the tool call, and its block message, which the harness shows, says the
 daemon on your machine does not answer and to run `defenseclaw-gateway
