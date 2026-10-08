@@ -93,19 +93,14 @@ func extractJSON(data []byte) []byte {
 	return data
 }
 
-// SkillScanner shells out to the Python “cisco-ai-skill-scanner“ CLI.
-//
-// Everything the scanner does is derived from config: the policy, the judge
-// (the resolved “llm:“ block, Config.ResolveLLM("scanners.skill")), the
-// optional analyzers and the environment. The process environment is an
-// allowlist, so shell variables such as “SKILL_SCANNER_LLM_MODEL“ never
-// change a scan. DefenseClaw never passes “--fail-on-severity“: the gate is
-// applied to the JSON findings by admission (fail_on_severity), and any
-// non-zero exit is a scan error.
+// SkillScanner shells out to the Python skill scanner. V9 scans derive their
+// judge and environment from config. Secure Client v8 scans preserve the
+// inherited scanner environment and argument behavior of main.
 type SkillScanner struct {
 	Config         config.SkillScannerConfig
 	LLM            config.LLMConfig
 	CiscoAIDefense config.CiscoAIDefenseConfig
+	SecureClient   bool
 }
 
 // NewSkillScannerFromLLM constructs a scanner from the resolved judge LLM
@@ -204,24 +199,34 @@ func (s *SkillScanner) buildArgs(target, policy string) []string {
 
 	judged := false
 	if s.Config.UseLLM {
-		if j, ok := s.judge(); ok {
+		if s.SecureClient && skillScannerSupportsLLMProvider(s.LLM.ProviderPrefix()) {
 			judged = true
 			args = append(args, "--use-llm")
-			if j.provider != "" {
-				args = append(args, "--llm-provider", j.provider)
+			if s.LLM.Provider != "" {
+				args = append(args, "--llm-provider", s.LLM.Provider)
 			}
 			if s.Config.LLMConsensus > 0 {
 				args = append(args, "--llm-consensus-runs", strconv.Itoa(s.Config.LLMConsensus))
+			}
+		} else if !s.SecureClient {
+			if j, ok := s.judge(); ok {
+				judged = true
+				args = append(args, "--use-llm")
+				if j.provider != "" {
+					args = append(args, "--llm-provider", j.provider)
+				}
+				if s.Config.LLMConsensus > 0 {
+					args = append(args, "--llm-consensus-runs", strconv.Itoa(s.Config.LLMConsensus))
+				}
 			}
 		}
 	}
 	if s.Config.UseBehavioral {
 		args = append(args, "--use-behavioral")
 	}
-	// The meta-analyzer needs the judge: without one skill-scanner exits 2
-	// ("Meta-Analyzer LLM API key not configured"), which fails the scan
-	// closed. Python runs meta under the same condition.
-	if s.Config.EnableMeta && judged {
+	// The new path enables meta only with a resolved judge. Secure Client keeps
+	// main's inherited-judge behavior.
+	if s.Config.EnableMeta && (judged || s.SecureClient) {
 		args = append(args, "--enable-meta")
 	}
 	if s.Config.UseTrigger {
@@ -271,11 +276,12 @@ var skillScannerEnvPassthroughPrefixes = []string{"AWS_", "AZURE_"}
 // profiles. Scans keep the credential chain but ignore both endpoint sources,
 // so only the resolved config judge can select a non-default endpoint.
 
-// scanEnv builds the scanner environment from config: the allowlisted
-// process variables plus the derived scanner settings. Nothing else from
-// the gateway's environment (SKILL_SCANNER_*, VIRUSTOTAL_*, AI_DEFENSE_*,
-// ENABLE_*_ANALYZER, ...) reaches the scanner.
+// scanEnv builds an allowlisted, config-derived environment for v9 scans.
+// Secure Client keeps the inherited v8 scanner environment.
 func (s *SkillScanner) scanEnv() []string {
+	if s.SecureClient {
+		return s.secureClientScanEnv()
+	}
 	env := make([]string, 0, 32)
 	derived := map[string]string{"NO_COLOR": "1", "TERM": "dumb",
 		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true"}
@@ -317,6 +323,41 @@ func (s *SkillScanner) scanEnv() []string {
 		}
 	}
 	return env
+}
+
+// secureClientScanEnv preserves the scanner environment inherited by main's
+// v8 Secure Client path. Config values fill missing variables only.
+func (s *SkillScanner) secureClientScanEnv() []string {
+	env := os.Environ()
+	existing := make(map[string]bool, len(env))
+	for _, kv := range env {
+		if name, _, ok := strings.Cut(kv, "="); ok {
+			existing[name] = true
+		}
+	}
+	inject := map[string]string{
+		"SKILL_SCANNER_LLM_API_KEY": s.LLM.ResolvedAPIKey(),
+		"SKILL_SCANNER_LLM_MODEL":   liteLLMModel(s.LLM),
+		"VIRUSTOTAL_API_KEY":        s.Config.ResolvedVirusTotalKey(),
+		"AI_DEFENSE_API_KEY":        s.CiscoAIDefense.ResolvedAPIKey(),
+		"NO_COLOR":                  "1",
+		"TERM":                      "dumb",
+	}
+	for name, value := range inject {
+		if value != "" && !existing[name] {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
+
+func skillScannerSupportsLLMProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", "anthropic", "openai":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasAnyPrefix(value string, prefixes []string) bool {
