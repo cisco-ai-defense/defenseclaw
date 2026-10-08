@@ -1321,6 +1321,9 @@ deleted.
   "(sandbox NAME)", the TUI's AI discovery panel keeps them apart and names
   the sandbox, and the `ai_component.*` telemetry records carry
   `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`.
+- Claude Code skills and rules kept in a project (`.claude/skills`,
+  `.claude/rules`) are listed by name like the ones in `~/.claude`, in a
+  sandbox's project and in each `ai_discovery.scan_roots` folder.
 - Opt-in process tree: a pack's new `observe.process_tree: true` (off in
   `open`, `balanced` and `strict`) or `sandbox run --process-tree` samples the
   sandbox's processes every 5 seconds while it runs (every 15 seconds on a

@@ -94,7 +94,7 @@ The continuous scanner in the gateway classifies every signal into one of the wi
 | `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
 | `editor_extension` | AI extensions and plugins in VS Code and its forks, JetBrains IDEs, Visual Studio, Zed and Vim/Neovim. The full list of every plugin, AI or not, is the [IDE plugin inventory](#ide-plugin-inventory) |
 | `mcp_server` | MCP servers configured for any connector (`mcpServers` blocks) |
-| `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
+| `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk, in the home folder and in the project (`~/.claude/skills`, `.claude/skills`) |
 | `rule` | Rule packs and ruleset files referenced by config |
 | `plugin` | Connector plugins (TypeScript, Python, native) |
 | `package_dependency` | `requirements.txt` / `package.json` / `pyproject.toml` AI deps |

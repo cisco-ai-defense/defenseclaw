@@ -137,10 +137,12 @@
       ],
       "local_endpoints": [],
       "skill_paths": [
-        "~/.claude/skills"
+        "~/.claude/skills",
+        ".claude/skills"
       ],
       "rule_paths": [
-        "~/.claude/rules"
+        "~/.claude/rules",
+        ".claude/rules"
       ]
     },
     {
