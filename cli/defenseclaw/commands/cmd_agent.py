@@ -3752,6 +3752,7 @@ def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
             dest = ai_signatures.install_signature_pack(
                 pack_path, data_dir=cfg.data_dir, signature_packs=[str(path) for path in legacy_packs],
                 replace=replace,
+                secure_client=True,
             )
         except ai_signatures.SignaturePackError as exc:
             raise click.ClickException(str(exc)) from exc

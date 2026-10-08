@@ -434,6 +434,24 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         finally:
             cleanup_app(app, db_path, tmp_dir)
 
+    def test_secure_client_installs_pack_with_pre_1_0_catalog_id(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")
+        source = Path(tmp_dir) / "operator.json"
+        source.write_text(
+            json.dumps({"version": 1, "id": "operator", "signatures": [
+                {"id": "jetbrains-ai", "name": "Operator JetBrains", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+                result = self.runner.invoke(agent, ["signatures", "install", str(source)], obj=app)
+            self.assertEqual(result.exit_code, 0, repr(result.exception) + result.output)
+            self.assertTrue((Path(app.cfg.data_dir) / "signature-packs" / "operator.json").exists())
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
     def test_secure_client_signature_install_keeps_v8_config(self):
         app, tmp_dir, db_path = make_app_context()
         app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")
