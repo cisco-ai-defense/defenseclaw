@@ -21,8 +21,8 @@ package manager
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
