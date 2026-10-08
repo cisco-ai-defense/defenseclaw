@@ -1594,6 +1594,10 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	where := "shown here as they come"
 	live := a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args)
 	switch {
+	case b.o.Detach:
+		// Nothing in this terminal follows a background run (GAP-0345).
+		row("Asks", "the run is in the background, so watch for them: "+CommandName+" approvals --watch --sandbox "+sb.Name+
+			" (or `defenseclaw tui`: 7, then t)")
 	case live && titleTakers[sb.Harness]:
 		// The harness rewrites the title on and on (Claude Code's
 		// spinner): the title cannot be promised (GAP-0239).
@@ -1632,8 +1636,10 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 }
 
 // titleTakers are the harnesses that keep setting the terminal title
-// themselves while they run, so a notice there is overwritten at once.
-var titleTakers = map[string]bool{"claudecode": true}
+// themselves while they run, so a notice there is overwritten at once:
+// Claude Code's spinner, and Codex, which names the project there
+// (GAP-0345).
+var titleTakers = map[string]bool{"claudecode": true, "codex": true}
 
 // hooksTierText is the banner's Hooks line for a sandbox whose hooks are
 // not in the managed tier: what of them the image protects and what the

@@ -360,6 +360,21 @@ func TestSessionAnnouncesAsks(t *testing.T) {
 	}
 }
 
+// GAP-0345: the banner promised the title for Codex, which keeps it too,
+// and "shown here" for a detached run, which leaves the terminal.
+func TestBannerAsksRowIsHonest(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.TTY = true
+	sb := sampleSandbox("cx")
+	sb.Harness, sb.HarnessName = "codex", "Codex"
+	ta.banner(&sb, bannerInfo{})
+	has(t, ta.output(), "Asks      Codex keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox cx")
+	ta.out.Reset()
+	ta.banner(&sb, bannerInfo{o: RunOptions{Detach: true, Prompt: "fix it"}})
+	has(t, ta.output(), "Asks      the run is in the background, so watch for them: defenseclaw sandbox approvals --watch --sandbox cx")
+	lacks(t, ta.output(), "shown here", "announced in this terminal")
+}
+
 // Manual R2-84 and R2-68: a blocked destination and a finding (an alert,
 // hook tamper) are announced while the harness runs, and the summary
 // repeats them, the block with the command that lifts it. What the harness
