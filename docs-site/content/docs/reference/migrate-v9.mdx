@@ -697,13 +697,29 @@ forward again. To stay on 0.8.x, go back by hand:
 1. Stop the gateway: `defenseclaw-gateway stop`.
 2. Copy `config.yaml.v8.bak` over `config.yaml`.
 3. Rename `policies/rego/data.json.migrated-v9` to `data.json`.
-4. Add back any block and allow entries that were moved out of `audit.db`.
+4. Restore each saved pre-9 Rego module in the data directory:
+
+   ```bash
+   cd ~/.defenseclaw/policies/rego
+   for module in admission guardrail skill_actions; do
+     if [ -f "$module.rego.migrated-v9" ]; then
+       mv "$module.rego.migrated-v9" "$module.rego"
+     fi
+   done
+   ```
+
+   The v9 migration can replace `admission.rego` and `guardrail.rego` and
+   retire `skill_actions.rego`. If a saved copy is missing and the live
+   module came from 1.0, restore that module from the matching 0.8.x policy
+   bundle before starting the gateway. A version 8 `config.yaml` alone does
+   not restore the older admission decisions.
+5. Add back any block and allow entries that were moved out of `audit.db`.
    `migration-v9.json` lists them as `audit.db` entries under `moved`; this
    step is why `defenseclaw rollback` is the better way back.
-5. Start the 0.8.x gateway.
+6. Start the 0.8.x gateway.
 
 After step 2 the file says `config_version: 8` again, the only version 0.8.x
-reads.
+reads. Complete the policy restoration in steps 3 and 4 before starting it.
 
 For a managed host, the older release must be given the version 8 admin config
 explicitly; see [Lifecycle](/docs/enterprise/lifecycle).
