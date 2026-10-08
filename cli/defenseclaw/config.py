@@ -166,6 +166,15 @@ class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
 
+class ConfigSaveError(OSError):
+    """An atomic config.yaml save failed before replacing the prior file."""
+
+    def __init__(self, path: str, cause: OSError) -> None:
+        super().__init__(cause.errno, cause.strerror or str(cause), path)
+        self.path = path
+
+
+
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
 # gateway's MaxSupportedConfigVersion.
@@ -3554,8 +3563,11 @@ class Config:
         refuses to reload.
         """
         path = str(config_path_for_data_dir(self.data_dir))
-        with locked_config_yaml(path):
-            self._save_locked(path)
+        try:
+            with locked_config_yaml(path):
+                self._save_locked(path)
+        except OSError as exc:
+            raise ConfigSaveError(path, exc) from exc
 
     def save_verified(self, verify: Callable[[str], None]) -> None:
         """Persist, verify the exact written generation, and roll back on failure.

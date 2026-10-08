@@ -2489,7 +2489,9 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
         raise click.ClickException(f"sandbox teardown did not finish: {exc}") from exc
     for line in (proc.stdout or "").splitlines():
         if line.strip():
-            ux.echo(f"  {ux.dim('·')} {line.strip()}")
+            # The gateway hint is for its teardown command, not uninstall.
+            hint = line.replace("rerun with --keep-images", "rerun uninstall with --skip-sandbox-teardown")
+            ux.echo(f"  {ux.dim('·')} {hint.strip()}")
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
     # GAP-0282: teardown goes on past a failed step, so the last line is the
     # last step that worked. The failures are the lines it marks with a cross.

@@ -1798,3 +1798,26 @@ func TestOmnigentSetupRejectsNonMappingPoliciesWithoutClobberingConfig(t *testin
 		}
 	}
 }
+
+func TestRemoveOmnigentConfigEntriesKeepsOperatorComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := "# operator note\npolicy_modules:\n  - defenseclaw_omnigent_policy\n  - own_policy\npolicies:\n  defenseclaw_guardrail:\n    handler: defenseclaw_omnigent_policy.defenseclaw_policy\n  own_policy:\n    handler: own.policy\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeOmnigentConfigEntries(path); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"# operator note", "own_policy", "own.policy"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("operator edit %q lost: %s", want, body)
+		}
+	}
+	if strings.Contains(string(body), omnigentPolicyModuleName) {
+		t.Fatalf("managed entries remain: %s", body)
+	}
+}

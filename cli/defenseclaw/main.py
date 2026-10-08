@@ -316,7 +316,8 @@ def cli(ctx: click.Context) -> None:
             # GAP-0288: the file is there and refused; `init` would not fix it.
             ux.echo(
                 f"Failed to load config: {exc}. Fix it in {cfg_mod.config_path()}; "
-                "'defenseclaw config validate' shows the line.",
+                "'defenseclaw config validate' shows the line. If the gateway is running, "
+                "it keeps its last good config.",
                 err=True,
             )
         else:
@@ -396,7 +397,9 @@ def cli(ctx: click.Context) -> None:
         app.store = Store(app.cfg.audit_db)
         app.store.init()
     except Exception as exc:
-        ux.echo(f"Failed to open audit store: {exc}", err=True)
+        from defenseclaw.audit_capacity import audit_open_failure_notice
+
+        ux.echo(audit_open_failure_notice(app.cfg.audit_db, exc), err=True)
         raise SystemExit(1)
 
     if source_is_v8 and not getattr(app, "config_problems", None):
@@ -693,6 +696,14 @@ def main() -> None:
         click.echo(f"Error: the audit event was not recorded: {exc}.", err=True)
         sys.exit(1)
     except OSError as exc:
+        from defenseclaw.config import ConfigSaveError
+
+        if isinstance(exc, ConfigSaveError):
+            click.echo(
+                f"Error: cannot write {exc.path}: {exc.strerror}; the previous config.yaml is unchanged.",
+                err=True,
+            )
+            sys.exit(1)
         if _output_pipe_closed(exc):
             _silence_closed_stdout()
             sys.exit(1)
