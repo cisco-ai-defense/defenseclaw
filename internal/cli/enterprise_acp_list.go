@@ -26,8 +26,8 @@ var enterpriseACPListCmd = &cobra.Command{
 it was issued to, the editor and agent, the profile, when it was enrolled,
 whether the user's private copy of the credential is present and whether the
 user has run setup (the editor entry's contract lock exists). The user's
-files are read as that user, in the default data directory
-(<home>/.defenseclaw).`,
+files are read as that user, in the enrolled data directory
+(or <home>/.defenseclaw for older enrollments).`,
 	Args: cobra.NoArgs,
 	// Secure Client keeps the command tree of main (issue #1092).
 	Annotations: map[string]string{secureClientAbsentAnnotation: "true"},
@@ -117,7 +117,18 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 	if account.home == "" {
 		return row
 	}
-	dataDir := filepath.Join(account.home, ".defenseclaw")
+	dataDir := enrollment.UserDataDir
+	if dataDir == "" {
+		dataDir = filepath.Join(account.home, ".defenseclaw")
+	}
+	home, err := filepath.Abs(account.home)
+	if err != nil {
+		return row
+	}
+	relative, err := filepath.Rel(home, dataDir)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return row
+	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, enrollment.ClientID, enrollment.AgentID)
 	if err != nil {
 		return row

@@ -372,6 +372,7 @@ func (function ObserverFunc) Observe(transition HealthTransition) { function(tra
 // attempt. Jitter may replace a computed delay but its result is clamped into
 // [0, MaxBackoff]. A nil Jitter uses bounded process randomness.
 type RetryPolicy struct {
+	LegacyJitter   bool
 	MaxAttempts    int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
@@ -390,6 +391,7 @@ type CircuitPolicy struct {
 
 // Config is generation-owned and immutable after NewDispatcher returns.
 type Config struct {
+	LegacyCircuit    bool
 	Destination      string
 	Generation       uint64
 	Signal           string

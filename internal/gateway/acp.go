@@ -158,7 +158,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID)
+	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration())
 	// Resolve the identity-based guardrail profile once, with the ACP
 	// agent's connector, as the hook, proxy and inspect paths do: resolved
 	// lazily, the request had no connector, so a connectors assignment never
@@ -281,13 +281,13 @@ func acpWithheldOutputReason(reason string) string {
 // joined to the hook rows of the same session (GAP-1946).
 type acpUnboundAgentContextKey struct{}
 
-func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector string) context.Context {
+func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector string, secureClient bool) context.Context {
 	env := audit.EnvelopeFromContext(ctx)
 	changed := false
 	if env.Connector != connector {
 		env.Connector, changed = connector, true
 	}
-	if session := acpFrameSessionID(req); session != "" {
+	if session := acpFrameSessionID(req, secureClient); session != "" {
 		if SessionIDFromContext(ctx) == "" {
 			ctx = ContextWithSessionID(ctx, session)
 		}
@@ -346,9 +346,14 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 }
 
 // acpFrameSessionID is the ACP sessionId a single frame names, or "".
-func acpFrameSessionID(req acp.Evaluation) string {
+func acpFrameSessionID(req acp.Evaluation, secureClient bool) string {
 	payload := req.Payload
 	if req.Aggregate {
+		// Main does not extract a session from completed-turn aggregates.
+		// Keep that record and trace shape for Secure Client (issue #1092).
+		if secureClient {
+			return ""
+		}
 		var turn struct {
 			Frames []json.RawMessage `json:"frames"`
 		}

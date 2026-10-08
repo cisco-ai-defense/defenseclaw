@@ -280,6 +280,7 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
         check_bind_user(client, report, args.bind_login)
     for name, gid in args.group or []:
         check_group(client, report, name, gid)
+    check_duplicate_group_gids(client, report)
     uid_owners: dict[int, str] = {}
     for user in client.get_all("/api/v1/users?limit=200"):
         value = user.get("profile", {}).get("uidNumber")
@@ -293,6 +294,18 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
     print("\nAll checks passed." if report.problems == 0 else f"\n{report.problems} problem(s) found.")
     return 1 if report.problems else 0
 
+
+
+def password_only_method(method: dict[str, Any]) -> bool:
+    constraints = method.get("constraints") or []
+    return (
+        method.get("type") == "ASSURANCE"
+        and method.get("factorMode") == "1FA"
+        and len(constraints) == 1
+        and set(constraints[0]) == {"knowledge"}
+        and constraints[0]["knowledge"].get("types") == ["password"]
+        and constraints[0]["knowledge"].get("required") is not False
+    )
 
 def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
                         bind_login: str | None, group_names: list[str]) -> None:
@@ -325,7 +338,7 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
         report.note(f"rule '{rule.get('name')}' ({rule.get('status')}, priority {rule.get('priority')}): "
                     f"{factor}, {scope}")
         if (rule.get("status") != "ACTIVE" or action.get("access") != "ALLOW"
-                or factor != "1FA" or users.get("exclude") or scoped_groups.get("exclude")):
+                or not password_only_method(method) or users.get("exclude") or scoped_groups.get("exclude")):
             continue
         # Okta ANDs users and groups on the same rule. An unrestricted rule covers both.
         if bind and not group_ids and (not user_ids or bind["id"] in user_ids):
@@ -352,7 +365,11 @@ def check_bind_user(client: Okta, report: Report, login: str) -> None:
     if user is None:
         report.problem("the user does not exist")
         return
-    report.ok(f"exists, status {user.get('status')}")
+    if user.get("status") != "ACTIVE":
+        report.problem(f"bind user is {user.get('status') or 'unknown'}, not ACTIVE",
+                       "Activate the bind user in Okta before using it for SSSD.")
+    else:
+        report.ok("exists, status ACTIVE")
     assigned = client.must("GET", f"/api/v1/users/{user['id']}/roles") or []
     if len(assigned) != 1 or assigned[0].get("type") != "CUSTOM":
         report.problem("bind user must have only one read-only custom role, with no privileged roles",
@@ -376,6 +393,22 @@ def check_bind_user(client: Okta, report: Report, login: str) -> None:
         return
     report.ok("only the read-only user and group role is assigned")
 
+
+
+def check_duplicate_group_gids(client: Okta, report: Report) -> set[int]:
+    """Report ambiguous POSIX group IDs and return the IDs already in use."""
+    owners: dict[int, str] = {}
+    for group in client.get_all("/api/v1/groups?limit=200"):
+        value = group.get("profile", {}).get("gidNumber")
+        if value is None:
+            continue
+        gid = int(value)
+        name = str(group.get("profile", {}).get("name", group.get("id")))
+        if gid in owners and owners[gid] != name:
+            report.problem(f"gidNumber {gid} is shared by {owners[gid]} and {name}")
+        else:
+            owners[gid] = name
+    return set(owners)
 
 def check_group(client: Okta, report: Report, name: str, gid: int | None) -> None:
     print(f"Group {name}")
@@ -505,11 +538,9 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
         return report.finish()
 
     print("Groups")
-    used_gids = {
-        int(g["profile"]["gidNumber"])
-        for g in client.get_all("/api/v1/groups?limit=200")
-        if g.get("profile", {}).get("gidNumber") is not None
-    }
+    used_gids = check_duplicate_group_gids(client, report)
+    if report.problems:
+        return report.finish()
     primary, primary_gid = ensure_group(client, report, args.primary_group, args.primary_gid, used_gids, args.gid_base)
     for name, gid in args.group or []:
         ensure_group(client, report, name, gid, used_gids, args.gid_base)
@@ -715,15 +746,7 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
     have = (rule.get("conditions") or {}).get("people") or {}
     action = (rule.get("actions") or {}).get("appSignOn") or {}
     method = action.get("verificationMethod") or {}
-    constraints = method.get("constraints") or []
-    password_only = (
-        method.get("type") == "ASSURANCE"
-        and method.get("factorMode") == "1FA"
-        and len(constraints) == 1
-        and set(constraints[0]) == {"knowledge"}
-        and constraints[0]["knowledge"].get("types") == ["password"]
-        and constraints[0]["knowledge"].get("required") is not False
-    )
+    password_only = password_only_method(method)
     same = (
         all(
             set((have.get(kind) or {}).get("include") or []) == set((people.get(kind) or {}).get("include") or [])

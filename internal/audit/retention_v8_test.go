@@ -592,6 +592,26 @@ func TestRetentionCancellationStopsBetweenCommittedBatches(t *testing.T) {
 	}
 }
 
+func TestSecureClientRetentionKeepsMainBatchSize(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	seedRetentionActivityRows(t, store, 1500, now.Add(-91*24*time.Hour))
+	ctx, cancel := context.WithCancel(t.Context())
+	reaper := newRetentionReaperAt(t, store, judge, 90, now, RetentionOptions{SecureClient: true}, retentionHooks{
+		yield: func(context.Context) error {
+			cancel()
+			return context.Canceled
+		},
+	})
+	result, err := reaper.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error=%v", err)
+	}
+	if result.RowsDeleted[RetentionActivityEvents] != 1000 || result.BatchCount != 1 {
+		t.Fatalf("secure client first batch=%#v, want 1000 rows", result)
+	}
+}
+
 func TestRetentionJudgeDeletionIsLegacyFirstAndResumesAfterCrossDBFailure(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,6 +177,7 @@ type RetentionHealthReporter interface {
 }
 
 type RetentionOptions struct {
+	SecureClient      bool
 	Reporter          RetentionReporter
 	HealthReporter    RetentionHealthReporter
 	PassiveCheckpoint bool
@@ -209,6 +211,7 @@ type RetentionReaper struct {
 	reporter          RetentionReporter
 	healthReporter    RetentionHealthReporter
 	passiveCheckpoint bool
+	secureClient      bool
 	hooks             retentionHooks
 	running           atomic.Bool
 	// paceFrom is when the batch in progress started; only Run touches it.
@@ -248,14 +251,39 @@ func newRetentionReaperWithHooks(
 	reaper := &RetentionReaper{
 		store: store, judgeBodies: judgeBodies,
 		reporter: options.Reporter, healthReporter: options.HealthReporter,
-		passiveCheckpoint: options.PassiveCheckpoint,
-		hooks:             hooks.withDefaults(),
+		passiveCheckpoint: options.PassiveCheckpoint, secureClient: options.SecureClient,
+		hooks: hooks.withDefaults(),
 	}
 	if reaper.hooks.yield == nil {
-		reaper.hooks.yield = reaper.pace
+		if options.SecureClient {
+			reaper.hooks.yield = func(ctx context.Context) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				runtime.Gosched()
+				return ctx.Err()
+			}
+		} else {
+			reaper.hooks.yield = reaper.pace
+		}
 	}
 	reaper.retentionDays.Store(retentionDays)
 	return reaper, nil
+}
+
+// batchSize restores the pre-1.0 retention transaction bound for Secure Client.
+func (reaper *RetentionReaper) batchSize() int {
+	if reaper.secureClient {
+		return 1000
+	}
+	return RetentionBatchSize
+}
+
+func (reaper *RetentionReaper) correlationBudget() time.Duration {
+	if reaper.secureClient {
+		return 30 * time.Second
+	}
+	return RetentionCorrelationRunBudget
 }
 
 // pace is the default pause between batches: it hands the writer connection
@@ -720,7 +748,7 @@ func (reaper *RetentionReaper) drainAuditTable(
 		if err := reaper.hooks.yield(ctx); err != nil {
 			return err
 		}
-		if deleted < RetentionBatchSize {
+		if deleted < int64(reaper.batchSize()) {
 			return nil
 		}
 	}
@@ -755,7 +783,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 		{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}},
 		{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}},
 	}
-	deadline := reaper.hooks.now().Add(RetentionCorrelationRunBudget)
+	deadline := reaper.hooks.now().Add(reaper.correlationBudget())
 	// Rotate the first stage on every run. A busy early stage can consume the
 	// whole time budget after one batch, so registry order alone does not
 	// guarantee that later relationship/event cleanup will ever run.
@@ -800,7 +828,7 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 	if err != nil {
 		return 0, err
 	}
-	args = append(args, RetentionBatchSize)
+	args = append(args, reaper.batchSize())
 	release, err := reaper.store.acquireReady()
 	if err != nil {
 		return 0, err
@@ -821,7 +849,7 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 		if rowsErr != nil {
 			return rowsErr
 		}
-		if rows > RetentionBatchSize {
+		if rows > int64(reaper.batchSize()) {
 			return errors.New("correlation retention batch exceeded fixed limit")
 		}
 		if rows > 0 && reaper.hooks.beforeAuditBatchCommit != nil {
@@ -996,7 +1024,7 @@ func (reaper *RetentionReaper) deleteAuditBatch(
 		var candidateCount int64
 		if spec.class == RetentionAuditEvents {
 			var candidateErr error
-			candidateCount, candidateErr = materializeRetentionAuditCandidates(ctx, tx, cutoffUnixNano)
+			candidateCount, candidateErr = materializeRetentionAuditCandidates(ctx, tx, cutoffUnixNano, reaper.batchSize())
 			if candidateErr != nil {
 				return candidateErr
 			}
@@ -1013,7 +1041,7 @@ func (reaper *RetentionReaper) deleteAuditBatch(
 		if spec.class == RetentionAuditEvents {
 			res, execErr = tx.ExecContext(ctx, statement)
 		} else {
-			res, execErr = tx.ExecContext(ctx, statement, cutoffUnixNano, RetentionBatchSize)
+			res, execErr = tx.ExecContext(ctx, statement, cutoffUnixNano, reaper.batchSize())
 		}
 		if execErr != nil {
 			return execErr
@@ -1022,7 +1050,7 @@ func (reaper *RetentionReaper) deleteAuditBatch(
 		if rowsErr != nil {
 			return rowsErr
 		}
-		if rows > RetentionBatchSize {
+		if rows > int64(reaper.batchSize()) {
 			return errors.New("retention batch exceeded fixed limit")
 		}
 		if spec.class == RetentionAuditEvents && rows != candidateCount {
@@ -1102,6 +1130,7 @@ func materializeRetentionAuditCandidates(
 	ctx context.Context,
 	tx *sql.Tx,
 	cutoffUnixNano int64,
+	batchSize int,
 ) (int64, error) {
 	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS
 		retention_v8_audit_candidates (id TEXT PRIMARY KEY) WITHOUT ROWID`); err != nil {
@@ -1112,7 +1141,7 @@ func materializeRetentionAuditCandidates(
 	}
 	result, err := tx.ExecContext(ctx,
 		`INSERT INTO retention_v8_audit_candidates (id) `+retentionAuditCandidateSelect,
-		cutoffUnixNano, RetentionBatchSize)
+		cutoffUnixNano, batchSize)
 	if err != nil {
 		return 0, fmt.Errorf("retention materialize bounded audit candidate set: %w", err)
 	}
@@ -1120,7 +1149,7 @@ func materializeRetentionAuditCandidates(
 	if err != nil {
 		return 0, fmt.Errorf("retention count bounded audit candidate set: %w", err)
 	}
-	if count > RetentionBatchSize {
+	if count > int64(batchSize) {
 		return 0, errors.New("retention audit candidate set exceeded fixed batch size")
 	}
 	return count, nil
@@ -1481,7 +1510,7 @@ func backfillRetentionTimestamp(ex dbExecer, spec retentionTimestampSpec, limit 
 		id       string
 		unixNano int64
 	}
-	repairs := make([]repairRow, 0, RetentionBatchSize)
+	repairs := make([]repairRow, 0, limit)
 	for rows.Next() {
 		var id, encoded string
 		if err := rows.Scan(&id, &encoded); err != nil {
@@ -1554,11 +1583,11 @@ func (reaper *RetentionReaper) repairRetentionTimestamps(
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(
 				`SELECT COUNT(*) FROM (SELECT id FROM %s
 				 WHERE retention_timestamp_unix_nano IS NULL LIMIT ?)`, spec.table,
-			), RetentionBatchSize).Scan(&before); err != nil {
+			), reaper.batchSize()).Scan(&before); err != nil {
 				return err
 			}
 			if before > 0 {
-				if err := backfillRetentionTimestamp(tx, spec, RetentionBatchSize); err != nil {
+				if err := backfillRetentionTimestamp(tx, spec, reaper.batchSize()); err != nil {
 					return err
 				}
 			}
@@ -1575,7 +1604,7 @@ func (reaper *RetentionReaper) repairRetentionTimestamps(
 		if repaired == 0 {
 			return nil
 		}
-		if repaired > RetentionBatchSize {
+		if repaired > reaper.batchSize() {
 			return errors.New("retention timestamp repair exceeded fixed batch size")
 		}
 		if err := reaper.hooks.yield(ctx); err != nil {
@@ -1655,11 +1684,11 @@ func (reaper *RetentionReaper) preflightJudgeRetention(ctx context.Context, cuto
 		rows, err := conn.QueryContext(ctx, `SELECT `+judgeBodySelectColumns+`
 			FROM judge_responses
 			WHERE timestamp_unix_nano < ? AND id > ?
-			ORDER BY id ASC LIMIT ?`, cutoffUnixNano, lastID, RetentionBatchSize)
+			ORDER BY id ASC LIMIT ?`, cutoffUnixNano, lastID, reaper.batchSize())
 		if err != nil {
 			return "", retentionRunFailure(RetentionFailureLegacyJudgeStore, err)
 		}
-		batch := make([]legacyJudgeBodyRow, 0, RetentionBatchSize)
+		batch := make([]legacyJudgeBodyRow, 0, reaper.batchSize())
 		for rows.Next() {
 			row, scanErr := scanLegacyJudgeBody(rows)
 			if scanErr != nil {
@@ -1764,7 +1793,7 @@ func (reaper *RetentionReaper) drainJudgeBodies(
 		if err := reaper.hooks.yield(ctx); err != nil {
 			return err
 		}
-		if deleted < RetentionBatchSize {
+		if deleted < int64(reaper.batchSize()) {
 			return nil
 		}
 	}
@@ -1786,12 +1815,12 @@ func (reaper *RetentionReaper) legacyJudgeBatchIDs(ctx context.Context, cutoff t
 	rows, err := reaper.store.db.QueryContext(ctx, `
 		SELECT id FROM judge_responses
 		WHERE timestamp_unix_nano < ?
-		ORDER BY timestamp_unix_nano ASC, id ASC LIMIT ?`, cutoffUnixNano, RetentionBatchSize)
+		ORDER BY timestamp_unix_nano ASC, id ASC LIMIT ?`, cutoffUnixNano, reaper.batchSize())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	ids := make([]string, 0, RetentionBatchSize)
+	ids := make([]string, 0, reaper.batchSize())
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -1851,7 +1880,7 @@ func (reaper *RetentionReaper) deleteLegacyJudgeIDs(ctx context.Context, ids []s
 		if rowsErr != nil {
 			return rowsErr
 		}
-		if rows > RetentionBatchSize {
+		if rows > int64(reaper.batchSize()) {
 			return errors.New("legacy judge retention batch exceeded fixed limit")
 		}
 		if commitErr := tx.Commit(); commitErr != nil {
@@ -1893,14 +1922,14 @@ func (reaper *RetentionReaper) deleteAuthoritativeJudgeBatch(
 			DELETE FROM legacy_judge_cutover_rows WHERE source_key = ? AND legacy_id IN (
 				SELECT id FROM judge_responses WHERE timestamp_unix_nano < ?
 				ORDER BY timestamp_unix_nano ASC, id ASC LIMIT ?
-			)`, sourceKey, cutoffUnixNano, RetentionBatchSize); execErr != nil {
+			)`, sourceKey, cutoffUnixNano, reaper.batchSize()); execErr != nil {
 			return execErr
 		}
 		res, execErr := tx.ExecContext(ctx, `
 			DELETE FROM judge_responses WHERE id IN (
 				SELECT id FROM judge_responses WHERE timestamp_unix_nano < ?
 				ORDER BY timestamp_unix_nano ASC, id ASC LIMIT ?
-			)`, cutoffUnixNano, RetentionBatchSize)
+			)`, cutoffUnixNano, reaper.batchSize())
 		if execErr != nil {
 			return execErr
 		}
@@ -1908,7 +1937,7 @@ func (reaper *RetentionReaper) deleteAuthoritativeJudgeBatch(
 		if rowsErr != nil {
 			return rowsErr
 		}
-		if rows > RetentionBatchSize {
+		if rows > int64(reaper.batchSize()) {
 			return errors.New("authoritative judge retention batch exceeded fixed limit")
 		}
 		if commitErr := tx.Commit(); commitErr != nil {
@@ -1928,6 +1957,35 @@ func (reaper *RetentionReaper) deleteAuthoritativeJudgeBatch(
 func (reaper *RetentionReaper) reclaimFreedPages(ctx context.Context, result *RetentionRunResult) error {
 	if reaper == nil || reaper.store == nil || reaper.store.db == nil {
 		return errors.New("audit retention reclaim store is unavailable")
+	}
+	if reaper.secureClient {
+		release, err := reaper.store.acquireReady()
+		if err != nil {
+			return err
+		}
+		defer release()
+		var mode, freelist, pageSize int
+		if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+			return err
+		}
+		if mode != sqliteAutoVacuumIncremental {
+			return nil
+		}
+		if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
+			return err
+		}
+		if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freelist); err != nil {
+			return err
+		}
+		if freelist <= 0 {
+			return nil
+		}
+		pages := max(1, (64<<20)/pageSize)
+		if pages > freelist {
+			pages = freelist
+		}
+		_, err = reaper.store.db.ExecContext(ctx, "PRAGMA incremental_vacuum("+strconv.Itoa(pages)+")")
+		return err
 	}
 	deadline := reaper.hooks.now().Add(RetentionVacuumRunBudget)
 	for {

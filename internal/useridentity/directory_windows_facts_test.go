@@ -55,7 +55,7 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified || entra.AccountDomain != "AzureAD" {
 		t.Fatalf("entra facts = %+v", entra)
 	}
-	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string) string { return "ignored@corp.example.com" }, now)
+	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string, string) string { return "ignored@corp.example.com" }, now)
 	if hybrid.Directory != DirectoryActiveDirectory || hybrid.Domain != "corp.example.com" || hybrid.Realm != "CORP.EXAMPLE.COM" ||
 		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" {
 		t.Fatalf("hybrid AD facts = %+v", hybrid)
@@ -68,7 +68,7 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 	// the principal is that UPN, not the UPN with the realm appended again.
 	upnSID := "S-1-5-21-1-2-3-1106"
 	reader.accounts[upnSID] = [2]string{"Dave@corp.example.com", "CORP"}
-	upnForm := resolveWindowsDirectoryFacts(reader, upnSID, func(string) string { return "" }, now)
+	upnForm := resolveWindowsDirectoryFacts(reader, upnSID, func(string, string) string { return "" }, now)
 	if upnForm.Directory != DirectoryActiveDirectory || upnForm.UPN != "dave@corp.example.com" ||
 		upnForm.Principal != "dave@corp.example.com" {
 		t.Fatalf("UPN-form LSA account facts = %+v", upnForm)
@@ -86,19 +86,19 @@ func TestADUPNCacheWaitsAndRetriesFailures(t *testing.T) {
 	cache.now = func() time.Time { return now }
 	const name = `CORP\alice`
 
-	if got := cache.lookup(name, time.Second); got != "" || calls != 1 {
+	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "" || calls != 1 {
 		t.Fatalf("failed lookup = %q after %d calls; want empty after 1", got, calls)
 	}
 	now = now.Add(adUPNFailureTTL - time.Second)
-	if got := cache.lookup(name, time.Second); got != "" || calls != 1 {
+	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "" || calls != 1 {
 		t.Fatalf("lookup inside the failure lifetime = %q after %d calls; want the cached failure", got, calls)
 	}
 	now = now.Add(2 * time.Second)
-	if got := cache.lookup(name, time.Second); got != "alice@corp.example.com" || calls != 2 {
+	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "alice@corp.example.com" || calls != 2 {
 		t.Fatalf("retried lookup = %q after %d calls; want the UPN after 2", got, calls)
 	}
 	now = now.Add(adUPNTTL)
-	if got := cache.lookup(name, time.Second); got != "alice@corp.example.com" || calls != 3 {
+	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "alice@corp.example.com" || calls != 3 {
 		t.Fatalf("lookup after a failure = %q after %d calls; want the last good UPN kept", got, calls)
 	}
 }
@@ -113,7 +113,7 @@ func TestWindowsBuiltInAndServiceSIDsAreLocal(t *testing.T) {
 	}
 	lookups := 0
 	for _, sid := range []string{"S-1-5-18", "S-1-5-80-123"} {
-		facts := resolveWindowsDirectoryFacts(reader, sid, func(string) string {
+		facts := resolveWindowsDirectoryFacts(reader, sid, func(string, string) string {
 			lookups++
 			return ""
 		}, time.Unix(1_800_000_000, 0))
@@ -123,5 +123,42 @@ func TestWindowsBuiltInAndServiceSIDsAreLocal(t *testing.T) {
 	}
 	if lookups != 0 {
 		t.Fatalf("service accounts triggered %d AD UPN lookups", lookups)
+	}
+}
+
+func TestADUPNCacheDoesNotReuseAccountNameAcrossSIDs(t *testing.T) {
+	const name = `CORP\alice`
+	calls := 0
+	cache := newADUPNCache(func(string) string {
+		calls++
+		if calls == 1 {
+			return "former@corp.example.com"
+		}
+		return "current@corp.example.com"
+	})
+	if got := cache.lookup("S-1-5-21-1-2-3-1105", name, time.Second); got != "former@corp.example.com" {
+		t.Fatalf("former SID UPN = %q", got)
+	}
+	if got := cache.lookup("S-1-5-21-1-2-3-1106", name, time.Second); got != "current@corp.example.com" || calls != 2 {
+		t.Fatalf("new SID UPN = %q after %d translations", got, calls)
+	}
+}
+
+func TestWindowsGroupNamesLookupHonorsBudget(t *testing.T) {
+	blocked := make(chan struct{})
+	defer close(blocked)
+	sids := []string{"S-1-5-21-1-2-3-1105", "S-1-5-21-1-2-3-1106"}
+	start := time.Now()
+	got := windowsGroupNamesWithLookup(sids, 2, 20*time.Millisecond, func(string) (string, string, bool) {
+		<-blocked
+		return "group", "CORP", true
+	})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("group lookup took %s after its budget", elapsed)
+	}
+	for i, sid := range sids {
+		if got[i] != sid {
+			t.Fatalf("group %d = %q; want SID %q after timeout", i, got[i], sid)
+		}
 	}
 }

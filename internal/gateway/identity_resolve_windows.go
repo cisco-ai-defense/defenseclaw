@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -73,7 +74,7 @@ func resolveWindowsDirectoryFacts(sid string, upnWait time.Duration) (useridenti
 		facts = mergeSpoolFacts(facts, record)
 	}
 	if facts.Empty() {
-		return useridentity.DirectoryFacts{ResolvedAt: now}, nil
+		return useridentity.DirectoryFacts{}, errors.New("Windows directory lookup returned no facts")
 	}
 	return facts, nil
 }

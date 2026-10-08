@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -539,7 +540,7 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	instance := func(sessionParams string) string {
 		req := deniedACPTestEvaluation()
 		req.Payload = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":` + sessionParams + `}`)
-		return AgentIdentityFromContext(acpEvaluationContext(t.Context(), req, "kiro")).AgentInstanceID
+		return AgentIdentityFromContext(acpEvaluationContext(t.Context(), req, "kiro", false)).AgentInstanceID
 	}
 	first := instance(`{"sessionId":"acp-session-1"}`)
 	if first == "" || first != instance(`{"sessionId":"acp-session-1"}`) {
@@ -582,7 +583,7 @@ func TestACPUnboundFrameDoesNotJoinAnotherAgentSession(t *testing.T) {
 	hook, _ := SharedAgentRegistry().ResolveForAgentIdentity(t.Context(), agent, session, "")
 	req := deniedACPTestEvaluation()
 	req.Payload = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"shared-acp-session"}}`)
-	ctx := acpEvaluationContext(t.Context(), req, "kiro")
+	ctx := acpEvaluationContext(t.Context(), req, "kiro", false)
 	identity := AgentIdentityFromContext(ctx)
 	if identity.AgentInstanceID != "" || agentIdentityIDForTraffic(ctx, identity) != "" {
 		t.Fatalf("unbound ACP frame joined hook agent %q: %+v", hook.AgentInstanceID, identity)
@@ -598,12 +599,19 @@ func TestACPAggregateCarriesTheTurnSession(t *testing.T) {
 	}
 	req := deniedACPTestEvaluation()
 	req.Payload, req.Aggregate = payload, true
-	ctx := acpEvaluationContext(t.Context(), req, "kiro")
+	ctx := acpEvaluationContext(t.Context(), req, "kiro", false)
 	if got := SessionIDFromContext(ctx); got != "turn-session-1" {
 		t.Fatalf("aggregate session = %q", got)
 	}
 	if got := AgentIdentityFromContext(ctx).AgentInstanceID; got == "" {
 		t.Fatal("aggregate omitted its agent instance")
+	}
+	secureClientContext := acpEvaluationContext(t.Context(), req, "kiro", true)
+	if session := SessionIDFromContext(secureClientContext); session != "" {
+		t.Fatalf("Secure Client aggregate session = %q, want none", session)
+	}
+	if session := audit.EnvelopeFromContext(secureClientContext).SessionID; session != "" {
+		t.Fatalf("Secure Client aggregate audit session = %q, want none", session)
 	}
 }
 

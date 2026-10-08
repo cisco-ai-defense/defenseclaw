@@ -215,6 +215,14 @@ func (s *ContinuousDiscoveryService) discoveryAccessSkipped(err error) bool {
 		return false
 	}
 	if macOSPrivacyDenied(runtime.GOOS, err) {
+		var pathErr *fs.PathError
+		if s != nil && !s.opts.SecureClient && errors.As(err, &pathErr) {
+			s.tccSkipped = true
+			if s.tccSkippedPaths == nil {
+				s.tccSkippedPaths = make(map[string]bool)
+			}
+			s.tccSkippedPaths[hashPath(filepath.Clean(pathErr.Path))] = true
+		}
 		return true
 	}
 	return s != nil && len(s.opts.homeOwners) > 0 && errors.Is(err, fs.ErrPermission)

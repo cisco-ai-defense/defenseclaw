@@ -578,6 +578,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 	for _, plane := range platform.Planes {
 		capability := capabilities[plane]
 		entry := PlaneHealth{
+			Selected:  selected[string(plane)],
 			Plane:     plane,
 			Available: capability.Available,
 			Mechanism: capability.Mechanism,

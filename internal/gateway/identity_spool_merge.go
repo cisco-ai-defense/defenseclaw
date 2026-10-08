@@ -91,7 +91,7 @@ func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.Identity
 		return enterprisehooks.IdentitySpoolRecord{}, false
 	}
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, key, validateManagedGuardianAuthorization)
-	if err != nil || now.Sub(record.UpdatedAt) > identitySpoolMaxAge {
+	if err != nil || record.UpdatedAt.After(now) || now.Sub(record.UpdatedAt) > identitySpoolMaxAge {
 		return enterprisehooks.IdentitySpoolRecord{}, false
 	}
 	return record, true

@@ -10053,7 +10053,10 @@ def _check_observability_v8_status(
             detail += f"; health={live_state}"
             if live.display_reason:
                 detail += f"/{live.display_reason}"
-            detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
+            detail += (
+                f"; queue={live.queue_label_for(secure_client=secure_client)};"
+                f" last={live.activity_label}; circuit={live.circuit_label}"
+            )
             if destination.kind == "splunk_hec" and live.last_error_class in {"http_rejected", "hec_ack_rejected"}:
                 detail += (
                     "; HEC rejected an event: check that the index exists and the token can write to it; "

@@ -520,8 +520,15 @@ func (p *GuardrailProxy) servedConnector() string {
 // user, recorded for `defenseclaw agent identities`. It then resolves the
 // request's guardrail profile with that connector and agent, so connectors
 // and agents assignments decide proxy traffic as explain says they do.
+type unverifiedProxyCallerKey struct{}
+
 func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 	ctx := r.Context()
+	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) {
+		// A provider key admits model traffic but says nothing about who sent it.
+		// Keep the proxy's base guardrail and leave the owner's agent unclaimed.
+		return r.WithContext(context.WithValue(ctx, unverifiedProxyCallerKey{}, true))
+	}
 	connectorName := p.servedConnector()
 	if identity := AgentIdentityFromContext(ctx); identity.IdentityID == "" {
 		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
@@ -4270,18 +4277,17 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bo
 	return r, true
 }
 
-// dropProxyUserClaims removes user claims before the correlation middleware
-// reads them. The hook helpers send the DefenseClaw pair to hook routes;
-// proxy clients supply no trusted user header, so these are only claims. Under the Secure Client integration the headers are left as they
-// are.
+// dropProxyUserClaims prevents proxy user headers from becoming correlation
+// identity. Generic X-User-* headers remain on the request for the configured
+// custom-header forwarding path; DefenseClaw headers are internal-only.
+type proxyUserClaimsIgnoredKey struct{}
+
 func dropProxyUserClaims(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if identityFactsEnabled.Load() {
 			r.Header.Del(llmEventUserIDHeader)
 			r.Header.Del(llmEventUserNameHeader)
-			for _, name := range [...]string{"X-User-Id", "X-User-ID", "X-User", "X-User-Name", "X-Username"} {
-				r.Header.Del(name)
-			}
+			r = r.WithContext(context.WithValue(r.Context(), proxyUserClaimsIgnoredKey{}, true))
 		}
 		next.ServeHTTP(w, r)
 	})

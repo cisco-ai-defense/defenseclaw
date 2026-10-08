@@ -956,12 +956,16 @@ func anyEqualFold(have []string, want string) bool {
 }
 
 // decisionConfig returns the configuration a decision for ctx reads: the
-// derived configuration of the request's profile, or a.scannerCfg.
+// derived configuration of the request's profile, or the live base snapshot.
 func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 	if a == nil {
 		return nil
 	}
-	return a.decisionConfigFrom(ctx, a.scannerCfg)
+	// Secure Client keeps the pre-profile startup policy path.
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
+	}
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot())
 }
 
 // decisionConfigFrom is decisionConfig for a caller that already holds a
@@ -1039,6 +1043,9 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 // agent. It applies only to a request with a verified user-scoped identity;
 // without one (nil) the proxy keeps its own settings.
 func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
+	if ctx != nil && ctx.Value(unverifiedProxyCallerKey{}) == true {
+		return nil
+	}
 	set := liveGuardrailProfiles.Load()
 	if set == nil {
 		return nil
@@ -1071,12 +1078,13 @@ func profileProxyOverride(ctx context.Context, connectorName string) (mode, bloc
 // The proxy scanned every request with the global pack, so a profile's
 // rule_pack_dir never reached OpenClaw or ZeptoClaw traffic (GAP-0313).
 func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
+	connectorName := profileRequestConnector(ctx)
 	if resolved := proxyProfileFor(ctx); resolved != nil {
-		if generation := resolved.ruleGeneration(""); generation != nil {
+		if generation := resolved.ruleGeneration(connectorName); generation != nil {
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration("")
+	return snapshotRulePackGeneration(connectorName)
 }
 
 // proxyGuardrailProfileTelemetryFor describes only a profile actually used

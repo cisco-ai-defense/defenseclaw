@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Managed by DefenseClaw packaging/identity/okta/install-sssd-okta.sh.
-# Edits are overwritten the next time the script runs; change the script
-# options instead. SSSD reads Okta users and groups through the Okta LDAP
+# The installer refuses a rerun if another SSSD domain was added. Merge
+# Okta changes manually when this host also serves another domain. SSSD reads Okta users and groups through the Okta LDAP
 # Interface (ldaps://<org>.ldap.okta.com:636).
 #
 # This file was run on RHEL 9.8 against an Okta org (SSSD 2.9.8 with the
