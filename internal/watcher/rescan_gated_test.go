@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -273,5 +274,29 @@ func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {
 	}
 	if fake.calls != 3 {
 		t.Fatalf("ungated: scanner calls = %d, want 3 (one per cycle)", fake.calls)
+	}
+}
+
+func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
+	dir := t.TempDir()
+	original, err := os.ReadFile(filepath.Join("..", "..", "policies", "guardrail", "default", "suppressions.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "suppressions.yaml")
+	if err := os.WriteFile(file, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "local"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"local": {Path: dir}}
+	w := New(cfg, nil, nil, nil, nil, nil, nil)
+	evt := InstallEvent{Type: InstallMCP, Connector: "codex"}
+	before := w.scannerFingerprint(evt)
+	if err := os.WriteFile(file, append(original, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if after := w.scannerFingerprint(evt); after == before {
+		t.Fatal("MCP fingerprint did not change with the rule-pack file")
 	}
 }
