@@ -305,9 +305,16 @@ func (s *scanner) plainDirsAbove(path string) bool {
 		dirs = append(dirs, dir)
 	}
 	for i := len(dirs) - 1; i >= 0; i-- {
-		if info, err := os.Lstat(dirs[i]); err != nil || !info.IsDir() {
-			return false
+		info, err := os.Lstat(dirs[i])
+		if err == nil && info.IsDir() {
+			continue
 		}
+		// A managed gateway may read a folder without the right to read
+		// the attributes of a folder above it: the guardian keeps the .kiro
+		// folder of a user enrolled for Kiro at its exact DACL (GAP-0897).
+		// The path is then plain when it resolves to itself, because a link
+		// or junction above it would resolve elsewhere.
+		return errors.Is(err, os.ErrPermission) && resolvesToItself(path)
 	}
 	return true
 }

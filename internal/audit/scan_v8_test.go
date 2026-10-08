@@ -403,6 +403,10 @@ func TestScanV8DerivedEvidenceMatchesForensicAndCanonicalRecords(t *testing.T) {
 }
 
 func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.T) {
+	// A standalone or per-user gateway keeps an account name in any script
+	// on the scan rows too, like its hook decisions (GAP-0822).
+	observability.SetUnicodeUserNames(true)
+	t.Cleanup(func() { observability.SetUnicodeUserNames(false) })
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(runtime)
@@ -422,7 +426,7 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		RequestID: "request-runtime", SessionID: "session-runtime",
 		TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef",
 		AgentID: "agent-runtime", AgentInstanceID: "instance-runtime", Connector: "codex",
-		UserID: "1002", UserIDKind: "posix_uid", UserName: "bob",
+		UserID: "1002", UserIDKind: "posix_uid", UserName: "dcad-eo\u00e9@dclab.test",
 	}
 
 	gotEvaluationID, scanID, err := logger.LogInspectFindingsWithCorrelation(t.Context(), source, corr)
@@ -452,7 +456,7 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		}
 		// Finding and scan-verdict rows name the caller, as hook decisions do.
 		if body["user.id"] != "1002" || body["defenseclaw.user.id_kind"] != "posix_uid" ||
-			body["defenseclaw.user.name"] != "bob" {
+			body["defenseclaw.user.name"] != corr.UserName {
 			t.Fatalf("record[%d] caller=%#v", index, body)
 		}
 		if index == 0 && body["defenseclaw.guardrail.evidence_summary"] != wantEvidence {

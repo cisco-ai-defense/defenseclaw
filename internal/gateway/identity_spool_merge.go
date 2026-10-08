@@ -121,7 +121,7 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	merged := own
 	if record.SSSDDomain != "" && own.Domain != "" && !strings.EqualFold(own.Domain, record.SSSDDomain) &&
 		!strings.EqualFold(own.Domain, spool.Domain) {
-		merged.Domain, merged.Realm, merged.Principal, merged.Directory = "", "", "", ""
+		merged.Domain, merged.Realm, merged.Principal, merged.Directory, merged.AccountDomain = "", "", "", "", ""
 	}
 	if spool.UPN != "" {
 		merged.UPN = spool.UPN

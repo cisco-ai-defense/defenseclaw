@@ -206,6 +206,58 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	validate("kiro", kiroBinary, result.contractLock)
 }
 
+// The setup command of an enrollment a newer one replaced is refused and
+// changes nothing: it overwrote the working entry and lock (GAP-0733).
+func TestEnterpriseACPUserSetupRefusesAReplacedEnrollment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows editor settings path is covered by the live managed run")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	stubEnterpriseACPGuardCustody(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	credential, err := acp.EnsureEnterpriseCredential(t.TempDir(), "uid:1001", "zed", "kiro", "act")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err := acp.PublishEnterpriseUserToken(dataDir, "zed", "kiro", credential.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnterpriseACPUserEnrollment(tokenPath, "act", "action"); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := filepath.Join(home, "kiro-cli")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setup := func(profile string) error {
+		_, err := setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
+			client: "zed", agent: "kiro", profile: profile, mode: acp.ModeObserve, dataDir: dataDir, guard: guard,
+			agentBinary: agent, gatewayURL: "http://127.0.0.1:18970/api/v1/acp/evaluate",
+			rerun: func(profile string, mode acp.Mode) string {
+				return "setup --profile " + profile + " --mode " + string(mode)
+			},
+		})
+		return err
+	}
+	if err := setup("obs"); err == nil || !strings.Contains(err.Error(), "enrolled you for zed/kiro in profile act") ||
+		!strings.Contains(err.Error(), "Run: setup --profile act --mode action") {
+		t.Fatalf("the setup of a replaced enrollment: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "zed", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused setup wrote the editor settings: %v", err)
+	}
+	if err := setup("act"); err != nil {
+		t.Fatalf("the setup of the current enrollment: %v", err)
+	}
+}
+
 // stubEnterpriseACPGuardCustody accepts the test binary as the guard: it is
 // not in an administrator-owned directory.
 func stubEnterpriseACPGuardCustody(t *testing.T) {

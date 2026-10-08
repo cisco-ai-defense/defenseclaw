@@ -18,7 +18,9 @@ profile rejects them and keeps its behavior as it was.
   and, with throwaway objects that were removed afterwards, every `--apply` path: `groups`
   (create two groups, add an enrolled device, run again), `remediation` (create the package from
   the kit scripts, assign it with a daily schedule, update and reassign it), `macos-script`
-  (create, assign, update) and `assign-app` (an app assigned as required to a group, run again).
+  (create, assign, update), `assign-app` (including an intent change) and
+  `remove-assignment`.
+  The add-device retry after Graph's propagation delay has a unit test only.
   `status` read the install report of an app and the run states of a Remediations package, both
   with no device yet. The tenant (licences, users, groups, automatic enrollment, the Apple push
   certificate) was prepared for this and a Windows 11 and an Ubuntu 24.04 Desktop device were
@@ -51,14 +53,16 @@ Run `python3 intune_tenant.py COMMAND --help` for the options. Python 3.9 or lat
 | `devices` | no | Managed devices with compliance, management state and last sync. Filters: `--os`, `--group`, `--noncompliant` |
 | `status` | no | Install state per device of an app, run state per device of a Remediations package |
 | `groups` | with `--apply` | Create static security groups; add an Entra device to a group by name |
-| `assign-app` | with `--apply` | Add an app assignment; changing its intent updates the existing assignment, which the preview names |
+| `assign-app` | with `--apply` | Add an app assignment; changing its intent deletes the old assignment and creates the new one (Graph cannot change it in place), which the preview names; a failed create restores the old one |
 | `remove-assignment` | with `--apply` | Remove an included group assignment before an uninstall rollout; exclusions are preserved |
 | `remediation` | with `--apply` | Create or update a Remediations package from `../windows/Remediate-*.ps1` (run as SYSTEM) and assign it on a daily schedule |
 | `macos-script` | with `--apply` | Create or update a macOS shell script from a file (run as root) and assign it |
 
 Rules: credentials only from the environment; every command that changes the tenant prints a
 plan until you pass `--apply` (and `--dry-run` is accepted); objects are found by exact display
-name, created when missing and updated when present, so a second run changes nothing; a Graph
+name, created when missing and updated when present. Repeating `--apply` may update
+script content and assignments when the input has changed; an unchanged input
+has no further work. A Graph
 error is printed with its status and code and the exit code is 1.
 
 ## Credentials and permissions

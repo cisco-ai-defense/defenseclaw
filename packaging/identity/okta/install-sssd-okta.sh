@@ -544,12 +544,13 @@ check_allow_group() {
 
 sssd_config_stale() {
   # A previous run may have installed the config and then failed at PAM or sshd.
-  # Compare nanoseconds so a rerun in the same second still notices that change.
+  # ActiveEnterTimestamp has whole-second precision, so compare whole seconds.
+  # A config written in the same second as the restart is already active.
   local started config_time service_time
   systemctl is-active sssd > /dev/null 2>&1 || return 0
   started=$(systemctl show sssd -p ActiveEnterTimestamp --value 2> /dev/null) || return 0
-  config_time=$(date -d "$(stat -c %y "$CONF" 2> /dev/null)" +%s%N 2> /dev/null) || return 0
-  service_time=$(date -d "$started" +%s%N 2> /dev/null) || return 0
+  config_time=$(stat -c %Y "$CONF" 2> /dev/null) || return 0
+  service_time=$(date -d "$started" +%s 2> /dev/null) || return 0
   ((config_time > service_time))
 }
 

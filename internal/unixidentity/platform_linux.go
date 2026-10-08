@@ -42,6 +42,7 @@ var (
 	localPasswdPath = "/etc/passwd"
 	localGroupPath  = "/etc/group"
 	nsswitchPath    = "/etc/nsswitch.conf"
+	sambaConfPath   = "/etc/samba/smb.conf"
 )
 
 // platformLocalAccounts reads /etc/passwd, the files backend itself.

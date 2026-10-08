@@ -37,6 +37,21 @@ func TestInventoryDACLSkipsKiroWhereTheGuardianOwnsIt(t *testing.T) {
 			t.Fatalf("%s's .kiro is guardian-owned: %v", home, owned)
 		}
 	}
+	// The IDE inventory grants nothing on a guardian-owned .kiro either,
+	// only below it (GAP-0897).
+	ide := func(home string) map[string]bool {
+		dirs := map[string]bool{}
+		for _, g := range inventoryDACLIDEGrants(home, owned[strings.ToLower(home)]) {
+			dirs[g.dir] = true
+		}
+		return dirs
+	}
+	if alice := ide(`C:\Users\Alice`); alice[".kiro"] || !alice[`.kiro\extensions`] {
+		t.Fatalf("alice IDE grants on .kiro = %v, below = %v; want none on .kiro, one below", alice[".kiro"], alice[`.kiro\extensions`])
+	}
+	if !ide(`C:\Users\bob`)[".kiro"] {
+		t.Fatal("bob lost the .kiro attributes grant")
+	}
 }
 
 // GAP-1863: every inventory folder that holds an enrolled per-user
@@ -212,7 +227,7 @@ func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
 		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
 	}
 	for pass, want := range []inventoryDACLResult{inventoryDACLGranted, inventoryDACLAlreadyPresent} {
-		for _, g := range inventoryDACLIDEGrants(home) {
+		for _, g := range inventoryDACLIDEGrants(home, nil) {
 			result, err := g.ensure(filepath.Join(home, g.dir), sid)
 			if g.dir == `AppData\Local\Google` {
 				if !errors.Is(err, errInventoryDACLLink) {

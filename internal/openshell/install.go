@@ -404,7 +404,34 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	// An old keg is already present during an upgrade. Only a change made
 	// by this invocation shows that the formula installation completed.
 	kegBefore := formulaKegState(i.BrewPrefix)
-	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}); err != nil {
+	command := Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}
+	var runErr error
+	if i.GOOS == "darwin" && os.Getenv("TMUX") != "" {
+		// NVIDIA's installer can return success after brew services refuses
+		// tmux, then leave no registration. Capture this one path so its raw
+		// usage dump does not reach the terminal.
+		command.Timeout = 30 * time.Minute
+		var output []byte
+		output, runErr = i.Runner.Output(ctx, command)
+		if bytes.Contains(output, []byte("brew services` cannot run under tmux")) ||
+			bytes.Contains(output, []byte("brew services cannot run under tmux")) {
+			// A separately started gateway may already answer; check once with
+			// a short deadline instead of the normal 90-second install wait.
+			probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			if i.VerifyGateway(probeCtx) == nil {
+				after, err := i.installedCLI(ctx)
+				if err == nil {
+					return &InstallResult{Plan: plan, Installed: true, CLIVersion: after.Version}, nil
+				}
+			}
+			return nil, ErrBrewNeedsTerminal
+		}
+		_, _ = i.Out.Write(output)
+	} else {
+		runErr = i.Runner.Run(ctx, command)
+	}
+	if err := runErr; err != nil {
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
 			// formula (NVIDIA's tap has no bottle for this macOS) with an

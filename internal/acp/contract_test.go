@@ -88,7 +88,7 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	if err := os.WriteFile(clientConfig, []byte(`{"agent_servers":{`+entry+`}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	entryDigest, err := ClientEntrySHA256(clientConfig, "kiro")
+	entryDigest, err := ClientEntrySHA256(clientConfig, "zed", "kiro")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +104,25 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
 		t.Fatalf("a rewrite of the settings around the guarded entry was refused: %v", err)
 	}
-	if err := os.WriteFile(clientConfig, []byte(strings.Replace(rewritten, `"kiro"]`, `"kiro","--x"]`, 1)), 0o600); err != nil {
+	// A mode picked in Zed's agent panel is stored in the entry and keeps
+	// it valid; an edit of what the editor launches does not (GAP-0900).
+	uiChoice := strings.Replace(rewritten, `"command":"guard"`, `"default_mode":"accept_edits","command":"guard"`, 1)
+	if err := os.WriteFile(clientConfig, []byte(uiChoice), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil ||
-		!strings.Contains(err.Error(), "DefenseClaw · Kiro entry") {
-		t.Fatalf("an edited guarded entry: err = %v", err)
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
+		t.Fatalf("a mode chosen in the editor UI was refused: %v", err)
+	}
+	for _, edit := range []string{
+		strings.Replace(uiChoice, `"kiro"]`, `"kiro","--x"]`, 1),
+		strings.Replace(uiChoice, `"command":"guard"`, `"command":"other"`, 1),
+	} {
+		if err := os.WriteFile(clientConfig, []byte(edit), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil ||
+			!strings.Contains(err.Error(), "DefenseClaw · Kiro entry") {
+			t.Fatalf("an edited guarded entry: err = %v", err)
+		}
 	}
 }

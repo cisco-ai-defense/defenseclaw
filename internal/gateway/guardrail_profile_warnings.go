@@ -37,6 +37,11 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := unnamedGroupsNote(subject); note != "" {
 		warnings = append(warnings, note)
 	}
+	if subject != nil && subject.cachedFactsAge > 0 {
+		warnings = append(warnings, fmt.Sprintf("the directory does not name %s now: this is the profile its hooks apply from the "+
+			"identity facts cached %s ago, which they keep for up to an hour while lookups fail", subject.UserName,
+			subject.cachedFactsAge.Round(time.Second)))
+	}
 	if runtime.GOOS == "windows" && subject != nil {
 		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
 			warnings = append(warnings, note)
@@ -188,6 +193,9 @@ const (
 	// so a configuration with thousands of assignments cannot make an
 	// administrator's command wait.
 	profileGroupCheckMax = 64
+	// profileQuietGroupsNamed bounds the groups one unconfirmed-domain note
+	// names.
+	profileQuietGroupsNamed = 8
 )
 
 // profileGroupCheck is the last pass over a set's groups, and the pass in
@@ -303,11 +311,14 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 }
 
 // unknownAssignmentGroups looks up each distinct group the assignments name
-// and warns for those exists reports as definitely absent, unless their
-// directory does not answer at all. Windows SIDs are checked by the LSA;
-// other platforms skip SIDs. Numeric group ids are not names. qualify, when
-// set, names the qualified form the host knows an
-// absent short name by, which the warning then suggests (GAP-0332).
+// and warns for those exists reports as definitely absent, naming the group
+// and its assignment, also when their directory does not answer for the
+// domain at all (GAP-0928). Windows SIDs are checked by the LSA; other
+// platforms skip SIDs. Numeric group ids are not names. qualify, when set,
+// names the spelling the host lists a group under: the qualified form of an
+// absent short name, which the warning then suggests (GAP-0332), or, outside
+// Windows, the short form a qualified name now resolves to, which account
+// group lists carry instead, so the assignment selects nobody (GAP-0916).
 func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error),
 	qualify func(context.Context, string) string) []string {
 	return unknownAssignmentGroupsForOS(ctx, assignments, exists, qualify, runtime.GOOS)
@@ -320,6 +331,8 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 		group, domain string
 	}
 	var unknown []unknownGroup
+	var warnings []string
+	respelled := map[string]string{} // by folded name: the spelling the host lists a known qualified group under
 	skippedLimit, skippedDeadline := false, false
 	absent := map[string]bool{}   // by folded name; present for every group looked up
 	answered := map[string]bool{} // by folded domain: the host knows a group of it
@@ -346,15 +359,28 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 				absent[key] = dead
 				if known {
 					answered[foldKey(domain)] = true
+					if qualify != nil && platform != "windows" && domain != "" {
+						respelled[key] = qualify(ctx, norm.NFC.String(group))
+					}
 				}
 			}
 			if dead {
 				unknown = append(unknown, unknownGroup{assignment: i + 1, group: group, domain: domain})
+			} else if listed := respelled[key]; listed != "" {
+				hint := ""
+				if _, listedDomain := useridentity.SplitQualifiedName(listed); listedDomain == "" {
+					hint = " (SSSD use_fully_qualified_names = False)"
+				}
+				warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is listed by this host as %q%s, the name account "+
+					"group lists carry, so the assignment selects nobody; write %q", i+1, group, listed, hint, listed))
 			}
 		}
 	}
-	var warnings []string
 	silent := map[string]bool{} // by folded domain, once asked: its directory does not answer
+	// One note per such domain, naming its assignments and groups (GAP-0255,
+	// GAP-0928).
+	quietGroups := map[string][]string{}
+	var quietDomains []string
 	for _, u := range unknown {
 		domainKey := foldKey(u.domain)
 		if platform != "windows" && u.domain != "" && !answered[domainKey] {
@@ -362,12 +388,12 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 			if !asked {
 				quiet = !directoryAnswers(ctx, u.group, u.domain, exists)
 				silent[domainKey] = quiet
-				if quiet {
-					warnings = append(warnings, fmt.Sprintf("could not confirm group names written for %s by this spelling; "+
-						"check the qualified name with getent group, since the host may use a different domain prefix or the lookup may be unavailable", u.domain))
-				}
 			}
 			if quiet {
+				if _, seen := quietGroups[domainKey]; !seen {
+					quietDomains = append(quietDomains, u.domain)
+				}
+				quietGroups[domainKey] = append(quietGroups[domainKey], fmt.Sprintf("assignment %d: group %q", u.assignment, u.group))
 				continue
 			}
 		}
@@ -380,6 +406,15 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 			}
 		}
 		warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", u.assignment, u.group))
+	}
+	for _, domain := range quietDomains {
+		named := quietGroups[foldKey(domain)]
+		if len(named) > profileQuietGroupsNamed {
+			named = append(named[:profileQuietGroupsNamed:profileQuietGroupsNamed], fmt.Sprintf("%d more", len(named)-profileQuietGroupsNamed))
+		}
+		warnings = append(warnings, fmt.Sprintf("could not confirm group names written for %s by this spelling (%s): renamed or "+
+			"deleted in the directory, another domain prefix, or the lookup is unavailable, so these may select nobody; check the "+
+			"qualified name with getent group", domain, strings.Join(named, ", ")))
 	}
 	if skippedLimit {
 		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: only the first %d distinct groups were checked; later assignment groups were not checked", profileGroupCheckMax))
@@ -599,4 +634,45 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 		"message":            message,
 	}
 	return view, message
+}
+
+// observedGroupDomains are the domains of the name@domain groups of accounts
+// whose directory facts the gateway resolved, so a short-name hint also
+// names an SSSD domain realmd does not list (GAP-0332).
+var observedGroupDomains = &boundedNameSet{max: 16}
+
+// boundedNameSet keeps the first max distinct names, compared without
+// regard to case.
+type boundedNameSet struct {
+	mu    sync.Mutex
+	max   int
+	names []string
+}
+
+func (b *boundedNameSet) add(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, `@\/: `) {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.names) >= b.max || slices.ContainsFunc(b.names, func(seen string) bool { return strings.EqualFold(seen, name) }) {
+		return
+	}
+	b.names = append(b.names, name)
+}
+
+func (b *boundedNameSet) list() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.names)
+}
+
+// noteGroupDomains records the domains of an account's name@domain groups.
+func noteGroupDomains(groups []string) {
+	for _, group := range groups {
+		if _, domain := useridentity.SplitQualifiedName(group); domain != "" && strings.Contains(group, "@") {
+			observedGroupDomains.add(domain)
+		}
+	}
 }

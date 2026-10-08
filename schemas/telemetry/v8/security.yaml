@@ -2236,7 +2236,9 @@ groups:
   - correlation.identity
   - correlation.guardrail.profile
   - correlation.sandbox
-  attributes: []
+  attributes:
+  - ref: defenseclaw.user.enrollment
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.hook.event
     requirement_level: required

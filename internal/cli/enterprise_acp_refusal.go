@@ -39,9 +39,12 @@ func enterpriseACPWindowsTargetError(err error, notLocalSystem bool) error {
 		return &enterpriseACPTargetRefusal{err: err, message: "enterprise acp: on Windows only LocalSystem can write the ACP token " +
 			"into a user profile, and this prompt is not LocalSystem; " + enterpriseACPWindowsEnrollForm}
 	case errors.As(err, &session):
+		// A disconnected session counts as signed in; the text named only
+		// a SID (GAP-0835).
 		return &enterpriseACPTargetRefusal{err: err, message: fmt.Sprintf(
-			"enterprise acp: %s has no signed-in session, and the ACP token is written as the signed-in user; "+
-				"run the enrollment again while that user is signed in (nothing retries it)", strings.TrimSpace(session.SID))}
+			"enterprise acp: %s is not signed in on this computer (no active or disconnected session), and the ACP token "+
+				"is written as that user; run this command again while the user is signed in (nothing retries it)",
+			enterpriseACPAccountLabel(strings.TrimSpace(session.SID)))}
 	case strings.Contains(err.Error(), "refusing non-interactive target SID"):
 		// The hook guardian text named "enterprise hooks" (GAP-0355).
 		_, sid, _ := strings.Cut(err.Error(), "refusing non-interactive target SID ")
@@ -49,6 +52,21 @@ func enterpriseACPWindowsTargetError(err error, notLocalSystem bool) error {
 			strings.TrimSpace(sid) + "), not by a user, so --user-home alone does not name one; " + enterpriseACPWindowsEnrollForm}
 	}
 	return err
+}
+
+// enterpriseACPAccountLabel names the account of a SID: the --user given or
+// the account name, with the SID.
+func enterpriseACPAccountLabel(sid string) string {
+	name := strings.TrimSpace(enterpriseACPUser)
+	if name == "" {
+		if account, err := enterpriseACPDescribePrincipal("sid:" + sid); err == nil && account.name != "" {
+			name = account.name
+		}
+	}
+	if name == "" || sid == "" {
+		return name + sid
+	}
+	return name + " (" + sid + ")"
 }
 
 // enterpriseACPRefusal is what enroll, verify and revoke report when the

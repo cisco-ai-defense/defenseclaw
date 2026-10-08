@@ -931,6 +931,23 @@ attributes:
       - claimed
     notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; anything the hook reports is claimed
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.enrollment
+  type: string
+  brief: How the enterprise enrollment rules treat the account a hook call came from
+  examples:
+  - exempt
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - exempt
+    notes: exempt for an account enterprise.enrollment.exempt_users lists (allowed and inspected, not enrolled); absent for every other account
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.group_count
   type: int64
   brief: Number of directory groups the end-user account belongs to

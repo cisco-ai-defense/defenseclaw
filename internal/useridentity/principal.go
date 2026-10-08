@@ -141,16 +141,34 @@ func BareAccountName(name string) string {
 }
 
 // AccountFilterMatches reports whether a --user filter selects an account
-// row: its id (uid or SID), its name, or the bare account of either side
-// (DOMAIN\name, user@realm), compared case-insensitively as Windows
-// compares account names. The admin views share it so a bare or a
-// qualified name works in each, whichever spelling the row carries
-// (GAP-0051, GAP-0079).
+// row: its id (uid or SID), its name, or its bare account, compared
+// case-insensitively as Windows compares account names. The admin views share
+// it (GAP-0051, GAP-0079). A bare filter selects the account of that name in
+// every domain. A qualified filter (DOMAIN\name, user@domain) selects only a
+// row of exactly that domain: CORP\alice is not OTHER\alice, and
+// alice@corp.example.com is not a local alice (GAP-0366). A row that names
+// its account bare is matched by a qualified filter only when its id is a SID:
+// Windows rows keep the bare name next to the SID, while a bare Unix row is a
+// local or short-name account of no known domain.
 func AccountFilterMatches(filter, id, name string) bool {
 	if filter == "" || strings.EqualFold(filter, id) || strings.EqualFold(filter, name) {
 		return true
 	}
-	return name != "" && strings.EqualFold(BareAccountName(filter), BareAccountName(name))
+	if name == "" {
+		return false
+	}
+	filterAccount, filterDomain := SplitQualifiedName(filter)
+	rowAccount, rowDomain := SplitQualifiedName(name)
+	switch {
+	case !EqualFold(filterAccount, rowAccount):
+		return false
+	case filterDomain == "":
+		return true
+	case rowDomain != "":
+		return EqualFold(filterDomain, rowDomain)
+	default:
+		return KindForID(id) == KindWindowsSID
+	}
 }
 
 func plausiblePrincipal(value string) bool {

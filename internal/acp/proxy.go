@@ -104,6 +104,7 @@ func Run(ctx context.Context, opts ProxyOptions) error {
 		pendingClient: make(map[string]string), pendingAgent: make(map[string]string),
 		peerProtocolFixes: !secureClientHost(),
 	}
+	defer state.agentSpoke()
 	clientOut := &lockedWriter{writer: opts.Stdout}
 	agentInput := &lockedWriter{writer: agentIn}
 	clientDone := make(chan error, 1)
@@ -167,6 +168,59 @@ type proxyState struct {
 	// one guard for every thread (Zed) showed nothing in a new thread after
 	// a revoke (GAP-0354).
 	uncheckedNotified map[string]bool
+	// silenceGen and silenceTimer drive the notice for an agent that does
+	// not answer a prompt (armSilenceNotice).
+	silenceGen   uint64
+	silenceTimer *time.Timer
+}
+
+// agentSilenceNotice is how long a prompt waits for any frame of the agent
+// before the guard tells the user it is waiting.
+var agentSilenceNotice = 60 * time.Second
+
+// armSilenceNotice tells the user, once per prompt, when the agent sends
+// nothing for agentSilenceNotice. An agent that has never run for the
+// account (Hermes) asks its first-run questions on a terminal the editor
+// cannot show, and the thread sat on a spinner for minutes with no text
+// (GAP-0870).
+func (s *proxyState) armSilenceNotice(opts ProxyOptions, session string, client io.Writer) {
+	if !s.peerProtocolFixes || session == "" {
+		return
+	}
+	name, command := opts.AgentID, opts.AgentID
+	if agent, err := LookupAgent(opts.AgentID); err == nil {
+		name, command = agent.Name, agent.Command
+	}
+	text := fmt.Sprintf("DefenseClaw: %s has not answered for %d seconds. If it has never run for your account on this "+
+		"computer, it may be waiting for its first-run questions in a terminal, which the editor cannot show: run %s once "+
+		"in a terminal, answer them, then start a new thread. Otherwise it is still working.",
+		name, int(agentSilenceNotice/time.Second), command)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.silenceGen++
+	generation := s.silenceGen
+	if s.silenceTimer != nil {
+		s.silenceTimer.Stop()
+	}
+	s.silenceTimer = time.AfterFunc(agentSilenceNotice, func() {
+		s.mu.Lock()
+		quiet := s.silenceGen == generation
+		s.mu.Unlock()
+		if quiet {
+			_, _ = client.Write(agentMessageChunk(session, text))
+		}
+	})
+}
+
+// agentSpoke cancels the silence notice: the agent sent a frame.
+func (s *proxyState) agentSpoke() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.silenceGen++
+	if s.silenceTimer != nil {
+		s.silenceTimer.Stop()
+		s.silenceTimer = nil
+	}
 }
 
 // checkingResumed re-arms the unchecked notice after an evaluation worked.
@@ -560,7 +614,8 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 			"so it was not delivered. Ask your administrator to enroll you for this editor and agent."
 	case errors.Is(err, ErrCredentialRejected) && opts.Managed:
 		return prefix + "the gateway did not accept this editor's ACP credential: your administrator may have revoked " +
-			"your access. It was not delivered. Contact your administrator."
+			"your access. It was not delivered. Ask your administrator to enroll you again; running setup cannot restore " +
+			"a revoked credential."
 	case errors.Is(err, ErrCredentialRejected):
 		rerun := "Run defenseclaw acp setup for this editor and agent again."
 		if opts.SetupCommand != "" {
@@ -614,6 +669,9 @@ func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg
 	}
 	next := "Contact your administrator."
 	switch {
+	case opts.Managed && errors.Is(err, ErrCredentialRejected):
+		// Setup cannot restore a revoked credential (GAP-0905).
+		next = "Ask your administrator to enroll you again; running setup cannot restore a revoked credential."
 	case errors.Is(err, ErrCredentialOtherAccount):
 		next = "Ask your administrator to enroll you for this editor and agent."
 	case !opts.Managed && opts.SetupCommand != "":
@@ -786,6 +844,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		if readErr != nil {
 			return fmt.Errorf("read ACP frame: %w", readErr)
 		}
+		if direction == AgentToClient {
+			state.agentSpoke()
+		}
 		if tooLong {
 			// The Go text was "bufio.Scanner: token too long", in both
 			// modes (GAP-0685).
@@ -901,6 +962,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			}
 		} else if _, err := fmt.Fprintln(dst, string(frame)); err != nil {
 			return err
+		}
+		if direction == ClientToAgent && msg.Method == "session/prompt" && msg.IsRequest() {
+			state.armSilenceNotice(opts, promptSessionID(msg), rejectDst)
 		}
 	}
 }
@@ -1043,19 +1107,21 @@ func trimFrameEnd(line []byte) []byte {
 	return bytes.TrimSuffix(line, []byte{'\r'})
 }
 
-// modeDriftError ends a session whose profile changed mode centrally. Its
-// text named "managed setup", a command no host has, and the editor showed
-// only "Agent failed to run" (GAP-0355): it now names the setup command to
-// run, with --activate when the profile moved to action mode.
+// modeDriftError ends a session whose editor entry is set up for another
+// mode than its profile has centrally. Its text named "managed setup", a
+// command no host has, and the editor showed only "Agent failed to run"
+// (GAP-0355): it now names the setup command to run, with --activate when the
+// profile is in action mode. An entry set up without --activate for an
+// action profile was told the administrator had changed the mode, which
+// nobody had (GAP-0924), so it states both modes and the possible causes.
 func modeDriftError(opts ProxyOptions) error {
 	now, command := "action", opts.setupCommandFor(opts.Profile, ModeAction)
+	cause := "it was set up without --activate, or the mode changed since"
 	if opts.Mode == ModeAction {
 		now, command = "observe", opts.setupCommandFor(opts.Profile, ModeObserve)
+		cause = "the mode changed since setup"
 	}
-	who := "the ACP mode of profile " + opts.Profile + " changed to " + now
-	if opts.Managed {
-		who = "your administrator changed the ACP mode of profile " + opts.Profile + " to " + now
-	}
+	who := fmt.Sprintf("profile %s is in %s mode, but this editor entry is set up for %s mode (%s)", opts.Profile, now, opts.Mode, cause)
 	next := "run the setup command of this editor entry again"
 	if strings.TrimSpace(opts.SetupCommand) != "" {
 		next = "run '" + command + "' to set this editor entry up again"

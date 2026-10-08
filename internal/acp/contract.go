@@ -41,10 +41,26 @@ func ManagedEntryName(agent string) string {
 	return "DefenseClaw · " + strings.ToUpper(agent[:1]) + strings.ToLower(agent[1:])
 }
 
+// editorOwnedEntryKeys are the keys an editor stores in an agent entry for
+// choices made in its own UI. Zed keeps the session mode, model and config
+// options picked in the agent panel there and sends them to the agent over
+// ACP (session/set_mode, session/set_model, session/set_config_option), where
+// the guard checks them like any other request; they cannot change what the
+// editor launches. Choosing "Accept Edits" stored default_mode in the guarded
+// entry, and the next start refused the entry as changed (GAP-0900). The
+// command, args, env and type, and every key not named here, stay pinned.
+var editorOwnedEntryKeys = map[string]map[string]bool{
+	"zed": {
+		"default_mode": true, "default_model": true, "favorite_models": true,
+		"default_config_options": true, "favorite_config_option_values": true,
+	},
+}
+
 // ClientEntrySHA256 is the digest of agent's guarded entry in the editor
 // settings file at path: its JSON with sorted keys, so that the editor
-// rewriting the file around it, or reformatting it, leaves it unchanged.
-func ClientEntrySHA256(path, agentID string) (string, error) {
+// rewriting the file around it, or reformatting it, leaves it unchanged. The
+// keys the editor owns for client are left out.
+func ClientEntrySHA256(path, clientID, agentID string) (string, error) {
 	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
 	if err != nil {
 		return "", err
@@ -59,6 +75,15 @@ func ClientEntrySHA256(path, agentID string) (string, error) {
 	entry, ok := servers[ManagedEntryName(agentID)]
 	if !ok {
 		return "", fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
+	}
+	if fields, isObject := entry.(map[string]any); isObject && len(editorOwnedEntryKeys[clientID]) > 0 {
+		pinned := make(map[string]any, len(fields))
+		for key, value := range fields {
+			if !editorOwnedEntryKeys[clientID][key] {
+				pinned[key] = value
+			}
+		}
+		entry = pinned
 	}
 	canonical, err := json.Marshal(entry)
 	if err != nil {
@@ -158,7 +183,7 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		{agentPath, lock.Agent.SHA256, "agent"},
 	} {
 		if pinned, entry := strings.CutPrefix(item.expected, EntryDigestPrefix); entry && item.label == "client configuration" && !secureClientHost() {
-			observed, digestErr := ClientEntrySHA256(item.path, agentID)
+			observed, digestErr := ClientEntrySHA256(item.path, clientID, agentID)
 			if digestErr != nil || !strings.EqualFold(observed, pinned) {
 				return fmt.Errorf("the %s entry in the editor settings file %s changed after setup (the contract lock pins it), "+
 					"so it must be set up again", ManagedEntryName(agentID), clientConfigPath)

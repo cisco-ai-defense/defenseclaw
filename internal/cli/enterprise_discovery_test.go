@@ -165,6 +165,11 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	const token = "dc-test-discovery-token"
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/guardrail/profiles/resolve" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"unknown connector \"bogus\"; valid connectors: claudecode, codex"}`))
+			return
+		}
 		if r.URL.Path == "/api/v1/slow" {
 			select { // a gateway still resolving a user
 			case <-r.Context().Done():
@@ -209,6 +214,12 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	}
 	if view.Gateway != "127.0.0.1:"+port || !view.Enabled || len(view.Planes) != 1 || view.Planes[0].Mechanism != "ps(1)" {
 		t.Fatalf("runtime view = %+v", view)
+	}
+	var bad json.RawMessage
+	if _, err := enterpriseGatewayGet("/api/v1/guardrail/profiles/resolve?connector=bogus", &bad); err == nil ||
+		commandExitCode(err) != 2 || !strings.Contains(err.Error(), `unknown connector "bogus"`) ||
+		!strings.Contains(err.Error(), "claudecode, codex") {
+		t.Fatalf("unknown connector = %v", err)
 	}
 
 	// GAP-0215: a gateway that took the connection and is still resolving a

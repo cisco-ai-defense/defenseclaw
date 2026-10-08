@@ -95,8 +95,9 @@ func (r *AgentIdentityRecord) ForgetSession(id string) {
 // AgentIdentityFilter narrows ListAgentIdentities. Empty fields match
 // everything.
 type AgentIdentityFilter struct {
-	// User matches the user id exactly or the user name case-insensitively,
-	// bare or qualified on either side (useridentity.AccountFilterMatches).
+	// User matches the user id exactly or the user name case-insensitively;
+	// a bare name selects every domain's account of that name, a qualified
+	// one only rows of exactly that domain (useridentity.AccountFilterMatches).
 	User      string
 	Connector string
 	// AgentIDs, when set, selects only these agents.
@@ -310,8 +311,8 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities` + where +
 		` ORDER BY last_seen DESC, agent_id`
 	// The user filter runs in Go (useridentity.AccountFilterMatches), so a
-	// bare name selects a row stored as user@realm or DOMAIN\user and the
-	// other way round, and the loop below counts, skips and limits. Without
+	// bare name selects a row stored as user@realm or DOMAIN\user, and the
+	// loop below counts, skips and limits. Without
 	// it SQLite does.
 	user := strings.TrimSpace(filter.User)
 	total := -1

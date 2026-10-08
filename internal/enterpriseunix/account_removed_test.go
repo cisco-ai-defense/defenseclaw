@@ -83,7 +83,7 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 			if hasWarning(status, codeGuardianTargetFailed) {
 				t.Fatalf("one account's target is reported as a protection failure: %+v", status.Warnings)
 			}
-			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user bob: the account no longer exists") || !strings.Contains(got, "after 3 consecutive definitive misses") {
+			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user bob: the account does not resolve") || !strings.Contains(got, "after 3 consecutive definitive misses") {
 				t.Fatalf("status does not report the deleted account's target: %+v", status.Warnings)
 			}
 			if got := messagesOf(status.Warnings, codeGuardianTargetUserPath); !strings.Contains(got, "amp for user carol is not protected: hook config parent is not a directory: /home/carol/.config/amp/plugins") {

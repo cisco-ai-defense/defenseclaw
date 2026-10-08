@@ -244,13 +244,54 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile}})
-	if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
-		t.Fatal(err)
+	writeLock := func(profile, mode string) {
+		t.Helper()
+		lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile},
+			"profile": profile, "mode": mode})
+		if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
+	// A lock of a replaced enrollment's profile, or of the other mode, is
+	// not a done setup (GAP-0833).
+	for _, stale := range [][2]string{{"replaced", "action"}, {"locked", "observe"}} {
+		writeLock(stale[0], stale[1])
+		listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+		if row, _ := listed[0].(map[string]any); row["setup"] != "stale" {
+			t.Fatalf("list row = %v for a lock of %v, want setup stale", row, stale)
+		}
+	}
+	writeLock("locked", "action")
 	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
 	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "done" {
 		t.Fatalf("list row = %v, want the custom directory token and setup lock", row)
+	}
+	// A pair the central policy moved to another profile is flagged with
+	// the profile to enroll under (GAP-0911).
+	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "moved"}, config.ACPBinding{Enabled: true, Profile: "moved"}
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	verified := run(runEnterpriseACPVerify)
+	if row, _ := listed[0].(map[string]any); !strings.Contains(fmt.Sprint(row["note"]), "now binds zed/kiro to profile moved") ||
+		!strings.Contains(fmt.Sprint(verified["central_note"]), "enroll the user again with --profile moved") {
+		t.Fatalf("a moved pair is not flagged: list %v, verify %v", row, verified)
+	}
+	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "locked"}, config.ACPBinding{Enabled: true, Profile: "locked"}
+	// After an account rename the recorded data directory names the old
+	// home; list reads the default one of the new home (GAP-0869).
+	renamedHome := t.TempDir()
+	enterpriseACPDescribePrincipal = func(string) (enterpriseACPAccount, error) {
+		return enterpriseACPAccount{exists: true, name: "alice2", home: renamedHome, uid: -1, gid: -1}, nil
+	}
+	if _, err := acp.PublishEnterpriseUserToken(filepath.Join(renamedHome, ".defenseclaw"), "zed", "kiro", strings.Repeat("ab", 32)); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "not run" ||
+		!strings.Contains(fmt.Sprint(row["note"]), "outside the home") {
+		t.Fatalf("list row after a rename = %v, want the copy found in the new home and a note", row)
+	}
+	enterpriseACPDescribePrincipal = func(string) (enterpriseACPAccount, error) {
+		return enterpriseACPAccount{exists: true, name: "alice", home: userHome, uid: -1, gid: -1}, nil
 	}
 
 	enrollment, err := resolveEnterpriseACPEnrollment(true)
@@ -374,6 +415,12 @@ func TestEnterpriseACPEnrollReplacesTheOtherProfile(t *testing.T) {
 	if err != nil || len(enrollments) != 1 || enrollments[0].Profile != "act" {
 		t.Fatalf("enrollments = %+v, err = %v; want only the act enrollment", enrollments, err)
 	}
+	// Setup learns of the replacement from the note beside the copy
+	// (GAP-0733).
+	tokenPath, _ := acp.EnterpriseUserTokenPath(filepath.Join(userHome, ".defenseclaw"), "zed", "hermes")
+	if note, ok := readEnterpriseACPUserEnrollment(tokenPath); !ok || note.Profile != "act" || note.Mode != "action" {
+		t.Fatalf("enrollment note = %+v, %v; want profile act in action mode", note, ok)
+	}
 	// The user copy belongs to act after the replacement. A stale or
 	// mistyped profile revoke must not remove it.
 	for _, stale := range []string{"obs", "missing"} {
@@ -421,6 +468,13 @@ func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
 	}
 	if got := enterpriseACPWindowsTargetError(cause, true); !errors.Is(got, cause) {
 		t.Fatal("the refusal dropped its cause")
+	}
+	// The refusal names the account, not only its SID (GAP-0835).
+	previousUser := enterpriseACPUser
+	t.Cleanup(func() { enterpriseACPUser = previousUser })
+	enterpriseACPUser = `HOST\dcw-user`
+	if got := enterpriseACPWindowsTargetError(&enterprisehooks.WindowsTargetSessionUnavailableError{SID: "S-1-5-21-1-2-3-1001"}, false); !strings.Contains(got.Error(), `HOST\dcw-user (S-1-5-21-1-2-3-1001) is not signed in`) {
+		t.Fatalf("no-session refusal = %q, want the account named", got)
 	}
 }
 

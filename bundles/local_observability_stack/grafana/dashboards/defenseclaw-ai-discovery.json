@@ -1176,7 +1176,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{ide_product=\"\"})",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"})",
           "refId": "A",
           "instant": true
         }
@@ -1301,7 +1301,7 @@
     {
       "type": "bargauge",
       "title": "Plugins by IDE",
-      "description": "Current plugin count per IDE product (`ide_product` label: vscode, cursor, kiro, jetbrains products, visualstudio, zed, eclipse, neovim, ...).",
+      "description": "Current plugin count per IDE product (`defenseclaw_ide_product` label: vscode, cursor, kiro, jetbrains products, visualstudio, zed, eclipse, neovim, ...).",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1314,8 +1314,8 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide_product) (defenseclaw_inventory_ide_plugins))",
-          "legendFormat": "{{ide_product}}",
+          "expr": "sort_desc(sum by (defenseclaw_ide_product) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"}))",
+          "legendFormat": "{{defenseclaw_ide_product}}",
           "refId": "A",
           "instant": true
         }
@@ -1357,7 +1357,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide_product, defenseclaw_ide_plugin_ai, defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins))",
+          "expr": "sort_desc(sum by (defenseclaw_ide_product, defenseclaw_ide_plugin_ai, defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"}))",
           "format": "table",
           "refId": "A",
           "instant": true
@@ -1383,13 +1383,13 @@
               "os_type": true
             },
             "indexByName": {
-              "ide_product": 0,
+              "defenseclaw_ide_product": 0,
               "defenseclaw_ide_plugin_ai": 1,
               "defenseclaw_ide_plugin_enabled": 2,
               "Value": 3
             },
             "renameByName": {
-              "ide_product": "IDE",
+              "defenseclaw_ide_product": "IDE",
               "defenseclaw_ide_plugin_ai": "AI",
               "defenseclaw_ide_plugin_enabled": "Enabled",
               "Value": "Plugins"
@@ -1422,7 +1422,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (defenseclaw_ide_plugin_ai) (defenseclaw_inventory_ide_plugins)",
+          "expr": "sum by (defenseclaw_ide_plugin_ai) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"})",
           "legendFormat": "ai={{defenseclaw_ide_plugin_ai}}",
           "refId": "A",
           "instant": true
@@ -1476,7 +1476,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins)",
+          "expr": "sum by (defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"})",
           "legendFormat": "{{defenseclaw_ide_plugin_enabled}}",
           "refId": "A",
           "instant": true

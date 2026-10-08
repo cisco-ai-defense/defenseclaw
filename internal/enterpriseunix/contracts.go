@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -112,10 +113,20 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			// Say it is gone only when the enumerator confirmed it: a directory
 			// that does not answer gives the same "no such account", and then
 			// directory_lookups_failing says so and the target stays (GAP-0593).
+			// Even then it says the account does not resolve, not that it
+			// was deleted: while the directory is unreachable the lookup
+			// gives the same answer (GAP-0838).
 			if enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
-				removed = append(removed, fmt.Sprintf(
-					"%s for user %s: the account no longer exists (the directory answers \"no such account\"); the enumerator removes this target after %d consecutive definitive misses, one per enumeration cycle",
-					result.Connector, result.User, enterprisehooks.UnixRevokeAfterMisses))
+				message := fmt.Sprintf("%s for user %s: the account does not resolve (the lookup answers \"no such account\"); "+
+					"if it was deleted, the enumerator removes this target after %d consecutive definitive misses, one per "+
+					"enumeration cycle; while the directory does not answer, nothing is removed",
+					result.Connector, result.User, enterprisehooks.UnixRevokeAfterMisses)
+				if directoryLookupsFailing(r.Warnings) {
+					message = fmt.Sprintf("%s for user %s: the account does not resolve while directory lookups are failing, "+
+						"so DefenseClaw cannot tell whether it was deleted; the target stays until the directory answers",
+						result.Connector, result.User)
+				}
+				removed = append(removed, message)
 			}
 			continue
 		}
@@ -498,6 +509,16 @@ func userHomePathRefusal(reason, home string) bool {
 // account named user (getent passwd on Linux, the local directory node on
 // macOS). An account that still exists, a lookup that fails, or a name that
 // is not a plain account name keeps the target a guardian_target_failed.
+// directoryLookupsFailing reports the directory_lookups_failing warning.
+func directoryLookupsFailing(warnings []enterprisestatus.Message) bool {
+	for _, warning := range warnings {
+		if warning.Code == codeDirectoryLookups {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *lifecycle) accountAbsent(ctx context.Context, user string) bool {
 	user = strings.TrimSpace(user)
 	if l.env.Accounts == nil || !plainAccountName(user) {

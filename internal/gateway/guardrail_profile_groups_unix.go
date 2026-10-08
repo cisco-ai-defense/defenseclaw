@@ -9,8 +9,11 @@ import (
 	"context"
 	"errors"
 	osuser "os/user"
+	"runtime"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // profileGroupExists asks the platform's account database (NSS on Linux,
@@ -18,8 +21,11 @@ import (
 // An error means the answer is unknown, not that the group is absent.
 var profileGroupExists = func(ctx context.Context, name string) (bool, error) {
 	_, err := unixidentity.Default(ctx).LookupGroup(name)
+	var respelled *unixidentity.GroupNameMismatchError
 	switch {
-	case err == nil:
+	case err == nil, errors.As(err, &respelled):
+		// A group the host answers under another spelling exists; the
+		// spelling is reported by profileGroupQualifiedName (GAP-0916).
 		return true, nil
 	case unixidentity.IsNotFound(err) && !unixidentity.GroupNameLookupDefinitive():
 		// Himmelblau finds an Entra group only by gid or object id, so its
@@ -36,11 +42,36 @@ var profileGroupExists = func(ctx context.Context, name string) (bool, error) {
 // service cannot look groups up by name.
 var errGroupNameNotSearchable = errors.New("the group service of this host cannot look groups up by name")
 
-// profileGroupQualifiedName returns the name@domain under which a joined
-// realm knows a group the host does not know by its short name (SSSD with
-// use_fully_qualified_names = True), or "" (GAP-0332).
+// profileGroupQualifiedName returns the spelling the host lists a group
+// under when it is not the one an assignment writes, or "". For a short name
+// the host does not know, the name@domain of a joined realm or of an SSSD
+// domain the gateway has seen accounts of (an Okta LDAP domain named okta,
+// which realmd does not list) that knows it (SSSD with
+// use_fully_qualified_names = True, GAP-0332). For a qualified name, the name
+// getent answers it with on Linux: after a switch to short names SSSD still
+// resolves dc-ml@corp.example.com, but as dc-ml, the name account group lists
+// then carry (GAP-0916).
 var profileGroupQualifiedName = func(ctx context.Context, name string) string {
-	return unixidentity.QualifiedGroupName(ctx, unixidentity.Default(ctx), name)
+	resolver := unixidentity.Default(ctx)
+	if strings.ContainsAny(name, `@\`) {
+		if runtime.GOOS != "linux" {
+			return ""
+		}
+		var respelled *unixidentity.GroupNameMismatchError
+		if _, err := resolver.LookupGroup(name); errors.As(err, &respelled) && !useridentity.EqualFold(respelled.Answered.Name, name) {
+			return respelled.Answered.Name
+		}
+		return ""
+	}
+	if qualified := unixidentity.QualifiedGroupName(ctx, resolver, name); qualified != "" {
+		return qualified
+	}
+	for _, domain := range observedGroupDomains.list() {
+		if _, err := resolver.LookupGroup(name + "@" + domain); err == nil {
+			return name + "@" + domain
+		}
+	}
+	return ""
 }
 
 // accountGroupIDs lists an OS account's group ids: os/user's listing, which

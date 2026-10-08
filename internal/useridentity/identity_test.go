@@ -130,3 +130,26 @@ func TestKeepQualifiedNamesKeepsThePasswdName(t *testing.T) {
 		t.Fatalf("Secure Client name = %q, want CORP\\alice", got)
 	}
 }
+
+// A qualified --user filter lists only the account of that domain; a bare
+// filter still lists every domain's account of the name, and a Windows row,
+// which keeps the bare name next to the SID, still matches DOMAIN\name
+// (GAP-0366, GAP-0079).
+func TestAccountFilterMatchesQualifiedDomainExactly(t *testing.T) {
+	for _, tc := range []struct {
+		filter, id, name string
+		want             bool
+	}{
+		{"eli-twin@dclab.test", "94403922", "eli-twin@dclab.test", true},
+		{"eli-twin@dclab.test", "1009", "eli-twin", false},
+		{`CORP\alice`, "70001", `OTHER\alice`, false},
+		{`CORP\alice`, "70002", `corp\alice`, true},
+		{"eli-twin", "1009", "eli-twin", true},
+		{"eli-twin", "94403922", "eli-twin@dclab.test", true},
+		{`DCLAB\dcad-alice`, "S-1-5-21-1-2-3-1104", "dcad-alice", true},
+	} {
+		if got := AccountFilterMatches(tc.filter, tc.id, tc.name); got != tc.want {
+			t.Errorf("AccountFilterMatches(%q, %q, %q) = %v, want %v", tc.filter, tc.id, tc.name, got, tc.want)
+		}
+	}
+}

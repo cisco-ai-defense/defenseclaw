@@ -54,7 +54,10 @@ func TestLinuxLocalAccountsAndDirectoryConfiguration(t *testing.T) {
 }
 
 // Tests never ask the host's realmd; the ones about realms set hostRealms.
-func init() { hostRealms = func(context.Context) ([]Realm, error) { return nil, nil } }
+func init() {
+	hostRealms = func(context.Context) ([]Realm, error) { return nil, nil }
+	sambaConfPath = filepath.Join(os.TempDir(), "defenseclaw-test-no-smb.conf")
+}
 
 // A per-user gateway resolves the directory type of a winbind account from
 // the realm realmd reports, as the root guardian does: only when the account
@@ -67,6 +70,9 @@ func init() { hostRealms = func(context.Context) ([]Realm, error) { return nil, 
 // the NetBIOS name CORP; the NetBIOS domain of a trusted domain gets no
 // realm facts. An nss_ldap account named by an e-mail address gets none
 // either: it took the principal of an AD account of that name (GAP-0730).
+// The account domain a DOMAIN\\user entry matches is the NetBIOS domain
+// winbind reports or, for a bare name (use default domain = yes), confirms
+// for the same uid; an nss_ldap CORP\\ivan gets none (GAP-0456, GAP-0814).
 func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
 	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
@@ -91,8 +97,10 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		70005: `CORP\erin`,
 		70006: `EMEA\frank`,
 		70007: "gina@corp.example.com",
+		70008: "hank",
+		70009: `CORP\ivan`,
 	}
-	services := map[int]string{70005: "winbind", 70006: "winbind", 70007: "ldap"}
+	services := map[int]string{70005: "winbind", 70006: "winbind", 70007: "ldap", 70008: "winbind", 70009: "ldap"}
 	startFakeSSSD(t, nil)
 	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
@@ -106,20 +114,23 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		f.results["-s "+service+" passwd "+name] = line
 		f.results["initgroups "+name] = commandResult{stdout: []byte(name + " 70000\n")}
 	}
+	f.results[`-s winbind passwd CORP\hank`] = f.results["-s winbind passwd 70008"]
 	type view struct {
-		directory                        useridentity.Directory
-		source, domain, realm, principal string
+		directory                                       useridentity.Directory
+		source, domain, realm, principal, accountDomain string
 	}
 	ad, sssd := useridentity.DirectoryActiveDirectory, useridentity.SourceSSSD
 	want := map[int]view{
-		70001: {"", sssd, "", "", ""},
-		70002: {"", sssd, "", "", ""},
-		70003: {"", sssd, "", "", ""},
-		70004: {"", sssd, "", "", ""},
-		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
-		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@corp.example.com"},
-		70006: {ad, useridentity.SourceWinbind, "emea", "", ""},
-		70007: {useridentity.DirectoryLDAP, useridentity.SourceNSSLDAP, "", "", ""},
+		70001: {"", sssd, "", "", "", ""},
+		70002: {"", sssd, "", "", "", ""},
+		70003: {"", sssd, "", "", "", ""},
+		70004: {"", sssd, "", "", "", ""},
+		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", "", ""},
+		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@corp.example.com", "CORP"},
+		70006: {ad, useridentity.SourceWinbind, "emea", "", "", "EMEA"},
+		70007: {useridentity.DirectoryLDAP, useridentity.SourceNSSLDAP, "", "", "", ""},
+		70008: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "hank@corp.example.com", "CORP"},
+		70009: {useridentity.DirectoryLDAP, useridentity.SourceNSSLDAP, "", "", "", ""},
 	}
 	r := newFakeNSS(f)
 	for uid, expected := range want {
@@ -127,7 +138,7 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("uid %d: %v", uid, err)
 		}
-		got := view{facts.Directory, facts.Source, facts.Domain, facts.Realm, facts.Principal}
+		got := view{facts.Directory, facts.Source, facts.Domain, facts.Realm, facts.Principal, facts.AccountDomain}
 		if got != expected || facts.Assurance != useridentity.AssuranceVerified {
 			t.Errorf("uid %d (%s) = %+v, want %+v, verified", uid, accounts[uid], facts, expected)
 		}
@@ -235,9 +246,12 @@ func (f *fakeSSSD) serve(conn net.Conn) {
 // erin@corp.example.com in the AD domain (GAP-0605, GAP-0568); a short LDAP
 // name gets no AD realm (GAP-0497), nor does an account of another domain
 // with its own SID that shares an AD account name, or one that copies an AD
-// account SID, which SSSD maps to the AD account uid. The AD alice keeps
+// account SID, which SSSD maps to the AD account uid. A SID-less CORP\\ivan
+// gets no domain from its name (GAP-0814); the AD alice gets the NetBIOS
+// domain SSSD confirms for her SID (GAP-0456). The AD alice keeps
 // trusted-domain memberships returned for her qualified name, plus local
-// groups listing alice (GAP-0729). The LDAP carol does not get the AD
+// groups listing alice (GAP-0729), split as glibc splits them: after a
+// comma and a space, but not as the last member of a CRLF line (GAP-0815). The LDAP carol does not get the AD
 // groups returned for her ambiguous short name (GAP-0563). A local group
 // listing alice@corp.example.com belongs to an account with that exact name.
 // An SSSD that is stopped while its memory cache still answers the uid
@@ -249,7 +263,8 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	})
 	dir := t.TempDir()
 	nsswitchPath, localPasswdPath, localGroupPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd"), filepath.Join(dir, "group")
-	for path, content := range map[string]string{nsswitchPath: "passwd: files sss\n", localPasswdPath: "", localGroupPath: "docker:x:7000:alice\nwheel:x:10:alice@corp.example.com\n"} {
+	for path, content := range map[string]string{nsswitchPath: "passwd: files sss\n", localPasswdPath: "", localGroupPath: "docker:x:7000:alice\nwheel:x:10:alice@corp.example.com\n" +
+		"staff:x:7001:bob, alice\ncrlf:x:7002:bob,alice\r\n"} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -266,7 +281,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 		"uid:80007": emea + "-1107", `name:emea.corp.example.com\gail`: emea + "-1107", `name:corp.example.com\gail`: emea + "-1107", "sid:" + emea + "-1107": "80007",
 		`name:ldap.corp.example.com\alice`: ldapChild + "-1109", "uid:80009": ldapChild + "-1109", "sid:" + ldapChild + "-1109": "80009",
 		"uid:80008": corp + "-1108", `name:corp.example.com\hank`: corp + "-1108", "sid:" + corp + "-1108": "90008",
-		"gid:5000": corp + "-513", "gid:5300": other + "-1201",
+		"gid:5000": corp + "-513", "gid:5300": other + "-1201", `name:CORP\alice`: corp + "-1101",
 	})
 	line := func(name string, uid int) commandResult {
 		id := strconv.Itoa(uid)
@@ -275,12 +290,12 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	f := &fakeRun{results: map[string]commandResult{
 		"initgroups corp.example.com\\alice": {stdout: []byte("corp.example.com\\alice 80001 5000 5300\n")},
 		"group 5000 7000 80001":              {stdout: []byte("domain users:*:5000:\ndocker:*:7000:\nalice:*:80001:\n")},
-		"group 5000 5300 7000 80001":         {stdout: []byte("domain users:*:5000:\ntrusted-admins:*:5300:\ndocker:*:7000:\nalice:*:80001:\n")},
+		"group 5000 5300 7000 7001 80001":    {stdout: []byte("domain users:*:5000:\ntrusted-admins:*:5300:\ndocker:*:7000:\nstaff:*:7001:\nalice:*:80001:\n")},
 		"initgroups carol":                   {stdout: []byte("carol 80003 5000 5100\n")},
 		"group 5100 80003":                   {stdout: []byte("ldap-devs:*:5100:\ncarol:*:80003:\n")},
 	}}
 	accounts := map[int]string{80001: "alice", 80002: "bob", 80003: "carol", 80004: "frank", 80005: "erin@corp.example.com",
-		80006: "dave", 80007: "gail@emea.corp.example.com", 80008: "hank", 80009: "alice@ldap.corp.example.com"}
+		80006: "dave", 80007: "gail@emea.corp.example.com", 80008: "hank", 80009: "alice@ldap.corp.example.com", 80010: `CORP\ivan`}
 	for uid, name := range accounts {
 		f.results["passwd "+strconv.Itoa(uid)] = line(name, uid)
 		f.results["-s sss passwd "+strconv.Itoa(uid)] = line(name, uid)
@@ -293,19 +308,19 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	r := newFakeNSS(f)
 	ad := useridentity.DirectoryActiveDirectory
 	for uid, want := range map[int]useridentity.DirectoryFacts{
-		80001: {Directory: ad, Domain: "corp.example.com", Realm: "CORP.EXAMPLE.COM", Principal: "alice@corp.example.com"},
-		80002: {}, 80003: {}, 80004: {}, 80005: {}, 80006: {}, 80008: {}, 80009: {},
+		80001: {Directory: ad, Domain: "corp.example.com", Realm: "CORP.EXAMPLE.COM", Principal: "alice@corp.example.com", AccountDomain: "CORP"},
+		80002: {}, 80003: {}, 80004: {}, 80005: {}, 80006: {}, 80008: {}, 80009: {}, 80010: {},
 		80007: {Directory: ad, Domain: "emea.corp.example.com", Realm: "EMEA.CORP.EXAMPLE.COM", Principal: "gail@emea.corp.example.com"},
 	} {
 		facts, err := r.DirectoryFactsWithoutGroupsForUID(uid, time.Now())
 		want.Source = useridentity.SourceSSSD
 		got := useridentity.DirectoryFacts{Source: facts.Source, Directory: facts.Directory, Domain: facts.Domain,
-			Realm: facts.Realm, Principal: facts.Principal}
+			Realm: facts.Realm, Principal: facts.Principal, AccountDomain: facts.AccountDomain}
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Errorf("uid %d (%s) = %+v, %v; want %+v", uid, accounts[uid], got, err, want)
 		}
 	}
-	for uid, want := range map[int][]string{80001: {"domain users", "trusted-admins", "docker", "alice"}, 80003: {"ldap-devs", "carol"}} {
+	for uid, want := range map[int][]string{80001: {"domain users", "trusted-admins", "docker", "staff", "alice"}, 80003: {"ldap-devs", "carol"}} {
 		if facts, err := r.DirectoryFactsForUID(uid, time.Now()); err != nil || !reflect.DeepEqual(facts.Groups, want) {
 			t.Errorf("uid %d groups = %q, %v; want %q", uid, facts.Groups, err, want)
 		}
