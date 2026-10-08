@@ -169,9 +169,10 @@ installed. Every path keeps your configuration and data.
   a shared host. The upgrade itself starts the gateway with the new binary, so
   upgrading one account leaves the other accounts' gateways running; a
   rollback to 0.8.4 runs the 0.8.4 start again.
-- To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
-  rollback command, so to return to 1.x from there, run the command the
-  rollback prints:
+- To go back to 0.8.x afterwards, run `defenseclaw rollback`, except
+  when you upgraded a Windows 0.8.7-0.8.10 Setup install. That case needs
+  the manual steps in [Rollback](#rollback). 0.8.x has no rollback command,
+  so to return to 1.x from an automatic rollback, run the command it prints:
 
   ```bash
   bash ~/.defenseclaw/previous/installer/install.sh --rollback
@@ -181,8 +182,17 @@ installed. Every path keeps your configuration and data.
 
 ## Rollback
 
-`defenseclaw rollback` swaps the live install with the one the last upgrade
-replaced: binaries, Python environment, and the configuration and data as they
+A Windows 0.8.7-0.8.10 Setup install cannot be restored by
+`defenseclaw rollback`; it refuses without changing the current install.
+To return to that release, run `defenseclaw uninstall`, then download its
+`DefenseClawSetup-x64.exe` and run it in your desktop session. The old
+Setup files and data from before the upgrade are in
+`%USERPROFILE%\.defenseclaw\previous`. See
+[Moving from the 0.8.x Setup package](/docs/get-started/windows/install-lifecycle#moving-from-the-08x-setup-package).
+
+For other installs, `defenseclaw rollback` swaps the live install with the
+one the last upgrade replaced: binaries, Python environment, and the
+configuration and data as they
 were at upgrade time. Anything written since then moves into
 `~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.

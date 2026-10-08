@@ -676,11 +676,20 @@ generation and digest it applied.
 
 ## Going back to 0.8.x
 
-Use `defenseclaw rollback` ([Rollback](/docs/get-started/upgrade#rollback)).
-It restores the whole 0.8.x install together with the data as it was when the
-upgrade started: the version 8 `config.yaml`, `data.json` and `audit.db`
-including the operator block and allow rows. Anything you changed since the
-upgrade stays in `~/.defenseclaw/previous` and returns if you roll forward.
+Except for a Windows 0.8.7-0.8.10 Setup install, use `defenseclaw rollback`
+([Rollback](/docs/get-started/upgrade#rollback)). It restores the whole 0.8.x
+install together with the data as it was when the upgrade started: the version
+8 `config.yaml`, `data.json` and `audit.db` including the operator block and
+allow rows. Anything you changed since the upgrade stays in
+`~/.defenseclaw/previous` and returns if you roll forward.
+
+For a Windows 0.8.7-0.8.10 Setup install, `defenseclaw rollback` refuses
+automatic restoration and leaves the current install in place. Run
+`defenseclaw uninstall`, then download `DefenseClawSetup-x64.exe` from the
+release you had and run it in a desktop session. The old Setup files and your
+data from before the upgrade are in
+`%USERPROFILE%\.defenseclaw\previous`. See
+[Moving from the 0.8.x Setup package](/docs/get-started/windows/install-lifecycle#moving-from-the-08x-setup-package).
 
 If you reinstall 0.8.x yourself instead, it refuses the migrated file. The
 0.8.x CLI prints:
