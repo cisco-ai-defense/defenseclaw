@@ -151,6 +151,21 @@ func TestWindowsEnterpriseProfileFromConfig(t *testing.T) {
 	if err := resolveWindowsEnterpriseLifecycleProfile("install", opts); err != nil || opts.resolvedProfile != "secure_client" {
 		t.Fatalf("plain config resolved %q, %v", opts.resolvedProfile, err)
 	}
+	// GAP-0607: a tab-indented config is refused 1639 (invalid arguments)
+	// with the line, like every other config the gateway cannot load;
+	// Secure Client keeps its result.
+	tabbed := filepath.Join(dir, "tabbed.yaml")
+	if err := os.WriteFile(tabbed, []byte("deployment_mode: managed_enterprise\nguardrail:\n\tconnectors: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed, profile: "standalone"})
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "line 3") {
+		t.Fatalf("standalone tab-indented config: %v", err)
+	}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed}); err == nil ||
+		errors.Is(err, errWindowsEnterpriseInvalidArguments) {
+		t.Fatalf("Secure Client tab-indented config: %v", err)
+	}
 }
 
 func TestWindowsEnterpriseStandaloneArguments(t *testing.T) {
