@@ -59,12 +59,15 @@ func platformDiscoveryHomeDir() (string, error) {
 // in the enterprisehooks package.
 const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
 
-// platformDiscoveryHomeDirs enumerates interactive-user profile roots by
-// walking HKLM\...\ProfileList. The gateway sidecar runs as a service (its
+// platformDiscoveryHomeOwners enumerates interactive-user profiles, each with
+// its account (SID and account name), by walking HKLM\...\ProfileList. The
+// gateway sidecar runs as a service (its
 // current-user Known Folder resolves to a per-service virtual profile under
 // C:\Windows\ServiceProfiles\), so a bare ~/... expansion never sees any real
 // user's .claude/.codex/.cursor directories. Feeding this list into
-// AIDiscoveryOptions.HomeDirs makes homesToScan() enumerate real profiles.
+// AIDiscoveryOptions.HomeDirs makes homesToScan() enumerate real profiles, and
+// the account lets a service-context scan attribute what it finds under a
+// profile to that profile's user.
 //
 // Filter: only S-1-5-21-... SIDs (local-account or domain-account interactive
 // users, 5+ sub-authorities), matching the same coarse gate the hook
@@ -73,21 +76,6 @@ const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pro
 // the scan does not waste ticks on ghost profiles. The standalone profile
 // uses winpath.IsInteractiveUserSID, the predicate the standalone hook
 // enumerator applies, which also admits Microsoft Entra ID users.
-func platformDiscoveryHomeDirs(standalone bool) []string {
-	owners := platformDiscoveryHomeOwners(standalone)
-	if len(owners) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(owners))
-	for _, owner := range owners {
-		out = append(out, owner.Home)
-	}
-	return out
-}
-
-// platformDiscoveryHomeOwners is platformDiscoveryHomeDirs with the account
-// of each profile (its SID and account name), so a service-context scan can
-// attribute what it finds under a profile to that profile's user.
 func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, profileListRegistryKey, registry.READ)
 	if err != nil {
