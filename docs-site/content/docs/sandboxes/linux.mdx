@@ -360,7 +360,7 @@ connected:
 | `kernel_feed_not_installed` | No feed on this computer |
 | `kernel_feed_not_permitted` | You are not in the `docker` group, or your gateway started before you joined it |
 | `kernel_feed_untrusted` | The socket or its directory is not root's, or is writable by others, or root does not serve it |
-| `kernel_feed_unavailable` | The feed is installed but stopped, or runs and does not answer. For a stopped feed, `kernel-feed status`, `sandbox ps` and `defenseclaw doctor` print the command that starts it, `sudo systemctl restart defenseclaw-sandbox-feed.service`. For one that runs and does not answer, `kernel-feed status` and `doctor` print `sudo systemctl status defenseclaw-sandbox-feed`, which says why; `sandbox ps` cannot tell the two apart and prints the restart command, which fixes both |
+| `kernel_feed_unavailable` | The feed is installed but stopped, or runs and does not answer. For a stopped feed, `kernel-feed status`, `sandbox ps` and `defenseclaw doctor` print the command that starts it, `sudo systemctl restart defenseclaw-sandbox-feed.service`. For one that runs and does not answer, `kernel-feed status` and `doctor` print `sudo systemctl status defenseclaw-sandbox-feed.service`, which says why; `sandbox ps` cannot tell the two apart and prints the restart command, which fixes both |
 | `kernel_feed_version_skew` | The feed speaks another protocol: run the `install` command it prints |
 | `kernel_feed_unsupported` | Not Linux |
 

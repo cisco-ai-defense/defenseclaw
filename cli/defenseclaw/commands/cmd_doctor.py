@@ -1370,9 +1370,9 @@ def _check_sandbox_kernel_feed(
     active = str(report.get("active") or "unknown").strip()
     # A stopped feed gets the command that starts it (GAP-0091).
     next_step = (
-        "run `sudo systemctl status defenseclaw-sandbox-feed`"
+        "run `sudo systemctl status defenseclaw-sandbox-feed.service`"
         if active == "active"
-        else "start it with `sudo systemctl restart defenseclaw-sandbox-feed`"
+        else "start it with `sudo systemctl restart defenseclaw-sandbox-feed.service`"
     )
     emit(
         "warn",
