@@ -18,7 +18,7 @@ gateway's service account is not the person running the AI agent.
 | --- | --- |
 | `user.id` | POSIX effective uid or Windows token SID. |
 | `defenseclaw.user.id_kind` | `posix_uid` or `windows_sid`, set only when the identifier came from the corresponding trusted OS source. |
-| `defenseclaw.user.name` | OS account name from the same lookup as `user.id`; never mixed with a fallback identity. |
+| `defenseclaw.user.name` | OS account name from the same lookup as `user.id`; never mixed with a fallback identity. A name in any script is kept (for example `dcad-eoé@corp.example.com`) on every record, scan and sandbox rows included. Under the Secure Client integration a name with a non-ASCII character is left out and `user.id` names the account. |
 | `defenseclaw.user.email` | Optional connector-account email. Collection is off by default. |
 | `defenseclaw.user.principal` | Directory principal of the account: a UPN, a Kerberos principal or `DOMAIN\user`, for example `alice@CORP.EXAMPLE.COM`. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.user.domain` | Directory domain or Kerberos realm of the principal. |

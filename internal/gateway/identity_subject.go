@@ -93,7 +93,10 @@ func withVerifiedSubject(ctx context.Context, s VerifiedSubject) context.Context
 // flags by NewSidecar and applyConfigReload.
 var identityFactsEnabled atomic.Bool
 
-func setIdentityFactsEnabled(v bool) { identityFactsEnabled.Store(v) }
+func setIdentityFactsEnabled(v bool) {
+	identityFactsEnabled.Store(v)
+	observability.SetUnicodeUserNames(v)
+}
 
 // identityLookupBlocking makes every request for an account whose directory
 // lookup has not resolved yet wait for it (up to its budget), not only the
