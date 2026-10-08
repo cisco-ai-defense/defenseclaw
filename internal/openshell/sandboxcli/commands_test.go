@@ -535,6 +535,27 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	}
 }
 
+// TestReviewKeepsAHostileFileNameOnOneLine (GAP-0291): a copy's review
+// printed a file name with a newline in it raw, so the name split into a
+// second line of the list a user trusts before bringing the work back. A
+// name is escaped onto one line and a long one cut in the middle.
+func TestReviewKeepsAHostileFileNameOnOneLine(t *testing.T) {
+	long := "edge/" + strings.Repeat("a", 240) + ".txt"
+	ta := newTestApp(t, "", copySandbox("plainbox"))
+	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain, Changes: []workspace.TreeChange{
+		{Path: "edge/line\n  A forged.txt", Status: "A", Added: 1}, {Path: "edge/esc\x1b]2;title\a", Status: "A"},
+		{Path: "edge/rtl‮txt.sh", Status: "A"}, {Path: long, Status: "A"},
+	}, Review: workspace.ReviewReport{FilesChanged: 4, Insertions: 1}}
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "plainbox"}))
+	has(t, ta.output(), `  A edge/line\n  A forged.txt`, `  A edge/esc\x1b]2;title\a`, "  A edge/rtl�txt.sh",
+		"  A edge/"+strings.Repeat("a", 75)+"…"+strings.Repeat("a", 75)+".txt")
+	for _, line := range strings.Split(ta.output(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "A forged.txt") {
+			t.Fatalf("a file name forged a line of the review:\n%s", ta.output())
+		}
+	}
+}
+
 // The review merges each file's reasons into one line (manual test L10).
 func TestReviewMergesAFilesReasons(t *testing.T) {
 	flags := []workspace.Flag{

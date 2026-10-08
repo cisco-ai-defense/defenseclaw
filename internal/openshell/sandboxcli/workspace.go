@@ -289,7 +289,7 @@ func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o 
 		case "D":
 			verb = "remove "
 		}
-		a.line("  " + verb + " " + c.Path)
+		a.line("  " + verb + " " + pathText(c.Path))
 	}
 	a.note("edits you made since the apply stay")
 	if o.Preview {
@@ -372,7 +372,7 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 			a.line(fmt.Sprintf("  … %d more", len(r.Changes)-20))
 			break
 		}
-		a.line("  " + undoVerb(c.Status) + " " + c.Path)
+		a.line("  " + undoVerb(c.Status) + " " + pathText(c.Path))
 	}
 	switch {
 	case r.RefsKept && (r.HeadBefore != r.HeadAfter || r.BranchBefore != r.BranchAfter):
@@ -417,14 +417,14 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 	}
 	for _, c := range r.Ignored {
 		if c.Removed {
-			a.line(fmt.Sprintf("  remove  %s the session wrote to %s (a Python bytecode cache)", plural(int64(c.Added+c.Modified), "file", "files"), c.Path))
+			a.line(fmt.Sprintf("  remove  %s the session wrote to %s (a Python bytecode cache)", plural(int64(c.Added+c.Modified), "file", "files"), pathText(c.Path)))
 		}
 	}
 	for _, c := range r.RestoredIgnored() {
-		a.line("  restore " + c.Path + " from the copy the undo point keeps (" + c.Summary() + " during the session)")
+		a.line("  restore " + pathText(c.Path) + " from the copy the undo point keeps (" + c.Summary() + " during the session)")
 	}
 	for _, p := range r.PinnedChanges {
-		a.warn(p + " changed on this machine during the session; it is kept")
+		a.warn(pathText(p) + " changed on this machine during the session; it is kept")
 	}
 	a.printUnrestored(r.Unrestored())
 }
@@ -471,7 +471,7 @@ func (a *App) printUnrestored(list []workspace.IgnoredChange) {
 				missing = append(missing, base)
 			}
 		}
-		a.warn(fmt.Sprintf("undo cannot restore %s (%s): %s", c.Path, what, remedy))
+		a.warn(fmt.Sprintf("undo cannot restore %s (%s): %s", pathText(c.Path), what, remedy))
 	}
 	switch {
 	case !u.Enabled && (covered || len(missing) > 0):
@@ -683,7 +683,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		a.line(a.style(line, ansiYellow))
 	}
 	for _, c := range res.Changes {
-		a.line(fmt.Sprintf("  %s %s", c.Status, c.Path))
+		a.line(fmt.Sprintf("  %s %s", c.Status, pathText(c.Path)))
 	}
 	a.printReviewDetail(&res.Review)
 	for _, d := range res.Dropped {
@@ -1035,7 +1035,7 @@ func alreadyMatched(pulled, written []workspace.TreeChange) int {
 // findingLine renders a scanner finding like the flag lines above it:
 // "  CRITICAL config/dev.env:3 — clawshield-secrets: AWS access key".
 func findingLine(f workspace.ScanFinding) string {
-	where := firstNonEmpty(f.Location, f.Path)
+	where := pathText(firstNonEmpty(f.Location, f.Path))
 	sev := strings.ToUpper(firstNonEmpty(f.Severity, "finding"))
 	text := where + " — " + f.Scanner
 	if title := firstNonEmpty(f.Title, f.RuleID); title != "" {
@@ -1145,13 +1145,13 @@ func (a *App) printReviewDetail(r *workspace.ReviewReport) {
 		return
 	}
 	for _, f := range mergeFlags(r.Flags) {
-		a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), f.name, strings.Join(f.details, "; ")))
+		a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), pathText(f.name), strings.Join(f.details, "; ")))
 	}
 	for _, f := range r.Findings {
 		a.line(findingLine(f))
 	}
 	if secrets := r.SecretPaths(); len(secrets) > 0 {
-		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
+		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(pathTexts(firstN(secrets, 4)), ", "))
 	}
 }
 
@@ -1164,7 +1164,7 @@ func riskLine(r *workspace.ReviewReport) string {
 	var names []string
 	for _, f := range mergeFlags(r.Flags) {
 		if severityRank[f.severity] >= severityRank[workspace.SeverityMedium] {
-			names = append(names, f.name)
+			names = append(names, pathText(f.name))
 		}
 	}
 	if len(names) == 0 {
