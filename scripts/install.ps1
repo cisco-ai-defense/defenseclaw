@@ -976,9 +976,9 @@ function Write-Shim([string]$Name, [string]$Target) {
     # `defenseclaw uninstall` recognizes the CLI shim by this exact command line.
     $path = Join-Path $BinDir "$Name.cmd"
     $text = "@echo off`r`n`"$Target`" %*`r`n"
-    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
     # cmd.exe reads batch files in the OEM code page.
     $encoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path, $encoding) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, $encoding)
     if (Test-Path -LiteralPath $path) { Remove-Aside $path }
     Move-Path "$path.new" $path
