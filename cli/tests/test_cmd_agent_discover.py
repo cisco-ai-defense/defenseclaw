@@ -477,9 +477,21 @@ def _wide_payload() -> dict:
     }
 
 
+def _pin_terminal_width(case: unittest.TestCase, columns: int = 120) -> None:
+    """The renderer sizes its table from the real terminal; pin it so a
+    narrow runner terminal (or a pytest-xdist worker) cannot pick the
+    compact view (GAP-0153)."""
+    pin = patch.dict(os.environ, {"COLUMNS": str(columns)})
+    pin.start()
+    case.addCleanup(pin.stop)
+
+
 class AiUsageRendererTests(unittest.TestCase):
     """Cover the grouped/detail/filter behavior added to fix the
     "488 identical package_dependency rows" report."""
+
+    def setUp(self):
+        _pin_terminal_width(self)
 
     def test_summary_collapses_wide_groups_into_one_row_with_count(self):
         from defenseclaw.commands import cmd_agent
@@ -1154,6 +1166,7 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
 
     def setUp(self):
         self.runner = CliRunner()
+        _pin_terminal_width(self)
 
     def _invoke(self, app, args):
         class FakeClient:

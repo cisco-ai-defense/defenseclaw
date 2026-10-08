@@ -5413,14 +5413,18 @@ def sandbox_wizard_fields(
         # runs (sandboxcli/setup.go offerOpenShellUpgrade).
         machine_line = machine.summary
         install = "no"
-        restart = (
-            "so stop the MicroVM sandboxes running on it first (setup does not upgrade while one runs)"
+        # The consequence leads: the field hint shows two lines, and the
+        # doctor's reason before it hid the restart even at 200 columns
+        # (GAP-0085).
+        consequence = (
+            "(Homebrew), only while no MicroVM sandbox runs"
             if macos
-            else "which drops the connections of every sandbox on it (Docker first pulls the new supervisor images from ghcr.io)"
+            else "(sudo); the gateway restart drops every running sandbox's connections"
         )
+        pulls = "" if macos else " Docker first pulls the new supervisor images from ghcr.io."
         install_hint = (
-            f"{machine.openshell_detail}. Yes upgrades it in place to {release} with {installer}; that restarts "
-            f"the OpenShell gateway, {restart}."
+            f"Yes upgrades in place to {release} {consequence}. {machine.openshell_detail}.{pulls} "
+            f"It runs {installer}."
         )
     elif machine.openshell_attention == "vm-driver":
         # Under the install's consent setup installs e2fsprogs and signs
@@ -5560,11 +5564,13 @@ def _sandbox_selected_harnesses(fields: Sequence[WizardFormField]) -> list[str]:
 def _build_sandbox_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     if (wizard_field_value(fields, "Action") or "setup") == "doctor":
         return ("sandbox", "doctor")
-    args = ["sandbox", "setup", "--non-interactive"]
+    args = ["sandbox", "setup"]
+    if wizard_bool_value(fields, "Install OpenShell", "no") == "yes":
+        # First, so the 80-column Will run line shows it (GAP-0085).
+        args.append("--install-openshell")
+    args.append("--non-interactive")
     for name in _sandbox_selected_harnesses(fields):
         args.extend(("--harness", name))
-    if wizard_bool_value(fields, "Install OpenShell", "no") == "yes":
-        args.append("--install-openshell")
     if wizard_bool_value(fields, "Mount Project Folder", "yes") == "no":
         args.append("--no-mounts")
     if wizard_bool_value(fields, "OpenShell Telemetry Off", "yes") == "no":

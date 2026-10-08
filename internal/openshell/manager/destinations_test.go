@@ -34,12 +34,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // fakeLineage is a ProcessLookup that knows one process.
 type fakeLineage struct{}
+
+func (fakeLineage) PIDOf(string, string, time.Time) int { return 0 }
 
 func (fakeLineage) Lineage(sandbox string, pid int) []ProcessRef {
 	if pid != 77 {
@@ -217,10 +220,32 @@ func TestDestinationsTellCredentialEndpointsFromTheModelProvider(t *testing.T) {
 	}
 }
 
+// The model provider row is named by the sandbox's --llm provider, not by
+// OpenShell's provider rule (named after the sandbox), and shows the binary
+// whose model calls got through, not one only refused the host (GAP-0079).
+func TestDestinationsNameTheModelProviderAndItsBinary(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "brbox",
+		LLM: &sandboxapi.LLMCredential{Profile: profiles.ClaudeBedrockMantleID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "dccert-block-marker"}}})
+	now, host := time.Now(), "bedrock-mantle.us-east-1.api.aws"
+	e.ocsf("brbox", "NET:OPEN [INFO] ALLOWED "+testClaudeBin+"(7) -> "+host+":443/tcp [policy:_provider_brbox_llm engine:opa]", now)
+	e.ocsf("brbox", "NET:OPEN [MED] DENIED /usr/bin/curl(9) -> "+host+":443/tcp [policy:- engine:opa] [reason:unsupported_rule]", now)
+	r := destinationKinds(t, e, "brbox")[host]
+	if r.Kind != sandboxapi.DestinationModelProvider || r.Provider != "Amazon Bedrock" || len(r.Binaries) != 2 || r.Binaries[1] != testClaudeBin {
+		t.Fatalf("model provider row = %+v", r)
+	}
+	for _, id := range profiles.IDs() {
+		if id != profiles.IngressID && llmProviderName(id) == "" {
+			t.Errorf("profile %s has no provider name", id)
+		}
+	}
+}
+
 // The destinations are kept across daemon restarts; a delete removes them.
 func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	e := liveEnv(t, "keepbox", nil)
 	e.ocsf("keepbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> files.example.org:443/tcp [policy:allow_files engine:opa]", time.Now())
+	e.ocsf("keepbox", "NET:OPEN [MED] DENIED /usr/bin/curl(9) -> paste.example.net:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
 	e.stopBox("keepbox")
 	path := filepath.Join(e.dataDir, "sandboxes", "keepbox", destinationsFile)
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
@@ -230,6 +255,11 @@ func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	e.startBox("keepbox", sandboxapi.StartRequest{})
 	if rows := destinationKinds(t, e, "keepbox"); rows["files.example.org"].Connections != 1 {
 		t.Fatalf("after a restart = %+v", rows)
+	}
+	// The status Egress line sums up the kept destinations, so a restart
+	// does not zero it next to its AI summary (GAP-0100).
+	if eg := e.get("keepbox").Egress; eg.Blocked != 1 || eg.BlockedRequests != 1 {
+		t.Fatalf("egress after a restart = %+v", eg)
 	}
 	// A delete drops them before it forgets the sandbox: a sighting that
 	// arrives in between (a refusal the egress sink still held) and a
@@ -303,6 +333,9 @@ func TestDestinationsCountTheProxysTraffic(t *testing.T) {
 	if kept := destinationKinds(t, e, "upbox")["example.org"]; kept.Tunnels != row.Tunnels || kept.BytesUp != row.BytesUp {
 		t.Fatalf("kept %+v, want the counts of %+v", kept, row)
 	}
+	if eg := e.get("upbox").Egress; eg.Destinations != 1 || eg.BytesUp != row.BytesUp {
+		t.Fatalf("egress after a restart = %+v, want the counts of %+v", eg, row)
+	}
 	upload(proxy)
 	eventually(t, "the cut in the new session", func() bool { return cuts() == 2 })
 	eventually(t, "both runs' counts", func() bool { return destinationKinds(t, e, "upbox")["example.org"].Tunnels == 2 })
@@ -355,5 +388,86 @@ func TestDestinationsFullOfUnknownAIStillReportAProvider(t *testing.T) {
 	shadow := e.tel.findingsOf(audit.SandboxFindingShadowAI)
 	if len(shadow) != before+1 || shadow[len(shadow)-1].TargetRef != "api.openai.com" {
 		t.Fatalf("findings before %d, after %+v", before, shadow[before:])
+	}
+}
+
+// TestProxiedDestinationsNameTheirProgram (GAP-0084, GAP-0088): every host
+// reached through the egress proxy showed BINARY "-" (the proxy sees no
+// program, and OpenShell's record of the connection names the proxy, not
+// the host), so a shadow AI row could not say what called it. A proxied
+// request takes the program of the one connection to the proxy OpenShell
+// recorded around it, whichever came first; two programs then leave it
+// unnamed rather than guessed.
+func TestProxiedDestinationsNameTheirProgram(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "pbox"})
+	b := e.boxOf("pbox")
+	opened := func(bin string, pid int) {
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: bin, PID: pid, HasPID: true, Host: openshellHostAlias,
+			Port: testEgressPort, Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+	}
+	request := func(host string) {
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "pbox", Host: host, Port: 443, Method: "CONNECT",
+			Time: now(), FirstSeen: true}, 0)
+	}
+	request("pypi.org")
+	opened("/usr/bin/curl", 77)
+	advance(time.Minute)
+	request("api.openai.com")
+	opened("/usr/bin/curl", 78)
+	opened("/usr/bin/python3", 79)
+	advance(time.Minute)
+	d, err := e.m.Destinations(t.Context(), "pbox")
+	must(t, err)
+	got := map[string]sandboxapi.DestinationRow{}
+	for _, r := range d.Destinations {
+		got[r.Host] = r
+	}
+	if r := got["pypi.org"]; !slices.Equal(r.Binaries, []string{"/usr/bin/curl"}) || r.PID != 77 {
+		t.Fatalf("pypi.org = %+v", r)
+	}
+	if r := got["api.openai.com"]; len(r.Binaries) != 0 || r.PID != 0 {
+		t.Fatalf("api.openai.com, two programs at once = %+v", r)
+	}
+}
+
+// TestAProxiedRefusalKeepsTheBinaryThatGotThrough: a proxied request is
+// paired with its program only after a window, and a refusal paired then
+// still does not move its program ahead of the one whose traffic got
+// through (the row's view shows the last binary).
+func TestAProxiedRefusalKeepsTheBinaryThatGotThrough(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "rbox"})
+	b := e.boxOf("rbox")
+	request := func(bin string, pid int, kind egress.EventKind) {
+		e.m.egressEvent(t.Context(), egress.Event{Kind: kind, SandboxName: "rbox", Host: "example.org", Port: 443, Method: "CONNECT",
+			Time: now(), FirstSeen: true, Category: egress.CategoryNotAllowlisted}, 0)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: bin, PID: pid, HasPID: true, Host: openshellHostAlias,
+			Port: testEgressPort, Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+		advance(time.Minute)
+		_, err := e.m.Destinations(t.Context(), "rbox")
+		must(t, err)
+	}
+	request("/usr/bin/curl", 77, egress.EventAllowed)
+	request("/usr/bin/wget", 78, egress.EventBlocked)
+	d, err := e.m.Destinations(t.Context(), "rbox")
+	must(t, err)
+	if len(d.Destinations) != 1 || !slices.Equal(d.Destinations[0].Binaries, []string{"/usr/bin/wget", "/usr/bin/curl"}) {
+		t.Fatalf("destinations = %+v, want curl last (its traffic got through)", d.Destinations)
+	}
+}
+
+// Hermes asks models.dev for its model metadata at every start (GAP-0161):
+// an open pack lets it through, and it is the harness's own request, no
+// shadow AI. From another harness's sandbox the host is still AI traffic.
+func TestHermesModelMetadataIsItsOwn(t *testing.T) {
+	r := &destRow{Host: "models.dev"}
+	if kind, provider, _ := r.classify("hermes"); kind != sandboxapi.DestinationHarnessVendor || provider != "Hermes Agent" {
+		t.Fatalf("hermes: %s %q, want the harness vendor", kind, provider)
+	}
+	if kind, _, _ := r.classify("claudecode"); kind != sandboxapi.DestinationUnknownAI {
+		t.Fatalf("claudecode: %s, want unknown AI", kind)
 	}
 }

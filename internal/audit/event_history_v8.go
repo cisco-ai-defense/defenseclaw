@@ -36,6 +36,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -1188,10 +1189,20 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 	}
 	// Scan and finding records name the asset only in their typed target
 	// reference; without this a plugin scan row had no target (GAP-2272).
-	for _, field := range []string{"defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref"} {
+	// Egress records name the host in their network target reference, and
+	// every other sandbox record its sandbox (GAP-0082).
+	for _, field := range []string{
+		"defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref",
+		"defenseclaw.network.target_ref", "defenseclaw.sandbox.name",
+	} {
 		if target, _ := payload[field].(string); strings.TrimSpace(target) != "" {
 			return target
 		}
+	}
+	// The OpenShell integration's own health (a gateway that does not
+	// answer) names no sandbox: its target is OpenShell (GAP-0169).
+	if subsystem, _ := payload["defenseclaw.health.subsystem"].(string); subsystem == string(gatewaylog.SubsystemOpenShell) {
+		return subsystem
 	}
 	return ""
 }
@@ -1211,6 +1222,11 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 	// "subsystem.degraded".
 	if subsystem, ok := payload["defenseclaw.health.subsystem"].(string); ok && subsystem != "" {
 		label := subsystem
+		if name, _ := payload["defenseclaw.sandbox.name"].(string); subsystem == string(gatewaylog.SubsystemOpenShell) && strings.TrimSpace(name) != "" {
+			// One sandbox's health (the target names it), not the OpenShell
+			// integration's (GAP-0160).
+			label = "sandbox"
+		}
 		if state, ok := payload["defenseclaw.health.state"].(string); ok && state != "" {
 			label += " " + state
 		}
@@ -1236,6 +1252,25 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		} {
 			if value, present := payload[field.key]; present && value != nil && fmt.Sprint(value) != "" {
 				label += " " + field.name + "=" + fmt.Sprint(value)
+			}
+		}
+		return label
+	}
+	// Sandbox records carry no message: name the sandbox, and for an egress
+	// decision the decision, the binary, its code and why, instead of only
+	// "egress.blocked" (GAP-0082). The reason is free text, so it goes last.
+	if sandbox, ok := payload["defenseclaw.sandbox.name"].(string); ok && strings.TrimSpace(sandbox) != "" {
+		label := fallback + " sandbox=" + strings.TrimSpace(sandbox)
+		if decision, ok := payload["defenseclaw.network.decision"].(string); ok && decision != "" {
+			label = "decision=" + decision + " sandbox=" + strings.TrimSpace(sandbox)
+			for _, field := range []struct{ key, name string }{
+				{"defenseclaw.sandbox.process.executable", "binary"},
+				{"defenseclaw.network.decision_code", "code"},
+				{"defenseclaw.network.reason", "reason"},
+			} {
+				if value, ok := payload[field.key].(string); ok && strings.TrimSpace(value) != "" {
+					label += " " + field.name + "=" + strings.TrimSpace(value)
+				}
 			}
 		}
 		return label

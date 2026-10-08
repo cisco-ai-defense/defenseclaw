@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -69,6 +70,15 @@ const (
 	processRecordRate    = 10
 	maxLineageDepth      = 32
 	maxCmdlineBytes      = 1024
+	// commBytes is how much of a program's name the kernel keeps as a
+	// process's comm (TASK_COMM_LEN less its NUL).
+	commBytes = 15
+	// lineageStartWindow is how long before its connection a process of the
+	// program may have started for PIDOf to credit it with the connection,
+	// and lineageClockSlack how long after: the sandbox's clock and its boot
+	// time (whole seconds) may be off by that much (GAP-0174).
+	lineageStartWindow = 5 * time.Second
+	lineageClockSlack  = time.Second
 )
 
 // procNode is one process of the tree. startTicks is its start in clock
@@ -170,7 +180,7 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 	}
 	start := m.now()
 	execStart := time.Now()
-	res, err := gw.Client.Exec(ctx, name, collectArgv("ps", 1, []string{"O", "argv", "O", "cwd"}), openshell.ExecOptions{
+	res, err := m.ownExec(ctx, gw, name, collectArgv("ps", 1, []string{"O", "argv", "O", "cwd"}), openshell.ExecOptions{
 		Timeout: processSampleTimeout, Attempts: 1, MaxOutputBytes: collectStreamBytes,
 	})
 	took := time.Since(execStart)
@@ -483,7 +493,7 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 		ev := audit.SandboxProcessEvent{
 			Sandbox: id, Event: event, Source: node.Source, PID: node.PID, ParentPID: node.PPID,
 			HostPID: node.HostPID, ExecID: node.ExecID,
-			Executable: node.Exe, Name: node.Comm, CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
+			Executable: node.Exe, Name: node.name(), CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
 			Lineage: t.ancestryLocked(t.parentLocked(node)), Timestamp: node.FirstSeen,
 		}
 		if event == audit.SandboxProcessExit {
@@ -557,14 +567,14 @@ func (t *procTree) byPIDLocked(pid int, exe string) *procNode {
 	return nil
 }
 
-// ancestryLocked is the comm of node and of each of its ancestors, at most
+// ancestryLocked is the name of node and of each of its ancestors, at most
 // maxLineageDepth of them. Callers hold t.mu.
 func (t *procTree) ancestryLocked(node *procNode) []string {
 	var out []string
 	seen := map[*procNode]bool{}
 	for node != nil && len(out) < maxLineageDepth && !seen[node] {
 		seen[node] = true
-		out = append(out, node.Comm)
+		out = append(out, node.name())
 		node = t.parentLocked(node)
 	}
 	return out
@@ -597,9 +607,84 @@ func (m *Manager) LineageFor(sandboxName string, pid int, exe string) []ProcessR
 	seen := map[*procNode]bool{}
 	for node := t.byPIDLocked(pid, exe); node != nil && len(out) < maxLineageDepth && !seen[node]; node = t.parentLocked(node) {
 		seen[node] = true
-		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.Comm, Exe: node.Exe, Start: node.Start})
+		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.name(), Exe: node.Exe, Start: node.Start})
 	}
 	return out
+}
+
+// PIDOf is the pid of the one process of sandbox sandboxName that runs exe
+// (runs), started at most lineageStartWindow before at (when the program was
+// seen connecting) and was not seen exiting before then, from the sandbox's
+// process tree; 0 while the tree is off, or when it holds no such process or
+// several. A program shorter than a sample interval (a quick curl, a
+// `sandbox exec`) is not in the tree, so a copy of it that started earlier
+// and still runs (a slow download) cannot be told from it and is not taken
+// (GAP-0174); a program that connects long after it started has no lineage
+// either. It implements ProcessLookup.
+func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
+	m.mu.Lock()
+	b := m.boxes[sandboxName]
+	var t *procTree
+	if b != nil {
+		t = b.procs
+	}
+	m.mu.Unlock()
+	if t == nil || exe == "" || at.IsZero() {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pid := 0
+	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), t.exited} {
+		for _, n := range nodes {
+			start := n.Start
+			if start.IsZero() {
+				// Only OpenShell's launch record named it so far.
+				start = n.FirstSeen
+			}
+			if !n.runs(exe) || start.Before(at.Add(-lineageStartWindow)) || start.After(at.Add(lineageClockSlack)) ||
+				(!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) || n.PID == pid {
+				continue
+			}
+			if pid != 0 {
+				return 0
+			}
+			pid = n.PID
+		}
+	}
+	return pid
+}
+
+// runs reports whether the process runs program exe. A sample seldom has a
+// workload process's executable (the workload's processes are not dumpable,
+// so the exec cannot read their exe link; GAP-0139): without one, the name
+// of its first argument or its comm (the kernel keeps 15 bytes of the
+// program's name) stands for it.
+func (n *procNode) runs(exe string) bool {
+	if n.Exe != "" {
+		return n.Exe == exe
+	}
+	name := path.Base(exe)
+	if argv0, _, _ := strings.Cut(n.Cmdline, " "); argv0 != "" && path.Base(argv0) == name {
+		return true
+	}
+	return n.Comm != "" && n.Comm == truncate(name, commBytes)
+}
+
+// name is the process's name in a lineage: its comm, unless that is the
+// kernel's cut of a longer name its executable or first argument gives in
+// full (openshell-sandb of openshell-sandbox; GAP-0172).
+func (n *procNode) name() string {
+	if len(n.Comm) != commBytes {
+		return n.Comm
+	}
+	argv0, _, _ := strings.Cut(n.Cmdline, " ")
+	for _, p := range []string{n.Exe, strings.Trim(argv0, `'"`)} {
+		if base := path.Base(p); len(base) > commBytes && strings.HasPrefix(base, n.Comm) {
+			return base
+		}
+	}
+	return n.Comm
 }
 
 var _ ProcessLookup = (*Manager)(nil)

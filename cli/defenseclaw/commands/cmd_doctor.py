@@ -2531,6 +2531,16 @@ def _check_component_connector_compatibility(
         else:
             tag = "warn"
         remediation = _health_remediation_text(finding.remediations)
+        if finding.reason_code == "connector-agent-unavailable":
+            from defenseclaw.inventory import agent_discovery
+
+            on_path = agent_discovery.binary_on_path(finding.connector)
+            if on_path:
+                # Installed after the last agent discovery: refresh the
+                # evidence rather than install it again (GAP-0052).
+                tag = "warn"
+                detail += f"; {on_path} is installed now, after the last agent discovery"
+                remediation = _health_remediation_text(finding.remediations[1:])
         if finding.reason_code in {"connector-version-not-observed", "connector-version-unparseable"}:
             # A slow or failed version probe leaves the connector in observe.
             # Refreshing discovery and rerunning setup restores the mode.
@@ -5162,7 +5172,7 @@ def _check_windows_native_hooks(
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
         return
     status = "pass" if check.healthy else "fail"
-    _emit(status, label, f"{check.state}: {check.detail}", r=r)
+    _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
 
 _CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
@@ -13364,9 +13374,27 @@ def _check_hook_contract_lock(
     raw_version = stable_agent_version(connector, str(entry.get("raw_agent_version") or ""))
     normalized = str(entry.get("normalized_agent_version") or "")
     script_version = str(entry.get("hook_script_version") or "")
+    # Native setup records the exact executable, version, and digest used
+    # to select the hook contract.  Automatic discovery can legitimately find a
+    # different installation (for example an npm .CMD wrapper ahead of the
+    # desktop app on PATH); it must not override that protected setup evidence.
+    protected_setup_connector = connector in {"codex", "hermes", "omnigent", "amp"} or (
+        connector == "opencode" and (platform_name or os.name) == "nt"
+    )
+    protected_setup_agent = protected_setup_connector and all(
+        (
+            str(entry.get("agent_executable") or "").strip(),
+            str(entry.get("agent_executable_sha256") or "").strip(),
+            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
+        )
+    )
     detail = f"contract={contract or '?'} status={status or '?'}"
     if raw_version:
         detail += f" {'agent_cli' if connector == 'cursor' else 'agent'}={raw_version}"
+        if protected_setup_agent:
+            # Doctor does not rediscover a protected agent: after an update this
+            # is the old version, next to the executable mismatch (GAP-0158).
+            detail += " (recorded at setup)"
     if normalized:
         detail += f" normalized={normalized}"
     if script_version:
@@ -13412,20 +13440,6 @@ def _check_hook_contract_lock(
     if native_runtime is not None:
         detail += f" {native_runtime.runtime_description}"
 
-    # Native setup records the exact executable, version, and digest used
-    # to select the hook contract.  Automatic discovery can legitimately find a
-    # different installation (for example an npm .CMD wrapper ahead of the
-    # desktop app on PATH); it must not override that protected setup evidence.
-    protected_setup_connector = connector in {"codex", "hermes", "omnigent", "amp"} or (
-        connector == "opencode" and (platform_name or os.name) == "nt"
-    )
-    protected_setup_agent = protected_setup_connector and all(
-        (
-            str(entry.get("agent_executable") or "").strip(),
-            str(entry.get("agent_executable_sha256") or "").strip(),
-            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
-        )
-    )
     # OpenCode and Amp are auto-loaded plugin connectors whose ordinary
     # gateway restart has no independent native-client handshake. Their
     # reviewed hook contract therefore depends on the durable executable seal
@@ -13519,7 +13533,7 @@ def _check_hook_contract_lock(
     elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
-        _emit("fail", "Hook contract", detail, r=r)
+        _emit("fail", "Hook contract", detail, r=r, remediation=native_runtime.repair)
     elif status == "unknown":
         _emit(
             "fail",

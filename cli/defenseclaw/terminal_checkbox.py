@@ -181,11 +181,14 @@ def _line_prompt_termios(termios_mod: object, attributes: list[object]) -> list[
 
     if not isinstance(attributes, list) or len(attributes) < 4:
         return None
-    iflag, lflag = attributes[0], attributes[3]
-    if not isinstance(iflag, int) or not isinstance(lflag, int):
+    iflag, oflag, lflag = attributes[0], attributes[1], attributes[3]
+    if not all(isinstance(flag, int) for flag in (iflag, oflag, lflag)):
         return None
     restored = list(attributes)
     restored[0] = iflag | int(getattr(termios_mod, "ICRNL"))
+    # Raw output (no OPOST/ONLCR) turns every later line into a staircase
+    # (GAP-0057).
+    restored[1] = oflag | int(getattr(termios_mod, "OPOST", 0) | getattr(termios_mod, "ONLCR", 0))
     restored[3] = lflag | int(
         getattr(termios_mod, "ECHO")
         | getattr(termios_mod, "ICANON")

@@ -61,8 +61,8 @@ on a copy instead, as every run on a Mac does. See
 | DefenseClaw | Installed and initialized (see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user, not root. |
 | Linux | amd64 or arm64. WSL2 is not supported. |
 | Kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. OpenShell refuses to start a sandbox without it. |
-| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. |
-| systemd | A user session with a systemd user manager. The OpenShell gateway runs as the `openshell-gateway` user service. |
+| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. Every member of the `docker` group can list and enter every container on the machine, sandboxes of other accounts included (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
+| systemd | A user session with a systemd user manager. The OpenShell gateway runs as the `openshell-gateway` user service, one per machine (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
 
 You don't need OpenShell installed first: setup offers to install it.
@@ -199,6 +199,10 @@ defenseclaw sandbox doctor
   ✓ ready for sandboxes
 ```
 
+The same check on a real Red Hat Enterprise Linux 9 host:
+
+![defenseclaw sandbox doctor on Linux: Landlock, Docker with BuildKit and host networking, disk space, systemd linger, the openshell-gateway service and its registration, the sandbox ingress and egress ports served by the DefenseClaw daemon, the hook-verified harness images, and the closing line ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
+
 `✓` passed, `⚠` is a warning, `✗` failed and `-` was skipped, with the
 reason. Every warning and failure names its fix on the next line (`→ …`).
 `defenseclaw sandbox doctor --fix` applies the fixes that need only your
@@ -308,10 +312,41 @@ The commands are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sand
 | `kernel_feed_version_skew` | The feed speaks another protocol: run the `install` command it prints |
 | `kernel_feed_unsupported` | Not Linux |
 
+## One OpenShell gateway per machine
+
+OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670`
+and runs as the `openshell-gateway` user service of the account that
+started it. A machine runs one gateway, so only that account can run
+sandboxes: a second account's gateway cannot get the port. On a second
+account, `sandbox setup` and `sandbox doctor` say that the gateway's port
+is held by a process of another account, and start nothing.
+
+To hand sandboxes to another account, stop the gateway in the account that
+runs it:
+
+```bash
+systemctl --user disable --now openshell-gateway
+```
+
+Then run `defenseclaw sandbox setup` in the other account. Several users
+on one host are tracked upstream in
+[NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+
+Membership in the `docker` group is root-equivalent on the machine.
+DefenseClaw keeps each account's state, tokens and project files to that
+account, and the OpenShell gateway refuses another account's client
+certificate, but every account in the `docker` group can list every
+sandbox container on the machine, whichever account started it
+(`docker ps`), and run commands in it (`docker exec`). That isolation does
+not hold against another member of the group, so give the `docker` group
+only to accounts that trust each other: one trusted group of users per
+machine.
+
 ## Common problems
 
 | You see | Do this |
 | --- | --- |
+| The **Gateway service** check says `127.0.0.1:17670, the gateway's port, is held by a process of another account` | Another account runs this machine's OpenShell gateway. See [one OpenShell gateway per machine](#one-openshell-gateway-per-machine). |
 | The **Landlock** check fails | Boot a kernel 6.2 or newer with `landlock` in its `lsm=` list. |
 | The **Docker** check says rootless Docker, or that Docker is older than 28 | Use a rootful Docker Engine 28 or newer and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again). With linger on, logging out does not restart your systemd user manager, so the OpenShell gateway service still lacks the group: see the next row. |
 | The **Gateway service** check says it runs under a user manager that started before you joined the docker group, or setup's gateway restart fails with `the restarted gateway is not healthy` and names `sudo systemctl restart user@<uid>.service` | Your systemd user manager keeps the groups it started with, and linger keeps it running when you log out. Restart it with `sudo systemctl restart user@$(id -u).service` (this stops your user services, which then start again), then run setup again. |
@@ -319,9 +354,10 @@ The commands are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sand
 | **systemd linger** warns | `sudo loginctl enable-linger $USER`, so the gateway keeps running after you log out. |
 | **Gateway service** fails with `openshell-gateway is inactive` | `defenseclaw sandbox doctor --fix` starts it. |
 | **Gateway service** says `openshell-gateway is not installed`, yet a gateway answers | OpenShell was installed another way than NVIDIA's installer. Setup uses that gateway as it runs, but DefenseClaw cannot restart it: after a gateway change, restart it yourself, the way you started it. The fix line names how to switch to the `openshell-gateway` user service. |
-| `the DefenseClaw daemon is not running` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
+| `the DefenseClaw daemon is not running` (also at the end of `sandbox setup`), or `the DefenseClaw gateway has not started on this account yet` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
 | `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
+| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. The Python harnesses (Hermes Agent, OpenHands, OmniGent) carry a DefenseClaw workaround. Other Python programs in the sandbox, such as `pip`, keep failing until an OpenShell release after 0.1.2 fixes it. |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

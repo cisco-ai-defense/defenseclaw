@@ -34,7 +34,12 @@ import (
 //     (curl -u, --user, --proxy-user, -U), and cmdlineUserArg one with it
 //     attached;
 //   - cmdlineURLPassword is the password of a URL's userinfo
-//     (scheme://user:password@host).
+//     (scheme://user:password@host);
+//   - cmdlineSecretKey is a word that names a secret and ends where its
+//     value, the next word, starts (a header: "Authorization: Bearer ...",
+//     "X-Api-Key: ..."), and cmdlineAuthScheme the scheme word an
+//     Authorization value starts with;
+//   - cmdlineWord is one word of an argument that holds several (a script).
 var (
 	cmdlineSecretArg   = regexp.MustCompile(`(?i)^(-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
 	cmdlineSecretFlag  = regexp.MustCompile(`(?i)^-{1,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*$`)
@@ -42,6 +47,9 @@ var (
 	cmdlineUserFlag    = regexp.MustCompile(`^(?:-u|-U|--user|--proxy-user)$`)
 	cmdlineUserArg     = regexp.MustCompile(`^(-u|-U|--user=|--proxy-user=)([^:]*:)(.+)$`)
 	cmdlineURLPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^/@:\s]*:)([^/@\s]+)@`)
+	cmdlineSecretKey   = regexp.MustCompile(`(?i)^[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:]$`)
+	cmdlineAuthScheme  = regexp.MustCompile(`(?i)^(?:bearer|basic|token|digest|negotiate)$`)
+	cmdlineWord        = regexp.MustCompile(`\S+`)
 )
 
 // WithheldArgv replaces the arguments of a Codex notify program, which
@@ -93,17 +101,25 @@ func notifyPrefix(args []string) ([]string, bool) {
 // join's command hash) uses it; a placeholder can contain spaces, so a joined
 // line cannot be split back into words.
 //
-// The quotes a word starts or ends with are set aside while the word is
-// checked and put back after. A command line split on white space keeps the
-// quoting of its arguments (Tetragon wraps an argument with a space in double
-// quotes, a tool shell runs `-c "... eval '...'"`, /proc keeps a shell's
-// literal quotes), and the rules are anchored at the start of a word, so
-// without this `"--token=..."` would pass unredacted.
+// The quotes, backslash escapes and brackets a word starts or ends with are
+// set aside while the word is checked and put back after. A command line
+// split on white space keeps the quoting of its arguments (Tetragon wraps an
+// argument with a space in double quotes, a tool shell runs
+// `-c "... eval '...'"`, Claude Code's wrapper nests a script in another with
+// escaped quotes, /proc keeps a shell's literal quotes), and the rules are
+// anchored at the start of a word, so without this `"--token=..."` would pass
+// unredacted. An argument of several words (the script of sh -c '...' or
+// eval '...', a header value) has its words redacted the same way.
 func CommandArgs(args []string) []string {
 	out := make([]string, 0, len(args))
-	mysql := len(args) > 0 && mysqlClient(args[0])
-	hideNext, userNext := false, false
-	var hideQuote byte
+	mysql := len(args) > 0 && mysqlClient(strings.Trim(args[0], `'"`))
+	// afterKey: the hidden value follows a key word (a header name), so an
+	// Authorization scheme before it stays.
+	hideNext, userNext, afterKey := false, false, false
+	// keyQuote is the quote the word that named the hidden value left open
+	// ("Authorization: Bearer ..." split on spaces), hideQuote the quote a
+	// hidden value is still inside.
+	var keyQuote, hideQuote byte
 	for _, word := range args {
 		opening, a, closing := splitEdgeQuotes(word)
 		if hideQuote != 0 {
@@ -118,9 +134,18 @@ func CommandArgs(args []string) []string {
 		userNext = false
 		sensitive := false
 		switch {
+		case hideNext && afterKey && cmdlineAuthScheme.MatchString(a):
+			// The scheme of "Authorization: Bearer ..." stays; its value goes.
+			if keyQuote != 0 && quoteCloses(word, keyQuote) {
+				keyQuote = 0
+			}
 		case hideNext:
-			a, hideNext = ForSinkEntity(a), false
+			a, hideNext, afterKey = ForSinkEntity(a), false, false
 			sensitive = true
+		case strings.ContainsAny(a, " \t\r\n"):
+			a = redactWords(a)
+		case cmdlineSecretKey.MatchString(a):
+			hideNext, afterKey, keyQuote = true, true, unclosedQuote(word)
 		case user && !strings.HasPrefix(a, "-") && strings.Contains(a, ":"):
 			name, password, _ := strings.Cut(a, ":")
 			a = name + ":" + ForSinkEntity(password)
@@ -130,7 +155,7 @@ func CommandArgs(args []string) []string {
 			a = m[1] + ForSinkEntity(m[2])
 			sensitive = true
 		case cmdlineSecretFlag.MatchString(a):
-			hideNext = true
+			hideNext, keyQuote = true, unclosedQuote(word)
 		case cmdlineUserFlag.MatchString(a):
 			userNext = true
 		case cmdlineUserArg.MatchString(a):
@@ -144,7 +169,14 @@ func CommandArgs(args []string) []string {
 			a = ForSinkEntity(a)
 		}
 		if sensitive {
-			hideQuote = unclosedQuote(word)
+			switch {
+			case keyQuote == 0:
+				hideQuote = unclosedQuote(word)
+			case !quoteCloses(word, keyQuote):
+				// The value is inside the quote its key opened, and it goes on.
+				hideQuote = keyQuote
+			}
+			keyQuote = 0
 		}
 		a = cmdlineURLPassword.ReplaceAllStringFunc(a, func(m string) string {
 			sub := cmdlineURLPassword.FindStringSubmatch(m)
@@ -190,12 +222,33 @@ func quoteCloses(word string, quote byte) bool {
 	return false
 }
 
-// splitEdgeQuotes splits the quote characters a word starts and ends with
-// off its core.
+// redactWords redacts the words of an argument that holds several, keeping
+// the white space between them.
+func redactWords(s string) string {
+	at := cmdlineWord.FindAllStringIndex(s, -1)
+	words := make([]string, len(at))
+	for i, r := range at {
+		words[i] = s[r[0]:r[1]]
+	}
+	red := CommandArgs(words)
+	var b strings.Builder
+	last := 0
+	for i, r := range at {
+		b.WriteString(s[last:r[0]])
+		b.WriteString(red[i])
+		last = r[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// splitEdgeQuotes splits the shell quotes, their backslash escapes (a script
+// nested in another) and the brackets a word starts and ends with off its
+// core.
 func splitEdgeQuotes(word string) (opening, core, closing string) {
-	core = strings.TrimLeft(word, `"'`)
+	core = strings.TrimLeft(word, `\'"($`+"`")
 	opening = word[:len(word)-len(core)]
-	trimmed := strings.TrimRight(core, `"'`)
+	trimmed := strings.TrimRight(core, `\'");`+"`")
 	return opening, trimmed, core[len(trimmed):]
 }
 

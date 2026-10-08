@@ -410,7 +410,10 @@ type SandboxHealthEvent struct {
 	// OPENSHELL_WATCH_FAILED, which the recorder refuses.
 	ErrorCode    string
 	ErrorSummary string
-	Timestamp    time.Time
+	// Severity overrides the state's default (HIGH when degraded or failed,
+	// else INFO).
+	Severity  string
+	Timestamp time.Time
 }
 
 // SandboxFindingKind classifies sandbox findings.
@@ -847,10 +850,12 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	decisionCode := optionalNetworkIdentifier(input.DecisionCode)
 	conversationID, agentID := sandboxAgentCorrelation(event, input.ConversationID)
 	bytesUp, bytesDown, duration := observability.Absent[int64](), observability.Absent[int64](), observability.Absent[int64]()
-	if input.End == SandboxEgressCompleted || input.Terminated {
+	// OpenShell's record of a connection it closed (a policy reload)
+	// counts neither bytes nor time; the proxy's ends do.
+	if input.Source == SandboxEgressSourceProxy && (input.End == SandboxEgressCompleted || input.Terminated) {
 		bytesUp, bytesDown = observability.Present(input.BytesUp), observability.Present(input.BytesDown)
 	}
-	if input.End != "" {
+	if input.Source == SandboxEgressSourceProxy && input.End != "" {
 		duration = observability.Present(input.Duration.Milliseconds())
 	}
 	actorPID, actorExe := optionalSandboxPID(input.PID), optionalSandboxText(input.Executable, maxSandboxPathBytes)
@@ -917,7 +922,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 		},
 	}
 	var metrics []RuntimeV8GeneratedMetric
-	if input.End == "" {
+	if input.End == "" && !auditOnlyEgressCode(input.DecisionCode) {
 		metrics = append(metrics, newSandboxEgressMetric(event, identity.Connector, decision, string(input.Source)))
 	}
 	return recorder.emit(ctx, log, metrics)
@@ -1144,6 +1149,10 @@ func (recorder *SandboxRecorder) RecordSandboxHealth(ctx context.Context, input 
 		eventName, outcome, severity, healthState = observability.TelemetryEventSubsystemDegraded, observability.OutcomeFailed, "HIGH", "failed"
 	default:
 		return fmt.Errorf("audit: sandbox health state %q is not registered", input.State)
+	}
+	severity, err := sandboxSeverity(input.Severity, severity)
+	if err != nil {
+		return err
 	}
 	subsystem := string(gatewaylog.SubsystemOpenShell)
 	fields := sandboxV8FieldsFor(identity)

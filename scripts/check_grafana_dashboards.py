@@ -766,6 +766,20 @@ def static_audit(
                             )
                 if datasource == "loki" and "| json" in expression and '__error__=""' not in expression:
                     errors.append(f"{uid}/{title}: JSON parsing must discard malformed log lines")
+                # Grafana reads a grouped Loki instant query as one frame of
+                # rows: reducing its values (the default) shows one unnamed
+                # bar or slice (GAP-0108, GAP-0178).
+                if (
+                    datasource == "loki"
+                    and kind in {"bargauge", "piechart"}
+                    and (target.get("instant") or target.get("queryType") == "instant")
+                    and re.search(r"\bby\s*\(", expression)
+                    and ((panel.get("options") or {}).get("reduceOptions") or {}).get("values") is not True
+                ):
+                    errors.append(
+                        f"{uid}/{title}: a grouped Loki instant query must be reduced by rows "
+                        "(reduceOptions.values true), or the panel shows one unnamed bar",
+                    )
                 range_function = re.search(
                     r"\b(?:increase|i?rate|i?delta|changes|resets|deriv|predict_linear|holt_winters|[A-Za-z_][A-Za-z0-9_]*_over_time)\(",
                     expression,

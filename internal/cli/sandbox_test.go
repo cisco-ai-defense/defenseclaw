@@ -39,12 +39,15 @@ import (
 )
 
 // sandboxManifestCommand describes one sandbox subcommand for the Python
-// stub parity check (track G2) and for this golden test.
+// stub parity check (track G2) and for this golden test. Long and Example
+// are pinned too: users read the stubs' --help, not cobra's (GAP-0171).
 type sandboxManifestCommand struct {
-	Path  string                 `json:"path"`
-	Use   string                 `json:"use"`
-	Short string                 `json:"short"`
-	Flags []sandboxManifestFlagJ `json:"flags,omitempty"`
+	Path    string                 `json:"path"`
+	Use     string                 `json:"use"`
+	Short   string                 `json:"short"`
+	Long    string                 `json:"long,omitempty"`
+	Example string                 `json:"example,omitempty"`
+	Flags   []sandboxManifestFlagJ `json:"flags,omitempty"`
 }
 
 type sandboxManifestFlagJ struct {
@@ -63,7 +66,7 @@ func sandboxManifest(root *cobra.Command) []sandboxManifestCommand {
 				continue
 			}
 			p := strings.TrimSpace(path + " " + sub.Name())
-			m := sandboxManifestCommand{Path: p, Use: sub.Use, Short: sub.Short}
+			m := sandboxManifestCommand{Path: p, Use: sub.Use, Short: sub.Short, Long: sub.Long, Example: sub.Example}
 			sub.Flags().VisitAll(func(f *pflag.Flag) {
 				if f.Name == "help" {
 					return
@@ -81,7 +84,7 @@ func sandboxManifest(root *cobra.Command) []sandboxManifestCommand {
 }
 
 // TestSandboxCommandManifest pins the `sandbox` command tree (commands,
-// flags, defaults). The Python Click stubs mirror it; regenerate with
+// help texts, flags, defaults). The Python Click stubs mirror it; regenerate with
 // DEFENSECLAW_UPDATE_GOLDEN=1 after an intended change.
 func TestSandboxCommandManifest(t *testing.T) {
 	got, err := json.MarshalIndent(sandboxManifest(sandboxCmd), "", "  ")
@@ -438,6 +441,26 @@ func TestSandboxPackCommandsWithoutAConfig(t *testing.T) {
 	show, _, _ := sandboxCmd.Find([]string{"pack", "show"})
 	if err := sandboxPreRun(show, nil); err == nil {
 		t.Fatal("a broken config.yaml was ignored")
+	}
+}
+
+// GAP-0168: `policy test --host a --host b` tested b alone, without a word.
+// A second --host is refused and names --fixture.
+func TestSandboxPolicyTestTakesOneHost(t *testing.T) {
+	test, _, err := sandboxCmd.Find([]string{"policy", "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := test.Flags().Lookup("host")
+	t.Cleanup(func() { _ = f.Value.(pflag.SliceValue).Replace(nil) })
+	if err := f.Value.Set("example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Value.Set("unlisted.example.com"); err == nil || !strings.Contains(err.Error(), "--fixture") || f.Value.String() != "example.org" {
+		t.Fatalf("second --host: %v (value %q)", err, f.Value.String())
+	}
+	if f.Value.Type() != "string" {
+		t.Fatalf("--host type %q, want string (the manifest's)", f.Value.Type())
 	}
 }
 

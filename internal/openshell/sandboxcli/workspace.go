@@ -706,7 +706,11 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			return err
 		}
 		if !yes {
-			return nothing()
+			a.note(notBroughtBack(o.Name, res.Kind))
+			if err := nothing(); err != nil {
+				return err
+			}
+			return &ExitError{Code: 1, Err: &Silent{Err: errors.New("the changes were not brought back")}}
 		}
 		o.AcceptSensitive = true
 	}
@@ -1084,6 +1088,17 @@ func mergeFlags(flags []workspace.Flag) []fileFlag {
 		}
 	}
 	return out
+}
+
+// notBroughtBack is what a no to bringBackQuestion leaves, and the ways on:
+// the same at a session's end and for `sandbox pull`.
+func notBroughtBack(name string, kind workspace.CopyKind) string {
+	other := "--branch or --patch-out FILE"
+	if kind == workspace.CopyPlain {
+		other = "--patch-out FILE"
+	}
+	return "not brought back; the changes stay in " + name + ": review them with `" + CommandName + " review " + name +
+		"`, then pull with --accept-sensitive, or " + other
 }
 
 // bringBackQuestion warns about what looks like a secret the sandbox

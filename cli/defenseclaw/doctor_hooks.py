@@ -310,6 +310,7 @@ class WindowsHookCheck:
     command: str = ""
     target: str = ""
     raw_target: str = ""
+    repair: str = ""
 
     @property
     def healthy(self) -> bool:
@@ -330,7 +331,7 @@ class WindowsHookCheck:
         elif self.raw_target:
             runtime = f"runtime_path={_display_path(self.raw_target)}"
         elif self.command:
-            runtime = f"runtime_command={self.command!r}"
+            runtime = f"runtime_command={_display_command(self.command)!r}"
         else:
             runtime = "runtime_path=unresolved"
         if self.healthy:
@@ -339,10 +340,12 @@ class WindowsHookCheck:
 
 
 class _InspectionError(Exception):
-    def __init__(self, state: str, detail: str) -> None:
+    def __init__(self, state: str, detail: str, *, repair: str = "") -> None:
         super().__init__(detail)
         self.state = state
         self.detail = detail
+        # The command that fixes it, when DefenseClaw has one (doctor's Next step).
+        self.repair = repair
 
 
 class _WindowsGUID(ctypes.Structure):
@@ -804,6 +807,17 @@ def _display_path(path: str, *, trusted: bool = False) -> str:
     return path if trusted or path.isprintable() else repr(path)
 
 
+# A PowerShell -EncodedCommand (or an abbreviation of it) and its base64 script.
+_ENCODED_SCRIPT = re.compile(r"(?i)((?:^|\s)[-/]e[a-z]*\s+)([A-Za-z0-9+/]{64,}={0,2})(?=\s|$)")
+
+
+def _display_command(command: str) -> str:
+    """A registered hook command for Doctor's text, with an encoded PowerShell
+    script shown by its length: the base64 only restates the hook wrapper, and
+    2.5 KB of it pushed the row's Next step off the screen (GAP-0158)."""
+    return _ENCODED_SCRIPT.sub(lambda m: f"{m.group(1)}<{len(m.group(2))}-character encoded script>", command)
+
+
 def _windows_hook_runtime_root(path: str) -> str | None:
     """Return the exact installer-managed stable hook root for ``path``."""
     # FOLDERID_LocalAppData = {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
@@ -1027,6 +1041,11 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
     return document
 
 
+_CODEX_RESELECT_STEP = (
+    "after a Codex update or reinstall, select the Codex executable again: defenseclaw setup codex --yes"
+)
+
+
 def _codex_policy_executable(data_dir: str) -> str:
     """Resolve Setup's exact protected Codex executable evidence.
 
@@ -1117,7 +1136,13 @@ def _codex_policy_executable(data_dir: str) -> str:
 def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tuple[bool, str]:
     """Read Codex's merged system/cloud/MDM hook policy through app-server."""
 
-    executable = _codex_policy_executable(data_dir)
+    try:
+        executable = _codex_policy_executable(data_dir)
+    except _InspectionError as exc:
+        # Setup records the Codex executable it trusts; a Codex update or
+        # reinstall changes it, and only a Setup re-run selects it again
+        # (GAP-0129).
+        raise _InspectionError(exc.state, exc.detail, repair=_CODEX_RESELECT_STEP) from exc
     env = dict(os.environ)
     env["CODEX_HOME"] = os.path.dirname(os.path.abspath(config_path))
     creationflags = 0
@@ -3687,4 +3712,5 @@ def validate_windows_hook_registration(
             command,
             target,
             raw_target,
+            repair=exc.repair,
         )

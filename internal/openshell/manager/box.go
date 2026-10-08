@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -125,14 +126,17 @@ type box struct {
 	// synthetic maps the synthetic addresses OpenShell's policy DNS handed
 	// the sandbox to their names (noteSyntheticAddress).
 	synthetic map[string]string
-	// closedPorts are the undeclared host ports whose denial the feed
-	// explained this session (hostPortDenied).
-	closedPorts map[int]bool
-	// blockedRequests counts the connections OpenShell refused (the
-	// DefenseClaw proxy counts its own refusals), and blockedHosts the
-	// destinations they were to, as the feed names them (noteBlocked).
-	blockedRequests int
-	blockedHosts    map[string]struct{}
+	// portLines is what the feed last said this session of each host port
+	// other than DefenseClaw's own: reached (true, hostPortAllowed) or
+	// closed (false, hostPortDenied).
+	portLines map[int]bool
+	// proxyOpens are OpenShell's records of the sandbox's connections to
+	// the egress proxy, which name the program that opened them, newest
+	// last (proxyActor).
+	proxyOpens []proxyOpen
+	// opens are OpenShell's allowed connections awaiting their first
+	// inspected request, by host:port (connectionRequest).
+	opens map[string]*openConns
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
 	// triageBusy is set while a triageNow poll runs; triageAgain asks it
@@ -229,6 +233,104 @@ type hookStats struct {
 	unnoticed       int64
 }
 
+// hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
+// so a restarted daemon goes on from them as it does from the kept
+// destinations: sandbox status and the Sandboxes list keep the counts of the
+// sandbox's life (GAP-0156). It keeps the verdict on the last session's
+// hooks too (unreachable, silent), so a stopped sandbox says the same of
+// its session after a restart (GAP-0186); a session that starts, and so a
+// running sandbox a restarted daemon adopts, is judged afresh (lifecycle).
+// The other times and the notices start over with the daemon.
+type hookCounts struct {
+	Requests       int64            `json:"requests,omitempty"`
+	ToolCalls      int64            `json:"tool_calls,omitempty"`
+	ToolBlocked    int64            `json:"tool_blocked,omitempty"`
+	ToolAsked      int64            `json:"tool_asked,omitempty"`
+	PromptBlocked  int64            `json:"prompt_blocked,omitempty"`
+	LastBlocked    string           `json:"last_blocked,omitempty"`
+	Events         map[string]int64 `json:"events,omitempty"`
+	OtherEvents    int64            `json:"other_events,omitempty"`
+	Tampered       int64            `json:"tampered,omitempty"`
+	Failed         int64            `json:"failed,omitempty"`
+	IngressRefused int64            `json:"ingress_refused,omitempty"`
+	// UnreachableSince, UnreachableReason and NoHookYet are the session's
+	// reach verdict (hookReach), SilentSince when its hooks fell silent.
+	UnreachableSince  time.Time `json:"unreachable_since,omitzero"`
+	UnreachableReason string    `json:"unreachable_reason,omitempty"`
+	NoHookYet         bool      `json:"no_hook_yet,omitempty"`
+	SilentSince       time.Time `json:"silent_since,omitzero"`
+}
+
+// counts are the counters of h a record keeps.
+func (h *hookStats) counts() hookCounts {
+	return hookCounts{
+		Requests: h.requests, ToolCalls: h.toolCalls, ToolBlocked: h.toolBlocked, ToolAsked: h.toolAsked,
+		PromptBlocked: h.promptBlocked, LastBlocked: h.lastBlocked, Events: maps.Clone(h.events), OtherEvents: h.otherEvents,
+		Tampered: h.tampered, Failed: h.failed, IngressRefused: h.ingressRefused,
+	}
+}
+
+// restore starts h from the counters a record kept, with at most
+// sandboxapi.MaxHookEvents event names (countEvent).
+func (h *hookStats) restore(c *hookCounts) {
+	if c == nil {
+		return
+	}
+	h.requests, h.toolCalls, h.toolBlocked, h.toolAsked = c.Requests, c.ToolCalls, c.ToolBlocked, c.ToolAsked
+	h.promptBlocked, h.lastBlocked, h.otherEvents = c.PromptBlocked, c.LastBlocked, c.OtherEvents
+	h.tampered, h.failed, h.ingressRefused = c.Tampered, c.Failed, c.IngressRefused
+	for name, n := range c.Events {
+		if len(h.events) >= sandboxapi.MaxHookEvents {
+			h.otherEvents += n
+			continue
+		}
+		if h.events == nil {
+			h.events = make(map[string]int64)
+		}
+		h.events[name] = n
+	}
+}
+
+// noteHookCountsLocked puts the box's hook counters and its session's hook
+// verdict in its record and reports whether they moved since the record
+// last kept them. Callers hold Manager.mu.
+func (b *box) noteHookCountsLocked() bool {
+	c := b.hooks.counts()
+	c.UnreachableSince, c.UnreachableReason, c.NoHookYet = b.reach.since, b.reach.reason, b.reach.noHookYet
+	c.SilentSince = b.silentSince
+	kept := b.rec.HookCounts
+	if kept == nil {
+		kept = &hookCounts{}
+	}
+	if reflect.DeepEqual(*kept, c) {
+		return false
+	}
+	b.rec.HookCounts = &c
+	return true
+}
+
+// keepHookCounts writes the record of every sandbox whose hook counters
+// moved since its record last kept them. It runs with the destinations
+// flush and when the daemon stops, so a daemon that did not stop cleanly
+// loses at most the last interval's counts. Callers must not hold
+// Manager.mu.
+func (m *Manager) keepHookCounts() {
+	m.mu.Lock()
+	var moved []*box
+	var names []string
+	for name, b := range m.boxes {
+		if !b.deleted && !b.retained && !b.creating && b.noteHookCountsLocked() {
+			moved, names = append(moved, b), append(names, name)
+		}
+	}
+	m.mu.Unlock()
+	for i, b := range moved {
+		if err := m.saveRecord(b); err != nil {
+			m.logf("keep the hook counts of %s: %v", names[i], err)
+		}
+	}
+}
+
 var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // identity is the correlation.sandbox group for the box. Callers hold
@@ -304,7 +406,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// a session for silent hooks stops the next one too while they stay
 		// silent.
 		b.silentSince, b.silenceSent = time.Time{}, false
-		b.closedPorts = nil
+		b.portLines, b.opens = nil, nil
 		// The new session's hooks name its session.
 		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {
@@ -326,10 +428,16 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.rec.SessionYolo = nil
 	}
 	b.rec.Phase = string(phase)
+	// The record written below keeps the hook counts reached so far.
+	b.noteHookCountsLocked()
 	id := b.identity()
 	rec := b.rec
 	m.mu.Unlock()
-	if previous == phase {
+	// A restarted daemon republishes the phase its record held: telemetry
+	// records it again, but nothing happened, so the feed gets no line
+	// ("sandbox X stopped" for every stopped sandbox at a restart, GAP-0167).
+	unchanged := previous == phase
+	if unchanged {
 		previous = ""
 	}
 	ev := audit.SandboxLifecycleEvent{
@@ -345,10 +453,12 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// The session is over: keep what it reached.
 		m.flushDestinations(rec.Name)
 	}
-	m.feed.Publish(sandboxapi.ActivityEvent{
-		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
-		Message: lifecycleMessage(rec.Name, phase),
-	})
+	if !unchanged {
+		m.feed.Publish(sandboxapi.ActivityEvent{
+			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
+			Message: lifecycleMessage(rec.Name, phase),
+		})
+	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
 }
@@ -457,10 +567,9 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	proxy := m.proxy
 	bindingID := b.rec.BindingID
 	shared := sharedLimitsOf(b)
-	blocked := b.blockedHostList()
 	accepted := b.rec.Accepted
 	m.mu.Unlock()
-	m.decorate(&v, proxy, bindingID, blocked, accepted)
+	m.decorate(&v, proxy, bindingID, accepted)
 	views := []sandboxapi.Sandbox{v}
 	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
 	return views[0]
@@ -525,71 +634,22 @@ func (m *Manager) sharedLimitsWarning(d openshell.Driver, max config.OpenShellRe
 	return v.Message + ", so it cannot start until that is lowered (`defenseclaw sandbox doctor --fix`)"
 }
 
-// maxBlockedHosts bounds the destinations a box remembers OpenShell
-// refused.
-const maxBlockedHosts = 4096
-
-// noteBlocked counts a connection OpenShell refused, to host (the name the
-// feed shows it blocked). Callers hold Manager.mu.
-func (b *box) noteBlocked(host string) {
-	b.blockedRequests++
-	b.noteBlockedHost(host)
-}
-
-// noteBlockedHost counts host among the destinations OpenShell refused.
-// Callers hold Manager.mu.
-func (b *box) noteBlockedHost(host string) {
-	if host = strings.ToLower(host); host == "" {
-		return
-	}
-	if b.blockedHosts == nil {
-		b.blockedHosts = map[string]struct{}{}
-	}
-	if len(b.blockedHosts) < maxBlockedHosts {
-		b.blockedHosts[host] = struct{}{}
-	}
-}
-
-// blockedHostList is what decorate needs of noteBlocked's destinations.
-// Callers hold Manager.mu.
-func (b *box) blockedHostList() []string {
-	out := make([]string, 0, len(b.blockedHosts))
-	for h := range b.blockedHosts {
-		out = append(out, h)
-	}
-	return out
-}
-
 // decorate adds what view leaves out because it needs I/O or other locks:
-// the proxy's counts and the snapshot, with its acceptance (accepted, the
-// record's Accepted) when it applies. The egress counts are destinations:
-// Destinations those the sandbox reached, Blocked those refused at least
-// once (by the DefenseClaw proxy or by OpenShell, whose refused
-// destinations openshellBlocked lists), the way the feed and a session's
-// ✗ lines name them; BlockedRequests counts the refused requests. Callers
-// must not hold Manager.mu.
-func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string, accepted *acceptedSnapshot) {
-	blocked := make(map[string]struct{}, len(openshellBlocked))
-	for _, h := range openshellBlocked {
-		blocked[h] = struct{}{}
-	}
+// the egress counts and the snapshot, with its acceptance (accepted, the
+// record's Accepted) when it applies. The egress counts sum up the
+// sandbox's destinations (egressSummary), the proxy's live counts merged
+// in. Callers must not hold Manager.mu.
+func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, accepted *acceptedSnapshot) {
 	live := map[string]egress.DestinationStats{}
 	if proxy != nil && proxy.Counter() != nil && bindingID != "" {
 		for _, d := range proxy.Counter().DestinationsFor(bindingID) {
+			if !d.Contacted && harnessFetchHost(v.Harness, d.Host, 0) {
+				continue
+			}
 			live[strings.ToLower(d.Host)] = d
-			if d.Contacted {
-				v.Egress.Destinations++
-			}
-			v.Egress.BytesUp += d.BytesUp
-			v.Egress.BytesDown += d.BytesDown
-			v.Egress.BlockedRequests += int(d.Blocked)
-			if d.Blocked > 0 {
-				blocked[strings.ToLower(d.Host)] = struct{}{}
-			}
 		}
 	}
-	v.Egress.Blocked = len(blocked)
-	v.Egress.ModelAPIs, v.Egress.ShadowAI = m.destinationSummary(v.Name, v.Harness, live)
+	v.Egress = m.egressSummary(v.Name, v.Harness, live)
 	if snap, err := m.ws.LoadSnapshot(m.opts.DataDir, v.Name); err == nil && snap != nil {
 		info := &sandboxapi.SnapshotInfo{Kind: string(snap.Kind), CreatedAt: snap.CreatedAt}
 		if snap.Git != nil {
@@ -670,7 +730,6 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.PendingApprovals++
 		}
 	}
-	v.Egress.BlockedRequests = b.blockedRequests
 	// What silent hooks lead to, as checkHookSilence decides it: under a
 	// policy that is not resolved, the fail-closed response.
 	var after time.Duration

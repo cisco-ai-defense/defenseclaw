@@ -97,13 +97,22 @@ func TestDestinations(t *testing.T) {
 		// With the process tree on, the binary is its lineage.
 		{Host: "example.org", Kind: sandboxapi.DestinationOther, Connections: 1, Binaries: []string{"/usr/bin/wget"}, LastSeen: seen,
 			PID: 77, Lineage: []sandboxapi.DestinationProcess{{PID: 77, Exe: "/usr/bin/wget"}, {PID: 42, Comm: "bash"}, {PID: 7, Comm: "claude"}}},
+		// GAP-0177: the PROVIDER cell holds an AI provider or -, never the
+		// egress category; a refusal's reason reads in words in KIND.
+		{Host: "pypi.org", Kind: "package_registry", Category: "package_registry", Connections: 2, LastSeen: seen},
+		{Host: "example.net", Kind: sandboxapi.DestinationBlocked, Category: "not_allowlisted", Blocked: 1, LastSeen: seen},
 	}, Models: []sandboxapi.ModelUse{{Provider: "anthropic", Model: "claude-haiku", Calls: 2, Failed: 1, LastSeen: seen}}}}
 	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputText))
-	has(t, ta.output(), "DESTINATION", "shadow AI", "model provider", "5, 2 model calls", "host.openshell.internal:8080,11434",
-		"0 (4 refused)", "/usr/bin/curl", "wget ← bash ← claude", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)")
+	out := ta.output()
+	has(t, out, "DESTINATION", "shadow AI", "model provider", "5, 2 model calls", "host.openshell.internal:8080,11434",
+		"0 (4 refused)", "/usr/bin/curl", "wget ← bash ← claude", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)",
+		"blocked (paste site)", "blocked (not on the allowlist)", "package registry")
+	if strings.Contains(out, "package_registry") || strings.Contains(out, "not_allowlisted") || strings.Contains(out, "paste_site") {
+		t.Fatalf("a category slug reads in the table:\n%s", out)
+	}
 	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputJSON))
 	var d sandboxapi.Destinations
-	if err := json.Unmarshal(ta.out.Bytes(), &d); err != nil || len(d.Destinations) != 5 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI ||
+	if err := json.Unmarshal(ta.out.Bytes(), &d); err != nil || len(d.Destinations) != 7 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI ||
 		len(d.Destinations[4].Lineage) != 3 {
 		t.Fatalf("destinations json = %s, %v", ta.out.String(), err)
 	}
@@ -135,6 +144,10 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// A restarted daemon keeps the counts, not the time of the last
+		// hook (GAP-0166): the column still counts them.
+		{"after a daemon restart", func(h *sandboxapi.HookCoverage) { h.LastHookAt = time.Time{} }, " 4 calls, 1 blocked ",
+			[]string{"Hook traffic  9 requests, 4 tool calls, 1 blocked\n"}},
 		// The verdicts per hook event, the most frequent first (#956).
 		{"events", func(h *sandboxapi.HookCoverage) {
 			h.Events = map[string]int64{"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "UserPromptSubmit": 3}
@@ -201,6 +214,8 @@ func TestActivityRendering(t *testing.T) {
 			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
 		// A DefenseClaw ask: the harness asks the user in its own UI.
 		{Seq: 18, Time: at, Kind: sandboxapi.ActivityToolAsked, Sandbox: "box", Tool: "Bash", Reason: "C2-WEBHOOK-SITE"},
+		// An approved --host-port service, first reached (GAP-0154).
+		{Seq: 19, Time: at, Kind: sandboxapi.ActivityEgressAllowed, Sandbox: "box", Host: "host.openshell.internal", Port: 8765, Source: sandboxapi.SourceOpenShell},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -224,6 +239,7 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ✗ httpbin.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 		"12:01:02 ✗ httpbin.org:80 (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 		"12:01:02 ? tool Bash asked for confirmation: C2-WEBHOOK-SITE",
+		"12:01:02 ✓ host.openshell.internal:8765 (port 8765 on this machine)",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -239,6 +255,48 @@ func TestActivityRendering(t *testing.T) {
 		t.Fatalf("followed %d events:\n%s", n, ta.output())
 	}
 	has(t, ta.output(), "12:01:02 box ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2")
+}
+
+// TestActivityFollowsTheDaemonsNextFeed (GAP-0092, GAP-0105): a daemon
+// restart ended `sandbox activity -f` without a word and with 0, or left it
+// skipping the new feed's events, numbered from one again under another
+// epoch. The follower waits for the daemon, follows its new feed from the
+// start and says so; what it replays of a feed already shown is skipped.
+func TestActivityFollowsTheDaemonsNextFeed(t *testing.T) {
+	ta := newTestApp(t, "")
+	at := ta.Now()
+	ev := func(epoch string, seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Epoch: epoch, Seq: seq, Time: at, Kind: sandboxapi.ActivityEgressAllowed, Sandbox: "box", Host: host, Port: 443}
+	}
+	ta.daemon.mu.Lock()
+	ta.daemon.events = []sandboxapi.ActivityEvent{ev("e1", 1, "one.example"), ev("e1", 2, "two.example")}
+	ta.daemon.mu.Unlock()
+	ctx, cancel := context.WithTimeout(bg, time.Second)
+	defer cancel()
+	restarted := false
+	ta.Sleep = func(context.Context, time.Duration) error {
+		if !restarted {
+			restarted = true
+			ta.daemon.mu.Lock()
+			ta.daemon.events = []sandboxapi.ActivityEvent{ev("e2", 1, "three.example")}
+			ta.daemon.mu.Unlock()
+		}
+		return nil
+	}
+	ta.daemon.onStatus = func(*sandboxapi.Status) {
+		if restarted {
+			// The new feed's stream stays open until the test ends.
+			ta.daemon.hold = make(chan struct{})
+		}
+	}
+	if err := ta.Activity(ctx, ActivityOptions{Follow: true}); err != nil {
+		t.Fatalf("Activity = %v", err)
+	}
+	out := ta.output()
+	if strings.Count(out, "one.example") != 1 || strings.Count(out, "three.example") != 1 ||
+		!strings.Contains(out, "the DefenseClaw daemon restarted; following its new feed") {
+		t.Fatalf("followed:\n%s", out)
+	}
 }
 
 func TestApprovalsAndDecisions(t *testing.T) {
@@ -263,8 +321,9 @@ func TestApprovalsAndDecisions(t *testing.T) {
 	if len(calls) != 1 || !strings.Contains(string(calls[0].Body), `"decision":"approve"`) || !strings.Contains(string(calls[0].Body), `"always":true`) {
 		t.Fatalf("decide calls = %+v", calls)
 	}
-	// One line per decision (manual test L10).
-	has(t, ta.output(), "approved ap-1", "next quiet moment", "kept for future sandboxes")
+	// One line per decision (manual test L10), which says to retry the
+	// connection that asked (GAP-0120: it was refused at once).
+	has(t, ta.output(), "approved ap-1", "next quiet moment", "then retry the connection that asked", "kept for future sandboxes")
 	if n := strings.Count(ta.output(), "\n"); n != 1 {
 		t.Fatalf("decide printed %d lines:\n%s", n, ta.output())
 	}
@@ -624,6 +683,24 @@ func TestReapScriptStopsTheSession(t *testing.T) {
 	}
 }
 
+// TestExecSaysWhyTheSandboxEndedIt (GAP-0077): a hook-silence stop ended
+// a `sandbox exec` command with only OpenShell's "exec relay closed before
+// the command reported an exit status". The exec says what stopped the
+// sandbox under the command.
+func TestExecSaysWhyTheSandboxEndedIt(t *testing.T) {
+	ta := newTestApp(t, "", sampleSandbox("box"))
+	ta.IO.TTY = false
+	ta.stream.answer = func(argv []string) (int, string) {
+		ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
+			sb.Phase = "stopped"
+			sb.Hooks.Silent, sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = true, "stop", "1m"
+		})
+		return 255, ""
+	}
+	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"sleep", "600"}}), 255)
+	has(t, ta.output(), "DefenseClaw stopped box while the command ran: its harness worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)")
+}
+
 func TestExecAndLogs(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("box"))
 	ta.IO.TTY = false
@@ -644,6 +721,7 @@ func TestExecAndLogs(t *testing.T) {
 	}
 	ta.ok(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"ls", "-la"}}))
 	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"false"}}), 7)
+	lacks(t, ta.output(), "while the command ran")
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 50}))
 	cmds := ta.stream.commands()
 	// `sandbox exec` runs the command through sandbox-env, under its
@@ -972,6 +1050,26 @@ func TestPullOfAStoppedSandboxReusesItsLastPull(t *testing.T) {
 	ta.wantCalls(t, 4, "POST", "copybox/start")
 }
 
+// TestStartSendsTheModelKeyTheEnvironmentHoldsNow (GAP-0080): a start of a
+// sandbox created with a model key from the environment hands the daemon
+// the key the environment holds now, which renews the provider's.
+func TestStartSendsTheModelKeyTheEnvironmentHoldsNow(t *testing.T) {
+	sb := copySandbox("keybox")
+	sb.Launch.CredentialProfile = profiles.AnthropicID
+	ta := newTestApp(t, "", sb, copySandbox("nokey"))
+	ta.env["ANTHROPIC_API_KEY"] = "sk-renewed-not-a-secret"
+	ta.ok(t, ta.Start(bg, "keybox", StartOptions{}))
+	var req sandboxapi.StartRequest
+	if bodies := ta.bodies("POST", "keybox/start"); len(bodies) != 1 || json.Unmarshal([]byte(bodies[0]), &req) != nil || req.LLM == nil ||
+		req.LLM.Profile != profiles.AnthropicID || req.LLM.Credentials["ANTHROPIC_API_KEY"] != "sk-renewed-not-a-secret" {
+		t.Fatalf("start request = %+v", req)
+	}
+	ta.ok(t, ta.Start(bg, "nokey", StartOptions{}))
+	if bodies := ta.bodies("POST", "nokey/start"); len(bodies) != 1 || strings.Contains(bodies[0], "llm") {
+		t.Fatalf("a sandbox created without a model key got one: %v", bodies)
+	}
+}
+
 // After a start and a stop whose look found the copy as the last pull read
 // it, that pull is reused, and the note says what holds: the copy has not
 // changed since that pull (it said the sandbox "has not run since" the pull,
@@ -1184,6 +1282,17 @@ func TestPolicyEdit(t *testing.T) {
 		!slices.Equal(c.OpenShell.Egress.Block, []string{"paste.example"}) {
 		t.Fatalf("egress = %+v", c.OpenShell.Egress)
 	}
+	// GAP-0151: no command took one entry off a list; `config unset` emptied
+	// the whole list. (Each command loads config.yaml as it starts.)
+	ta.Cfg = loadConfig(t, ta)
+	ta.ok(t, ta.fresh().PolicyRemove(bg, "allow", []string{"*.PyPI.org", "other.example"}))
+	has(t, ta.output(), "removed *.pypi.org from openshell.egress.allow", "other.example is not in openshell.egress.allow")
+	ta.ok(t, ta.PolicyRemove(bg, "block", []string{"paste.example"}))
+	ta.Cfg = loadConfig(t, ta)
+	if !slices.Equal(ta.Cfg.OpenShell.Egress.Allow, []string{"registry.npmjs.org"}) || len(ta.Cfg.OpenShell.Egress.Block) != 0 {
+		t.Fatalf("egress after the removals = %+v", ta.Cfg.OpenShell.Egress)
+	}
+	wantErr(t, ta.PolicyRemove(bg, "block", []string{"paste.example"}), "paste.example is not in openshell.egress.block")
 	off := false
 	for _, c := range []struct {
 		name  string

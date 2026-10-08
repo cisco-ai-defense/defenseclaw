@@ -79,6 +79,8 @@
     "path": "sandbox connect",
     "use": "connect \u003cname\u003e [-- harness-args...]",
     "short": "Resume a sandbox: start it if stopped and attach the harness",
+    "long": "Resumes a sandbox: starts it when it is stopped and attaches the harness to your\nterminal, or with --prompt (or the harness's own print flag after --) runs one prompt\nheadless, which needs no terminal. A sandbox this command started is stopped again when\nthe session ends; one that was already running, whose detached run is still going, or\nthat another session is attached to keeps running. --shell opens a login shell instead,\nreviewed at its end like a harness session.",
+    "example": "  defenseclaw sandbox connect myapp-7f3a\n  defenseclaw sandbox connect myapp-7f3a --prompt \"now add the tests\"\n  defenseclaw sandbox connect myapp-7f3a --shell",
     "flags": [
       {
         "name": "prompt",
@@ -163,6 +165,7 @@
     "path": "sandbox discover",
     "use": "discover \u003cname\u003e",
     "short": "Find the AI components inside a running sandbox now (MCP servers, skills, CLIs, agents)",
+    "long": "Reads what the agent installed and configured inside a running sandbox (MCP servers,\nskills, rules, plugins, AI CLIs and agents, environment variable names, shell history\nmentions and, for a copy, package manifests) and lists the AI components found. The\ndaemon does this on its own once the sandbox is ready and every\nai_discovery.scan_interval_min while it runs; the AI inventory (\"defenseclaw agent\nusage --sandbox NAME\") shows the result after its next scan.",
     "flags": [
       {
         "name": "json",
@@ -181,6 +184,7 @@
     "path": "sandbox doctor",
     "use": "doctor",
     "short": "Check that this machine can run sandboxes",
+    "long": "Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration,\nversion and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,\nthe sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw\ndaemon, harness images, shell wrappers and the organization policy. Exits 1 when a\ncheck fails (with --output json the result is printed and the exit status is 0; read\n\"ok\").",
     "flags": [
       {
         "name": "fix",
@@ -298,6 +302,7 @@
     "path": "sandbox image rm",
     "use": "rm \u003charness\u003e...",
     "short": "Remove the harnesses' images (on a Mac also their MicroVM disks)",
+    "long": "Removes the images DefenseClaw built for the named harnesses under this data\ndirectory: the harness images and, on the MicroVM driver, the run images and\naliases made from them, and forgets their records. On a Mac it also removes the\nMicroVM disks OpenShell prepared from them (about 5 GB each), once Docker no\nlonger has their images; that needs the DefenseClaw daemon's list of sandboxes.\nIt refuses, removing nothing, while a sandbox is recorded with one of the\nimages: delete that sandbox first. The next run of the harness builds its image\nagain.",
     "flags": [
       {
         "name": "dry-run",
@@ -315,12 +320,14 @@
   {
     "path": "sandbox kernel-feed",
     "use": "kernel-feed",
-    "short": "Feed Tetragon's exec records into your docker sandboxes' process trees (Linux, a root service)"
+    "short": "Feed Tetragon's exec records into your docker sandboxes' process trees (Linux, a root service)",
+    "long": "The sandbox kernel feed is a small root service for a Linux host whose administrator runs\nTetragon: it reads Tetragon's exec and exit records of the processes in OpenShell docker sandboxes\nand streams each sandbox's to its owner's DefenseClaw gateway, which adds them to the sandbox's\nprocess tree (sandbox run --process-tree): processes that live for milliseconds are recorded too.\nIt only reads Tetragon (never a policy call), serves members of the docker group, and gives each\nof them only their own sandboxes' records; docker-group members can already see every container,\nso that filter is a courtesy, not a boundary. Without it the tree is the 5 s sample, as before."
   },
   {
     "path": "sandbox kernel-feed install",
     "use": "install",
-    "short": "Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon)"
+    "short": "Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon)",
+    "long": "Copies the defenseclaw-sensor-helper of this install to /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper,\nchecks that this host's Tetragon serves a root-owned unix socket (never a TCP address) and that Docker\nanswers, then writes and starts defenseclaw-sandbox-feed.service. Run it again after an upgrade to update\nthe feed. Refused on a managed host, where sandboxes are not supported."
   },
   {
     "path": "sandbox kernel-feed status",
@@ -436,12 +443,26 @@
   {
     "path": "sandbox policy allow",
     "use": "allow \u003chost\u003e...",
-    "short": "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)"
+    "short": "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)",
+    "flags": [
+      {
+        "name": "remove",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
   },
   {
     "path": "sandbox policy block",
     "use": "block \u003chost\u003e...",
-    "short": "Add hosts to openshell.egress.block"
+    "short": "Add hosts to openshell.egress.block",
+    "flags": [
+      {
+        "name": "remove",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
   },
   {
     "path": "sandbox policy explain",
@@ -545,6 +566,7 @@
     "path": "sandbox policy suggest",
     "use": "suggest",
     "short": "Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations",
+    "long": "Record, then lock: read the destinations your sandboxes reached (kept across daemon\nrestarts and stops) and suggest a pack that extends balanced with every host they\nreached that balanced's curated allowlist does not cover. Hosts only ever refused,\nshadow AI, hosts on the blocklist feed and the sandbox's own model provider and\n--credential endpoints are listed apart, not suggested. --pack-out writes the pack\nto a new file, --diff shows what it changes against the effective policy. Nothing\nis applied.",
     "flags": [
       {
         "name": "diff",
@@ -576,6 +598,7 @@
     "path": "sandbox policy test",
     "use": "test",
     "short": "Show what the egress policy decides for a destination, the rule and where it comes from",
+    "long": "Show what the egress policy decides for a destination: allowed or blocked, the rule\nof the egress proxy's order that decides, and the setting that holds it. It asks the\nsame decider the egress proxy uses. --sandbox tests that sandbox's policy (its\nunblocks included); otherwise --pack, --profile and --harness resolve the policy a\nrun in this folder would get, without the daemon. --fixture checks a YAML or JSON\nlist of {host, port, binary, expect: allow|block, rule} and exits 1 on any mismatch.",
     "flags": [
       {
         "name": "binary",
@@ -627,6 +650,7 @@
     "path": "sandbox ps",
     "use": "ps \u003cname\u003e",
     "short": "List the processes of a sandbox whose process tree is on",
+    "long": "Lists the processes running in a sandbox whose process tree is on (a pack's\nobserve.process_tree: true, or \"sandbox run --process-tree\"): pid, parent, uptime and\ncommand line, the values of arguments that name secrets replaced. --tree shows each\nprocess under its parent. The daemon samples the sandbox every 5 seconds while it runs\n(every 15 seconds on a Mac when sampling its MicroVM is slow) and adds what OpenShell\nreports of processes starting and exiting, so a process that starts and ends between\ntwo samples, unreported, is not seen. The agent chooses its processes' names and\narguments.",
     "flags": [
       {
         "name": "json",
@@ -650,6 +674,7 @@
     "path": "sandbox pull",
     "use": "pull \u003cname\u003e",
     "short": "Bring a copy-mode sandbox's work back (3-way apply, a branch, or a patch)",
+    "long": "Brings a copy-mode sandbox's work back after a review: --apply merges it into your\nworking tree (3-way), --branch puts it on branch dc/\u003cname\u003e, --patch-out writes a patch.\nWhen --apply cannot merge (a conflict, or git older than 2.38), your working tree is\nleft as it was, the changes go to branch dc/\u003cname\u003e and a patch instead, and pull exits\nwith status 4.",
     "flags": [
       {
         "name": "accept-sensitive",
@@ -712,6 +737,7 @@
     "path": "sandbox review",
     "use": "review \u003cname\u003e",
     "short": "Review the session's changes, flagging files that can run code on this machine",
+    "long": "Reviews what changed in a mounted project since its pre-session snapshot, flagging\nfiles that can run code on this machine. For a copy-mode sandbox (every sandbox on\nmacOS) it previews what \"sandbox pull\" would bring back and applies nothing; with\n--output json it prints the pull's result.",
     "flags": [
       {
         "name": "diff",
@@ -735,6 +761,8 @@
     "path": "sandbox run",
     "use": "run \u003charness\u003e [flags] [-- harness-args...]",
     "short": "Run a harness in a sandbox on this folder",
+    "long": "Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver)\nlive-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS\n(the MicroVM driver) every run works on a copy. The harness is claude, codex,\ncopilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy,\nworks too; amp, cursor-agent and devin are not verified yet, so they do not run).\nSkip-permissions mode is on by default;\n--safe keeps the harness's own prompts. The harness gets your terminal; when it exits\nyou get a summary, a review of changed files that can run code on your machine, and\nthe choice to keep or undo the changes (from a copy: to bring them back, or leave them\nin the sandbox for pull). Arguments after -- go to the harness.\n\nA headless run in the foreground (--prompt, or the harness's own print flag after --)\ndeletes its sandbox when it ends and nothing is left in it to bring back or undo, as\n--rm does; --keep (or openshell.keep_headless) keeps it. Interactive sessions and\n--detach runs keep their sandbox.",
+    "example": "  defenseclaw sandbox run claude\n  defenseclaw sandbox run codex --copy --name fix-tests\n  defenseclaw sandbox run claude --detach --prompt \"fix the failing tests\"\n  defenseclaw sandbox run claude --credential STRIPE_API_KEY=api.stripe.com -- --model sonnet",
     "flags": [
       {
         "name": "bedrock-region",
@@ -867,6 +895,7 @@
     "path": "sandbox setup",
     "use": "setup",
     "short": "One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, images",
+    "long": "Checks this machine, installs OpenShell with NVIDIA's installer when you agree and\nconfigures your local OpenShell gateway (backed up and restored by \"sandbox teardown\"):\non Linux it enables project-folder bind mounts and turns OpenShell's upstream telemetry\noff unless you keep it; on a Mac it switches the gateway to OpenShell's MicroVM driver.\nThen it records the harnesses, offers shell wrappers and builds the harness images.",
     "flags": [
       {
         "name": "harness",
@@ -925,6 +954,7 @@
     "path": "sandbox start",
     "use": "start \u003cname\u003e",
     "short": "Start a stopped sandbox for a new session",
+    "long": "Starts a stopped sandbox for a new session. A mounted project gets a fresh undo\nsnapshot, unless the folder still holds changes an earlier session made that were\nneither undone nor kept at its end (a detached run, or one without a terminal to ask\non): then the earlier undo point stays, so \"sandbox undo\" still reverts them.\n--new-snapshot accepts those changes and takes a fresh snapshot.",
     "flags": [
       {
         "name": "new-snapshot",
@@ -960,6 +990,7 @@
     "path": "sandbox stop",
     "use": "stop \u003cname\u003e",
     "short": "Stop a sandbox (it is kept for start or connect)",
+    "long": "Stops a sandbox and keeps it for start or connect. When its detached run is still\ngoing, the stop ends it: stop asks first on a terminal (--yes does not). Every stop,\nthis one or one from the TUI, the macOS app or undo, marks the run interrupted and\nkeeps its log, so \"sandbox logs\" still shows it.",
     "flags": [
       {
         "name": "yes",
@@ -973,6 +1004,7 @@
     "path": "sandbox teardown",
     "use": "teardown",
     "short": "Remove every DefenseClaw sandbox, provider, profile, image, gateway change and wrapper",
+    "long": "Deletes DefenseClaw's sandboxes, OpenShell providers and provider profiles and its\nharness images, restores the OpenShell gateway configuration that setup changed (when\nnobody changed it since), removes the shell wrappers and turns openshell.enabled off.\nOpenShell itself stays installed. \"defenseclaw uninstall\" runs it.",
     "flags": [
       {
         "name": "dry-run",
@@ -996,6 +1028,7 @@
     "path": "sandbox unblock",
     "use": "unblock \u003chost\u003e",
     "short": "Lift an egress block for one sandbox or for every sandbox",
+    "long": "Lifts a block of the blocklist feed or of the profile's default (IP addresses under\nopen, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for\nevery sandbox (--always). It cannot lift a block-list entry: remove your own with\n`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository\npolicy's (.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open\na private network (add the exact host to openshell.egress.allow), this machine (run\nthe sandbox with --host-port PORT) or a cloud metadata or link-local address.",
     "flags": [
       {
         "name": "always",
@@ -1012,6 +1045,7 @@
     "path": "sandbox undo",
     "use": "undo \u003cname\u003e",
     "short": "Restore the project folder to its pre-session snapshot",
+    "long": "Restore a mounted project folder to its pre-session snapshot, after a preview. Files git ignores\n(dependency directories, build output) have no copy in the snapshot: undo deletes what the session\nwrote to Python bytecode caches and names the rest, with what to do about them, unless\nopenshell.workdir.undo_ignored has the snapshot keep a copy of node_modules, .venv and the like,\nwhich undo then restores.\n\nFor a copy-mode sandbox (every sandbox on macOS), undo reverts its last `pull --apply` instead; edits you\nmade since stay.",
     "flags": [
       {
         "name": "json",

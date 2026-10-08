@@ -69,6 +69,14 @@ var (
 	// release's supervisor images (Installer.PrepareUpgrade), without which
 	// the restarted gateway's docker driver does not start.
 	ErrRuntimeImages = errors.New("openshell: Docker could not pull the images the upgraded gateway starts with")
+	// ErrHomebrewPrefix means this account cannot write to the Homebrew
+	// prefix (HomebrewPrefixError): Homebrew installs formulas only as the
+	// account that owns it. Nothing was downloaded or run.
+	ErrHomebrewPrefix = errors.New("openshell: this account cannot install Homebrew formulas")
+	// ErrSudo means the install could not use sudo, which NVIDIA's
+	// installer needs on Linux to install the openshell package. Nothing
+	// was installed or downloaded by the script.
+	ErrSudo = errors.New("openshell: the install needs sudo")
 )
 
 // linuxPackageCLI is where the deb and rpm packages install the CLI.
@@ -238,6 +246,48 @@ type Installer struct {
 	// discover the Discover registration, dial it and PrepareUpgrade, with
 	// the images gateway.toml leaves to the release: RuntimeImages).
 	PrepareUpgrade func(ctx context.Context, release Version) error
+	// Geteuid is the caller's uid (default os.Geteuid): root needs no sudo.
+	Geteuid func() int
+	// HomebrewPrefixProblem says, on a Mac, why Homebrew cannot install a
+	// formula as this account (a HomebrewPrefixError), nil when it can
+	// (default: the folders Homebrew writes under homebrewPrefix).
+	HomebrewPrefixProblem func() error
+}
+
+// HomebrewPrefixError is ErrHomebrewPrefix: Path, a folder Homebrew writes
+// to tap and install a formula, is not writable by this account; Owner
+// owns it.
+type HomebrewPrefixError struct {
+	Prefix, Path, Owner string
+}
+
+func (e *HomebrewPrefixError) Error() string {
+	owner := ""
+	if e.Owner != "" {
+		owner = ", which " + e.Owner + " owns,"
+	}
+	return fmt.Sprintf("openshell: this account cannot write to %s%s so Homebrew at %s cannot install the nvidia/openshell formula as this account", e.Path, owner, e.Prefix)
+}
+
+func (e *HomebrewPrefixError) Is(target error) bool { return target == ErrHomebrewPrefix }
+
+// homebrewPrefixProblem checks the folders under prefix Homebrew writes to
+// when it taps a repository (Library/Taps, else Library) and installs a
+// formula (Cellar). One that does not exist is not judged.
+func homebrewPrefixProblem(prefix string, writable func(string) bool) error {
+	for _, candidates := range [][]string{{filepath.Join(prefix, "Library", "Taps"), filepath.Join(prefix, "Library")}, {filepath.Join(prefix, "Cellar")}} {
+		for _, dir := range candidates {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			if !writable(dir) {
+				return &HomebrewPrefixError{Prefix: prefix, Path: dir, Owner: ownerName(info)}
+			}
+			break
+		}
+	}
+	return nil
 }
 
 func (i *Installer) defaults() {
@@ -297,6 +347,38 @@ func (i *Installer) defaults() {
 	if i.PrepareUpgrade == nil {
 		i.PrepareUpgrade = i.prepareUpgrade
 	}
+	if i.Geteuid == nil {
+		i.Geteuid = os.Geteuid
+	}
+	if i.HomebrewPrefixProblem == nil {
+		i.HomebrewPrefixProblem = func() error { return homebrewPrefixProblem(homebrewPrefix(), dirWritable) }
+	}
+}
+
+// checkSudo makes sure, before the script runs, that sudo will let it
+// install the openshell package (Linux): at once when sudo needs no
+// password, else with sudo's own password prompt now, which then lasts
+// for the script. A refused or cancelled prompt, or no sudo, is ErrSudo,
+// with nothing installed.
+func (i *Installer) checkSudo(ctx context.Context) error {
+	if i.GOOS != "linux" || i.Geteuid() == 0 {
+		return nil
+	}
+	_, err := i.Runner.Output(ctx, Command{Name: "sudo", Args: []string{"-n", "true"}, Timeout: 15 * time.Second})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, exec.ErrNotFound):
+		return fmt.Errorf("%w, which is not installed here", ErrSudo)
+	}
+	fmt.Fprintln(i.Out, "  sudo asks for your password now, before anything is installed:")
+	if err := i.Runner.Run(ctx, Command{Name: "sudo", Args: []string{"-v"}}); err != nil {
+		if errors.Is(err, ErrInterrupted) || ctx.Err() != nil {
+			return fmt.Errorf("%w: cancelled at sudo's password prompt", ErrSudo)
+		}
+		return fmt.Errorf("%w, which did not accept this account (%v)", ErrSudo, err)
+	}
+	return nil
 }
 
 // Install runs the flow: detect an existing CLI, download the pinned
@@ -356,6 +438,12 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		}
 	}
 	plan.BreakingUpgrade = existing != nil && (existing.Version == (Version{}) || existing.Version.Compare(mustParse(breakingReleaseFloor)) < 0)
+	if i.GOOS == "darwin" {
+		// NVIDIA's script taps and installs with Homebrew as this account.
+		if err := i.HomebrewPrefixProblem(); err != nil {
+			return nil, err
+		}
+	}
 
 	script, err := i.download(ctx)
 	if err != nil {
@@ -381,7 +469,12 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
-	if upgrading {
+	switch {
+	case upgrading && i.GOOS == "darwin":
+		// A Mac runs sandboxes in MicroVMs, which the restart stops.
+		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway once the release is installed, which stops every MicroVM sandbox on it",
+			"before the script: nothing runs while a MicroVM sandbox does (the restart would stop it without a flush)")
+	case upgrading:
 		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it",
 			"before the script: on the docker driver, Docker pulls the release's supervisor images from ghcr.io (the restarted gateway does not start without them); "+
 				"on the MicroVM driver, nothing runs while a sandbox does (the restart would stop it without a flush)")
@@ -426,6 +519,9 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	if !ok {
 		return nil, ErrInstallDeclined
 	}
+	if err := i.checkSudo(ctx); err != nil {
+		return nil, err
+	}
 	if upgrading {
 		if err := i.PrepareUpgrade(ctx, target); err != nil {
 			return nil, err
@@ -433,6 +529,10 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 	}
 
 	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}); err != nil {
+		if errors.Is(err, ErrInterrupted) {
+			return nil, fmt.Errorf("openshell: the installer was interrupted and may have done part of its work; "+
+				"`defenseclaw sandbox doctor` shows what is there, and `defenseclaw sandbox setup` runs it again: %w", err)
+		}
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
 			// formula (NVIDIA's tap has no bottle for this macOS) with an

@@ -309,6 +309,11 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	if req.Sandbox == "" && !req.Always {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name a sandbox or ask for always")
 	}
+	// `sandbox policy block HOST` writes config.yaml, and the snapshot
+	// follows the file only after the reload watcher: an unblock in that
+	// second must not be decided, and reported done, against the block
+	// list from before the write (GAP-0173).
+	m.syncConfig(ctx)
 	var (
 		b   *box
 		eff *packs.Effective
@@ -395,6 +400,18 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: req.Sandbox, Host: host,
 		Reason: resp.Scope, Message: resp.Message})
 	return resp, nil
+}
+
+// syncConfig loads config.yaml into the configuration snapshot
+// (Options.SyncConfig). A file the reload refuses keeps the snapshot as it
+// is; the reload reports why in the daemon's health.
+func (m *Manager) syncConfig(ctx context.Context) {
+	if m.opts.SyncConfig == nil {
+		return
+	}
+	if err := m.opts.SyncConfig(ctx); err != nil {
+		m.logf("load config.yaml before the decision: %v", err)
+	}
 }
 
 // EgressUnblock reports whether a sandbox's egress proxy reaches host
@@ -680,7 +697,10 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	m.mu.Lock()
 	b := m.boxes[e.SandboxName]
 	var ident audit.SandboxIdentity
+	var harnessName string
+	var eff *packs.Effective
 	if b != nil {
+		harnessName, eff = b.rec.Harness, b.eff
 		// The proxy's requests are no sign of the harness at work (hook
 		// silence): the proxy cannot tell the harness's from a tool's or a
 		// `sandbox exec` command's. OpenShell's record of the connection
@@ -707,9 +727,29 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			DecisionCode: decisionCode(e), Reason: truncate(reason, 512),
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
 		}
+		category, text := string(e.Category), categoryText(e)
+		if blocked && e.Category == egress.CategoryOperatorBlock && eff != nil {
+			// The block list merges the pack's, the repository policy's
+			// and the user's own: the line, the destination and the audit
+			// record (an alert) say whose entry it was, where it is removed
+			// (GAP-0136).
+			if c, t := blockOriginText(eff.BlockOrigin(e.Host)); c != "" {
+				category, text = c, t
+				ev.DecisionCode, ev.Reason = "SANDBOX_EGRESS_"+strings.ToUpper(c), truncate(t+more, 512)
+			}
+		}
+		fetch := blocked && harnessFetchHost(harnessName, e.Host, e.Port)
+		if fetch {
+			// The harness's own background request, which it does without:
+			// audited, but no alert.
+			ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+		}
 		m.tel.RecordSandboxEgress(ctx, ev)
+		if fetch {
+			return
+		}
 		m.observeDestination(ctx, b, destinationSighting{host: e.Host, port: e.Port, at: e.Time, proxy: true, denied: blocked,
-			category: string(e.Category)})
+			category: category})
 		if blocked || e.FirstSeen {
 			kind := sandboxapi.ActivityEgressAllowed
 			// The port tells an HTTPS request from a plain-HTTP one to
@@ -718,11 +758,11 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			msg := "✓ " + where
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
-				msg = "✗ " + where + " (" + categoryText(e) + ")" + more
+				msg = "✗ " + where + " (" + text + ")" + more
 			}
 			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
-				Source: sandboxapi.SourceProxy, Category: string(e.Category), Rule: e.Rule, Unblockable: blocked && e.Unblockable,
+				Source: sandboxapi.SourceProxy, Category: category, Rule: e.Rule, Unblockable: blocked && e.Unblockable,
 				Reason: truncate(e.Reason, 300), Message: msg,
 			})
 		}
@@ -942,6 +982,21 @@ func policyOutcome(e egress.Event) string {
 		out += " feed " + e.Feed + "@" + e.FeedVersion
 	}
 	return truncate(out, 256)
+}
+
+// blockOriginText is the feed category and text of a block-list refusal
+// whose entry came from origin (packs.Effective.BlockOrigin); "" for the
+// user's own list, which operator_block already names.
+func blockOriginText(origin string) (category, text string) {
+	switch origin {
+	case packs.BlockFromPack:
+		return sandboxapi.CategoryPackBlock, "on the pack's block list"
+	case packs.BlockFromRepoPolicy:
+		return sandboxapi.CategoryRepoPolicyBlock, "on the repository policy's block list, " + packs.RepoPolicyPath
+	case packs.BlockFromFirewall:
+		return sandboxapi.CategoryFirewallBlock, "a deny rule of the host egress firewall"
+	}
+	return "", ""
 }
 
 func categoryText(e egress.Event) string {

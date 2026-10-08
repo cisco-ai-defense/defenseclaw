@@ -1364,3 +1364,46 @@ func findWarning(warnings []string, prefix string) string {
 	}
 	return ""
 }
+
+// TestStartRenewsTheModelCredential (GAP-0080): a sandbox kept the model
+// key it was created with, so after a Bedrock key expired every model call
+// of the next session failed (401) until the sandbox was deleted. A start
+// gives the provider the key the caller's environment holds now, for the
+// profile the sandbox was created with only, and only its own variables.
+// The gateway never returns a provider's values (the first fix compared
+// with them and so never updated anything live), so the fake withholds
+// them as well, and the key the provider already holds changes nothing.
+func TestStartRenewsTheModelCredential(t *testing.T) {
+	e := newEnv(t, nil)
+	e.fake.WithholdProviderCredentials()
+	e.live(sandboxapi.CreateRequest{Name: "keybox", LLM: anthropicLLM})
+	key := func() map[string]string {
+		p, err := e.fake.SDK().Providers().Get(t.Context(), e.client.Workspace(), "keybox-llm")
+		must(t, err)
+		return p.Spec.Credentials
+	}
+	// start reports the provider updates the start made.
+	start := func(profile string, creds map[string]string) int {
+		e.stopBox("keybox")
+		before := e.fake.Calls(openshelltest.MethodUpdateProvider)
+		e.startBox("keybox", sandboxapi.StartRequest{LLM: &sandboxapi.LLMCredential{Profile: profile, Credentials: creds}})
+		return e.fake.Calls(openshelltest.MethodUpdateProvider) - before
+	}
+	start(profiles.OpenAIID, map[string]string{"ANTHROPIC_API_KEY": "sk-other"})
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-test-secret" {
+		t.Fatalf("another profile's credential replaced the key: %v", got)
+	}
+	unchanged := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"})
+	if n := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-renewed", "OTHER_KEY": "x"}); n != unchanged+1 {
+		t.Fatalf("a renewed key made %d provider updates, a start %d", n, unchanged)
+	}
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-renewed" || got["OTHER_KEY"] != "" {
+		t.Fatalf("provider credentials = %v", got)
+	}
+	if n := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-renewed"}); n != unchanged {
+		t.Fatalf("the key the provider holds made %d provider updates, a start %d", n, unchanged)
+	}
+	if ev := e.events("keybox", sandboxapi.ActivityLifecycle, "model_credential_updated"); len(ev) != 1 {
+		t.Fatalf("feed = %+v", ev)
+	}
+}

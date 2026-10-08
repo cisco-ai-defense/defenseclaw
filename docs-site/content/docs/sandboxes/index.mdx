@@ -30,10 +30,12 @@ defenseclaw sandbox run claude
 
 On a Mac, the run looks like this. The capture is from a real session whose
 sandbox was named with `--name myapp-claude` (without `--name` it would be
-`myapp-` plus a random suffix) and whose model credential was an Amazon
-Bedrock key. Below the banner, Claude Code starts as usual.
+`myapp-` plus a random suffix), that ran under the `balanced` pack with the
+process tree on (`--pack balanced --process-tree`), and whose model
+credential was an Amazon Bedrock key. Below the banner, Claude Code starts as
+usual.
 
-![defenseclaw sandbox run claude on a Mac: the copy is made with .env held back, then the banner shows the sandbox, the project copy, the model credential bound to its endpoint, and where asks appear, before Claude Code starts](/images/sandboxes/screens/terminal-run-banner.png)
+![defenseclaw sandbox run claude --pack balanced --process-tree on a Mac: the copy is made with .env held back, then the banner shows the sandbox, the project copy, the model credential bound to its endpoint and how that endpoint is reached, and where asks appear, before Claude Code starts](/images/sandboxes/screens/terminal-run-banner.png)
 
 The banner's lines, as text, for a default-named sandbox with an Anthropic
 API key:
@@ -43,6 +45,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
   Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
   Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
 ```
 

@@ -32,6 +32,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
@@ -85,6 +87,10 @@ const (
 // tree is off has destinations without lineage.
 type ProcessLookup interface {
 	Lineage(sandboxName string, pid int) []ProcessRef
+	// PIDOf is the pid of the one process of the sandbox that runs exe and
+	// started shortly before at, when the program was seen connecting; 0
+	// for none or several.
+	PIDOf(sandboxName, exe string, at time.Time) int
 }
 
 // ProcessRef is one process of a lineage, as the process index saw it in
@@ -163,10 +169,17 @@ type destRow struct {
 	Category string   `json:"category,omitempty"`
 	Refusal  string   `json:"refusal,omitempty"`
 	Binaries []string `json:"binaries,omitempty"`
-	PID      int      `json:"pid,omitempty"`
-	Proxy    counts   `json:"proxy,omitzero"`
+	// ActorAt is when the last of Binaries was last seen connecting: the
+	// row's lineage is that of the process of it that started shortly
+	// before (PIDOf, GAP-0174).
+	ActorAt time.Time `json:"actor_at,omitzero"`
+	PID     int       `json:"pid,omitempty"`
+	Proxy   counts    `json:"proxy,omitzero"`
 
 	live counts
+	// proxyAt are the proxy's requests to the host that no program is
+	// named for yet (attributeProxied).
+	proxyAt []proxyRequest
 	// hit is the catalog's provider of the host, when it has one.
 	hit *catalog.Provider
 }
@@ -221,13 +234,43 @@ type destinationInfo struct {
 	// credentialHosts are the endpoints of the sandbox's --credential
 	// bindings that are not also its model provider's.
 	credentialHosts []string
+	// llm names the sandbox's model provider (llmProviderName).
+	llm string
+}
+
+// llmProviderName names the provider of a --llm credential profile
+// template: what the view calls the sandbox's model provider. Never
+// OpenShell's provider rule, which DefenseClaw names after the sandbox
+// (_provider_<name>_llm), and not only the catalog, which knows no Amazon
+// Bedrock host.
+func llmProviderName(template string) string {
+	switch template {
+	case profiles.AnthropicID, profiles.ClaudeOAuthID, profiles.OpenCodeAnthropicID, profiles.CopilotAnthropicID:
+		return "Anthropic"
+	case profiles.OpenAIID, profiles.OpenCodeOpenAIID:
+		return "OpenAI"
+	case profiles.ClaudeBedrockMantleID, profiles.CodexBedrockMantleID, profiles.OpenCodeBedrockMantleID,
+		profiles.CopilotBedrockMantleID, profiles.BedrockMantleOpenAIID:
+		return "Amazon Bedrock"
+	case profiles.GeminiID:
+		return "Google Gemini"
+	case profiles.CopilotGitHubID:
+		return "GitHub Copilot"
+	case profiles.AmpID:
+		return "Amp"
+	case profiles.CursorID:
+		return "Cursor"
+	case profiles.KiroID:
+		return "Kiro"
+	}
+	return ""
 }
 
 func (m *Manager) destinationInfo(b *box) destinationInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	info := destinationInfo{name: b.rec.Name, harness: b.rec.Harness, bindingID: b.rec.BindingID, session: b.rec.Sessions,
-		id: b.identity(), gone: b.deleted || b.retained}
+		id: b.identity(), gone: b.deleted || b.retained, llm: llmProviderName(b.rec.CredentialProfile)}
 	var modelHosts []string
 	for _, ep := range b.rec.ProviderEndpoints {
 		if ep.Role == roleLLM {
@@ -365,17 +408,105 @@ func (r *destRow) note(s destinationSighting) {
 			}
 		}
 	}
-	if s.binary != "" {
-		bin := truncate(s.binary, maxDestinationText)
-		r.Binaries = slices.DeleteFunc(r.Binaries, func(b string) bool { return b == bin })
-		r.Binaries = append(r.Binaries, bin)
+	r.addActor(s.binary, s.pid, s.denied, s.at)
+}
+
+// addActor records the program (and its pid, 0 when unknown) that reached
+// the row's host at `at`, or was refused it (denied). The last binary is the
+// one a view shows for the row: the latest whose traffic got through, once
+// one did. A refusal does not move a binary up, and one only ever refused a
+// host the sandbox reached goes first (the first to go when the list is
+// full).
+func (r *destRow) addActor(binary string, pid int, denied bool, at time.Time) {
+	if binary != "" {
+		bin := truncate(binary, maxDestinationText)
+		switch listed := slices.Contains(r.Binaries, bin); {
+		case denied && listed:
+		case denied && r.Reached:
+			r.Binaries = slices.Insert(r.Binaries, 0, bin)
+		default:
+			r.Binaries = slices.DeleteFunc(r.Binaries, func(b string) bool { return b == bin })
+			r.Binaries = append(r.Binaries, bin)
+		}
 		if len(r.Binaries) > maxDestinationBins {
 			r.Binaries = r.Binaries[len(r.Binaries)-maxDestinationBins:]
 		}
+		if r.Binaries[len(r.Binaries)-1] == bin {
+			r.ActorAt = at
+		}
 	}
-	if s.pid > 0 {
-		r.PID = s.pid
+	if pid > 0 {
+		r.PID = pid
 	}
+}
+
+// proxyOpen is OpenShell's record of a connection to the egress proxy: the
+// program that opened it, as the workload reports it, and when the record
+// came.
+type proxyOpen struct {
+	binary string
+	pid    int
+	at     time.Time
+}
+
+// proxyRequest is a request of the egress proxy to a row's host that no
+// program is named for yet: when it came, and whether the proxy refused it.
+type proxyRequest struct {
+	at     time.Time
+	denied bool
+}
+
+// Pairing a request of the egress proxy with the connection it came on:
+// the proxy sees neither the program nor its socket, and OpenShell's
+// record of the connection names no destination. proxyOpenWindow bounds
+// how far apart the two come; maxProxyOpens and maxProxyRequests bound
+// what a sandbox keeps of each.
+const (
+	proxyOpenWindow  = 5 * time.Second
+	maxProxyOpens    = 256
+	maxProxyRequests = 16
+)
+
+// proxyActor is the program that opened the proxy connection a request
+// that came at `at` rode on: the one program OpenShell's records of proxy
+// connections around then name. Records of two programs then leave it
+// unknown rather than guessed.
+func proxyActor(opens []proxyOpen, at time.Time) (binary string, pid int, ok bool) {
+	for _, o := range opens {
+		if o.at.Before(at.Add(-proxyOpenWindow)) || o.at.After(at.Add(proxyOpenWindow)) {
+			continue
+		}
+		switch {
+		case binary == "":
+			binary, pid = o.binary, o.pid
+		case o.binary != binary:
+			return "", 0, false
+		case o.pid != pid:
+			pid = 0
+		}
+	}
+	return binary, pid, binary != ""
+}
+
+// attributeProxied names the program of each of the row's proxied
+// requests (proxyActor) once the window around it is over, so every
+// OpenShell record that could pair with it is in; it reports whether it
+// named one. A request it cannot pair is forgotten.
+func (r *destRow) attributeProxied(opens []proxyOpen, now time.Time) bool {
+	named := false
+	kept := r.proxyAt[:0]
+	for _, q := range r.proxyAt {
+		if now.Before(q.at.Add(proxyOpenWindow)) {
+			kept = append(kept, q)
+			continue
+		}
+		if bin, pid, ok := proxyActor(opens, q.at); ok {
+			r.addActor(bin, pid, q.denied, q.at)
+			named = true
+		}
+	}
+	r.proxyAt = kept
+	return named
 }
 
 // classify says what the row's host is (see the comment at the top): its
@@ -383,7 +514,6 @@ func (r *destRow) note(s destinationSighting) {
 func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 	switch hit := r.hit; {
 	case r.ProviderRule:
-		provider = strings.TrimPrefix(r.Rule, providerRulePrefix)
 		if hit != nil {
 			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
@@ -393,6 +523,14 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
 		return sandboxapi.DestinationCredential, provider, vendor
+	case harnessFetchHost(harnessName, r.Host, 0):
+		// The harness's own background request (OpenCode's model
+		// catalog), which an open pack lets through: its vendor's, no
+		// shadow AI.
+		if spec, ok := harness.Get(harnessName); ok {
+			provider = spec.DisplayName
+		}
+		return sandboxapi.DestinationHarnessVendor, provider, ""
 	case hit != nil && hit.SupportedConnector != "" && hit.SupportedConnector == harnessName:
 		return sandboxapi.DestinationHarnessVendor, hit.DisplayName, hit.Vendor
 	case hit != nil:
@@ -455,6 +593,12 @@ func (m *Manager) observeDestination(ctx context.Context, b *box, s destinationS
 		return
 	}
 	r.note(s)
+	if s.proxy && s.binary == "" {
+		r.proxyAt = append(r.proxyAt, proxyRequest{at: m.now(), denied: s.denied})
+		if n := len(r.proxyAt); n > maxProxyRequests {
+			r.proxyAt = slices.Delete(r.proxyAt, 0, n-maxProxyRequests)
+		}
+	}
 	t.dirty = true
 	kind, provider, _ := r.classify(info.harness)
 	level := shadowRefused
@@ -600,6 +744,9 @@ func (m *Manager) proxyStats(bindingID string) map[string]egress.DestinationStat
 // Callers hold destMu.
 func (m *Manager) mergeLiveLocked(t *destTable, live map[string]egress.DestinationStats, harnessName string) {
 	for host, d := range live {
+		if !d.Contacted && harnessFetchHost(harnessName, host, 0) {
+			continue
+		}
 		r := t.rows[host]
 		if r == nil {
 			if r = t.row(m, host, d.FirstSeen, harnessName); r == nil {
@@ -627,18 +774,31 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 	}
 	info := m.destinationInfo(b)
 	live := m.proxyStats(info.bindingID)
+	m.mu.Lock()
+	opens := slices.Clone(b.proxyOpens)
+	m.mu.Unlock()
+	now := m.now()
 	m.destMu.Lock()
 	out := &sandboxapi.Destinations{Name: info.name, Harness: info.harness, Destinations: []sandboxapi.DestinationRow{}}
 	t := m.dests[info.name]
 	if t == nil && len(live) > 0 {
 		t = m.tableLocked(info.name)
 	}
-	binaries := map[string]string{}
+	// actors are each row's program and when it was seen connecting, in
+	// out.Destinations' order, for its lineage.
+	type actor struct {
+		binary string
+		at     time.Time
+	}
+	var actors []actor
 	if t != nil {
 		m.mergeLiveLocked(t, live, info.harness)
 		for _, r := range t.rows {
-			out.Destinations = append(out.Destinations, r.view(info.harness))
-			binaries[sandboxapi.DisplayText(r.Host)] = r.lastBinary()
+			if r.attributeProxied(opens, now) {
+				t.dirty = true
+			}
+			out.Destinations = append(out.Destinations, r.view(info))
+			actors = append(actors, actor{r.lastBinary(), r.ActorAt})
 		}
 		for _, u := range t.models {
 			out.Models = append(out.Models, *u)
@@ -646,16 +806,24 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 		out.Dropped = t.dropped
 	}
 	m.destMu.Unlock()
+	for i := range out.Destinations {
+		d := &out.Destinations[i]
+		pid := d.PID
+		if pid <= 0 && m.procs != nil && actors[i].binary != "" {
+			// OpenShell names no pid for a connection (its NET records
+			// say 0 on both drivers): the program the row names finds its
+			// process in the tree when exactly one copy of it started
+			// shortly before it was seen connecting (GAP-0139, GAP-0174).
+			pid = m.procs.PIDOf(info.name, actors[i].binary, actors[i].at)
+		}
+		d.Lineage = m.lineage(info.name, pid, actors[i].binary)
+	}
 	slices.SortFunc(out.Destinations, func(a, b sandboxapi.DestinationRow) int {
 		return cmp.Or(cmp.Compare(destinationRank(a.Kind), destinationRank(b.Kind)), b.LastSeen.Compare(a.LastSeen), cmp.Compare(a.Host, b.Host))
 	})
 	slices.SortFunc(out.Models, func(a, b sandboxapi.ModelUse) int {
 		return cmp.Or(cmp.Compare(b.Calls, a.Calls), cmp.Compare(a.Provider, b.Provider), cmp.Compare(a.Model, b.Model))
 	})
-	for i := range out.Destinations {
-		d := &out.Destinations[i]
-		d.Lineage = m.lineage(info.name, d.PID, binaries[d.Host])
-	}
 	return out, nil
 }
 
@@ -676,8 +844,11 @@ func destinationRank(kind string) int {
 
 // view renders a row for the API. Its text is the workload's, so it is made
 // safe to print.
-func (r *destRow) view(harnessName string) sandboxapi.DestinationRow {
-	kind, provider, vendor := r.classify(harnessName)
+func (r *destRow) view(info destinationInfo) sandboxapi.DestinationRow {
+	kind, provider, vendor := r.classify(info.harness)
+	if kind == sandboxapi.DestinationModelProvider && info.llm != "" {
+		provider = info.llm
+	}
 	total := r.total()
 	v := sandboxapi.DestinationRow{
 		Host: sandboxapi.DisplayText(r.Host), Ports: slices.Clone(r.Ports), Kind: kind, Provider: sandboxapi.DisplayText(provider),
@@ -695,25 +866,43 @@ func (r *destRow) view(harnessName string) sandboxapi.DestinationRow {
 	return v
 }
 
-// destinationSummary counts the AI destinations of a sandbox for its
-// Egress status line.
-func (m *Manager) destinationSummary(name, harnessName string, live map[string]egress.DestinationStats) (modelAPIs, shadow int) {
+// egressSummary is a sandbox's Egress status line, summed up from its
+// destinations, which are kept across daemon restarts (a summary of the
+// proxy counter and OpenShell refusals since the daemon started read 0
+// after a restart next to an AI summary that did not, GAP-0100): the hosts
+// the proxy reached, those either boundary refused at least once and the
+// refused requests, the bytes, and the AI destinations.
+func (m *Manager) egressSummary(name, harnessName string, live map[string]egress.DestinationStats) sandboxapi.EgressStats {
+	var s sandboxapi.EgressStats
 	m.destMu.Lock()
 	defer m.destMu.Unlock()
 	t := m.dests[name]
+	if t == nil && len(live) > 0 {
+		t = m.tableLocked(name)
+	}
 	if t == nil {
-		return 0, 0
+		return s
 	}
 	m.mergeLiveLocked(t, live, harnessName)
 	for _, r := range t.rows {
+		total := r.total()
+		if total.Tunnels > 0 {
+			s.Destinations++
+		}
+		if total.Blocked > 0 || r.Refused > 0 {
+			s.Blocked++
+		}
+		s.BlockedRequests += int(total.Blocked + r.Refused)
+		s.BytesUp += total.BytesUp
+		s.BytesDown += total.BytesDown
 		switch kind, _, _ := r.classify(harnessName); {
 		case kind == sandboxapi.DestinationModelProvider || kind == sandboxapi.DestinationHarnessVendor:
-			modelAPIs++
+			s.ModelAPIs++
 		case sandboxapi.ShadowAIKind(kind):
-			shadow++
+			s.ShadowAI++
 		}
 	}
-	return modelAPIs, shadow
+	return s
 }
 
 // destinationsPath is where a sandbox's destinations table is kept.
@@ -742,14 +931,18 @@ type destinationsFileV1 struct {
 // come back.
 func (m *Manager) flushDestinations(only string) {
 	m.mu.Lock()
-	type target struct{ name, harness, bindingID string }
+	type target struct {
+		name, harness, bindingID string
+		opens                    []proxyOpen
+	}
 	var targets []target
 	for name, b := range m.boxes {
 		if (only == "" || name == only) && !b.deleted && !b.retained && !b.creating {
-			targets = append(targets, target{name, b.rec.Harness, b.rec.BindingID})
+			targets = append(targets, target{name, b.rec.Harness, b.rec.BindingID, slices.Clone(b.proxyOpens)})
 		}
 	}
 	m.mu.Unlock()
+	now := m.now()
 	for _, tg := range targets {
 		path, ok := m.destinationsPath(tg.name)
 		if !ok {
@@ -759,6 +952,11 @@ func (m *Manager) flushDestinations(only string) {
 		m.destMu.Lock()
 		if t := m.dests[tg.name]; t != nil {
 			m.mergeLiveLocked(t, live, tg.harness)
+			for _, r := range t.rows {
+				if r.attributeProxied(tg.opens, now) {
+					t.dirty = true
+				}
+			}
 			if t.dirty {
 				if err := m.writeDestinationsLocked(path, tg.name, t); err != nil {
 					m.logf("keep the destinations of %s: %v", tg.name, err)

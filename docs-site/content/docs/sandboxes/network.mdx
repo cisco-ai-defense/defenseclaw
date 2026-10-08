@@ -283,7 +283,16 @@ refusal and then a contact raise one of each).
 ```
 
 The list survives daemon restarts and stops and is deleted with the
-sandbox.
+sandbox. `defenseclaw sandbox destinations NAME` prints it:
+
+![defenseclaw sandbox destinations myapp-claude: the model provider with its model calls, one shadow AI destination (api.openai.com), one blocked site (pastebin.com) and three ordinary sites, each with its requests, bytes, the program that connected and when it was last seen, and a warning that counts the shadow AI destinations](/images/sandboxes/screens/terminal-destinations.png)
+
+With the process tree on, the program column also shows the connecting
+program's parents (see
+[see what the sandbox runs](/docs/sandboxes/guide#see-what-the-sandbox-runs)).
+In Grafana, the Sandboxes board has a row for these findings:
+
+![Grafana Sandboxes board, Findings and shadow AI row: Findings by kind counts 2 sandbox.shadow_ai findings, the Shadow-AI destinations table lists api.openai.com and api.mistral.ai as LOW with one finding each, and Recent sandbox findings names the sandbox and the host](/images/grafana/sandboxes-findings.png)
 
 ## See what happened
 

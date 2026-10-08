@@ -143,17 +143,14 @@ defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/acme-rules
 defenseclaw guardrail use-pack acme-rules-2
 ```
 
-The second re-pins the edited directory. Validate it, then write the digest that `validate-pack` printed:
+The second re-pins the edited directory. `use-pack` validates it again and writes its new digest:
 
 ```bash
 defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/acme-rules
-defenseclaw config set guardrail.custom_packs.acme-rules.digest \
-  sha256:4201916150bb32dd7895b604c2f9b36a9bbe0d09d14a93658a5f63179d9f4454
+defenseclaw guardrail use-pack acme-rules
 ```
 
-Use the digest your own `validate-pack` run printed, with the `sha256:` prefix.
-
-Use `config set` here. `use-pack` cannot re-pin a directory whose pin is already stale, because the CLI refuses to start while `config.yaml` fails validation.
+`use-pack` runs while the stale pin fails the config check, which stops the other `guardrail` commands; `use-pack default` switches back to the default pack instead.
 
 ## Customise a pack with guardrail.rules
 

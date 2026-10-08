@@ -24,8 +24,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -62,21 +64,90 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 	enc := json.NewEncoder(a.IO.Out)
 	enc.SetEscapeHTML(false)
 	n := 0
-	err = api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: o.Sandbox, Since: o.Since, Follow: o.Follow}, func(ev sandboxapi.ActivityEvent) error {
+	// The last event shown: a feed lives in the daemon's memory, and one
+	// that restarted starts another, numbered from one under a new epoch.
+	var epoch string
+	var seq uint64
+	show := func(ev sandboxapi.ActivityEvent) error {
+		if epoch != "" && ev.Epoch == epoch && ev.Seq <= seq {
+			// Replayed after a reconnect to the same feed.
+			return nil
+		}
+		if epoch != "" && ev.Epoch != "" && ev.Epoch != epoch && o.Output != OutputJSON {
+			a.note("the DefenseClaw daemon restarted; following its new feed")
+		}
+		if ev.Epoch != "" {
+			epoch, seq = ev.Epoch, ev.Seq
+		}
 		n++
 		if o.Output == OutputJSON {
 			return enc.Encode(ev)
 		}
 		a.println(a.activityLine(ev, o.Sandbox == ""))
 		return nil
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
+	}
+	err = api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: o.Sandbox, Since: o.Since, Follow: o.Follow}, show)
+	// A followed stream ends when the daemon restarts or lets go of its
+	// sandboxes: follow the feed it serves next (from its start; what this
+	// one showed is skipped), or say why the feed stopped.
+	// A daemon whose events name no epoch cannot be followed across its
+	// restarts: what it replays could not be told from what is new.
+	for quiet := 0; o.Follow && epoch != "" && ctx.Err() == nil && (err == nil || sandboxapi.IsCode(err, sandboxapi.CodeUnavailable)); {
+		if quiet++; quiet > followQuietReconnects {
+			return &ExitError{Code: 1, Err: errors.New("the activity feed stopped: the DefenseClaw daemon keeps ending the stream")}
+		}
+		if err = a.awaitDaemon(ctx, api); err != nil {
+			return err
+		}
+		shown := n
+		err = api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: o.Sandbox, Follow: true}, show)
+		if n > shown {
+			quiet = 0
+		}
+	}
+	if err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil {
 		return apiError(err)
 	}
 	if n == 0 && !o.Follow && o.Output != OutputJSON {
 		a.note("no activity yet")
 	}
 	return nil
+}
+
+// followRetry bounds how long `activity -f` waits for the daemon to answer
+// again after its stream ended; followQuietReconnects how many streams in a
+// row may end with nothing new.
+const (
+	followRetry           = time.Minute
+	followQuietReconnects = 5
+)
+
+// awaitDaemon waits until the daemon serves sandboxes again, at most
+// followRetry; an error says the feed stopped.
+func (a *App) awaitDaemon(ctx context.Context, api API) error {
+	deadline := a.Now().Add(followRetry)
+	const poll = 2 * time.Second
+	for polls := 0; ; polls++ {
+		if err := a.Sleep(ctx, poll); err != nil {
+			return err
+		}
+		st, err := api.Status(ctx)
+		if err == nil && st.Enabled && st.Available {
+			return nil
+		}
+		if a.Now().After(deadline) || time.Duration(polls)*poll >= followRetry {
+			why := "it does not answer"
+			switch {
+			case err != nil:
+				why = apiError(err).Error()
+			case !st.Enabled:
+				why = "sandboxes are off"
+			case !st.Available:
+				why = "sandboxes are unavailable: " + firstNonEmpty(st.Reason, "not connected to OpenShell")
+			}
+			return &ExitError{Code: 1, Err: fmt.Errorf("the activity feed stopped: the DefenseClaw daemon went away and is not back after %s (%s)", followRetry, why)}
+		}
+	}
 }
 
 // activityLine renders one feed item: "15:04:05 ✓ registry.npmjs.org" or
@@ -91,16 +162,22 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	switch ev.Kind {
 	case sandboxapi.ActivityEgressAllowed:
 		b.WriteString(a.style("✓", ansiGreen) + " " + hostPort(ev))
+		if ev.Host == packs.OpenShellHostAlias && ev.Port > 0 {
+			// A --host-port service or a local model endpoint (GAP-0154).
+			b.WriteString(a.dim(" (port " + strconv.Itoa(ev.Port) + " on this machine)"))
+		}
 	case sandboxapi.ActivityEgressBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
 		switch why := firstNonEmpty(ev.Category, ev.Reason); {
+		case sshPort(ev):
+			b.WriteString(" (" + sandboxapi.SSHBlockedText(ev.Host) + ")")
 		case ev.Category == sandboxapi.CategoryLargeUpload:
 			// The proxy's reason names the threshold the upload crossed.
 			b.WriteString(" (" + sandboxapi.LargeUploadBlockedText(ev.Reason) + ")")
 		case why != "":
-			b.WriteString(" (" + reasonText(why) + ")")
+			b.WriteString(" (" + sandboxapi.BlockedText(why, ev.Host) + ")")
 		}
-		if ev.Unblockable && ev.Host != "" {
+		if ev.Unblockable && ev.Host != "" && !sshPort(ev) {
 			scope := ""
 			if ev.Sandbox != "" {
 				scope = " --sandbox " + ev.Sandbox
@@ -160,38 +237,9 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	return b.String()
 }
 
-// reasonTexts explain the reason tokens the feed carries for blocked
-// egress: OpenShell's own for the connections it denies, and the egress
-// proxy's categories.
-var reasonTexts = map[string]string{
-	"transparent_tcp_policy_denied":  "no OpenShell rule allows it",
-	"transparent_tcp_mapping_denied": "no OpenShell rule allows this port",
-	"policy_dns_ineligible":          "no OpenShell rule allows the name",
-	"paste_site":                     "paste site",
-	"file_drop":                      "file-sharing site",
-	"webhook_catcher":                "webhook catcher",
-	"tunnel":                         "tunnel service",
-	"anonymizer":                     "anonymizer",
-	"host_internal":                  "this machine",
-	"private_network":                "private network",
-	"port_not_allowed":               "port not allowed",
-	"invalid_destination":            "invalid destination",
-	"admin_block":                    "blocked by your organization",
-	"admin_allow_only":               "not on your organization's allowed list",
-	"operator_block":                 "on your block list",
-	"not_allowlisted":                "not on the allowlist",
-	"rate_limited":                   "rate limited",
-	"ip_literal":                     "IP address instead of a name",
-}
-
-// reasonText is the short explanation of a feed reason token; an unknown
-// token reads with spaces for its underscores.
-func reasonText(token string) string {
-	if text, ok := reasonTexts[token]; ok {
-		return text
-	}
-	return strings.ReplaceAll(token, "_", " ")
-}
+// sshPort reports a refused connection to port 22: git over SSH, ssh.
+// OpenShell opens no SSH out of a sandbox, which no unblock changes.
+func sshPort(ev sandboxapi.ActivityEvent) bool { return ev.Port == 22 }
 
 // largeUploadText is an egress.large_upload report to dest (the feed's
 // hostPort, a session's host) without its ⚠: "large upload to
@@ -339,7 +387,9 @@ func (a *App) Decide(ctx context.Context, o DecideOptions) error {
 	}
 	switch m := strings.TrimSpace(res.Message); {
 	case res.Approval.Status == sandboxapi.ApprovalQueued:
-		msg += "; it applies at the next quiet moment of the sandbox"
+		// The connection that asked was refused at once: nothing waits for
+		// the answer, so the program has to try again.
+		msg += "; it applies at the next quiet moment of the sandbox (usually within a minute), then retry the connection that asked"
 	case m != "" && m != verb && !strings.HasPrefix(m, verb+";") && !strings.HasPrefix(m, verb+" "):
 		msg += "; " + m
 	}

@@ -21,6 +21,7 @@ package sandboxcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -136,8 +137,12 @@ func TestSessionEnd(t *testing.T) {
 			want: []string{"its undo point is kept because nobody accepted the changes", "undo: defenseclaw sandbox undo " + sbName,
 				"drop it: defenseclaw sandbox delete " + sbName}},
 		{name: "headless --rm --yes", setup: headless, opts: RunOptions{Harness: "claude", Prompt: "fix it", Rm: true, Yes: true}, check: deleted(false)},
-		{name: "a secret from a copy, declined", input: "a\n\n", setup: secret, opts: copyRun, check: applied(false),
-			want: []string{"the sandbox wrote what looks like a secret: config/keys.txt", "Some changes hold what looks like a secret. Bring them back anyway?"}},
+		// GAP-0135: the no ended with "Sandbox kept" alone, and an answer
+		// other than y or n was asked again without a word.
+		{name: "a secret from a copy, declined", input: "a\nmaybe\n\n", setup: secret, opts: copyRun, check: applied(false),
+			want: []string{"the sandbox wrote what looks like a secret: config/keys.txt", "Some changes hold what looks like a secret. Bring them back anyway?",
+				"answer y or n", "not brought back; the changes stay in fix-tests: review them with `defenseclaw sandbox review fix-tests`, " +
+					"then pull with --accept-sensitive, or --branch or --patch-out FILE"}},
 		{name: "a secret from a copy, accepted", input: "a\ny\n", setup: secret, opts: copyRun, check: applied(true)},
 		{name: "a headless answer on a terminal", setup: answers(true), opts: RunOptions{Harness: "claude", Prompt: "fix it"}, check: stopped,
 			want: []string{"done �]0;DCMARK� \x1b[32mok\x1b[0m\n"}, not: []string{"\x1b]"}},
@@ -413,7 +418,7 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
 	for _, where := range []string{"host.openshell.internal:5432", "host.openshell.internal:6379", "db.example.net:6379", "host.openshell.internal:443",
-		"paste.example.net (blocklisted)"} {
+		"paste.example.net (on the block list)"} {
 		if !strings.Contains(live, "✗ DefenseClaw blocked "+where) {
 			t.Errorf("no notice names %s:\n%q", where, live)
 		}
@@ -606,16 +611,16 @@ func TestSessionSummary(t *testing.T) {
 				})
 			}
 		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted since then"}, not: []string{"hooks are not reaching"}},
-		// PR 1022 live retest N1: the daemon restarted twice during the
-		// session, which left its counters at zero rather than below the
-		// session's start, and the summary read "0 tool calls · 0 new sites
-		// contacted" after 7 tool calls. Its start time says it restarted.
+		// The daemon keeps its hook counts across a restart (GAP-0156): one
+		// that left no counter lower kept them, so the session counts what
+		// it moved them by and names no restart (PR 1022 live retest N1,
+		// before any daemon kept them, read "0 tool calls" after 7).
 		{name: "a daemon restart that left no counter lower", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
 			ta.daemon.mu.Lock()
 			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
 			ta.daemon.mu.Unlock()
-		}, want: []string{"Session ended · 0 tool calls since the daemon restarted at " + time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04") +
-			" · 0 new sites contacted since then"}},
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.HookRequests += 9; sb.Hooks.ToolCalls += 7 })
+		}, want: []string{"Session ended · 7 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
 		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
 			ta.daemon.mu.Lock()
 			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
@@ -655,6 +660,56 @@ func TestSessionSummary(t *testing.T) {
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},
+		// GAP-0077: the OpenShell gateway restarted under the session (an
+		// upgrade), which closed the harness's exec relay: the sandbox read
+		// as unknown for a moment, then ready, and the session said it was
+		// stopped from outside and kept stopped.
+		{name: "the connection was lost", opts: claude, exit: 1, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 1
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "unknown" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
+				}
+				return nil
+			}
+		}, check: noStop,
+			want: []string{"the connection to " + sbName + " was lost (the OpenShell gateway restarted, for one), which ended Claude Code; " + sbName +
+				" is still running → reattach: defenseclaw sandbox connect " + sbName, "Sandbox " + sbName + " keeps running → reattach"},
+			not: []string{"stopped from outside", "Sandbox kept (stopped)"}},
+		// GAP-0096: DefenseClaw's own stop for silent hooks is no stop from
+		// outside.
+		{name: "stopped by DefenseClaw for silent hooks", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() {
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+					sb.Phase = "stopped"
+					sb.Hooks.Silent, sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = true, "stop", "1m"
+				})
+			}
+		}, check: noStop,
+			want: []string{"DefenseClaw stopped " + sbName + ": Claude Code worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)"},
+			not:  []string{"stopped from outside"}},
+		// GAP-0170: a delete from another terminal read as a stop, then the
+		// review failed and the keep/undo question came for a sandbox that
+		// was gone.
+		{name: "deleted from elsewhere", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "deleting" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.mu.Lock()
+					delete(ta.daemon.sandboxes, sbName)
+					ta.daemon.mu.Unlock()
+				}
+				return nil
+			}
+		}, check: noStop,
+			want: []string{sbName + " was deleted from outside this session, which ended Claude Code; there is nothing left to review, and its undo point went with it"},
+			not:  []string{"stopped from outside", "could not review", "Keep changes?"}},
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
@@ -833,6 +888,21 @@ func TestSessionHookWarnings(t *testing.T) {
 			not:  []string{"hooks are not reaching"}, notLive: []string{"hooks are not reaching"}},
 		{name: "kiro the daemon found unreachable", opts: kiro, setup: quiet(0), exit: ExitHooksUnreachable,
 			during: unreachable("r2c1-kiro", "no hook request")},
+		// GAP-0157: `-- --version` prints and exits without a session; it
+		// sent no hook and nothing showed a session at work without them.
+		{name: "a connect that only asks the version", do: func(ta *testApp) error {
+			return ta.Connect(bg, ConnectOptions{Name: "verbox", Args: []string{"--version"}})
+		}, setup: func(ta *testApp) {
+			quiet(time.Hour)(ta)
+			sb := sampleSandbox("verbox")
+			sb.Phase = "stopped"
+			ta.daemon.add(sb)
+		}, want: []string{"no hook of this session reached DefenseClaw: Claude Code ran with the arguments after -- and may not have started a session; " +
+			"if it did, run: defenseclaw sandbox doctor"},
+			not: []string{"hooks are not reaching"}},
+		{name: "a pass-through run the daemon found unreachable", opts: RunOptions{Harness: "claude", Args: []string{"--model", "m"}}, setup: quiet(time.Hour),
+			exit: ExitHooksUnreachable, during: unreachable(sbName, "the hook token was refused"),
+			want: []string{"✗ " + hooksWarningText("the hook token was refused")}},
 		// PR 1022 review of N1: a daemon restart during the session left
 		// the new daemon's counters at zero, and the session said none of
 		// its hooks reached DefenseClaw (Copilot CLI, after 7 allowed tool
@@ -842,7 +912,7 @@ func TestSessionHookWarnings(t *testing.T) {
 			quiet(time.Hour)(ta)
 			ta.env["OPENAI_API_KEY"] = "sk-mock"
 		}, during: restartedAt(5 * time.Minute),
-			want: []string{"Session ended · 0 tool calls since the daemon restarted at " + restartClock, restartNote, "continue this conversation"},
+			want: []string{"Session ended · 0 tool calls · ", restartNote, "continue this conversation"},
 			not:  []string{"no hook of this session reached", "not reaching"}},
 		{name: "a claude session across a daemon restart", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
 			quiet(10 * time.Millisecond)(ta)
@@ -870,7 +940,7 @@ func restartedAt(after time.Duration) func(*testing.T, *testApp) {
 
 var (
 	restartClock = time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04")
-	restartNote  = "the DefenseClaw daemon restarted during the session (at " + restartClock + ") and keeps no hook counts across a restart, " +
+	restartNote  = "the DefenseClaw daemon restarted during the session (at " + restartClock + ") and has counted no hook of it since, " +
 		"so DefenseClaw cannot tell whether this session's hooks reached it"
 )
 
@@ -1422,6 +1492,30 @@ func TestRunWithAChangedRepoPolicy(t *testing.T) {
 	}
 }
 
+// TestRefreshNamesAWayOn (GAP-0106): `connect NAME --refresh` over a pull
+// that was not applied said "apply it, or refresh with --force to discard
+// it", and connect has no --force. The refusal names the pull commands.
+func TestRefreshNamesAWayOn(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.refreshErr = fmt.Errorf("%w, and a refresh would discard it (sandbox copybox)", workspace.ErrUnappliedPull)
+	err := ta.Connect(bg, ConnectOptions{Name: "copybox", Refresh: true})
+	if err == nil || !strings.Contains(err.Error(), "bring the work back first (`defenseclaw sandbox pull copybox --apply`, --branch or --patch-out FILE)") ||
+		strings.Contains(err.Error(), "--force") {
+		t.Fatalf("Connect = %v", err)
+	}
+	// GAP-0131: work never pulled read "refresh the copy: the sandbox has
+	// changes that were not pulled: pull or discard them first (sandbox
+	// copybox); bring the work back first (...)": twice, and a discard no
+	// command offers. It is one sentence now.
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.refreshErr = fmt.Errorf("%w, and a refresh would discard them (sandbox copybox)", workspace.ErrUnpulledChanges)
+	err = ta.Connect(bg, ConnectOptions{Name: "copybox", Refresh: true})
+	if want := "copybox has work that was not pulled: bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch, " +
+		"or --patch-out FILE), or connect without --refresh to go on with the copy as it is"; err == nil || err.Error() != want {
+		t.Fatalf("Connect = %v, want %q", err, want)
+	}
+}
+
 // Manual R2-101: a stopped sandbox the policy would not start is not
 // offered for resume; status and connect say to delete it and run again.
 func TestOutOfPolicySandboxIsNotOfferedForResume(t *testing.T) {
@@ -1742,7 +1836,8 @@ func TestCopySessionAfterAnApply(t *testing.T) {
 
 // `sandbox pull` and a session's end ask the same question before bringing
 // back changes that can run code on this machine (cert
-// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret").
+// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret"). A no says what
+// it leaves and exits 1.
 func TestPullAsksLikeTheSessionEnd(t *testing.T) {
 	ta := newTestApp(t, "n\n")
 	sb := copySandbox("copybox")
@@ -1752,8 +1847,14 @@ func TestPullAsksLikeTheSessionEnd(t *testing.T) {
 		Changes: []workspace.TreeChange{{Path: "Makefile", Status: "M"}},
 		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: "Makefile", Label: "Makefile", Kind: workspace.RiskExecutable,
 			Severity: workspace.SeverityHigh, Detail: "build file"}}}}
-	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
-	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?")
+	// GAP-0086: the no ended the command without a word, and with 0.
+	err := ta.Pull(bg, PullOptions{Name: "copybox", Apply: true})
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("declined pull = %v, want exit status 1", err)
+	}
+	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?",
+		"not brought back; the changes stay in copybox: review them with `defenseclaw sandbox review copybox`, then pull with --accept-sensitive")
 	lacks(t, ta.output(), "or hold a secret")
 }
 

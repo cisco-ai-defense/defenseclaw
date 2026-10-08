@@ -149,9 +149,14 @@ type record struct {
 	GatewayEndpoint  string `json:"gateway_endpoint,omitempty"`
 	GatewayWorkspace string `json:"gateway_workspace,omitempty"`
 
-	CredentialProfile string   `json:"credential_profile,omitempty"`
-	BedrockRegion     string   `json:"bedrock_region,omitempty"`
-	Providers         []string `json:"providers,omitempty"`
+	CredentialProfile string `json:"credential_profile,omitempty"`
+	BedrockRegion     string `json:"bedrock_region,omitempty"`
+	// LLMDigest is the credentialDigest of the model credential DefenseClaw
+	// last gave the sandbox's model provider, never the value: OpenShell
+	// does not return a provider's values, so a start compares the caller's
+	// key with it (refreshModelCredential).
+	LLMDigest string   `json:"llm_digest,omitempty"`
+	Providers []string `json:"providers,omitempty"`
 	// ProviderEndpoints are what the sandbox's --llm and --credential
 	// providers open directly, around the egress proxy; every later policy
 	// resolution judges them again. DetachedProviders are the providers
@@ -184,6 +189,10 @@ type record struct {
 	// accept names the session it reviewed (Manager.Accept). A restarted
 	// daemon that finds the sandbox still ready counts nothing.
 	Sessions int `json:"sessions,omitempty"`
+	// HookCounts are the hook counters as the daemon last kept them
+	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
+	// record share them, so they are replaced, never changed in place.
+	HookCounts *hookCounts `json:"hook_counts,omitempty"`
 	// Cursor resumes the WatchSandbox stream.
 	Cursor string `json:"cursor,omitempty"`
 	// HostAlias is what OpenShell last reported of host.openshell.internal

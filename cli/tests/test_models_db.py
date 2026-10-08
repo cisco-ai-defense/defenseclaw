@@ -712,6 +712,22 @@ class ModelsDbTests(unittest.TestCase):
                     json.dumps({"defenseclaw.network.decision": "block"}),
                 ),
                 (
+                    # A sandbox harness's own refused request is audited
+                    # only (GAP-0130).
+                    "harness-fetch-egress",
+                    now,
+                    "sandbox-egress",
+                    "",
+                    "network.egress",
+                    "egress.blocked",
+                    json.dumps(
+                        {
+                            "defenseclaw.network.decision": "block",
+                            "defenseclaw.network.decision_code": "SANDBOX_EGRESS_HARNESS_FETCH",
+                        }
+                    ),
+                ),
+                (
                     "canonical-failure",
                     now,
                     "enforcement",

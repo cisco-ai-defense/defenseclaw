@@ -18,8 +18,11 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -146,21 +149,19 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	out := make([]sandboxapi.Sandbox, 0, len(m.boxes))
 	bindings := make([]string, 0, len(m.boxes))
 	shared := make([]openshell.ComputeDriver, 0, len(m.boxes))
-	blocked := make([][]string, 0, len(m.boxes))
 	accepted := make([]*acceptedSnapshot, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
 			out = append(out, m.view(b))
 			bindings = append(bindings, b.rec.BindingID)
 			shared = append(shared, sharedLimitsOf(b))
-			blocked = append(blocked, b.blockedHostList())
 			accepted = append(accepted, b.rec.Accepted)
 		}
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
 	for i := range out {
-		m.decorate(&out[i], proxy, bindings[i], blocked[i], accepted[i])
+		m.decorate(&out[i], proxy, bindings[i], accepted[i])
 	}
 	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -211,6 +212,80 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	}
 	v := m.viewOf(b)
 	return &v, nil
+}
+
+// refreshModelCredential gives the sandbox's model provider the credential
+// the caller's environment holds now (StartRequest.LLM): a provider keeps
+// what its sandbox was created with, so once that key expired (a Bedrock
+// API key lasts hours) every model call of a later session failed until
+// the sandbox was deleted and run again. Only for the profile the sandbox
+// was created with, and only the variables that profile delivers.
+//
+// OpenShell never hands a provider's credential values back (the SDK's
+// provider has none after a get), so whether the key changed is judged
+// against rec.LLMDigest, the digest of the one DefenseClaw last gave the
+// provider. It returns the digest the provider's credential has now.
+func (m *Manager) refreshModelCredential(ctx context.Context, gw *Gateway, rec record, llm *sandboxapi.LLMCredential) (string, error) {
+	if llm == nil || llm.Profile == "" || llm.Profile != rec.CredentialProfile || len(llm.Credentials) == 0 {
+		return rec.LLMDigest, nil
+	}
+	pname := providerName(rec.Name, roleLLM, 0)
+	p, err := gw.Client.GetProvider(ctx, pname)
+	switch {
+	case openshell.IsNotFound(err):
+		return rec.LLMDigest, nil
+	case err != nil:
+		return "", upstream("get provider "+pname, err)
+	case !managedBy(p.Labels, rec.Owner) || p.Labels[LabelSandbox] != rec.Name:
+		return "", sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"the OpenShell provider %s is not the one DefenseClaw created for sandbox %s; delete the sandbox and run a new one", pname, rec.Name)
+	}
+	profile, err := gw.Client.GetProfile(ctx, p.Type)
+	switch {
+	case openshell.IsNotFound(err):
+		// Nothing says which variables the provider delivers: it keeps its key.
+		m.logf("sandbox %s: provider profile %s is gone; the model credential is not renewed", rec.Name, p.Type)
+		return rec.LLMDigest, nil
+	case err != nil:
+		return "", upstream("get provider profile "+p.Type, err)
+	}
+	delivered := map[string]bool{}
+	for _, c := range profile.Credentials {
+		for _, env := range c.EnvVars {
+			delivered[env] = true
+		}
+	}
+	creds := map[string]string{}
+	for k, v := range llm.Credentials {
+		if delivered[k] && validSecretValue(v) {
+			creds[k] = v
+		}
+	}
+	digest := credentialDigest(creds)
+	if len(creds) == 0 || digest == rec.LLMDigest {
+		return rec.LLMDigest, nil
+	}
+	// The gateway merges the keys an update names into the provider's.
+	p.Spec.Credentials = creds
+	if _, err := gw.Client.UpdateProvider(ctx, p); err != nil {
+		return "", upstream("update provider "+pname, err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Reason: "model_credential_updated",
+		Message: "sandbox " + rec.Name + " takes the model credential your environment holds now"})
+	return digest, nil
+}
+
+// credentialDigest is the SHA-256 of a provider's credentials (names and
+// values), which the record keeps in place of the values.
+func credentialDigest(creds map[string]string) string {
+	if len(creds) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	for _, k := range slices.Sorted(maps.Keys(creds)) {
+		fmt.Fprintf(h, "%s\x00%s\n", k, creds[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // refuseRetained refuses what needs a live sandbox on a retained box (a
@@ -435,6 +510,18 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		p.Spec.Credentials[openshell.EnvSandboxToken] = token
 		if _, err := gw.Client.UpdateProvider(ctx, p); err != nil {
 			return upstream("rotate provider "+pname, err)
+		}
+	}
+	digest, err := m.refreshModelCredential(ctx, gw, rec, req.LLM)
+	if err != nil {
+		return err
+	}
+	if digest != rec.LLMDigest {
+		m.mu.Lock()
+		b.rec.LLMDigest = digest
+		m.mu.Unlock()
+		if err := m.saveRecord(b); err != nil {
+			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {

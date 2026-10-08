@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // SuggestOptions are the `policy suggest` flags.
@@ -177,8 +178,24 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 	case o.PackOut != "":
 		a.ok(fmt.Sprintf("wrote %s: pack %s, extends %s, %s to allow", o.PackOut, s.PackName, suggestBase,
 			plural(int64(len(s.Allow)), "host", "hosts")))
+		home := "<openshell.pack_dir>/" + s.PackName + "/" + packs.PackFileName
+		if dir := a.packDir(); dir != "" {
+			home = a.tildePath(filepath.Join(dir, s.PackName, packs.PackFileName))
+		}
+		written := o.PackOut
+		if dir, err := filepath.EvalSymlinks(filepath.Dir(written)); err == nil {
+			written = filepath.Join(dir, filepath.Base(written))
+		}
+		if project, err := a.project(); err == nil && workspace.Overlaps(project, written) {
+			// A run that mounts the project refuses a pack inside it: the
+			// agent could change its own policy.
+			a.warn(o.PackOut + " is inside the project folder, where a run that mounts the project refuses a pack (the agent could change its own policy)")
+			a.note("review it, then move it to " + home + " and lock the project to it: " + CommandName + " run --pack " + s.PackName +
+				" (or run with --copy --pack " + o.PackOut + ")")
+			break
+		}
 		a.note("review it, then lock a project to it: " + CommandName + " run --pack " + o.PackOut +
-			" (or put it at <openshell.pack_dir>/" + s.PackName + "/" + packs.PackFileName + " and use --pack " + s.PackName + ")")
+			" (or put it at " + home + " and use --pack " + s.PackName + ")")
 	case !o.Diff:
 		_, err := fmt.Fprint(a.IO.Out, terminalText(s.Pack))
 		return err
@@ -670,12 +687,17 @@ func (a *App) suggestionDiff(ctx context.Context, api API, sandbox string, s *su
 	}
 	diff := &suggestionDiff{Against: against + " (pack " + current.Pack + ")", Settings: []settingChange{}}
 	now := map[string]string{}
+	forced := map[string]bool{}
 	for _, st := range current.Settings {
 		now[st.Key] = st.Value
+		// The gateway's compute driver or a run flag holds it (a MicroVM
+		// gateway works on a copy, and `sandbox run` passes --copy there):
+		// whatever the pack says, a run with the same flags gets the same.
+		forced[st.Key] = st.Source == string(packs.SourceGateway) || st.Source == string(packs.SourceFlag)
 	}
 	for _, st := range eff.Explain() {
 		from, ok := now[st.Key]
-		if !ok || from == st.Value || st.Key == "pack" {
+		if !ok || from == st.Value || st.Key == "pack" || forced[st.Key] {
 			continue
 		}
 		diff.Settings = append(diff.Settings, settingChange{Key: st.Key, From: from, To: st.Value})

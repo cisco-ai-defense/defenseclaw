@@ -540,6 +540,50 @@ func TestHookTamperAfterRestart(t *testing.T) {
 	}
 }
 
+// A daemon restart keeps a sandbox's hook counts, as it keeps its
+// destinations: sandbox status and the Sandboxes list go on from them
+// instead of dropping to what came after the restart (GAP-0156).
+func TestHookCountsSurviveARestart(t *testing.T) {
+	e := liveEnv(t, "countrestart", nil)
+	d := e.decider("countrestart", "Bash")
+	e.m.ObserveIngress(e.binding("countrestart"), sandboxauth.RouteHook)
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_1", "allow"))
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_2", "block"))
+	before := e.get("countrestart").Hooks
+	e.restartDaemon()
+	after := e.get("countrestart").Hooks
+	if after.HookRequests != 1 || after.ToolCalls != 2 || after.ToolBlocked != 1 || after.LastBlocked != before.LastBlocked ||
+		after.Events["PreToolUse"] != 2 {
+		t.Fatalf("hook counts after a restart = %+v, want those of %+v", after, before)
+	}
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_3", "allow"))
+	if n := e.get("countrestart").Hooks.ToolCalls; n != 3 {
+		t.Fatalf("tool calls after the restart = %d, want 3", n)
+	}
+}
+
+// A stopped sandbox's verdict on its last session's hooks (unreachable,
+// silent) survives a daemon restart like its counts, so the list, the TUI
+// and the alerts agree (GAP-0186); its next session is judged afresh.
+func TestStoppedSandboxsHookVerdictSurvivesARestart(t *testing.T) {
+	e := liveEnv(t, "verdictbox", nil)
+	b := e.boxOf("verdictbox")
+	e.m.mu.Lock()
+	b.reach.since, b.reach.reason, b.silentSince = time.Now(), "the harness has been calling its model for 30s without a single hook request", time.Now()
+	e.m.mu.Unlock()
+	e.stopBox("verdictbox")
+	e.restartDaemon()
+	if h := e.get("verdictbox").Hooks; !h.Unreachable || !strings.Contains(h.UnreachableReason, "without a single hook") || !h.Silent {
+		t.Fatalf("hooks after a restart = %+v, want the stopped session's verdict", h)
+	}
+	if _, err := e.m.Start(t.Context(), "verdictbox", sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if h := e.get("verdictbox").Hooks; h.Unreachable || h.Silent {
+		t.Fatalf("hooks of a new session = %+v, want it judged afresh", h)
+	}
+}
+
 // Hook text is cut and stripped of control characters, and a redacted reason
 // never reaches the feed.
 func TestHookLabelAndDisplayReason(t *testing.T) {
@@ -615,10 +659,32 @@ func TestHookCoverage(t *testing.T) {
 	}
 }
 
+// TestLowAlertsAreNoSessionFinding (GAP-0091): a LOW default-pack alert
+// (ENT-EMAIL-BULK on one commit author's address in `git log` output) was a
+// warning on the feed, the status and the session summary. LOW alerts are
+// audited only; MEDIUM and above stay findings.
+func TestLowAlertsAreNoSessionFinding(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "lowbox"})
+	binding, d := e.binding("lowbox"), e.decider("lowbox", "Bash")
+	e.m.ObserveIngress(binding, sandboxauth.RouteHook)
+	low, medium := d("PostToolUse", "", "alert"), d("PostToolUse", "", "alert")
+	low.Severity, low.Reason = "LOW", "Allowed but flagged by DefenseClaw rule ENT-EMAIL-BULK: Email address."
+	medium.Severity, medium.Reason = "MEDIUM", "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT: E2E sandbox alert marker."
+	e.m.ObserveHookDecision(low)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 0 {
+		t.Fatalf("a LOW alert on the feed: %+v", got)
+	}
+	e.m.ObserveHookDecision(medium)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 1 || got[0].Severity != "MEDIUM" {
+		t.Fatalf("findings = %+v", got)
+	}
+}
+
 // Every verdict counts under its hook event, the harness's name for it, tool
 // events or not (#956). The counts live as long as the sandbox's other hook
-// counters: a stop and start keep them, a new sandbox of the name and a
-// daemon restart start over.
+// counters: a stop and start keep them, as a daemon restart does
+// (TestHookCountsSurviveARestart), and a new sandbox of the name starts over.
 func TestHookEventCounts(t *testing.T) {
 	e := newEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "eventbox"})
@@ -638,10 +704,6 @@ func TestHookEventCounts(t *testing.T) {
 	want["SessionStart"]++
 	if h := e.get("eventbox").Hooks; !maps.Equal(h.Events, want) {
 		t.Fatalf("after a restart of the sandbox: events %v, want %v", h.Events, want)
-	}
-	e.restartDaemon()
-	if h := e.get("eventbox").Hooks; h.Events != nil || h.HookRequests != 0 {
-		t.Fatalf("after a daemon restart: hooks %+v, want no counts", h)
 	}
 	e.m.ObserveHookDecision(e.decider("eventbox", "Bash")("Stop", "", "allow"))
 	e.deleteBox("eventbox", sandboxapi.DeleteRequest{})
@@ -783,6 +845,30 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	advance(time.Hour)
 	if silence() != 2 {
 		t.Fatal("an idle harness raised a finding")
+	}
+}
+
+// TestHookSilenceSeesTurnsOnAKeptConnection (GAP-0094): a harness with its
+// hooks switched off kept one model connection open and made 28 model
+// calls in 9 minutes; only its NET records name its binary, so the check
+// saw a handful of events and never fired. Its model calls on the
+// connection it opened count as its work.
+func TestHookSilenceSeesTurnsOnAKeptConnection(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "keptbox"})
+	b := e.boxOf("keptbox")
+	advance(harnessStartupGrace)
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443,
+		Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	for range 11 {
+		advance(time.Minute)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassHTTP, Host: "api.anthropic.com", Port: 443, Method: "POST", Path: "/v1/messages",
+			Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 1 {
+		t.Fatalf("hook_silence findings = %d, want 1", n)
 	}
 }
 

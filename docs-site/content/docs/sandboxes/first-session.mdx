@@ -66,6 +66,7 @@ Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + bloc
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
 ```
 
 </Tab>
@@ -76,6 +77,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
   Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
   Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
 ```
 
@@ -89,7 +91,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
 | `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy. |
 | `Hidden` | Secret files that appear empty inside a live mount. On a copy they are held back instead. |
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook that runs on your machine. |
-| `Model` | Which credential the harness uses. The sandbox gets a placeholder; OpenShell adds the real key only on requests to the model provider. |
+| `Model` | Which credential the harness uses. The sandbox gets a placeholder; OpenShell adds the real key only on requests to the model provider. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. |
 
 </Step>
 
@@ -113,10 +115,11 @@ defenseclaw sandbox activity -f
 14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
 
-The same feed from a real session, for a sandbox named with
-`--name myapp-claude`:
+The same feed from a real session on a Mac, for a sandbox named with
+`--name myapp-claude` and printed with
+`defenseclaw sandbox activity --sandbox myapp-claude`:
 
-![defenseclaw sandbox activity -f: the sandbox's lifecycle lines, sites the agent reached (example.org, pypi.org, registry.npmjs.org, api.github.com) and two blocked ones (webhook.site, pastebin.com), each with its unblock command](/images/sandboxes/screens/terminal-activity-feed.png)
+![defenseclaw sandbox activity --sandbox myapp-claude: the sandbox's lifecycle lines, a blocked tool call, sites the agent reached (registry.npmjs.org, github.com, pypi.org), two shadow AI warnings (api.openai.com and api.mistral.ai) and three blocked sites (api.openai.com, api.mistral.ai and pastebin.com), each with its unblock command](/images/sandboxes/screens/terminal-activity-feed.png)
 
 | Mark | Meaning |
 | --- | --- |
@@ -129,6 +132,11 @@ The same feed from a real session, for a sandbox named with
 `--sandbox NAME` limits the feed to one sandbox. The same feed appears in the
 TUI's Sandboxes panel and in the macOS app (see
 [TUI and macOS app](/docs/sandboxes/apps)).
+
+For the list rather than the feed, `defenseclaw sandbox destinations NAME`
+shows every site the sandbox reached or tried to reach and what each one is,
+including AI services the harness does not use (see
+[destinations and shadow AI](/docs/sandboxes/network#destinations-and-shadow-ai)).
 
 For a one-screen summary of a sandbox:
 
@@ -258,9 +266,10 @@ Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch f
 - `s` leaves it in the sandbox for a later `sandbox pull`.
 
 The end of a real session on a Mac, for a sandbox started with
-`--name myapp-claude`, after two blocked sites:
+`--name myapp-claude`, after three blocked sites, two of them AI services the
+harness does not use:
 
-![End of a sandbox session on a Mac: 12 tool calls, 4 new sites contacted, 2 sites blocked (webhook.site and pastebin.com, each with its unblock command), 1 file changed, and the question to bring the changes back by apply, branch, patch file or skip](/images/sandboxes/screens/terminal-session-summary.png)
+![End of a sandbox session on a Mac: 5 tool calls with 1 blocked, 3 new sites contacted, 3 sites blocked, 2 files changed, shadow AI warnings for api.openai.com and api.mistral.ai with their unblock commands, a warning about the changed .mcp.json that can run code, and the question to bring the changes back by apply, branch, patch file or skip](/images/sandboxes/screens/terminal-session-summary.png)
 
 </Tab>
 </Tabs>

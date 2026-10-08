@@ -300,10 +300,6 @@ struct SetupDefinitionsParityTests {
             contentsOf: sourceRoot.appendingPathComponent("DataLayer/CatalogCLI.swift"),
             encoding: .utf8
         )) ?? ""
-        let gateway = (try? String(
-            contentsOf: sourceRoot.appendingPathComponent("DataLayer/GatewayClient.swift"),
-            encoding: .utf8
-        )) ?? ""
         let models = (try? String(
             contentsOf: sourceRoot.appendingPathComponent("DataLayer/Models.swift"),
             encoding: .utf8
@@ -321,8 +317,8 @@ struct SetupDefinitionsParityTests {
                "CLI MCP catalog preserves bundled provenance")
         expect(catalog.contains("if item.bundled"),
                "bundled MCP rows have an Info-only action set")
-        expect(gateway.contains("bundled: (r[\"bundled\"] as? Bool) ?? false"),
-               "gateway MCP catalog preserves bundled provenance")
+        // The gateway MCP catalog client is gone (7f1ab11a0): the app lists
+        // MCP servers through the CLI catalog only (GAP-0121).
     }
 
     private static func localCatalogCoversActiveConnectorCompatibilityRoots() {

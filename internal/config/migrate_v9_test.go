@@ -446,11 +446,12 @@ observability: {}
 }
 
 // The migration resets what the retired standalone sandbox left: it drops
-// openshell.mode and openshell.sandbox_home and the two veth hosts, so the
+// every openshell sub-key of that integration (mode, sandbox_home and the
+// 0.0.x runtime pin, GAP-0097) and the two veth hosts, so the
 // 1.0 gateway binds its API on loopback and the upgrade's probes (which ask
 // APIBindHost, as the Python CLI's api_bind_host does) find it there, on
-// disk and in the gateway's in-memory load of the v8 file alike. The ignored
-// legacy sub-keys and every other setting stay; a second run changes
+// disk and in the gateway's in-memory load of the v8 file alike. Every
+// other setting stays; a second run changes
 // nothing; a config that never ran standalone keeps its hosts.
 func TestMigrateV9ResetsTheRetiredStandaloneSandbox(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
@@ -502,7 +503,7 @@ func TestMigrateV9ResetsTheRetiredStandaloneSandbox(t *testing.T) {
 			t.Errorf("%s.host survived the migration: %v", section, keys)
 		}
 	}
-	for _, key := range []string{"mode", "sandbox_home"} {
+	for _, key := range []string{"mode", "sandbox_home", "policy_dir", "version", "auto_pair", "host_networking"} {
 		if _, ok := doc.OpenShell[key]; ok {
 			t.Errorf("openshell.%s survived the migration", key)
 		}
@@ -513,11 +514,12 @@ func TestMigrateV9ResetsTheRetiredStandaloneSandbox(t *testing.T) {
 	if !slices.ContainsFunc(result.Record.Notes, func(n string) bool { return strings.Contains(n, "/home/alice/.openclaw") }) {
 		t.Errorf("migration notes = %v, want the pinned OpenClaw home named", result.Record.Notes)
 	}
-	if doc.Gateway["port"] != 18789 || doc.Guardrail["port"] != 4000 || doc.OpenShell["version"] != "0.6.2" ||
+	if doc.Gateway["port"] != 18789 || doc.Guardrail["port"] != 4000 || doc.OpenShell["binary"] != "openshell" ||
 		doc.Claw["home_dir"] != "/home/sandbox/.openclaw" {
 		t.Fatalf("the migration changed more than the standalone keys:\n%s", migrated)
 	}
-	for _, key := range []string{"openshell.mode", "openshell.sandbox_home", "claw.openclaw_home_original", "guardrail.host", "gateway.host"} {
+	for _, key := range []string{"openshell.mode", "openshell.sandbox_home", "openshell.policy_dir", "openshell.version", "openshell.auto_pair",
+		"openshell.host_networking", "claw.openclaw_home_original", "guardrail.host", "gateway.host"} {
 		if !slices.Contains(result.Record.Removed, key) {
 			t.Errorf("migration record removed = %v, want %s", result.Record.Removed, key)
 		}

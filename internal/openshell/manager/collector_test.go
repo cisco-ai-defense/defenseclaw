@@ -475,6 +475,8 @@ func TestCollectScriptReadsATreeWithoutHanging(t *testing.T) {
 
 // A sample leaves out the collector and the timeout(1) wrapper Exec runs it
 // under: each sample would otherwise see them start, and the next one exit.
+// It leaves out kernel threads too: on the MicroVM driver `sandbox ps
+// --tree` listed about 75 guest kernel threads under kthreadd.
 func TestCollectScriptLeavesItselfOut(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the collector runs in Linux sandboxes; it needs /proc")
@@ -504,6 +506,11 @@ func TestCollectScriptLeavesItselfOut(t *testing.T) {
 	for _, p := range c.Processes {
 		if p.PID == wrapper || p.PPID == wrapper {
 			t.Fatalf("the sample reports the collector's own process %+v", p)
+		}
+		// GAP-0087: kthreadd (pid 2 outside a pid namespace) and the kernel
+		// threads under it are not processes of the workload.
+		if p.PID == 2 || p.PPID == 2 {
+			t.Fatalf("the sample reports a kernel thread %+v", p)
 		}
 	}
 	if len(c.Processes) == 0 {

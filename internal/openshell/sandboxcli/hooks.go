@@ -220,9 +220,10 @@ func (s *session) checkHooksAfter(ctx context.Context, window time.Duration) {
 		return
 	}
 	if !sb.Hooks.Unreachable {
-		// A daemon that restarted during the window counts from zero: no
-		// hook since then says nothing of the hooks before (the summary
-		// says it cannot tell).
+		// A daemon that restarted during the window and did not stop
+		// cleanly lost its last minute of hook counts: no hook since then
+		// says nothing of the hooks before (the summary says it cannot
+		// tell).
 		if st, err := s.api.Status(ctx); err == nil && s.startedBefore(st.StartedAt) {
 			return
 		}
@@ -232,8 +233,8 @@ func (s *session) checkHooksAfter(ctx context.Context, window time.Duration) {
 }
 
 // hooksReached reports whether at least one hook of the session reached
-// DefenseClaw by the time after was read. A daemon restart resets the
-// hook counters (the new daemon counts from zero), so the time of the last
+// DefenseClaw by the time after was read. A daemon that did not stop
+// cleanly loses its last minute of hook counts, so the time of the last
 // hook decides too, and what the session saw on its way.
 func (s *session) hooksReached(after *sandboxapi.Sandbox) bool {
 	if s.sawHooks.Load() {
@@ -250,10 +251,11 @@ func (s *session) hooksReached(after *sandboxapi.Sandbox) bool {
 	return reached
 }
 
-// hookReachUnknown reports that the daemon restarted during the session,
-// which started its hook counters again, and has no verdict of its own on
-// the session's hooks: a hook that reached the daemon before the restart
-// left no trace, so DefenseClaw cannot tell whether one did (PR 1022: a
+// hookReachUnknown reports that the daemon restarted during the session and
+// has no verdict of its own on the session's hooks: a restart that was not
+// clean loses the hook counts of its last minute, so a hook that reached
+// the daemon before it may have left no trace, and DefenseClaw cannot tell
+// whether one did (PR 1022, when no restart kept the counts: a
 // Copilot CLI session of 7 allowed tool calls and a restart ended with "no
 // hook of this session reached DefenseClaw"). A daemon that does not say
 // when it started gives its restart away by hook counters below the
@@ -306,7 +308,7 @@ func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool)
 		if s.restartedDuring() {
 			at = " (at " + a.clock(s.daemonStarted) + ")"
 		}
-		a.note("the DefenseClaw daemon restarted during the session" + at + " and keeps no hook counts across a restart, " +
+		a.note("the DefenseClaw daemon restarted during the session" + at + " and has counted no hook of it since, " +
 			"so DefenseClaw cannot tell whether this session's hooks reached it")
 		return
 	}
@@ -328,6 +330,18 @@ func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool)
 		// Its first hook comes with the first prompt, and the daemon saw
 		// the harness do no work without one: a session nobody prompted.
 		a.note("no hook of this session reached DefenseClaw: " + s.harnessName() + " sends its first one with your first prompt")
+		return
+	}
+	s.hooksMu.Lock()
+	warned := s.hooksWarned
+	s.hooksMu.Unlock()
+	if s.passArgs && !s.headless && !warned && !after.Hooks.Unreachable {
+		// Arguments the harness may answer without starting a session
+		// (`connect NAME -- --version`), and nothing showed a session at work
+		// without its hooks: no live warning, no verdict of the daemon's
+		// (GAP-0157). A headless prompt always starts one.
+		a.note("no hook of this session reached DefenseClaw: " + s.harnessName() + " ran with the arguments after -- and may not have started a session; " +
+			"if it did, run: " + CommandName + " doctor")
 		return
 	}
 	s.noHooks = true

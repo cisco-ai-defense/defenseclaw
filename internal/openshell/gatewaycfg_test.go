@@ -231,6 +231,19 @@ func TestGatewayConfigCreate(t *testing.T) {
 	}
 }
 
+// TestGatewayPlanSaysRemove (GAP-0075): keeping OpenShell's telemetry on
+// drops OPENSHELL_TELEMETRY_ENABLED from gateway.env, which the plan
+// showed as "set unset OPENSHELL_TELEMETRY_ENABLED".
+func TestGatewayPlanSaysRemove(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.write(t, "gateway.toml", disabledTOML)
+	f.write(t, "gateway.env", openshell.EnvTelemetryEnabled+"=false\n")
+	text := f.plan(t, openshell.GatewayChanges{UnsetEnv: []string{openshell.EnvTelemetryEnabled}}).String()
+	if !strings.Contains(text, "    remove "+openshell.EnvTelemetryEnabled+" (OpenShell's usage telemetry stays on, its default)\n") || strings.Contains(text, "set unset") {
+		t.Fatalf("plan:\n%s", text)
+	}
+}
+
 func TestGatewayConfigEditKeepsCommentsAndBacksUp(t *testing.T) {
 	f := newGatewayFixture(t)
 	f.write(t, "gateway.toml", operatorTOML)
@@ -387,6 +400,26 @@ func TestGatewayConfigRollback(t *testing.T) {
 		}
 		if err := f.cfg.Rollback(context.Background(), res); err != nil || f.read(t, "gateway.toml") != operatorTOML || f.restarts() != 2 {
 			t.Fatalf("rollback did not restore and restart: %v", err)
+		}
+	})
+	// GAP-0149: teardown restarted a stopped service (another account's
+	// gateway held the port), which then restarted forever. A stopped
+	// service gets its files back and no start.
+	t.Run("rollback of a stopped service", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.write(t, "gateway.toml", operatorTOML)
+		res, err := f.apply(f.plan(t, bindMounts))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.unit = systemdUnit("inactive", "disabled", time.Time{}, filepath.Join(f.dir, "gateway.env"))
+		flushes := f.flushes
+		if err := f.cfg.Rollback(context.Background(), res); !errors.Is(err, openshell.ErrGatewayServiceStopped) || f.read(t, "gateway.toml") != operatorTOML ||
+			f.restarts() != 1 || f.flushes != flushes {
+			t.Fatalf("Rollback = %v; restarts %d, flushes %d", err, f.restarts(), f.flushes-flushes)
+		}
+		if st, err := f.cfg.Read(); err != nil || !st.RestartPendingSince.IsZero() {
+			t.Fatalf("Rollback left a pending-restart mark: %+v, %v", st, err)
 		}
 	})
 }
@@ -921,6 +954,28 @@ func TestGatewayServiceState(t *testing.T) {
 		}
 		if err := f.cfg.Restart(context.Background()); err != nil || !f.runner.Called("brew services restart nvidia/openshell/openshell") {
 			t.Fatalf("restart: %v", err)
+		}
+	})
+	// GAP-0050: in a shell from sudo -iu, brew prints warnings before its
+	// JSON, and setup stopped at "Gateway service: unexpected output".
+	t.Run("homebrew warns first", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", "Warning: running through sudo, using user/* instead of gui/* domain!\n"+
+			"Hide these hints with HOMEBREW_NO_ENV_HINTS (see `man brew`).\n"+`[{"name":"openshell","running":true,"loaded":true,"status":"started","file":"/x.plist"}]`+"\n", nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Active || !st.Installed {
+			t.Fatalf("state = %+v, %v", st, err)
+		}
+	})
+	// GAP-0076: a service launchd has not loaded reported "is none".
+	t.Run("homebrew service not loaded", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"name":"openshell","running":false,"loaded":false,"status":"none","file":"/x.plist"}]`, nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || st.Active || st.Status != "not running (not loaded)" {
+			t.Fatalf("state = %+v, %v", st, err)
 		}
 	})
 	// Without the formula there is no service to ask brew about, and brew

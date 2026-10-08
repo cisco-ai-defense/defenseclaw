@@ -166,9 +166,35 @@ var domainCategories = map[string]Category{
 	"cdn-lfs.huggingface.co": CategoryModelHub,
 }
 
+// multiVendor is the vendor of a signature that lists the model API hosts
+// of several vendors (the AI SDKs signature). Its name names no provider,
+// so each of its hosts takes the vendor apiVendors gives it: its name, its
+// price, and an id of its own.
+const multiVendor = "multiple"
+
+// apiVendors are the vendors of the model API hosts a multi-vendor
+// signature lists, spelled as vendorCategories keys them.
+var apiVendors = map[string]string{
+	"api.openai.com":                    "OpenAI",
+	"api.anthropic.com":                 "Anthropic",
+	"generativelanguage.googleapis.com": "Google",
+	"aiplatform.googleapis.com":         "Google",
+	"api.mistral.ai":                    "Mistral AI",
+	"api.cohere.ai":                     "Cohere",
+	"api.groq.com":                      "Groq",
+	"openrouter.ai":                     "OpenRouter",
+	"api.x.ai":                          "xAI",
+	"api.perplexity.ai":                 "Perplexity",
+	"api.together.xyz":                  "Together",
+	"api.deepseek.com":                  "DeepSeek",
+	"api.fireworks.ai":                  "Fireworks",
+	"api.replicate.com":                 "Replicate",
+}
+
 // Provider is a resolved egress peer.
 type Provider struct {
-	// ID is the signature id the domain came from, or "" for an unknown
+	// ID is the signature id the domain came from (with "/" and the
+	// domain for a multi-vendor signature's), or "" for an unknown
 	// inference-shaped host.
 	ID string
 	// DisplayName is what an operator reads.
@@ -236,10 +262,15 @@ func FromSignatures(signatures []inventory.AISignature) *Catalog {
 				ID:                 signature.ID,
 				DisplayName:        signature.Name,
 				Vendor:             signature.Vendor,
-				Category:           classify(signature.Vendor, domain),
 				MatchedDomain:      domain,
 				SupportedConnector: signature.SupportedConnector,
 			}
+			// A host of the AI SDKs signature is its vendor's, not "AI SDKs"
+			// by "Multiple" (GAP-0119).
+			if vendor, ok := apiVendors[domain]; ok && strings.EqualFold(strings.TrimSpace(signature.Vendor), multiVendor) {
+				provider.ID, provider.DisplayName, provider.Vendor = signature.ID+"/"+domain, vendor, vendor
+			}
+			provider.Category = classify(provider.Vendor, domain)
 			// First writer wins so a later signature cannot silently reclassify
 			// a domain an earlier one already owns.
 			if _, exists := catalog.exact[domain]; !exists {

@@ -38,6 +38,7 @@ from typing import Any
 from defenseclaw.alert_semantics import (
     ALERT_ACTIONABLE_SEVERITIES,
     ALERT_ALL_SEVERITIES,
+    ALERT_AUDIT_ONLY_DECISION_CODES,
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
 )
@@ -1117,10 +1118,17 @@ class Store:
                         AND UPPER(COALESCE(severity, 'INFO')) = 'INFO'
                     )
                 )"""
+            audit_only = "1 = 1"
+            if "payload_json" in columns:
+                decision_code = self._safe_json_extract("payload_json", '$."defenseclaw.network.decision_code"')
+                audit_only = (
+                    f"COALESCE({decision_code}, '') NOT IN ({self._sql_string_values(ALERT_AUDIT_ONLY_DECISION_CODES)})"
+                )
             canonical_action = f"""(
                 bucket IN ('enforcement.action', 'network.egress')
                 AND {canonical_outcome} IN ({outcome_values})
                 AND {canonical_priority}
+                AND {audit_only}
             )"""
             health_failure = f"""(
                 bucket IN ('platform.health', 'diagnostic')

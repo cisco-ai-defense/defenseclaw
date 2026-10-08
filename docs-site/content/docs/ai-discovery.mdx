@@ -374,8 +374,18 @@ configured there, which its own scan of this machine never sees:
   separate entries. `defenseclaw agent usage --sandbox NAME` shows one
   sandbox's; every view tags them "(sandbox NAME)".
 - A stopped sandbox keeps what was found, without its processes; a deleted
-  one's entries turn `gone`. `ai_discovery.enabled: false` turns this off
-  too.
+  one's entries turn `gone` at once (the delete starts a scan, as
+  `agent usage --refresh` does). `ai_discovery.enabled: false` turns this
+  off too.
+
+A real sandbox, read with `defenseclaw sandbox discover` (the MCP servers, the
+skills, the agent CLI and the running agent found inside it):
+
+![defenseclaw sandbox discover myapp-claude: one row per component with its category, product, what found it, the MCP server and skill names, and the file or folder that holds it](/images/sandboxes/screens/terminal-sandbox-discover.png)
+
+The same components in the AI inventory, tagged with the sandbox:
+
+![defenseclaw agent usage --sandbox myapp-claude: the AI visibility table with Claude Code and GitHub Copilot rows marked (sandbox myapp-claude), their categories, detectors, signal counts and sample evidence](/images/sandboxes/screens/terminal-agent-usage-sandbox.png)
 
 ### Tunable knobs
 
@@ -800,6 +810,16 @@ The local observability stack ships the **AI Agent Usage & Detection** board
 Its **IDE plugins** section shows the plugin count by IDE, AI against other
 plugins, disabled plugins and a per-user table. The `$user` box narrows the
 Loki panels to one user by `user.id`, account name or principal.
+
+Its **Sandbox signals** section lists what AI discovery found
+[inside OpenShell sandboxes](#inside-openshell-sandboxes), one row per
+sandbox and component, from the `ai_component.*` records that carry
+`defenseclaw.sandbox.name`. The `$sandbox` box narrows that table and the
+per-signal log to one sandbox; All keeps the host's own records in the log.
+The metric panels count the host's and the sandboxes' signals together:
+sandbox names are never metric labels.
+
+![Grafana AI Agent Usage & Detection board, Sandbox signals section: a row for each AI component found inside the sandbox, with its vendor, product, component category and whether the record says it was discovered or removed](/images/grafana/ai-discovery-sandbox.png)
 
 It cross-links from the overview, runtime, and agent-identity dashboards so you can drill from "block rate spiked" → "which agent" → "when was this agent first discovered."
 

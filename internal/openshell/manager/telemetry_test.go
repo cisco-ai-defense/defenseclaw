@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
 
 // refusingTelemetry refuses egress records while refuse is set and keeps
@@ -203,6 +204,7 @@ func TestOCSFActivityRecords(t *testing.T) {
 	// sandbox's goroutines read it.
 	e.fakeClock(at)
 	e.live(sandboxapi.CreateRequest{Name: "actbox"})
+	forgetOwnExecs(e.m, "actbox")
 	for _, line := range []string{
 		"PROC:LAUNCH [INFO] python3(42) [cmd:python3 /work/app/main.py dccert-block-marker --password dccertvalue]",
 		"PROC:TERMINATE [INFO] python3(42) [exit:3]",
@@ -251,17 +253,125 @@ func TestOCSFActivityRecords(t *testing.T) {
 	}
 }
 
+// forgetOwnExecs forgets the execs the creation of a sandbox ran: the fake
+// gateway reports no SSH OPEN for them.
+func forgetOwnExecs(m *Manager, sandbox string) {
+	m.ownExecs.mu.Lock()
+	defer m.ownExecs.mu.Unlock()
+	delete(m.ownExecs.at, sandbox)
+}
+
+// TestOwnExecsAreNoSSHActivity (GAP-0083, GAP-0089): every exec is an SSH
+// session in the sandbox, so with the process tree on an idle sandbox's
+// 5-second samples were a sandbox.ssh OPEN record each, about 17000 a day.
+// The OPEN of an exec DefenseClaw ran itself is dropped; a user's is kept.
+func TestOwnExecsAreNoSSHActivity(t *testing.T) {
+	e := newEnv(t, nil)
+	at := time.Now()
+	e.fakeClock(at)
+	e.live(sandboxapi.CreateRequest{Name: "sshbox"})
+	forgetOwnExecs(e.m, "sshbox")
+	ssh := func() int {
+		return len(where(&e.tel.mu, &e.tel.activity, func(a audit.SandboxActivityEvent) bool { return a.Kind == audit.SandboxActivitySSH }))
+	}
+	e.m.ownExecs.started("sshbox", at)
+	e.m.ownExecs.started("sshbox", at)
+	for range 3 {
+		e.ocsf("sshbox", "SSH:OPEN [INFO] ALLOWED", at)
+	}
+	if n := ssh(); n != 1 {
+		t.Fatalf("ssh records = %d, want the one exec DefenseClaw did not run", n)
+	}
+	// An exec whose OPEN never came is forgotten after ownExecWindow.
+	e.m.ownExecs.started("sshbox", at.Add(-2*ownExecWindow))
+	e.ocsf("sshbox", "SSH:OPEN [INFO] ALLOWED", at)
+	if n := ssh(); n != 2 {
+		t.Fatalf("ssh records = %d after a stale exec", n)
+	}
+}
+
+// OpenShell reports an allowed connection and then each HTTP request it
+// inspects on it: the connection and its first request are one egress
+// record, a later request on it another (GAP-0093).
+func TestAnInspectedConnectionIsOneEgressRecord(t *testing.T) {
+	e := liveEnv(t, "l7box", nil)
+	now := time.Now()
+	for _, line := range []string{
+		"NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> host.openshell.internal:8080/tcp [policy:allow_host_openshell_internal_8080 engine:opa]",
+		"HTTP:GET [INFO] ALLOWED GET http://host.openshell.internal:8080/ [policy:allow_host_openshell_internal_8080 engine:l7]",
+		"NET:OPEN [INFO] ALLOWED /usr/bin/curl(10) -> api.github.com:443/tcp [policy:allow_github engine:opa]",
+		"HTTP:GET [INFO] ALLOWED GET http://api.github.com:443/zen [policy:allow_github engine:l7]",
+		"HTTP:GET [INFO] ALLOWED GET http://api.github.com:443/octocat [policy:allow_github engine:l7]",
+	} {
+		e.ocsf("l7box", line, now)
+	}
+	count := func(host string) int {
+		return len(where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == host }))
+	}
+	if hp, gh := count(openshellHostAlias), count("api.github.com"); hp != 1 || gh != 2 {
+		t.Fatalf("egress records: host port %d (want 1), api.github.com %d (want 2)", hp, gh)
+	}
+}
+
 // An allowed connection to a host port other than DefenseClaw's own is an
-// allowed egress record and a destination.
+// allowed egress record and a destination, and the session's first one is a
+// feed line (GAP-0154).
 func TestAllowedHostPortConnectionsAreRecorded(t *testing.T) {
 	e := liveEnv(t, "portbox", nil)
-	e.ocsf("portbox", "NET:OPEN [INFO] ALLOWED /usr/bin/node(9) -> host.openshell.internal:8080/tcp [policy:allow_host_openshell_internal_8080 engine:opa]", time.Now())
+	for range 2 {
+		e.ocsf("portbox", "NET:OPEN [INFO] ALLOWED /usr/bin/node(9) -> host.openshell.internal:8080/tcp [policy:allow_host_openshell_internal_8080 engine:opa]", time.Now())
+	}
+	if lines := e.events("portbox", sandboxapi.ActivityEgressAllowed, ""); len(lines) != 1 || lines[0].Host != openshellHostAlias ||
+		lines[0].Port != 8080 || !strings.Contains(lines[0].Message, "port 8080 on this machine") {
+		t.Fatalf("feed = %+v", lines)
+	}
 	recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == openshellHostAlias })
-	if len(recs) != 1 || recs[0].Port != 8080 || recs[0].Blocked || recs[0].DecisionCode != "SANDBOX_EGRESS_ALLOWED" || recs[0].PID != 9 {
+	if len(recs) != 2 || recs[0].Port != 8080 || recs[0].Blocked || recs[0].DecisionCode != "SANDBOX_EGRESS_ALLOWED" || recs[0].PID != 9 {
 		t.Fatalf("host port = %+v", recs)
 	}
 	d, _ := e.m.Destinations(context.Background(), "portbox")
 	if len(d.Destinations) != 1 || d.Destinations[0].Host != openshellHostAlias || d.Destinations[0].Ports[0] != 8080 {
 		t.Fatalf("destinations = %+v", d.Destinations)
+	}
+}
+
+// TestStreamGapAfterAGatewayRestart (GAP-0137): each planned OpenShell
+// gateway restart raised a HIGH alert per sandbox, deleted ones included,
+// reading "sandbox events were lost: cursor_out_of_range". The gap reads
+// in words at MEDIUM (no alert), and a deleted sandbox reports none.
+func TestStreamGapAfterAGatewayRestart(t *testing.T) {
+	e := liveEnv(t, "gapbox", nil)
+	gap := stream.Event{Kind: stream.KindGap, Gap: &stream.Gap{Reason: stream.GapCursorOutOfRange}}
+	e.m.handleEvent(t.Context(), e.boxOf("gapbox"), gap)
+	got := where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool { return h.State == audit.SandboxHealthDegraded })
+	if len(got) != 1 || got[0].Severity != "MEDIUM" || !strings.Contains(got[0].ErrorSummary, "gateway restarted") {
+		t.Fatalf("health = %+v", got)
+	}
+	b := e.boxOf("gapbox")
+	e.m.mu.Lock()
+	b.deleted = true
+	e.m.mu.Unlock()
+	e.m.handleEvent(t.Context(), b, gap)
+	if n := len(where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool { return h.State == audit.SandboxHealthDegraded })); n != 1 {
+		t.Fatalf("a deleted sandbox reported its gap: %d records", n)
+	}
+}
+
+// A gateway that does not answer is recorded in words with the next step,
+// the client's error last (GAP-0169): another account's gateway on the port
+// read only "x509: certificate signed by unknown authority".
+func TestGatewayUnavailableSummary(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`openshell: health: Unavailable: connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority"`,
+			"is not this account's"},
+		{`openshell: health: Unavailable: connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:17670: connect: connection refused"`,
+			"is not running"},
+		{"openshell: health: DeadlineExceeded: context deadline exceeded", "does not answer"},
+	} {
+		got := gatewayUnavailableSummary(errors.New(tc.raw))
+		if !strings.HasPrefix(got, "the OpenShell gateway ") || !strings.Contains(got, tc.want) ||
+			!strings.Contains(got, "run `defenseclaw sandbox doctor`") || !strings.HasSuffix(got, "("+tc.raw+")") {
+			t.Errorf("summary of %q = %q", tc.raw, got)
+		}
 	}
 }

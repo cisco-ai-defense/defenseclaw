@@ -94,7 +94,9 @@ func hooksText(sb sandboxapi.Sandbox) string {
 		return "unreachable!"
 	case sb.Hooks.Silent:
 		return "silent!"
-	case sb.Hooks.LastHookAt.IsZero():
+	case sb.Hooks.HookRequests == 0 && sb.Hooks.ToolCalls == 0:
+		// No hook reached DefenseClaw yet. A restarted daemon keeps the
+		// counts, not the time of the last hook (GAP-0166).
 		return "-"
 	}
 	s := plural(sb.Hooks.ToolCalls, "call", "calls")
@@ -398,7 +400,8 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 		}
 		started = true
 	}
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
+		passArgs: len(o.Args) > 0}
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {
@@ -474,8 +477,16 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
 		hint := a.diskFullHint(err)
-		if errors.Is(err, workspace.ErrUploadNotArrived) {
+		switch {
+		case errors.Is(err, workspace.ErrUploadNotArrived):
 			hint = strayUploadHint
+		case errors.Is(err, workspace.ErrUnpulledChanges):
+			// One sentence: connect and run take no flag that discards it.
+			return &wsError{msg: s.sb.Name + " has work that was not pulled: bring it back with `" + CommandName + " pull " + s.sb.Name +
+				" --apply` (or --branch, or --patch-out FILE), or connect without --refresh to go on with the copy as it is", err: err}
+		case errors.Is(err, workspace.ErrUnappliedPull):
+			hint = "bring the work back first (`" + CommandName + " pull " + s.sb.Name + " --apply`, --branch or --patch-out FILE), " +
+				"or connect without --refresh to go on with the copy as it is"
 		}
 		return workspaceFailure("refresh the copy", err, hint)
 	}
@@ -555,9 +566,30 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return err
 	}
 	if code != 0 {
+		// OpenShell's own line ("exec relay closed before the command
+		// reported an exit status") does not say why: the sandbox stopped
+		// under the command, or the gateway restarted.
+		if after, err := api.Get(ctx, sb.Name); err == nil && after.Phase != "ready" {
+			a.warn(execEndedText(after))
+		}
 		return &ExitError{Code: code}
 	}
 	return nil
+}
+
+// execEndedText says why a command in sb ended with it: sb is not ready
+// any more.
+func execEndedText(sb *sandboxapi.Sandbox) string {
+	switch h := sb.Hooks; {
+	case h.Silent && h.OnSilence == packs.OnSilenceStop:
+		return "DefenseClaw stopped " + sb.Name + " while the command ran: its harness worked for " + firstNonEmpty(h.SilenceAfter, "a while") +
+			" without a hook reaching DefenseClaw (hooks.on_silence: stop)"
+	case sb.Phase == "unknown" || sb.Phase == "provisioning" || sb.Phase == "starting":
+		return "the connection to " + sb.Name + " was lost while the command ran (the OpenShell gateway restarted, for one); `" +
+			CommandName + " status " + sb.Name + "` shows whether it runs"
+	}
+	return sb.Name + " is " + sb.Phase + ": it stopped while the command ran (`" + CommandName + " stop`, the TUI, or DefenseClaw); start it with `" +
+		CommandName + " start " + sb.Name + "`"
 }
 
 // StopOptions are the `sandbox stop` flags.

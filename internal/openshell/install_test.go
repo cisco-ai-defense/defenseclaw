@@ -86,6 +86,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 	f.runner.OnFunc(f.cliPath+" --version", func(context.Context, openshell.Command) ([]byte, error) {
 		return []byte(version + "\n"), nil
 	})
+	f.runner.On("sudo -n true", "", nil)
 	f.runner.OnFunc("/bin/sh", func(_ context.Context, c openshell.Command) ([]byte, error) {
 		path := c.Args[0]
 		data, err := os.ReadFile(path)
@@ -118,7 +119,9 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 			}
 			return true, nil
 		},
-		VerifyGateway: func(context.Context) error { f.verified++; return nil },
+		VerifyGateway:         func(context.Context) error { f.verified++; return nil },
+		Geteuid:               func() int { return 1000 },
+		HomebrewPrefixProblem: func() error { return nil },
 	}
 	return f
 }
@@ -184,6 +187,41 @@ func TestInstallFresh(t *testing.T) {
 	}
 	if strings.Contains(plan, "ACK_BREAKING") {
 		t.Errorf("fresh install plan acknowledges a breaking upgrade:\n%s", plan)
+	}
+	f.assertNoLeftovers()
+}
+
+// TestInstallChecksSudoFirst (GAP-0056, GAP-0064): as an account without
+// sudo rights the Linux install printed its plan, ran NVIDIA's script,
+// which downloaded the packages and asked for a password three times, and
+// failed with "installer failed: /bin/sh: exit status 1"; a Ctrl-C at that
+// prompt ended DefenseClaw without a word and left its temporary directory
+// behind. Sudo is checked after consent and before the script: refused or
+// cancelled, the install is ErrSudo with nothing run or left behind.
+func TestInstallChecksSudoFirst(t *testing.T) {
+	for name, answer := range map[string]error{
+		"refused":   errors.New("exit status 1"),
+		"cancelled": fmt.Errorf("sudo: %w", openshell.ErrInterrupted),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f.runner.On("sudo -n true", "sudo: a password is required", errors.New("exit status 1"))
+			f.runner.On("sudo -v", "", answer)
+			_, err := f.inst.Install(context.Background())
+			if !errors.Is(err, openshell.ErrSudo) || f.ran() {
+				t.Fatalf("Install = %v (script ran %v), want ErrSudo before the script", err, f.ran())
+			}
+			if name == "cancelled" && !strings.Contains(err.Error(), "cancelled at sudo's password prompt") {
+				t.Fatalf("err = %v", err)
+			}
+			f.assertNoLeftovers()
+		})
+	}
+	// An installer the user interrupts says so, and leaves nothing behind.
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.runner.On("/bin/sh", "", fmt.Errorf("/bin/sh: %w", openshell.ErrInterrupted))
+	if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrInterrupted) || !strings.Contains(err.Error(), "the installer was interrupted") {
+		t.Fatalf("Install = %v, want the interruption", err)
 	}
 	f.assertNoLeftovers()
 }
@@ -308,6 +346,20 @@ func TestInstallUpgradesInPlace(t *testing.T) {
 			}
 		}
 		f.assertNoLeftovers()
+	})
+	// GAP-0072: a Mac runs sandboxes in MicroVMs; its plan has no
+	// docker-driver note.
+	t.Run("upgraded on a Mac", func(t *testing.T) {
+		f, _ := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		f.inst.GOOS, f.inst.E2fsprogsDirs = "darwin", []string{t.TempDir()}
+		if _, err := f.inst.Upgrade(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		plan := f.out.String()
+		if !strings.Contains(plan, "which stops every MicroVM sandbox on it") || !strings.Contains(plan, "nothing runs while a MicroVM sandbox does") ||
+			strings.Contains(plan, "ghcr.io") || strings.Contains(plan, "docker driver") {
+			t.Fatalf("plan:\n%s", plan)
+		}
 	})
 	t.Run("Install keeps it", func(t *testing.T) {
 		f, prepared := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)

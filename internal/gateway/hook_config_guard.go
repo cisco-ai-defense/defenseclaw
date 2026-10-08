@@ -133,6 +133,11 @@ type HookConfigGuard struct {
 	// busyRepairs counts consecutive repairs that failed on a busy connector
 	// file; it sets the re-arm backoff and resets after any other outcome.
 	busyRepairs int
+	// lastHealFailure is the self-heal failure last reported. The same
+	// failure again (the next audit tick, a SessionStart) writes no log line,
+	// alert or audit row until the contract is current or the failure changes:
+	// a Codex update raised a HIGH alert every 30 s (GAP-0132).
+	lastHealFailure string
 	// repairObserver receives every repair outcome after audit, telemetry and
 	// the heal notifier have run. Tests use it as the repair-completed /
 	// repair-failed event instead of polling the files Setup is replacing.
@@ -726,6 +731,7 @@ func (g *HookConfigGuard) repairCurrent(
 	}
 	g.clearPolicyFailure()
 	if present && evidenceCurrent {
+		g.setHealFailure("")
 		return nil
 	}
 	requested := append([]string(nil), changed...)
@@ -904,6 +910,28 @@ func (g *HookConfigGuard) clearPolicyFailure() {
 	g.mu.Unlock()
 }
 
+// setHealFailure records failure ("" once the contract is current) as the
+// self-heal failure last reported and returns whether it was already the
+// one reported, so the caller reports it only once.
+func (g *HookConfigGuard) setHealFailure(failure string) (repeat bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	repeat = failure != "" && g.lastHealFailure == failure
+	g.lastHealFailure = failure
+	return repeat
+}
+
+// healFailureHint ends a self-heal failure report on a per-user install,
+// where doctor's hook rows name the repair (after a Codex update: setup
+// codex re-selects the executable). A managed deployment's administrator
+// repairs it, so it gets no per-user command.
+func healFailureHint() string {
+	if gatewayRunsAsServiceAccount() {
+		return ""
+	}
+	return "; defenseclaw doctor names the fix"
+}
+
 // healLocked re-runs the connector Setup to re-install the hook block, emits
 // audit + telemetry, and suppresses the resulting self-write. Caller holds
 // repairMu and has rechecked ownership, suppression, and explicit inactivity.
@@ -953,15 +981,18 @@ func (g *HookConfigGuard) healLocked(
 		if releasePolicy != nil {
 			releasePolicy()
 		}
-		recordTampered()
 		err := setupErr
-		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
+		recordGatewayErrorV8(baseCtx, g.observabilityV8Runtime(), "hook_guard", "self-heal-failed")
+		if g.setHealFailure("setup: " + err.Error()) {
+			return err
+		}
+		recordTampered()
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v%s\n", connName, err, healFailureHint())
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("failed to re-install %s hook config", connName), err)
-		recordGatewayErrorV8(baseCtx, g.observabilityV8Runtime(), "hook_guard", "self-heal-failed")
 		if g.logger != nil {
 			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
-				fmt.Sprintf("hook self-heal Setup failed: %v", err), "", connName)
+				fmt.Sprintf("hook self-heal Setup failed: %v%s", err, healFailureHint()), "", connName)
 		}
 		return err
 	}
@@ -971,16 +1002,19 @@ func (g *HookConfigGuard) healLocked(
 		if releasePolicy != nil {
 			releasePolicy()
 		}
-		recordTampered()
 		if err == nil {
 			err = fmt.Errorf("effective hook contract is still inactive")
 		}
-		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not restore enforcement: %v\n", connName, err)
+		if g.setHealFailure("verify: " + err.Error()) {
+			return err
+		}
+		recordTampered()
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not restore enforcement: %v%s\n", connName, err, healFailureHint())
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("re-installed %s hook config but enforcement is still inactive", connName), err)
 		if g.logger != nil {
 			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
-				fmt.Sprintf("hook self-heal verification failed: %v", err), "", connName)
+				fmt.Sprintf("hook self-heal verification failed: %v%s", err, healFailureHint()), "", connName)
 		}
 		return err
 	}
@@ -989,13 +1023,16 @@ func (g *HookConfigGuard) healLocked(
 			if releasePolicy != nil {
 				releasePolicy()
 			}
+			if g.setHealFailure("evidence: " + err.Error()) {
+				return err
+			}
 			recordTampered()
-			fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not publish current registration evidence: %v\n", connName, err)
+			fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not publish current registration evidence: %v%s\n", connName, err, healFailureHint())
 			emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 				fmt.Sprintf("re-installed %s hook config but registration evidence is unavailable", connName), err)
 			if g.logger != nil {
 				_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
-					fmt.Sprintf("hook self-heal registration evidence failed: %v", err), "", connName)
+					fmt.Sprintf("hook self-heal registration evidence failed: %v%s", err, healFailureHint()), "", connName)
 			}
 			return err
 		}
@@ -1003,6 +1040,7 @@ func (g *HookConfigGuard) healLocked(
 	if releasePolicy != nil {
 		releasePolicy()
 	}
+	g.setHealFailure("")
 	recordTampered()
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)

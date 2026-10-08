@@ -184,16 +184,41 @@ func (m *Manager) handleEvent(ctx context.Context, b *box, ev stream.Event) {
 		m.triageNow(b)
 	case stream.KindGap:
 		m.mu.Lock()
-		id := b.identity()
+		id, deleted := b.identity(), b.deleted
 		m.mu.Unlock()
-		m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
-			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), ErrorSummary: "sandbox events were lost: " + ev.Gap.Reason, Timestamp: m.now()})
+		if deleted || ev.Gap == nil {
+			// A deleted sandbox's stream has nothing left to report.
+			return
+		}
+		m.tel.RecordSandboxHealth(ctx, gapHealth(id, ev.Gap.Reason, m.now()))
 	case stream.KindWarning:
 		m.streamWarning(ctx, b, ev.Warning)
 	case stream.KindConnected:
 		// A reconnect may have missed a draft notification.
 		m.triageNow(b)
 	}
+}
+
+// gapHealth is the degraded health record of events lost on a sandbox's
+// stream, in words (GAP-0137). A cursor out of range is what a gateway
+// restart (an upgrade, setup installing OpenShell) or a trimmed event log
+// leaves: MEDIUM, no alert. A cursor the gateway could not have issued (a
+// different gateway, a damaged state file) stays HIGH.
+func gapHealth(id audit.SandboxIdentity, reason string, at time.Time) audit.SandboxHealthEvent {
+	ev := audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), Timestamp: at}
+	switch reason {
+	case stream.GapCursorOutOfRange:
+		ev.Severity = "MEDIUM"
+		ev.ErrorSummary = "the OpenShell gateway restarted or trimmed its event log: this sandbox's events up to the reconnect at " +
+			at.UTC().Format("15:04:05") + " UTC may be missing (" + reason + ")"
+	case stream.GapCursorRejected:
+		ev.ErrorSummary = "the OpenShell gateway does not know where this sandbox's events left off (a different gateway, " +
+			"or a damaged sandbox record): its events up to the reconnect at " + at.UTC().Format("15:04:05") + " UTC may be missing (" + reason + ")"
+	default:
+		ev.ErrorSummary = "sandbox events were lost: " + reason
+	}
+	return ev
 }
 
 // streamWarning reports a warning of the sandbox's stream: OpenShell's
@@ -312,7 +337,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
-			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),
+			Blocked: r.Denied(), Reason: truncate(openshellReason(r, host), 512), PolicyOutcome: truncate(r.Policy, 256),
 			Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
 		}
 		if !quiet {
@@ -321,10 +346,20 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
-			if !quiet {
-				m.mu.Lock()
-				b.noteBlocked(host)
-				m.mu.Unlock()
+			switch {
+			case fetch:
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+			case dnsRefusal(r):
+				// The connection that follows is the refusal that counts
+				// (and the alert); the lookup alone is audited at INFO.
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeLookupRefused, "INFO"
+			case policyReloadCut(r):
+				// The end of a connection the policy still allows, not a
+				// refusal: no block, no alert, no blocked count (GAP-0138).
+				ev.Blocked, ev.End, ev.Terminated = false, audit.SandboxEgressFailed, true
+				ev.DecisionCode = "SANDBOX_EGRESS_TERMINATED"
+				ev.Reason = truncate("OpenShell closed it when the sandbox policy changed; the client connects again ("+
+					firstNonEmpty(r.Reason, r.Message)+")", 512)
 			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
@@ -338,7 +373,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if r.Class == ocsf.ClassHTTP {
 			ev.Scheme = schemeOf(r.URL)
 		}
-		m.tel.RecordSandboxEgress(ctx, ev)
+		if !m.connectionRequest(b, r, host, at) {
+			m.tel.RecordSandboxEgress(ctx, ev)
+		}
 		if r.Denied() && !quiet {
 			m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
 				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
@@ -368,6 +405,87 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
 			Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
 	}
+}
+
+// l7Window bounds how long after OpenShell allowed a connection the first
+// request it inspected on it may come; maxOpenConns bounds the connections
+// a sandbox has awaiting one.
+const (
+	l7Window     = 5 * time.Second
+	maxOpenConns = 256
+)
+
+// openConns are OpenShell's allowed connections to one host and port whose
+// first inspected request has not come yet.
+type openConns struct {
+	at      time.Time
+	pending int
+}
+
+// connectionRequest reports an allowed OpenShell HTTP record that is the
+// first request on a connection whose NET record was already recorded.
+// OpenShell reports an allowed connection (NET, naming the process) and
+// then each HTTP request it inspects on it, so recording both made one
+// plain request two egress records (GAP-0093). Each later request on the
+// connection is a record of its own, and so is every denied one. It notes
+// an allowed NET open and returns false for it.
+func (m *Manager) connectionRequest(b *box, r ocsf.Record, host string, at time.Time) bool {
+	open := r.Class == ocsf.ClassNetwork && strings.EqualFold(r.Activity, "OPEN")
+	if !r.Allowed() || (!open && r.Class != ocsf.ClassHTTP) {
+		return false
+	}
+	key := host + ":" + strconv.Itoa(r.Port)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o := b.opens[key]
+	if !open {
+		if o == nil || o.pending == 0 || at.Sub(o.at) > l7Window {
+			return false
+		}
+		o.pending--
+		return true
+	}
+	if o == nil {
+		if len(b.opens) >= maxOpenConns {
+			for k, v := range b.opens {
+				if at.Sub(v.at) > l7Window {
+					delete(b.opens, k)
+				}
+			}
+			if len(b.opens) >= maxOpenConns {
+				return false
+			}
+		}
+		if b.opens == nil {
+			b.opens = map[string]*openConns{}
+		}
+		o = &openConns{}
+		b.opens[key] = o
+	} else if at.Sub(o.at) > l7Window {
+		o.pending = 0
+	}
+	o.at = at
+	o.pending++
+	return false
+}
+
+// openshellReason is the audit reason of an OpenShell record: for a denial
+// the words the activity feed shows for OpenShell's reason token and host
+// (a cloud metadata or link-local host by name, GAP-0147), with the token
+// after them, and for SSH what to do instead; otherwise OpenShell's reason
+// or message (GAP-0134).
+func openshellReason(r ocsf.Record, host string) string {
+	token := firstNonEmpty(r.Reason, r.Message)
+	if !r.Denied() || token == "" {
+		return token
+	}
+	if r.Port == 22 {
+		return sandboxapi.SSHBlockedText(host) + " (" + token + ")"
+	}
+	if text, ok := sandboxapi.LookupBlockedText(r.Reason, host); ok {
+		return text + " (" + token + ")"
+	}
+	return token
 }
 
 // dnsRefusal reports OpenShell's refusal of a name lookup ("NET:REFUSE …
@@ -544,6 +662,14 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 		// its own binary made it (the proxy cannot tell); it is no model
 		// call, which goes around the proxy.
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary), noModelCall)
+		if r.Allowed() && r.Binary != "" {
+			m.mu.Lock()
+			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: ocsfPID(r), at: m.now()})
+			if n := len(b.proxyOpens); n > maxProxyOpens {
+				b.proxyOpens = slices.Delete(b.proxyOpens, 0, n-maxProxyOpens)
+			}
+			m.mu.Unlock()
+		}
 	case 0:
 	default:
 		ofHarness := harnessActivity(harnessName, r.Binary)
@@ -620,7 +746,11 @@ func policyReloadCut(r ocsf.Record) bool {
 // `sandbox exec` commands) is no sign that hooks are overdue, and neither
 // is a record from before the session (replayed after a watch resumed).
 func (m *Manager) markWork(b *box, at time.Time, ofHarness bool, req modelRequest) {
-	if ofHarness {
+	// A layer-7 record names no binary: one on the harness's own model
+	// connection (harnessRequest) is the harness at work too. A harness
+	// keeps that connection open for many turns, so its NET records alone
+	// are a handful a session, and hooks switched off went unnoticed.
+	if ofHarness || req != noModelCall {
 		m.markActive(b, at)
 	}
 	if req != modelTurn && req != modelConnection {

@@ -82,9 +82,9 @@ defenseclaw-gateway audit export --connector claudecode --newest --limit 200 \
 Three safe options:
 
 - **Remove the test rule.** `defenseclaw guardrail use-pack --clear --connector claudecode`
-  puts Claude Code back on the global pack. Then delete
-  `~/.defenseclaw/policies/guardrail/first-guardrail` and drop its pinned digest
-  with `defenseclaw config unset guardrail.custom_packs.first-guardrail`.
+  puts Claude Code back on the global pack and removes the pack's pinned digest
+  (`guardrail.custom_packs.first-guardrail`), which nothing uses any more. Then
+  delete `~/.defenseclaw/policies/guardrail/first-guardrail`.
 - **Customize a copied rule pack.** Change or remove rules in a copied pack, as
   the quickstart did, and select it with `use-pack`. Editing a bundled pack in
   place makes upgrades harder to review.

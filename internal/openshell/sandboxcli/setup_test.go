@@ -243,10 +243,32 @@ func TestSetupIsNotDoneWhileSandboxesStayOff(t *testing.T) {
 	useGateway(ta)
 	ta.daemon.status.Available = false
 	ta.daemon.status.Reason = "the OpenShell gateway is not available"
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	// Not ready is status 1, as doctor's failures (GAP-0165).
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "the daemon has not turned sandboxes on yet: the OpenShell gateway is not available",
 		"not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `defenseclaw sandbox doctor --fix`")
 	lacks(t, ta.output(), "Done →")
+}
+
+// TestSetupIsNotDoneWithoutTheDaemon (GAP-0145): an account that never
+// started the DefenseClaw daemon got setup's green "Done", then a run that
+// said the gateway was not set up. Setup now ends not ready and says to
+// start the daemon, whether it does not answer or never started (no token).
+func TestSetupIsNotDoneWithoutTheDaemon(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.TTY = false
+	useGateway(ta)
+	ta.daemon.errors["GET "+sandboxapi.PathStatus] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "the DefenseClaw daemon is not reachable"}
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
+	has(t, ta.output(), "not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, "+
+		"then `defenseclaw sandbox run claude`")
+	lacks(t, ta.output(), "Done →")
+	// A run before the first start says to start it, and to set the gateway
+	// up only where init did not.
+	msg := sandboxapi.ErrNoGatewayToken.Error()
+	if start, setup := strings.Index(msg, "start it with `defenseclaw-gateway start`"), strings.Index(msg, "if `defenseclaw init` did not set it up"); start < 0 || setup < start {
+		t.Fatalf("ErrNoGatewayToken = %q", msg)
+	}
 }
 
 // TestSetupShowsTheMachineCheckWhileItRuns pins that the machine check's
@@ -316,13 +338,23 @@ func TestSetupWithoutATerminalNeedsYesOrNonInteractive(t *testing.T) {
 	ta.IO.TTY = false
 	before, _ := os.ReadFile(ta.ConfigPath)
 	useGateway(ta)
-	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "there is no terminal; pass --yes to accept the defaults, or --non-interactive")
+	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "its standard input is not a terminal; pass --yes to accept the defaults, or --non-interactive")
 	if len(ta.gateway.planned) != 0 || ta.gateway.applied != 0 {
 		t.Fatalf("gateway plans = %+v, applied %d; want none", ta.gateway.planned, ta.gateway.applied)
 	}
 	if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 		t.Fatalf("the configuration changed:\n%s", after)
 	}
+
+	// GAP-0059: with only the output piped (`sandbox setup | tee
+	// setup.log`) someone at the terminal answers; setup asked for --yes.
+	piped := setupApp(t, "n\n", "", false)
+	piped.IO.TTY, piped.IO.InTTY = false, true
+	useGateway(piped)
+	if err := piped.Setup(bg, SetupOptions{SkipImages: true}); err != nil && strings.Contains(err.Error(), "not a terminal") {
+		t.Fatalf("Setup = %v with a terminal on standard input", err)
+	}
+	has(t, piped.output(), "Allow sandboxes to mount the project folder you launch from?")
 }
 
 func TestSetupNeedsConsentToInstall(t *testing.T) {
@@ -409,6 +441,10 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: no sandbox runs on it now"}},
 		{"a MicroVM started meanwhile", "", false, flag, openshell.DriverVM, 0, fmt.Errorf("%w (dc-late): stop them first", openshell.ErrSandboxesRunning), true,
 			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush (dc-late): stop them first"}},
+		// GAP-0056, GAP-0064: sudo refused or cancelled before the script.
+		{"no sudo", "", false, flag, "", 0, fmt.Errorf("%w: cancelled at sudo's password prompt", openshell.ErrSudo), true,
+			[]string{"⚠ OpenShell 0.1.1 is kept, the upgrade did not run: the install needs sudo: cancelled at sudo's password prompt",
+				"→ an administrator upgrades the machine's openshell package (`defenseclaw sandbox setup --install-openshell` from an account with sudo)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := setupApp(t, tc.input, "", true)
@@ -469,6 +505,61 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 			t.Fatal("upgraded under a gateway that is not usable")
 		}
 	})
+}
+
+// TestSetupStartsAStoppedGatewayService (GAP-0054, GAP-0063): with the
+// OpenShell package installed machine-wide and this account's gateway
+// service stopped and unregistered, setup stopped on the registration's
+// hint (which could not work before the gateway had started), then on the
+// service's, and reached the upgrade question only on a third run. It stops
+// on the service first, offers its fix (start, then register) and goes on
+// in the same run.
+func TestSetupStartsAStoppedGatewayService(t *testing.T) {
+	started := false
+	ta := setupApp(t, "\nn\n", "", true)
+	ta.HostDoctor = upgradableReport(func(r *openshell.DoctorReport) {
+		if started {
+			return
+		}
+		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService, Installed: true}
+		svc := r.Get(openshell.CheckIDGatewayService)
+		svc.Status, svc.Detail = openshell.StatusFail, "openshell-gateway is inactive (dead)"
+		svc.Fix = &openshell.Fix{Summary: "start the gateway and enable it at login, then register it", Command: "systemctl --user enable --now openshell-gateway",
+			Automatic: true, Apply: func(context.Context) error { started = true; return nil }}
+		reg := r.Get(openshell.CheckIDRegistration)
+		reg.Status, reg.Detail = openshell.StatusFail, "openshell: no gateway registration found"
+	})
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+	if !started {
+		t.Fatal("the service fix did not run")
+	}
+	has(t, ta.output(), "✗ Gateway service: openshell-gateway is inactive (dead)", `Fix "Gateway service" now: start the gateway and enable it at login, then register it?`,
+		`fixed "Gateway service"`, "Upgrade OpenShell 0.1.1 to "+openshell.InstallerVersion)
+	lacks(t, ta.output(), "Gateway registration:")
+}
+
+// TestSetupSaysWhoOwnsHomebrew (GAP-0048): a Homebrew prefix this account
+// cannot write to stops the install before anything runs, naming its owner
+// and the way on, not Xcode.
+func TestSetupSaysWhoOwnsHomebrew(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	inst := &fakeInstaller{err: &openshell.HomebrewPrefixError{Prefix: "/opt/homebrew", Path: "/opt/homebrew/Library/Taps", Owner: "admin2"}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	if !errors.Is(err, openshell.ErrHomebrewPrefix) {
+		t.Fatalf("Setup = %v", err)
+	}
+	has(t, ta.output(), "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which admin2 owns,",
+		"Homebrew installs formulas only as the account that owns its prefix (admin2)")
+	lacks(t, ta.output(), "Xcode")
 }
 
 // TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when
@@ -627,7 +718,7 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 			c := r.Get(openshell.CheckIDGatewayVersion)
 			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering: connection refused"
 			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
-		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway: " + start + "\n"},
+		}, "Gateway service", "✗ Gateway service: openshell-gateway is inactive\n", "→ start the gateway and enable it at login: " + start + "\n"},
 		// Something else answers: the service's own fix, which the doctor
 		// gives as the operator's (it does not start the unit over it).
 		{"service stopped, a gateway answers", func(r *openshell.DoctorReport) {
@@ -647,7 +738,9 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 	} {
 		for _, o := range []SetupOptions{{}, {InstallOpenShell: true}, {NonInteractive: true}} {
 			t.Run(fmt.Sprintf("%s %+v", tc.name, o), func(t *testing.T) {
-				ta := setupApp(t, "", "", false)
+				// A stopped service's fix is offered (no); -n takes it, and
+				// stops when the service is still stopped.
+				ta := setupApp(t, "n\n", "", false)
 				ta.HostDoctor = hostReport(tc.edit)
 				inst := &fakeInstaller{}
 				ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
@@ -726,7 +819,7 @@ func TestSetupSaysTheDaemonNeedsARestartForDocker(t *testing.T) {
 	ta.IO.TTY = false
 	useGateway(ta)
 	ta.daemon.status.DockerGroupMissing = true
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "started before you joined the docker group", "`defenseclaw-gateway restart`")
 	lacks(t, ta.output(), "Done →")
 }
@@ -854,7 +947,7 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}))
+	wantExit(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}), 1)
 	if len(ta.gateway.planned) != 0 {
 		t.Fatalf("gateway changed without need: %+v", ta.gateway.planned)
 	}
@@ -1000,6 +1093,24 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 	}
 }
 
+// TestSetupNamesTheGatewayTOMLOnceKnown (GAP-0061): before OpenShell was
+// installed the MicroVM question named ~/.config/openshell/gateway.toml,
+// and after the Homebrew install the plan edited the formula's file under
+// the Homebrew prefix. Until OpenShell is installed the question names no
+// path.
+func TestSetupNamesTheGatewayTOMLOnceKnown(t *testing.T) {
+	ta := setupApp(t, "n\n", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	ta.gateway.state.TOMLPath = filepath.Join(ta.home, ".config", "openshell", "gateway.toml")
+	_ = ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true})
+	has(t, ta.output(), `(sets compute_driver = "vm" in the gateway's gateway.toml and restarts the gateway;`)
+	lacks(t, ta.output(), "~/.config/openshell/gateway.toml")
+}
+
 // TestSetupSwitchesADockerDesktopMacToMicroVMs: a fresh Mac on Docker
 // Desktop, whose Linux VM has no Landlock, still reaches the MicroVM
 // question instead of stopping at the machine check; --yes and
@@ -1066,7 +1177,7 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 	runningOn(t, ta, 1)
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	if ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("applied %d, restarts %d", ta.gateway.applied, ta.gateway.restarts)
 	}
@@ -1265,7 +1376,13 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 			}
 		}
 		_ = fake
-		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+		// Left on the docker driver without Landlock, setup ends not ready
+		// (status 1, GAP-0165).
+		if err := ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}); tc.landlock.Status == openshell.StatusPass {
+			ta.ok(t, err)
+		} else {
+			wantExit(t, err, 1)
+		}
 		out := ta.output()
 		has(t, out, tc.want, "the 2 sandboxes on it (dc-a, theirs) were made on the docker driver, stop if running, and cannot start again "+
 			"unless the gateway is switched back", "Restart the OpenShell gateway now? [y/N]",
@@ -1552,6 +1669,32 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 }
 
+// TestDoctorFixWaitsForTheDaemonAfterARestart (GAP-0074): a fix that
+// restarted the gateway was followed at once by the checks again, whose
+// report ended with a failed DefenseClaw daemon row (sandboxes unavailable,
+// connection refused) seconds before the daemon reconnected. The doctor now
+// waits for the daemon first.
+func TestDoctorFixWaitsForTheDaemonAfterARestart(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.Checks = append(r.Checks, openshell.Check{ID: openshell.CheckIDTelemetry, Title: "OpenShell telemetry", Status: openshell.StatusWarn,
+			Detail: "on", Fix: &openshell.Fix{Summary: "set it off and restart the gateway", Automatic: true, RestartsGateway: true,
+				Apply: func(context.Context) error { return nil }}})
+	})
+	runningOn(t, ta, 0)
+	calls := 0
+	ta.daemon.mu.Lock()
+	ta.daemon.status.Available, ta.daemon.status.Reason = false, "connection refused"
+	ta.daemon.onStatus = func(st *sandboxapi.Status) {
+		calls++
+		st.Available = calls >= 3
+	}
+	ta.daemon.mu.Unlock()
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+	has(t, ta.output(), "waiting for the DefenseClaw daemon to reconnect to the restarted gateway", `fixed "OpenShell telemetry"`)
+	lacks(t, ta.output(), "sandboxes are unavailable")
+}
+
 // TestDoctorFixNamesChecksAsItAsked: `doctor --fix` asked `Fix "Gateway":
 // start the gateway?` and then reported "✗ gateway-version: brew services
 // start …", naming the check by its id; the outcome lines name it by the
@@ -1757,6 +1900,11 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	writeFile(t, edited, "dc\n")
 	ta.ok(t, ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: kept, Backup: kept + ".bak"}, {Path: edited}}}))
 	writeFile(t, edited, "user edit\n")
+	// GAP-0123: every edit left a backup, and teardown kept them all.
+	backups := []string{kept + ".defenseclaw-20261007T100000Z.bak", kept + ".defenseclaw-20261007T110000Z.bak"}
+	for _, b := range append(backups, edited+".defenseclaw-20261007T100000Z.bak") {
+		writeFile(t, b, "dc\n")
+	}
 	rc := filepath.Join(ta.home, ".bashrc")
 	if _, err := wrapper.Enable(wrapper.Bash, rc, "/usr/local/bin/defenseclaw-gateway", wrapper.Wrap{Command: "claude", Harness: "claude"}); err != nil {
 		t.Fatal(err)
@@ -1769,6 +1917,7 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	has(t, ta.output(), "leftover data     dc-claude-stale", "dc-claude-live, dc-claude-orphan",
 		"provider profiles "+profiles.IngressProfileID(ownPort)+", "+profiles.IngressProfileID(oldPort)+" (this install's hook ingress)\n  images ")
 	lacks(t, ta.output(), "dc-claude-theirs")
+	has(t, ta.output(), "then remove the 2 backups DefenseClaw made of it")
 	if ta.calls("DELETE", "dc-claude-live") != 0 || len(ta.gateway.rollbacks) != 0 {
 		t.Fatal("the dry run changed something")
 	}
@@ -1800,7 +1949,15 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if len(ta.gateway.rollbacks) != 1 || len(ta.gateway.rollbacks[0].Files) != 1 || ta.gateway.rollbacks[0].Files[0].Path != kept {
 		t.Fatalf("rollbacks = %+v", ta.gateway.rollbacks)
 	}
-	has(t, ta.output(), edited+" changed after DefenseClaw edited it")
+	has(t, ta.output(), edited+" changed after DefenseClaw edited it", "removed the 2 backups DefenseClaw made of the gateway configuration")
+	for _, b := range backups {
+		if _, err := os.Stat(b); !os.IsNotExist(err) {
+			t.Errorf("backup %s is still there: %v", b, err)
+		}
+	}
+	if _, err := os.Stat(edited + ".defenseclaw-20261007T100000Z.bak"); err != nil {
+		t.Errorf("the backup of a file left alone is gone: %v", err)
+	}
 	if b, _ := wrapper.Read(rc); len(b.Wraps) != 0 {
 		t.Fatalf("wrappers left: %+v", b)
 	}

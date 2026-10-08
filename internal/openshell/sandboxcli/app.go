@@ -87,6 +87,9 @@ type IO struct {
 	Out, Err io.Writer
 	// TTY reports that In and Out are a terminal (prompts and attach).
 	TTY bool
+	// InTTY reports that In is a terminal: someone can answer a prompt
+	// although Out is piped (`sandbox setup | tee setup.log`).
+	InTTY bool
 	// OutTTY and ErrTTY report that Out and Err are terminals: what a
 	// sandbox prints there (a run log, a headless harness's output) cannot
 	// drive them (sandboxOutput).

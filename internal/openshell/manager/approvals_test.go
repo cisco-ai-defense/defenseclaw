@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/nestguard"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -130,6 +131,83 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	curl := e.propose("fetchbox", "raw.githubusercontent.com")
 	e.draft("fetchbox")
 	e.waitChunk("fetchbox", curl, "approved")
+}
+
+// TestSSHRefusalIsOneFeedLine (GAP-0090, GAP-0111): git over SSH to
+// github.com:22 showed "(no OpenShell rule allows it)" and then, from
+// triage's rejection of the drafted rule, "(port not allowed)" for the one
+// attempt. The rejection of a port-22 draft adds no line: OpenShell's
+// denial is on the feed, and the CLI says to use an HTTPS remote.
+func TestSSHRefusalIsOneFeedLine(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "sshbox"})
+	id := e.addChunk("sshbox", chunk("allow_github_com_22", "github.com", 22))
+	e.draft("sshbox")
+	e.waitChunk("sshbox", id, "rejected")
+	if got := e.events("sshbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 0 {
+		t.Fatalf("feed = %+v", got)
+	}
+}
+
+// TestProxyRefusedHarnessFetchIsQuiet (GAP-0095): OpenCode asks
+// models.opencode.ai for its model catalog at every start, through the
+// egress proxy, which balanced refuses: each start showed a blocked site
+// with an unblock hint, counted one blocked destination and raised a
+// shadow AI finding. The refusal is audited only; a tool's request to the
+// same host under another harness is the agent's.
+func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
+	e := newEnv(t, nil)
+	claude := e.images.rec
+	useOpenCode(t, e)
+	e.live(sandboxapi.CreateRequest{Name: "ocbox", Harness: "opencode"})
+	refuse := func(name string) {
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventBlocked, SandboxName: name, Host: "models.opencode.ai", Port: 443, Time: time.Now(),
+			Category: egress.CategoryNotAllowlisted, Unblockable: true}, 0)
+	}
+	refuse("ocbox")
+	audited := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "models.opencode.ai" && r.Blocked })
+	d, err := e.m.Destinations(t.Context(), "ocbox")
+	if len(audited) != 1 || audited[0].DecisionCode != audit.SandboxEgressCodeHarnessFetch || audited[0].Severity != "INFO" ||
+		err != nil || len(e.events("ocbox", sandboxapi.ActivityEgressBlocked, "")) != 0 || len(d.Destinations) != 0 ||
+		e.get("ocbox").Egress.Blocked != 0 || len(e.tel.findingsOf(audit.SandboxFindingShadowAI)) != 0 {
+		t.Fatalf("audited %d, feed %+v, destinations %+v (%v), blocked %d", len(audited), e.events("ocbox", sandboxapi.ActivityEgressBlocked, ""), d, err, e.get("ocbox").Egress.Blocked)
+	}
+	// An open pack lets it through: the harness's vendor, no shadow AI.
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "ocbox", Host: "models.opencode.ai", Port: 443, Time: time.Now(),
+		FirstSeen: true}, 0)
+	d, err = e.m.Destinations(t.Context(), "ocbox")
+	if err != nil || len(d.Destinations) != 1 || d.Destinations[0].Kind != sandboxapi.DestinationHarnessVendor ||
+		len(e.tel.findingsOf(audit.SandboxFindingShadowAI)) != 0 {
+		t.Fatalf("allowed: destinations %+v (%v), shadow AI %d", d, err, len(e.tel.findingsOf(audit.SandboxFindingShadowAI)))
+	}
+	e.images.rec = claude
+	e.live(sandboxapi.CreateRequest{Name: "claudebox", Copy: true})
+	refuse("claudebox")
+	if len(e.events("claudebox", sandboxapi.ActivityEgressBlocked, "")) != 1 {
+		t.Fatal("another harness's request to the host is not on the feed")
+	}
+}
+
+// TestOpenShellDenialAuditReadsLikeTheFeed (GAP-0134): one git ls-remote
+// over SSH raised two MEDIUM alerts, the refused lookup and the connection,
+// whose reasons were OpenShell's tokens. The lookup is audited at INFO under
+// a code the alerts leave out, and a denial's reason has the feed's words
+// (for SSH: use an HTTPS remote; for a cloud metadata address its name,
+// GAP-0147) before the token.
+func TestOpenShellDenialAuditReadsLikeTheFeed(t *testing.T) {
+	e := liveEnv(t, "gitbox", nil)
+	e.ocsf("gitbox", "NET:REFUSE [MED] DENIED github.com [reason:policy_dns_ineligible]", time.Now())
+	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/ssh(0) -> github.com:22 [reason:transparent_tcp_policy_denied]", time.Now())
+	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.example.net:443 [reason:transparent_tcp_policy_denied]", time.Now())
+	e.ocsf("gitbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 169.254.169.254:80 [reason:transparent_tcp_policy_denied]", time.Now())
+	got := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool { return ev.Blocked })
+	if len(got) != 4 || got[0].DecisionCode != audit.SandboxEgressCodeLookupRefused || got[0].Severity != "INFO" ||
+		got[1].DecisionCode != "SANDBOX_EGRESS_OPENSHELL_DENIED" || got[1].Severity != "" ||
+		got[1].Reason != "SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…) (transparent_tcp_policy_denied)" ||
+		got[2].Reason != "no OpenShell rule allows it (transparent_tcp_policy_denied)" ||
+		got[3].Reason != "cloud metadata or link-local address, never reachable from a sandbox (transparent_tcp_policy_denied)" {
+		t.Fatalf("audited %+v", got)
+	}
 }
 
 // Of OpenShell's denials only the connection counts and shows on the feed: a
@@ -792,9 +870,15 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	}
 	ask := asks[0]
 	requested := slices.DeleteFunc(e.events("hpbox", sandboxapi.ActivityApprovalRequested, ""), func(ev sandboxapi.ActivityEvent) bool { return ev.ApprovalID != ask.ID })
-	// Both denials are refused requests; an ask is no blocked destination.
-	if eg := e.get("hpbox").Egress; len(requested) != 1 || eg.BlockedRequests != 2 || eg.Blocked != 0 {
-		t.Fatalf("%d approval.requested events, egress %+v; want 1, both denials and no blocked destination", len(requested), eg)
+	// An ask is no blocked destination, and the denials that raised it are
+	// the ask's, not refused requests of the destinations.
+	if eg := e.get("hpbox").Egress; len(requested) != 1 || eg.BlockedRequests != 0 || eg.Blocked != 0 {
+		t.Fatalf("%d approval.requested events, egress %+v; want 1 and no blocked destination or request", len(requested), eg)
+	}
+	// Its audit record (an alert) reads as the ask, not as a raw OpenShell code (GAP-0138).
+	if recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Port == 38830 }); len(recs) == 0 ||
+		recs[0].DecisionCode != "SANDBOX_EGRESS_HOST_PORT_ASK" || !strings.Contains(recs[0].Reason, "asks to reach port 38830 on your machine") {
+		t.Fatalf("audited %+v", recs)
 	}
 	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)

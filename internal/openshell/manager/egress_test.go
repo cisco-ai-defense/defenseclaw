@@ -20,6 +20,7 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -232,6 +233,24 @@ func TestPerSandboxDeciders(t *testing.T) {
 	}
 }
 
+// GAP-0173: `sandbox policy block HOST` then at once `sandbox unblock HOST`
+// is decided against config.yaml as written, not the snapshot from before
+// the write that the reload watcher has not replaced yet: the unblock is
+// refused with the block list's remedy instead of reported done.
+func TestUnblockLoadsTheBlockListJustWritten(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "balbox", Profile: "balanced"})
+	e.m.opts.SyncConfig = func(context.Context) error {
+		e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"example.org"} })
+		return nil
+	}
+	resp, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "example.org", Sandbox: "balbox"})
+	var se *sandboxapi.Error
+	if !errors.As(err, &se) || se.Code != sandboxapi.CodePolicyViolation || !strings.Contains(se.Detail, "policy block --remove example.org") {
+		t.Fatalf("unblock right after the block = %+v, %v; want the block list's refusal", resp, err)
+	}
+}
+
 // A sandbox whose policy stops resolving (its pack deleted) keeps no decider
 // of its last good policy: the proxy refuses it with the reason, triage leaves
 // it alone and its direct rules answer to the organization's policy alone.
@@ -289,6 +308,54 @@ func TestUnresolvablePolicyFailsClosed(t *testing.T) {
 	}
 	e.m.triageSandbox(t.Context(), e.boxOf("teambox"))
 	e.waitChunk("teambox", waiting, "approved")
+}
+
+// TestUnresolvablePolicyRecordSaysWhatToDo (GAP-0160): the degraded record
+// of a sandbox whose pack is gone says what to do, and is an alert (HIGH)
+// only while the sandbox runs: a stopped one sends nothing under the
+// policy, and its start refuses with the reason.
+func TestUnresolvablePolicyRecordSaysWhatToDo(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	e.create(sandboxapi.CreateRequest{Name: "runbox", Pack: "team"})
+	e.create(sandboxapi.CreateRequest{Name: "idlebox", Pack: "team", Project: e.otherProject("idle")})
+	run, idle := e.boxOf("runbox"), e.boxOf("idlebox")
+	e.m.mu.Lock()
+	run.phase, idle.phase, idle.rec.Phase = audit.SandboxPhaseReady, audit.SandboxPhaseStopped, string(audit.SandboxPhaseStopped)
+	e.m.mu.Unlock()
+	must(t, os.Remove(filepath.Join(packDir, "team", "pack.yaml")))
+	e.m.refreshEgress()
+	record := func(name string) audit.SandboxHealthEvent {
+		got := where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool {
+			return h.Sandbox.Name == name && h.ErrorCode == "openshell_pack_invalid"
+		})
+		if len(got) != 1 || !strings.Contains(got[0].ErrorSummary, "or delete the sandbox: defenseclaw sandbox delete "+name) {
+			t.Fatalf("%s health = %+v", name, got)
+		}
+		return got[0]
+	}
+	if r, i := record("runbox"), record("idlebox"); r.Severity != "" || i.Severity != "MEDIUM" {
+		t.Fatalf("severities: running %q (want the default HIGH), stopped %q (want MEDIUM)", r.Severity, i.Severity)
+	}
+}
+
+// TestRestartSuspendsAnUnresolvableSandboxsCredential (GAP-0180): a daemon
+// that restarts while a running sandbox's pack is gone still takes its proxy
+// credential back from the sandbox, and suspends it: the proxy refuses the
+// sandbox with the reason instead of as an unknown credential, whose
+// refusals raised a second alert about a stale or revoked credential.
+func TestRestartSuspendsAnUnresolvableSandboxsCredential(t *testing.T) {
+	packDir := writeTeamPack(t)
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = packDir })
+	e.live(sandboxapi.CreateRequest{Name: "teambox", Pack: "team"})
+	e.stop()
+	must(t, os.Remove(filepath.Join(packDir, "team", "pack.yaml")))
+	e.restartDaemon()
+	proxy := startLiveProxy(t, e)
+	if status, body := proxy.connect(t, "teambox", "example.org:443"); status != http.StatusForbidden ||
+		body.Category != egress.CategoryEgressOff || !strings.Contains(body.Reason, "cannot be resolved") {
+		t.Fatalf("CONNECT after the restart = %d %+v, want the sandbox refused with the reason", status, body)
+	}
 }
 
 // Every change to a sandbox's proxy credential reaches its open tunnels:
@@ -1147,7 +1214,9 @@ func TestPolicyMovedIntoTheMountFailsClosed(t *testing.T) {
 
 // A connection OpenShell closes because the policy changed under it (every
 // reload does that) showed as a block, twice per reload; it stays in the
-// audit record only. A real denial still counts.
+// audit record only, as the end of an allowed connection, not a block: it
+// raised MEDIUM alerts and counted on the dashboards' blocked egress
+// (GAP-0138). A real denial still counts.
 func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e := liveEnv(t, "portsbox", nil)
 	cut := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:L7 tunnel closed before inspection " +
@@ -1155,7 +1224,8 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e.ocsf("portsbox", cut, time.Now())
 	e.ocsf("portsbox", cut, time.Now())
 	audited := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool {
-		return ev.Host == "bedrock-mantle.us-east-1.api.aws" && ev.Blocked
+		return ev.Host == "bedrock-mantle.us-east-1.api.aws" && !ev.Blocked && ev.End == audit.SandboxEgressFailed && ev.Terminated &&
+			ev.DecisionCode == "SANDBOX_EGRESS_TERMINATED"
 	})
 	if got := e.events("portsbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 0 || e.get("portsbox").Egress.Blocked != 0 || len(audited) != 2 {
 		t.Fatalf("feed = %+v, blocked %d, audited %d; want the reload's cuts audited only", got, e.get("portsbox").Egress.Blocked, len(audited))

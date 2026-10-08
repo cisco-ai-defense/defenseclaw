@@ -56,7 +56,7 @@ func (a *App) Destinations(ctx context.Context, name string, format OutputFormat
 			shadow++
 		}
 		rows = append(rows, []string{
-			destinationHost(r), destinationKindText(r.Kind), truncate(firstNonEmpty(r.Provider, r.Category, "-"), 32),
+			destinationHost(r), truncate(destinationKindCell(r), 48), truncate(firstNonEmpty(r.Provider, "-"), 32),
 			destinationRequests(r), humanBytes(r.BytesUp) + " / " + humanBytes(r.BytesDown),
 			truncate(firstNonEmpty(destinationBinary(r), "-"), 40), r.LastSeen.Local().Format("01-02 15:04"),
 		})
@@ -101,6 +101,31 @@ func destinationHost(r sandboxapi.DestinationRow) string {
 		host = "[" + host + "]"
 	}
 	return host + ":" + strings.Join(ports, ",")
+}
+
+// destinationKindCell is a row's KIND cell: the kind in words and, for a
+// destination only ever refused, why in words. The PROVIDER cell holds only
+// an AI provider: the egress category there repeated the kind
+// (package_registry) or was a raw refusal token (not_allowlisted; GAP-0177).
+func destinationKindCell(r sandboxapi.DestinationRow) string {
+	kind := destinationKindText(r.Kind)
+	if r.Kind != sandboxapi.DestinationBlocked || r.Category == "" {
+		return kind
+	}
+	// Whose list refused it, in words (GAP-0125: a repository-policy block
+	// read operator_block).
+	why := sandboxapi.BlockedText(r.Category, r.Host)
+	switch r.Category {
+	case "operator_block":
+		why = "your block list"
+	case sandboxapi.CategoryPackBlock:
+		why = "the pack's block list"
+	case sandboxapi.CategoryRepoPolicyBlock:
+		why = "repository policy"
+	case sandboxapi.CategoryFirewallBlock:
+		why = "host egress firewall"
+	}
+	return kind + " (" + why + ")"
 }
 
 // destinationKindText is how a destination kind reads.

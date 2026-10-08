@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -88,6 +89,20 @@ type teardownPlan struct {
 	// unhanded says, per copy-mode sandbox, the work it holds that never
 	// came back to the folder (see unhandedWork).
 	unhanded []string
+}
+
+// gatewayBackups are the backups DefenseClaw made of the gateway file path
+// before it edited it (openshell.GatewayConfigurator: one per edit, named
+// path.defenseclaw-<UTC>.bak), regular files only.
+func gatewayBackups(path string) []string {
+	matches, _ := filepath.Glob(path + ".defenseclaw-*.bak")
+	var out []string
+	for _, m := range matches {
+		if info, err := os.Lstat(m); err == nil && info.Mode().IsRegular() {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // Teardown removes everything DefenseClaw created for sandboxes: its
@@ -365,6 +380,9 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		if f.Backup == "" {
 			how = "remove it (DefenseClaw created it)"
 		}
+		if n := len(gatewayBackups(f.Path)); n > 0 {
+			how += ", then remove the " + plural(int64(n), "backup", "backups") + " DefenseClaw made of it"
+		}
 		row("gateway config", a.tildePath(f.Path)+": "+how)
 	}
 	switch {
@@ -610,15 +628,35 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		case errors.Is(err, openshell.ErrNoGatewayService):
 			// A gateway run another way, which DefenseClaw cannot restart.
 			a.ok("restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
+		case errors.Is(err, openshell.ErrGatewayServiceStopped):
+			// Not started for it (GAP-0149): another account's gateway, say,
+			// holds the port, one gateway running per machine.
+			a.ok("restored the OpenShell gateway configuration; this account's " + openshell.GatewayService +
+				" service is not running, so it loads it when it starts")
 		case err != nil:
 			fail("restore the gateway configuration", err)
 		default:
 			a.ok("restored the OpenShell gateway configuration and restarted it")
 		}
-		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) {
+		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) || errors.Is(err, openshell.ErrGatewayServiceStopped) {
 			if r, err := a.loadReceipt(); err == nil {
 				r.GatewayFiles = nil
 				_ = a.saveReceipt(r)
+			}
+			// Every edit of a gateway file (setup, doctor --fix, the TUI)
+			// kept a backup; restored, the files need none of them.
+			removed := 0
+			for _, f := range p.gateway {
+				for _, b := range gatewayBackups(f.Path) {
+					if err := os.Remove(b); err == nil {
+						removed++
+					} else {
+						fail("remove the backup "+b, err)
+					}
+				}
+			}
+			if removed > 0 {
+				a.ok("removed the " + plural(int64(removed), "backup", "backups") + " DefenseClaw made of the gateway configuration")
 			}
 		}
 	}

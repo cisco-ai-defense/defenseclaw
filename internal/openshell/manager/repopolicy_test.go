@@ -24,8 +24,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -124,5 +127,42 @@ func TestPolicyTestUsesTheSandboxDecider(t *testing.T) {
 	}
 	if got := directProvider(eps, "api.anthropic.com", 8443); got != "" {
 		t.Fatalf("another port: %q", got)
+	}
+}
+
+// TestRepoPolicyBlocksSayWhose (GAP-0125): a host the repository policy
+// blocks showed on the feed as "(on your block list)", so a user looked
+// for an openshell.egress.block entry they never set. The line names the
+// repository policy.
+func TestRepoPolicyBlocksSayWhose(t *testing.T) {
+	e := newEnv(t, nil)
+	writeFile(t, filepath.Join(e.project, packs.RepoPolicyPath), "version: 1\negress: {block: [example.org]}\n")
+	ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Project: e.project})
+	must(t, err)
+	e.live(sandboxapi.CreateRequest{Name: "repoblock", RepoPolicyDigest: ex.RepoPolicy.Digest})
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventBlocked, SandboxName: "repoblock", Host: "example.org", Port: 443, Time: time.Now(),
+		Category: egress.CategoryOperatorBlock, Rule: "example.org"}, 0)
+	got := e.events("repoblock", sandboxapi.ActivityEgressBlocked, "")
+	if len(got) != 1 || got[0].Category != sandboxapi.CategoryRepoPolicyBlock || !strings.Contains(got[0].Message, packs.RepoPolicyPath) {
+		t.Fatalf("feed = %+v", got)
+	}
+	// So does the audit record, an alert (GAP-0136).
+	recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "example.org" })
+	if len(recs) != 1 || recs[0].DecisionCode != "SANDBOX_EGRESS_REPO_POLICY_BLOCK" || !strings.Contains(recs[0].Reason, packs.RepoPolicyPath) {
+		t.Fatalf("audited %+v", recs)
+	}
+	// So do the destinations and `policy test`, which said "The operator
+	// blocked this destination in DefenseClaw configuration."
+	d, err := e.m.Destinations(t.Context(), "repoblock")
+	must(t, err)
+	if len(d.Destinations) != 1 || d.Destinations[0].Category != sandboxapi.CategoryRepoPolicyBlock {
+		t.Fatalf("destinations = %+v", d.Destinations)
+	}
+	b := e.boxOf("repoblock")
+	e.m.mu.Lock()
+	eff := b.eff
+	e.m.mu.Unlock()
+	if chk := eff.CheckEgress(nil, egress.Principal{BindingID: "test"}, "example.org", 443); chk.Allowed || !strings.Contains(chk.Reason, "repository policy") {
+		t.Fatalf("check = %+v", chk)
 	}
 }

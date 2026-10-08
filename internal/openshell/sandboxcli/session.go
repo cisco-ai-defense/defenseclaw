@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
@@ -70,6 +71,10 @@ type session struct {
 	// harness or shell still runs in the sandbox (attachedSessions):
 	// nothing may stop the sandbox, or undo the folder, under them.
 	others int
+	// lost is set when the session's connection to the sandbox broke (the
+	// OpenShell gateway restarted under it, for one) while the sandbox
+	// went on running: it is left running for a reattach.
+	lost bool
 	// headless marks a one-prompt session (the resume hint says how to
 	// run the next prompt).
 	headless bool
@@ -84,13 +89,15 @@ type session struct {
 	before *sandboxapi.Sandbox
 	// daemonStarted is when the daemon the session ends with started
 	// (sandboxapi.Status.StartedAt; zero when it does not say): after the
-	// session's start, the daemon restarted during it, and its counters
-	// cover only the time since.
+	// session's start, the daemon restarted during it.
 	daemonStarted time.Time
 
 	// shell marks a `connect --shell` session: no harness, so no hooks to
 	// expect.
 	shell bool
+	// passArgs is set when the command was given arguments for the harness
+	// (after --), which it may answer without a session (--version).
+	passArgs bool
 	// startedAt is when the harness (or shell) was attached; harnessCode
 	// its exit status.
 	startedAt   time.Time
@@ -469,6 +476,8 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	}
 	text := "✗ DefenseClaw blocked " + where
 	switch why := firstNonEmpty(ev.Category, ev.Reason); {
+	case sshPort(ev):
+		text += " (" + sandboxapi.SSHBlockedText(ev.Host) + ")"
 	case ev.Category == sandboxapi.CategoryLargeUpload:
 		// The large-upload block (egress.block_large_uploads) cut an
 		// upload there (its event counts what went up), or refused a
@@ -480,11 +489,11 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 			text += " (" + clause + ")"
 		}
 	case why != "":
-		text += " (" + reasonText(why) + ")"
+		text += " (" + sandboxapi.BlockedText(why, ev.Host) + ")"
 	}
 	host := strings.ToLower(ev.Host)
 	n := sessionNotice{summary: text}
-	if ev.Unblockable {
+	if ev.Unblockable && !sshPort(ev) {
 		// Once the host is unblocked the summary gives the block without
 		// the command (onUnblock).
 		n.host, n.unblocked = host, text+"; unblocked since"
@@ -702,14 +711,23 @@ func firstN(list []string, n int) []string {
 func (s *session) end(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
 	a := s.app
+	deleted := func() error {
+		a.println()
+		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() +
+			"; there is nothing left to review, and its undo point went with it")
+		return nil
+	}
 	after, err := s.settled(ctx)
 	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-		a.println()
-		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() + "; there is nothing left to review")
-		return nil
+		return deleted()
 	}
 	if err != nil {
 		return apiError(err)
+	}
+	// A delete from another terminal stops the sandbox first: it reads as
+	// deleting, then is gone (GAP-0170).
+	if after, err = s.settledPhase(ctx, after); sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return deleted()
 	}
 	a.println()
 	if st, err := s.api.Status(ctx); err == nil {
@@ -744,6 +762,8 @@ func (s *session) end(ctx context.Context) error {
 		stopped = true
 	case s.others > 0:
 		a.note(s.sb.Name + " keeps running: " + s.othersText() + ", so what changes after this review is not in it")
+	case s.lost:
+		a.note(s.sb.Name + " keeps running for a reattach, so what changes after this review is not in it")
 	case s.started && !s.liveRun:
 		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
 			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
@@ -758,6 +778,9 @@ func (s *session) end(ctx context.Context) error {
 		a.note(s.sb.Name + " is still running (it was running when you connected); changes it makes after this point are not in this review")
 	}
 	rev, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{})
+	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return deleted()
+	}
 	reviewed := err == nil
 	if !reviewed {
 		a.warn("could not review the session's changes: " + apiError(err).Error())
@@ -809,6 +832,19 @@ func (s *session) end(ctx context.Context) error {
 			a.page(diff.Diff)
 		}
 		decision, accepted = s.onExit(changed)
+	}
+	if changed && (decision == "u" || accepted) {
+		// The question may have waited while the sandbox was deleted, or a
+		// new sandbox took its name: the answer is not for that one
+		// (GAP-0170).
+		now, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			return deleted()
+		}
+		if err == nil && s.sb.ID != "" && now.ID != "" && now.ID != s.sb.ID {
+			a.warn(s.sb.Name + " was deleted while this question waited, and a new sandbox took its name; the answer does not apply to it")
+			return nil
+		}
 	}
 	switch {
 	case decision == "u":
@@ -877,10 +913,64 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 			"and that stopped " + s.harnessName()
 	}
 	if after.Phase != "ready" {
+		if h := after.Hooks; h.Silent && h.OnSilence == packs.OnSilenceStop {
+			// DefenseClaw's own stop (raiseSilence), not someone else's.
+			return "DefenseClaw stopped " + name + ": " + s.harnessName() + " worked for " + firstNonEmpty(h.SilenceAfter, "a while") +
+				" without a hook reaching DefenseClaw (hooks.on_silence: stop). Check its hook configuration in the sandbox before you start it again"
+		}
 		return name + " was stopped from outside this session (`" + CommandName + " stop` or the TUI), which ended " + s.harnessName()
+	}
+	if s.lost {
+		return "the connection to " + name + " was lost (the OpenShell gateway restarted, for one), which ended " + s.harnessName() +
+			"; " + name + " is still running → reattach: " + CommandName + " connect " + name
 	}
 	return ""
 }
+
+// settledPhase waits, at most settlePhaseWait, while the sandbox's phase
+// is passing (the OpenShell gateway restarting under it reads as unknown
+// or provisioning), and returns it as it then is. A session whose harness
+// failed while the sandbox passed through such a phase and came back
+// ready lost its connection to the sandbox, not the sandbox (lost).
+//
+// A sandbox being deleted (from another terminal or the TUI) is passing
+// too: once it is gone, settledPhase returns the not-found error.
+func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (*sandboxapi.Sandbox, error) {
+	passing := func(phase string) bool {
+		switch phase {
+		case "unknown", "provisioning", "starting", "creating", "deleting":
+			return true
+		}
+		return false
+	}
+	if !passing(after.Phase) {
+		return after, nil
+	}
+	for range int(settlePhaseWait / settlePhaseInterval) {
+		if s.app.Sleep(ctx, settlePhaseInterval) != nil {
+			break
+		}
+		next, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			return nil, err
+		}
+		if err != nil {
+			break
+		}
+		after = next
+		if !passing(after.Phase) {
+			break
+		}
+	}
+	s.lost = after.Phase == "ready" && s.harnessCode != 0 && s.before != nil && s.before.Phase == "ready"
+	return after, nil
+}
+
+// settlePhaseWait and settlePhaseInterval pace settledPhase.
+const (
+	settlePhaseWait     = 20 * time.Second
+	settlePhaseInterval = 2 * time.Second
+)
 
 // onExit returns k (keep), u (undo), d (diff) or i (the user pressed
 // Ctrl-C), and whether keeping was the user's choice (an answer, --yes,
@@ -971,6 +1061,9 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		case s.others > 0:
 			a.note("Sandbox " + name + " keeps running: " + s.othersText() + " → stop it once they end: " + CommandName + " stop " + name)
+			return nil
+		case s.lost:
+			a.note("Sandbox " + name + " keeps running → reattach: " + CommandName + " connect " + name + "   stop: " + CommandName + " stop " + name)
 			return nil
 		case !s.started:
 			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)
@@ -1118,6 +1211,10 @@ func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
 			break
 		}
 		next, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			// Deleted while the session ended (GAP-0170).
+			return nil, err
+		}
 		if err != nil {
 			break
 		}
@@ -1145,33 +1242,30 @@ const (
 // the sandbox reached for the first time, and the sites blocked those the
 // session announced blocked (its ✗ lines, which the summary repeats), or
 // the daemon's count of newly blocked ones when that is higher (a late
-// denial, or a flood the feed paced). A daemon restart during the session
-// starts its counters from zero (nothing keeps them): the session's then
-// count from zero too, and the line says they cover only the time since
-// the restart.
+// denial, or a flood the feed paced). A daemon restart keeps the hook
+// counts and the destinations (GAP-0156), up to the last minute's when the
+// daemon did not stop cleanly: counters below the session's start mean
+// they started again, and the line says they cover only the time since the
+// restart.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
 		before = &sandboxapi.Sandbox{}
 	}
 	hooksBefore, egressBefore := before.Hooks, before.Egress
-	// since qualifies the counts a daemon restart started again; sitesReset
-	// marks the egress counts among them.
+	// since qualifies the hook counts a daemon restart started again;
+	// sitesReset marks the egress counts that started again.
+	restarted := "since the daemon restarted"
+	if s.restartedDuring() {
+		restarted += " at " + s.app.clock(s.daemonStarted)
+	}
 	since, sitesReset := "", false
-	switch {
-	case s.restartedDuring():
-		hooksBefore, egressBefore = sandboxapi.HookCoverage{}, sandboxapi.EgressStats{}
-		since, sitesReset = "since the daemon restarted at "+s.app.clock(s.daemonStarted), true
-	default:
-		// A daemon that does not say when it started: counters below the
-		// session's start mean it restarted.
-		if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
-			hooksBefore, since = sandboxapi.HookCoverage{}, "since the daemon restarted"
-		}
-		if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
-			after.Egress.BlockedRequests < egressBefore.BlockedRequests {
-			egressBefore, sitesReset = sandboxapi.EgressStats{}, since != ""
-		}
+	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
+		hooksBefore, since = sandboxapi.HookCoverage{}, restarted
+	}
+	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
+		after.Egress.BlockedRequests < egressBefore.BlockedRequests {
+		egressBefore, sitesReset = sandboxapi.EgressStats{}, true
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
@@ -1206,8 +1300,11 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	sites := after.Egress.Destinations - egressBefore.Destinations
 	contacted := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
-	if sitesReset {
+	switch {
+	case sitesReset && since != "":
 		contacted += " since then"
+	case sitesReset:
+		contacted += " " + restarted
 	}
 	parts = append(parts, contacted)
 	s.noticeMu.Lock()
@@ -1231,10 +1328,9 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 }
 
 // restartedDuring reports that the daemon the session ended with started
-// after the session did: it restarted during the session, and nothing kept
-// its counters, so they cover only the time since (PR 1022 live retest N1:
-// "0 tool calls · 0 new sites contacted" after 7 tool calls and two
-// restarts, which left no counter below the session's start).
+// after the session did: it restarted during the session, and a restart that
+// was not clean may have lost its last minute of hook counts
+// (hookReachUnknown).
 func (s *session) restartedDuring() bool {
 	return s.startedBefore(s.daemonStarted)
 }
@@ -1406,6 +1502,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		}
 		opts.AcceptSensitive = yes
 		if !yes {
+			a.note(notBroughtBack(after.Name, pull.Kind))
 			s.keepUnpulled()
 			return s.finish(ctx, false)
 		}

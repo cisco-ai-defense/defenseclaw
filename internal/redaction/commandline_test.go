@@ -123,6 +123,47 @@ func TestCommandLineWithholdsTheNotifyPayload(t *testing.T) {
 	}
 }
 
+// TestCommandLineRedactsScriptsAndHeaders: the words of a script argument
+// (sh -c '...', eval '...') and of a header value are redacted the same way
+// and the rest of the script stays (GAP-0107), also when the script is
+// nested in another with escaped quotes (Claude Code's wrapper of every Bash
+// call, GAP-0144), and when a text source split the header on spaces.
+func TestCommandLineRedactsScriptsAndHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		argv []string
+		kept string
+	}{
+		{[]string{"sh", "-c", `python3 -c "import time; time.sleep(90)" --token=dccertvalue`}, `"import time; time.sleep(90)" --token=<redacted`},
+		{[]string{"bash", "-c", `eval 'curl -H "Authorization: Bearer dccertvalue" https://example.invalid/'`}, `"Authorization: Bearer <redacted`},
+		{[]string{"curl", "-H", "X-Api-Key: dccertvalue", "https://example.invalid/"}, "X-Api-Key: <redacted"},
+		{[]string{"/bin/bash", "-c", `source /sandbox/.claude/shell-snapshots/snapshot-bash.sh && eval 'sh -c "curl -s -H \"Authorization: Bearer dccertvalue\" https://example.invalid; sleep 40"' < /dev/null`},
+			`\"Authorization: Bearer <redacted`},
+		{[]string{"/bin/bash", "-c", `eval 'curl -H '\''X-Api-Key: dccertvalue'\'' https://example.invalid/'`}, `'\''X-Api-Key: <redacted`},
+		// Tetragon's arguments, split on spaces: the URL after the header
+		// is not part of the hidden value.
+		{strings.Fields(`curl -H "Authorization: Bearer dccertvalue" https://example.invalid/`), `" https://example.invalid/`},
+		{strings.Fields(`curl -H "X-Api-Key: dccertvalue dccertvalue" https://example.invalid/`), `" https://example.invalid/`},
+		{strings.Fields(`mysqladmin "--password dccertvalue" status`), `" status`},
+	} {
+		if got := CommandLine(tc.argv, 1024); strings.Contains(got, "dccertvalue") || !strings.Contains(got, tc.kept) {
+			t.Errorf("cmdline %q of %q, want %q kept", got, tc.argv, tc.kept)
+		}
+	}
+	// Look-alikes stay as they are: a word that only mentions a secret, and
+	// a scheme word that is a flag's value.
+	for _, argv := range [][]string{
+		{"sh", "-c", `echo "the auth module" && make test`},
+		{"git", "log", "--format=%an basic"},
+	} {
+		if got := CommandLine(argv, 1024); got != strings.Join(argv, " ") {
+			t.Errorf("cmdline %q of %q", got, argv)
+		}
+	}
+	if got := CommandLine([]string{"tool", "--password", "basic", "next"}, 1024); strings.Contains(got, "basic") || !strings.HasSuffix(got, " next") {
+		t.Errorf("a flag's value that reads like a scheme: %q", got)
+	}
+}
+
 func TestCommandLineRedactsAllWordsOfQuotedSecret(t *testing.T) {
 	for _, line := range []string{
 		`bash -c "--token=dccert-first dccert-second dccert-third"`,

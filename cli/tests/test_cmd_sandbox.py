@@ -124,6 +124,26 @@ def test_short_help_is_the_go_short_description() -> None:
         assert python[path].short_help == entry["short"], path
 
 
+def test_long_help_and_examples_are_the_go_ones() -> None:
+    # GAP-0171: users read the stub's --help, so a Go Long text the stub lacks
+    # is help nobody sees (unblock never said what it cannot lift). Click
+    # rewraps, so compare the words.
+    def words(text: str) -> str:
+        return " ".join(text.split())
+
+    stubs = {"sandbox " + " ".join(cmd.path): cmd for cmd in cmd_sandbox.SANDBOX_COMMANDS}
+    for path, entry in _manifest().items():
+        if entry.get("long"):
+            assert words(stubs[path].long) == words(entry["long"]), path
+        if entry.get("example"):
+            assert words(stubs[path].example) == words(entry["example"]), path
+    shown = CliRunner().invoke(sandbox, ["unblock", "--help"], obj=AppContext())
+    assert shown.exit_code == 0, shown.output
+    assert "It cannot lift a block-list entry" in words(shown.output)
+    # GAP-0187: nor what the egress guard keeps closed.
+    assert "Nor does it open a private network" in words(shown.output)
+
+
 def test_bool_and_repeatable_flags_have_the_matching_click_shape() -> None:
     for path, command in _python_tree().items():
         for param in command.params:
@@ -321,6 +341,9 @@ def test_an_unstartable_gateway_binary_is_a_plain_error(monkeypatch: pytest.Monk
         (["sandbox", "pack", "show", "strict"], {}, True),
         (["sandbox", "pack", "validate", "pack.yaml"], {}, True),
         (["sandbox", "pack"], {}, False),
+        # GAP-0124: the CI mode the policy-packs page documents needs no install.
+        (["sandbox", "policy", "test", "--pack", "balanced", "--fixture", "f.yaml"], {}, True),
+        (["sandbox", "policy", "show"], {}, False),
         (["sandbox", "run", "claude"], {"DEFENSECLAW_SANDBOX_ID": "sb-1"}, True),
         (["sandbox", "run", "claude"], {}, False),
         (["sandbox", "list"], {}, False),

@@ -127,21 +127,53 @@ network boundary (`openshell`). It carries the destination as
 dialed address (`defenseclaw.network.resolved_ip`), `url.scheme` when known,
 `defenseclaw.network.decision` (`allow` or `block`) with `.blocked`, a stable
 `.decision_code`, a bounded `.reason`, and the source policy summary
-(`.policy_outcome`). Only OpenShell's HTTP events can add the origin-form
-path of a plain-HTTP request (`defenseclaw.network.target_path`); the
-DefenseClaw proxy never records URL paths. Blocked decisions default to
+(`.policy_outcome`). OpenShell reports an allowed connection (naming the
+process) and then each HTTP request it inspects on it: the connection and
+its first request are one record, each later request on it a record of its
+own, and every denied request is recorded. Only OpenShell's HTTP events can
+add the origin-form path of a plain-HTTP request
+(`defenseclaw.network.target_path`); the DefenseClaw proxy never records
+URL paths. Blocked decisions default to
 MEDIUM, allowed ones to INFO. Each record also increments
-`defenseclaw.egress.events`.
+`defenseclaw.egress.events`, except a refusal that is audited only
+(`SANDBOX_EGRESS_LOOKUP_REFUSED`, `SANDBOX_EGRESS_HARNESS_FETCH`, below),
+which is no blocked request: the Sandboxes dashboard leaves those out of its
+blocked egress too.
 
 OpenShell's denials are recorded as they come (decision code
-`SANDBOX_EGRESS_OPENSHELL_DENIED`), including the connections it closes on a
-policy reload ("policy generation is stale") and the denials of this
-install's own ingress and egress ports; those two are not counted in the
+`SANDBOX_EGRESS_OPENSHELL_DENIED`), including the denials of this
+install's own ingress and egress ports, which are not counted in the
 sandbox's blocked requests and are not shown as blocks on the activity feed.
+A connection OpenShell closes on a policy reload ("policy generation is
+stale"; every reload closes the open connections, allowed ones included) is
+no denial: it is the end of an allowed connection, `log.egress.failed` with
+outcome `cancelled` and decision code `SANDBOX_EGRESS_TERMINATED`, without
+byte counts or duration, and no alert. The denial of a `--host-port` port
+that raises an ask has decision code `SANDBOX_EGRESS_HOST_PORT_ASK` and a
+reason that names the ask.
+The reason of an OpenShell denial (`defenseclaw.network.reason`) has the
+words the activity feed shows, with OpenShell's token after them: `no
+OpenShell rule allows it (transparent_tcp_policy_denied)`, for a cloud
+metadata or link-local address `cloud metadata or link-local address, never
+reachable from a sandbox`, and for port 22 `SSH does not leave a sandbox: use
+an HTTPS remote (https://HOST/…)`.
+OpenShell's refusal of a name lookup (`policy_dns_ineligible`) is recorded
+at INFO with decision code `SANDBOX_EGRESS_LOOKUP_REFUSED` and is no alert:
+the connection that follows is denied, recorded and alerted on its own.
+A refusal of a request the harness makes on its own and does without
+(OpenCode's model catalog, the Codex tip download), by OpenShell or the
+proxy, is recorded at INFO with decision code `SANDBOX_EGRESS_HARNESS_FETCH`
+and is no alert: `defenseclaw alerts` and the TUI leave it out.
 A denied connection to a host port is recorded with `server.address`
 `host.openshell.internal`, not OpenShell's synthetic address. A sandbox
 whose policy turned its web egress off while it ran is refused by the proxy
 with category `egress_off` (decision code `SANDBOX_EGRESS_EGRESS_OFF`).
+A refusal by the merged block list names whose entry it was, as the feed
+does: decision code `SANDBOX_EGRESS_PACK_BLOCK`,
+`SANDBOX_EGRESS_REPO_POLICY_BLOCK` or `SANDBOX_EGRESS_FIREWALL_BLOCK` with
+the feed's words as the reason ("on the repository policy's block list,
+.defenseclaw/sandbox.yaml"); the user's own entries keep
+`SANDBOX_EGRESS_OPERATOR_BLOCK`.
 OpenShell's allowed connections to a host port other than this install's
 own (a `--host-port` service, a local model endpoint) are recorded as
 allowed with `server.address` `host.openshell.internal`.
@@ -259,6 +291,23 @@ Two `degraded` records are the manager's own:
   counted in `GET /api/v1/sandbox/status` (`telemetry_failures`,
   `telemetry_error`) and on `defenseclaw sandbox status`.
 
+Events lost on a sandbox's stream are a `degraded` record of that sandbox
+(`openshell_watch_failed`) whose summary says what happened, with the
+stream's reason in brackets. A cursor out of range (`cursor_out_of_range`:
+the gateway restarted, as an upgrade or `sandbox setup --install-openshell`
+does, or trimmed its event log) is MEDIUM, which is no alert; a cursor the
+gateway could not have issued (`cursor_rejected`) stays HIGH. A deleted
+sandbox reports none.
+
+A connection to the OpenShell gateway that fails is a `degraded` record of the
+integration (`openshell_unavailable`, at the first failure and whenever the
+error changes) whose summary says what happened: the gateway is not running
+(nothing listens on its port), the gateway on the port is not this account's
+(its certificate is not from this account's OpenShell CA, as when another
+account's gateway holds the port), or it does not answer. It names
+`defenseclaw sandbox doctor` and ends with the client's error in brackets. Its
+audit row's target is `openshell`.
+
 ### Findings
 
 `defenseclaw.finding.category` is `sandbox.<kind>`:
@@ -288,7 +337,8 @@ process joins the tree and one when it exits:
 `.pid` (absent on a `tetragon` record whose in-sandbox pid was not captured),
 `.host_pid` and `.exec_id` (Tetragon's exec id; both only on `tetragon`
 records), `.parent_pid` (absent while only OpenShell reported the
-process, which names no parent), `.name` (comm), `.executable`,
+process, which names no parent), `.name` (comm; in full from the
+executable or first argument when the kernel cut it at 15 bytes), `.executable`,
 `.command_line` (the first 16 arguments, joined, the values of arguments that
 name secrets replaced, at most 1,024 bytes), `.working_directory`,
 `.exit_code` (when OpenShell reported it) and `.lineage` (the names of up to
@@ -304,7 +354,13 @@ OpenShell does not report, has no record. An OpenShell launch makes both a
 lineage once a sample saw them).
 
 With the tree on, `sandbox destinations` and its API name the lineage of the
-process that made each connection (`lineage`, the process first).
+process that made each connection (`lineage`, the process first). OpenShell's
+NET records name the program but pid 0 (both drivers), so a row takes the
+one process of its last binary (by path, or by name when the sample could
+not read the process's executable) that started in the 5 seconds before that
+binary was last seen connecting; none, or two copies, leave it without a
+lineage. An older copy that is still running is not taken: a program too
+short for a sample is not in the tree and cannot be told from it.
 
 ### AI discovery inside a sandbox
 

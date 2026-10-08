@@ -289,7 +289,8 @@ type CredentialProfile struct {
 	// DefaultModel is the model a sandbox with this profile runs because
 	// the provider does not serve the harness's own default. It travels
 	// with ModelProvider (Codex) or as ANTHROPIC_MODEL in Env (Claude Code)
-	// into the run's managed configuration, above user config and
+	// into the run's managed configuration, or as a model flag in
+	// LaunchArgs (Hermes) ahead of the caller's arguments, above user config and
 	// configuration overrides; only the harness's model flag picks another
 	// (Spec.Model).
 	DefaultModel string
@@ -404,13 +405,14 @@ type Spec struct {
 	directFetches []DirectFetch
 }
 
-// DirectFetch is a request the pinned harness binary makes on its own
-// around the egress proxy (its HTTP client ignores the proxy variables)
-// with no setting that turns it off, and that the harness does without
-// when it fails. OpenShell refuses it and drafts a proposal to open the
+// DirectFetch is a request the pinned harness binary makes on its own with
+// no setting that turns it off, and that the harness does without when it
+// fails. Around the egress proxy (its HTTP client ignores the proxy
+// variables) OpenShell refuses it and drafts a proposal to open the
 // destination; triage rejects that proposal instead of adding a direct rule
 // (and the policy reload that closes the sandbox's open connections) the
-// harness does not need.
+// harness does not need. Through the proxy, an allowlist pack refuses it.
+// Either refusal is audited but not shown or counted as the agent's.
 type DirectFetch struct {
 	Host string
 	Port int

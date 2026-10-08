@@ -162,6 +162,26 @@ def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
     )
 
 
+def _is_rule_pack_switch(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail use-pack``.
+
+    It repairs the state the config check refuses most often: an edited
+    custom pack no longer matches its ``guardrail.custom_packs`` pin, and
+    ``use-pack NAME`` pins it again (``use-pack default`` switches away). The
+    write itself validates the whole candidate config, so skipping the
+    start-up check lets nothing invalid through (GAP-0128). Matched like
+    :func:`_is_offline_rulepack_validation`.
+    """
+    if ctx.invoked_subcommand != "guardrail":
+        return False
+    argv = sys.argv[1:]
+    try:
+        guardrail_index = argv.index("guardrail")
+    except ValueError:
+        return False
+    return guardrail_index + 1 < len(argv) and argv[guardrail_index + 1] == "use-pack"
+
+
 def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     """Return whether a ``sandbox`` stub runs without a DefenseClaw config.
 
@@ -170,7 +190,9 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     uninstall of a half-installed host), a nested ``sandbox run`` inside a
     sandbox, which runs the harness natively, and the read-only ``sandbox
     pack list|show|validate`` (an administrator reads a pack's digest before
-    writing the config that pins it). An existing non-v8 document is still
+    writing the config that pins it) and ``sandbox policy test`` (a CI job
+    checks a pack against a fixture with no install, GAP-0124), which use
+    the default configuration there. An existing non-v8 document is still
     refused by the preflight.
     """
     if ctx.invoked_subcommand != "sandbox":
@@ -183,9 +205,11 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     child = argv[index + 1] if index + 1 < len(argv) else ""
     if child == "teardown":
         return True
+    grandchild = argv[index + 2] if index + 2 < len(argv) else ""
     if child == "pack":
-        grandchild = argv[index + 2] if index + 2 < len(argv) else ""
         return grandchild in {"list", "show", "validate"}
+    if child == "policy":
+        return grandchild == "test"
     return child == "run" and bool(os.environ.get("DEFENSECLAW_SANDBOX_ID", "").strip())
 
 
@@ -343,7 +367,7 @@ def cli(ctx: click.Context) -> None:
     # see a clear diagnostic instead of a deep stack trace. Skipped for
     # recovery commands (doctor/config/keys/upgrade) so a broken config
     # doesn't lock them out of the tools that would fix it.
-    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup":
+    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup" and not _is_rule_pack_switch(ctx):
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()

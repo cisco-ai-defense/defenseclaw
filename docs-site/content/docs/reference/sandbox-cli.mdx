@@ -68,7 +68,9 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   `json`. While sandboxes are off, a JSON command that needs them (`list`,
   `policy show`) prints `{"enabled": false, "available": false, "reason": ...}`,
   the same fields as `sandbox status --json`, and exits `1`.
-- **Exit status.** `0` on success and `1` on an error. `run` and `connect`
+- **Exit status.** `0` on success and `1` on an error. `setup` exits `1`
+  when it ends not ready for sandboxes yet (its last line says why and what
+  to do), as `doctor` does when a check fails. `run` and `connect`
   return the exit status of the harness, and `exec` that of its command
   (`connect --shell` exits `0` when the shell ends). When the harness exits
   `0` but not one of the session's hooks reached DefenseClaw, so that every
@@ -76,6 +78,9 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   its first hook only with your first prompt (Kiro CLI, Hermes Agent,
   Antigravity, OpenHands, OmniGent, GitHub Copilot CLI) and was never
   prompted is not counted, unless the daemon saw it work without hooks.
+  Neither is an interactive session given harness arguments after `--`
+  that may start no session (`connect NAME -- --version`), unless the
+  daemon or the live check flagged it: it ends with a note instead.
   `logs` does the same when it reports a finished detached run none of
   whose hooks reached DefenseClaw. `pull --apply` exits `4` when it could not
   merge in place (a conflict, or git older than 2.38) and left your working
@@ -1051,16 +1056,25 @@ boundary, and says what each one is:
   Each provider raises a `shadow_ai` finding once a session: LOW the first
   time the policy refuses it, MEDIUM the first time the sandbox reaches it
   (a refusal and then a contact raise one of each);
-- otherwise the category the egress proxy allowed it under (for example
-  `package registry`), **blocked** when it was only ever refused, or
-  **other**.
+- otherwise **blocked** when it was only ever refused (the KIND cell says
+  whose list refused it, for example `blocked (paste site)`), or **other**.
+
+The PROVIDER column names the AI provider, or is `-`.
 
 Each row shows the requests and refusals both boundaries counted, the bytes
 the proxy relayed, and the last binary OpenShell named making the
 connection. The binary is what the process in the sandbox claims to be.
 With the [process tree](/docs/sandboxes/policy-packs) on, the binary column
 shows that process and its parents instead (`curl ← bash ← claude`), and
-`--output json` adds them (`lineage`). A second table lists the
+`--output json` adds them (`lineage`). OpenShell names no process id for a
+connection (on Linux and on the Mac), so the row finds the binary's process
+in the tree by its path (or its name: the sandbox seldom shows a process's
+executable): the one copy of it that started in the 5 seconds before the
+connection. A program that ran for less than one sample (5 seconds, 15 on a
+slow Mac), that ran in two copies then, or that connected long after it
+started (a package manager's later downloads) keeps only the binary: a
+program too short for the tree cannot be told from an older copy that is
+still running. A second table lists the
 models OpenShell's inference route reported calls to. The view survives
 daemon restarts and stops, keeps at most 512 hosts (the oldest that are not
 AI destinations make room; when every row is one, a provider the catalog
@@ -1072,6 +1086,10 @@ line of `sandbox status NAME` sums it up.
 defenseclaw sandbox destinations myapp-7f3a
 defenseclaw sandbox destinations myapp-7f3a --output json
 ```
+
+Output from a real sandbox named `myapp-claude`:
+
+![defenseclaw sandbox destinations myapp-claude: the model provider, one shadow AI destination, one blocked site and three ordinary sites, with requests, bytes, the program that connected and when it was last seen](/images/sandboxes/screens/terminal-destinations.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags destinations */}
 | Flag | Takes | Default | Description |
@@ -1148,8 +1166,9 @@ Lifts an egress block for one sandbox (`--sandbox NAME`) or for every sandbox
 (`--always`, saved to `openshell.egress.unblocked`). Choose exactly one of
 the two. Only blocks from the blocklist feed or the profile's default can be
 lifted: IP addresses under `open`, and hosts off the allowlist under
-`balanced`. Your own block list, private networks, this machine, and your
-organization's lists can't be unblocked, and neither can anything under
+`balanced`. Your own block list (remove an entry with
+[`sandbox policy block --remove`](#sandbox-policy-block)), private networks,
+this machine, and your organization's lists can't be unblocked, and neither can anything under
 `strict`, which runs without the egress proxy. With
 `openshell.admin.allow_unblock: false`, nothing can be unblocked. The
 [decision order](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
@@ -1347,12 +1366,18 @@ The daemon does the same on its own once the sandbox is ready and every
 sandbox stops (without its processes). The AI inventory shows the sandbox's
 components, marked with its name, after its next scan:
 `defenseclaw agent usage --sandbox NAME`. `ai_discovery.enabled: false` turns
-it off.
+it off. Each row lists the components it names (`NAMES`: MCP servers,
+skills, rules, plugins) apart from the files and folders they were found in
+(`EVIDENCE`: a config file, a skills folder, a binary).
 
 ```bash
 defenseclaw sandbox discover myapp-7f3a
 defenseclaw sandbox discover myapp-7f3a --json
 ```
+
+Output from a real sandbox named `myapp-claude`:
+
+![defenseclaw sandbox discover myapp-claude: one row per component with its category, product, what found it, its names and the file or folder that holds it](/images/sandboxes/screens/terminal-sandbox-discover.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags discover */}
 | Flag | Takes | Default | Description |
@@ -1373,7 +1398,9 @@ starting and exiting, so a process that starts and ends between two samples,
 and that OpenShell does not report, is not seen. The agent chooses its
 processes' names and arguments: they are shown, never acted on. The same tree
 is in the TUI's sandbox detail and in the `sandbox.process_tree` telemetry
-records. On a Linux host with the sandbox kernel feed installed
+records. A stopped sandbox lists no processes: `ps` says when it was last
+sampled, and `--json` lists the processes that ended. On a Linux host with
+the sandbox kernel feed installed
 ([`sandbox kernel-feed`](#sandbox-kernel-feed)), every exec and exit the
 kernel sees in a docker sandbox is recorded as well, and the listing says
 `source: kernel`. A process the feed reported without its in-sandbox pid is
@@ -1384,6 +1411,11 @@ with the feed's state and counters.
 defenseclaw sandbox ps myapp-7f3a --tree
 defenseclaw sandbox ps myapp-7f3a --json
 ```
+
+Output from a real sandbox named `myapp-claude` while a rate-limited `curl`
+ran:
+
+![defenseclaw sandbox ps myapp-claude --tree: the sandbox's init process, a login shell, the DefenseClaw supervisor, Claude Code, a shell it started and the curl under that shell, with the note that the tree is sampled every 5 seconds](/images/sandboxes/screens/terminal-sandbox-ps-tree.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags ps */}
 | Flag | Takes | Default | Description |
@@ -1497,7 +1529,9 @@ a relative FILE is in the current folder) and checks it as `sandbox pack
 validate` would, removing it if it doesn't load. `--diff` prints what the pack
 changes against the effective policy (the sandbox's, or a run's in this
 folder): the settings that differ, and every reached destination the pack
-would block. Nothing is applied: lock a project to the pack with
+would block. Settings a `sandbox run` flag or the gateway decides (such as
+the copy a Mac always works on) are left out, since the pack doesn't change
+them. Nothing is applied: lock a project to the pack with
 `sandbox run --pack FILE`. See
 [Record, then lock](/docs/sandboxes/policy-packs#record-then-lock).
 
@@ -1551,7 +1585,7 @@ defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pac
 | `--binary` | text |  | The program that connects (shown in the report). |
 | `--fixture` | text |  | Check every destination of this YAML or JSON list; exit 1 on a mismatch. |
 | `--harness` | text |  | Resolve for this harness. |
-| `--host` | text |  | The destination host (or host:port). |
+| `--host` | text |  | The destination host (or host:port), given once (list several with --fixture). |
 | `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--pack` | text |  | Resolve with this pack. |
@@ -1578,20 +1612,27 @@ defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags policy allow */}
-This command has no flags.
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--remove` | switch |  | Remove the hosts from openshell.egress.allow instead. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox policy block`
 
 Adds host patterns to `openshell.egress.block` in `config.yaml`. A host on the
-block list can't be unblocked; remove the entry to reach it again.
+block list can't be unblocked; remove the entry to reach it again with
+`--remove`, which takes entries as written (`sandbox policy allow --remove`
+does the same for the allow list).
 
 ```bash
 defenseclaw sandbox policy block files.example.net
+defenseclaw sandbox policy block --remove files.example.net
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags policy block */}
-This command has no flags.
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--remove` | switch |  | Remove the hosts from openshell.egress.block instead. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 Both commands check each pattern and refuse a change that would make

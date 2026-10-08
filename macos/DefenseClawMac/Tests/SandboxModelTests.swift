@@ -379,7 +379,7 @@ struct SandboxModelTests {
 
     /// A private-network address asks in every pack; balanced also asks for
     /// hosts off its allowlist and strict for every destination, and a port on
-    /// this machine never asks (--host-port opens it). The TUI's Asks view says
+    /// this machine asks only when the run named it (--host-port). The TUI's Asks view says
     /// the same (sandbox_state.NO_ASKS_TEXT).
     private static func noAsksTextHoldsForEveryPackAndMatchesTheTUI() {
         let text = SandboxSnapshot.noAsksText

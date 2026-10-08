@@ -128,6 +128,10 @@ type Options struct {
 	Telemetry audit.SandboxTelemetry
 	// Persist keeps "always" decisions in config.yaml; nil refuses them.
 	Persist triage.Persister
+	// SyncConfig loads config.yaml into the snapshot Config returns before
+	// a decision that must see the user's latest write (the reload watcher
+	// follows the file a second or so later); nil decides on the snapshot.
+	SyncConfig func(context.Context) error
 	// Quiesce is the ingress in-flight tracker approvals wait on.
 	Quiesce triage.Quiescer
 	// ForgetBinding drops the ingress's per-binding state after a revoke.
@@ -190,6 +194,11 @@ type Options struct {
 	// token, so while it returns an error Create and Start are refused.
 	// Nil assumes the caller holds them.
 	Listeners func() error
+	// DiscoveryRemoved is told the name of a sandbox whose AI discovery
+	// record a delete removed, so the AI inventory drops its signals now
+	// instead of at its next scan (GAP-0184). It must not block; nil does
+	// nothing.
+	DiscoveryRemoved func(name string)
 	// Guard runs the nested-repository guard of a mounted project while
 	// its sandbox is ready (default: package nestguard). GuardGitlinks
 	// lists a project's index gitlinks (default: the host git through
@@ -282,6 +291,9 @@ type Manager struct {
 	kfeed *kernelFeed
 	// procGate paces each sandbox's process and SSH records.
 	procGate *rateGate
+	// ownExecs are DefenseClaw's own execs, whose SSH OPEN records are
+	// dropped.
+	ownExecs ownExecs
 	// authFails paces the proxy's refusals of invalid credentials into
 	// health records (authFailed).
 	authFails authFailures
@@ -462,6 +474,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer func() {
 		m.stopWatchers()
 		m.closeGateway()
+		m.feed.closeSubscribers()
 		m.runMu.Lock()
 		m.runCtx = nil
 		m.runMu.Unlock()
@@ -487,12 +500,14 @@ func (m *Manager) Run(ctx context.Context) error {
 	destinations := time.NewTicker(destinationFlushEvery)
 	defer destinations.Stop()
 	defer m.flushDestinations("")
+	defer m.keepHookCounts()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-destinations.C:
 			m.flushDestinations("")
+			m.keepHookCounts()
 		case <-silence.C:
 			m.checkHookSilence(ctx)
 			m.pruneToolCalls()
@@ -548,7 +563,7 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 	if err != nil {
 		if m.gwErr == nil || m.gwErr.Error() != err.Error() {
 			m.logf("OpenShell gateway unavailable: %v", err)
-			m.health(ctx, audit.SandboxHealthDegraded, gatewaylog.ErrCodeOpenShellUnavailable, err.Error())
+			m.health(ctx, audit.SandboxHealthDegraded, gatewaylog.ErrCodeOpenShellUnavailable, gatewayUnavailableSummary(err))
 		}
 		m.gwErr, m.gwErrAt = err, m.now()
 		if m.opts.OnGateway != nil {
@@ -705,6 +720,24 @@ func (m *Manager) health(ctx context.Context, state audit.SandboxHealthState, co
 	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
 		State: state, ErrorCode: errorToken(code), ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
+}
+
+// gatewayUnavailableSummary is the degraded health record of a failed
+// connection to the OpenShell gateway: what happened in words and the next
+// step, with the client's error last (GAP-0169). The client's text alone
+// ("tls: failed to verify certificate: x509: certificate signed by unknown
+// authority" while another account's gateway held the port) said neither.
+func gatewayUnavailableSummary(err error) string {
+	raw := err.Error()
+	what := "the OpenShell gateway does not answer"
+	switch {
+	case strings.Contains(raw, "certificate signed by unknown authority"):
+		what = "the OpenShell gateway on this account's port is not this account's (its certificate is not from this account's " +
+			"OpenShell CA; another account's gateway may hold the port)"
+	case strings.Contains(raw, "connection refused"):
+		what = "the OpenShell gateway is not running (nothing listens on its port)"
+	}
+	return what + "; run `defenseclaw sandbox doctor` (" + raw + ")"
 }
 
 // errorToken is a gateway error code as audit records carry it: a stable

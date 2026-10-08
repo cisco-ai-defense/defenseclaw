@@ -1032,11 +1032,78 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	})
 }
 
+// GAP-0082: a sandbox egress row names its host as the target and the
+// sandbox, binary, code and reason as its details, not only egress.blocked.
+func TestSandboxEgressRowNamesTheHostAndTheSandbox(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+		Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "pastebin.com", Port: 443, Blocked: true,
+		DecisionCode: "SANDBOX_EGRESS_PASTE_SITE", Reason: "paste site", Executable: "/usr/bin/curl",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	want := "decision=block sandbox=" + testSandboxIdentity().Name + " binary=/usr/bin/curl code=SANDBOX_EGRESS_PASTE_SITE reason=paste site"
+	if rows[0].Target != "pastebin.com" || rows[0].Details != want {
+		t.Fatalf("row target=%q details=%q, want pastebin.com and %q", rows[0].Target, rows[0].Details, want)
+	}
+}
+
+// GAP-0160: a sandbox's degraded health row reads "sandbox degraded: …"
+// (its target names the sandbox), not "openshell degraded", which stays for
+// the OpenShell integration's own health.
+func TestSandboxHealthRowNamesTheSandbox(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	for _, ev := range []SandboxHealthEvent{
+		{Sandbox: testSandboxIdentity(), State: SandboxHealthDegraded, ErrorCode: "openshell_pack_invalid", ErrorSummary: "the sandbox policy cannot be resolved"},
+		{State: SandboxHealthDegraded, ErrorCode: "openshell_unavailable", ErrorSummary: "the gateway does not answer"},
+	} {
+		if err := recorder.RecordSandboxHealth(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Details] = true
+	}
+	if !got["sandbox degraded: the sandbox policy cannot be resolved"] || !got["openshell degraded: the gateway does not answer"] {
+		t.Fatalf("details = %v", got)
+	}
+}
+
 // TestSandboxEgressEndsAndActivity pins the records the sandbox manager adds
 // on top of the egress decisions: the end of an allowed connection
 // (completed with its bytes and duration, failed or timed out) without a
 // second metric point, the actor OpenShell named, the binding, the launching
 // user and the hooks' session, and the process, SSH and inference families.
+// GAP-0134, GAP-0138: a refusal that is audited only (a refused name lookup,
+// the harness's own request) counts no egress decision, and OpenShell's
+// record of a connection it closed on a policy reload carries no bytes or
+// time, which OpenShell does not count.
+func TestSandboxEgressAuditOnlyRecords(t *testing.T) {
+	harness := newSandboxHarness(t)
+	sb := testSandboxIdentity()
+	envelope := CorrelationEnvelope{SessionID: "envelope-session", AgentID: "agent-sandbox-1"}
+	runtime, _ := harness.recordOne(t, router.AdmissionOrdinary, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceOpenShell,
+		Host: "github.com", Blocked: true, DecisionCode: SandboxEgressCodeLookupRefused, Severity: "INFO"}, envelope)
+	if events := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawEgressEvents); len(events) != 0 {
+		t.Fatalf("a refused lookup counted %d egress decisions", len(events))
+	}
+	_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceOpenShell,
+		Host: "api.example.com", Port: 443, End: SandboxEgressFailed, Terminated: true, DecisionCode: "SANDBOX_EGRESS_TERMINATED"}, envelope)
+	if record.Outcome() != observability.OutcomeCancelled {
+		t.Fatalf("outcome = %q", record.Outcome())
+	}
+	assertSandboxFields(t, sandboxBody(t, record), map[string]any{"defenseclaw.network.bytes_up": nil, "defenseclaw.network.duration_ms": nil})
+}
+
 func TestSandboxEgressEndsAndActivity(t *testing.T) {
 	harness := newSandboxHarness(t)
 	sb := testSandboxIdentity()
@@ -2455,5 +2522,19 @@ func assertCatalogValue(t *testing.T, family, key, fieldType string, value any, 
 		}
 	default:
 		t.Fatalf("%s %s has unsupported catalog type %s", family, key, fieldType)
+	}
+}
+
+// GAP-0169: the OpenShell integration's own health row (a gateway that does
+// not answer) names OpenShell as its target, not nothing.
+func TestOpenShellHealthRowNamesOpenShell(t *testing.T) {
+	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	if err := recorder.RecordSandboxHealth(context.Background(), SandboxHealthEvent{State: SandboxHealthDegraded,
+		ErrorCode: "openshell_unavailable", ErrorSummary: "the OpenShell gateway is not running"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 || rows[0].Target != "openshell" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 }

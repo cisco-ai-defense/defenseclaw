@@ -104,8 +104,11 @@ func TestDiscoverInventoriesTheSandbox(t *testing.T) {
 	detectors := map[string]bool{}
 	for _, sig := range res.Signals {
 		detectors[sig.Detector] = true
-		if sig.Detector == "mcp" && !slices.Contains(sig.Names, "dccert-marker") {
-			t.Fatalf("mcp signal %+v, want the server named", sig)
+		// The server is a name; the config file it is in is evidence
+		// (GAP-0116).
+		if sig.Detector == "mcp" && (!slices.Contains(sig.Names, "dccert-marker") || len(sig.Evidence) == 0 ||
+			slices.ContainsFunc(sig.Names, func(n string) bool { return strings.HasSuffix(n, ".json") })) {
+			t.Fatalf("mcp signal %+v, want the server named and its config file as evidence", sig)
 		}
 	}
 	for _, want := range []string{"mcp", "process", "env"} {
@@ -162,10 +165,16 @@ func TestDiscoverInventoriesTheSandbox(t *testing.T) {
 		t.Fatalf("discover of a stopped sandbox = %v, want conflict", err)
 	}
 
-	// A delete removes the record and its tree.
+	// A delete removes the record and its tree, and tells the AI inventory,
+	// which drops its signals at once (GAP-0184).
+	var removed atomic.Value
+	e.m.opts.DiscoveryRemoved = func(name string) { removed.Store(name) }
 	e.deleteBox("discbox", sandboxapi.DeleteRequest{})
 	if _, err := os.Stat(e.m.discoveryDir("discbox")); !os.IsNotExist(err) {
 		t.Fatalf("discovery folder after delete: %v", err)
+	}
+	if got, _ := removed.Load().(string); got != "discbox" {
+		t.Fatalf("DiscoveryRemoved got %q, want discbox", got)
 	}
 }
 

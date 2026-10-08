@@ -27,6 +27,7 @@ from typing import Any
 from defenseclaw.alert_semantics import (
     ALERT_ACTIONABLE_SEVERITIES,
     ALERT_ALL_SEVERITIES,
+    ALERT_AUDIT_ONLY_DECISION_CODES,
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
 )
@@ -166,6 +167,14 @@ _V8_ALERT_WHERE_SQL_TEMPLATE = """
             ) IN (
                 {non_allow_outcomes}
             )
+            AND COALESCE(
+                CASE WHEN json_valid(COALESCE(payload_json, ''))
+                     THEN json_extract(
+                         payload_json,
+                         '$."defenseclaw.network.decision_code"'
+                     ) END,
+                ''
+            ) NOT IN ({audit_only_decision_codes})
         )
         OR (
             bucket IN ('platform.health', 'diagnostic')
@@ -228,6 +237,7 @@ def _v8_alert_where_sql(columns: frozenset[str]) -> str:
         all_severities=_sql_string_values(ALERT_ALL_SEVERITIES),
         actionable_severities=_sql_string_values(ALERT_ACTIONABLE_SEVERITIES),
         non_allow_outcomes=_sql_string_values(ALERT_NON_ALLOW_OUTCOMES),
+        audit_only_decision_codes=_sql_string_values(ALERT_AUDIT_ONLY_DECISION_CODES),
         legacy_finding_actions=_sql_string_values(ALERT_LEGACY_FINDING_ACTIONS),
         legacy_hook_event=LEGACY_HOOK_EVENT_NAME,
         hook_may_block=hook_decision_may_block_sql(

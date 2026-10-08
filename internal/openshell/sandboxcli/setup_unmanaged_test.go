@@ -265,7 +265,7 @@ func TestSetupSaysAnUnwrittenChangeNeedsSetup(t *testing.T) {
 			})
 			ta.gateway.applyRes = &openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: ta.ConfigPath}}}
 			_, _ = useGateway(ta)
-			ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+			wantExit(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}), 1)
 			out := ta.output()
 			has(t, out, "Run sandboxes in OpenShell MicroVMs?", "Write this change? DefenseClaw cannot restart this gateway")
 			lacks(t, out, "Done →", "every run works on a copy (the MicroVM driver")

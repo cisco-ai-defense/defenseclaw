@@ -659,6 +659,36 @@ def test_unverified_version_hint_names_action_mode() -> None:
     assert "'defenseclaw setup hermes --mode action'" in row["remediation"]
 
 
+def test_agent_installed_after_discovery_names_the_refresh() -> None:
+    # GAP-0052: Claude Code installed after init read as missing until a
+    # refresh, and the next step said to install it.
+    from types import SimpleNamespace
+
+    from defenseclaw import doctor_health
+
+    finding = doctor_health.ConnectorHealthFinding(
+        connector="claudecode",
+        status=doctor_health.HealthStatus.UNAVAILABLE,
+        reason_code="connector-agent-unavailable",
+        summary="claudecode is active but its agent installation is unavailable",
+        remediations=doctor_health._unavailable_connector_remediations("claudecode"),
+    )
+    report = SimpleNamespace(components=(), connectors=(finding,))
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=None),
+        mock.patch("defenseclaw.doctor_health.build_health_report", return_value=report),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch("defenseclaw.inventory.agent_discovery.shutil.which", return_value="/opt/bin/claude"),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["claudecode"], r)
+    row = next(c for c in r.checks if c["label"] == "Connector compatibility: claudecode")
+    assert row["status"] == "warn"
+    assert "is installed now, after the last agent discovery" in row["detail"]
+    assert row["remediation"].startswith("defenseclaw agent discover --refresh")
+
+
 def test_init_next_steps_drop_a_plain_setup_covered_by_mode_action() -> None:
     # GAP-1372: init printed "setup hermes --mode action" and then a plain "setup hermes".
     from types import SimpleNamespace
