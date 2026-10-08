@@ -586,9 +586,14 @@ func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started,
 		t.kernel.pinned++
 	}
 	if binary == sandboxfeed.ClaudeHookScript {
-		if f.Hook {
+		// A run Claude Code started (its launch shell, `sh -c <script>`)
+		// that the feed did not fold; the workload's own runs of the script
+		// are never folded and say nothing about the feed.
+		launcher := t.byExec[f.ParentExecID]
+		switch {
+		case f.Hook:
 			t.kernel.unfolded = 0
-		} else {
+		case launcher != nil && strings.HasSuffix(launcher.Cmdline, " -c "+sandboxfeed.ClaudeHookScript):
 			t.kernel.unfolded++
 		}
 	}

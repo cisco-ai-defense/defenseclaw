@@ -50,12 +50,18 @@ func TestUnfoldedHookCallsAreCounted(t *testing.T) {
 		return list.Kernel.UnfoldedHookCalls
 	}
 	at := time.Now().Add(-time.Minute)
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "claude", "", 9500, 100, "/usr/local/bin/claude", "/usr/local/bin/claude", at))
 	for i := range 3 {
 		name := fmt.Sprintf("full-%d", i)
-		e.m.observeKernelFrame(ctx, b, execFrame(id, name, "", 9600+i, 0, sandboxfeed.ClaudeHookScript,
-			sandboxfeed.ClaudeHookScript+" -p "+sandboxfeed.ClaudeHookScript, at.Add(time.Duration(i)*time.Second)))
-		e.m.observeKernelFrame(ctx, b, execFrame(id, name+"-jq", name, 9700+i, 0, "/usr/bin/jq", "/usr/bin/jq -r .x", at.Add(time.Duration(i)*time.Second)))
+		at := at.Add(time.Duration(i) * time.Second)
+		e.m.observeKernelFrame(ctx, b, execFrame(id, name+"-sh", "claude", 9590+i, 0, "/bin/sh", "/bin/sh -c "+sandboxfeed.ClaudeHookScript, at))
+		e.m.observeKernelFrame(ctx, b, execFrame(id, name, name+"-sh", 9600+i, 0, sandboxfeed.ClaudeHookScript,
+			sandboxfeed.ClaudeHookScript+" -p "+sandboxfeed.ClaudeHookScript, at))
+		e.m.observeKernelFrame(ctx, b, execFrame(id, name+"-jq", name, 9700+i, 0, "/usr/bin/jq", "/usr/bin/jq -r .x", at))
 	}
+	// The workload's own run of the script is never folded: not counted.
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "own-shell", "claude", 9650, 0, "/bin/bash", "/bin/bash -c ./run-hook", at.Add(5*time.Second)))
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "own", "own-shell", 9651, 0, sandboxfeed.ClaudeHookScript, sandboxfeed.ClaudeHookScript, at.Add(5*time.Second)))
 	if n := unfolded(); n != 3 {
 		t.Fatalf("unfolded = %d, want 3", n)
 	}
