@@ -332,15 +332,15 @@ config_check() {
 
 bind_test() {
   if ((SKIP_BIND_TEST)); then
-    log "  skipped: bind test (--skip-bind-test)"
+    warn "bind was not tested (--skip-bind-test); an initially Online SSSD domain can later go Offline"
     return 0
   fi
   if [[ -z $PASSWORD ]]; then
-    log "  skipped: bind test (no password given)"
+    warn "bind was not tested (no password given); an initially Online SSSD domain can later go Offline"
     return 0
   fi
   if ! command -v ldapsearch > /dev/null; then
-    log "  skipped: bind test (install openldap-clients to test the bind user before SSSD changes)"
+    warn "bind was not tested; install openldap-clients to test the bind user before SSSD changes"
     return 0
   fi
   printf '%s' "$PASSWORD" > "$WORK/bind.pw"
@@ -390,9 +390,10 @@ install_conf() {
     local backup
     backup="$CONF.bak-$(date -u +%Y%m%dT%H%M%SZ)"
     cp -p "$CONF" "$backup"
-    log "  backup: $backup"
+    log "  backup: $backup (restore this exact file to undo this run)"
+    PREVIOUS_SSSD_CONF=$backup
   elif ((DRY_RUN)); then
-    log "  would create $CONF (mode 0600, root)"
+    log "  would create $CONF (mode 0600, root); undo by removing this file"
     CONF_CHANGED=1
     return 0
   fi
@@ -420,6 +421,7 @@ pam_step() {
   authselect_profile_check
   local current="" features=() force=()
   current=$(authselect current --raw 2> /dev/null || true)
+  log "  previous authselect profile: ${current:-none} (restore this to undo the install)"
   if [[ $current == sssd* && $current == *with-mkhomedir* ]]; then
     log "  unchanged: authselect already uses sssd with-mkhomedir"
   else
@@ -470,9 +472,11 @@ DROPIN
   install -m 0600 -o root -g root "$want" "$SSHD_DROPIN"
   restorecon "$SSHD_DROPIN" > /dev/null 2>&1 || true
   if ! sshd -t 2> "$WORK/sshd-test.err"; then
+    local rejected
+    rejected=$(head -1 "$WORK/sshd-test.err")
     cat "$WORK/sshd-test.err" >&2
     if [[ -n $backup ]]; then cp -p "$backup" "$SSHD_DROPIN"; else rm -f -- "$SSHD_DROPIN"; fi
-    fail 1 "sshd -t rejected the drop-in; it was removed"
+    fail 1 "sshd -t rejected a configuration file: $rejected. The new drop-in was rolled back; $CONF was already replaced (previous: ${PREVIOUS_SSSD_CONF:-none, this was a first install})."
   fi
   systemctl reload sshd
   log "  installed: $SSHD_DROPIN (sshd reloaded; open sessions stay)"
@@ -482,7 +486,11 @@ wait_online() {
   local i
   for ((i = 0; i < 25; i++)); do
     if sssctl domain-status "$DOMAIN" -o 2> /dev/null | grep -q 'Online status: Online'; then
-      return 0
+      # SSSD can report Online before its first LDAP connection attempt.
+      sleep 25
+      if sssctl domain-status "$DOMAIN" -o 2> /dev/null | grep -q 'Online status: Online'; then
+        return 0
+      fi
     fi
     sleep 1
   done
@@ -526,17 +534,18 @@ restart_sssd() {
       check_allow_group
     else
       sssctl domain-status "$DOMAIN" -o 2>&1 | head -5 >&2 || true
-      fail 1 "sssd restarted but the $DOMAIN domain is not Online. Read: journalctl -u sssd -n 50. The previous config is the newest $CONF.bak-* file."
+      fail 1 "sssd restarted but the $DOMAIN domain is not Online. Read: journalctl -u sssd -n 50. Previous config: ${PREVIOUS_SSSD_CONF:-none, this was a first install}."
     fi
   elif wait_online; then
     log "  ok: sssd is running and the $DOMAIN domain is Online"
     check_allow_group
   else
-    warn "sssd is running but the $DOMAIN domain is not Online"
+    fail 1 "sssd is running but the $DOMAIN domain is not Online; check the bind and journalctl -u sssd. Previous config: ${PREVIOUS_SSSD_CONF:-none, this was a first install}."
   fi
 }
 
 CONF_CHANGED=0
+PREVIOUS_SSSD_CONF=""
 
 main() {
   umask 077

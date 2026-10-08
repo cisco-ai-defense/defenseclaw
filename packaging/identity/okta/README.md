@@ -45,7 +45,7 @@ Active Directory are covered by the identity docs, not by this kit).
 | `verify-okta-identity.sh` | Read-only check of SSSD, `getent`, `id`, the InfoPipe UPN, and the profile DefenseClaw picks for each user. |
 | `admin-config.example.yaml` | Machine config for the standalone enterprise profile with profiles by Okta group. |
 | `user-config.example.yaml` | The same idea for a per-user install. |
-| `build-sssd-ppolicy-backport.sh`, `backport-ppolicy.py` | Builds RHEL 9's SSSD 2.9.8 with the `ldap_use_ppolicy` option. Pinned to `sssd-2.9.8-4.el9_8.1`. Builds only, installs nothing. |
+| `build-sssd-ppolicy-backport.sh`, `backport-ppolicy.py` | Builds RHEL 9's SSSD 2.9.8 with the `ldap_use_ppolicy` option. Pinned to `sssd-2.9.8-4.el9_8.1`. Builds the SSSD packages, but first installs build tools and build dependencies with `sudo dnf`; it does not install the rebuilt SSSD packages. |
 
 ## Quick start
 

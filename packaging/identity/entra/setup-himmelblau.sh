@@ -62,7 +62,7 @@ KEY_URL=https://packages.himmelblau-idm.org/himmelblau.asc
 KEYRING=/etc/apt/keyrings/himmelblau.gpg
 SOURCES=/etc/apt/sources.list.d/himmelblau.list
 CONF=/etc/himmelblau/himmelblau.conf
-PACKAGES=(himmelblau nss-himmelblau pam-himmelblau himmelblau-sshd-config)
+PACKAGES=(himmelblau nss-himmelblau pam-himmelblau himmelblau-sshd-config himmelblau-apparmor)
 SOCKETS=(himmelblaud.socket himmelblaud-tasks.socket himmelblaud-broker.socket)
 SERVICES=(himmelblaud himmelblaud-tasks)
 
@@ -156,11 +156,18 @@ do_configure() {
   if [ "${#allow_groups[@]}" -eq 0 ]; then
     echo "  note: no --allow-group, so every user of the tenant can sign in to this host"
   fi
+  if [ -r "$CONF" ]; then
+    echo "  unmanaged settings in the old file will be removed; a timestamped backup preserves them:"
+    grep -Ev '^([[:space:]]*($|#|\[global\])|[[:space:]]*(domain|cn_name_mapping|pam_allow_groups|home_attr|home_alias|use_etc_skel)[[:space:]]*=)' "$CONF" |
+      cut -d= -f1 | sed 's/^/    /' || true
+  fi
   if [ "$apply" -eq 1 ]; then
     install -d -m 0755 "$(dirname "$CONF")"
     if [ -f "$CONF" ]; then
-      cp -p "$CONF" "$CONF.bak"
-      echo "  kept the previous file as $CONF.bak"
+      local backup
+      backup="$CONF.bak-$(date -u +%Y%m%dT%H%M%S%NZ)"
+      cp -p "$CONF" "$backup"
+      echo "  kept the previous file as $backup"
     fi
     config_text > "$CONF.new"
     chmod 0644 "$CONF.new"
