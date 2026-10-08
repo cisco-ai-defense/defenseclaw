@@ -172,6 +172,12 @@ while [ "$#" -gt 0 ]; do
         --min-version) DC_MIN_VERSION=${2:-}; shift 2 ;;
         --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
         --format) DC_FORMAT=${2:-}; shift 2 ;;
+# Intune's Linux agent may repeat its /proc/self/fd/N script descriptor.
+case "${1:-}" in
+    /proc/self/fd/*)
+        case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
+        ;;
+esac
         -h | --help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'defenseclaw detect: unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac

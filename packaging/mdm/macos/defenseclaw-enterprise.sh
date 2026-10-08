@@ -47,6 +47,7 @@
 set -eu
 
 DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the copies
+DC_LOG_NAME=defenseclaw-enterprise.sh
 
 # ---- MDM settings ------------------------------------------------------------
 # Script-only MDMs (Intune platform scripts, Jamf policies, ...) upload this
@@ -132,7 +133,7 @@ dc_log() {
         ( umask 077; : >"$DC_LOG" ) 2>/dev/null || return 0
     fi
     [ -f "$DC_LOG" ] && [ ! -L "$DC_LOG" ] || return 0
-    printf '%s %s[%s] %s\n' "$(dc_now)" "${0##*/}" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
+    printf '%s %s[%s] %s\n' "$(dc_now)" "$DC_LOG_NAME" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
 }
 
 dc_cleanup() {
@@ -267,6 +268,13 @@ dc_parse_args() {
             --config-stdin) DC_CONFIG_STDIN=1; shift ;;
             --secret-name) DC_SECRET_NAME=${2:-}; shift 2 ;;
             --secret-file) DC_SECRET_FILE=${2:-}; shift 2 ;;
+    # Intune's Linux agent invokes sh /proc/self/fd/N /proc/self/fd/N.
+    # The second descriptor is its script argument, not an operator flag.
+    case "${1:-}" in
+        /proc/self/fd/*)
+            case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
+            ;;
+    esac
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
             --https-proxy) DC_HTTPS_PROXY=${2:-}; shift 2 ;;
             --log) DC_LOG=${2:-}; shift 2 ;;
@@ -620,7 +628,6 @@ dc_main() {
     platform=$(dc_platform)
     [ "$platform" = "$DC_SCRIPT_OS" ] ||
         dc_fail_result "$DC_EXIT_INVALID" mdm_wrong_platform "this copy of the wrapper is for $DC_SCRIPT_OS, not $platform"
-    dc_layout
     dc_validate_args
     [ "$(id -u)" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_not_root "run as root (the MDM agent's system context)"
 
@@ -630,7 +637,7 @@ dc_main() {
     trap 'exit 1' HUP INT TERM
     chmod 0700 "$DC_STAGE"
     [ "$(dc_stat_uid "$DC_STAGE")" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging directory is not root-owned"
-    dc_log "start action=$DC_ACTION"
+    dc_log "validated action=$DC_ACTION"
 
     if [ "$DC_ACTION" != ensure ]; then
         dc_trusted_path "$DC_GATEWAY" ||
@@ -666,7 +673,10 @@ dc_main() {
         [ -s "$secret" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
     fi
 
+    dc_layout
+    dc_log "start action=$DC_ACTION"
     DC_CHANNEL_FLAG=""
+    dc_layout
     DC_PAYLOAD_GATEWAY=""
     if [ -n "$DC_SOURCE$DC_SOURCE_URL" ]; then
         dc_stage_source
