@@ -2773,7 +2773,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
         self.assertEqual(result.exit_code, 1)
         self.assertIn("quarantined", result.output)
-        self.assertIn("block list", result.output)
+        self.assertIn("install blocked by this scan", result.output)
         # A scan verdict's install block is enforcement journal, not policy.
         journal = self.app.store.get_action("plugin", "strict-danger-pkg", "openclaw")
         self.assertEqual(journal.actions.install if journal else None, "block")
