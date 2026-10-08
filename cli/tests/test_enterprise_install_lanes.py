@@ -194,6 +194,21 @@ def test_upgrade_config_check_requires_every_v8_value_kept_or_recorded(tmp_path:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_upgrade_lane_applies_v8_to_previous_package(tmp_path: Path) -> None:
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    writer = re.search(r"^write_admin_config\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    upgrade = re.search(r"^upgrade_lane\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert writer and upgrade
+    assert "write_admin_config 8" in upgrade.group(0)
+    env = {**os.environ, "stage": str(tmp_path), "data_dir": str(tmp_path / "data"),
+           "vendor_policy_dir": str(tmp_path / "policy")}
+    result = subprocess.run(["bash", "-c", writer.group(0) + "\nwrite_admin_config 8"],
+                            env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "config.yaml").read_text().startswith("config_version: 8\n")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
 def test_unit_check_fails_on_diagnostics_outside_the_allow_list(tmp_path: Path) -> None:
     """The lane's unit check fails on a directive the systemd 239 allow list does not name."""
     bin_dir, unit_dir = tmp_path / "bin", tmp_path / "units"
