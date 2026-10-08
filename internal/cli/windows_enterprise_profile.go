@@ -405,6 +405,13 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		} `yaml:"enterprise"`
 	}
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
+		if !supplied {
+			// A run that keeps the installed config cannot heal it; one given
+			// the config to install keeps this file aside (GAP-0948).
+			return windowsEnterpriseConfiguredTrust{}, fmt.Errorf(
+				"parse enterprise.trust in %s: %w; this installed config.yaml does not parse, so a run that keeps it cannot heal it: run %s /ensure CONFIG=<config.yaml> JSON=1 (or /repair CONFIG=) with the config to install, which keeps this file as rejected-config.yaml",
+				path, err, windowsEnterpriseStandaloneSetupName)
+		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("parse enterprise.trust in %s: %w", path, err)
 	}
 	configured := windowsEnterpriseConfiguredTrust{path: path}

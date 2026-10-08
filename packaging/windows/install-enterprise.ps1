@@ -70,6 +70,10 @@ param(
     # of user runtimes, shared connector configuration, or another scope from
     # a DefenseClaw-like name.
     [switch]$Purge,
+    # Standalone Uninstall only: the last resort when no lifecycle can recover
+    # a pending transaction. It removes the deployment without reading that
+    # transaction (see Invoke-DefenseClawForcedUninstallPreparation).
+    [switch]$Force,
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
@@ -3378,6 +3382,9 @@ try {
         # The launching CLI's protected temp folder, which the purge's stale
         # temp sweep must keep (GAP-1853); TEMP now points at the bootstrap.
         $arguments['LauncherTemp'] = [string]$bootstrapEnvironment.OriginalEnvironment['TEMP']
+        if ($Force) {
+            $arguments['Force'] = $true
+        }
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {

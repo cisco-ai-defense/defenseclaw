@@ -1753,6 +1753,8 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 		"schema_version": 1, "ok": true, "action": "upgrade", "installed": true, "transaction_pending": false,
 		"errors":                          []string{},
 		"stale_lifecycle_journal_removed": "managed-hook lifecycle snapshot retire failed: retire 2 managed runtime generations for SID S-1-5-21-1-2-3-1019: refusing to collect an invalid managed runtime bundle",
+		// GAP-1041: the teardown journal a refused uninstall left.
+		"stale_teardown_journal_removed": `C:\ProgramData\Cisco\DefenseClaw\install\managed-hooks-teardown-journal.json`,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1770,8 +1772,9 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 			found = append(found, warning.Message)
 		}
 	}
-	if len(found) != 1 || !strings.Contains(found[0], "managed-hooks-lifecycle-journal.json") ||
-		!strings.Contains(found[0], "refusing to collect an invalid managed runtime bundle") {
+	if len(found) != 2 || !strings.Contains(found[0], "managed-hooks-lifecycle-journal.json") ||
+		!strings.Contains(found[0], "refusing to collect an invalid managed runtime bundle") ||
+		!strings.Contains(found[1], `install\managed-hooks-teardown-journal.json`) {
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 }

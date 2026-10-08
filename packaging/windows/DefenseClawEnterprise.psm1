@@ -170,6 +170,10 @@ $script:DefenseClawRecoveryGatewayRefusal = $null
 # managed-hook lifecycle journal it could not retire (GAP-1322). Reset per
 # lifecycle run.
 $script:DefenseClawStaleLifecycleJournalRemoved = ''
+# Standalone: the managed-hook teardown journal this run removed because an
+# earlier uninstall that was refused or rolled back left it (GAP-1041). Reset
+# per lifecycle run.
+$script:DefenseClawStaleTeardownJournalRemoved = ''
 # Standalone: set when this run's managed-hook lifecycle capture wrote the
 # release's Cursor enterprise adapter back over a changed or deleted one
 # (GAP-2480). Reset per lifecycle run.
@@ -6855,8 +6859,12 @@ function Test-DefenseClawRawAclTrustedOnly {
             ([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
             continue
         }
+        # OWNER RIGHTS (S-1-3-4) grants the owner, checked above, and no one
+        # else. The key contract carries one, so the list an icacls run leaves
+        # after it removes the gateway entry has it too (GAP-0920).
         if ($ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
-            $ace.SecurityIdentifier.Value -notin $TrustedSIDs) {
+            ($ace.SecurityIdentifier.Value -notin $TrustedSIDs -and
+                $ace.SecurityIdentifier.Value -cne $script:OwnerRightsSID)) {
             return $false
         }
     }
@@ -6933,6 +6941,7 @@ function Get-DefenseClawRedactionKeySecuritySnapshot {
                         $script:SystemSID,
                         $script:AdministratorsSID,
                         $script:TrustedInstallerSID,
+                        $script:OwnerRightsSID,
                         $GatewayServiceSID
                     )) {
                     $ace.SecurityIdentifier.Value
@@ -6940,8 +6949,9 @@ function Get-DefenseClawRedactionKeySecuritySnapshot {
             }
         ) | Microsoft.PowerShell.Utility\Select-Object -Unique
         $owner = if ($null -ne $actual.Owner) { $actual.Owner.Value } else { 'none' }
+        # One holder is a string, not a list: + joined the two SIDs.
         throw (
-            "untrusted principal $(@($holders + $owner)[0]) can open the redaction correlation key: $path " +
+            "untrusted principal $(@(@($holders) + @($owner))[0]) can open the redaction correlation key: $path " +
             "(owner $owner; other principals with access: $(if (@($holders).Count -gt 0) { @($holders) -join ', ' } else { 'none' })). " +
             'Only SYSTEM, Administrators and NT SERVICE\DefenseClawGateway may hold this key. Remove the other entries ' +
             "(icacls `"$path`" /setowner *S-1-5-32-544, then icacls `"$path`" /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F), then run the command again"
@@ -8380,6 +8390,74 @@ function Assert-DefenseClawServiceImagePath {
     }
 }
 
+function Get-DefenseClawTransactionRedactionKeyGatewaySID {
+    <#
+        The gateway service SID a transaction checks the redaction key
+        against: the live service SID, the deterministic one when an active
+        deployment lost its service, and none otherwise.
+    #>
+    param(
+        [Parameter(Mandatory)]$Services,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [switch]$PriorDeploymentActive
+    )
+    $gatewayServiceEntry = @($Services) |
+        Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals(
+                [string]$_.name,
+                $GatewayServiceName,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        } |
+        Microsoft.PowerShell.Utility\Select-Object -First 1
+    if ($null -ne $gatewayServiceEntry -and [bool]$gatewayServiceEntry.existed) {
+        return Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    }
+    if ($PriorDeploymentActive) {
+        return Get-DefenseClawDeterministicServiceSID -ServiceName $GatewayServiceName
+    }
+    return ''
+}
+
+function Repair-DefenseClawDeploymentAclDrift {
+    <#
+        Standalone, with the services stopped. When the gateway service lost
+        its access to runtime, etc or logs (an icacls run that removed
+        NT SERVICE\DefenseClawGateway), or the redaction key list has only
+        trusted entries but not the contract, put the deployment's own access
+        lists back and return $true. Repair, ensure and every other
+        transaction then snapshot and restart with them; before, the snapshot
+        recorded the stripped lists, the gateway could not start, and the
+        rollback stayed pending (GAP-0920).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [string]$RedactionKeyClass
+    )
+    $drifted = [string]$RedactionKeyClass -ceq 'trusted_drift'
+    if (-not $drifted) {
+        try {
+            Assert-DefenseClawGatewayServiceAccess `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            $drifted = $true
+        }
+    }
+    if (-not $drifted) {
+        return $false
+    }
+    Set-DefenseClawRetainedRuntimeAcls `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+    Set-DefenseClawManagedCoreAcls `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+    return $true
+}
+
 function New-DefenseClawTransaction {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -8451,7 +8529,22 @@ function New-DefenseClawTransaction {
     }
     $quiescingIntentPublished = $false
     $servicesQuiescedAt = ''
+    $precheckRedactionKeyClass = ''
     try {
+        if (Test-DefenseClawStandaloneProfile) {
+            # Read-only, before any service changes: a redaction key another
+            # account can open is refused with the services as they were. The
+            # same refusal after the stop below left every service stopped
+            # and the transaction pending (GAP-0920).
+            $precheckRedactionKeyClass = [string](
+                Get-DefenseClawRedactionKeySecuritySnapshot `
+                    -Layout $Layout `
+                    -GatewayServiceSID (Get-DefenseClawTransactionRedactionKeyGatewaySID `
+                        -Services $services `
+                        -GatewayServiceName $GatewayServiceName `
+                        -PriorDeploymentActive:$PriorDeploymentActive)
+            ).preimage_class
+        }
         # Publish prior service state before the first explicit stop. If this
         # process is terminated after either stop or while copying preimages,
         # recovery can restore enforcement without requiring snapshot.json to
@@ -8525,25 +8618,18 @@ function New-DefenseClawTransaction {
             -Value $quiescingIntent `
             -Path $Layout.PendingPath
 
-        $gatewayServiceEntry = $services |
-            Microsoft.PowerShell.Core\Where-Object {
-                [string]::Equals(
-                    [string]$_.name,
-                    $GatewayServiceName,
-                    [StringComparison]::OrdinalIgnoreCase
-                )
-            } |
-            Microsoft.PowerShell.Utility\Select-Object -First 1
-        $redactionKeyGatewaySID = if ($null -ne $gatewayServiceEntry -and
-            [bool]$gatewayServiceEntry.existed) {
-            Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
-        }
-        elseif ($PriorDeploymentActive) {
-            Get-DefenseClawDeterministicServiceSID `
-                -ServiceName $GatewayServiceName
-        }
-        else {
-            ''
+        $redactionKeyGatewaySID = Get-DefenseClawTransactionRedactionKeyGatewaySID `
+            -Services $services `
+            -GatewayServiceName $GatewayServiceName `
+            -PriorDeploymentActive:$PriorDeploymentActive
+        if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and
+            (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+            # Nothing writes runtime now: put the deployment's access lists
+            # back before the snapshot records them (GAP-0920).
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -RedactionKeyClass $precheckRedactionKeyClass)
         }
         $redactionKeySecurity =
             Get-DefenseClawRedactionKeySecuritySnapshot `
@@ -8878,6 +8964,7 @@ function New-DefenseClawTransaction {
             throw $snapshotError
         }
         $restartErrors = [Collections.Generic.List[string]]::new()
+        $aclRestoreFailure = ''
         try {
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
@@ -8915,12 +9002,34 @@ function New-DefenseClawTransaction {
                 [void](ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
                     -Value $servicesQuiescedAt)
             }
+            $restoreServices = $services
+            if (Test-DefenseClawStandaloneProfile) {
+                # The recorded states are in-memory dictionaries here, which
+                # the service reader refused ("invalid identity or running
+                # state"), so a failed snapshot never restarted the services
+                # it had stopped (GAP-0920).
+                $restoreServices = @(foreach ($entry in $services) { [pscustomobject]$entry })
+                if ($PriorDeploymentActive -and
+                    (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+                    try {
+                        [void](Repair-DefenseClawDeploymentAclDrift `
+                            -Layout $Layout `
+                            -GatewayServiceName $GatewayServiceName `
+                            -RedactionKeyClass $precheckRedactionKeyClass)
+                    }
+                    catch {
+                        # The restart below still runs; this is reported
+                        # only if it fails too.
+                        $aclRestoreFailure = $_.Exception.Message
+                    }
+                }
+            }
             Set-DefenseClawServiceActivationPhase `
                 -State $quiescingIntent `
                 -Path $Layout.PendingPath `
                 -Phase activating
             Start-DefenseClawTransactionServices `
-                -Services $services `
+                -Services $restoreServices `
                 -Layout $Layout `
                 -ServicesQuiescedAt $servicesQuiescedAt `
                 -TrustInProcessQuiescence `
@@ -8929,6 +9038,9 @@ function New-DefenseClawTransaction {
         }
         catch {
             $restartErrors.Add($_.Exception.Message)
+        }
+        if ($restartErrors.Count -gt 0 -and $aclRestoreFailure) {
+            $restartErrors.Add("restoring the deployment access lists also failed: $aclRestoreFailure")
         }
         if ($restartErrors.Count -gt 0) {
             throw "transaction snapshot failed ($($snapshotError.Exception.Message)); restoring prior service state also failed and protected quiescing recovery was retained: $($restartErrors -join '; ')"
@@ -11255,6 +11367,17 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
     $rollbackRequired = [bool]$prepared.Value -or (
         $journalPreserved -and ($journalExists -or $journalChanged)
     )
+    if ($rollbackRequired -and -not [bool]$prepared.Value -and $journalExists -and
+        -not $journalChanged -and (Test-DefenseClawStandaloneProfile) -and
+        (Get-DefenseClawTeardownJournalPhase -Path $Layout.ManagedHooksTeardownJournalPath) -ceq 'rolled_back') {
+        # Standalone: the journal is the unchanged one an earlier, rolled-back
+        # uninstall left. Hidden prepare rewrites it before its first change,
+        # so this transaction changed nothing there. The hidden rollback
+        # refused it once the deployment changed ("does not match the
+        # protected deployment"), and the transaction stayed pending for good
+        # (GAP-1041).
+        $rollbackRequired = $false
+    }
     Restore-DefenseClawTransaction `
         -SnapshotPath $SnapshotPath `
         -Layout $Layout `
@@ -15813,6 +15936,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
     $script:DefenseClawStaleLifecycleJournalRemoved = ''
+    $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
@@ -19452,6 +19576,10 @@ function Get-DefenseClawLifecycleStatus {
         if (-not [string]::IsNullOrEmpty($script:DefenseClawStaleLifecycleJournalRemoved)) {
             $status['stale_lifecycle_journal_removed'] =
                 $script:DefenseClawStaleLifecycleJournalRemoved
+        }
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawStaleTeardownJournalRemoved)) {
+            $status['stale_teardown_journal_removed'] =
+                $script:DefenseClawStaleTeardownJournalRemoved
         }
         if ($script:DefenseClawCursorAdapterRestored) {
             $status['cursor_adapter_restored'] = $true
@@ -24533,6 +24661,148 @@ function Suspend-DefenseClawStandaloneSensorHelperForServicing {
     return $true
 }
 
+function Invoke-DefenseClawForcedUninstallPreparation {
+    <#
+        Standalone Setup /uninstall FORCE=1, the last resort when no
+        lifecycle can recover a pending transaction (for example a snapshot
+        that cannot be taken, GAP-0920, or a teardown journal that no longer
+        matches, GAP-1041). It reads nothing of the transaction: it stops the
+        DefenseClaw services (after checking they are this deployment's) and
+        moves StateRoot aside, so the uninstall goes on as the state-absent
+        exact-scope purge, which removes the exact services, their IPC grant,
+        InstallRoot and the machine-wide hook files, and names what stays.
+        Returns the moved StateRoot, or an empty string when there was none.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GatewayServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GuardianServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Guardian
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $enumeratorServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Enumerator
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $Layout.SensorHelperServiceName `
+        -ExpectedGatewayPath $Layout.SensorHelperPath `
+        -ExpectedSensorHelperImage (Get-DefenseClawSensorHelperImage `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) `
+        -SensorHelper
+    foreach ($name in @(
+            $enumeratorServiceName,
+            $GuardianServiceName,
+            $GatewayServiceName,
+            [string]$Layout.SensorHelperServiceName
+        )) {
+        if (Test-DefenseClawServiceExists -Name $name) {
+            Set-DefenseClawServiceStartMode -Name $name -StartMode 4
+            Stop-DefenseClawService -Name $name
+        }
+    }
+    $stateRoot = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stateRoot -PathType Container)) {
+        return ''
+    }
+    Assert-DefenseClawNoReparsePath -Path $stateRoot
+    $moved = $stateRoot + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+    [IO.Directory]::Move($stateRoot, $moved)
+    return $moved
+}
+
+function Complete-DefenseClawForcedUninstall {
+    <#
+        Removes the StateRoot a forced uninstall moved aside, as every
+        standalone uninstall removes StateRoot, and marks the result. A folder
+        that cannot be removed is named in forced_state_root_kept.
+    #>
+    param(
+        [Parameter(Mandatory)]$Result,
+        [AllowEmptyString()][string]$MovedStateRoot
+    )
+    $kept = ''
+    if (-not [string]::IsNullOrWhiteSpace($MovedStateRoot)) {
+        try {
+            Remove-DefenseClawManagedTree `
+                -Path $MovedStateRoot `
+                -RequiredBase $script:ProgramData `
+                -Label 'moved StateRoot'
+        }
+        catch {
+            $kept = "${MovedStateRoot}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+        }
+    }
+    $Result |
+        Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name forced -Value $true -Force
+    if ($kept) {
+        $Result |
+            Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name forced_state_root_kept -Value $kept -Force
+    }
+    return $Result
+}
+
+function Get-DefenseClawTeardownJournalPhase {
+    <#
+        The phase a managed-hook teardown journal records, or an empty string
+        when it cannot be read: an unreadable journal is not provably
+        finished, and the teardown command reports it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $journal = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Path -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $phaseProperty = $journal.PSObject.Properties['phase']
+        if ($null -ne $phaseProperty) {
+            return [string]$phaseProperty.Value
+        }
+    }
+    catch {
+        return ''
+    }
+    return ''
+}
+
+function Remove-DefenseClawRolledBackTeardownJournal {
+    <#
+        Standalone. Removes the managed-hook teardown journal of a teardown
+        that was rolled back (phase rolled_back) when no transaction is
+        pending: the rollback that wrote that phase finished, so nothing reads
+        it again. Left behind, it made the next uninstall fail "managed-hook
+        teardown journal does not match the protected deployment" once the
+        deployment changed, and that failed uninstall stayed pending
+        (GAP-1041). With -Stale the removal is reported as
+        stale_lifecycle_journal_removed. Returns whether it removed the file.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$Stale
+    )
+    $path = [string]$Layout.ManagedHooksTeardownJournalPath
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return $false
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    if ((Get-DefenseClawTeardownJournalPhase -Path $path) -cne 'rolled_back') {
+        return $false
+    }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $path -Force
+    if ($Stale) {
+        $script:DefenseClawStaleTeardownJournalRemoved = $path
+    }
+    return $true
+}
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -24599,6 +24869,9 @@ function Invoke-DefenseClawUninstallLifecycle {
         Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        [void](Remove-DefenseClawRolledBackTeardownJournal -Layout $Layout -Stale)
     }
     $selfUninstallCallerIdentity = $null
     if ($SelfUninstallCallerPID -gt 0) {
@@ -24822,6 +25095,17 @@ function Invoke-DefenseClawUninstallLifecycle {
                 $rollbackErrors.Add(
                     "transaction cleanup failed: $($_.Exception.Message)"
                 )
+            }
+        }
+        if ($rollbackErrors.Count -eq 0 -and (Test-DefenseClawStandaloneProfile)) {
+            # The finished rollback was the last reader of the journal this
+            # uninstall wrote (GAP-1041). A removal that fails here is
+            # retried, and reported, by the next uninstall.
+            try {
+                [void](Remove-DefenseClawRolledBackTeardownJournal -Layout $Layout)
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Verbose "rolled-back teardown journal stays: $($_.Exception.Message)"
             }
         }
         if ($rollbackErrors.Count -gt 0) {
@@ -25601,7 +25885,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$ProductVersion,
         # Standalone: the launching CLI's own protected PowerShell temp folder
         # (install-enterprise.ps1 passes the TEMP it was started with).
-        [string]$LauncherTemp
+        [string]$LauncherTemp,
+        # Standalone Uninstall only: remove the deployment without recovering
+        # its pending transaction (Setup /uninstall FORCE=1).
+        [switch]$Force
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
@@ -25686,6 +25973,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -AllowMissing:($Action -in @('Status', 'Verify'))
     if ($Purge -and $Action -ne 'Uninstall') {
         throw '-Purge is valid only with Uninstall'
+    }
+    if ($Force -and ($Action -ne 'Uninstall' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-Force is valid only with a standalone Uninstall'
     }
     if ($SelfUninstallCallerPID -lt 0 -or
         ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
@@ -25943,6 +26233,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # any managed layout directory is created. It is therefore sufficient
         # authority to resume a crash-interrupted purge after StateRoot itself
         # has been partially or completely deleted.
+        $forcedStateRoot = ''
+        if ($Force) {
+            $forcedStateRoot = Invoke-DefenseClawForcedUninstallPreparation `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+        }
         $preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery `
             -Action $Action `
             -Layout $layout `
@@ -25954,7 +26251,15 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -RequestedCoreHardeningCertification:$CoreHardeningCertification `
             -SelfUninstallCallerPID $SelfUninstallCallerPID
         if ([bool]$preLayoutRecovery.handled) {
+            if ($Force) {
+                return Complete-DefenseClawForcedUninstall `
+                    -Result $preLayoutRecovery.result `
+                    -MovedStateRoot $forcedStateRoot
+            }
             return $preLayoutRecovery.result
+        }
+        if ($Force) {
+            throw "the forced uninstall moved StateRoot aside but did not reach the state-absent removal; the moved state is $forcedStateRoot"
         }
 
         if ($Action -eq 'Reconcile') {

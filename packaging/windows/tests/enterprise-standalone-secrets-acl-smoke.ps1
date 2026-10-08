@@ -150,6 +150,12 @@ try {
             if ((Get-DefenseClawRedactionKeySecurityClass -Actual $driftedKey -GatewayServiceSID $sid) -cne 'trusted_drift') {
                 $failures.Add('a redaction key with only trusted entries was not recorded as trusted_drift')
             }
+            # What icacls /remove:g leaves of the contract: its OWNER RIGHTS
+            # entry stays, and grants only the (trusted) owner.
+            $strippedKey = [Security.AccessControl.RawSecurityDescriptor]::new("O:$($sid)G:BAD:P(A;;RC;;;S-1-3-4)(A;;FA;;;SY)(A;;FA;;;BA)")
+            if ((Get-DefenseClawRedactionKeySecurityClass -Actual $strippedKey -GatewayServiceSID $sid) -cne 'trusted_drift') {
+                $failures.Add('the contract without its gateway entry was not recorded as trusted_drift')
+            }
             Test-Refused 'redaction key Users can read' { Get-DefenseClawRedactionKeySecurityClass -Actual $openKey -GatewayServiceSID $sid } 'unrecognized active'
 
             # The Secure Client profile has no standalone credential store.

@@ -563,6 +563,9 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	if opts.Purge {
 		arguments = append(arguments, "--purge")
 	}
+	if opts.Force {
+		arguments = append(arguments, "--force")
+	}
 	if opts.JSON {
 		arguments = append(arguments, "--json")
 	}
