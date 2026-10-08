@@ -42,7 +42,7 @@ from defenseclaw.config import (
 )
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.gateway import OrchestratorClient
+from defenseclaw.gateway import OrchestratorClient, SandboxAPIError
 from defenseclaw.inventory import agent_discovery, ai_signatures
 
 
@@ -316,6 +316,16 @@ def usage(
     """
     if limit < 0:
         raise click.BadParameter("--limit must be >= 0", param_hint="--limit")
+    if sandboxes:
+        from defenseclaw.platform_support import host_os
+
+        if host_os() == "windows":
+            # No sandbox can exist here: say so, as `defenseclaw sandbox`
+            # does, instead of an empty table (GAP-0386).
+            from defenseclaw.commands.cmd_sandbox import UNSUPPORTED_EXIT_CODE, UNSUPPORTED_PLATFORM_MESSAGE
+
+            click.echo(f"✗ --sandbox: {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
+            raise SystemExit(UNSUPPORTED_EXIT_CODE)
 
     client = _usage_client(
         app,
@@ -344,6 +354,7 @@ def usage(
         )
         return
 
+    notes = _sandboxes_not_found(client, payload, sandboxes)
     click.echo(
         _render_ai_usage_table(
             payload,
@@ -359,6 +370,41 @@ def usage(
             wide=wide,
         ).rstrip()
     )
+    for note in notes:
+        click.echo(note)
+
+
+def _sandboxes_not_found(client: Any, payload: Mapping[str, Any], sandboxes: tuple[str, ...]) -> list[str]:
+    """Check each ``--sandbox`` name AI discovery has no signal for (GAP-0386).
+
+    An unknown name was an empty table and exit 0. It is an error now; a
+    sandbox that exists but was not scanned yet gets a note on how to scan
+    it. A daemon that cannot say leaves the table as it is.
+    """
+    signals = [sig for sig in payload.get("signals") or [] if isinstance(sig, Mapping)]
+    seen = {str(sig.get("sandbox_name") or "").strip().lower() for sig in signals}
+    notes: list[str] = []
+    for name in dict.fromkeys(s.strip() for s in sandboxes if s.strip()):
+        if name.lower() in seen:
+            continue
+        try:
+            client.get_sandbox(name)
+        except SandboxAPIError as exc:
+            if exc.code == "not_found":
+                raise click.ClickException(
+                    f"no sandbox {name}: `defenseclaw sandbox list` shows your sandboxes"
+                ) from exc
+            if exc.code == "disabled":
+                raise click.ClickException(
+                    f"no sandbox {name}: OpenShell sandboxes are not set up here (`defenseclaw sandbox setup`)"
+                ) from exc
+            continue
+        except requests.RequestException:
+            continue
+        notes.append(
+            f"AI discovery has found nothing in sandbox {name} yet: `defenseclaw sandbox discover {name}` scans it now."
+        )
+    return notes
 
 
 _IDE_PLUGIN_ENABLED_LABELS = {
