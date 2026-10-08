@@ -24,6 +24,7 @@ import click
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup_observability import (
+    _add_v8_destination,
     _build_v8_preset_destination,
     _print_v8_destination_list,
     _remove_v8_destination,
@@ -1203,8 +1204,8 @@ def test_v8_enable_mutates_exact_source_index() -> None:
     result = V8PolicyWriteResult(True, "a" * 64, "b" * 64)
     with (
         patch(
-            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_index",
-            return_value=3,
+            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_snapshot",
+            return_value=(3, "a" * 64, []),
         ),
         patch(
             "defenseclaw.observability.v8_writer.mutate_v8_config",
@@ -1216,15 +1217,15 @@ def test_v8_enable_mutates_exact_source_index() -> None:
     assert Path(args[0]) == Path("/tmp/dc/config.yaml")
     assert args[1][0].path == ("observability", "destinations", 3, "enabled")
     assert args[1][0].value is True
-    assert kwargs == {"data_dir": "/tmp/dc"}
+    assert kwargs == {"data_dir": "/tmp/dc", "expected_before_sha256": "a" * 64}
 
 
 def test_v8_remove_mutates_exact_source_index() -> None:
     result = V8PolicyWriteResult(True, "a" * 64, "b" * 64)
     with (
         patch(
-            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_index",
-            return_value=1,
+            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_snapshot",
+            return_value=(1, "a" * 64, []),
         ),
         patch(
             "defenseclaw.observability.v8_writer.mutate_v8_config",
@@ -1818,3 +1819,59 @@ def test_no_restart_connector_setup_says_a_hot_change_applies_on_its_own(tmp_pat
     assert "restart" not in stopped
     roster = base.replace("{codex: {mode: observe}}", "{codex: {mode: observe}, claudecode: {mode: observe}}")
     assert "applies it on its own, without a restart" in run(roster)
+
+
+def test_failed_setup_rollback_keeps_a_newer_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.observability import v8_writer
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    (tmp_path / "config.yaml").write_text("config_version: 8\nobservability: {}\n")
+    key = PRESETS["splunk-hec"].token_env
+    monkeypatch.delenv(key, raising=False)
+    original_mutate = v8_writer.mutate_v8_config
+    inside_first = False
+
+    def add(token: str):
+        return _add_v8_destination(
+            str(tmp_path), PRESETS["splunk-hec"],
+            {"endpoint": "https://hec.example.com:8088/services/collector"},
+            name="hec", enabled=True, signals=None, token_value=token,
+            target=None, dry_run=False,
+        )
+
+    def concurrent_commit(*args, **kwargs):
+        nonlocal inside_first
+        if not inside_first:
+            inside_first = True
+            add("newer")
+            raise RuntimeError("first setup failed")
+        return original_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(v8_writer, "mutate_v8_config", concurrent_commit)
+    with pytest.raises(RuntimeError, match="first setup failed"):
+        add("first")
+
+    assert dotenv_values(tmp_path / ".env")[key] == "newer"
+    assert os.environ[key] == "newer"
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes(), source_name="config.yaml").source
+    assert source["observability"]["destinations"][0]["name"] == "hec"
+
+
+def test_remove_refuses_a_reordered_destination_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.observability import v8_writer
+
+    source = _source() + "    - name: third\n      kind: console\n"
+    path = tmp_path / "config.yaml"
+    path.write_text(source)
+    original_mutate = v8_writer.mutate_v8_config
+
+    def concurrent_edit(*args, **kwargs):
+        path.write_text(source.replace("    - name: terminal\n      kind: console\n", ""))
+        return original_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(v8_writer, "mutate_v8_config", concurrent_edit)
+    with pytest.raises(RuntimeError, match="changed after"):
+        _remove_v8_destination(str(tmp_path), "archive")
+    assert [d["name"] for d in load_validate_v8(path.read_bytes(), source_name=str(path)).source["observability"]["destinations"]] == [
+        "archive", "third"
+    ]

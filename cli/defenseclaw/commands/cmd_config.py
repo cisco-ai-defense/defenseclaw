@@ -499,9 +499,9 @@ def _admission_layer_key(parts: list) -> bool:
     """Whether *parts* name a field of admission.defaults or admission.<type>."""
     if len(parts) < 2 or parts[0] != "admission" or parts[1] not in ("defaults", *_ADMISSION_TYPES):
         return False
-    if len(parts) > 3 and parts[2] == "actions":
+    if len(parts) == 4 and parts[2] == "actions":
         return str(parts[3]).lower() in ("critical", "high", "medium", "low", "info")
-    return len(parts) == 2 or parts[2] in _ADMISSION_FIELDS
+    return len(parts) == 2 or (len(parts) == 3 and parts[2] in _ADMISSION_FIELDS)
 
 
 def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]]:
@@ -624,7 +624,11 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         if verb != "unset":
             click.echo(f"{key} already has that value (generation {result.generation}).")
         return False
-    click.echo(f"{verb.capitalize()} {key} (config generation {result.generation}, sha256 {result.sha256[:12]}).")
+    changed_key = ", ".join(result.changed) if verb == "unset" else key
+    click.echo(
+        f"{verb.capitalize()} {changed_key} "
+        f"(config generation {result.generation}, sha256 {result.sha256[:12]})."
+    )
     from defenseclaw.gateway import local_policy_digest
 
     cfg = app.cfg if app.cfg is not None else config_module.load()
@@ -722,16 +726,15 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         raise click.UsageError(str(exc)) from exc
     for _key, parts in parsed:
         _refuse_config_version(parts)
-    if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
-        return
-    # Nothing was removed: a key with a default is already unset, anything
-    # else is not a configuration key (a typo must not look like success).
+    # Validate every path before the writer runs so a valid path cannot hide a typo.
     for key, parts in parsed:
         view = _key_view(app, parts)
         if not _admission_layer_key(parts) and not _lookup(view, parts)[0] and not _unlisted_entry_key(parts):
             if _is_destination_key(parts):
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
+    if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
+        return
     if len(keys) == 1:
         click.echo(f"{keys[0]} is not set in config.yaml; its default already applies.")
     else:

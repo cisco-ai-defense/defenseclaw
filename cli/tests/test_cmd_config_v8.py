@@ -371,3 +371,31 @@ def test_generic_redaction_profile_refusal_names_unknown_and_defined(tmp_path: P
     detail = cmd_config._v8_failure_detail(str(config_path), refusal)
     assert "strickt" in detail and "defined:" in detail
     assert "observability.defaults.redaction_profile" in detail
+
+
+def test_unset_validates_every_key_before_writing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 9\nupdate:\n  check: false\n")
+
+    def run(*args: str):
+        with (
+            patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+            patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+        ):
+            return CliRunner().invoke(cmd_config.config_cmd, list(args))
+
+    before = path.read_bytes()
+    typo = run("unset", "update.check", "update.chek")
+    assert typo.exit_code != 0
+    assert "update.chek is not a configuration key" in typo.output
+    assert path.read_bytes() == before
+
+    extra = run("unset", "update.check", "admission.skill.actions.high.extra")
+    assert extra.exit_code != 0
+    assert path.read_bytes() == before
+
+    mixed = run("unset", "update.check", "update.channel")
+    assert mixed.exit_code == 0, mixed.output
+    assert "Unset update.check (" in mixed.output
+    assert "Unset update.check, update.channel" not in mixed.output

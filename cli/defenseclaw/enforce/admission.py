@@ -20,6 +20,7 @@ admission.rego and internal/policy), reading only config.yaml:
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -203,6 +204,22 @@ def _data_json_action(raw: Any) -> tuple[SeverityAction, bool] | None:
         ),
         False,
     )
+
+
+def _read_policy_data(policy_dir: str) -> dict[str, Any] | None:
+    """Read the Secure Client policy data for legacy status output."""
+    for candidate in (
+        os.path.join(policy_dir, "rego", "data.json"),
+        os.path.join(policy_dir, "data.json"),
+    ) if policy_dir else ():
+        try:
+            with open(candidate, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmission:
