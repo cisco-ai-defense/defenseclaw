@@ -146,6 +146,36 @@ func TestMigrateV9SeedsAMissingDefaultRulePack(t *testing.T) {
 	}
 }
 
+// A v9 config must never be committed when its referenced shipped pack
+// cannot be installed.
+func TestMigrateV9RefusesFailedRulePackSeed(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged Unix user for read-only directory permissions")
+	}
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n")
+	if err := os.WriteFile(configPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packRoot := filepath.Join(dir, "policies", "guardrail")
+	if err := os.MkdirAll(packRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(packRoot, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(packRoot, 0o700)
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+		t.Fatal("migration committed despite a failed rule-pack seed")
+	}
+	if got, err := os.ReadFile(configPath); err != nil || string(got) != string(source) {
+		t.Fatalf("config after failed migration = %q, %v", got, err)
+	}
+}
+
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
@@ -990,6 +1020,32 @@ func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T)
 	if strings.Contains(string(result.Migrated), "rule_pack_dir") || len(result.Record.Conflicts) != 1 ||
 		result.Record.Conflicts[0].To != "guardrail.rule_pack" {
 		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+}
+
+// A missing audit.db is optional, but a path that cannot be accessed must
+// stop the persisted migration before it drops operator policy.
+func TestMigrateV9RefusesAuditDBAccessError(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(configPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, AuditDBPath: filepath.Join(parent, "audit.db"),
+	})
+	if err == nil {
+		t.Fatal("migration committed without reading the configured audit.db")
+	}
+	if got, readErr := os.ReadFile(configPath); readErr != nil || string(got) != string(source) {
+		t.Fatalf("config after failed migration = %q, %v", got, readErr)
 	}
 }
 
