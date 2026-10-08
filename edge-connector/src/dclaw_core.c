@@ -20,6 +20,7 @@ static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
 /* External module functions */
 extern dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash);
 extern dclaw_action_t dclaw_policy_check_destination(const char *host);
+extern dclaw_action_t dclaw_policy_check_severity(dclaw_severity_t sev);
 extern dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags);
 extern uint8_t dclaw_policy_lookup_capability(const char *tool_name);
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
@@ -85,17 +86,17 @@ int dclaw_init(const dclaw_device_info_t *info) {
     uint64_t now = hal_tick_ms();
     g_state.audit_writer.last_flush_tick = now;
 
-    g_state.rate_limiters[0].bucket_size = 60;
-    g_state.rate_limiters[0].refill_rate = 60;
-    g_state.rate_limiters[0].tokens = 60;
+    g_state.rate_limiters[0].bucket_size = policy_rate_tool_calls_per_min;
+    g_state.rate_limiters[0].refill_rate = policy_rate_tool_calls_per_min;
+    g_state.rate_limiters[0].tokens = policy_rate_tool_calls_per_min;
     g_state.rate_limiters[0].last_refill_tick = now;
-    g_state.rate_limiters[1].bucket_size = 30;
-    g_state.rate_limiters[1].refill_rate = 30;
-    g_state.rate_limiters[1].tokens = 30;
+    g_state.rate_limiters[1].bucket_size = policy_rate_network_per_min;
+    g_state.rate_limiters[1].refill_rate = policy_rate_network_per_min;
+    g_state.rate_limiters[1].tokens = policy_rate_network_per_min;
     g_state.rate_limiters[1].last_refill_tick = now;
-    g_state.rate_limiters[2].bucket_size = 10;
-    g_state.rate_limiters[2].refill_rate = 10;
-    g_state.rate_limiters[2].tokens = 10;
+    g_state.rate_limiters[2].bucket_size = policy_rate_actuations_per_min;
+    g_state.rate_limiters[2].refill_rate = policy_rate_actuations_per_min;
+    g_state.rate_limiters[2].tokens = policy_rate_actuations_per_min;
     g_state.rate_limiters[2].last_refill_tick = now;
 
     /* P1-18 fix: In production builds (DCLAW_DEV_MODE=OFF), refuse to start
@@ -156,6 +157,7 @@ static uint16_t compute_target_hash(const uint8_t *tool_hash) {
     return (uint16_t)(tool_hash[0] | (tool_hash[1] << 8));
 }
 
+
 #if DCLAW_SPECULATIVE_EXECUTION
 static bool is_sync_block_required(uint8_t cap_flags) {
     for (size_t i = 0; i < escalation_table_count; i++) {
@@ -182,6 +184,8 @@ static dclaw_verdict_t make_verdict(dclaw_action_t action, dclaw_reason_t reason
 
 dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     if (!req) return (dclaw_verdict_t){.action = DCLAW_ACTION_BLOCK, .reason = DCLAW_REASON_INVALID_INPUT};
+
+    g_state.eval_count++;
 
     /* P1-6 fix: Check global emergency BLOCK_ALL / LOCKDOWN flag at the TOP
      * of evaluation. When active, ALL requests are immediately blocked
@@ -321,6 +325,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     /* Step 7: Verdict cache lookup */
     dclaw_verdict_t cached;
     if (dclaw_cache_lookup(req->tool_hash, &cached)) {
+        g_state.eval_cache_hit_count++;
         dclaw_audit_write(cached.action, cached.reason, target_hash, req->session_id);
         switch (cached.action) {
             case DCLAW_ACTION_ALLOW:    g_state.eval_allowed_count++;   break;
@@ -392,22 +397,4 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     g_state.eval_denied_count++;
     return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT, DCLAW_VERDICT_SYNC);
 #endif /* DCLAW_MQTT_ENABLED */
-}
-
-dclaw_action_t dclaw_check_destination(const char *host, uint16_t port) {
-    (void)port;
-    return dclaw_policy_check_destination(host);
-}
-
-void dclaw_report_result(uint16_t session_id, const char *tool_name,
-                         bool success, const char *output_summary) {
-    (void)output_summary;
-    uint8_t dummy_hash[32] = {0};
-    if (tool_name) {
-        for (size_t i = 0; tool_name[i] && i < 32; i++)
-            dummy_hash[i] = (uint8_t)tool_name[i];
-    }
-    uint16_t target_hash = (uint16_t)(dummy_hash[0] | (dummy_hash[1] << 8));
-    dclaw_audit_write(success ? DCLAW_ACTION_ALLOW : DCLAW_ACTION_BLOCK,
-                      DCLAW_REASON_POLICY_TABLE, target_hash, session_id);
 }

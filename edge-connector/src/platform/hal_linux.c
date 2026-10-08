@@ -14,7 +14,7 @@
 
 static const char *get_flash_path(void) {
     const char *env = getenv("DCLAW_FLASH_PATH");
-    return env ? env : "/tmp/edge-connector-flash.bin";
+    return env ? env : "/var/lib/defenseclaw/flash.bin";
 }
 
 static int flash_fd = -1;

@@ -104,6 +104,10 @@ static uint8_t pending_ring_next = 0;
 
 void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash) {
     mqtt_pending_entry_t *slot = &pending_ring[pending_ring_next];
+    if (slot->occupied) {
+        fprintf(stderr, "[DCLAW] WARNING: pending verdict slot %d evicted (ring full)\n",
+                pending_ring_next);
+    }
     slot->request_id = request_id;
     memcpy(slot->tool_hash, tool_hash, 32);
     slot->occupied = true;
@@ -130,6 +134,7 @@ extern int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_le
 extern int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                               const uint8_t *signature);
 extern int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
+extern bool dclaw_emergency_has_gap(uint32_t cloud_current_seq);
 
 /* === MQTT packet encoding helpers === */
 
@@ -515,14 +520,6 @@ static int mqtt_send_pingreq(int fd) {
 }
 
 /*
- * Send MQTT DISCONNECT (2 bytes: 0xE0, 0x00) and close socket.
- */
-static void mqtt_send_disconnect(int fd) {
-    uint8_t pkt[2] = { MQTT_PKT_DISCONNECT, 0x00 };
-    sock_write_all(fd, pkt, 2); /* best-effort */
-}
-
-/*
  * Mark connection as lost. Closes socket and sets state for reconnect.
  */
 static void mqtt_mark_disconnected(void) {
@@ -875,6 +872,22 @@ int dclaw_mqtt_reconnect(void) {
     } else {
         mqtt_ctx.backoff_ms = 1000; /* Reset backoff on success */
         mqtt_ctx.broker_index = 0;
+
+        /* REQ-32: Check for emergency sequence gap after reconnect.
+         * During the disconnect window, emergency broadcasts may have been
+         * missed. If the emergency state is initialized (we've seen at least
+         * one emergency message before), log a warning so operators know
+         * messages may have been lost. */
+        dclaw_state_t *rs = dclaw_get_state();
+        if (rs->emergency.initialized) {
+            /* We don't know the cloud's current sequence number, so we
+             * cannot call dclaw_emergency_has_gap() precisely. Log a
+             * warning unconditionally after reconnect when emergency
+             * state is active; the next emergency message will trigger
+             * gap detection via the normal sequence check. */
+            fprintf(stderr, "[DCLAW] WARNING: emergency sequence gap may exist after reconnect "
+                    "(last_seen_seq=%u)\n", rs->emergency.last_seen_seq);
+        }
     }
     return rc;
 }
@@ -947,15 +960,6 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
     return 0;
 }
 
-int dclaw_mqtt_subscribe(const char *topic, uint8_t qos) {
-    if (mqtt_ctx.state != MQTT_STATE_CONNECTED) return -1;
-    if (mqtt_ctx.socket_fd < 0) return -1;
-
-    uint16_t pkt_id = mqtt_ctx.next_packet_id++;
-    return mqtt_send_subscribe(mqtt_ctx.socket_fd, topic, qos, pkt_id);
-    /* Note: SUBACK will be consumed by dclaw_mqtt_poll() */
-}
-
 int dclaw_mqtt_poll(int timeout_ms) {
     if (mqtt_ctx.state != MQTT_STATE_CONNECTED) return -1;
     if (mqtt_ctx.socket_fd < 0) return -1;
@@ -1020,18 +1024,6 @@ int dclaw_mqtt_poll(int timeout_ms) {
         mqtt_ctx.last_activity_tick = now;
     }
 
-    return 0;
-}
-
-int dclaw_mqtt_disconnect(void) {
-    if (mqtt_ctx.socket_fd >= 0) {
-        mqtt_send_disconnect(mqtt_ctx.socket_fd);
-        close(mqtt_ctx.socket_fd);
-        mqtt_ctx.socket_fd = -1;
-    }
-    mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
-    mqtt_ctx.recv_len = 0;
-    dclaw_get_state()->online = false;
     return 0;
 }
 

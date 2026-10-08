@@ -156,8 +156,14 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     buf[pos++] = (uint8_t)(escalated >> 8);
     buf[pos++] = (uint8_t)(escalated);
 
-    /* cache_hit_pct (1 byte) */
-    buf[pos++] = 0;
+    /* cache_hit_pct (1 byte) — computed from actual cache stats */
+    {
+        uint8_t pct = 0;
+        if (s->eval_count > 0) {
+            pct = (uint8_t)(100U * s->eval_cache_hit_count / s->eval_count);
+        }
+        buf[pos++] = pct;
+    }
 
     /* session_count (1 byte) */
     uint8_t active = 0;
@@ -166,10 +172,11 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     }
     buf[pos++] = active;
 
-    /* audit_head_hmac (8 bytes) — last entry's hmac extended to 8 bytes */
+    /* audit_head_hmac (8 bytes) — last entry's 4-byte hmac + prev_hmac[4] */
     memset(buf + pos, 0, 8);
     if (s->audit_writer.count > 0) {
         memcpy(buf + pos, s->audit_writer.buffer[s->audit_writer.count - 1].hmac, 4);
+        memcpy(buf + pos + 4, s->audit_writer.prev_hmac, 4);
     }
     pos += 8;
 

@@ -575,6 +575,14 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
+	// Reject verdict requests from unregistered devices.
+	if _, registered := b.fleet.GetDevice(fullID); !registered {
+		b.logger.Printf("[mqtt-bridge] rejected verdict request from unregistered device %d (tenant=%d fleet=%d)",
+			parts.DeviceID, parts.TenantID, parts.FleetID)
+		b.incErrors()
+		return
+	}
+
 	vr, err := DecodeVerdictRequest(msg.Payload)
 	if err != nil {
 		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)

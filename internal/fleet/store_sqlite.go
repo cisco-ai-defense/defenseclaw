@@ -59,10 +59,14 @@ func createTable(db *sql.DB) error {
 			flags           INTEGER NOT NULL DEFAULT 0,
 			denied_total    INTEGER NOT NULL DEFAULT 0,
 			allowed_total   INTEGER NOT NULL DEFAULT 0,
+			warned_total    INTEGER NOT NULL DEFAULT 0,
+			escalated_total INTEGER NOT NULL DEFAULT 0,
 			flash_writes    INTEGER NOT NULL DEFAULT 0,
 			last_uptime     INTEGER NOT NULL DEFAULT 0,
 			prev_denied     INTEGER NOT NULL DEFAULT 0,
-			prev_allowed    INTEGER NOT NULL DEFAULT 0
+			prev_allowed    INTEGER NOT NULL DEFAULT 0,
+			prev_warned     INTEGER NOT NULL DEFAULT 0,
+			prev_escalated  INTEGER NOT NULL DEFAULT 0
 		)
 	`)
 	if err != nil {
@@ -76,6 +80,10 @@ func createTable(db *sql.DB) error {
 		"ALTER TABLE devices ADD COLUMN last_uptime INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN prev_denied INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN prev_allowed INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN warned_total INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN escalated_total INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN prev_warned INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN prev_escalated INTEGER NOT NULL DEFAULT 0",
 	} {
 		if _, err := db.Exec(col); err != nil {
 			// Ignore "duplicate column name" — column already exists.
@@ -118,33 +126,40 @@ func (s *SQLiteStore) SaveDevice(dev *manager.Device) error {
 			device_id, tenant_id, fleet_id, hw_profile, fw_version,
 			policy_version, capabilities, status, last_heartbeat,
 			last_audit_hmac, site_id, registered_at, flags,
-			denied_total, allowed_total, flash_writes,
-			last_uptime, prev_denied, prev_allowed
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			denied_total, allowed_total, warned_total, escalated_total,
+			flash_writes, last_uptime, prev_denied, prev_allowed,
+			prev_warned, prev_escalated
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET
-			hw_profile     = excluded.hw_profile,
-			fw_version     = excluded.fw_version,
-			policy_version = excluded.policy_version,
-			capabilities   = excluded.capabilities,
-			status         = excluded.status,
-			last_heartbeat = excluded.last_heartbeat,
-			last_audit_hmac= excluded.last_audit_hmac,
-			site_id        = excluded.site_id,
-			flags          = excluded.flags,
-			denied_total   = excluded.denied_total,
-			allowed_total  = excluded.allowed_total,
-			flash_writes   = excluded.flash_writes,
-			last_uptime    = excluded.last_uptime,
-			prev_denied    = excluded.prev_denied,
-			prev_allowed   = excluded.prev_allowed
+			hw_profile      = excluded.hw_profile,
+			fw_version      = excluded.fw_version,
+			policy_version  = excluded.policy_version,
+			capabilities    = excluded.capabilities,
+			status          = excluded.status,
+			last_heartbeat  = excluded.last_heartbeat,
+			last_audit_hmac = excluded.last_audit_hmac,
+			site_id         = excluded.site_id,
+			flags           = excluded.flags,
+			denied_total    = excluded.denied_total,
+			allowed_total   = excluded.allowed_total,
+			warned_total    = excluded.warned_total,
+			escalated_total = excluded.escalated_total,
+			flash_writes    = excluded.flash_writes,
+			last_uptime     = excluded.last_uptime,
+			prev_denied     = excluded.prev_denied,
+			prev_allowed    = excluded.prev_allowed,
+			prev_warned     = excluded.prev_warned,
+			prev_escalated  = excluded.prev_escalated
 	`,
 		dev.DeviceID, dev.TenantID, dev.FleetID,
 		dev.HWProfile, dev.FWVersion,
 		dev.PolicyVersion, dev.Capabilities,
 		string(dev.Status), dev.LastHeartbeat.Format(time.RFC3339),
 		hmacHex, dev.SiteID, dev.RegisteredAt.Format(time.RFC3339),
-		dev.Flags, dev.DeniedTotal, dev.AllowedTotal, dev.FlashWrites,
-		dev.LastUptime, dev.PrevDenied, dev.PrevAllowed,
+		dev.Flags, dev.DeniedTotal, dev.AllowedTotal,
+		dev.WarnedTotal, dev.EscalatedTotal,
+		dev.FlashWrites, dev.LastUptime, dev.PrevDenied, dev.PrevAllowed,
+		dev.PrevWarned, dev.PrevEscalated,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device %d: %w", dev.DeviceID, err)
@@ -159,8 +174,9 @@ func (s *SQLiteStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*ma
 		SELECT device_id, tenant_id, fleet_id, hw_profile, fw_version,
 		       policy_version, capabilities, status, last_heartbeat,
 		       last_audit_hmac, site_id, registered_at, flags,
-		       denied_total, allowed_total, flash_writes,
-		       last_uptime, prev_denied, prev_allowed
+		       denied_total, allowed_total, warned_total, escalated_total,
+		       flash_writes, last_uptime, prev_denied, prev_allowed,
+		       prev_warned, prev_escalated
 		FROM devices WHERE device_id = ?
 	`, fullID)
 
@@ -172,8 +188,9 @@ func (s *SQLiteStore) ListDevices() ([]*manager.Device, error) {
 		SELECT device_id, tenant_id, fleet_id, hw_profile, fw_version,
 		       policy_version, capabilities, status, last_heartbeat,
 		       last_audit_hmac, site_id, registered_at, flags,
-		       denied_total, allowed_total, flash_writes,
-		       last_uptime, prev_denied, prev_allowed
+		       denied_total, allowed_total, warned_total, escalated_total,
+		       flash_writes, last_uptime, prev_denied, prev_allowed,
+		       prev_warned, prev_escalated
 		FROM devices ORDER BY device_id
 	`)
 	if err != nil {
@@ -280,8 +297,11 @@ func scanDeviceFromScanner(s scanner) (*manager.Device, error) {
 		&dev.PolicyVersion, &dev.Capabilities,
 		&status, &lastHB, &hmacHex, &dev.SiteID,
 		&registeredAt, &dev.Flags,
-		&dev.DeniedTotal, &dev.AllowedTotal, &dev.FlashWrites,
-		&dev.LastUptime, &dev.PrevDenied, &dev.PrevAllowed,
+		&dev.DeniedTotal, &dev.AllowedTotal,
+		&dev.WarnedTotal, &dev.EscalatedTotal,
+		&dev.FlashWrites, &dev.LastUptime,
+		&dev.PrevDenied, &dev.PrevAllowed,
+		&dev.PrevWarned, &dev.PrevEscalated,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {

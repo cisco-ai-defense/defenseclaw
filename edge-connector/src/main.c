@@ -8,8 +8,8 @@
 #include <errno.h>
 #include <stdlib.h>
 
-#ifndef DCLAW_IPC_SOCKET_PATH
-#define DCLAW_IPC_SOCKET_PATH "/tmp/defenseclaw.sock"
+#ifndef DCLAW_IPC_SOCKET_PATH_DEFAULT
+#define DCLAW_IPC_SOCKET_PATH_DEFAULT "/tmp/defenseclaw.sock"
 #endif
 
 #define DCLAW_MAX_IPC_CLIENTS 8
@@ -26,6 +26,8 @@ extern void dclaw_canary_tick(void);
 #endif
 extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
                                     dclaw_tool_request_t *out);
+extern int  dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer);
+extern dclaw_state_t *dclaw_get_state(void);
 
 static volatile bool g_running = true;
 
@@ -100,6 +102,11 @@ int main(void) {
         return 1;
     }
 
+    /* Resolve IPC socket path: env var override, then compile-time default */
+    const char *env_ipc = getenv("DCLAW_IPC_SOCKET_PATH");
+    const char *ipc_socket_path = (env_ipc && env_ipc[0] != '\0')
+                                  ? env_ipc : DCLAW_IPC_SOCKET_PATH_DEFAULT;
+
     /* Initialize MQTT and attempt initial connection */
 #if DCLAW_MQTT_ENABLED
     (void)dclaw_mqtt_init();
@@ -107,16 +114,16 @@ int main(void) {
 #endif
 
     /* Create the IPC Unix domain socket */
-    int server_fd = hal_ipc_socket_create(DCLAW_IPC_SOCKET_PATH);
+    int server_fd = hal_ipc_socket_create(ipc_socket_path);
     if (server_fd < 0) {
         fprintf(stderr, "edge-connector: failed to create IPC socket at %s\n",
-                DCLAW_IPC_SOCKET_PATH);
+                ipc_socket_path);
         dclaw_shutdown();
         return 1;
     }
 
     fprintf(stderr, "edge-connector: running (profile=%s, ipc=%s)\n",
-            DCLAW_PROFILE_NAME, DCLAW_IPC_SOCKET_PATH);
+            DCLAW_PROFILE_NAME, ipc_socket_path);
 
     /* pollfd array: slot 0 = server socket, slots 1..MAX = client connections */
     struct pollfd fds[1 + DCLAW_MAX_IPC_CLIENTS];
@@ -155,7 +162,10 @@ int main(void) {
         if (ready > 0 && (fds[0].revents & POLLIN)) {
             int client_fd = hal_ipc_socket_accept(server_fd);
             if (client_fd >= 0) {
-                if (num_clients < DCLAW_MAX_IPC_CLIENTS) {
+                /* Verify peer credentials before admitting the connection */
+                if (dclaw_ipc_verify_peer(client_fd, &dclaw_get_state()->ipc_peer) != 0) {
+                    hal_ipc_socket_close(client_fd);
+                } else if (num_clients < DCLAW_MAX_IPC_CLIENTS) {
                     client_fds[num_clients] = client_fd;
                     num_clients++;
                 } else {
@@ -260,7 +270,7 @@ int main(void) {
             hal_ipc_socket_close(client_fds[i]);
     }
     hal_ipc_socket_close(server_fd);
-    (void)unlink(DCLAW_IPC_SOCKET_PATH);
+    (void)unlink(ipc_socket_path);
 
     dclaw_shutdown();
     fprintf(stderr, "edge-connector: shutdown complete\n");

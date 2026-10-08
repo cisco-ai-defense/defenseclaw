@@ -82,8 +82,21 @@ endif()
 
 # P2-22 fix: Ensure asserts are active in all test targets even in Release
 # builds. -UNDEBUG removes the NDEBUG that CMake adds for Release/RelWithDebInfo.
+# Also set DCLAW_FLASH_PATH for all tests so they work even when the default
+# /var/lib/defenseclaw/ directory does not exist.
 foreach(_tgt IN LISTS DCLAW_TEST_TARGETS)
     target_compile_options(${_tgt} PRIVATE -UNDEBUG)
+endforeach()
+
+# Set default flash path for tests that don't already have ENVIRONMENT set.
+# Tests with explicit flash paths (ota_emergency, acceptance) keep their own.
+get_property(_all_tests DIRECTORY PROPERTY TESTS)
+foreach(_test IN LISTS _all_tests)
+    get_test_property(${_test} ENVIRONMENT _env)
+    if(NOT _env)
+        set_tests_properties(${_test} PROPERTIES
+            ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-${_test}.bin")
+    endif()
 endforeach()
 
 # Fuzz harness (requires sanitizer support for libFuzzer)

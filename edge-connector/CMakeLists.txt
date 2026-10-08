@@ -100,7 +100,6 @@ set(CORE_SOURCES
     src/enforce/ipc_json.c
     src/enforce/rate_limiter.c
     src/persist/audit_ring.c
-    src/persist/flash_safe.c
     src/persist/config_store.c
     src/platform/hal_linux.c
 )

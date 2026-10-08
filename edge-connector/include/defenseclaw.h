@@ -303,6 +303,8 @@ typedef struct {
     uint32_t eval_denied_count;
     uint32_t eval_warned_count;
     uint32_t eval_escalated_count;
+    uint32_t eval_count;            /* total evaluations (for cache_hit_pct) */
+    uint32_t eval_cache_hit_count;  /* cache hits (for cache_hit_pct) */
     uint16_t                next_request_id;
     bool                    online;
     bool                    initialized;
@@ -315,9 +317,6 @@ typedef struct {
 
 int dclaw_init(const dclaw_device_info_t *info);
 dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req);
-dclaw_action_t dclaw_check_destination(const char *host, uint16_t port);
-void dclaw_report_result(uint16_t session_id, const char *tool_name,
-                         bool success, const char *output_summary);
 int dclaw_flush_audit(void);
 bool dclaw_audit_key_provisioned(void);
 int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,

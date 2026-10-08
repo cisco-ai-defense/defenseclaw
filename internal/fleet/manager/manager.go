@@ -24,27 +24,31 @@ const (
 
 // Device holds the registered state of an IoT device.
 type Device struct {
-	DeviceID      uint64       `json:"device_id"`
-	TenantID      uint16       `json:"tenant_id"`
-	FleetID       uint16       `json:"fleet_id"`
-	HWProfile     string       `json:"hw_profile"`
-	FWVersion     string       `json:"fw_version"`
-	PolicyVersion uint16       `json:"policy_version"`
-	Capabilities  uint8        `json:"capabilities"`
-	Status        DeviceStatus `json:"status"`
-	LastHeartbeat time.Time    `json:"last_heartbeat"`
-	LastAuditHMAC []byte       `json:"last_audit_hmac"`
-	SiteID        string       `json:"site_id"`
-	RegisteredAt  time.Time    `json:"registered_at"`
-	Flags         uint8        `json:"flags"`
-	DeniedTotal   uint64       `json:"denied_total"`
-	AllowedTotal  uint64       `json:"allowed_total"`
-	FlashWrites   uint32       `json:"flash_writes"`
+	DeviceID       uint64       `json:"device_id"`
+	TenantID       uint16       `json:"tenant_id"`
+	FleetID        uint16       `json:"fleet_id"`
+	HWProfile      string       `json:"hw_profile"`
+	FWVersion      string       `json:"fw_version"`
+	PolicyVersion  uint16       `json:"policy_version"`
+	Capabilities   uint8        `json:"capabilities"`
+	Status         DeviceStatus `json:"status"`
+	LastHeartbeat  time.Time    `json:"last_heartbeat"`
+	LastAuditHMAC  []byte       `json:"last_audit_hmac"`
+	SiteID         string       `json:"site_id"`
+	RegisteredAt   time.Time    `json:"registered_at"`
+	Flags          uint8        `json:"flags"`
+	DeniedTotal    uint64       `json:"denied_total"`
+	AllowedTotal   uint64       `json:"allowed_total"`
+	WarnedTotal    uint64       `json:"warned_total"`
+	EscalatedTotal uint64       `json:"escalated_total"`
+	FlashWrites    uint32       `json:"flash_writes"`
 
 	// NEW-3 fix: Replay detection via monotonic uptime and delta counters.
-	LastUptime  uint32 `json:"last_uptime"`
-	PrevDenied  uint16 `json:"prev_denied"`
-	PrevAllowed uint16 `json:"prev_allowed"`
+	LastUptime    uint32 `json:"last_uptime"`
+	PrevDenied    uint16 `json:"prev_denied"`
+	PrevAllowed   uint16 `json:"prev_allowed"`
+	PrevWarned    uint16 `json:"prev_warned"`
+	PrevEscalated uint16 `json:"prev_escalated"`
 }
 
 // Heartbeat represents a parsed 32-byte device heartbeat.
@@ -309,6 +313,8 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			deviceID, hb.UptimeSec, dev.LastUptime)
 		dev.PrevDenied = 0
 		dev.PrevAllowed = 0
+		dev.PrevWarned = 0
+		dev.PrevEscalated = 0
 	} else if hb.UptimeSec > 0 && hb.UptimeSec == dev.LastUptime {
 		// Exact same uptime with no reboot — replay. Drop it.
 		log.Printf("[fleet] replay detected for device %d: uptime %d == last %d, dropping",
@@ -338,8 +344,20 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	} else {
 		dev.AllowedTotal += uint64(hb.AllowedCount)
 	}
+	if hb.WarnedCount >= dev.PrevWarned {
+		dev.WarnedTotal += uint64(hb.WarnedCount - dev.PrevWarned)
+	} else {
+		dev.WarnedTotal += uint64(hb.WarnedCount)
+	}
+	if hb.EscalatedCount >= dev.PrevEscalated {
+		dev.EscalatedTotal += uint64(hb.EscalatedCount - dev.PrevEscalated)
+	} else {
+		dev.EscalatedTotal += uint64(hb.EscalatedCount)
+	}
 	dev.PrevDenied = hb.DeniedCount
 	dev.PrevAllowed = hb.AllowedCount
+	dev.PrevWarned = hb.WarnedCount
+	dev.PrevEscalated = hb.EscalatedCount
 
 	if fm.onHeartbeat != nil {
 		fm.onHeartbeat()

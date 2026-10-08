@@ -2,10 +2,6 @@
 #include "platform.h"
 #include <string.h>
 
-#ifndef DCLAW_IPC_SOCKET_PATH
-#define DCLAW_IPC_SOCKET_PATH "/tmp/defenseclaw.sock"
-#endif
-
 extern dclaw_state_t *dclaw_get_state(void);
 
 static uint32_t ipc_request_count_this_sec = 0;
