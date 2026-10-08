@@ -87,15 +87,15 @@ type IdentitySpoolRecord struct {
 const identitySpoolClockSlack = time.Minute
 
 // IdentitySpoolStale reports whether the records in dir look older than
-// fresh to a reader of the wall clock: the newest is older than fresh, or a
-// record is dated more than a minute in the future. The gateway trusts a
+// fresh to a reader of the wall clock: any record is older than fresh, or
+// dated more than a minute in the future. The gateway trusts a
 // record by its wall-clock age, so after a clock step (an NTP correction, a
 // resume from suspend) every record looked over an hour old, or the records
 // written under a slow clock did once it was corrected, and the accounts
 // assigned by UPN fell to the default profile until the guardian's next
-// interval (GAP-0921). newest is the time of the newest record, zero for
+// interval (GAP-0921). oldest is the time of the oldest record, zero for
 // none.
-func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (newest time.Time, stale bool) {
+func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest time.Time, stale bool) {
 	if dir == "" {
 		return time.Time{}, false
 	}
@@ -113,14 +113,14 @@ func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (newest 
 			continue
 		}
 		written := info.ModTime()
-		if written.After(newest) {
-			newest = written
+		if oldest.IsZero() || written.Before(oldest) {
+			oldest = written
 		}
 		if written.Sub(now) > identitySpoolClockSlack {
 			future = true
 		}
 	}
-	return newest, !newest.IsZero() && (future || now.Sub(newest) > fresh)
+	return oldest, !oldest.IsZero() && (future || now.Sub(oldest) > fresh)
 }
 
 // IdentitySpoolDir is the spool directory for a guardian authorization
