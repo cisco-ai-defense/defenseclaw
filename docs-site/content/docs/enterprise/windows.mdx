@@ -1091,6 +1091,13 @@ in `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`. Files that name another
 deployment's hook binary stay. The `machine_state_remaining` warning names
 anything it could not remove, and why.
 
+Codex's `C:\ProgramData\OpenAI\Codex\requirements.toml` can hold your own
+keys as well, so a purge without the deployment record leaves it. The next
+Setup `/ensure` adopts it: it separates DefenseClaw's hooks (the ones that
+name this deployment's hook binary) from the rest, records the rest as the
+file to restore on uninstall, and continues. A file DefenseClaw created on
+its own is deleted again by that later uninstall.
+
 If `C:\ProgramData\Cisco\DefenseClaw` was deleted by hand, uninstall
 finds no recorded deployment. It still removes the four services, the
 binaries, DefenseClaw's Claude Code files in
