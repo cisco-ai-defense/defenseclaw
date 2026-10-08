@@ -1512,3 +1512,40 @@ func TestInboundOriginPolicyRequiresExactLocalForwardPair(t *testing.T) {
 		t.Fatalf("terminal policy = %#v err=%v", terminal, err)
 	}
 }
+
+func TestOTLPInboundNativeProjectedLogRejectsIdentityClaims(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.native.log.v8.log.identity.observed")
+	if !ok {
+		t.Fatal("native log match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	leaf.logRecord.Body = inboundProjectedLogBody(t, leaf)
+	mutateInboundProjectedLogBody(t, &leaf, func(wire map[string]any) {
+		wire["body"] = map[string]any{
+			"user.id":                              "1001",
+			"defenseclaw.user.principal":           "other@example.org",
+			"defenseclaw.user.principal.assurance": "verified",
+			"defenseclaw.agent.identity.id":        "agt-other",
+			"defenseclaw.guardrail.profile.name":   "admins",
+		}
+	})
+	message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+		Resource:  &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		SchemaUrl: leaf.resource.schemaURL,
+		ScopeLogs: []*logspb.ScopeLogs{{
+			Scope:     &commonpb.InstrumentationScope{Name: leaf.scope.name, Version: leaf.scope.version},
+			SchemaUrl: leaf.scope.schemaURL, LogRecords: []*logspb.LogRecord{leaf.logRecord},
+		}},
+	}}}
+	accounting, err := api.importDecodedOTLPRequestV8(t.Context(), message, otelSignalLogs, source, time.Now().UTC())
+	if err != nil || !accounting.valid() || accounting.invalidMappedField != 1 {
+		t.Fatalf("native identity claim accounting=%+v err=%v", accounting, err)
+	}
+	if events := readStoredOTLPV8Events(t, fixture.path); len(events) != 0 {
+		t.Fatalf("native identity claim persisted %d records", len(events))
+	}
+}

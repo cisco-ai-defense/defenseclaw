@@ -100,7 +100,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 
 	now := time.Now().UTC()
 	lifecycle, hasLifecycle := spec.LifecycleForEvent(req.HookEventName)
-	cursor, hasCursor := correlationCursorForHook(ctx, repo, instance.ConnectorInstanceID, req, spec)
+	cursor, hasCursor := correlationCursorForHook(ctx, repo, instance.ConnectorInstanceID, req, spec, a.managedAIDOnly())
 	if hasCursor {
 		if req.AgentID == "" {
 			req.AgentID = cursor.AgentID
@@ -490,7 +490,7 @@ func (a *APIServer) finalizeHookCorrelationReceipt(
 	return repo.MarkOccurrenceCanonicalPersisted(ctx, *receipt, time.Now().UTC())
 }
 
-func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationRepository, instance audit.ConnectorInstanceID, req agentHookRequest, spec connector.CorrelationSpec) (audit.CorrelationCursor, bool) {
+func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationRepository, instance audit.ConnectorInstanceID, req agentHookRequest, spec connector.CorrelationSpec, secureClient bool) (audit.CorrelationCursor, bool) {
 	if req.SessionID == "" {
 		return audit.CorrelationCursor{}, false
 	}
@@ -499,19 +499,21 @@ func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationReposi
 	if req.AgentID != "" {
 		cursor, err = repo.GetCursor(ctx, instance, req.SessionID, req.AgentID)
 	} else {
-		// The ledger is keyed by connector, not by user. An agentless hook
-		// takes its own main agent's cursor, never the one another user's
-		// hooks left under the same session id (GAP-0232).
-		if req.AgentIdentityID != "" {
+		// Outside Secure Client, an identity-scoped agentless hook may
+		// inherit only its own deterministic main agent. The registry is
+		// process-local, so it cannot authorize a generic cursor after restart.
+		if req.AgentIdentityID != "" && !secureClient {
 			if spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) {
 				main := agentNodeID(req.AgentIdentityID, req.ConnectorName, req.SessionID, "root")
 				if own, getErr := repo.GetCursor(ctx, instance, req.SessionID, main); getErr == nil && own.Active {
 					return own, true
 				}
 			}
-			if SharedAgentRegistry().SessionSharedWithOtherIdentity(ctx, req.SessionID, req.AgentIdentityID) {
-				return audit.CorrelationCursor{}, false
-			}
+			return audit.CorrelationCursor{}, false
+		}
+		if req.AgentIdentityID != "" &&
+			SharedAgentRegistry().SessionSharedWithOtherIdentity(ctx, req.SessionID, req.AgentIdentityID) {
+			return audit.CorrelationCursor{}, false
 		}
 		cursor, err = repo.FindActiveCursor(ctx, instance, req.SessionID)
 		if errors.Is(err, audit.ErrCorrelationConflict) && spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) {

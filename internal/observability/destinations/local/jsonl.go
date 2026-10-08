@@ -49,6 +49,9 @@ type JSONLConfig struct {
 	MaxBackups int
 	MaxAgeDays int
 	Compress   bool
+	// FailOnOpenError preserves Secure Client's startup refusal on an
+	// ordinary file-open failure.
+	FailOnOpenError bool
 }
 
 // DefaultJSONLConfig returns the documented v8 rotation defaults for path.
@@ -98,8 +101,13 @@ func NewJSONL(config JSONLConfig) (*JSONL, error) {
 		return nil, newError(ErrorOpenFailed)
 	}
 	file, identity, size, err := secureOpenAppend(config.Path)
-	if err != nil && isUnsafeFailure(err) {
-		return nil, newError(ErrorUnsafePath)
+	if err != nil {
+		if isUnsafeFailure(err) {
+			return nil, newError(ErrorUnsafePath)
+		}
+		if config.FailOnOpenError {
+			return nil, newError(ErrorOpenFailed)
+		}
 	}
 	// A file the gateway cannot open yet (an access list without write for
 	// its account, a full or offline volume) disables only this destination:
