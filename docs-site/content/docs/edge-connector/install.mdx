@@ -50,6 +50,8 @@ cmake .. -DDCLAW_PROFILE=STANDARD  # ~68KB — Raspberry Pi, Jetson, SBCs
 cmake .. -DDCLAW_PROFILE=EDGE      # ~131KB — Edge gateways with bloom filter
 ```
 
+> **Note:** Sizes shown are for stripped Release builds with `-Os -flto`. Debug builds are larger (~79KB MINIMAL, ~265KB STANDARD/EDGE).
+
 ## Configure the policy
 
 ### Step 1 — Copy and edit
@@ -425,7 +427,7 @@ export DCLAW_MQTT_PASS=yourpassword
 ```
 
 <Callout type="warn">
-TLS is not yet implemented in the Edge Connector. Use plaintext MQTT on a trusted network for now. mTLS support is planned for Phase 2.
+MQTT transport is currently plaintext only (`mqtt://`). TLS/mTLS support (`mqtts://`) is planned for Phase 2. Deploy the MQTT broker on a trusted network or use a VPN tunnel.
 </Callout>
 
 **Configure the gateway (Go fleet server):**

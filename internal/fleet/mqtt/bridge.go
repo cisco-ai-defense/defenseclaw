@@ -343,58 +343,10 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 	// An anonymous MQTT publisher can match topic and payload device_id, but
 	// cannot forge a valid HMAC without the per-device key. This prevents
 	// matching-ID heartbeat spoofing.
-	if b.keyProvider != nil {
-		fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
-		deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
-
-		if deviceKey == nil {
-			b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — key lookup returned nil for device %d (key store error, fail closed)",
-				parts.DeviceID)
-			b.incErrors()
-			return
-		}
-
-		if hw.Signed {
-			// Signed heartbeat: verify HMAC-SHA256 over topic + payload.
-			// Including the topic binds the HMAC to the message type, so a
-			// valid signed heartbeat cannot be replayed on the /register topic.
-			mac := hmac.New(sha256.New, deviceKey)
-			mac.Write([]byte(msg.Topic))
-			mac.Write(msg.Payload[:32])
-			expected := mac.Sum(nil)
-
-			if !hmac.Equal(expected, hw.HMACTag) {
-				b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — HMAC verification failed for device %d (possible spoofing attempt)",
-					parts.DeviceID)
-				b.incErrors()
-				return
-			}
-		} else {
-			// Unsigned (legacy) heartbeat: check whether this device has a
-			// per-device key provisioned. If it does, reject — an attacker
-			// could bypass HMAC by sending a shorter (unsigned) payload.
-			// P1-06 fix: only accept unsigned heartbeats from truly legacy
-			// devices that have no per-device key.
-			// P1-06 fix (fail-closed): key-store errors are treated as
-			// "key exists" — we reject rather than accept on error.
-			if checker, ok := b.keyProvider.(DeviceKeyChecker); ok {
-				hasKey, err := checker.HasDeviceKey(fullDeviceID)
-				if err != nil {
-					b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — key store error for device %d: %v (fail-closed)",
-						parts.DeviceID, err)
-					b.incErrors()
-					return
-				}
-				if hasKey {
-					b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — unsigned heartbeat from keyed device %d (possible HMAC bypass attempt)",
-						parts.DeviceID)
-					b.incErrors()
-					return
-				}
-			}
-			b.logger.Printf("[mqtt-bridge] WARNING: device %d sent unsigned heartbeat (no HMAC) — upgrade edge-connector for signed heartbeats",
-				parts.DeviceID)
-		}
+	if err := b.verifyMessageHMAC(msg, parts, hw); err != nil {
+		b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — %v", err)
+		b.incErrors()
+		return
 	}
 
 	// Convert to the manager's Heartbeat type
@@ -471,57 +423,10 @@ func (b *Bridge) handleRegistration(msg Message) {
 	// Without this check, an attacker could overwrite a device's inventory
 	// (policy version, firmware, capabilities) by sending an unsigned
 	// registration payload to an already-keyed device's topic.
-	if b.keyProvider != nil {
-		fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
-		deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
-
-		if deviceKey == nil {
-			b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — key lookup returned nil for device %d (key store error, fail closed)",
-				parts.DeviceID)
-			b.incErrors()
-			return
-		}
-
-		if hw.Signed {
-			// Signed registration: verify HMAC-SHA256 over topic + payload.
-			// Including the topic binds the HMAC to the message type, so a
-			// valid signed heartbeat cannot be replayed on the /register topic.
-			mac := hmac.New(sha256.New, deviceKey)
-			mac.Write([]byte(msg.Topic))
-			mac.Write(msg.Payload[:32])
-			expected := mac.Sum(nil)
-
-			if !hmac.Equal(expected, hw.HMACTag) {
-				b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — HMAC verification failed for device %d (possible spoofing attempt)",
-					parts.DeviceID)
-				b.incErrors()
-				return
-			}
-		} else {
-			// Unsigned (legacy) registration: check whether this device has a
-			// per-device key provisioned. If it does, reject — an attacker
-			// could bypass HMAC by sending a shorter (unsigned) payload to
-			// overwrite the device's inventory.
-			// P1-06 fix (fail-closed): key-store errors are treated as
-			// "key exists" — we reject rather than accept on error.
-			if checker, ok := b.keyProvider.(DeviceKeyChecker); ok {
-				hasKey, err := checker.HasDeviceKey(fullDeviceID)
-				if err != nil {
-					b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — key store error for device %d: %v (fail-closed)",
-						parts.DeviceID, err)
-					b.incErrors()
-					return
-				}
-				if hasKey {
-					b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — unsigned registration from keyed device %d (possible HMAC bypass attempt)",
-						parts.DeviceID)
-					b.incErrors()
-					return
-				}
-			}
-			b.logger.Printf("[mqtt-bridge] WARNING: device %d sent unsigned registration (no HMAC) — upgrade edge-connector for signed registrations",
-				parts.DeviceID)
-		}
+	if err := b.verifyMessageHMAC(msg, parts, hw); err != nil {
+		b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — %v", err)
+		b.incErrors()
+		return
 	}
 
 	// P0-6 fix: When AllowAutoRegistration is false (production default),
@@ -657,6 +562,57 @@ func (b *Bridge) incErrors() {
 	b.mu.Lock()
 	b.decodeErrors++
 	b.mu.Unlock()
+}
+
+// verifyMessageHMAC validates the HMAC-SHA256 tag on a signed or unsigned
+// heartbeat/registration message. Returns nil when verification succeeds
+// (or the message is an acceptable unsigned legacy message). Returns an
+// error describing the rejection reason otherwise. Both handleHeartbeat
+// and handleRegistration delegate to this method to avoid duplicating the
+// ~50-line HMAC verification block.
+func (b *Bridge) verifyMessageHMAC(msg Message, parts *TopicParts, hw *HeartbeatWire) error {
+	if b.keyProvider == nil {
+		return nil
+	}
+
+	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+	deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
+
+	if deviceKey == nil {
+		return fmt.Errorf("key lookup returned nil for device %d (key store error, fail closed)", parts.DeviceID)
+	}
+
+	if hw.Signed {
+		// Signed message: verify HMAC-SHA256 over topic + payload.
+		// Including the topic binds the HMAC to the message type, so a
+		// valid signed heartbeat cannot be replayed on the /register topic.
+		mac := hmac.New(sha256.New, deviceKey)
+		mac.Write([]byte(msg.Topic))
+		mac.Write(msg.Payload[:32])
+		expected := mac.Sum(nil)
+
+		if !hmac.Equal(expected, hw.HMACTag) {
+			return fmt.Errorf("HMAC verification failed for device %d (possible spoofing attempt)", parts.DeviceID)
+		}
+	} else {
+		// Unsigned (legacy) message: check whether this device has a
+		// per-device key provisioned. If it does, reject -- an attacker
+		// could bypass HMAC by sending a shorter (unsigned) payload.
+		// P1-06 fix (fail-closed): key-store errors are treated as
+		// "key exists" -- we reject rather than accept on error.
+		if checker, ok := b.keyProvider.(DeviceKeyChecker); ok {
+			hasKey, err := checker.HasDeviceKey(fullDeviceID)
+			if err != nil {
+				return fmt.Errorf("key store error for device %d: %v (fail-closed)", parts.DeviceID, err)
+			}
+			if hasKey {
+				return fmt.Errorf("unsigned message from keyed device %d (possible HMAC bypass attempt)", parts.DeviceID)
+			}
+		}
+		b.logger.Printf("[mqtt-bridge] WARNING: device %d sent unsigned message (no HMAC) — upgrade edge-connector for signed messages",
+			parts.DeviceID)
+	}
+	return nil
 }
 
 // computeVerdictHMACFull computes the 4-byte HMAC tag covering all verdict

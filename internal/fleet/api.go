@@ -771,12 +771,13 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// P1-tombstone fix: If any key deletions failed, report partial failure
-	// with HTTP 500 so operators know the device keys were not fully revoked.
+	// with HTTP 207 Multi-Status so operators know the device keys were not
+	// fully revoked. The decommission itself succeeded but key cleanup did not.
 	if len(keyDeleteFailed) > 0 {
 		resp["key_delete_failed"] = keyDeleteFailed
 		resp["status"] = "partial_failure"
 		resp["error"] = "some device keys could not be deleted — those devices may still authenticate"
-		writeJSON(w, http.StatusInternalServerError, resp)
+		writeJSON(w, http.StatusMultiStatus, resp)
 		return
 	}
 

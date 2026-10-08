@@ -44,7 +44,7 @@ cmake .. -DDCLAW_PROFILE=STANDARD
 make
 ```
 
-Profiles: `MINIMAL` (22KB), `STANDARD` (68KB), `EDGE` (131KB)
+Profiles: `MINIMAL` (~22KB), `STANDARD` (~68KB), `EDGE` (~131KB) — sizes are for stripped Release builds with `-Os -flto`; Debug builds are larger.
 
 ## Test
 
@@ -124,6 +124,8 @@ edge-connector/
 | `MINIMAL` | ~22KB | ~8KB |
 | `STANDARD` | ~68KB | ~14-19KB |
 | `EDGE` | ~131KB | ~64KB |
+
+> **Note:** Sizes shown are for stripped Release builds with `-Os -flto`. Debug builds are larger (~79KB MINIMAL, ~265KB STANDARD/EDGE).
 
 ## Cloud Components
 

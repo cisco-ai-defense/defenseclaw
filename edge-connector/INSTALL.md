@@ -30,6 +30,8 @@ sudo make install
 | `STANDARD` | ~68KB | ~14-19KB | Raspberry Pi, Jetson, SBCs |
 | `EDGE` | ~131KB | ~64KB | Edge gateways with bloom filter |
 
+> **Note:** Sizes shown are for stripped Release builds with `-Os -flto`. Debug builds are larger (~79KB MINIMAL, ~265KB STANDARD/EDGE).
+
 ```bash
 cmake .. -DDCLAW_PROFILE=MINIMAL   # for tiny devices
 cmake .. -DDCLAW_PROFILE=EDGE      # for edge gateways

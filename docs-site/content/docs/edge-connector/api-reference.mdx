@@ -39,7 +39,7 @@ All request and response bodies use `Content-Type: application/json`. Request bo
 
 ### CSRF protection
 
-All state-changing requests (`POST`, `PUT`, `DELETE`) must include the `X-DefenseClaw-Client: true` header. Requests without this header are rejected with `403 Forbidden`. This prevents cross-site request forgery from browser contexts.
+State-changing requests (`POST`, `PUT`, `DELETE`) through the gateway require the `X-DefenseClaw-Client` header. This is enforced by the gateway's CSRF middleware, not the fleet API itself. Direct fleet API calls (e.g., from the CLI) include this header automatically.
 
 ---
 
