@@ -46,7 +46,19 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	// run stops and starts the services (GAP-2246). It still reports the
 	// recorded deployment below, so detection sees it installed.
 	statusBusy := false
-	if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
+	busyMessage := ""
+	if env.applyTriggerRunning(ctx) {
+		// The apply trigger is applying a changed config.yaml, secret or
+		// policy file: until it commits, the files differ from the record and
+		// the gateway may not read the new file yet. status and verify said
+		// "modified after install ... run repair" for those seconds, and a
+		// repair then fought the apply for the lock (GAP-0919).
+		if l.opts.Action == ActionVerify {
+			r.AddError(codeBusy, applyingConfigChange(ActionVerify))
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+		statusBusy, busyMessage = true, applyingConfigChange(ActionStatus)
+	} else if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
 		lock, err := env.acquireLock(ctx)
 		statusBusy = errors.Is(err, errLockBusy)
 		lock.release()
@@ -94,7 +106,10 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.Installed = true
 			r.InstalledVersion = record.ProductVersion
 		}
-		r.AddError(codeBusy, errLockBusy.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionStatus))
+		if busyMessage == "" {
+			busyMessage = errLockBusy.Error() + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
+		}
+		r.AddError(codeBusy, busyMessage)
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {
@@ -187,6 +202,34 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddError(codeVerify, "a lifecycle transaction is pending; "+l.recoverPendingFromVerify(ctx))
 	}
 	return 0
+}
+
+// applyTriggerRunning reports whether the apply trigger (the run the path
+// unit or launchd job starts after config.yaml, a secret or a policy file
+// changed) is running now.
+func (e *Env) applyTriggerRunning(ctx context.Context) bool {
+	name := unitApplyService
+	if e.GOOS == "darwin" {
+		name = labelApply
+	}
+	if e.SelfUnit == name {
+		return false
+	}
+	status, err := e.Services.Status(ctx, Unit{Name: name})
+	if err != nil {
+		return false
+	}
+	if e.GOOS == "darwin" {
+		return status.State == "running"
+	}
+	return strings.HasPrefix(status.State, "activating")
+}
+
+// applyingConfigChange is the lifecycle_busy message of a status or verify
+// that ran while the apply trigger applied a configuration change.
+func applyingConfigChange(action string) string {
+	return "a configuration change is being applied (the apply trigger runs ensure after config.yaml, a secret or a policy file changed), so " +
+		action + " checked nothing but the installed version; this is not a failure and needs no repair: wait for it to finish (usually under a minute), then rerun " + action
 }
 
 // clearSupersededUnitFailures clears the failed state an earlier lifecycle

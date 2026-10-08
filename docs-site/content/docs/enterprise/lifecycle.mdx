@@ -227,6 +227,11 @@ The managed config is administrator-owned. For what it contains, see
 | macOS | `/opt/cisco/defenseclaw/etc/config.yaml` | The `com.cisco.defenseclaw.apply` daemon runs `ensure --reason path` when the file changes, or when an entry directly inside `etc/secrets` or `etc/policies` is added, removed or replaced, at most once every 30 seconds |
 | Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` | The lifecycle does not watch it. Run Setup `/ensure` again with the new file |
 
+While the apply trigger runs (usually under a minute), `status` and `verify`
+report `lifecycle_busy`, exit `75` and say a configuration change is being
+applied. That is not a failure and needs no repair: run them again when it
+finishes.
+
 On Linux and macOS you can also hand the new file to `ensure`. It validates the
 file, installs it as the managed config (mode `0640`, owner root, group of the
 service account), and applies it:
