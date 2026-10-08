@@ -321,7 +321,9 @@ func runWindowsEnterpriseStandaloneAction(
 		if report.CursorTargetEnabled {
 			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
 		}
-		if report.GatewayReady {
+		// Readiness, not the probe: another process on the port answers
+		// /health too (GAP-1029).
+		if result.Readiness.Gateway {
 			if body, err := windowsStandaloneGatewayHealth(); err == nil {
 				appendStandaloneGatewayWarnings(result, body)
 			}

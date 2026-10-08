@@ -96,6 +96,37 @@ func (notRunningRT) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("%w: %w (state=1 pid=0)", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 }
 
+type portHeldRT struct{}
+
+func (portHeldRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("%w: %w: connected listener PID 9328 does not equal service PID 7828",
+		errManagedGatewayPeerUnverified, errManagedGatewayPortHeld)
+}
+
+// GAP-1029: while another process listens on the gateway API port, a Windows
+// standalone hook says the port is held, not that the running service is
+// stopped; Secure Client keeps the peer-unverified reason.
+func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
+	for _, explain := range []bool{true, false} {
+		home := t.TempDir()
+		token := "managed-test-token"
+		var out, errb bytes.Buffer
+		Run(context.Background(), Options{
+			Connector: "codex", Event: "PreToolUse", HookContractID: "codex-hooks-v4", APIAddr: "127.0.0.1:1",
+			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open", ManagedEnterprise: true,
+			ExplainUnenrolledAccount: explain, AuthenticatedManagedToken: &token,
+			Stdin:  strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
+			Stdout: &out, Stderr: &errb, HTTPClient: &http.Client{Transport: portHeldRT{}},
+		})
+		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+		held := strings.Contains(out.String(), "another program is using the DefenseClaw gateway") &&
+			strings.Contains(string(failures), managedGatewayPortHeldReason)
+		if explain != held || strings.Contains(out.String(), "not running") {
+			t.Fatalf("explain=%v: stdout = %q failures = %q, want the held-port text only for the standalone hook", explain, out.String(), failures)
+		}
+	}
+}
+
 // A Windows standalone managed hook (ExplainUnenrolledAccount) whose gateway
 // service is stopped fails closed with the plain text and says the service
 // is not running, in the agent's denial and in hook-failures.jsonl
