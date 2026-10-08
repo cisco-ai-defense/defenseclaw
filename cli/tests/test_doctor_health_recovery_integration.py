@@ -1130,4 +1130,8 @@ def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> N
     ):
         assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True, plan_only=True)[0] == "plan"
         assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True)[0] == "pass"
+        # The deleted audit.db is the reopen repair's case: the initialize
+        # repair must not block (and so skip) it while the gateway runs.
+        with patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value="gateway running"):
+            assert cmd_doctor._plan_audit_db_recovery(cfg).state == "noop"
     restart.assert_called_once()

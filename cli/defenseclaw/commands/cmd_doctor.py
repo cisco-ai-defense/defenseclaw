@@ -11840,6 +11840,17 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
             blockers=(plan.reason_code,),
         )
     if blocker := _recovery_gateway_blocker(cfg):
+        if _audit_store_replaced(_live_gateway_health(cfg)):
+            # The running gateway still holds the deleted file. The reopen
+            # repair restarts it and the gateway creates audit.db as it
+            # starts; a blocked plan here skipped that repair as a dependent
+            # of the service repair (GAP-0325).
+            return RepairDecision(
+                "noop",
+                "the running gateway still holds the deleted audit database; "
+                f"{_AUDIT_STORE_REOPEN_REPAIR_ID} restarts it and the gateway creates a new one",
+                effects=effects,
+            )
         return RepairDecision("blocked", blocker, effects=effects, blockers=(blocker,))
     return RepairDecision(
         "applicable",
