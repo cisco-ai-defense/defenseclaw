@@ -64,7 +64,7 @@ Active Directory are covered by the identity docs, not by this kit).
    ./okta-ldap-setup.py check --bind-login ldap-bind@example.com --group linux-users
    ```
 
-   Every command can be run again; it changes only what differs.
+   Every command can be run again; it changes only what differs. If an existing Okta group shares a `gidNumber` with another group, `assign-posix` stops before writing and `check` reports the collision. Give the groups distinct IDs in Okta before using them for profiles.
 3. On the host, use an SSSD that has `ldap_use_ppolicy` (SSSD 2.10 or later, or the
    backport build), then, as root:
 
