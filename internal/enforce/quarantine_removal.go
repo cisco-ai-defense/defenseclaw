@@ -227,9 +227,9 @@ func (c QuarantineRemovalChannel) deferRequest(request QuarantineRemovalRequest)
 }
 
 // ServeDeferred retries every deferred request with handle. A request is
-// dropped once handle removes the source or refuses it for another reason
-// (the source changed or is gone); it stays while the removal is still
-// deferred.
+// dropped only after handle removes the source. A transient failure keeps the
+// request so a later guardian pass can retry it; every pass verifies the
+// enrolled source and quarantine copy again before removal.
 func (c QuarantineRemovalChannel) ServeDeferred(handle func(QuarantineRemovalRequest) error) {
 	if c.DeferredDir == "" {
 		return
@@ -249,7 +249,7 @@ func (c QuarantineRemovalChannel) ServeDeferred(handle func(QuarantineRemovalReq
 			_ = os.Remove(path)
 			continue
 		}
-		if err := handle(request); err == nil || !errors.Is(err, ErrQuarantineRemovalDeferred) {
+		if err := handle(request); err == nil {
 			_ = os.Remove(path)
 		}
 	}
