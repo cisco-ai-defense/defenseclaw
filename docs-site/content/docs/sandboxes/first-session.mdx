@@ -403,8 +403,12 @@ session, every tool call is blocked, and the harness shows why with each
 blocked call:
 
 ```text
-defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there (`defenseclaw sandbox doctor` says what is wrong)
+defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there if it is stopped, and after a start retries in a minute (`defenseclaw sandbox doctor` says what is wrong)
 ```
+
+After `defenseclaw-gateway start` the daemon can take up to a minute to
+answer the sandbox again; a call blocked in that minute goes through when
+retried.
 
 The terminal's title says so too, and the bell rings (Claude Code keeps the
 title for itself). When not one hook of the session got through, the run

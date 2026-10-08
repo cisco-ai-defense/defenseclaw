@@ -38,8 +38,8 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 8697,
-      "sha256": "5a3e26f287482ccb75cb06a551854cd2815b40a238d88bf680e2939237f417a9"
+      "size": 8934,
+      "sha256": "1da036b41531518fb1b4707bb61d85df0343dec6e92ec7b7f3d793fe58cb7a89"
     },
     "/usr/local/lib/defenseclaw/hooks/cursor-hook.sh": {
       "mode": "-rwxr-xr-x",

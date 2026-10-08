@@ -77,8 +77,10 @@ readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
 # DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
 # answer, worded for the agent and for the user who reads its screen: what is
 # down, and how the user brings it back. "sandbox ingress unreachable" alone
-# left both guessing when the daemon stopped mid-session (GAP-0272).
-readonly DC_SANDBOX_UNREACHABLE="DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting), so every tool call is blocked until it is back: the user runs \`defenseclaw-gateway start\` there (\`defenseclaw sandbox doctor\` says what is wrong)"
+# left both guessing when the daemon stopped mid-session (GAP-0272). A
+# daemon that was just started can take a minute to answer: the agent told
+# the user to start the daemon they had just started (GAP-0332).
+readonly DC_SANDBOX_UNREACHABLE="DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs \`defenseclaw-gateway start\` there if it is stopped, and after a start retries in a minute (\`defenseclaw sandbox doctor\` says what is wrong)"
 
 # defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
 #
