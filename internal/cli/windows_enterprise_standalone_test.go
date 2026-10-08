@@ -2311,3 +2311,26 @@ func TestPlanWindowsEnterpriseEnsureRefusesAnAPIPortChange(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// GAP-0935: a verify that fails on the same release (an antivirus quarantine
+// removed defenseclaw-hook.exe) repairs with this run's payload, which the
+// planner found identical to the recorded one, so the missing file comes
+// back; a pending-transaction repair still takes no sources.
+func TestWindowsEnterpriseEnsureRepairAfterAFailedVerifyKeepsThePayload(t *testing.T) {
+	failed := installedStatus("verify")
+	failed["ok"] = false
+	failed["errors"] = []string{`managed path is missing: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failed, installedStatus("repair")}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure: %v\n%s", err, stdout.String())
+	}
+	if len(stub.calls) != 3 || stub.calls[2][1] != "Repair" ||
+		!strings.Contains(strings.Join(stub.calls[2], " "), `-HookBinary C:\stage\defenseclaw-hook.exe`) {
+		t.Fatalf("installer runs %q", stub.calls)
+	}
+}

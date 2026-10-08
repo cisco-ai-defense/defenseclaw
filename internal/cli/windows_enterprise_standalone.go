@@ -797,6 +797,7 @@ func applyWindowsEnterpriseInstallerReport(
 			}
 			message += windowsEnterprisePerUserDataDirNextStep(original, message)
 			message += windowsEnterpriseInvalidRuntimeBundleNextStep(original)
+			message += windowsEnterpriseMissingArtifactNextStep(original, opts != nil && strings.TrimSpace(opts.hookBinary) != "")
 		}
 		result.AddError(code, message)
 	}
@@ -2144,9 +2145,16 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	actionOpts.jsonOutput = true
 	if plan.Action == "repair" {
 		// Repair reapplies ACL, service, and environment invariants from the
-		// installed payload; it takes no sources and records the installed
-		// binaries' version.
-		clearWindowsEnterpriseSources(&actionOpts)
+		// installed payload and records the installed binaries' version. A
+		// repair after a failed verify keeps this run's payload: the planner
+		// found every supplied source byte-identical to the recorded one
+		// (no drift), so it is the installed release, and it is the only
+		// copy of a payload file an antivirus quarantine removed. Without it
+		// ensure refused "recorded managed artifact is missing" where Setup
+		// /repair healed the same host (GAP-0935).
+		if plan.Reason != "verify_failed" {
+			clearWindowsEnterpriseSources(&actionOpts)
+		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
 	}
 	var cleanupManifest func()
