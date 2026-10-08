@@ -93,4 +93,19 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 			}
 		})
 	}
+	// The NetBIOS name is the DOMAIN\user namespace and never masks the DNS
+	// domain (GAP-0365, GAP-0635); an account of another domain of the
+	// forest gets none from the bound domain's node.
+	for _, tt := range []struct {
+		name, dscl, domain, accountDomain string
+	}{
+		{"network", networkAccount, "corp.example.com", "CORP"},
+		{"mobile", mobileAccount, "corp.example.com", "CORP"},
+		{"child domain", childDomainAccount, "child.corp.example.com", ""},
+	} {
+		got := ParseMacOSDirectoryFacts(MacOSDirectoryInputs{DSCL: tt.dscl, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO}, now)
+		if got.Domain != tt.domain || got.AccountDomain != tt.accountDomain {
+			t.Fatalf("%s: domain %q account domain %q; want %q %q", tt.name, got.Domain, got.AccountDomain, tt.domain, tt.accountDomain)
+		}
+	}
 }

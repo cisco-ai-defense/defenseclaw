@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -746,6 +747,26 @@ func TestExplainNamesEntraIDAccountsThroughTheLSA(t *testing.T) {
 	if _, _, err := resolveWindowsExplainAccount("entra-bob@contoso.example", bySID, byName); err == nil || !strings.Contains(err.Error(), noMapping.Error()) {
 		t.Errorf("unknown account: err = %v; want an error with the LSA's reason", err)
 	}
+	// An AD UPN with an alternate suffix resolves through its
+	// DOMAIN\sAMAccountName, as the live decision names it (GAP-0609).
+	previous := windowsSAMNameForUPN
+	windowsSAMNameForUPN = func(upn string) string {
+		if strings.EqualFold(upn, "ew3.contract@alt.dclab.test") {
+			return `DCLAB\dcad-ew3`
+		}
+		return ""
+	}
+	t.Cleanup(func() { windowsSAMNameForUPN = previous })
+	ew3 := windowsAccount{SID: "S-1-5-21-1-2-3-1203", Name: "dcad-ew3", User: true}
+	adByName := func(name string) (windowsAccount, error) {
+		if strings.EqualFold(name, `DCLAB\dcad-ew3`) {
+			return ew3, nil
+		}
+		return byName(name)
+	}
+	if id, user, err := resolveWindowsExplainAccount("ew3.contract@alt.dclab.test", bySID, adByName); err != nil || id != ew3.SID || user != "dcad-ew3" {
+		t.Errorf("alternate-suffix UPN = %q, %q, %v; want %s, dcad-ew3", id, user, err, ew3.SID)
+	}
 }
 
 // TestExplainReportsGroupsThatCannotBeListed pins GAP-0201: an account whose
@@ -1046,6 +1067,30 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 	if userEntryMatches(&subject, `CORP\\alice`) {
 		t.Fatal("a DNS first label selected another account domain")
+	}
+	// macOS: the guardian record carries the NetBIOS domain the AD node
+	// names, so DCLAB\user matches the mobile account (GAP-0635).
+	mac := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "2092147702", UserName: "dcad-w2i-c",
+		Directory: mergeSpoolFacts(useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: time.Now()},
+			enterprisehooks.IdentitySpoolRecord{AccountDomain: "DCLAB", Facts: useridentity.DirectoryFacts{
+				Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test", Principal: "dcad-w2i-c@dclab.test",
+			}}),
+	}, true)
+	if !userEntryMatches(&mac, "DCLAB\\dcad-w2i-c") || userEntryMatches(&mac, "OTHERDOM\\dcad-w2i-c") {
+		t.Fatalf("macOS AD subject %+v: DCLAB\\user must match and OTHERDOM\\user must not", mac)
+	}
+	// Windows: a local account by COMPUTER\user or .\user, an Entra ID
+	// account by AzureAD\name (GAP-0636, GAP-0676); .\ never names an Entra
+	// or domain account.
+	local := profileSubjectFromVerified(VerifiedSubject{UserID: "S-1-5-21-9-9-9-1001", UserName: "dcw-ew1",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, AccountDomain: "WS01", ResolvedAt: time.Now()}}, true)
+	entra := profileSubjectFromVerified(VerifiedSubject{UserID: "S-1-12-1-1-2-3-4", UserName: "EntraAlice",
+		Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryEntraID, AccountDomain: "AzureAD",
+			Domain: "contoso.example", UPN: "alice@contoso.example", ResolvedAt: time.Now()}}, true)
+	if !userEntryMatches(&local, "WS01\\dcw-ew1") || !userEntryMatches(&local, ".\\dcw-ew1") ||
+		!userEntryMatches(&entra, "AzureAD\\EntraAlice") || userEntryMatches(&entra, ".\\EntraAlice") {
+		t.Fatal("COMPUTER\\user and .\\user must select the local account, AzureAD\\name the Entra ID account, and .\\ no Entra account")
 	}
 }
 

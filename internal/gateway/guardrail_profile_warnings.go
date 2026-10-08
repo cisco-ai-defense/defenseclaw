@@ -233,8 +233,19 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 				warnings = nil
 			}
 			check.mu.Lock()
+			previous, wasChecked := check.warnings, check.checked
 			check.warnings, check.checked, check.checkedAt, check.running = warnings, !failing, time.Now(), nil
 			check.mu.Unlock()
+			// A group that stops resolving between start and reload (an SSSD
+			// naming switch) is logged when a later check finds it, not only
+			// at the next start or reload (GAP-0704).
+			if wasChecked {
+				for _, warning := range warnings {
+					if !slices.Contains(previous, warning) {
+						fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
+					}
+				}
+			}
 			close(done)
 		}()
 	}

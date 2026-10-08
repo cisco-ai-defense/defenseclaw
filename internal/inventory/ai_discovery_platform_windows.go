@@ -142,6 +142,21 @@ func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 	return out
 }
 
+// platformDiscoveryAccountName names a profile's account again for
+// refreshHomeOwnerNames, or "" when the LSA does not answer (the owner keeps
+// its last name rather than the profile folder's).
+func platformDiscoveryAccountName(sid, _ string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
+	}
+	account, _, _, err := parsed.LookupAccount("")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(account)
+}
+
 // windowsProfileAccountName is the account name of sid, or the profile
 // folder's name when the account cannot be looked up.
 func windowsProfileAccountName(sid, home string) string {

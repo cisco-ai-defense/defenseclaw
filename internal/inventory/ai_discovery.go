@@ -1124,6 +1124,7 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 	s.tccSkipped = false
 	s.tccSkippedPaths = make(map[string]bool)
 	s.privacyEvidencePaths = make(map[string][]string)
+	s.refreshHomeOwnerNames()
 	scanID := newScanID()
 	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
 		ScanID: scanID, Source: source, PrivacyMode: s.opts.Mode, StartedAt: start,

@@ -645,6 +645,7 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			Since   string `json:"since"`
 			Stale   int    `json:"stale"`
 		} `json:"directory"`
+		ProfileWarnings []string `json:"profile_warnings"`
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
@@ -662,7 +663,25 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.AddWarning(codeDirectoryLookups, message+". Check SSSD or the domain controller; `"+
 			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
 	}
+	for i, warning := range health.ProfileWarnings {
+		if i == profileWarningsMax {
+			l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d more guardrail profile assignment warnings", len(health.ProfileWarnings)-i))
+			break
+		}
+		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
+			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
+		}
+	}
 }
+
+// codeProfileAssignment warns that a guardrail profile assignment selects
+// nobody: a group the host does not know (renamed, deleted, or spelled
+// another way after an SSSD naming switch), so its members get the default
+// profile (GAP-0704).
+const codeProfileAssignment = "profile_assignment_unmatched"
+
+// profileWarningsMax bounds the assignment warnings status and verify list.
+const profileWarningsMax = 20
 
 // enrollmentCounts summarizes the guardian authorization ledger; detailed
 // per-target state belongs to `enterprise hooks status`.

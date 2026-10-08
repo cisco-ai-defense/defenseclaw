@@ -1402,6 +1402,14 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			if directory := directoryHealthSummary(directoryCacheHealth()); directory != nil {
 				body["directory"] = directory
 			}
+			// An assignment group the host does not know (renamed, deleted,
+			// or spelled another way after an SSSD naming switch) selects
+			// nobody, and the whole team falls to the default profile:
+			// status and verify report it (GAP-0704). The last check is
+			// served; a stale one is refreshed in the background.
+			if warnings := liveGuardrailProfiles.Load().unknownGroupWarnings(0); len(warnings) > 0 {
+				body["profile_warnings"] = warnings
+			}
 			// Non-secret fingerprints of the per-user credential keys that
 			// authenticate right now (a rotation's staged key included).
 			body["user_scoped_credentials"] = map[string]interface{}{

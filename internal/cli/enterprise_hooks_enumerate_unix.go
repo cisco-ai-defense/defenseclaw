@@ -365,7 +365,9 @@ func runEnterpriseHooksEnumerateCycle(
 	// The guardian runs the per-user foreign-hook cleanup for every eligible
 	// account, including users whose connectors are all machine policy and
 	// who therefore have no manifest rows.
-	if err := enterpriseHooksEnumerateEligibleWriter(enterprisehooks.UnixEligibleAccountsPath(manifestPath), cycle.EligibleAccounts); err != nil {
+	// Accounts with an untrusted home are listed apart: the guardian keeps
+	// their identity record but writes nothing in their homes (GAP-0714).
+	if err := enterpriseHooksEnumerateEligibleWriter(enterprisehooks.UnixEligibleAccountsPath(manifestPath), cycle.EligibleAccounts, cycle.IdentityAccounts); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the eligible accounts: %v\n", err)
 	}
 	// Status and verify report agents found installed but not enrollable,
@@ -383,7 +385,7 @@ func runEnterpriseHooksEnumerateCycle(
 // can satisfy their root-owned directory chain.
 var (
 	enterpriseHooksEnumerateManifestWriter    = enterprisehooks.WriteUnixTargetsManifestAtomic
-	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEligibleAccounts
+	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEnumeratorAccounts
 	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgents
 	enterpriseHooksEnumerateRefusedWriter     = writeEnterpriseHookRefusedSurfaces
 )

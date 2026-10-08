@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -80,7 +81,8 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 			}
 			return &fakePeerHomeResolver{accounts: accounts}
 		},
-		now: func() time.Time { return now },
+		now:       func() time.Time { return now },
+		homesFile: filepath.Join(t.TempDir(), "managed_peer_homes.json"),
 	}
 	cache.lookup(1001)
 	cache.lookup(1001)
@@ -101,6 +103,12 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	}
 	if home := cache.lookup(1002); home != "" {
 		t.Fatalf("a uid that never resolved got the home %q", home)
+	}
+	// A gateway that starts during the outage reads the homes the last one
+	// persisted, so the agent identity still does not move.
+	restarted := &managedHookPeerHomeCache{newResolver: cache.newResolver, now: cache.now, homesFile: cache.homesFile}
+	if home := restarted.lookup(1001); home != "/home/alice" {
+		t.Fatalf("lookup after a restart during the outage = %q, want /home/alice", home)
 	}
 }
 
@@ -242,5 +250,35 @@ func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
 	shortEntra.UserName, shortEntra.UPN = "carol@contoso.example", "carol@contoso.example"
 	if note := entraShortNameNote(byUPN, &shortEntra); note != "" {
 		t.Errorf("an account named by its UPN got the note %q", note)
+	}
+}
+
+// GAP-0720: a new account given the uid of a removed one gets its own
+// groups as soon as the account cache names it, not the old holder's
+// cached facts for up to 15 minutes.
+func TestManagedHookPeerDirectoryForgetsAReplacedAccount(t *testing.T) {
+	previousFacts := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previousFacts) })
+	name := "eli-old"
+	now := time.Unix(1_000_000, 0)
+	cache := &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver {
+			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{41001: {Name: name, UID: 41001, Home: "/home/" + name}}}
+		},
+		now: func() time.Time { return now },
+	}
+	cache.directoriesOnce.Do(func() {
+		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+			return useridentity.DirectoryFacts{Groups: []string{name + "-group"}, ResolvedAt: time.Now()}, nil
+		})
+	})
+	if facts, ok := cache.directory(41001, true); !ok || len(facts.Groups) != 1 || facts.Groups[0] != "eli-old-group" {
+		t.Fatalf("first holder facts = %+v, %v", facts, ok)
+	}
+	name = "eli-new"
+	now = now.Add(managedHookPeerHomeTTL + time.Second)
+	if facts, ok := cache.directory(41001, true); !ok || len(facts.Groups) != 1 || facts.Groups[0] != "eli-new-group" {
+		t.Fatalf("facts after the uid changed hands = %+v, %v; want the new account's", facts, ok)
 	}
 }

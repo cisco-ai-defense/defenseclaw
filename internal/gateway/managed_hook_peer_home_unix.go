@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -86,7 +88,83 @@ type managedHookPeerHomeCache struct {
 	// config root and the agent identity derived from it do not move while
 	// the directory is away (GAP-0314).
 	homes map[int]string
+	// homesFile persists homes in the gateway's data directory, so a
+	// gateway that starts while the directory is away still has the last
+	// home of each uid and keeps its agent identity (GAP-0314). Empty when
+	// nothing is persisted (per-user gateways, Secure Client).
+	homesFile   string
+	homesLoaded bool
+	// holders is the account (name and home) each uid's cached directory
+	// facts were used for. When another account holds the uid (a removed
+	// account's uid given to a new one), its facts are dropped: the new
+	// person must not get the old holder's groups and profile until the
+	// facts expire (GAP-0720).
+	holders map[int]string
 }
+
+// managedHookPeerHomesFileMax bounds the persisted homes file read at start.
+const managedHookPeerHomesFileMax = 4 << 20
+
+// setStore names the file that persists the last resolved homes; "" turns
+// persistence off. The file is read once, at the first lookup.
+func (c *managedHookPeerHomeCache) setStore(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if path != c.homesFile {
+		c.homesFile, c.homesLoaded = path, false
+	}
+}
+
+// loadHomesLocked merges the persisted homes under the ones this process
+// resolved itself. c.mu is held.
+func (c *managedHookPeerHomeCache) loadHomesLocked() {
+	if c.homesLoaded || c.homesFile == "" {
+		return
+	}
+	c.homesLoaded = true
+	data, err := safefile.ReadRegularFileBounded(c.homesFile, managedHookPeerHomesFileMax)
+	if err != nil {
+		return
+	}
+	var stored map[string]string
+	if json.Unmarshal(data, &stored) != nil {
+		return
+	}
+	for key, home := range stored {
+		uid, err := strconv.Atoi(key)
+		if err != nil || uid < 0 || normalizeManagedHookPeerHome(home) != home {
+			continue
+		}
+		if _, known := c.homes[uid]; known || len(c.homes) >= managedHookPeerHomesMax {
+			continue
+		}
+		if c.homes == nil {
+			c.homes = make(map[int]string)
+		}
+		c.homes[uid] = home
+	}
+}
+
+// saveHomesLocked writes homes to the store. c.mu is held; it runs only
+// when a uid's home changes, which is rare.
+func (c *managedHookPeerHomeCache) saveHomesLocked() {
+	if c.homesFile == "" {
+		return
+	}
+	stored := make(map[string]string, len(c.homes))
+	for uid, home := range c.homes {
+		stored[strconv.Itoa(uid)] = home
+	}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return
+	}
+	_ = safefile.WritePrivate(c.homesFile, data)
+}
+
+// setManagedHookPeerHomeStore names the managed gateway's persisted homes
+// file, or "" for none.
+func setManagedHookPeerHomeStore(path string) { managedHookPeerHomes.setStore(path) }
 
 // managedHookPeerHomesMax bounds the last resolved homes kept, one per uid.
 const managedHookPeerHomesMax = 16384
@@ -165,7 +243,26 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	if uid < 0 {
 		return useridentity.DirectoryFacts{}, false
 	}
-	return c.directoryCache().get(strconv.Itoa(uid), block)
+	key := strconv.Itoa(uid)
+	if !identityFactsEnabled.Load() {
+		return c.directoryCache().get(key, block)
+	}
+	if account, ok := c.account(uid); ok {
+		holder := account.Name + "\x00" + account.Home
+		c.mu.Lock()
+		previous, known := c.holders[uid]
+		if !known && len(c.holders) < managedHookPeerHomesMax || known && previous != holder {
+			if c.holders == nil {
+				c.holders = make(map[int]string)
+			}
+			c.holders[uid] = holder
+		}
+		c.mu.Unlock()
+		if known && previous != holder {
+			c.directoryCache().forget(key)
+		}
+	}
+	return c.directoryCache().get(key, block)
 }
 
 // directoryCache returns the cache of verified directory facts per uid,
@@ -218,17 +315,25 @@ func (c *managedHookPeerHomeCache) lookup(uid int) string {
 	account, ok := c.account(uid)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.loadHomesLocked()
 	if !ok {
 		return c.homes[uid]
 	}
 	home := normalizeManagedHookPeerHome(account.Home)
-	if _, known := c.homes[uid]; home == "" {
-		delete(c.homes, uid)
+	previous, known := c.homes[uid]
+	if home == "" {
+		if known {
+			delete(c.homes, uid)
+			c.saveHomesLocked()
+		}
 	} else if known || len(c.homes) < managedHookPeerHomesMax {
 		if c.homes == nil {
 			c.homes = make(map[int]string)
 		}
 		c.homes[uid] = home
+		if previous != home {
+			c.saveHomesLocked()
+		}
 	}
 	return home
 }

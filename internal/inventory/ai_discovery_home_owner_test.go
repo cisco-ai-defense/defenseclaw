@@ -116,6 +116,21 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		t.Fatalf("process signal user = %q/%q runtime %q", signal.UserID, signal.UserName, signal.Runtime.User)
 	}
 
+	// A renamed account is named by its new name at the next scan
+	// (GAP-0702).
+	previous := discoveryAccountName
+	discoveryAccountName = func(sid, _ string) string {
+		if sid == "S-1-5-21-1-2-3-1002" {
+			return "bób"
+		}
+		return ""
+	}
+	t.Cleanup(func() { discoveryAccountName = previous })
+	s.refreshHomeOwnerNames()
+	if owner, ok := s.homeOwnerForSID("S-1-5-21-1-2-3-1002"); !ok || owner.UserName != "bób" {
+		t.Fatalf("owner after a rename = %+v, %v; want the new name", owner, ok)
+	}
+
 	denied := &fs.PathError{Op: "open", Path: alice, Err: fs.ErrPermission}
 	if !s.discoveryAccessSkipped(denied) {
 		t.Fatal("a profile folder the service was not granted failed the scan")

@@ -237,6 +237,17 @@ func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 	return entry.facts, entry.fetchedAt, true
 }
 
+// forget drops key's entry, so the next get resolves it afresh. A lookup in
+// flight finishes on the dropped entry.
+func (c *identityCache[T]) forget(key string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+}
+
 func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T]) {
 	done := make(chan struct{})
 	entry.inflight = done

@@ -982,6 +982,21 @@ func TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity(t *testing.T) {
 // same test run carried session_id correctly — proving the envelope
 // refresh only covered the unified path. We now verify the unified
 // path IS that "covering" path for every connector.
+// GAP-0603: the hook's records read the user back from the identity
+// enrichAgentHookContext installs, so it must keep the id kind.
+func TestEnrichAgentHookContextKeepsTheUserIDKind(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	ctx := ContextWithAgentIdentity(context.Background(), AgentIdentity{
+		UserID: "S-1-5-21-1-2-3-1001", UserIDKind: "windows_sid", UserName: "dcw-eo1",
+	})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "s-0603"}
+	if user := resolveHookUser(enrichAgentHookContext(ctx, req), req.Payload); user.ID != "S-1-5-21-1-2-3-1001" || user.IDKind != "windows_sid" {
+		t.Fatalf("hook user = %+v, want the SID with id kind windows_sid", user)
+	}
+}
+
 func TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope(t *testing.T) {
 	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
 		RunID: "run-keep",

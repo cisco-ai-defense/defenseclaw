@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -18,11 +19,22 @@ import (
 // resolveWindowsExplainAccount).
 var profileExplainAccount = LookupWindowsAccount
 
+func init() {
+	windowsSAMNameForUPN = func(upn string) string { return useridentity.SAMNameForUPN(upn, profileExplainUPNWait) }
+}
+
 // LookupWindowsAccount names a user account given as a SID, DOMAIN\name,
 // bare name or UPN through the LSA (see resolveWindowsExplainAccount).
 // Entra ID accounts resolve only this way; `enterprise policy show|verify
 // --user` uses it too (GAP-0242).
 func LookupWindowsAccount(name string) (id, userName string, err error) {
+	// LookupAccountName does not take ".\name", the form Windows tools print
+	// for an account of this computer (GAP-0636).
+	if rest, local := strings.CutPrefix(strings.TrimSpace(name), `.\`); local && rest != "" {
+		if computer, cerr := windows.ComputerName(); cerr == nil && computer != "" {
+			name = computer + `\` + rest
+		}
+	}
 	return resolveWindowsExplainAccount(name, lsaAccountBySID, lsaAccountByName)
 }
 

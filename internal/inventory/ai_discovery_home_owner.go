@@ -57,6 +57,27 @@ func brokeredProcessAccounts() map[int]ProcessAccount {
 	return lookup()
 }
 
+// discoveryAccountName names the account of a profile owner; tests replace it.
+var discoveryAccountName = platformDiscoveryAccountName
+
+// refreshHomeOwnerNames names each profile's account again at the start of
+// a scan. An account renamed while the gateway runs (Rename-LocalUser keeps
+// its SID and profile folder) otherwise kept the name it had when the
+// gateway started in discovery and the IDE inventory, and --user with the
+// new name found none of its rows, until a restart (GAP-0702).
+func (s *ContinuousDiscoveryService) refreshHomeOwnerNames() {
+	if s.opts.SecureClient {
+		// Secure Client keeps main's names, read once at start.
+		return
+	}
+	for i := range s.opts.homeOwners {
+		owner := &s.opts.homeOwners[i]
+		if name := strings.TrimSpace(discoveryAccountName(owner.UserID, owner.Home)); name != "" {
+			owner.UserName = name
+		}
+	}
+}
+
 // homeOwnerForAccount returns the one profile owner whose account is user.
 func (s *ContinuousDiscoveryService) homeOwnerForAccount(user string) (discoveryHomeOwner, bool) {
 	user = strings.TrimSpace(user[strings.LastIndex(user, `\`)+1:])

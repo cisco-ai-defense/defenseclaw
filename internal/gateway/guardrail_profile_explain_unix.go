@@ -25,7 +25,12 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
 	resolver := unixidentity.Default(ctx)
-	account, err := resolver.LookupUser(name)
+	// name@domain and DOMAIN\name resolve as getent resolves them, when the
+	// answer is the same account (GAP-0711).
+	account, err := unixidentity.LookupAccountSpelling(resolver, name, func(uid int) (useridentity.DirectoryFacts, bool) {
+		facts, err := profileExplainDirectoryFacts(strconv.Itoa(uid))
+		return facts, err == nil
+	})
 	if err != nil {
 		uid, convErr := strconv.Atoi(name)
 		if convErr != nil {

@@ -1522,6 +1522,12 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 		UserID:    user.ID,
 		UserName:  user.Name,
 	}
+	if identityFactsEnabled.Load() {
+		// The hook's records read the user back from this identity: without
+		// the kind every hook decision, lifecycle, model and tool record lost
+		// defenseclaw.user.id_kind (GAP-0603). Secure Client keeps main's.
+		identity.UserIDKind = user.IDKind
+	}
 	// The agent identity is derived from verified facts only (see
 	// resolveHookAgentIdentity); it keys the session instance, so two users
 	// who send the same session id get different instances.

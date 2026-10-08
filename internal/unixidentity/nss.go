@@ -145,9 +145,22 @@ func (r *NSSResolver) LookupUser(name string) (Account, error) {
 		return Account{}, err
 	}
 	if !strings.EqualFold(account.Name, name) {
-		return Account{}, fmt.Errorf("unixidentity: getent passwd %s answered for %q", name, account.Name)
+		return Account{}, &NameMismatchError{Key: name, Answered: account}
 	}
 	return account, nil
+}
+
+// NameMismatchError is a getent passwd answer for an account whose name is
+// not the one asked: the same account in another spelling (CORP\alice for
+// alice@corp.example.com on a winbind host) or another account (an SSSD UPN or
+// e-mail search across domains). LookupAccountSpelling tells them apart.
+type NameMismatchError struct {
+	Key      string
+	Answered Account
+}
+
+func (e *NameMismatchError) Error() string {
+	return fmt.Sprintf("unixidentity: getent passwd %s answered for %q", e.Key, e.Answered.Name)
 }
 
 // LookupUID resolves an account by uid.

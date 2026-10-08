@@ -206,7 +206,7 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 		if !ManagedEnterpriseActive() {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
 		}
 		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)

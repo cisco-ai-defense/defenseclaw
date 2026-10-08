@@ -37,6 +37,10 @@ import (
 const enterpriseHookIdentitySpoolInterval = 15 * time.Minute
 const enterpriseHookIdentitySpoolRetryInterval = time.Minute
 
+// enterpriseHookLoadIdentityAccounts is replaceable in tests (the record is
+// root-only).
+var enterpriseHookLoadIdentityAccounts = enterprisehooks.LoadUnixIdentityAccounts
+
 var enterpriseHookIdentitySpoolState struct {
 	sync.Mutex
 	running     bool
@@ -63,6 +67,24 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 		seen[row.UID] = true
 		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: row.UID, User: row.User})
 		keys = append(keys, strconv.Itoa(row.UID)+":"+row.User)
+	}
+	// Eligible accounts without rows, and accounts whose home is untrusted,
+	// keep their identity record too: a standard user who makes his home
+	// group-writable must not drop the profile assigned to his UPN to the
+	// default (GAP-0714).
+	if strings.TrimSpace(run.Manifest) != "" {
+		extra, err := enterpriseHookLoadIdentityAccounts(enterprisehooks.UnixEligibleAccountsPath(run.Manifest))
+		if err != nil {
+			fmt.Fprintf(stderr, "[hook-guardian] identity spool: eligible accounts: %v\n", err)
+		}
+		for _, account := range extra {
+			if account.UID <= 0 || seen[account.UID] {
+				continue
+			}
+			seen[account.UID] = true
+			accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: account.UID, User: account.User})
+			keys = append(keys, strconv.Itoa(account.UID)+":"+account.User)
+		}
 	}
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")

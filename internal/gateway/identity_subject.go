@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -397,6 +398,14 @@ func applyIdentityPosture(cfg *config.Config) {
 		spool = enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
 	}
 	setIdentitySpoolDir(spool)
+	// A managed gateway keeps the last home of each uid across restarts, so
+	// one that starts during a directory outage keeps the agent identities
+	// (GAP-0314). Secure Client persists nothing new.
+	homes := ""
+	if enabled && managed.IsManagedEnterprise(cfg.DeploymentMode) && strings.TrimSpace(cfg.DataDir) != "" {
+		homes = filepath.Join(cfg.DataDir, "managed_peer_homes.json")
+	}
+	setManagedHookPeerHomeStore(homes)
 	blocking := false
 	for _, assignment := range cfg.Guardrail.ProfileAssignments {
 		if len(assignment.Match.Groups) > 0 || len(assignment.Match.Users) > 0 {
