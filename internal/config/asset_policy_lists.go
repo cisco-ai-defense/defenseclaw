@@ -16,7 +16,10 @@
 
 package config
 
-import "strings"
+import (
+	"runtime"
+	"strings"
+)
 
 // Explicit list verdicts returned by AssetListDecision and ToolListDecision.
 const (
@@ -115,7 +118,41 @@ func allowPinMatches(pins []string, path string) bool {
 		return true
 	}
 	for _, pin := range pins {
-		if PathHasComponents(path, pin) {
+		if (runtime.GOOS == "windows" && PathHasComponents(path, pin)) ||
+			(runtime.GOOS != "windows" && pathHasComponentsExact(path, pin)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathHasComponentsExact preserves case for allow pins on case-sensitive hosts.
+func pathHasComponentsExact(path, marker string) bool {
+	parts := strings.Split(strings.ReplaceAll(path, "\\", "/"), "/")
+	pins := strings.Split(strings.ReplaceAll(marker, "\\", "/"), "/")
+	pathParts, pinParts := make([]string, 0, len(parts)), make([]string, 0, len(pins))
+	for _, part := range parts {
+		if part != "" {
+			pathParts = append(pathParts, part)
+		}
+	}
+	for _, part := range pins {
+		if part != "" {
+			pinParts = append(pinParts, part)
+		}
+	}
+	if len(pinParts) == 0 {
+		return false
+	}
+	for i := 0; i+len(pinParts) <= len(pathParts); i++ {
+		matched := true
+		for j := range pinParts {
+			if pathParts[i+j] != pinParts[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
 			return true
 		}
 	}

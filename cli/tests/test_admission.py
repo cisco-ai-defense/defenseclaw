@@ -93,6 +93,19 @@ class TestEvaluateAdmissionAllowed(_StoreTestBase):
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "manual-allow")
 
+    def test_path_pinned_allow_does_not_admit_case_sibling(self):
+        from defenseclaw.config import AssetPolicyRule
+        from defenseclaw.enforce.asset_lists import list_decision
+
+        self.cfg.asset_policy.skill.allowed = [
+            AssetPolicyRule(name="Good", source_path_contains=["/home/u/.claude/skills/Good"]),
+        ]
+        decision, _ = list_decision(
+            self.cfg.asset_policy, "skill", "Good",
+            source_path="/home/u/.claude/skills/good",
+        )
+        self.assertEqual(decision, "" if os.name != "nt" else "allow")
+
     def test_first_party_allow_bypasses_scan(self):
         d = evaluate_admission(self.pe, target_type="plugin", name="acme-plugin",
                                source_path="/home/u/.openclaw/extensions/acme-plugin")

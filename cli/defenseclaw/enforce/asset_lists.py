@@ -356,12 +356,15 @@ def list_decision(
     return "", None
 
 
-def path_has_components(path: str, marker: str) -> bool:
+def path_has_components(path: str, marker: str, *, case_sensitive: bool = False) -> bool:
     """True when ``path`` contains ``marker`` as a contiguous run of whole
-    path components, case-insensitively and with either slash (F-0543). Go
+    path components, with optional case sensitivity and either slash (F-0543). Go
     ``config.PathHasComponents``."""
     def parts(value: str) -> list[str]:
-        return [p for p in str(value or "").lower().replace("\\", "/").split("/") if p]
+        value = str(value or "")
+        if not case_sensitive:
+            value = value.lower()
+        return [part for part in value.replace("\\", "/").split("/") if part]
 
     path_parts, marker_parts = parts(path), parts(marker)
     n = len(marker_parts)
@@ -374,7 +377,9 @@ def _allow_pin_matches(rule: Any, source_path: str) -> bool:
     """A pinned allow matches only the pinned path, by whole components, so
     a look-alike sibling never inherits it (F-0941)."""
     pins = getattr(rule, "source_path_contains", []) or []
-    return not pins or any(path_has_components(source_path, pin) for pin in pins)
+    return not pins or any(
+        path_has_components(source_path, pin, case_sensitive=os.name != "nt") for pin in pins
+    )
 
 
 def tool_decision(asset_policy: Any, tool: str, connector: str = "") -> tuple[str, Any | None]:

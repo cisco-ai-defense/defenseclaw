@@ -10,7 +10,10 @@
 
 package config
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestEvaluateAssetPolicyDisabledAllows(t *testing.T) {
 	cfg := &Config{}
@@ -449,5 +452,21 @@ func TestEvaluateAssetPolicyRegistryHTTPTransportAliases(t *testing.T) {
 		if decision.Action != want {
 			t.Fatalf("transport %q: action=%q, want %q", transport, decision.Action, want)
 		}
+	}
+}
+
+func TestAllowPinCaseSibling(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Allowed = []AssetPolicyRule{{
+		Name: "Good", SourcePathContains: []string{"/home/u/.claude/skills/Good"},
+	}}
+	verdict, _ := cfg.AssetListDecision(AssetPolicyInput{
+		TargetType: "skill", Name: "Good", SourcePath: "/home/u/.claude/skills/good",
+	})
+	if runtime.GOOS != "windows" && verdict != "" {
+		t.Fatalf("case-distinct skill inherited allow: %q", verdict)
+	}
+	if runtime.GOOS == "windows" && verdict != AssetListAllow {
+		t.Fatalf("Windows case-insensitive pin did not match: %q", verdict)
 	}
 }
