@@ -593,8 +593,24 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     existing = graph.get_all(f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments")
     for assignment in existing:
         target = assignment.get("target", {})
-        if target.get("groupId") == group["id"] and assignment.get("intent") == args.intent:
+        if target.get("groupId") != group["id"]:
+            continue
+        if target.get("@odata.type") == GROUP_TARGET and assignment.get("intent") == args.intent:
             print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
+            return 0
+        if target.get("@odata.type") == "#microsoft.graph.exclusionGroupAssignmentTarget":
+            if not args.apply:
+                print(f"[plan] would replace exclusion for group {args.group}")
+                return 0
+            body = {
+                "@odata.type": "#microsoft.graph.mobileAppAssignment",
+                "intent": args.intent,
+                "target": {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
+            }
+            if "settings" in assignment:
+                body["settings"] = assignment["settings"]
+            graph.request("PATCH", f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments/{assignment['id']}", body)
+            print(f"replaced exclusion for group {args.group}")
             return 0
     if not args.apply:
         print(f"[plan] would assign app {args.app} to group {args.group} with intent {args.intent}")

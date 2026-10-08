@@ -475,3 +475,32 @@ def test_okta_template_filters_local_group_names(tmp_path: Path) -> None:
     local = {line.partition(":")[0] for line in Path("/etc/group").read_text().splitlines() if ":" in line}
     assert local <= filtered
     assert {"wheel", "sudo", "adm"} <= filtered
+
+
+def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{
+                    "id": "assignment-1", "intent": "required",
+                    "target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget", "groupId": "group-1"},
+                }]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args([
+        "assign-app", "--app", "app", "--group", "team", "--apply",
+    ])
+    assert intune.cmd_assign_app(Graph(), args) == 0
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
+    assert calls[0][1].endswith("/assignments/assignment-1")
+    assert calls[0][2]["target"]["@odata.type"] == intune.GROUP_TARGET
