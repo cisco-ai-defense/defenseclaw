@@ -30,6 +30,9 @@ func platformDiscoveryHomeOwners(_ bool) []discoveryHomeOwner {
 	return nil
 }
 
+// platformDiscoveryAccountName has no profile owners to name here.
+func platformDiscoveryAccountName(string, string) string { return "" }
+
 func platformDiscoveryVariable(name, _ string) (string, bool) {
 	return os.LookupEnv(name)
 }

@@ -1118,6 +1118,7 @@ func (s *ContinuousDiscoveryService) runScanSingleFlight(
 func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
 	start := time.Now()
 	s.tccSkipped = false
+	s.refreshHomeOwnerNames()
 	scanID := newScanID()
 	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
 		ScanID: scanID, Source: source, PrivacyMode: s.opts.Mode, StartedAt: start,
