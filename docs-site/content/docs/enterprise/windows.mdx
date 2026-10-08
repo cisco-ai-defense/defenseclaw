@@ -730,6 +730,13 @@ asset_policy:
         source_path_contains: ["C:\\Users\\dcw-epw1\\.claude\\skills\\epa-high"]
 ```
 
+For a Claude Code plugin from a marketplace, use `asset_policy.plugin` with
+the name `claude plugin list` shows, `plugin@marketplace`. A denied rule also
+matches the plugin name alone and the name in its
+`.claude-plugin/plugin.json`, and refuses the plugin at its version folder
+with `install-rejected ... source=admin-deny`; an allowed rule needs
+`plugin@marketplace`.
+
 - A blocked skill whose folder is still in place is released at the next
   periodic rescan (`watch.rescan_interval_min`, 60 minutes by default), or at
   once when the user copies it in again: admission allows it
