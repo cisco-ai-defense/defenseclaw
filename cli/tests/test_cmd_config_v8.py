@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import click
+import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_config
 from defenseclaw.config_inspect import ConfigInspectError, ConfigV8WireResult
@@ -413,6 +415,7 @@ def test_unset_validates_every_key_before_writing(tmp_path: Path, monkeypatch) -
     assert "Unset update.check, update.channel" not in mixed.output
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the managed standalone layouts are Linux and macOS only")
 def test_config_path_uses_managed_vendor_policy_default(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.yaml"
     data_dir = tmp_path / "data"
