@@ -419,3 +419,23 @@ func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 		}
 	}
 }
+
+// A display name is readable text on one line: bidi overrides and other
+// format characters go, controls become one space, and the length stays
+// bounded (GAP-0670).
+func TestCleanKeepsDisplayNamesReadable(t *testing.T) {
+	for in, want := range map[string]string{
+		"safe \u202egnp.exe":            "safe gnp.exe",
+		"a\u2066b\u2069c\u200bd":        "abcd",
+		"line1\nline2\r\nline3":         "line1 line2 line3",
+		"\x1b[2J\x1b[31mred":            "[2J [31mred",
+		"  [bold red]RED[/bold red]\t ": "[bold red]RED[/bold red]",
+	} {
+		if got := clean(in); got != want {
+			t.Errorf("clean(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := clean(strings.Repeat("x", 3000)); len(got) != maxFieldLen {
+		t.Errorf("clean bounded a long name to %d bytes, want %d", len(got), maxFieldLen)
+	}
+}

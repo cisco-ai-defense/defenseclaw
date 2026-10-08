@@ -480,7 +480,11 @@ remote server, and a hash of its path.
 
 Not collected: the contents or source of any extension, settings, tokens or
 credentials, workspace and project files, chat or editor history, or the
-extension's own data. The only database read is the one key
+extension's own data. Each text field (a display name, a publisher) is kept
+to one printable line of at most 256 bytes: format characters such as
+right-to-left overrides are dropped and control characters become a space, so
+a planted name cannot render differently in a table or a dashboard. The only
+database read is the one key
 `extensionsIdentifiers/disabled` in a VS Code `state.vscdb`, opened read-only
 and immutable with a 2-second limit. Paths leave the host only as hashes.
 
