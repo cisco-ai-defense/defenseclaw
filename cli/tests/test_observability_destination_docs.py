@@ -32,8 +32,9 @@ def test_shared_stack_docs_keep_the_dashboard_destination_name() -> None:
     assert "selects the `local-observability-v1` metric projection" in local
     assert "if you renamed the destination" not in local
     assert "named `local-observability`" in _flat(DOCS / "observability/grafana-dashboards.mdx")
-    # GAP-0058: the IDE gauge's board labels need that destination too.
-    assert "plain `otlp` destination exports the canonical names `defenseclaw_ide_product`" in _flat(
+    # GAP-0679: the board reads the exported IDE gauge labels, so a plain
+    # `otlp` destination fills it too.
+    assert "The board queries the exported label names directly, including for a plain `otlp` destination" in _flat(
         DOCS / "ai-discovery.mdx"
     )
 
