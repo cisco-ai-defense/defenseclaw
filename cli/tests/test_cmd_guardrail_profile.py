@@ -330,3 +330,37 @@ def test_profile_validation_mirrors_the_gateway(mutate, message):
     mutate(gc)
     with pytest.raises(ValueError, match=message):
         validate_guardrail_profiles(gc)
+
+
+def test_profile_summary_includes_every_scoped_assignment(monkeypatch):
+    from defenseclaw import gateway
+
+    app = AppContext()
+    app.cfg = default_config()
+    app.cfg.guardrail.profiles = {
+        "base": GuardrailProfile(mode="observe"),
+        "pin": GuardrailProfile(mode="action"),
+    }
+    agents = [f"agt-{n:016d}" for n in range(17)]
+    app.cfg.guardrail.profile_assignments = [
+        GuardrailProfileAssignment(profile="pin", match=GuardrailProfileMatch(agents=[agent]))
+        for agent in agents
+    ]
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "agent_identities_all",
+        lambda self, *, user: {"identities": [{"agent_id": agent, "connector": "codex"} for agent in agents]},
+    )
+    monkeypatch.setattr(
+        gateway.OrchestratorClient,
+        "guardrail_profile_resolve",
+        lambda self, *, user="", connector="", agent="": {
+            "profile": "pin" if agent else "base",
+            "match": "agent" if agent else "default",
+        },
+    )
+
+    result = gateway.current_user_guardrail_profile(app.cfg)
+    assert len(result["overrides"]) == len(agents)
+    assert agents[-1] in cmd_guardrail.profile_status_text(app.cfg, result)

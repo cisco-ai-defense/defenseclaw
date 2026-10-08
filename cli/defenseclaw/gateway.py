@@ -165,7 +165,7 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
                 if (connector, agent) not in probes:
                     probes.append((connector, agent))
     overrides: list[dict[str, str]] = []
-    for connector, agent in probes[:_PROFILE_OVERRIDE_PROBES]:
+    for connector, agent in probes:
         try:
             answer = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
         except Exception:  # noqa: BLE001 - the user-level answer still stands.
