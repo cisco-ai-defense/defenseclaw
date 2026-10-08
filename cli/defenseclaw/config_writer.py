@@ -355,6 +355,8 @@ def _transact(
         raise ManagedConfigWriteError(MANAGED_REFUSAL)
     candidate, changed = mutate(current, target)
     if exists and candidate == current:
+        if verify is not None:
+            verify(target)
         return WriteResult(_current_generation(target), digest, [], [])
     validate_candidate(target, candidate)
     try:

@@ -383,6 +383,28 @@ def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
     assert "mode: action # keep" in open(path, encoding="utf-8").read()
 
 
+def test_verified_noop_rejects_a_concurrent_registry_policy_change(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+    from defenseclaw.registry_policy import RegistryRequiredUpdateError, set_registry_required
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path, "asset_policy:\n  skill:\n    registry_required: true\n")
+    stale = config_module.load(data_dir=str(tmp_path))
+    changed = config_writer.apply(
+        [Change("asset_policy.skill.registry_required", False)],
+        "cli:other",
+        "concurrent policy update",
+        path=path,
+    )
+
+    with pytest.raises(RegistryRequiredUpdateError, match="persisted global"):
+        set_registry_required(stale, "skill", True)
+
+    assert config_module.load(data_dir=str(tmp_path)).asset_policy.skill.registry_required is False
+    assert config_writer.read_generation_state(path).generation == changed.generation
+
+
 def test_operator_block_from_a_stale_config_keeps_a_concurrent_block(tmp_path, monkeypatch):
     # Two processes load the same config, then each blocks a different skill:
     # the second write is made against the file on disk, so both stay blocked.
