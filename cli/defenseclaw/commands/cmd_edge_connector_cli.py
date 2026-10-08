@@ -441,7 +441,10 @@ def policy_versions(app: AppContext, tenant_id: int, fleet_id: int, as_json: boo
 
 
 @edge_connector_group_policy.command("emergency")
-@click.argument("cmd", type=click.Choice(["block-all", "enter-lockdown", "release-lockdown", "revoke-sessions", "force-sync"]))
+@click.argument("cmd", type=click.Choice([
+    "block-all", "enter-lockdown", "release-lockdown",
+    "revoke-sessions", "force-sync",
+]))
 @click.option("--tenant-id", default=1, type=int, help="Tenant ID (default 1).")
 @click.option("--fleet-id", default=1, type=int, help="Fleet ID (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")
@@ -651,7 +654,11 @@ def test_fleet(
         try:
             dr = c.get(f"/devices/{full_device_id}")
             if dr.status_code == 404:
-                results["device_check"] = {"status": "not_found", "device_id": device_id, "looked_up_as": full_device_id}
+                results["device_check"] = {
+                    "status": "not_found",
+                    "device_id": device_id,
+                    "looked_up_as": full_device_id,
+                }
                 all_ok = False
             elif 200 <= dr.status_code < 300:
                 ds = str((_body(dr) or {}).get("status") or "unknown").lower()
