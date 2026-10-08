@@ -53,14 +53,26 @@ func TestCodexWindowsCmdletWritesReachCELBlockRules(t *testing.T) {
 		"Add-Content -Path f.txt -Value dccert-block-marker -NoNewline",
 		"Out-File -FilePath f.txt -InputObject dccert-block-marker -Encoding utf8",
 		"echo dccert-block-marker > f.txt",
+		// A second statement left the whole command partial, so the rule
+		// only reported a candidate (GAP-0175, 1.0.31).
+		"Write-Output dccert-block-marker; exit $LASTEXITCODE",
+		"Write-Output dccert-block-marker; exit 0",
+		"Get-Location; Write-Output dccert-block-marker",
+		"Get-Content README.md; Write-Output 'dccert-block-marker'; $exitCode = $LASTEXITCODE; exit $exitCode",
 		"Set-Content -Path f.txt -Value hello",
+		"Get-Location; Write-Output hello; exit 0",
+		"exit 0; Write-Output dccert-block-marker",
+		"if ($false) { Write-Output dccert-block-marker }",
 	} {
 		resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
 			HookEventName: "PreToolUse", ToolName: "Bash", CWD: cwd,
 			ToolInput: map[string]interface{}{"command": command},
 		})
 		want := "block"
-		if command == "Set-Content -Path f.txt -Value hello" {
+		switch command {
+		case "Set-Content -Path f.txt -Value hello", "Get-Location; Write-Output hello; exit 0",
+			// Unreachable or conditional: no match proves it runs.
+			"exit 0; Write-Output dccert-block-marker", "if ($false) { Write-Output dccert-block-marker }":
 			want = "allow"
 		}
 		if resp.RawAction != want {
