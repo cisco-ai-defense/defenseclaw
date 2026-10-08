@@ -78,6 +78,22 @@ class TestEvaluateAdmissionBlocked(_StoreTestBase):
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "manual-block")
 
+    def test_scoped_pinned_allow_overrides_global_block(self):
+        from defenseclaw.config import AssetPolicyRule
+
+        self.cfg.asset_policy.skill.denied = [AssetPolicyRule(name="trusted")]
+        self.cfg.asset_policy.skill.allowed = [
+            AssetPolicyRule(
+                name="trusted", connector="codex",
+                source_path_contains=["/opt/trusted"],
+            ),
+        ]
+        decision = evaluate_admission(
+            self.pe, target_type="skill", name="trusted", connector="codex",
+            source_path="/opt/trusted",
+        )
+        self.assertEqual(decision.verdict, "allowed")
+
     def test_blocked_after_allow_then_block(self):
         """Block after allow should leave the item blocked (last-write wins)."""
         self.pe.allow("skill", "dual", "good")
@@ -122,6 +138,18 @@ class TestEvaluateAdmissionAllowed(_StoreTestBase):
             source_path="/home/u/.claude/skills/good",
         )
         self.assertEqual(decision, "" if os.name != "nt" else "allow")
+
+    def test_configured_first_party_path_outside_agent_home(self):
+        self.cfg.admission.plugin.first_party_allow_list = [
+            AdmissionFirstParty(
+                name="trusted", source_path_contains=["/opt/company/plugins/trusted"],
+            ),
+        ]
+        decision = evaluate_admission(
+            self.pe, target_type="plugin", name="trusted",
+            source_path="/opt/company/plugins/trusted",
+        )
+        self.assertEqual(decision.verdict, "allowed")
 
     def test_first_party_allow_bypasses_scan(self):
         d = evaluate_admission(self.pe, target_type="plugin", name="acme-plugin",
@@ -937,6 +965,28 @@ class TestCompileAdmission(unittest.TestCase):
         self.assertTrue(skill.actions["LOW"][1])
         self.assertEqual(compile_admission(cfg, "plugin").actions["LOW"][0].install, "block")
 
+    def test_secure_client_unconstrained_legacy_first_party_entry(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as policy_dir:
+            os.makedirs(os.path.join(policy_dir, "rego"))
+            with open(os.path.join(policy_dir, "rego", "data.json"), "w", encoding="utf-8") as handle:
+                json.dump({"first_party_allow_list": [
+                    {"target_type": "plugin", "target_name": "trusted", "source_path_contains": []},
+                ]}, handle)
+            cfg = SimpleNamespace(
+                deployment_mode="managed_enterprise", policy_dir=policy_dir,
+                admission=AdmissionConfig(),
+            )
+            pe = PolicyEngine(None, cfg)
+            with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}):
+                decision = evaluate_admission(
+                    pe, target_type="plugin", name="trusted", source_path="/opt/trusted",
+                )
+        self.assertEqual(decision.verdict, "allowed")
+
     def test_secure_client_keeps_the_1_0_data_json_admission(self):
         # As Go secureClientAdmission: data.json decides and no scanner gate
         # is derived, so a LOW skill finding stays a warning.
@@ -959,6 +1009,21 @@ class TestCompileAdmission(unittest.TestCase):
         self.assertEqual((skill.actions["MEDIUM"][0].install, skill.actions["MEDIUM"][0].runtime), ("block", "disable"))
         self.assertEqual(skill.actions["LOW"][0].install, "none")
         self.assertFalse(skill.actions["LOW"][1])
+
+
+class TestPolicyViews(_StoreTestBase):
+    def test_case_variant_journal_row_merges_with_operator_allow(self):
+        from defenseclaw.config import AssetPolicyRule
+        from defenseclaw.enforce.asset_lists import install_counts, merge_operator_entries
+
+        self.store.set_action_field("skill", "MySkill", "install", "block", "scan")
+        self.cfg.asset_policy.skill.allowed = [AssetPolicyRule(name="myskill")]
+        entries = merge_operator_entries(
+            self.store.list_actions_by_type("skill"), self.cfg, "skill",
+        )
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].actions.install, "allow")
+        self.assertEqual(install_counts(self.store, self.cfg)[:2], (0, 1))
 
 
 class TestPolicyEngineToolConnectorScope(_StoreTestBase):

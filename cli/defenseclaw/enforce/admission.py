@@ -393,11 +393,14 @@ def evaluate_admission(
     legacy = getattr(pe, "_legacy_rows", lambda: False)()
 
     blocked_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the block list")
-    if (
-        pe.is_blocked_for_connector(target_type, name, connector)
-        if connector
-        else pe.is_blocked(target_type, name)
-    ):
+    if hasattr(pe, "is_blocked_for_connector"):
+        blocked = pe.is_blocked_for_connector(
+            target_type, name, connector, source_path=source_path, url=url,
+            command=command, args=args or [], transport=transport,
+        )
+    else:
+        blocked = pe.is_blocked(target_type, name)
+    if blocked:
         return AdmissionDecision("blocked", blocked_reason, source="manual-block")
 
     asset_decision = evaluate_asset_policy(
@@ -453,10 +456,15 @@ def evaluate_admission(
     # first-party allow list cannot bless an operator/third-party asset that
     # merely lands under a first-party provenance directory.
     fp_constraints = policy.first_party_allow.get(name)
-    if allow_first_party and fp_constraints and policy.allow_list_bypass_scan:
-        if _matches_provenance(fp_constraints, source_path) and (
-            legacy or _own_first_party_content(target_type, name, source_path)
-        ):
+    if allow_first_party and fp_constraints is not None and policy.allow_list_bypass_scan:
+        from defenseclaw.enforce.asset_lists import path_has_components
+
+        configured = policy.field_sources.get("first_party_allow_list", "").startswith("config:")
+        path_matches = (
+            any(path_has_components(source_path, marker) for marker in fp_constraints)
+            if configured else _matches_provenance(fp_constraints, source_path)
+        )
+        if path_matches and (legacy or _own_first_party_content(target_type, name, source_path)):
             return _done(AdmissionDecision(
                 "allowed", f"{target_type} '{name}' is on the allow list — scan skipped", source="policy-allow",
             ))
