@@ -77,8 +77,9 @@ func TestDoctorOnAMacWhoseGatewayIsAnotherAccounts(t *testing.T) {
 		if svc.Fix == nil || !strings.Contains(svc.Fix.Summary, "one OpenShell gateway runs on a machine") {
 			t.Fatalf("service fix = %+v", svc.Fix)
 		}
-		if reg := r.Get(openshell.CheckIDRegistration); reg == nil || reg.Fix == nil || !strings.HasPrefix(reg.Fix.Summary, "nothing to register") {
-			t.Fatalf("registration = %+v", reg)
+		// What follows from it is not checked, with no fix of its own (GAP-0296).
+		if reg := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusSkip, "another account's (see Gateway service)"); reg.Fix != nil {
+			t.Fatalf("registration fix = %+v", reg.Fix)
 		}
 		unknown := "the gateway's compute driver is not known here: " + filepath.Join(f.brew, "var", "openshell", "gateway.toml") + " belongs to "
 		expectCheck(t, r, openshell.CheckIDVMIdentity, openshell.StatusSkip, unknown)

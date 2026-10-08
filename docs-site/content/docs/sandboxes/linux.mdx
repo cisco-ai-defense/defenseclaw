@@ -279,7 +279,10 @@ and runs as the `openshell-gateway` user service of the account that
 started it. A machine runs one gateway, so only that account can run
 sandboxes: a second account's gateway cannot get the port. On a second
 account, `sandbox setup` and `sandbox doctor` say that the gateway's port
-is held by a process of another account, and start nothing.
+is held by a process of another account, and start nothing. The doctor
+skips the checks that follow from it (`not checked: the OpenShell gateway
+on this machine is another account's`): the gateway, its registration and
+Docker, whose fixes would not help.
 
 To hand sandboxes to another account, stop the gateway in the account that
 runs it:

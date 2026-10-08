@@ -118,8 +118,8 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 			t.Fatalf("service fix = %+v", svc.Fix)
 		}
 		// Nor does the registration send the user to a doctor --fix that
-		// cannot start the gateway.
-		if reg := r.Get("gateway-registration"); reg == nil || reg.Fix == nil || strings.Contains(reg.Fix.Summary, "doctor --fix") {
+		// cannot start the gateway: it is not checked (GAP-0288).
+		if reg := r.Get("gateway-registration"); reg == nil || reg.Status != openshell.StatusSkip || reg.Fix != nil {
 			t.Fatalf("registration = %+v", reg)
 		}
 	})
@@ -127,7 +127,9 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 	// GAP-0201: the account that handed the gateway over keeps its
 	// registration; the gateway answering on the port is the other
 	// account's, whose CA refuses this account's certificate. The Gateway
-	// row printed the raw x509 error and told it to register again.
+	// row printed the raw x509 error and told it to register again, and
+	// the rows that follow from it failed with their own fixes (GAP-0288):
+	// they are skipped, and Gateway service gives the way on.
 	t.Run("another account's gateway answers on the port", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "disabled"), nil)
@@ -136,11 +138,22 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 		f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
 			return nil, errors.New("openshell: health: Unavailable: tls: failed to verify certificate: x509: certificate signed by unknown authority")
 		}
+		f.found["docker"] = false
 		r := f.run()
-		gw := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "is another account's (see Gateway service)")
-		if strings.Contains(gw.Detail, "x509") || gw.Fix == nil || gw.Fix.Command != "" || !strings.Contains(gw.Fix.Summary, "hand the gateway back") ||
-			!r.GatewayPortElsewhere {
-			t.Fatalf("gateway = %+v, fix %+v, elsewhere %v", gw, gw.Fix, r.GatewayPortElsewhere)
+		const elsewhere = "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+		for _, id := range []string{openshell.CheckIDGatewayVersion, openshell.CheckIDGatewayDriver, openshell.CheckIDDocker} {
+			if c := expectCheck(t, r, id, openshell.StatusSkip, elsewhere); c.Fix != nil {
+				t.Fatalf("%s keeps a fix: %+v", id, c.Fix)
+			}
+		}
+		var failed []string
+		for _, c := range r.Checks {
+			if c.Status == openshell.StatusFail {
+				failed = append(failed, c.ID)
+			}
+		}
+		if len(failed) != 1 || failed[0] != openshell.CheckIDGatewayService || !r.GatewayPortElsewhere || strings.Contains(r.String(), "x509") {
+			t.Fatalf("failed = %v, elsewhere %v:\n%s", failed, r.GatewayPortElsewhere, r.String())
 		}
 	})
 }

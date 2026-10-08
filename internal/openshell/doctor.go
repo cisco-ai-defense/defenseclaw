@@ -627,8 +627,44 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
+	r.deferToGatewayOwner()
 	r.report.Driver = r.driver()
 	return r.report
+}
+
+// gatewayOwnedElsewhere is the detail of a check deferToGatewayOwner skips.
+const gatewayOwnedElsewhere = "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+
+// deferToGatewayOwner skips the failed and warned checks that another
+// account's gateway on the port decides. This account can neither reach
+// nor register that gateway, and what those checks would advise (register
+// it again, start Docker Desktop here, restart the gateway) does not help:
+// the doctor counted four failures, three with contradicting fixes, where
+// one cause has one way on, which the Gateway service check gives
+// (GAP-0288, GAP-0296).
+func (r *doctorRun) deferToGatewayOwner() {
+	if !r.portOther {
+		return
+	}
+	for i := range r.report.Checks {
+		c := &r.report.Checks[i]
+		if (c.Status == StatusFail || c.Status == StatusWarn) && gatewayDependent(c.ID) {
+			c.Status, c.Detail, c.Fix = StatusSkip, gatewayOwnedElsewhere, nil
+		}
+	}
+}
+
+// gatewayDependent reports whether a check judges what this account's own
+// gateway would need or does: Docker for its sandboxes, the registration
+// and its credentials, the gateway's answers and configuration.
+func gatewayDependent(id string) bool {
+	switch id {
+	case CheckIDDocker, CheckIDDockerBuildKit, CheckIDDockerHostNetwork, CheckIDDockerFileSharing,
+		CheckIDVMIdentity, CheckIDVMResources, CheckIDRegistration, CheckIDMTLS,
+		CheckIDGatewayVersion, CheckIDGatewayDriver, CheckIDGlobalPolicy, CheckIDBindMounts, CheckIDTelemetry:
+		return true
+	}
+	return false
 }
 
 func (r *doctorRun) checkPlatform() bool {
@@ -1693,9 +1729,11 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		case err != nil && r.portOther:
 			// The gateway on the port is another account's, with its own
 			// CA: no registration of this account's can reach it
-			// (GAP-0201).
-			version.Detail = "the gateway at " + r.reg.Endpoint + " is another account's (see Gateway service), so it refuses this account's client certificate"
-			version.Fix = &Fix{Summary: "ask that account to hand the gateway back, or run sandboxes from it (see Gateway service)"}
+			// (GAP-0201), and the Gateway service check gives the one way
+			// on (GAP-0288).
+			version.Status, version.Detail = StatusSkip, gatewayOwnedElsewhere
+			skipRest(gatewayOwnedElsewhere)
+			return
 		case err != nil && credentialFailure(err):
 			version.Detail = "the gateway refused DefenseClaw's TLS credentials: " + err.Error()
 			version.Fix = &Fix{Summary: "register the local gateway again, so the CLI's client certificate matches the gateway's CA",

@@ -220,6 +220,34 @@ func TestSetupNonInteractive(t *testing.T) {
 		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude")
 }
 
+// TestSetupStopsAtAnotherAccountsGateway (GAP-0296): a second account on a
+// Mac whose gateway is the first account's was told to start Docker
+// Desktop. Setup stops at the gateway's owner instead, before any machine
+// check that gateway decides, and starts nothing.
+func TestSetupStopsAtAnotherAccountsGateway(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.IO.TTY = false
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.GatewayPortElsewhere = true
+		for i := range r.Checks {
+			switch c := &r.Checks[i]; c.ID {
+			case openshell.CheckIDDocker:
+				c.Status, c.Detail = openshell.StatusSkip, "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+			case openshell.CheckIDGatewayService:
+				c.Status, c.Detail = openshell.StatusFail, "127.0.0.1:17670, the gateway's port, is held by a process of another account"
+				c.Fix = &openshell.Fix{Summary: "one OpenShell gateway runs on a machine, under the account that started it"}
+			}
+		}
+	})
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, Yes: true})
+	if err == nil || ta.gateway.applied != 0 || len(ta.images.built) != 0 {
+		t.Fatalf("setup = %v, gateway applied %d, images %v", err, ta.gateway.applied, ta.images.built)
+	}
+	has(t, ta.output(), "Gateway service: 127.0.0.1:17670, the gateway's port, is held by a process of another account",
+		"→ one OpenShell gateway runs on a machine, under the account that started it")
+	lacks(t, ta.output(), "Docker Desktop")
+}
+
 // TestSetupSwitchesAnUndrivenGatewayToDocker: a gateway whose configuration
 // pins a driver DefenseClaw does not drive (podman, from its install) is
 // switched to docker in setup's one plan (GAP-1264).

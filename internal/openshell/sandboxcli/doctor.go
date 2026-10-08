@@ -110,7 +110,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		switch gw := rep.Get(openshell.CheckIDGatewayVersion); {
 		case st.unavailable && rep.GatewayPortElsewhere:
 			// The daemon's connection error is the other account's
-			// certificate refusal (GAP-0201): say what it means.
+			// certificate refusal (GAP-0201): say what it means, as a
+			// consequence of that one cause (GAP-0288).
+			st.check.Status, st.check.Fix = openshell.StatusSkip, nil
 			st.check.Detail = "running, but sandboxes are unavailable: the OpenShell gateway on its port is another account's (see Gateway service)"
 		case st.unavailable && gw != nil && gw.Status == openshell.StatusFail:
 			// The daemon's reason repeats the Gateway check's error: one
