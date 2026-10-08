@@ -422,8 +422,9 @@ func TestMigrateV9TransliteratesANonASCIIPackFolder(t *testing.T) {
 }
 
 func TestMigrateV9KeepsTheZeroEightBackupOfARelabelledV9File(t *testing.T) {
-	// GAP-0352: a v9 file hand-edited to config_version 8 replaced the
-	// pristine 0.8.x config.yaml.v8.bak on the next migration.
+	// GAP-0307, GAP-0544: a v9 file relabelled config_version 8 replaced the
+	// pristine 0.8.x config.yaml.v8.bak and migration-v9.json on the next
+	// migration; a default-home v9 file carries no key that tells it apart.
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", dir)
@@ -432,7 +433,11 @@ func TestMigrateV9KeepsTheZeroEightBackupOfARelabelledV9File(t *testing.T) {
 	if err := os.WriteFile(configPath+ConfigV8BackupSuffix, pristine, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	relabelled := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack: default\nobservability: {}\n"
+	record := []byte(`{"schema_version":1,"source_sha256":"aa","moved":[{"source":"data.json","from":"x","to":"y"}]}`)
+	if err := os.WriteFile(MigrationRecordPath(configPath), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relabelled := "config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n"
 	if err := os.WriteFile(configPath, []byte(relabelled), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +448,18 @@ func TestMigrateV9KeepsTheZeroEightBackupOfARelabelledV9File(t *testing.T) {
 	if kept, _ := os.ReadFile(configPath + ConfigV8BackupSuffix); string(kept) != string(pristine) {
 		t.Errorf("the 0.8.x backup was replaced:\n%s", kept)
 	}
-	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "keeps the 0.8.x config") }) {
+	sources, _ := filepath.Glob(configPath + ConfigV8BackupSuffix + ".*")
+	records, _ := filepath.Glob(filepath.Join(dir, "migration-v9.*.json"))
+	if len(sources) != 1 || len(records) != 1 {
+		t.Fatalf("want one saved source and one earlier record, got %q %q", sources, records)
+	}
+	if saved, _ := os.ReadFile(sources[0]); string(saved) != relabelled {
+		t.Errorf("the source was not saved beside the backup:\n%s", saved)
+	}
+	if earlier, _ := os.ReadFile(records[0]); string(earlier) != string(record) {
+		t.Errorf("the earlier migration record was not kept:\n%s", earlier)
+	}
+	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "keeps the config the first") }) {
 		t.Errorf("no note says the backup was kept: %q", result.Record.Notes)
 	}
 }
