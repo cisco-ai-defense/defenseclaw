@@ -10,7 +10,36 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+// A revoke of a signed-out Windows user records the user's copy, and the
+// enumerator removes it once the user is signed in (GAP-0718).
+func TestEnterpriseACPUserCopyRemovedAtNextSignIn(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
+	enrollment := enterpriseACPEnrollment{
+		target:    enterpriseHookTarget{home: `C:\Users\dcw-w2a1`, uid: -1, gid: -1, sid: "S-1-5-21-1-2-3-1001"},
+		principal: "sid:S-1-5-21-1-2-3-1001", client: "zed", agent: "kiro", profile: "w2w-obs",
+	}
+	note := enterpriseACPDeferUserCopyCleanup(enrollment, `C:\Users\dcw-w2a1\.defenseclaw\acp\zed-kiro.token`)
+	if !strings.Contains(note, "until the next sign-in") || strings.Contains(note, "enroll") {
+		t.Fatalf("note = %q", note)
+	}
+	signedIn := false
+	remove := func(entry acp.EnterpriseUserCopyCleanup) (bool, error) { return signedIn, nil }
+	var log bytes.Buffer
+	cleanEnterpriseACPUserCopies(cfg.DataDir, remove, nil, &log)
+	if pending, _ := acp.EnterpriseUserCopyCleanups(cfg.DataDir); len(pending) != 1 {
+		t.Fatalf("pending while signed out = %v", pending)
+	}
+	signedIn = true
+	cleanEnterpriseACPUserCopies(cfg.DataDir, remove, nil, &log)
+	if pending, _ := acp.EnterpriseUserCopyCleanups(cfg.DataDir); len(pending) != 0 || !strings.Contains(log.String(), "removed the revoked ACP token copy") {
+		t.Fatalf("pending after sign-in = %v, log = %q", pending, log.String())
+	}
+}
 
 // The Windows enumerator revokes the enrollments of a deleted account and
 // keeps every other one (GAP-0367).

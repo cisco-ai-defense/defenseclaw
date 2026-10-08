@@ -597,20 +597,15 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 		return enterpriseACPResult(cmd, nil, err)
 	}
 	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
-		info, statErr := os.Lstat(tokenPath)
-		if errors.Is(statErr, os.ErrNotExist) {
-			return nil
-		}
-		if statErr != nil {
-			return statErr
-		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("refusing to remove unsafe ACP user token path")
-		}
-		return os.Remove(tokenPath)
+		return removeEnterpriseACPUserTokenCopy(tokenPath)
 	})
-	err = enterpriseACPRefusal(err)
 	note := ""
+	if !cfg.SecureClientIntegration() && found && enterpriseACPSignedOut(err) {
+		// Access is revoked; only the user's inert copy waits for the user
+		// (GAP-0718).
+		note, err = enterpriseACPDeferUserCopyCleanup(enrollment, tokenPath), nil
+	}
+	err = enterpriseACPRefusal(err)
 	if !cfg.SecureClientIntegration() && err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// The home is gone with its account: nothing is left to remove,
