@@ -1126,8 +1126,12 @@ ai_discovery:
 The policy names end in eight hex digits of the rendered policy's hash, for
 example `defenseclaw-controls-3f9c2a7d`. DefenseClaw adds, changes and deletes
 only names it recorded itself. A policy of yours, even one with a
-`defenseclaw-` name, is never touched; status reports it as
-`tetragon_foreign_defenseclaw_name`.
+`defenseclaw-` name, is never touched and is listed under your policies. When
+its name has DefenseClaw's own form (`defenseclaw-` then `observe`,
+`connect`, `controls` or `controls-burnin`, then eight hex digits), status
+also warns `tetragon_foreign_defenseclaw_name`, because it reads like one of
+DefenseClaw's. Another `defenseclaw-` name, such as `defenseclaw-foo`, raises
+no warning.
 
 What the helper may ask of Tetragon depends on the mode:
 
