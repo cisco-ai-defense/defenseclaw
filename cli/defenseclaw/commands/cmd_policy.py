@@ -1101,30 +1101,30 @@ _policy_name_option = click.option(
 )
 
 
-def _live_admission_triple(app: AppContext, holder_name: str, severity: str) -> dict:
-    """The current live action for a severity as an install/file/runtime
-    mapping: the configured value, else the compiled default."""
+def _live_admission_triple(app: AppContext, holder_name: str, severity: str) -> tuple[dict, bool]:
+    """The current live triple and its allowed verdict, from config or the compiled default."""
     from defenseclaw.enforce.admission import compile_admission
 
     holder = getattr(app.cfg.admission, holder_name)
     raw = holder.actions.get(severity)
     if isinstance(raw, dict):
-        return dict(raw)
+        return dict(raw), False
     target = "tool" if holder_name == "defaults" else holder_name
     if isinstance(raw, str):
         from defenseclaw.enforce.admission import _SHORTHANDS
 
-        action = _SHORTHANDS.get(raw, _SHORTHANDS["warn"])[0]
+        action, allowed = _SHORTHANDS.get(raw, _SHORTHANDS["warn"])
     else:
-        action = compile_admission(app.cfg, target).actions[severity.upper()][0]
-    return {"install": action.install, "file": action.file, "runtime": action.runtime}
+        action, allowed = compile_admission(app.cfg, target).actions[severity.upper()]
+    return {"install": action.install, "file": action.file, "runtime": action.runtime}, allowed
 
 
 def _edit_live_actions(
     app: AppContext, holder_name: str, severity: str, runtime: str | None, file_action: str | None,
     install: str | None, reload_gateway: bool,
 ) -> None:
-    triple = _live_admission_triple(app, holder_name, severity)
+    triple, allowed = _live_admission_triple(app, holder_name, severity)
+    original = dict(triple)
     changed = []
     for key, value in (("runtime", runtime), ("file", file_action), ("install", install)):
         if value is not None:
@@ -1133,13 +1133,16 @@ def _edit_live_actions(
     if not changed:
         click.echo("No changes specified. Use --runtime, --file, and/or --install.")
         return
-    getattr(app.cfg.admission, holder_name).actions[severity] = triple
+    # A triple cannot express the distinct allowed verdict. Keep the allow
+    # shorthand when the requested edit leaves its actions unchanged.
+    value = "allow" if allowed and triple == original else triple
+    getattr(app.cfg.admission, holder_name).actions[severity] = value
     updated = [f"admission.{holder_name}.actions.{severity}"]
     if holder_name == "defaults":
         # Skills resolve the scanner gate (scanners.skill_scanner
         # fail_on_severity / review_queue_min) before admission.defaults, and
         # the gate covers every severity, so the edit is also the skill's own.
-        app.cfg.admission.skill.actions[severity] = dict(triple)
+        app.cfg.admission.skill.actions[severity] = dict(value) if isinstance(value, dict) else value
         updated.append(f"admission.skill.actions.{severity}")
     app.cfg.save()
     ux.ok(f"Updated {' and '.join(updated)}: {', '.join(changed)}")

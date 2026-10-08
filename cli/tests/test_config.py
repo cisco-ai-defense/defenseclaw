@@ -1040,7 +1040,7 @@ class TestConfigLoadSave(unittest.TestCase):
             loaded.ai_discovery.enabled = False
             loaded.save()
             with open(config_file) as f:
-                self.assertEqual(yaml.safe_load(f)["ai_discovery"]["ide_inventory"], "off")
+                self.assertEqual(config_mod.parse_config_yaml(f.read())["ai_discovery"]["ide_inventory"], "off")
 
     def test_global_only_asset_policy_omits_connectors_key(self):
         # An enabled-but-global-only config must NOT emit `connectors:` so it

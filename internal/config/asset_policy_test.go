@@ -11,9 +11,30 @@
 package config
 
 import (
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestAssetPolicyLoaderRejectsAliasDuplicateConnectors(t *testing.T) {
+	raw := []byte(`config_version: 9
+asset_policy:
+  enabled: true
+  skill:
+    default: deny
+  connectors:
+    open-hands:
+      mode: action
+    open_hands:
+      mode: observe
+`)
+	_, err := LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), raw)
+	if err == nil || !strings.Contains(err.Error(), "asset_policy.connectors") ||
+		!strings.Contains(err.Error(), "same connector") {
+		t.Fatalf("duplicate connector alias load error = %v", err)
+	}
+}
 
 func TestEvaluateAssetPolicyDisabledAllows(t *testing.T) {
 	cfg := &Config{}

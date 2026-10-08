@@ -458,8 +458,11 @@ def status(app: AppContext, as_json: bool) -> None:
     # live counters from its identity-bound status snapshot). The same code
     # path drives a single-connector install (one row) and a fan-out install
     # (N rows), so the output never branches on connector count.
-    health = None if config_problems else _fetch_runtime_bound_health(client, cfg)
-    if config_problems:
+    # Secure Client has historically reported its live accepted state even
+    # when a later on-disk edit is invalid.
+    skip_live_health = bool(config_problems) and profile != "secure_client"
+    health = None if skip_live_health else _fetch_runtime_bound_health(client, cfg)
+    if skip_live_health:
         _status_row(
             "Sidecar",
             ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
@@ -492,7 +495,7 @@ def status(app: AppContext, as_json: bool) -> None:
             "Health check:  defenseclaw doctor",
             "Subsystems:    defenseclaw-gateway status",
         )
-    elif not config_problems:
+    else:
         try:
             from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
 
@@ -1730,8 +1733,9 @@ def _status_payload(app) -> dict:
         payload["activity"] = None
 
     config_invalid = bool(getattr(app, "config_problems", None))
+    skip_live_health = config_invalid and profile != "secure_client"
     health = None
-    if not config_invalid:
+    if not skip_live_health:
         from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
         bind = gateway_api_client_host(cfg)
@@ -1744,7 +1748,7 @@ def _status_payload(app) -> dict:
             health = _fetch_runtime_bound_health(client, cfg)
         except Exception:
             health = None
-    if config_invalid:
+    if skip_live_health:
         payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
     else:
         payload["sidecar"] = {"running": health is not None}

@@ -1692,11 +1692,13 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	// picked up automatically on the next install.
 	switch evt.Type {
 	case InstallSkill:
-		return w.withRulePackOverlay(scanner.NewSkillScannerFromLLM(
+		ss := scanner.NewSkillScannerFromLLM(
 			cfg.Scanners.SkillScanner,
 			cfg.ResolveLLM("scanners.skill"),
 			cfg.CiscoAIDefense,
-		), evt)
+		)
+		ss.SecureClient = cfg.SecureClientIntegration()
+		return w.withRulePackOverlay(ss, evt)
 	case InstallMCP:
 		ms := scanner.NewMCPScannerFromLLM(
 			cfg.Scanners.MCPScanner,

@@ -724,10 +724,15 @@ every user:
 asset_policy:
   skill:
     allowed:
-      - name: epa-high
+      - name: reviewed-skill
         reason: reviewed by security
-        source_path_contains: ["C:\\Users\\dcw-epw1\\.claude\\skills\\epa-high"]
+        source_path_contains: ["C:\\Users\\<account>\\.claude\\skills\\reviewed-skill"]
 ```
+
+Replace `<account>` with the actual Windows profile directory name, and
+`reviewed-skill` with the installed skill folder name in both fields.
+`source_path_contains` must match the reviewed copy's actual path; omit it
+only when the allow rule should cover every user's copy.
 
 - A blocked skill whose folder is still in place is released at the next
   periodic rescan (`watch.rescan_interval_min`, 60 minutes by default), or at

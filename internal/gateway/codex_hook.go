@@ -220,10 +220,11 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	cfg := a.decisionConfig(ctx)
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
+		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
 			count := a.scanCodexComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -298,7 +299,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
 	case "Stop":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
+		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
 		}
 	}
@@ -3517,8 +3518,8 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
@@ -3567,8 +3568,8 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) []string {
 	if req.sandboxView != nil {
 		var scanPaths []string
-		if a.scannerCfg != nil {
-			scanPaths = a.scannerCfg.ConnectorHookConfig("codex").ScanPaths
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			scanPaths = cfg.ConnectorHookConfig("codex").ScanPaths
 		}
 		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
@@ -3590,8 +3591,8 @@ func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) 
 			out = append(out, p)
 		}
 	}
-	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.ConnectorHookConfig("codex").ScanPaths {
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		for _, p := range cfg.ConnectorHookConfig("codex").ScanPaths {
 			add(p)
 		}
 	}
@@ -3789,7 +3790,7 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
-	if !req.ScanComponents && !a.codexComponentScanDue() {
+	if !req.ScanComponents && !a.codexComponentScanDue(ctx) {
 		return 0
 	}
 	targets := codexComponentTargets(req.CWD)
@@ -3860,10 +3861,10 @@ func codexMCPEntryScanTargets(configPaths []string) []string {
 	return out
 }
 
-func (a *APIServer) codexComponentScanDue() bool {
+func (a *APIServer) codexComponentScanDue(ctx context.Context) bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes) * time.Minute
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(cfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.codexMu.Lock()
 	defer a.codexMu.Unlock()
@@ -4088,6 +4089,7 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 			cfg.ResolveLLM("scanners.skill"),
 			cfg.CiscoAIDefense,
 		)
+		ss.SecureClient = cfg.SecureClientIntegration()
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
 		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)

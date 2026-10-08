@@ -262,6 +262,14 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	if err := ValidateCandidate(abs, migrated); err != nil {
 		return nil, fmt.Errorf("config: the migrated config_version 9 document does not validate: %w", err)
 	}
+	// A rebased pack is written only during commit; its digest cannot be
+	// checked on disk during the dry run. Other referenced assets already
+	// exist and can be checked before either a preview or a commit.
+	if len(m.rebasedPacks) == 0 {
+		if err := ValidateCandidateAssets(abs, migrated); err != nil {
+			return nil, fmt.Errorf("config: the migrated config_version 9 assets do not validate: %w", err)
+		}
+	}
 	if in.DryRun || in.InMemory {
 		return result, nil
 	}
@@ -474,7 +482,9 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err := m.migrateScanners(root); err != nil {
 		return nil, false, err
 	}
-	m.migrateSignaturePacks(root)
+	if err := m.migrateSignaturePacks(root); err != nil {
+		return nil, false, err
+	}
 	if node := v9Pop(root, "update_check"); node != nil {
 		var check bool
 		if node.Decode(&check) == nil {
@@ -2109,12 +2119,17 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 // writeRebasedRulePack writes a rebased pack to dir, which must not exist:
 // the files go to a sibling folder that is renamed into place.
 func writeRebasedRulePack(dir string, files map[string][]byte) error {
-	staging := dir + ".rebasing"
-	_ = os.RemoveAll(staging)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".rebasing-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
 	for rel, data := range files {
 		target := filepath.Join(staging, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			_ = os.RemoveAll(staging)
 			return err
 		}
 		if err := cfgtxn.WriteFileDurable(target, data, 0o600); err != nil {
@@ -2123,7 +2138,6 @@ func writeRebasedRulePack(dir string, files map[string][]byte) error {
 		}
 	}
 	if err := os.Rename(staging, dir); err != nil {
-		_ = os.RemoveAll(staging)
 		return err
 	}
 	return nil
@@ -2328,36 +2342,66 @@ func v9NonEmptyLLM(node *yaml.Node) bool {
 
 // migrateSignaturePacks lists the packs installed under
 // <data_dir>/signature-packs in ai_discovery.signature_packs: v8 loaded that
-// folder implicitly, and since 9 only configured packs load.
-func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
+// folder implicitly, and since 9 only configured packs load. Pin the bytes
+// that v8 loaded so a managed standalone config can still apply.
+func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) error {
 	dataDir := m.dataDir()
 	installed, _ := filepath.Glob(filepath.Join(dataDir, "signature-packs", "*.json"))
 	if len(installed) == 0 {
-		return
+		return nil
 	}
 	discovery := v8YAMLMapValue(root, "ai_discovery")
 	listed := map[string]bool{}
 	packs := v8YAMLMapValue(discovery, "signature_packs")
+	pins := v8YAMLMapValue(discovery, "signature_pack_digests")
 	for _, item := range v9SeqItems(packs) {
 		listed[filepath.Clean(expandPath(item.Value))] = true
 	}
+	pinned := map[string]bool{}
+	if pins != nil && pins.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(pins.Content); i += 2 {
+			pinned[filepath.Clean(expandPath(pins.Content[i].Value))] = true
+		}
+	}
+	secureClient := v9SecureClientDocument(root)
 	var added []string
+	addedPins := map[string]string{}
 	for _, path := range installed {
 		if !listed[filepath.Clean(path)] {
 			added = append(added, path)
 		}
+		if secureClient || pinned[filepath.Clean(path)] {
+			continue
+		}
+		raw, err := os.ReadFile(path) // #nosec G304 -- pack found in the configured data_dir.
+		if err != nil {
+			return fmt.Errorf("config: read signature pack %s: %w", path, err)
+		}
+		addedPins[path] = "sha256:" + cfgtxn.SHA256Hex(raw)
 	}
-	if len(added) == 0 {
-		return
+	if len(added) > 0 {
+		if packs == nil || packs.Kind != yaml.SequenceNode {
+			packs = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+			v9Set(root, packs, "ai_discovery", "signature_packs")
+		}
+		for _, path := range added {
+			packs.Content = append(packs.Content, v9Scalar(path))
+		}
+		m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_packs", added)
 	}
-	if packs == nil || packs.Kind != yaml.SequenceNode {
-		packs = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-		v9Set(root, packs, "ai_discovery", "signature_packs")
+	if len(addedPins) > 0 {
+		if pins == nil || pins.Kind != yaml.MappingNode {
+			pins = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			v9Set(root, pins, "ai_discovery", "signature_pack_digests")
+		}
+		for _, path := range installed {
+			if digest, ok := addedPins[path]; ok {
+				v9Set(pins, v9Scalar(digest), path)
+			}
+		}
+		m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_pack_digests", addedPins)
 	}
-	for _, path := range added {
-		packs.Content = append(packs.Content, v9Scalar(path))
-	}
-	m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_packs", added)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

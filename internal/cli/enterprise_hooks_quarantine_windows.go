@@ -88,7 +88,7 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 					case err == nil:
 						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: removed now that the user is signed in\n", request.TargetType, request.SourcePath)
 					case !errors.Is(err, enforce.ErrQuarantineRemovalDeferred):
-						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: deferred removal dropped: %v\n", request.TargetType, request.SourcePath, err)
+						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: deferred removal retry pending: %v\n", request.TargetType, request.SourcePath, err)
 					}
 					return err
 				})

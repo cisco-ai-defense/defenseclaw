@@ -3636,11 +3636,10 @@ def use_pack_cmd(
             return
         _preflight_config_write(app)
         key = _scope_key(connector_key, None)
+        stale, dropped = _stale_rule_changes(app.cfg, fallback.path, connector_key)
         result = _write_guardrail_config(
             app,
-            [
-                config_writer.Change(f"{key}.rule_pack", unset=True),
-            ],
+            [config_writer.Change(f"{key}.rule_pack", unset=True), *stale],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
         )
@@ -3653,9 +3652,11 @@ def use_pack_cmd(
             exit_code=0,
             pack_name=fallback.pack,
             path=fallback.path,
+            dropped=dropped,
             message=(
                 f"{_connector_label(connector_key)} now uses the global rule pack '{fallback.pack}'. "
-                f"{_applied_note(app, result)}"
+                + (f"Dropped rule references the pack does not have: {'; '.join(dropped)}. " if dropped else "")
+                + _applied_note(app, result)
             ),
         )
         return
@@ -3844,7 +3845,7 @@ def protection() -> None:
 def protection_list_cmd(app: AppContext, json_out: bool) -> None:
     """List the opt-in protection packs and which scopes have them on.
 
-    Read-only. A scope is the global rule pack or one active connector.
+    Read-only. Scopes include global, active connectors, and configured profiles.
     """
     from defenseclaw import policy_catalog
 
@@ -3853,6 +3854,31 @@ def protection_list_cmd(app: AppContext, json_out: bool) -> None:
         {"scope": row.scope, "pack": row.pack, "path": row.pack_path, "enabled": list(row.protection)}
         for row in policy_catalog.scope_postures(app.cfg)
     ]
+    gc = app.cfg.guardrail
+    fallback = policy_catalog.global_pack(app.cfg).path
+    for name, profile in sorted((getattr(gc, "profiles", None) or {}).items()):
+        profile_scopes = [(None, f"profile:{name}")]
+        profile_scopes.extend(
+            (key, f"profile:{name}/connector:{key}")
+            for key in sorted(getattr(profile, "connectors", None) or {})
+        )
+        for connector, scope in profile_scopes:
+            blocks = _scope_blocks(app.cfg, connector, name)
+            path = fallback
+            for block in blocks:
+                path = policy_catalog.configured_pack_dir(app.cfg, block) or path
+            enabled = dict.fromkeys(
+                [
+                    *(pack for block in blocks for pack in policy_catalog.configured_protection(block)),
+                    *policy_catalog.enabled_protection(path),
+                ]
+            )
+            scopes.append({
+                "scope": scope,
+                "pack": policy_catalog.pack_name_for_path(app.cfg, path)[0],
+                "path": path,
+                "enabled": list(enabled),
+            })
     if json_out:
         click.echo(json.dumps({"version": 1, "packs": [p.to_json() for p in packs], "scopes": scopes}, indent=2))
         return
@@ -3867,7 +3893,10 @@ def protection_list_cmd(app: AppContext, json_out: bool) -> None:
     click.echo()
     ux.echo(f"  • {ux._style('on per scope:', fg='bright_black', bold=True)}")
     for scope in scopes:
-        who = "global" if scope["scope"] == "global" else f"{_connector_label(scope['scope'])} ({scope['scope']})"
+        if scope["scope"] == "global" or scope["scope"].startswith("profile:"):
+            who = scope["scope"]
+        else:
+            who = f"{_connector_label(scope['scope'])} ({scope['scope']})"
         enabled = ", ".join(scope["enabled"]) or ux.dim("none")
         ux.echo(f"      - {who}: {enabled} {ux.dim('· pack ' + str(scope['pack']))}")
     click.echo()

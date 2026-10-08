@@ -13,7 +13,7 @@
 // SHA-256 and compiles it; the gateway service then runs it read-only.
 //
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
-//	defenseclaw-scanners mcp-scan --settings <scanners.mcp_scanner as JSON> <url>
+//	defenseclaw-scanners mcp-scan --input-stdin <url>
 //	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--include-self]
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
@@ -81,31 +81,22 @@ if t is None:
     sys.exit("plugin-scan: a plugin directory is required")
 print(json.dumps(scan_plugin(t,o).to_dict()))`
 
-	// mcpScanScript is the gateway's "mcp scan --json" for a remote server.
-	// The runtime reads no config of its own: --settings carries the
-	// scanners.mcp_scanner block with config.yaml's keys, read by the config
-	// loader's own parser, so yara, analyzers and every other key reach the
-	// scan as they do on the Python CLI path. --rule-pack carries the
-	// guardrail rule pack the CLI lays over the server definition
-	// (rulepack.maybe_wrap), applied with the same overlay (GAP-0296). The
-	// judge and AI Defense settings come from the environment that
-	// internal/scanner runtimeEnv derives from config.
+	// mcpScanScript reads the config-derived scan input from stdin. Large
+	// pinned rule sets never enter either Windows process command line.
 	mcpScanScript = `import json,os,sys
 from types import SimpleNamespace
 from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, MCPServerEntry, _merge_mcp_scanner
 from defenseclaw.scanner.mcp import MCPScannerWrapper
 a=sys.argv[1:]
-usage="usage: mcp-scan --settings <scanners.mcp_scanner as JSON> [--rule-pack <pack as JSON>] [--server-entry-stdin] <server URL or name>"
-if len(a)<3 or a[0]!="--settings":
+usage="usage: mcp-scan --input-stdin <server URL or name>"
+if len(a)!=2 or a[0]!="--input-stdin" or a[1].startswith("--"):
     sys.exit(usage)
-c=_merge_mcp_scanner(json.loads(a[1])); i=2; rp=None; entry=None
-if i<len(a) and a[i]=="--rule-pack":
-    if i+1>=len(a): sys.exit(usage)
-    rp=json.loads(a[i+1]); i+=2
-if i<len(a) and a[i]=="--server-entry-stdin":
-    entry=MCPServerEntry(**json.load(sys.stdin)); i+=1
-if len(a)!=i+1 or a[i].startswith("--"):
-    sys.exit(usage)
+payload=json.load(sys.stdin)
+c=_merge_mcp_scanner(payload["settings"])
+rp=payload.get("rule_pack")
+entry_data=payload.get("server_entry")
+entry=MCPServerEntry(**entry_data) if entry_data is not None else None
+i=1
 t=a[i]
 if entry is not None and (entry.name!=t or not entry.command or entry.url):
     sys.exit("mcp-scan: invalid local server entry")

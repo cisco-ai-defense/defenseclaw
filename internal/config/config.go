@@ -2862,6 +2862,16 @@ func loadConfigSourceChecked(
 		return nil, fmt.Errorf("config: acp: %w", err)
 	}
 
+	// Asset policy connector aliases must resolve to one enforcement mode.
+	// Secure Client keeps the pre-1.0 config loader behavior.
+	if !cfg.SecureClientIntegration() {
+		if err := cfg.AssetPolicy.Validate(); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "asset_policy_invalid")
+			}
+			return nil, fmt.Errorf("config: asset_policy: %w", err)
+		}
+	}
 	if err := cfg.Guardrail.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")

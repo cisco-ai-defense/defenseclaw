@@ -201,11 +201,12 @@ func (a *APIServer) managedAIDOnly() bool {
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	cfg := a.decisionConfig(ctx)
 	failOpenReason := aidFailOpenUnavailable
 	if !managedAIDHookContentIsInspectable(toolName, content) {
 		failOpenReason = aidFailOpenNoContent
-	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
-		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+	} else if a == nil || a.ciscoInspector == nil || cfg == nil ||
+		!cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
@@ -347,7 +348,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	if a == nil || a.ciscoInspector == nil {
 		return nil
 	}
-	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		return nil
 	}
 	if !managedAIDHookContentIsInspectable(toolName, content) {
@@ -672,7 +673,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		if !isWriteToolName(strings.ToLower(req.Tool)) {
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
-		if cg := a.runCodeGuardOnArgsWithProvenance(req); len(cg.findings) > 0 {
+		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, req); len(cg.findings) > 0 {
 			return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
 		}
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
@@ -709,7 +710,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	isWriteTool := isWriteToolName(tool)
 	var cgScan codeGuardArgsScan
 	if isWriteTool {
-		cgScan = a.runCodeGuardOnArgsWithProvenance(req)
+		cgScan = a.runCodeGuardOnArgsWithProvenance(ctx, req)
 	}
 	cgFindings := codeGuardRuleFindings(cgScan, true, action.EnforcementCapable)
 
@@ -854,7 +855,7 @@ func isWriteToolName(tool string) bool {
 // runCodeGuardOnArgs extracts path/content from write_file/edit_file args
 // and runs CodeGuard content scanning.
 func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
-	return a.runCodeGuardOnArgsWithProvenance(req).findings
+	return a.runCodeGuardOnArgsWithProvenance(context.Background(), req).findings
 }
 
 type codeGuardArgsScan struct {
@@ -862,7 +863,7 @@ type codeGuardArgsScan struct {
 	complete bool
 }
 
-func (a *APIServer) runCodeGuardOnArgsWithProvenance(req *ToolInspectRequest) codeGuardArgsScan {
+func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *ToolInspectRequest) codeGuardArgsScan {
 	// managed_enterprise: local content scanners (CodeGuard/ClawShield)
 	// are disabled — AID is authoritative. Defense-in-depth: short-circuit
 	// here too so no other caller re-introduces CodeGuard blocking in
@@ -895,8 +896,8 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(req *ToolInspectRequest) co
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	cg := scanner.NewCodeGuardScanner(rulesDir)
 	scan := cg.ScanContentWithProvenance(filePath, content)

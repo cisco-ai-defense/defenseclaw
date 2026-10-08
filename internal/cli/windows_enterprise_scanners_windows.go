@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -366,7 +367,7 @@ func runWindowsScannerRuntime(executable, step string) error {
 	}
 	var stdout bytes.Buffer
 	lines := &windowsScannerLineWriter{out: progress}
-	command := exec.CommandContext(ctx, executable, step)
+	command := processutil.CommandContext(ctx, executable, step)
 	command.Stdout, command.Stderr = &stdout, lines
 	start := time.Now()
 	done := make(chan struct{})
@@ -383,7 +384,7 @@ func runWindowsScannerRuntime(executable, step string) error {
 			}
 		}
 	}()
-	err := command.Run()
+	err := processutil.RunTree(command)
 	close(done)
 	lines.flush()
 	out := append(stdout.Bytes(), lines.captured.Bytes()...)

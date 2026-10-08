@@ -13,9 +13,8 @@ import (
 )
 
 // GAP-0424: the enumerator publishes the Claude Code servers of an enrolled
-// user (user scope, local scope, a project .mcp.json inside the profile)
-// for the gateway, which cannot read ~/.claude.json; a project outside the
-// profile is not read.
+// user (user scope, local scope, and project .mcp.json files) for the
+// gateway, which cannot read ~/.claude.json.
 func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 	home := t.TempDir()
 	outside := t.TempDir()
@@ -53,7 +52,33 @@ func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 	for _, server := range servers {
 		got[server.Name] = server.Project
 	}
-	if len(got) != 3 || got["user-srv"] != "" || got["local-srv"] != inside || got["shared-proj"] != inside {
-		t.Fatalf("published %v, want user-srv, local-srv and shared-proj only", got)
+	if len(got) != 4 || got["user-srv"] != "" || got["local-srv"] != inside || got["shared-proj"] != inside || got["shared-"+filepath.Base(outside)] != outside {
+		t.Fatalf("published %v, want user, local and both project servers", got)
+	}
+}
+
+// An unreadable or malformed state must not leave the previously admitted
+// definition in the gateway's inventory.
+func TestWriteWindowsClaudeMCPSpoolDropsStaleState(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(state, []byte(`{"mcpServers":{"old":{"command":"old"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	const sid = "S-1-5-21-1-1001"
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err == nil && len(servers) != 0 {
+		t.Fatalf("stale servers remain: %v", servers)
 	}
 }

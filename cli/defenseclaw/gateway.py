@@ -1631,7 +1631,10 @@ def _is_runnable_file(path: str) -> bool:
 def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
     """Compute effective_policy_digest from disk with the installed gateway
     (``defenseclaw-gateway policy digest --json``); None when it cannot."""
-    binary = resolve_gateway_binary()
+    try:
+        binary = resolve_trusted_gateway_binary()
+    except OSError:
+        return None
     if not binary:
         return None
     env = dict(os.environ)

@@ -105,8 +105,15 @@ var policyValidateCmd = &cobra.Command{
 		}
 
 		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
-			// The managed packages ship no Rego: the admission policy is
-			// compiled from config.yaml alone, so there is nothing to compile.
+			// An existing policy root without Rego is config-only mode, as
+			// the gateway treats it. A missing root is a failed reload.
+			paths, err := resolvePolicyPaths()
+			if err != nil {
+				return err
+			}
+			if _, rootErr := os.Stat(paths.rootDir); rootErr != nil {
+				return fmt.Errorf("policy: compilation failed:\npolicy: read rego directory: %w", statErr)
+			}
 			fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
 		} else {
 			fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
@@ -136,7 +143,7 @@ func validateSecureClientPolicy(regoDir string) error {
 	if err != nil {
 		return fmt.Errorf("policy: load failed: %w", err)
 	}
-	if _, err := policy.NewExact(regoDir); err != nil {
+	if _, err := policy.PrepareSecureClientExact(context.Background(), regoDir); err != nil {
 		return fmt.Errorf("policy: compilation failed:\n%w", err)
 	}
 	fmt.Println("All Rego modules compiled successfully.")
@@ -310,23 +317,16 @@ var policyEvaluateCmd = &cobra.Command{
 		}
 
 		secureClient := cfg != nil && cfg.SecureClientIntegration()
-		if secureClient {
-			// Secure Client keeps the data.json requirement of main (issue #1092).
-			if _, err := policy.LoadSecureClientData(paths.regoDir); err != nil {
-				return err
-			}
-		}
-
-		block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
-			TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
-		})
 		input := policy.AdmissionInput{
 			TargetType: targetType,
 			TargetName: targetName,
 			Path:       "/dry-run",
-			BlockList:  block,
-			AllowList:  allow,
-			Admission:  policy.AdmissionFor(policy.CompileAdmission(cfg), targetType),
+		}
+		if !secureClient {
+			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
+				TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
+			})
+			input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), targetType)
 		}
 
 		if severity != "" {
@@ -343,14 +343,25 @@ var policyEvaluateCmd = &cobra.Command{
 		// gateway falls back to decides, as it does there. Secure Client
 		// keeps the engine error of main (issue #1092).
 		var out *policy.AdmissionOutput
-		engine, err := policy.NewExact(paths.regoDir)
+		var engine *policy.Engine
+		var secureClientPrepared *policy.Prepared
+		if secureClient {
+			secureClientPrepared, err = policy.PrepareSecureClientExact(ctx, paths.regoDir)
+		} else {
+			engine, err = policy.NewExact(paths.regoDir)
+		}
 		switch {
 		case !secureClient && (errors.Is(err, policy.ErrNoModules) || errors.Is(err, fs.ErrNotExist)):
 			out = policy.EvaluateAdmissionFallback(input)
 		case err != nil:
 			return err
 		default:
-			if out, err = engine.Evaluate(ctx, input); err != nil {
+			if secureClient {
+				out, err = secureClientPrepared.EvaluateAdmission(ctx, input)
+			} else {
+				out, err = engine.Evaluate(ctx, input)
+			}
+			if err != nil {
 				return fmt.Errorf("evaluation failed: %w", err)
 			}
 		}

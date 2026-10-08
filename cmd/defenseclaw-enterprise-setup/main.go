@@ -233,6 +233,9 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		code := enterpriseSetupArgumentFailureCode()
+		if standalone {
+			err = enterpriseSetupInvalidArguments{err}
+		}
 		writeEnterpriseSetupFailureFor(stdout, stderr, standalone, name, opts, err, code)
 		return code
 	}
@@ -302,6 +305,9 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	opts := enterpriseSetupOptions{LifecycleTimeout: defaultLifecycleTimeout}
 	normalized, help, err := normalizeEnterpriseSetupArgumentsForFlavor(arguments, standalone)
 	if err != nil || help {
+		if standalone && err != nil {
+			captureStandaloneSetupErrorIntent(arguments, &opts)
+		}
 		return opts, help, err
 	}
 	flags := flag.NewFlagSet(enterpriseSetupArtifactName, flag.ContinueOnError)
@@ -436,6 +442,41 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	}
 	opts.LifecycleTimeout = time.Duration(timeoutSeconds) * time.Second
 	return opts, false, nil
+}
+
+// captureStandaloneSetupErrorIntent preserves the output mode and action when
+// normalization rejects an earlier property. MDM callers may put JSON=1 after
+// the bad property, so the failure still needs the schema-2 result.
+func captureStandaloneSetupErrorIntent(arguments []string, opts *enterpriseSetupOptions) {
+	for _, argument := range arguments {
+		argument = strings.TrimSpace(argument)
+		lower := strings.ToLower(argument)
+		if lower == "--json" {
+			opts.JSON = true
+			continue
+		}
+		if strings.HasPrefix(lower, "/") {
+			for _, action := range enterpriseSetupActions(true) {
+				if lower == "/"+action {
+					opts.Action = action
+					break
+				}
+			}
+			continue
+		}
+		name, value, found := strings.Cut(argument, "=")
+		if !found {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "json", "--json":
+			if enabled, err := strconv.ParseBool(value); err == nil {
+				opts.JSON = enabled
+			}
+		case "action", "--action":
+			opts.Action = strings.ToLower(strings.TrimSpace(value))
+		}
+	}
 }
 
 func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone bool) ([]string, bool, error) {

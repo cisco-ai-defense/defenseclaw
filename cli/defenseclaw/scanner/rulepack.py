@@ -254,6 +254,8 @@ class RulePack:
     def scan_path(self, path: str) -> list[Finding]:
         """Walk *path* (file or dir) and apply :meth:`scan_text` to text files."""
         findings: list[Finding] = []
+        if os.path.islink(path):
+            return findings
         if os.path.isfile(path):
             text = _read_text(path)
             if text is not None:
@@ -273,6 +275,8 @@ class RulePack:
                     _log.debug("rule-pack overlay hit file cap (%d) under %s", _MAX_FILES, path)
                     return findings
                 full = os.path.join(root, fname)
+                if os.path.islink(full):
+                    continue
                 text = _read_text(full)
                 if text is None:
                     continue

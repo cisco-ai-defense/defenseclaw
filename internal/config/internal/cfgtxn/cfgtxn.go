@@ -199,6 +199,9 @@ func (t *Txn) Commit(candidate []byte, mode os.FileMode, actor, reason string) (
 		return GenerationState{}, errors.New("configwrite: commit without the writer lock")
 	}
 	previous, readErr := os.ReadFile(t.path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return GenerationState{}, fmt.Errorf("configwrite: read previous config %s: %w", t.path, readErr)
+	}
 	existed := readErr == nil
 	if err := WriteFileDurable(t.path, candidate, mode); err != nil {
 		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)

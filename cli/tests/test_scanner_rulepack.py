@@ -298,6 +298,21 @@ class TestScanPath(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertTrue(hits[0].location.startswith("tool.py"))
 
+    def test_scan_path_skips_symlinked_file(self):
+        outside = os.path.join(self.tmp, "outside.py")
+        with open(os.path.join(self.pack_dir, "rules", "marker.yaml"), "w") as fh:
+            fh.write(
+                "version: 1\ncategory: test\nrules:\n"
+                "  - id: MARKER\n    pattern: linked-file-marker\n"
+                "    title: marker\n    severity: HIGH\n"
+            )
+        with open(outside, "w") as fh:
+            fh.write("linked-file-marker\n")
+        os.symlink(outside, os.path.join(self.target, "linked.py"))
+        pack = rulepack.load_rule_pack(self.pack_dir)
+        self.assertEqual(pack.scan_path(self.target), [])
+        self.assertEqual(pack.scan_path(os.path.join(self.target, "linked.py")), [])
+
     def test_skips_binary_and_oversize(self):
         # Binary extension is skipped even if it contains the pattern bytes.
         with open(os.path.join(self.target, "blob.bin"), "w") as fh:
@@ -559,9 +574,11 @@ class TestWindowsRuntimeMCPScan(unittest.TestCase):
         clean = ScanResult(scanner="mcp-scanner", target=url, timestamp=datetime.now(timezone.utc), findings=[])
         pack = json.dumps({"dir": _write_pack(tmp), "rules": [{"disable": ["SEC-TOOL-ONLY"]}]})
         out = io.StringIO()
+        payload = json.dumps({"settings": {}, "rule_pack": json.loads(pack)})
         with (
             patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan", return_value=clean),
-            patch.object(sys, "argv", ["mcp-scan", "--settings", "{}", "--rule-pack", pack, url]),
+            patch.object(sys, "argv", ["mcp-scan", "--input-stdin", url]),
+            patch.object(sys, "stdin", io.StringIO(payload)),
             contextlib.redirect_stdout(out),
         ):
             exec(compile(script, "mcpScanScript", "exec"), {"__name__": "__main__"})

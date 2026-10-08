@@ -1915,6 +1915,22 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertNotIn("hidden", detail)
 
 
+def test_failed_llm_probe_with_malformed_url_still_emits_row():
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(
+        guardrail=SimpleNamespace(enabled=True),
+        resolve_llm=lambda _scope: SimpleNamespace(model="openai/test", base_url="http://[invalid"),
+    )
+    result = _DoctorResult()
+    with patch("defenseclaw.llm.ping", return_value=(False, "connection refused")):
+        cmd_doctor._check_llm_reachable(cfg, result)
+    assert result.checks[0]["label"] == "LLM reachable"
+    assert result.checks[0]["status"] != "pass"
+    assert "connection refused" in result.checks[0]["detail"]
+    assert "http://[invalid" not in result.checks[0]["detail"]
+
+
 
 class VerifyBedrockTests(unittest.TestCase):
     """Regression tests for :func:`_verify_bedrock` (M3).
