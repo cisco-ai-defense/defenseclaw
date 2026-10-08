@@ -251,6 +251,11 @@ func TestOpenShellDenialsCountConnections(t *testing.T) {
 	if sb := e.get("denialbox"); sb.Egress.Blocked != 4 || sb.Egress.Destinations != 0 {
 		t.Fatalf("egress = %+v; want the feed's four blocked destinations and none reached", sb.Egress)
 	}
+	// The agent's next post-tool hook says so too, with the flag (GAP-0326).
+	if got := e.m.EgressRefusals(e.binding("denialbox").ID, "denialbox"); len(got) != 1 || got[0].Note != NotePortClosed ||
+		got[0].Port != 29170 || !strings.Contains(got[0].Remedy, "--host-port 29170") {
+		t.Fatalf("refusals told the agent = %+v", got)
+	}
 	if asks, _ := e.m.Approvals(t.Context(), "denialbox"); len(asks) != 0 {
 		t.Fatalf("asks = %+v; an undeclared port does not ask", asks)
 	}

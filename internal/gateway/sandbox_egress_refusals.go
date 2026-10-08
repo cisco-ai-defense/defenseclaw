@@ -208,6 +208,10 @@ func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 		case manager.NoteDeclined:
 			return "The user declined this sandbox's connection to " + sandboxAskTarget(r) + " when DefenseClaw asked them; " +
 				"a tool sees only a connection error. Do not try it again unless the user says so."
+		case manager.NotePortClosed, manager.NotePortRefused:
+			// The feed's hint, for the agent too (GAP-0326).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " was refused (" + r.What + "); " +
+				"a tool sees only a connection error. " + sentence(upperFirst(r.Remedy))
 		}
 	}
 	if len(refusals) == 1 {

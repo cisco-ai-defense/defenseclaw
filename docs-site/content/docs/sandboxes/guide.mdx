@@ -1420,7 +1420,10 @@ run warns about them and leaves them off the `Host` line. A connection to
 your machine is a door into it, so the sandbox's first connection to the
 port arrives as an ask for you to approve. Once approved, the session's
 first connection shows in `defenseclaw sandbox activity` as
-`✓ host.openshell.internal:5432 (port 5432 on this machine)`.
+`✓ host.openshell.internal:5432 (port 5432 on this machine)`. A port the
+run did not list stays closed: the feed says so with the flag to add, and
+so does the note the agent gets with its failing tool call (Claude Code,
+Codex, Copilot CLI, Cursor and Devin read it), so its answer names the fix.
 
 The ports DefenseClaw refuses are your account's: its API, hook ingress and
 egress proxy, and the OpenShell gateway. On a machine several accounts use,

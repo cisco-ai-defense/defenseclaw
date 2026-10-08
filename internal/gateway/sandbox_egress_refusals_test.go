@@ -249,6 +249,15 @@ func TestSandboxEgressRefusalNoticeOfSSH(t *testing.T) {
 		"The user declined this sandbox's connection to port 8765 on the user's machine") {
 		t.Fatalf("declined note = %q", got)
 	}
+	// GAP-0326: a port the run did not declare names the flag, as the feed.
+	closed := port
+	closed.Note, closed.What = manager.NotePortClosed, "a port on the user's machine the run did not declare"
+	closed.Remedy = "tell the user: running the sandbox again with --host-port 8765 makes DefenseClaw ask them about it"
+	if got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{closed}); !strings.Contains(got,
+		"connection to port 8765 on the user's machine (host.openshell.internal:8765) was refused (a port on the user's machine the run did not declare)") ||
+		!strings.Contains(got, "Tell the user: running the sandbox again with --host-port 8765") {
+		t.Fatalf("closed note = %q", got)
+	}
 }
 
 func TestSandboxEgressRefusalNotice(t *testing.T) {
