@@ -48,7 +48,7 @@ type recordingServer struct {
 	server   *http.Server
 }
 
-func startStandaloneHookServer(t *testing.T, path string, body string) *recordingServer {
+func startStandaloneHookServer(t *testing.T, path string, body string, status ...int) *recordingServer {
 	t.Helper()
 	listener, err := net.Listen("unix", path)
 	if err != nil {
@@ -61,6 +61,9 @@ func startStandaloneHookServer(t *testing.T, path string, body string) *recordin
 		recorder.mu.Unlock()
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
+		if len(status) != 0 {
+			w.WriteHeader(status[0])
+		}
 		_, _ = io.WriteString(w, body)
 	})}
 	go func() { _ = recorder.server.Serve(listener) }()
@@ -131,6 +134,18 @@ func standaloneRun(t *testing.T, socket string, serviceUID int) runResult {
 	return runResult{stdout: out.String(), stderr: errb.String(), code: code}
 }
 
+func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	startStandaloneHookServer(t, socket, `{"error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`, http.StatusForbidden)
+	result := standaloneRun(t, socket, os.Getuid())
+	if result.code != 0 || !strings.Contains(result.stdout, "not enrolled in DefenseClaw") ||
+		!strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+		strings.Contains(result.stdout+result.stderr, "HTTP 403") ||
+		strings.Contains(result.stdout+result.stderr, "enterprise_managed_uid_unregistered") {
+		t.Fatalf("enrollment refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 func TestStandaloneHookSocketTrustedListenerGetsRequestWithoutToken(t *testing.T) {
 	dir := shortSocketDir(t)
 	socket := filepath.Join(dir, "hook.sock")
@@ -162,11 +177,11 @@ func TestStandaloneHookSocketImpostorGetsZeroBytes(t *testing.T) {
 	_, sentBytes := rawRecordingListener(t, "unix", socket)
 	// The listener runs as this test's uid; claim the gateway is another account.
 	result := standaloneRun(t, socket, os.Getuid()+1)
-	if result.code == 0 {
-		t.Fatalf("impostor listener must fail closed; stdout=%q stderr=%q", result.stdout, result.stderr)
+	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("impostor listener must deny through the Claude Code hook: stdout=%q stderr=%q", result.stdout, result.stderr)
 	}
-	if !strings.Contains(result.stderr+result.stdout, managedGatewayPeerUnverifiedReason) {
-		t.Fatalf("missing peer-unverified reason: stdout=%q stderr=%q", result.stdout, result.stderr)
+	if strings.Contains(result.stderr+result.stdout, managedGatewayPeerUnverifiedReason) {
+		t.Fatalf("internal peer reason reached the user: stdout=%q stderr=%q", result.stdout, result.stderr)
 	}
 	if n := sentBytes(); n != 0 {
 		t.Fatalf("hook wrote %d bytes to an unverified listener", n)
@@ -249,11 +264,11 @@ func TestStandaloneWithoutHookSocketNeverUsesTCP(t *testing.T) {
 				return nil, errors.New("unexpected request")
 			})}
 		}
-		if code := Run(t.Context(), opts); code == 0 {
-			t.Fatalf("injected=%v: a standalone hook without a socket must fail closed; stdout=%q stderr=%q", injected, out.String(), errb.String())
+		if code := Run(t.Context(), opts); code != 0 || !strings.Contains(out.String(), `"permissionDecision":"deny"`) {
+			t.Fatalf("injected=%v: a standalone hook without a socket must deny; stdout=%q stderr=%q", injected, out.String(), errb.String())
 		}
-		if !strings.Contains(out.String()+errb.String(), managedGatewayPeerUnverifiedReason) {
-			t.Fatalf("injected=%v: missing peer-unverified reason: stdout=%q stderr=%q", injected, out.String(), errb.String())
+		if strings.Contains(out.String()+errb.String(), managedGatewayPeerUnverifiedReason) {
+			t.Fatalf("injected=%v: internal peer reason reached the user: stdout=%q stderr=%q", injected, out.String(), errb.String())
 		}
 	}
 	if injectedCalls != 0 {
@@ -263,8 +278,9 @@ func TestStandaloneWithoutHookSocketNeverUsesTCP(t *testing.T) {
 		t.Fatalf("hook wrote %d bytes to the loopback TCP port", n)
 	}
 	// A configured socket path that names no socket fails closed too.
-	if result := standaloneRun(t, filepath.Join(shortSocketDir(t), "absent.sock"), os.Getuid()); result.code == 0 {
-		t.Fatalf("a missing socket must fail closed; stderr=%q", result.stderr)
+	if result := standaloneRun(t, filepath.Join(shortSocketDir(t), "absent.sock"), os.Getuid()); result.code != 0 ||
+		!strings.Contains(result.stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("a missing socket must fail closed; stdout=%q stderr=%q", result.stdout, result.stderr)
 	}
 }
 

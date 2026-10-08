@@ -686,6 +686,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			opts.Event = resolveHookEvent("", payload)
 		}
 		return failForeignHookBlocked(opts, sp, surfaceUnverifiedText(opts))
+	case resp.StatusCode == http.StatusForbidden && managedStandaloneHook(opts) &&
+		refusalReason(body) == "enterprise_managed_uid_unregistered":
+		if strings.TrimSpace(opts.Event) == "" {
+			opts.Event = resolveHookEvent("", payload)
+		}
+		return failUnenrolled(opts, sp, "enterprise_managed_uid_unregistered")
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
@@ -1349,8 +1355,15 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, unenrolledAccountExplanation, reason)
 	explanation := "DefenseClaw: " + unenrolledAccountExplanation
+	if managedStandaloneHook(opts) && reason == "enterprise_managed_uid_unregistered" {
+		explanation = "DefenseClaw blocked this " + hookEventSubject(opts.Event) +
+			": this account is not enrolled in DefenseClaw or is excluded by the administrator. Contact your administrator."
+	}
+	if sp.connector == "claudecode" && managedStandaloneHook(opts) {
+		return emitManagedClaudeBlock(opts, explanation)
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, unenrolledAccountExplanation, reason)
 	if sp.connector == "codex" {
 		return emitCodexBlock(opts, explanation)
 	}
@@ -1632,6 +1645,9 @@ func managedPeerFailureReason(opts Options, err error) string {
 // connector's usual fail-closed ones.
 func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer, reason string) int {
 	text := managedStandaloneFailClosedText(opts.Event, layer, reason)
+	if sp.connector == "claudecode" {
+		return emitManagedClaudeBlock(opts, text)
+	}
 	fmt.Fprintln(opts.Stderr, text)
 	switch sp.connector {
 	case "codex":
@@ -1650,6 +1666,22 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 		return result.exit
 	}
 	return emitHookResult(opts, sp, result)
+}
+
+// emitManagedClaudeBlock uses the same structured block shapes as a gateway
+// policy verdict, so Claude Code shows the reason without a hook-command prefix.
+func emitManagedClaudeBlock(opts Options, reason string) int {
+	encoded := mustJSONString(reason)
+	switch opts.Event {
+	case "UserPromptSubmit", "UserPromptExpansion":
+		fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s}\n", encoded)
+	case "PreToolUse":
+		fmt.Fprintf(opts.Stdout, "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":%s}}\n", encoded)
+	default:
+		fmt.Fprintln(opts.Stderr, reason)
+		return blockExit
+	}
+	return 0
 }
 
 // managedStandaloneFailClosedText is what a standalone managed hook (Unix or
@@ -1677,7 +1709,7 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		cause, advice = "the DefenseClaw gateway is not available",
 			"Try again in a moment; if this continues, contact your administrator."
 	}
-	return "DefenseClaw blocked this " + hookEventSubject(event) + ": " + cause + ". " + advice + " (" + strings.TrimSpace(reason) + ")"
+	return "DefenseClaw blocked this " + hookEventSubject(event) + ": " + cause + ". " + advice
 }
 
 // hookEventSubject names what an agent hook event carries, in the words a

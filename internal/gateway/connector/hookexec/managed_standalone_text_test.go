@@ -32,18 +32,22 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 			name:    "claude prompt, gateway unreachable",
 			failure: sessionStopCauses[2],
 			ev:      sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`},
-			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
+			want:    "DefenseClaw blocked this prompt: " + unavailable,
 		},
 		{
 			name:    "codex prompt, gateway unreachable",
 			failure: sessionStopCauses[2],
 			ev:      sessionStopEvent{connector: "codex", event: "UserPromptSubmit"},
-			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
+			want:    "DefenseClaw blocked this prompt: " + unavailable,
 			body:    true,
 		},
 	} {
 		r, _ := runSessionStop(t, tc.failure, tc.ev, true)
-		if got := strings.TrimSpace(r.stderr); got != tc.want {
+		if tc.ev.connector == "claudecode" {
+			if r.code != 0 || !strings.Contains(r.stdout, mustJSONString(tc.want)) || r.stderr != "" {
+				t.Fatalf("%s: expected structured prompt block: %+v", tc.name, r)
+			}
+		} else if got := strings.TrimSpace(r.stderr); got != tc.want {
 			t.Fatalf("%s: stderr\n got %q\nwant %q", tc.name, got, tc.want)
 		}
 		if tc.body && !strings.Contains(r.stdout, mustJSONString(tc.want)) {
@@ -121,8 +125,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	}
 	code, stdout, stderr, failures := run(true)
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
-		"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
-		"(" + managedGatewayNotRunningReason + ")"
+		"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service."
 	if code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) || !strings.Contains(stdout, mustJSONString(want)) {
 		t.Fatalf("windows standalone: code = %d stdout = %q stderr = %q, want a deny carrying %q", code, stdout, stderr, want)
 	}
