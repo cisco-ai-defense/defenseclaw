@@ -25,6 +25,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -204,4 +205,29 @@ func hasFinding(findings []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A reload between the MCP and tool checks must not combine permissions
+// from two policy generations into an allow.
+func TestInspectToolPolicyUsesOneConfigAcrossMCPAndToolChecks(t *testing.T) {
+	api, _ := toolPolicyAPI(t, "action")
+	old := api.scannerCfg
+	denyTool(old, "mcp__jira__createIssue", "codex", "old tool block")
+	newCfg := &config.Config{}
+	denyAsset(newCfg, "mcp", "jira", "codex", "new server block")
+	reads := 0
+	api.configSnapshot = func() *config.Config {
+		reads++
+		if reads <= 2 {
+			return old
+		}
+		return newCfg
+	}
+	ctx := withPinnedGeneration(context.Background(), &Generation{Config: old, N: 1})
+	verdict := api.inspectTrustedToolPolicyCtx(ctx, &ToolInspectRequest{
+		Tool: "mcp__jira__createIssue", Connector: "codex", Args: json.RawMessage(`{}`),
+	}, trustedActionRequest{})
+	if verdict.Action != "block" || !hasFinding(verdict.Findings, "STATIC-BLOCK") {
+		t.Fatalf("mixed-generation verdict = %+v, want the pinned tool block", verdict)
+	}
 }

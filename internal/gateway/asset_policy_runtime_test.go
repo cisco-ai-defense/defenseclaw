@@ -792,3 +792,23 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 		t.Fatal("url deny matched another user's server")
 	}
 }
+
+// Every source path for a skill name must be checked before the tool runs.
+func TestCodexReadChecksEverySameNameSkillFolder(t *testing.T) {
+	home := t.TempDir()
+	benign := filepath.Join(t.TempDir(), "skills", "blocked")
+	denied := filepath.Join(home, ".agents", "skills", "blocked")
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{
+		Name: "blocked", Connector: "codex", SourcePathContains: []string{denied},
+	}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: home})
+	decision, matched := api.codexSkillAssetDecision(ctx, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Bash",
+		ToolInput: map[string]interface{}{"command": "cat " + benign + "/SKILL.md " + denied + "/SKILL.md"},
+	})
+	if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+		t.Fatalf("same-name folder decision = %+v, matched=%v; want denied path block", decision, matched)
+	}
+}
