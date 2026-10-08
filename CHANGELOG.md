@@ -49,6 +49,16 @@ says otherwise. Per-user installs never connect to Tetragon.
     native agent install): script-hosted
     agents and the other users stay in monitor mode, and status says so
     (`kernel_pid_anchor_monitor_only`, `kernel_binary_anchor_scope_limited`).
+    An agent session that was already running when the controls loaded
+    (`enforce` turned on, or Tetragon restarted) is monitored until it
+    restarts (`kernel_sessions_predate_controls`); a pause and a resume keep
+    the controls loaded and the session denied. At most eight running agent
+    sessions are anchored in one monitor controls policy, because every extra
+    `file_open` hook runs for every open on the computer: further sessions
+    are reported as `kernel_roots_over_limit` and their user's burn-in pauses
+    until every live session is measured. A new session may wait a few
+    seconds for its process id to reach an enabled controls policy
+    (`kernel_session_policy_pending`) and accrues no burn-in while it waits.
     An eligible account counts as enrolled for
     the connectors that reach it through vendor machine policy (Claude Code,
     Codex, Cursor, Copilot CLI and OpenCode) without a `targets.yaml` row, so
@@ -123,17 +133,20 @@ says otherwise. Per-user installs never connect to Tetragon.
   stack gains five Prometheus alerts; and the Splunk bridge the matching
   macros and panels.
 - **Surfaces.** `defenseclaw agent discovery runtime status` shows the backend
-  and the kernel floor; `runtime permissions` explains why a per-user install
+  and the kernel controls; `runtime permissions` explains why a per-user install
   does not connect to Tetragon; `defenseclaw doctor` has a **Kernel sensor
   (Tetragon)** row (TCP API, fallback, policy not applied, pause, orphans)
   and, on Linux with the sandbox kernel feed installed, a **Sandbox kernel
   feed** row that prints the update command;
   `defenseclaw config get --effective` lists `enterprise.tetragon.*`;
-  the TUI Runtime panel shows the backend. These Python surfaces exist only
+  the TUI Runtime panel shows the kernel sensor, the kernel controls and your
+  Tetragon policies; `defenseclaw-gateway status` ends its Subsystems list with
+  a `Kernel sensor:` line. These Python surfaces exist only
   where a `defenseclaw` command line is installed: the managed Linux packages
   ship none, and an administrator there uses the Go commands and telemetry.
   `/health` and `GET /api/v1/ai-usage/runtime` carry `backend` and
-  `policy.kernel`.
+  `policy.kernel`; the keys are in the
+  [gateway API reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api).
 - **Sandbox kernel feed (open-source Linux, opt-in root service).** On a
   computer whose administrator runs Tetragon, `sudo defenseclaw-gateway sandbox
   kernel-feed install` adds Tetragon's exec and exit records to the process
@@ -184,7 +197,10 @@ says otherwise. Per-user installs never connect to Tetragon.
   A host that sets no `enterprise.tetragon` gets no new drop-in.
 - The per-user Linux install ships `defenseclaw-sensor-helper` in
   `~/.local/bin` (used only by the sandbox kernel feed);
-  `defenseclaw uninstall --binaries` removes it.
+  `defenseclaw uninstall --binaries` removes it. `install.sh` and
+  `defenseclaw upgrade` warn when the root sandbox kernel feed runs another
+  release than the one just installed, and print the
+  `sudo ... sandbox kernel-feed install` command that updates it.
 - Downgrading below this release while policies are loaded: see
   [Remove the policies, or downgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
 
@@ -196,7 +212,12 @@ says otherwise. Per-user installs never connect to Tetragon.
 - **The claim that `cn_proc` is unprivileged** (comments, the permissions
   probe, docs and TUI copy): it was false.
 - **The sandbox manager's private command-line redaction.** One shared
-  implementation now serves the manager and the sensor helper.
+  implementation now serves the manager, the sensor helper and the sandbox
+  kernel feed. It redacts quoted secrets, header values (including
+  `--header=X-Api-Key: ...`), `user:password` arguments, URL passwords and
+  key-shaped arguments, and a second pass over a redacted line changes
+  nothing; the rules are listed under
+  [Process command lines](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/redaction#process-command-lines).
 
 ## [1.0.0] — Release-owned upgrades
 

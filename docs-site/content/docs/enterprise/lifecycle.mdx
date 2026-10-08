@@ -93,6 +93,16 @@ result to `/var/lib/defenseclaw-enterprise/last-package-result.json`. The
 script never fails the package transaction, so read that file or run `verify`
 afterwards.
 
+If the computer runs [Tetragon](/docs/enterprise/tetragon), two things follow
+an upgrade. A release that changes a kernel control changes the digest that
+`enterprise.tetragon.enforce_ack` approves, so with `mode: enforce` every user
+falls back to monitor mode (`kernel_enforce_ack_stale`) until the approval
+matches: push the old and the new digest as a list while the rings upgrade
+([Upgrades](/docs/enterprise/tetragon#upgrades)). And the first `ensure` or
+`repair` of a release with Tetragon support applies the sensor helper's new
+unit settings; a computer with no `enterprise.tetragon` block gets no new
+drop-in.
+
 ```bash title="Payload archive"
 VERSION=1.0.0   # the release you deploy
 ARCH=amd64      # or arm64
@@ -188,6 +198,13 @@ version 9 file and fails with a config error.
   any file changes, unless the marker exists. The postinstall script passes
   `--allow-downgrade` to the lifecycle and deletes the marker, so each
   rollback needs a new marker.
+- **Tetragon (Linux).** A failed or interrupted `ensure`, upgrade or package
+  install that rolls itself back stops a sensor helper that loaded Tetragon
+  policies, deletes those `defenseclaw-*` policies, and only then puts the
+  previous files back. Your own Tetragon policies are not touched. A
+  deliberate rollback to a release before Tetragon support leaves those
+  policies loaded in Tetragon, so clean them up first; see
+  [Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so
   it refuses older RHEL packages.
 
@@ -473,6 +490,16 @@ to keep the machine state for a reinstall instead.
   `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
   before you remove the package. The MDM `uninstall.sh --purge` does this
   for you.
+- **Tetragon (Linux).** Uninstall deletes the `defenseclaw-*` policies the
+  sensor helper loaded in Tetragon before it removes any file, so no control
+  keeps denying after the helper is gone. With the machine state it then
+  removes the helper's state in `/var/lib/defenseclaw-sensor` (burn-in, a
+  pause and the record of loaded policies) and its runtime directories
+  `/run/defenseclaw-sensor` and `/run/defenseclaw-sensor-tetragon`;
+  `--keep-state` keeps the state. `apt remove` and `dnf remove` run the same
+  cleanup from the package's pre-removal script. Tetragon itself and your own
+  policies stay. See
+  [Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
 - **Registrations left (Linux and macOS).** Each user's registrations are

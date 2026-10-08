@@ -83,6 +83,22 @@ The app opens on a home page and groups its views into four menus:
 The demo dashboards below are the ones you would build by hand for a production
 deployment, pointed at the local index for a self-contained demo.
 
+#### AI Runtime Planes on Linux with Tetragon
+
+On Linux computers that run Tetragon with DefenseClaw's sensor helper, the
+**AI Runtime Planes** dashboard adds three groups of panels. They read the
+plane C `plane_health` records, `ai.runtime.kernel_policy`,
+`ai.runtime.kernel_event` and the `enforcement.block.applied` records whose
+initiator is `kernel`, through two macros: `defenseclaw_demo_kernel_denials`
+and `defenseclaw_demo_kernel_events`. They show the same things as the Grafana
+rows in [Kernel controls and your Tetragon policies](/docs/observability/grafana-dashboards#kernel-controls-and-your-tetragon-policies).
+
+| Group | Panels |
+| --- | --- |
+| **Fleet: kernel controls per host** | One row per computer: Tetragon version and backend, mode, approval, enforced, enrolled and burn-in users, pause and controls digest |
+| **Kernel controls (Linux)** | **Kernel denials**, **Would-block (monitor mode)**, **Agent activity with no hook decision**, **Paused hosts and operator overrides**, denials and would-blocks by control, **DefenseClaw kernel policies**, **Burn-in progress per user**, and **Kernel denials**, one record per refused access |
+| **Your Tetragon policies: events from AI agents** | **Agent events**, **Blocked by your policies**, **Events your policies saw (every process)**, **Policy, agent, action, outcome and hook join**, and the records themselves |
+
 #### Executive Agent Watch Overview
 
 The CISO-friendly landing page: high-attention sessions, blocked actions, scanner heat, HITL backlog.

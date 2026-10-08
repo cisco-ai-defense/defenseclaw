@@ -79,7 +79,22 @@ over the `defenseclaw_kernel_*` series, each naming the panel to open:
 | `DefenseClawTetragonFallback` | Tetragon is installed, but the sensor helper runs on `cn_proc` and `fanotify`, for 15 minutes |
 | `DefenseClawCustomerPolicyBlocksAgents` | One of your own Tetragon policies denied an AI agent (informational) |
 
-{/* SCREENSHOT: grafana-kernel-fleet.png — the Runtime Planes dashboard first row "Fleet: kernel controls per host" with two computers, their approval, enforced and burn-in counts, from round row OB-13 */}
+A real run on a RHEL 9 lab computer with Tetragon 1.7.1, over the last
+stretch of a burn-in round (the computer's name is replaced with `host-a`). The
+fleet row lists each computer once, with its current mode, approval and user
+counts:
+
+![Grafana AI Discovery Runtime Planes, first row Fleet: kernel controls per host. Tiles for hosts reporting kernel controls, hosts with a stale approval, hosts on fallback, paused hosts, kernel denials and would-blocks, and a table of approval, backend, controls digest, host, mode, paused, Tetragon version, enrolled users, enforcing and in burn-in](/images/tetragon/grafana-kernel-fleet.png)
+
+The row for your own policies separates what they saw from what reached an AI
+agent:
+
+![Grafana AI Discovery Runtime Planes, row Your Tetragon policies: events from AI agents, with tiles for agent events, blocks by your policies, would-blocks and every event your policies saw, a chart of agent events by policy, and a table by policy, agent, action, outcome and hook join](/images/tetragon/grafana-kernel-your-policies.png)
+
+**Blocked Events & Analysis** shows the kernel denials by control, connector,
+user and process:
+
+![Grafana Blocked Events and Analysis, row Kernel denials (Linux): 13 kernel denials, 1 block by an administrator's Tetragon policy, and a table of denials by connector, control, process, user and count](/images/tetragon/grafana-blocked-events-kernel.png)
 
 ## Filter by user
 

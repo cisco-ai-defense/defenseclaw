@@ -151,6 +151,12 @@ What a process did under which agent.
 | macOS sandbox | The process tree every 15 seconds | The virtual machine |
 | Windows | Process-creation audit events when enabled | - |
 
+On a Linux sandbox with the [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon)
+installed, `sandbox ps --tree` names the source of the tree and how much of it
+the kernel recorded:
+
+![defenseclaw sandbox ps with --tree on a Claude Code sandbox: the sandbox's init process, a login shell, the DefenseClaw supervisor and Claude Code, then the line source: kernel (Tetragon, through the sandbox kernel feed) with 331 execs and exits recorded and 295 of them with their pid in the sandbox](/images/segmentation/terminal-sandbox-ps-tree-kernel.png)
+
 ### Shadow AI
 
 AI use that the inventory and the policy did not expect.
@@ -280,6 +286,12 @@ three:
 - **Leaves them alone.** The sensor helper adds, changes and deletes only the
   policies it recorded loading itself. A policy of yours with a `defenseclaw-`
   name is yours, and `status` warns about the name.
+
+This is what a developer sees when one of your enforcing policies blocks a
+tool call: the note from the tool result names your policy, and the model
+passes the instruction on.
+
+![Claude Code after a block by an administrator's Tetragon policy: the cat failed with Operation not permitted, the note from the tool result reads Your organization's Tetragon policy th-r1-customer-deny blocked cat (file_open), the call failed, do not retry it, and the model refuses to retry and tells the developer to contact the administrator](/images/tetragon/terminal-claude-customer-policy-notice.png)
 
 DefenseClaw does not distribute your policies to the fleet and does not
 compile its own guardrail, egress or sandbox policy into Tetragon. Those are

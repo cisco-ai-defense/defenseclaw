@@ -80,6 +80,20 @@ with `V` for the full model inventory; model rows add Model, Model status, and
 Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
 
+The Runtime panel reads the same gateway as `agent discovery runtime status`.
+Where the gateway reports a Tetragon backend (a computer on which an
+administrator installed the `defenseclaw` command line next to a managed Linux
+gateway), the agent-actions badge names it, for example `agent actions: up
+(Tetragon, enforce)`, and the plane's expanded view adds the kernel sensor and
+its events lost, the kernel controls (`enforcing 2 of 3 users`, or `monitoring 3
+users, not enforcing`), the denials and would-block hits of the last hour, your
+own Tetragon policies' agent events, any DefenseClaw policy that did not load,
+and an active pause with who set it and a reminder that root ends it with `tetragon resume`. Under a
+selected finding a note says what the kernel or one of your policies did to
+that agent. The lines are the ones in [Runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran);
+the managed packages ship no TUI, so an administrator there uses
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
+
 ### IDE plugins
 
 On Inventory (`6`), move to the **IDE plugins** sub-tab with `l` or Right
