@@ -292,6 +292,13 @@ the lifecycle from there. See [Payload trust](#payload-trust) for how the
 lifecycle decides which files to trust. It also generates the target manifest from the
 profiles on the computer, so you never write `targets.yaml`.
 
+An agent reads its hooks when it starts, so an agent session a user opened
+before the first install (a Claude Code or Codex window left open, for
+example) runs without DefenseClaw until it is restarted. The `/ensure`
+result, `status` and `verify` name each such user and session with the
+`agent_sessions_restart_required` warning; ask those users to restart their
+agents.
+
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
 
