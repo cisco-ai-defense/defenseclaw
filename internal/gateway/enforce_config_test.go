@@ -112,6 +112,37 @@ func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 	}
 }
 
+// A watcher block belongs to the connector that owns the scanned copy.
+func TestEnforceUnblockClearsConnectorWatcherBlock(t *testing.T) {
+	api, _ := enforceTestAPI(t, "asset_policy:\n  skill:\n    denied:\n      - {name: shared-skill, connector: codex}\n")
+	for _, connector := range []string{"", "codex", "claudecode"} {
+		if err := api.store.SetActionFieldForConnector("skill", "shared-skill", connector, "install", "block", "watcher"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := api.store.SetActionFieldForConnector("skill", "shared-skill", "codex", "runtime", "disable", "watcher"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := enforceRequest(t, api.handleEnforceBlock, http.MethodDelete,
+		`{"target_type":"skill","target_name":"shared-skill","connector":"codex"}`)
+	if code != http.StatusOK || out["status"] != "unblocked" {
+		t.Fatalf("unblock = %d %v", code, out)
+	}
+	codex, err := api.store.GetActionForConnector("skill", "shared-skill", "codex")
+	if err != nil || codex == nil || codex.Actions.Install != "" || codex.Actions.Runtime != "disable" {
+		t.Fatalf("codex journal = %+v, %v; want install cleared and runtime retained", codex, err)
+	}
+	global, err := api.store.GetAction("skill", "shared-skill")
+	if err != nil || global != nil && global.Actions.Install != "" {
+		t.Fatalf("older global journal = %+v, %v; want install cleared", global, err)
+	}
+	claude, err := api.store.GetActionForConnector("skill", "shared-skill", "claudecode")
+	if err != nil || claude == nil || claude.Actions.Install != "block" {
+		t.Fatalf("other connector journal = %+v, %v; want install block retained", claude, err)
+	}
+}
+
 func TestEnforceAllowWriterFailureDoesNotEnableRuntime(t *testing.T) {
 	received := make(chan receivedRequest, 1)
 	srv := startMockGW(t, rpcRecordingLoop(received))

@@ -2262,9 +2262,19 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete && a.store != nil {
-		// The watcher's own install block is journal state; an operator
-		// unblock clears it too, so a restore no longer keeps it (GAP-1971).
-		_ = a.store.ClearActionField(req.TargetType, req.TargetName, "install")
+		// Older watcher blocks and OpenClaw use the global journal row.
+		// Other watchers also use a connector row, which must be cleared
+		// for an unblock to release a restored asset on the next scan.
+		scopes := []string{""}
+		if scope := config.NormalizeConnectorName(req.Connector); scope != "" && scope != "openclaw" {
+			scopes = append(scopes, scope)
+		}
+		for _, scope := range scopes {
+			if err := a.store.ClearActionFieldForConnector(req.TargetType, req.TargetName, scope, "install"); err != nil {
+				a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 	}
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(action), req.TargetName, details)
