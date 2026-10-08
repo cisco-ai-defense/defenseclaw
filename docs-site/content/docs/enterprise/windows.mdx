@@ -398,6 +398,17 @@ every skill, MCP server and plugin install is blocked: `status` warns and
 `verify` fails with `scanner_runtime_unavailable`, and Setup `/repair`
 installs it again.
 
+The lifecycle records the SHA-256 of the `defenseclaw-scanners.exe` it
+admitted (a valid Authenticode signature, or the digest the payload manifest
+pins) in `admission.json` in the scanner runtime folder. Before `status`,
+`verify`, `repair`, `ensure` or a scan runs the executable, it checks the file
+against that record. A copy changed or replaced in place, even by an
+administrator, is not run: the `Scanners:` state is `untrusted`, `verify`
+fails and `status`, `repair` and `ensure` from the installed CLI warn with
+`scanner_runtime_unavailable` (the Intune remediation script reports
+"not repaired"), and every skill, MCP server and plugin install is blocked
+until Setup `/repair` or `/ensure` installs the admitted copy again.
+
 ## Verify the install
 
 Run from an elevated PowerShell 7 session:

@@ -89,7 +89,7 @@
       "type": "object", "additionalProperties": false, "required": ["state"],
       "description": "Standalone Windows scanner runtime; omitted everywhere else.",
       "properties": {
-        "state": { "type": "string", "enum": ["ready", "not_prepared", "missing"] },
+        "state": { "type": "string", "enum": ["ready", "not_prepared", "untrusted", "missing"] },
         "versions": { "type": "object", "additionalProperties": { "type": "string" } },
         "policy": { "type": "string" },
         "judge_model": { "type": "string" }
