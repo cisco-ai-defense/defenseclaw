@@ -1178,16 +1178,19 @@ root-only and grants control of kernel policy. `defenseclaw doctor` and
 `runtime permissions` say so when Tetragon is present, and `doctor` warns when
 Tetragon serves its API on a TCP port.
 
-The managed Linux packages ship no `defenseclaw` command line or TUI, so on a
-managed computer the administrator's surfaces are the Go commands
-(`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon
-verify` and `tetragon status`), the telemetry and the agent's own answers.
-`defenseclaw doctor`, `agent discovery runtime status` and the TUI Runtime
-panel show the lines below wherever a `defenseclaw` command line reads a
-gateway that reports a Tetragon backend, for example on a computer where an
-administrator installed the wheel.
+Only a managed Linux gateway reports a Tetragon backend, and in this release no
+`defenseclaw` command line reads one: the managed Linux packages ship no
+command line or TUI, the per-user installer refuses to run on a managed
+computer, and a per-user command line does not hold the deployment's gateway
+token. So on managed Linux the TUI Runtime panel, `agent discovery runtime
+status` and the managed rows of `defenseclaw doctor` do not show Tetragon. The
+administrator's surfaces there are the Go commands
+(`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`,
+`enterprise linux tetragon verify` and `tetragon status`), the telemetry and
+the agent's own answers.
 
-When the Plane C entry carries a backend, `runtime status` adds lines for it:
+When the Plane C entry carries a backend, `enterprise linux discovery` adds
+lines for it under agent actions:
 
 ```text
 kernel sensor: Tetragon v1.7.1, enforce, 0 events lost
@@ -1382,11 +1385,11 @@ visible — press `p` to expand each plane's reason — and coverage sits in the
 header beside the finding count, because a reader who sees only the count
 cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
 renders a kill chain as a sequence rather than a set, and always states the
-inventory verdict including `unobserved`. When Plane C reads Tetragon, the TUI
-appends it to the plane's summary (for example "Tetragon 1.7.1, observe") and
-the expanded strip adds the lost-event count, the DefenseClaw policies and the
-kernel controls. The macOS app does not show it: the app manages the Mac's own
-gateway, and Tetragon runs only on Linux.
+inventory verdict including `unobserved`. Neither shows Tetragon: only a
+managed Linux gateway reports it, no `defenseclaw` command line reads that
+gateway in this release (see
+[Plane C on managed Linux](#plane-c-on-managed-linux-tetragon)), and the macOS
+app manages only the Mac's own gateway.
 
 ## Use it alongside Registry
 

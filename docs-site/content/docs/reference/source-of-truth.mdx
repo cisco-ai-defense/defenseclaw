@@ -236,7 +236,7 @@ On a managed Linux host whose `enterprise.tetragon.mode` is `observe` or
 `enforce`, the digest also has a `kernel_policy` component: the digest of the
 built-in kernel control set, with no mode, user or path in it, so it is the
 same on every host of a release. The sensor helper reports the one it
-applied; `defenseclaw doctor` and `enterprise linux status` warn
+applied; `enterprise linux status` warns
 `kernel_policy_not_applied` when it differs from the generation's. It is also
 the value you put in `enterprise.tetragon.enforce_ack`. An absent
 `enterprise.tetragon` block and one that spells out the defaults give the same

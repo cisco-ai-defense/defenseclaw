@@ -142,12 +142,14 @@ Tetragon (see [Tetragon on a Linux fleet](/docs/enterprise/tetragon)).
 They are warnings. A problem with your Tetragon never fails
 `enterprise linux verify`, and `security_complete` does not depend on it.
 `enterprise linux tetragon verify`, the readiness check for a mode, does fail
-while Tetragon is down or refused. `defenseclaw doctor` shows the
-matching rows under **Kernel sensor (Tetragon)** where a `defenseclaw` command
-line is installed; the managed Linux packages ship none, so there the same
-information is in `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify` and
-`tetragon status`. A doctor row uses a hyphenated spelling of the code, shown
-in brackets.
+while Tetragon is down or refused. On a managed computer the same information
+is in `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify` and
+`tetragon status`. `defenseclaw doctor` has matching rows under **Kernel sensor
+(Tetragon)**, with a hyphenated spelling of the code shown in brackets, but in
+this release no `defenseclaw` command line reads a managed gateway (see
+[Plane C on managed Linux](/docs/ai-discovery#plane-c-on-managed-linux-tetragon)),
+so only its per-user rows (`tetragon-tcp-api`, `tetragon-not-used-per-user`)
+appear.
 
 Every message reads `<what happened> (<impact>); <next step>`. Run
 `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify` first: it prints the failing check

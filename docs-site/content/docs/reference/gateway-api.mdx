@@ -290,8 +290,9 @@ that as a failed Policy row. The next change that builds clears it.
 On a managed Linux computer whose sensor helper has DefenseClaw policies in
 Tetragon (`observe` or `enforce`, or policies still loaded after a mode
 change), `policy` also carries a `kernel` object. It is absent in every other
-state, so a reader treats a missing `kernel` as "nothing loaded". `defenseclaw
-doctor` compares its `kernel_policy` with `components.kernel_policy`.
+state, so a reader treats a missing `kernel` as "nothing loaded". `enterprise
+linux status` compares its `kernel_policy` with `components.kernel_policy`
+(`kernel_policy_not_applied`).
 
 | Key | Meaning |
 | --- | --- |
@@ -539,9 +540,11 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 
 On a managed Linux computer the Plane C entry of the snapshot carries a
 `backend` object. The same object is in `/health` under
-`ai_runtime.details.planes.c.backend`. `defenseclaw agent discovery runtime
-status`, `defenseclaw doctor`, the TUI Runtime panel and `defenseclaw-gateway
-status` all read it, so their words cannot drift apart. Other computers omit it.
+`ai_runtime.details.planes.c.backend`. `defenseclaw-gateway status` and
+`enterprise linux discovery` read it. `defenseclaw agent discovery runtime
+status`, `defenseclaw doctor` and the TUI Runtime panel format it in the same
+words, but in this release no `defenseclaw` command line reads a managed
+gateway, so they do not show it. Other computers omit it.
 
 ```json title="GET /health, ai_runtime.details.planes.c.backend (trimmed, values illustrative)"
 {

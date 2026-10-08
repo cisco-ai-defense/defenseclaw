@@ -132,18 +132,19 @@ says otherwise. Per-user installs never connect to Tetragon.
   your Tetragon policies and kernel denials on **Blocked events**; the local
   stack gains five Prometheus alerts; and the Splunk bridge the matching
   macros and panels.
-- **Surfaces.** `defenseclaw agent discovery runtime status` shows the backend
-  and the kernel controls; `runtime permissions` explains why a per-user install
-  does not connect to Tetragon; `defenseclaw doctor` has a **Kernel sensor
-  (Tetragon)** row (TCP API, fallback, policy not applied, pause, orphans)
-  and, on Linux with the sandbox kernel feed installed, a **Sandbox kernel
-  feed** row that prints the update command;
-  `defenseclaw config get --effective` lists `enterprise.tetragon.*`;
-  the TUI Runtime panel shows the kernel sensor, the kernel controls and your
-  Tetragon policies; `defenseclaw-gateway status` ends its Subsystems list with
-  a `Kernel sensor:` line. These Python surfaces exist only
-  where a `defenseclaw` command line is installed: the managed Linux packages
-  ship none, and an administrator there uses the Go commands and telemetry.
+- **Surfaces.** On managed Linux, `enterprise linux discovery` shows the
+  kernel sensor, the kernel controls and your Tetragon policies, and
+  `defenseclaw-gateway status` ends its Subsystems list with a `Kernel sensor:`
+  line. `runtime permissions` explains why a per-user install does not connect
+  to Tetragon; `defenseclaw doctor` has a **Kernel sensor (Tetragon)** row that
+  warns when Tetragon serves its API on TCP and, on Linux with the sandbox
+  kernel feed installed, a **Sandbox kernel feed** row that prints the update
+  command; `defenseclaw config get --effective` lists `enterprise.tetragon.*`.
+  `agent discovery runtime status`, the TUI Runtime panel and doctor's managed
+  rows have the same Tetragon lines, but they do not show them in this release:
+  only a managed gateway reports Tetragon, and no `defenseclaw` command line
+  reads one (the managed Linux packages ship none, and a per-user command line
+  does not hold the deployment's gateway token).
   `/health` and `GET /api/v1/ai-usage/runtime` carry `backend` and
   `policy.kernel`; the keys are in the
   [gateway API reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api).
