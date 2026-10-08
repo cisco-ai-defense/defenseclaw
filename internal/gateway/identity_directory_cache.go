@@ -159,13 +159,23 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		c.refreshLocked(key, entry)
 	}
 	if entry.ok {
-		facts, wait := entry.facts, entry.inflight
+		facts, wait, fetchedAt := entry.facts, entry.inflight, entry.fetchedAt
 		// An incomplete answer past its lifetime (a group no name answered
 		// for, as a directory outage leaves) is replaced before a blocking
 		// caller uses it again, so a group that answers again applies at the
-		// next request rather than the one after (GAP-0326).
-		if !block || wait == nil || !expired || c.lifetime(facts) != identityDirectoryIncompleteTTL {
+		// next request rather than the one after (GAP-0326). Expired
+		// partial groups also wait: old memberships can select a lenient profile.
+		partial := c.partial != nil && c.partial(facts)
+		incomplete := c.incomplete != nil && c.incomplete(facts)
+		if !block || !expired || (!partial && !incomplete) {
 			c.mu.Unlock()
+			return facts, true
+		}
+		if wait == nil {
+			c.mu.Unlock()
+			if partial {
+				return zero, false
+			}
 			return facts, true
 		}
 		c.mu.Unlock()
@@ -174,10 +184,16 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		select {
 		case <-wait:
 		case <-timer.C:
+			if partial {
+				return zero, false
+			}
 			return facts, true
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if partial && !entry.fetchedAt.After(fetchedAt) {
+			return zero, false
+		}
 		if entry.ok {
 			return entry.facts, true
 		}

@@ -136,6 +136,28 @@ func TestIdentityDirectoryCacheBlockingRequestWaitsForIncompleteRefresh(t *testi
 	}
 }
 
+// Expired partial groups must be refreshed before a blocking profile lookup.
+func TestIdentityDirectoryCacheBlockingRequestRefreshesPartialGroups(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		if calls == 1 {
+			return useridentity.DirectoryFacts{Groups: []string{"lenient"}, GroupsPartial: true, ResolvedAt: now}, nil
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"strict"}, ResolvedAt: now}, nil
+	})
+	cache.now = func() time.Time { return now }
+	cache.partial = func(facts useridentity.DirectoryFacts) bool { return facts.GroupsPartial }
+	if facts, ok := cache.get("S-1-5-21-1-2-3-1103", true); !ok || !facts.GroupsPartial {
+		t.Fatalf("initial partial groups = %+v, %v", facts, ok)
+	}
+	now = now.Add(identityDirectoryRetry)
+	if facts, ok := cache.get("S-1-5-21-1-2-3-1103", true); !ok || facts.GroupsPartial || len(facts.Groups) != 1 || facts.Groups[0] != "strict" {
+		t.Fatalf("blocking lookup used stale group: %+v, %v", facts, ok)
+	}
+}
+
 // TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce pins GAP-0124: an
 // account whose lookup cannot finish (in more groups than are named, a
 // directory that never answers) leaves one line with the reason in the
