@@ -18739,6 +18739,27 @@ function Get-DefenseClawServiceState {
     return $service.Status.ToString().ToLowerInvariant()
 }
 
+function Get-DefenseClawServiceStartModeName {
+    <#
+        The startup type of a service as status reports it (auto, manual or
+        disabled), or '' when the service is absent or its mode cannot be
+        read. Verify said only "startup mode drift: 4, expected 2", so the
+        Intune Detect line could not say that a stopped guardian was also
+        disabled (GAP-0864).
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        switch (Get-DefenseClawServiceStartMode -Name $Name) {
+            2 { return 'auto' }
+            3 { return 'manual' }
+            4 { return 'disabled' }
+        }
+    }
+    catch {
+    }
+    return ''
+}
+
 function ConvertTo-DefenseClawBoundedDiagnostic {
     param(
         [AllowNull()]$Value,
@@ -18997,6 +19018,14 @@ function Get-DefenseClawLifecycleStatus {
         $status['sensor_helper_service_state'] = Get-DefenseClawServiceState -Name $sensorHelperName
         $status['enumerator_service'] = $enumeratorName
         $status['enumerator_service_state'] = Get-DefenseClawServiceState -Name $enumeratorName
+        $startModes = [ordered]@{}
+        foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorName, $sensorHelperName)) {
+            $mode = Get-DefenseClawServiceStartModeName -Name $name
+            if (-not [string]::IsNullOrEmpty($mode)) {
+                $startModes[$name] = $mode
+            }
+        }
+        $status['service_start_modes'] = [pscustomobject]$startModes
         # The standalone helper derives this log from the fixed layout (the
         # Service Control Manager discards service stderr).
         $status['sensor_helper_log_path'] = [IO.Path]::Combine(

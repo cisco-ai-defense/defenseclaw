@@ -54,34 +54,35 @@ type windowsEnterpriseStandaloneRun struct {
 // windowsEnterpriseInstallerReport is the subset of the installer's schema-1
 // status document the standalone result is built from.
 type windowsEnterpriseInstallerReport struct {
-	SchemaVersion                     int      `json:"schema_version"`
-	OK                                bool     `json:"ok"`
-	Action                            string   `json:"action"`
-	Installed                         bool     `json:"installed"`
-	TransactionPending                bool     `json:"transaction_pending"`
-	InstallRoot                       string   `json:"install_root"`
-	StateRoot                         string   `json:"state_root"`
-	GatewayService                    string   `json:"gateway_service"`
-	GuardianService                   string   `json:"guardian_service"`
-	GatewayServiceState               string   `json:"gateway_service_state"`
-	GuardianServiceState              string   `json:"guardian_service_state"`
-	SensorHelperService               string   `json:"sensor_helper_service"`
-	SensorHelperServiceState          string   `json:"sensor_helper_service_state"`
-	EnumeratorService                 string   `json:"enumerator_service"`
-	EnumeratorServiceState            string   `json:"enumerator_service_state"`
-	GatewayReady                      bool     `json:"gateway_ready"`
-	GuardianReady                     bool     `json:"guardian_ready"`
-	CodexMachineRequirementsReady     bool     `json:"codex_machine_requirements_ready"`
-	CodexMachineRequirementsDisposion string   `json:"codex_machine_requirements_disposition"`
-	CodexTargetEnabled                bool     `json:"codex_target_enabled"`
-	CursorTargetEnabled               bool     `json:"cursor_target_enabled"`
-	ClaudeTargetEnabled               bool     `json:"claude_target_enabled"`
-	ClaudeEffectivePolicyVerified     bool     `json:"claude_effective_policy_verified"`
-	SecurityComplete                  bool     `json:"security_complete"`
-	InstalledVersion                  string   `json:"installed_version"`
-	TrustMode                         string   `json:"trust_mode"`
-	Error                             string   `json:"error"`
-	Errors                            []string `json:"errors"`
+	SchemaVersion                     int               `json:"schema_version"`
+	OK                                bool              `json:"ok"`
+	Action                            string            `json:"action"`
+	Installed                         bool              `json:"installed"`
+	TransactionPending                bool              `json:"transaction_pending"`
+	InstallRoot                       string            `json:"install_root"`
+	StateRoot                         string            `json:"state_root"`
+	GatewayService                    string            `json:"gateway_service"`
+	GuardianService                   string            `json:"guardian_service"`
+	GatewayServiceState               string            `json:"gateway_service_state"`
+	GuardianServiceState              string            `json:"guardian_service_state"`
+	SensorHelperService               string            `json:"sensor_helper_service"`
+	SensorHelperServiceState          string            `json:"sensor_helper_service_state"`
+	EnumeratorService                 string            `json:"enumerator_service"`
+	EnumeratorServiceState            string            `json:"enumerator_service_state"`
+	ServiceStartModes                 map[string]string `json:"service_start_modes"`
+	GatewayReady                      bool              `json:"gateway_ready"`
+	GuardianReady                     bool              `json:"guardian_ready"`
+	CodexMachineRequirementsReady     bool              `json:"codex_machine_requirements_ready"`
+	CodexMachineRequirementsDisposion string            `json:"codex_machine_requirements_disposition"`
+	CodexTargetEnabled                bool              `json:"codex_target_enabled"`
+	CursorTargetEnabled               bool              `json:"cursor_target_enabled"`
+	ClaudeTargetEnabled               bool              `json:"claude_target_enabled"`
+	ClaudeEffectivePolicyVerified     bool              `json:"claude_effective_policy_verified"`
+	SecurityComplete                  bool              `json:"security_complete"`
+	InstalledVersion                  string            `json:"installed_version"`
+	TrustMode                         string            `json:"trust_mode"`
+	Error                             string            `json:"error"`
+	Errors                            []string          `json:"errors"`
 	// A committed standalone uninstall reports the DefenseClaw per-user
 	// registrations it could not remove from users' agent configurations.
 	// They are decoded leniently: a malformed value must not hide the
@@ -707,10 +708,11 @@ func applyWindowsEnterpriseInstallerReport(
 			continue
 		}
 		result.Services = append(result.Services, enterprisestatus.Service{
-			Name:     service.name,
-			Kind:     service.kind,
-			State:    service.state,
-			Required: true,
+			Name:      service.name,
+			Kind:      service.kind,
+			State:     service.state,
+			StartMode: report.ServiceStartModes[service.name],
+			Required:  true,
 		})
 	}
 	result.Readiness = enterprisestatus.Readiness{

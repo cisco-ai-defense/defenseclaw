@@ -2244,3 +2244,45 @@ func TestWindowsEnterpriseStandardUserStandaloneRepairOnSecureClient(t *testing.
 		t.Fatalf("repair --profile standalone: %v, output %q; want profile conflict", err, output.String())
 	}
 }
+
+// GAP-0864: the verify JSON the Intune Detect script reads carries each
+// service's start mode, as the Unix lifecycle reports it, so a stopped and
+// disabled guardian reads "(start disabled)". The report line is the shape
+// the lifecycle module prints for standalone status and verify.
+func TestWindowsEnterpriseVerifyJSONCarriesServiceStartModes(t *testing.T) {
+	line := `{"schema_version":1,"ok":false,"action":"verify","installed":true,"transaction_pending":false,` +
+		`"gateway_service":"DefenseClawGateway","guardian_service":"DefenseClawHookGuardian",` +
+		`"gateway_service_state":"running","guardian_service_state":"stopped",` +
+		`"enumerator_service":"DefenseClawHookEnumerator","enumerator_service_state":"running",` +
+		`"sensor_helper_service":"DefenseClawSensorHelper","sensor_helper_service_state":"running",` +
+		`"service_start_modes":{"DefenseClawGateway":"auto","DefenseClawHookGuardian":"disabled",` +
+		`"DefenseClawHookEnumerator":"auto","DefenseClawSensorHelper":"auto"},` +
+		`"errors":["service DefenseClawHookGuardian startup mode drift: 4, expected 2"]}`
+	report, err := parseWindowsEnterpriseInstallerReport([]byte(line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("verify", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(result, nil, report, windowsEnterpriseStandaloneRun{})
+	body, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Services []struct {
+			Name      string `json:"name"`
+			State     string `json:"state"`
+			StartMode string `json:"start_mode"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	modes := map[string]string{}
+	for _, service := range document.Services {
+		modes[service.Name] = service.State + "/" + service.StartMode
+	}
+	if modes["DefenseClawHookGuardian"] != "stopped/disabled" || modes["DefenseClawGateway"] != "running/auto" {
+		t.Fatalf("services = %s", body)
+	}
+}
