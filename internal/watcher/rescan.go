@@ -138,6 +138,9 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		defer func() { w.startupAdmitRoots = nil }()
 	}
 	targets := w.enumerateTargets()
+	if !w.startupRescanDone {
+		w.recordStartupMCP(targets)
+	}
 	if len(targets) == 0 {
 		w.markWatchRoots()
 		return
@@ -398,10 +401,13 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			if strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())
+			if !e.IsDir() && !w.admitsLinkedAsset(path) {
+				continue
+			}
 			if isBundledSkillWatchPath(path) {
 				continue
 			}
@@ -432,7 +438,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	for _, dir := range w.pluginDirs {
 		if w.connectorForPath(dir) == "claudecode" {
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
-				if w.isOwnPlugin(plugin) {
+				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
 					continue
 				}
 				targets = append(targets, InstallEvent{
@@ -726,8 +732,10 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 // without invoking the scanner or writing a scan_results row.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[string]string) rescanOutcome {
 	if evt.Type == InstallMCP {
-		w.mcpMu.Lock()
-		defer w.mcpMu.Unlock()
+		if !w.claimMCP(evt.Path) {
+			return rescanSkipped // admitted by the added-server loop
+		}
+		defer w.releaseMCP(evt.Path)
 	}
 	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
 		return rescanSkipped
@@ -779,7 +787,8 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
-				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted {
+				moved := w.movedByAdmission(evt)
+				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted && !moved {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
 					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
@@ -804,6 +813,18 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
+	if !scan && w.allowRuleReleases(ctx, evt) {
+		fmt.Fprintf(os.Stderr, "[rescan] %s %s is allowed by a rule and still blocked; running install admission\n", evt.Type, evt.Name)
+		w.notifyAdmission(w.runAdmission(ctx, evt))
+		return rescanScanned
+	}
+	if !scan && w.quarantinedCopyIsBack(ctx, evt) {
+		// A baseline written before the original was removed (GAP-0551).
+		fmt.Fprintf(os.Stderr, "[rescan] %s %s was quarantined and is back; running install admission\n", evt.Type, evt.Name)
+		res := w.runAdmission(ctx, evt)
+		w.notifyAdmission(res)
+		return rescanScanned
+	}
 	if !scan {
 		// Nothing changed and the scanner fingerprint matches: skip the
 		// expensive scan entirely. compareSnapshots derives from the same
@@ -949,7 +970,7 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, scanID string) {
-	if snap == nil || scanID == "" {
+	if w.movedByAdmission(evt) || snap == nil || scanID == "" {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
@@ -1498,10 +1519,14 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 	case InstallMCP:
 		return w.snapshotMCPServer(evt)
 	default:
-		if _, err := os.Stat(evt.Path); err != nil {
+		path := addressablePath(evt.Path)
+		if w.admitsLinkedAsset(evt.Path) {
+			path = linkedAssetTarget(evt.Path)
+		}
+		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(evt.Path)
+		return SnapshotTarget(path)
 	}
 }
 
@@ -1567,7 +1592,10 @@ func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEnt
 
 func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 	if evt.Type != InstallMCP {
-		return evt.Path
+		if w.admitsLinkedAsset(evt.Path) {
+			return linkedAssetTarget(evt.Path)
+		}
+		return addressablePath(evt.Path)
 	}
 	entry, err := w.lookupMCPServer(evt)
 	if err != nil {

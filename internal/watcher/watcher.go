@@ -222,9 +222,18 @@ type InstallWatcher struct {
 	addedMCPMu  sync.Mutex
 	addedMCP    map[string]bool
 	admitMCPNow chan struct{}
-	// mcpMu serializes MCP admission between that loop and the rescan
-	// cycle, so a server is admitted once.
-	mcpMu sync.Mutex
+	// mcpClaims are the MCP servers (event paths) that loop or the rescan
+	// cycle is handling: the other one leaves a claimed server alone, so a
+	// server is admitted once and its admission never waits for the scan of
+	// another server (GAP-0254).
+	mcpClaimMu sync.Mutex
+	mcpClaims  map[string]bool
+	// mcpStartup are the MCP servers the first rescan cycle listed: that
+	// cycle records their baselines, so discovery skips them until it ends
+	// and admits every other server at once (GAP-0254).
+	mcpStartupMu     sync.Mutex
+	mcpStartup       map[string]bool
+	mcpStartupListed atomic.Bool
 
 	// binaryVersions caches each scanner binary's probed --version and file identity.
 	binaryVersions sync.Map
@@ -241,12 +250,15 @@ type InstallWatcher struct {
 	admissions   sync.WaitGroup
 	// admitMu serializes onAdmit, which admission workers call.
 	admitMu sync.Mutex
+	// movedOut are the paths whose asset admission quarantined or whose link
+	// it removed: they get no rescan baseline (forgetMovedAsset).
+	movedOut sync.Map
 	// fpMu guards a rescan cycle's fingerprint cache.
 	fpMu sync.Mutex
 
 	// pollMCP has Run look for MCP servers added outside `mcp set` every
-	// mcpDiscoveryInterval (SetMCPDiscoveryPoll); firstCycleDone gates it
-	// until the first rescan cycle recorded the existing servers.
+	// mcpDiscoveryInterval (SetMCPDiscoveryPoll); firstCycleDone says the
+	// first rescan cycle ended (mcpStartup applies until then).
 	pollMCP        bool
 	firstCycleDone atomic.Bool
 }
@@ -419,6 +431,9 @@ func (w *InstallWatcher) addedMCPLoop(ctx context.Context) {
 }
 
 // admitAddedMCPServers admits each queued server that has no baseline yet.
+// A server the rescan cycle is handling is left to it; a server whose
+// baseline could not be read is queued again for the next discovery. Both
+// say so in gateway.log, so a missed admission is never silent.
 func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 	w.addedMCPMu.Lock()
 	names := w.addedMCP
@@ -426,6 +441,7 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 	w.addedMCPMu.Unlock()
 	servers, err := w.readMCPServers()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[watch] list mcp servers for admission: %v\n", err)
 		return
 	}
 	for _, server := range servers {
@@ -436,19 +452,88 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 			continue
 		}
 		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector, Timestamp: time.Now().UTC()}
-		w.mcpMu.Lock()
-		if _, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path); errors.Is(err, sql.ErrNoRows) {
-			if snap, err := w.snapshotForEvent(evt); err == nil {
-				fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
-				res := w.runAdmission(ctx, evt)
-				w.notifyAdmission(res)
-				if !res.Interrupted {
-					w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
-				}
-			}
+		if !w.claimMCP(evt.Path) {
+			continue // the rescan cycle is admitting or scanning it
 		}
-		w.mcpMu.Unlock()
+		w.admitAddedMCPServer(ctx, evt)
+		w.releaseMCP(evt.Path)
 	}
+}
+
+func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEvent) {
+	_, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	if err == nil {
+		return // admitted or baselined already
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; its baseline could not be read, retrying: %v\n", evt.Name, err)
+		w.queueAddedMCP(evt.Name)
+		return
+	}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; reading its definition failed: %v\n", evt.Name, err)
+		}
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	if !res.Interrupted {
+		w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
+	}
+}
+
+// queueAddedMCP queues name for the next admission pass without waking it.
+func (w *InstallWatcher) queueAddedMCP(name string) {
+	w.addedMCPMu.Lock()
+	if w.addedMCP == nil {
+		w.addedMCP = map[string]bool{}
+	}
+	w.addedMCP[name] = true
+	w.addedMCPMu.Unlock()
+}
+
+// claimMCP marks the MCP server at path as handled by the caller; it fails
+// while another admission or the rescan cycle holds it.
+func (w *InstallWatcher) claimMCP(path string) bool {
+	w.mcpClaimMu.Lock()
+	defer w.mcpClaimMu.Unlock()
+	if w.mcpClaims[path] {
+		return false
+	}
+	if w.mcpClaims == nil {
+		w.mcpClaims = map[string]bool{}
+	}
+	w.mcpClaims[path] = true
+	return true
+}
+
+func (w *InstallWatcher) releaseMCP(path string) {
+	w.mcpClaimMu.Lock()
+	delete(w.mcpClaims, path)
+	w.mcpClaimMu.Unlock()
+}
+
+// recordStartupMCP keeps the MCP servers the first rescan cycle lists and
+// lets discovery start at once instead of after that cycle (GAP-0254).
+func (w *InstallWatcher) recordStartupMCP(targets []InstallEvent) {
+	w.mcpStartupMu.Lock()
+	w.mcpStartup = map[string]bool{}
+	for _, evt := range targets {
+		if evt.Type == InstallMCP {
+			w.mcpStartup[evt.Path] = true
+		}
+	}
+	w.mcpStartupMu.Unlock()
+	w.mcpStartupListed.Store(true)
+}
+
+func (w *InstallWatcher) listedAtStartup(path string) bool {
+	w.mcpStartupMu.Lock()
+	defer w.mcpStartupMu.Unlock()
+	return w.mcpStartup[path]
 }
 
 // mcpDiscoveryInterval is how often a per-user watcher looks for MCP
@@ -476,10 +561,23 @@ func (w *InstallWatcher) mcpDiscoveryLoop(ctx context.Context) {
 	}
 }
 
+// DiscoverAddedMCPServers admits now every MCP server without a baseline. A
+// managed gateway calls it when its enrolled users servers change.
+func (w *InstallWatcher) DiscoverAddedMCPServers() {
+	if w == nil || !w.admitNewMCP {
+		return
+	}
+	w.discoverAddedMCPServers()
+}
+
 // discoverAddedMCPServers queues for admission the MCP servers that have no
-// baseline yet, once the first rescan cycle recorded the existing ones.
+// baseline yet. It starts once the first rescan cycle listed the existing
+// servers, which that cycle baselines; it does not wait for the cycle to
+// end, which after an upgrade rescans every skill for many minutes
+// (GAP-0254).
 func (w *InstallWatcher) discoverAddedMCPServers() {
-	if !w.firstCycleDone.Load() || w.store == nil {
+	firstCycle := !w.firstCycleDone.Load()
+	if (firstCycle && !w.mcpStartupListed.Load()) || w.store == nil {
 		return
 	}
 	servers, err := w.readMCPServers()
@@ -491,7 +589,13 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		if strings.TrimSpace(server.Name) == "" || server.Bundled {
 			continue
 		}
-		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), MCPEventPath(server)); errors.Is(err, sql.ErrNoRows) {
+		path := MCPEventPath(server)
+		if firstCycle && w.listedAtStartup(path) {
+			continue
+		}
+		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), path); err != nil {
+			// A read error other than no rows is retried by admission,
+			// which says so.
 			added = append(added, server.Name)
 		}
 	}
@@ -776,6 +880,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			if w.connectorForPath(event.Name) == "claudecode" {
 				if depth, inside := w.claudeCacheDepth(event.Name); inside {
+					if w.inClaudePluginStaging(event.Name, 0) {
+						continue
+					}
 					if info, statErr := os.Stat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
 						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
@@ -889,7 +996,7 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 	w.mu.Unlock()
 
 	for _, path := range ready {
-		if _, err := os.Stat(path); err != nil {
+		if _, err := os.Stat(addressablePath(path)); err != nil && !w.admitsLinkedAsset(path) {
 			w.endAdmission(path)
 			continue
 		}
@@ -1167,6 +1274,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	case "allowed":
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=%s", targetType, w.allowedAuditReason(out.Reason)))
+		w.releaseAllowListed(evt, out.Reason)
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 		return res
@@ -1556,6 +1664,13 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		)
 		// The Windows scanner runtime applies the rule pack as the CLI does (GAP-0296).
 		ms.RulePack = scanner.MCPRulePackFor(cfg, w.eventConnector(evt))
+		// A project-scoped command server is found only from its project
+		// (GAP-0623).
+		if entry, err := w.lookupMCPServer(evt); err == nil && entry.Project != "" && entry.URL == "" {
+			if info, statErr := os.Stat(entry.Project); statErr == nil && info.IsDir() {
+				ms.Project, ms.Connector = entry.Project, entry.Connector
+			}
+		}
 		return ms
 
 	case InstallPlugin:
@@ -1773,7 +1888,126 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		fmt.Fprintf(os.Stderr, "[watch] quarantine provenance remains pending for %s: %v\n", evt.Path, err)
 	}
 	w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, plan.QuarantinePath)
+	w.forgetMovedAsset(evt)
 	return nil
+}
+
+// forgetMovedAsset drops the rescan baseline of an asset that admission
+// moved out of its folder, and keeps admission from writing one: on a
+// managed computer the hook guardian removes the original later, so the
+// baseline was written while the folder was still there, and a copy of the
+// same skill put back at that path (by another user, or after the folder
+// was recreated) was skipped as unchanged by the next rescan and stayed
+// active (GAP-0551). The Secure Client profile keeps the earlier behaviour.
+func (w *InstallWatcher) forgetMovedAsset(evt InstallEvent) {
+	if w.secureClientActive() || w.store == nil {
+		return
+	}
+	w.movedOut.Store(evt.Path, struct{}{})
+	if err := w.store.DeleteTargetSnapshot(string(evt.Type), evt.Path); err != nil {
+		fmt.Fprintf(os.Stderr, "[watch] forget baseline of %s: %v\n", evt.Path, err)
+	}
+}
+
+// releaseAllowListed clears the runtime disable and the install block that
+// an earlier verdict left in the journal for a skill or plugin that an allow
+// rule now admits. An administrator who reviewed a blocked skill and added an
+// asset_policy allow rule for it saw the copy admitted while the agent still
+// refused it as runtime-disabled, and a managed computer has no enable
+// command (GAP-0628). Quarantined copies are kept; the Secure Client profile
+// keeps the earlier behaviour.
+func (w *InstallWatcher) releaseAllowListed(evt InstallEvent, reason string) {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) ||
+		w.allowedAuditReason(reason) != "allow-listed" {
+		return
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
+	if err != nil || entry == nil {
+		return
+	}
+	var cleared []string
+	for field, value := range map[string]string{"runtime": entry.Actions.Runtime, "install": entry.Actions.Install} {
+		if value == "" {
+			continue
+		}
+		if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
+			cleared = append(cleared, field+"="+value)
+		}
+	}
+	if len(cleared) > 0 {
+		sort.Strings(cleared)
+		_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+			fmt.Sprintf("type=%s released by an allow rule: cleared %s connector=%s", evt.Type, strings.Join(cleared, " "), scope))
+	}
+}
+
+// allowRuleReleases reports a skill or plugin whose journal still blocks or
+// disables it while an allow rule now admits it, so the rescan admits it
+// again and releases it without a new copy (GAP-0628).
+func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent) bool {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return false
+	}
+	connector := w.eventConnector(evt)
+	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, w.journalScope(connector))
+	if err != nil || entry == nil || (entry.Actions.Runtime == "" && entry.Actions.Install == "") {
+		return false
+	}
+	cfg := w.liveConfig()
+	out := w.evaluateAdmission(ctx, w.admissionInputFor(cfg, evt, string(evt.Type), connector))
+	return out != nil && out.Verdict == "allowed" && w.allowedAuditReason(out.Reason) == "allow-listed"
+}
+
+// quarantinedCopyIsBack reports a skill or plugin at a path that holds an
+// active quarantine of it: the original was moved out and a copy is back.
+func (w *InstallWatcher) quarantinedCopyIsBack(ctx context.Context, evt InstallEvent) bool {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return false
+	}
+	records, err := w.store.ListQuarantineRecordsForConnector(ctx, evt.Type.String(), evt.Name, w.eventConnector(evt))
+	if err != nil {
+		return false
+	}
+	for _, record := range records {
+		if record.State == audit.QuarantineStateActive && sameWatcherPath(record.OriginalPath, evt.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// movedByAdmission reports, once, that admission moved evt out.
+func (w *InstallWatcher) movedByAdmission(evt InstallEvent) bool {
+	_, moved := w.movedOut.LoadAndDelete(evt.Path)
+	return moved
+}
+
+// admitsLinkedAsset reports a skill or plugin that is a symlink or Windows
+// junction, which admission scans through its target and, when blocked,
+// takes out of the folder. The Secure Client profile keeps the earlier
+// behaviour.
+func (w *InstallWatcher) admitsLinkedAsset(path string) bool {
+	return !w.secureClientActive() && enforce.IsLinkedAsset(path)
+}
+
+// linkedAssetTarget is the folder a linked skill or plugin points to: the
+// scanners do not follow a link at the root of what they scan, so a link to
+// a skill with a critical finding was scanned as an empty folder and
+// allowed (GAP-0394). An unresolvable link keeps its own path, whose scan
+// then fails closed.
+func linkedAssetTarget(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != filepath.Clean(path) {
+		return resolved
+	}
+	target, err := os.Readlink(path) // a Windows junction
+	if err != nil || strings.TrimSpace(target) == "" {
+		return path
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return filepath.Clean(target)
 }
 
 // removeLinkedAsset takes a skill or plugin that is a symlink or Windows
@@ -1789,6 +2023,7 @@ func (w *InstallWatcher) removeLinkedAsset(ctx context.Context, evt InstallEvent
 	if target == "" {
 		target = "an unreadable target"
 	}
+	w.forgetMovedAsset(evt)
 	removed := fmt.Errorf("%w: it pointed to %s; that folder was not changed", errLinkRemoved, target)
 	_ = w.logger.LogEventCtx(ctx, audit.Event{
 		Action:   string(audit.ActionWatcherBlock),
@@ -1977,6 +2212,49 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 	}
 }
 
+// claudeStagingGrace is how long the rescan leaves a Claude Code plugin
+// staging folder alone; one that stays longer is scanned as a plugin.
+const claudeStagingGrace = 15 * time.Minute
+
+// inClaudePluginStaging reports a path below a Claude Code plugin staging
+// folder (cache/temp_local_<id>), younger than grace when grace is set.
+// Claude Code builds a plugin there and then moves it to
+// <marketplace>/<plugin>/<version>: the watcher scanned the staging copy as
+// a plugin, blocked it for its missing manifest and held its files while the
+// move ran, so even a clean plugin failed to install with EPERM (GAP-0629).
+// The final folder is admitted as before. The Secure Client profile keeps
+// the earlier behaviour.
+func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration) bool {
+	if w.secureClientActive() {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
+		if !strings.HasPrefix(strings.ToLower(first), "temp_") {
+			return false
+		}
+		if grace <= 0 {
+			return true
+		}
+		info, statErr := os.Lstat(filepath.Join(rootAbs, first))
+		return statErr == nil && time.Since(info.ModTime()) < grace
+	}
+	return false
+}
+
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
@@ -2080,8 +2358,10 @@ func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit
 // subdirectories inside a skill are ignored — a skill is always a top-level
 // directory under a skill dir.
 func (w *InstallWatcher) isDirectChildDir(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
+	info, err := os.Stat(addressablePath(path))
+	// A link whose target the gateway cannot read is still admitted: its
+	// scan fails closed and the link is taken out (GAP-0394).
+	if (err != nil && !w.admitsLinkedAsset(path)) || (err == nil && !info.IsDir()) {
 		return false
 	}
 

@@ -116,3 +116,32 @@ func liveWatchClaudePluginTree(t *testing.T, cfg *config.Config, store *audit.St
 	}
 	return out
 }
+
+// GAP-0629: Claude Code builds a plugin in cache/temp_local_<id> and then
+// moves it to <marketplace>/<plugin>/<version>; the watcher scanned the
+// staging copy as a plugin and held it while the move ran, so a clean
+// plugin failed to install. Staging is left alone; the final folder is
+// still a plugin.
+func TestClaudePluginStagingIsNotAPlugin(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	staging := filepath.Join(cache, "temp_local_1759900000000", "skills", "epa-plug-ok-skill")
+	final := filepath.Join(cache, "epa-market", "epa-plug-ok", "1.0.0")
+	for _, dir := range []string{staging, final} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	if !w.inClaudePluginStaging(staging, 0) || w.inClaudePluginStaging(final, 0) {
+		t.Fatal("staging and final folders are not told apart")
+	}
+	var plugins []string
+	for _, evt := range w.enumerateTargets() {
+		plugins = append(plugins, evt.Path)
+	}
+	if len(plugins) != 1 || plugins[0] != final {
+		t.Fatalf("rescan targets %v, want only %s", plugins, final)
+	}
+}

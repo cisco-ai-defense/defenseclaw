@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1409,5 +1410,162 @@ func TestWatcherScanCorrelationNamesOwnerAndJudge(t *testing.T) {
 	}
 	if other := w.ownedScanCorrelation(audit.ScanCorrelation{}, &scanner.ScanResult{Target: t.TempDir()}); other.UserName != "" || other.UserID != "" {
 		t.Fatalf("an asset outside every enrolled home got an owner: %+v", other)
+	}
+}
+
+// targetOnlyScanner finds a critical issue only when it scans real content:
+// like the skill scanner, it does not follow a link at the root.
+type targetOnlyScanner struct {
+	countingScanner
+	link string
+}
+
+func (s *targetOnlyScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	result, err := s.countingScanner.Scan(ctx, target)
+	if err == nil && target != s.link {
+		result.Findings = []scanner.Finding{{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"}}
+	}
+	return result, err
+}
+
+// GAP-0394: a symlinked skill reached verdict allowed because the scanner
+// scanned the link, not the folder the agent loads, and the rescan never
+// listed it. It is scanned through its target, listed by the rescan, and the
+// link is taken out.
+func TestLinkedSkillIsScannedThroughItsTarget(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	target := filepath.Join(t.TempDir(), "linked-high-src")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(skillDir, "linked-high")
+	if runtime.GOOS == "windows" {
+		// A junction needs no privilege.
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v %s", err, out)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &targetOnlyScanner{countingScanner: countingScanner{name: "skill-scanner"}, link: link}
+	}
+	listed := false
+	for _, evt := range w.enumerateTargets() {
+		listed = listed || evt.Path == link
+	}
+	if !listed {
+		t.Fatal("the rescan does not list the linked skill")
+	}
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "linked-high", Path: link, Timestamp: time.Now()})
+	if res.Verdict == VerdictAllowed {
+		t.Fatalf("verdict %s (%s), want the critical target blocked", res.Verdict, res.Reason)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("the link stayed in the skills folder (lstat err %v)", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the link target was touched: %v", err)
+	}
+}
+
+// GAP-0551: on a managed computer the hook guardian removes a quarantined
+// original after admission, so admission wrote a rescan baseline while the
+// folder was still there; the same skill copied back to that path later was
+// skipped by the rescan as unchanged and stayed active. A quarantined path
+// keeps no baseline, so the copy is admitted again.
+func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the process cannot delete from")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	cfg.Watch.RescanEnabled = true
+	cfg.Watch.RescanContentGated = true
+	scans := &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+		{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
+	}}
+	var verdicts []AdmissionResult
+	watch := func() *InstallWatcher {
+		w := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) { verdicts = append(verdicts, r) })
+		w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+		return w
+	}
+	first := watch()
+	first.runRescanCycle(context.Background()) // the root is covered
+	path := filepath.Join(skillDir, "rvw-crit1")
+	write := func() {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# rvw-crit1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	// The gateway cannot delete the original; the guardian removes it later.
+	if err := os.Chmod(skillDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillDir, 0o700) })
+	enforce.SetQuarantineSourceRemover(func(enforce.AssetQuarantinePlan, string) error { return nil })
+	t.Cleanup(func() { enforce.SetQuarantineSourceRemover(nil) })
+	evt := InstallEvent{Type: InstallSkill, Name: "rvw-crit1", Path: path, Timestamp: time.Now()}
+	snap := first.admissionSnapshot(evt)
+	res := first.runAdmission(context.Background(), evt)
+	first.recordAdmissionBaseline(evt, snap, res.ScanID)
+	// A host upgraded from a build that wrote it still has that baseline.
+	first.persistSnapshot(evt, snap, "scan-before-upgrade", first.scannerFingerprint(evt))
+	if err := os.Chmod(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(path); err != nil { // the guardian removal
+		t.Fatal(err)
+	}
+	write() // the same skill, copied back
+	before := scans.calls
+	watch().runRescanCycle(context.Background())
+	if scans.calls != before+1 || len(verdicts) != 1 || verdicts[0].Event.Path != path || verdicts[0].Verdict == VerdictAllowed {
+		t.Fatalf("rescan scans %d (was %d), verdicts %+v: the copy put back was not admitted", scans.calls, before, verdicts)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("the copy put back was not quarantined (lstat err %v)", err)
+	}
+}
+
+// GAP-0628: an administrator who reviewed a blocked skill and added an
+// asset_policy allow rule for it saw it admitted while the agent still
+// refused it as runtime-disabled. An allow rule releases the journal block
+// and runtime disable, at the next admission or rescan, without a new copy.
+func TestAllowRuleReleasesABlockedSkill(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Watch.RescanEnabled = true
+	cfg.Watch.RescanContentGated = true
+	path := filepath.Join(skillDir, "epa-high")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# epa-high\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	w.runRescanCycle(context.Background()) // baseline: unchanged from now on
+	for field, value := range map[string]string{"runtime": "disable", "install": "block"} {
+		if err := store.SetActionFieldForConnector("skill", "epa-high", "claudecode", field, value, "auto-block: watch detected HIGH findings"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "epa-high"}}
+	w.runRescanCycle(context.Background())
+	entry, err := store.GetActionForConnector("skill", "epa-high", "claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry != nil && (entry.Actions.Runtime != "" || entry.Actions.Install != "") {
+		t.Fatalf("journal %+v, want the allow rule to clear the runtime disable and install block", entry.Actions)
 	}
 }

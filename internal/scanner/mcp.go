@@ -135,6 +135,13 @@ type MCPScanner struct {
 	// over the server definition (GAP-0296). The Python CLI resolves its own
 	// from config.yaml, so only the runtime command line carries it.
 	RulePack MCPRulePack
+	// Project and Connector name where a project-scoped local server is
+	// defined (its .mcp.json or the local scope of ~/.claude.json): the
+	// Python CLI resolves a bare server name against the configuration of
+	// its working folder, so the scan runs there for that connector. A name
+	// looked up from the gateway folder was never found (GAP-0623).
+	Project   string
+	Connector string
 }
 
 // mcpScannerBinary returns the executable to invoke, coercing the
@@ -213,6 +220,9 @@ func (s *MCPScanner) buildArgs(target string) []string {
 		args = append(args, "--scan-instructions")
 	}
 
+	if s.Project != "" && s.Connector != "" {
+		args = append(args, "--connector", s.Connector)
+	}
 	args = append(args, target)
 	return args
 }
@@ -254,6 +264,9 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		return nil, argsErr
 	}
 	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
+	if s.Project != "" && !usesScannerRuntime(s.Config.Binary) {
+		cmd.Dir = s.Project
+	}
 	// Inherit the gateway's environment (like the plugin scanner):
 	// the Python CLI resolves LLM / Cisco AI Defense credentials from
 	// its own config, so no scanner-specific env injection is needed.

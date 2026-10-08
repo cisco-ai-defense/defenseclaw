@@ -343,21 +343,48 @@ func (c *Config) ReadWatchedMCPServers(connectors []string) ([]MCPServerEntry, e
 // maxClaudeProjects bounds the projects claudeCodeProjectMCPServers reads.
 const maxClaudeProjects = 512
 
-// claudeCodeProjectMCPServers lists, for each project in Claude Code's state
-// file, the local-scope servers stored there and the project's .mcp.json.
+// claudeCodeProjectMCPServers lists, for each project in the Claude Code
+// state file, the local-scope servers stored there and the project .mcp.json.
 func claudeCodeProjectMCPServers() []MCPServerEntry {
 	data, err := os.ReadFile(claudeCodeMCPStatePath())
 	if err != nil {
 		return nil
 	}
-	var state struct {
-		Projects map[string]json.RawMessage `json:"projects"`
-	}
+	var state map[string]any
 	if json.Unmarshal(data, &state) != nil {
 		return nil
 	}
-	projects := make([]string, 0, len(state.Projects))
-	for project := range state.Projects {
+	return claudeStateProjectServers(state, func(project string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(project, ".mcp.json"))
+	})
+}
+
+// ClaudeStateMCPServers lists the MCP servers a Claude Code state file
+// (~/.claude.json) names: the user scope, the local scope of each project,
+// and the .mcp.json of each project, which readProjectMCP returns (nil skips
+// them). Entries are tagged claudecode; project servers carry their project.
+// The managed Windows enumerator, which runs as LocalSystem, reads the state
+// file for the gateway service, whose account cannot read it (GAP-0424).
+func ClaudeStateMCPServers(data []byte, readProjectMCP func(project string) ([]byte, error)) ([]MCPServerEntry, error) {
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	user, _ := readMCPFromAnyPaths(state, []string{"mcpServers"})
+	out := make([]MCPServerEntry, 0, len(user))
+	for _, entry := range dedupMCPEntries(user) {
+		entry.Connector = "claudecode"
+		out = append(out, entry)
+	}
+	return append(out, claudeStateProjectServers(state, readProjectMCP)...), nil
+}
+
+// claudeStateProjectServers lists the local-scope and .mcp.json servers of
+// every project in a decoded Claude Code state file.
+func claudeStateProjectServers(state map[string]any, readProjectMCP func(project string) ([]byte, error)) []MCPServerEntry {
+	projectStates, _ := state["projects"].(map[string]any)
+	projects := make([]string, 0, len(projectStates))
+	for project := range projectStates {
 		if filepath.IsAbs(project) {
 			projects = append(projects, project)
 		}
@@ -368,15 +395,21 @@ func claudeCodeProjectMCPServers() []MCPServerEntry {
 	}
 	var out []MCPServerEntry
 	for _, project := range projects {
-		var raw map[string]any
-		if json.Unmarshal(state.Projects[project], &raw) == nil {
+		if raw, ok := projectStates[project].(map[string]any); ok {
 			local, _ := readMCPFromAnyPaths(raw, []string{"mcpServers"})
 			for _, entry := range local {
 				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "local"
 				out = append(out, entry)
 			}
 		}
-		if shared, err := readMCPFromDotMCPJSON(filepath.Join(project, ".mcp.json")); err == nil {
+		if readProjectMCP == nil {
+			continue
+		}
+		data, err := readProjectMCP(project)
+		if err != nil {
+			continue
+		}
+		if shared, err := parseDotMCPJSON(data); err == nil {
 			for _, entry := range shared {
 				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
 				out = append(out, entry)
@@ -1616,7 +1649,11 @@ func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseDotMCPJSON(data)
+}
 
+// parseDotMCPJSON reads the servers of an .mcp.json document.
+func parseDotMCPJSON(data []byte) ([]MCPServerEntry, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err

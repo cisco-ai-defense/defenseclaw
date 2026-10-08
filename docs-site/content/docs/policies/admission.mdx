@@ -624,7 +624,11 @@ journal, and are never read as policy:
 
 The journal is not part of the effective policy digest, and `config.yaml`
 never lists it. `unblock` also clears the journal's install block for the
-name, so a later `restore` does not leave the asset blocked.
+name, so a later `restore` does not leave the asset blocked. On a managed
+device, which has no `enable` or `restore`, an `allowed` rule for a skill or
+plugin in the admin config clears its install block and runtime disable at
+the next admission or rescan. See
+[Release a blocked or quarantined skill](/docs/enterprise/windows#release-a-blocked-or-quarantined-skill).
 
 ## Upgrading from config_version 8
 
