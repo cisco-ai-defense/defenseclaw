@@ -68,6 +68,10 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// exemptAuditAt is when each exempt account and connector last got an
+	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
+	exemptAuditMu sync.Mutex
+	exemptAuditAt map[string]time.Time
 	// foreignHookSessionLocks serializes foreign-hook session exchanges per
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
