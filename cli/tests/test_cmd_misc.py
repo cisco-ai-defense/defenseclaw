@@ -1285,8 +1285,23 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.scanners.mcp_scanner.analyzers, "yara,llm")
 
+    def test_openai_compatible_accepts_base_url(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["mcp-scanner", "--non-interactive", "--no-verify",
+             "--llm-provider", "openai-compatible", "--llm-model", "test-model",
+             "--llm-base-url", "https://llm.example/v1"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.llm.provider, "openai")
+        self.assertEqual(self.app.cfg.llm.base_url, "https://llm.example/v1")
+
     def test_mcp_scanner_no_old_llm_flags(self):
-        """The old --endpoint-url, --llm-base-url, --llm-timeout, --llm-max-retries flags are gone."""
+        """The retired endpoint and timeout options remain absent."""
         from defenseclaw.commands.cmd_setup import setup
 
         result = self.runner.invoke(
@@ -1295,7 +1310,6 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("--endpoint-url", result.output)
-        self.assertNotIn("--llm-base-url", result.output)
         self.assertNotIn("--llm-timeout", result.output)
         self.assertNotIn("--llm-max-retries", result.output)
 

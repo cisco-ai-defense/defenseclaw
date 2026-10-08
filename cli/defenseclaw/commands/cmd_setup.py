@@ -2907,6 +2907,7 @@ def _set_skill_aidefense(sc, enabled: bool) -> None:
     help="Judge LLM provider (any `setup llm` provider, or openai-compatible)",
 )
 @click.option("--llm-model", default=None, help="LLM model for semantic analysis")
+@click.option("--llm-base-url", default=None, help="Base URL for openai-compatible and vllm judges")
 @click.option("--api-endpoint", default=None, help="Cisco AI Defense API URL for the api analyzer")
 @click.option("--api-key-env", default=None, help="Env var holding the Cisco AI Defense API key")
 @click.option(
@@ -2926,6 +2927,7 @@ def setup_mcp_scanner(
     analyzers,
     llm_provider,
     llm_model,
+    llm_base_url,
     api_endpoint,
     api_key_env,
     api_timeout_ms,
@@ -2957,9 +2959,7 @@ def setup_mcp_scanner(
             if problem:
                 raise click.BadParameter(problem, param_hint="'--analyzers'")
             mc.analyzers = ",".join(names) or "auto"
-        # The judge's base URL is set with `setup skill-scanner --llm-base-url`
-        # or `setup llm`; both scanners share the top-level llm: block.
-        _apply_scanner_llm_flags(llm, llm_provider, llm_model, None)
+        _apply_scanner_llm_flags(llm, llm_provider, llm_model, llm_base_url)
         # The TUI's "Use a remote scan API" goal sends these; without them
         # the command failed with "No such option: --api-endpoint" (GAP-2529).
         if api_endpoint is not None:

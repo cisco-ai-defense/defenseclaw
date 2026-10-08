@@ -347,15 +347,29 @@ def _write_overlay(path: str, overlay: _Overlay) -> None:
 
 
 def _config_backed(app: AppContext | None) -> bool:
-    """True when custom providers live in config.yaml ``llm_providers``."""
+    """True when providers are config-owned on this installation."""
     from defenseclaw.config import Config
+    from defenseclaw.enforce.asset_lists import is_secure_client
 
-    return app is not None and isinstance(getattr(app, "cfg", None), Config)
+    return (
+        app is not None
+        and isinstance(getattr(app, "cfg", None), Config)
+        and not is_secure_client(app.cfg)
+    )
 
 
-def _load_providers(app: AppContext | None, path: str) -> _Overlay:
-    """The provider set to edit: config.yaml ``llm_providers``. A legacy
-    operator overlay (one config has not absorbed yet) seeds it once."""
+def _refresh_provider_config(app: AppContext) -> None:
+    """Read the latest config after acquiring the provider edit lock."""
+    if not _config_backed(app):
+        return
+    from defenseclaw.config import config_path_for_data_dir, load
+
+    if os.path.exists(config_path_for_data_dir(app.cfg.data_dir)):
+        app.cfg = load(data_dir=app.cfg.data_dir)
+
+
+def _load_providers(app: AppContext | None, path: str, *, seed_legacy: bool = True) -> _Overlay:
+    """Read config-owned providers; edit commands may seed a legacy overlay once."""
     if not _config_backed(app):
         return _read_overlay(path)
     from defenseclaw import derived_providers
@@ -371,6 +385,8 @@ def _load_providers(app: AppContext | None, path: str) -> _Overlay:
                 entry["tls"] = _compact_tls(dataclasses.asdict(provider.tls))
             providers.append(entry)
         return _Overlay(providers=providers, ollama_ports=list(llm_providers.ollama_ports))
+    if not seed_legacy:
+        return _Overlay.empty()
     state, _ = derived_providers.overlay_state(app.cfg, path)
     if state != derived_providers.STATE_LEGACY:
         return _Overlay.empty()
@@ -613,13 +629,14 @@ def _provider_registry(app: AppContext) -> tuple[dict[str, Any], str | None]:
         except (requests.ConnectionError, requests.Timeout, OSError):
             live_error = "management API unavailable"
 
-    overlay = _read_overlay(_overlay_path(app))
+    overlay = _load_providers(app, _overlay_path(app), seed_legacy=False)
     fallback = {
         "providers": overlay.providers,
         "ollama_ports": overlay.ollama_ports,
-        "source": "disk-fallback",
+        "source": "config-fallback" if _config_backed(app) else "disk-fallback",
         "live": False,
-        "warning": "disk fallback may not match the running sidecar registry",
+        "warning": "config fallback may not match the running sidecar registry"
+        if _config_backed(app) else "disk fallback may not match the running sidecar registry",
     }
     if live_error:
         fallback["live_error"] = live_error
@@ -634,7 +651,7 @@ def _display_provider_registry(app: AppContext, as_json: bool) -> None:
         if data["live"]:
             ux.ok("source: live sidecar registry")
         else:
-            ux.warn("DISK FALLBACK — this may not match the running sidecar registry.")
+            ux.warn(f"{data['source'].replace('-', ' ').upper()} — this may not match the running sidecar registry.")
             if live_error:
                 click.echo(f"  live query: {live_error}")
         for item in data.get("providers", []):
@@ -1636,6 +1653,7 @@ def provider_add(
     # lose entries. The lock is released on exit of the `with` block,
     # after `os.replace` has made the new overlay visible.
     with _OverlayLock(path):
+        _refresh_provider_config(app)
         overlay = _load_providers(app, path)
 
         entry: dict[str, Any] | None = None
@@ -1799,6 +1817,7 @@ def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
     """
     path = _overlay_path(app)
     with _OverlayLock(path):
+        _refresh_provider_config(app)
         overlay = _load_providers(app, path)
 
         before = len(overlay.providers)
