@@ -96,7 +96,10 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}
-	windowsEnterpriseHotConfigWrite = func(_ context.Context, path string, raw []byte, reason string) error {
+	windowsEnterpriseHotConfigWrite = func(_ context.Context, path string, raw []byte, reason, expectedSHA string) error {
+		if current, err := os.ReadFile(path); err != nil || configwrite.SHA256Hex(current) != expectedSHA {
+			return errors.New("installed config changed before write")
+		}
 		host.writes = append(host.writes, reason)
 		// The writer records a generation with every write.
 		if err := os.WriteFile(configwrite.GenerationPath(path), []byte(`{"generation":`+strconv.Itoa(len(host.writes)+10)+`}`), 0o600); err != nil {
@@ -283,5 +286,58 @@ func TestWindowsEnterprisePolicyDigestRunsUnderTheServicePins(t *testing.T) {
 	}
 	if got[managed.ConfigPathEnv][0] != host.configPath || len(got["PATH"]) != 1 {
 		t.Fatalf("config %q, PATH %q: want the installed config and the console PATH kept", got[managed.ConfigPathEnv], got["PATH"])
+	}
+}
+
+// GAP-0492: a lifecycle that commits while the hot path waits must become
+// the rollback baseline if the candidate fails validation.
+func TestWindowsEnterpriseHotConfigValidationRollbackUsesLockedSnapshot(t *testing.T) {
+	const old = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const committed = "config_version: 9\nguardrail:\n  mode: action\n"
+	const candidate = "config_version: 9\nguardrail:\n  mode: disabled\n"
+	host, opts := newHotConfigHost(t, old, candidate)
+	windowsEnterpriseHotConfigLock = func(string) (func(), error) {
+		if err := os.WriteFile(host.configPath, []byte(committed), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return func() {}, nil
+	}
+	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
+		return windowsServiceConfigValidation{}, errors.New("invalid candidate")
+	}
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, &enterprisestatus.Result{})
+	if applied {
+		t.Fatal("invalid candidate applied")
+	}
+	got, err := os.ReadFile(host.configPath)
+	if err != nil || string(got) != committed {
+		t.Fatalf("rollback replaced committed config: %q, %v", got, err)
+	}
+}
+
+// GAP-0493: adoption failure has the same rollback baseline as validation.
+func TestWindowsEnterpriseHotConfigAdoptionRollbackUsesLockedSnapshot(t *testing.T) {
+	const old = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const committed = "config_version: 9\nguardrail:\n  mode: action\n"
+	const candidate = "config_version: 9\nguardrail:\n  mode: disabled\n"
+	host, opts := newHotConfigHost(t, old, candidate)
+	windowsEnterpriseHotConfigLock = func(string) (func(), error) {
+		if err := os.WriteFile(host.configPath, []byte(committed), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return func() {}, nil
+	}
+	previousDigest := windowsEnterprisePolicyDigest
+	windowsEnterprisePolicyDigest = host.digest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = previousDigest })
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, &enterprisestatus.Result{})
+	if applied {
+		t.Fatal("unadopted candidate applied")
+	}
+	got, err := os.ReadFile(host.configPath)
+	if err != nil || string(got) != committed {
+		t.Fatalf("rollback replaced committed config: %q, %v", got, err)
 	}
 }
