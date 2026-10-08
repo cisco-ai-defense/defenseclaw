@@ -769,6 +769,10 @@ func (a *App) copyWarnings(rec *workspace.CopyRecord) {
 	if n := len(rec.HeldBack); n > 0 {
 		a.warn(plural(int64(n), "secret file", "secret files") + " held back from the copy: " + strings.Join(firstN(rec.HeldBack, 8), ", "))
 	}
+	if n := len(rec.Unmasked); n > 0 {
+		a.warn(plural(int64(n), "file that looks like a secret is", "files that look like secrets are") + " in the copy (--unmask), so the agent can read " +
+			itThem(rec.Unmasked) + ": " + strings.Join(firstN(rec.Unmasked, 8), ", "))
+	}
 	for _, w := range rec.Warnings {
 		a.warn(w)
 	}

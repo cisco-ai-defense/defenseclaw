@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -191,6 +192,30 @@ func TestStageRefusesOversizedFolders(t *testing.T) {
 	opts.MaxWalkEntries = 5
 	if rec, err := Stage(bg, opts); err != nil || rec.Kind != CopyPlain || rec.Files != 4 {
 		t.Fatalf("record: %+v, %v", rec, err)
+	}
+}
+
+// GAP-0248: --unmask on a copy was silent both ways: a shared secret-looking
+// file got no line, and a pattern that matched only a git-ignored file
+// (never copied) said nothing. The record names both.
+func TestStageNamesWhatUnmaskShared(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", "local.env\n")
+	e.commit("ignore")
+	writeFile(t, e.project, ".env", "TOKEN=dccert-decoy\n")
+	writeFile(t, e.project, "local.env", "TOKEN=dccert-decoy\n")
+	opts := e.stageOpts("c1")
+	opts.Unmask = []string{".env", "local.env"}
+	rec, err := Stage(bg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rec.Unmasked, ",") != ".env" || slices.Contains(rec.HeldBack, ".env") {
+		t.Fatalf("unmasked %v, held back %v", rec.Unmasked, rec.HeldBack)
+	}
+	if !slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.HasPrefix(w, "--unmask local.env matched no file the copy takes") }) {
+		t.Fatalf("warnings = %v", rec.Warnings)
 	}
 }
 

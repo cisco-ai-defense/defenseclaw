@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -128,6 +129,9 @@ type CopyRecord struct {
 	// applied to the copy and to the capture Apply merges into.
 	LineEndings map[string]string `json:"line_endings,omitempty"`
 	HeldBack    []string          `json:"held_back,omitempty"`
+	// Unmasked are the files that look like secrets --unmask shared with
+	// the sandbox, which the run names so the user can confirm them.
+	Unmasked []string `json:"unmasked,omitempty"`
 	// Withheld counts the committed blobs left out of the shipped history
 	// (see withholdHistory); the copy is then a partial clone.
 	Withheld   int        `json:"withheld,omitempty"`
@@ -761,6 +765,24 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	held, err := detectSecretsIn(root, candidates, scanOpts)
 	if err != nil {
 		return nil, nil, err
+	}
+	// What --unmask shared, and what it named that the copy does not take
+	// (git-ignored files never go): both were silent (GAP-0248).
+	unmaskOnly := scanOpts
+	unmaskOnly.unmask = nil
+	rec.Unmasked = nil
+	for _, rel := range candidates {
+		if unmaskedBy(scanOpts.unmask, rel) {
+			if would, err := detectSecretsIn(root, []string{rel}, unmaskOnly); err == nil && len(would) > 0 {
+				rec.Unmasked = append(rec.Unmasked, rel)
+			}
+		}
+	}
+	for _, u := range scanOpts.unmask {
+		if !slices.ContainsFunc(candidates, func(rel string) bool { return unmaskedBy([]string{u}, rel) }) {
+			rec.Warnings = append(rec.Warnings, "--unmask "+u+" matched no file the copy takes (a copy takes git's view of the folder: "+
+				"tracked files and untracked ones git does not ignore), so it shared nothing")
+		}
 	}
 	heldSet := toSet(held)
 	var files []stagedFile
