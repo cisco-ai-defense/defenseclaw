@@ -95,7 +95,7 @@ func isNoPost(sel tpSelector) bool {
 //  5. no exec hook, no kprobe Override, nothing but file_open and tcp_connect;
 //  6. every path is absolute, clean, inside an enrolled home (or a listed
 //     system path) and free of symlinks;
-//  7. at most 5 selectors per hook, 64 pids per selector, DNS-1123 names,
+//  7. at most 5 selectors per hook, 4 pids per selector, DNS-1123 names,
 //     bounded value lists, and at most 4 values in a numeric Equal list
 //     (Tetragon refuses more; the uid list of a pid anchor uses InMap);
 //  8. the text round-trips through the typed schema with unknown fields

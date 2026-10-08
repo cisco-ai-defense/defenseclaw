@@ -1257,8 +1257,7 @@ The same user's normal shell, other users, IDE terminals, containers, and
 programs that only look like an agent by name are observed, never denied.
 Status lists them as "observed, not enforced" with the reason: `ide_hosted`,
 `heuristic_root`, `not_enrolled` or `guardrail_observe`. A user with no agent
-installed has no control at all. At most 64 running agent processes per
-control are anchored; the rest are counted as `kernel_roots_over_limit`.
+installed has no control at all.
 
 Paths are the exact names in each enrolled home. The controls do not cover
 agent configuration files, repository files such as `AGENTS.md` or `.mcp.json`,
@@ -1267,6 +1266,11 @@ execution.
 
 Known limits of these controls:
 
+- At most eight running agent sessions are anchored in one monitor controls
+  policy. Further roots are reported as `kernel_roots_over_limit`; their user's
+  covered burn-in time pauses until every live root is measured. Eight roots
+  use two `file_open` hooks on the measured Tetragon 1.7.1 host. More hooks
+  loaded but cost more than the budget described below.
 - A new agent session may wait a few seconds for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; if loading fails, the warning remains until the policy is repaired.
 - A control denies below an agent session that Tetragon saw start while the
   controls were loaded. A session that was already running when they loaded
@@ -1332,6 +1336,28 @@ first round; the `enforce` column spans both):
 | --- | --- | --- | --- |
 | `open` and `close` of one file, 300,000 times | 6.2 to 6.3 µs per open | 14.4 to 16.9 µs per open | about +8 to +11 µs per open (2.3 to 2.7 times) |
 | Reading 60,000 files under `/usr` with `cat` | 0.81 to 0.85 s | 1.23 to 1.27 s | about +45 to 55 percent wall time |
+
+In a separate monitor-only probe on the same host and Tetragon version, a
+controls copy scoped to one probe uid and its own processes produced these
+results. Each cost range is three runs of 300,000 opens and closes of one
+file. "No copy" kept the host's existing policies loaded.
+
+| Live roots in the controls copy | `file_open` hooks | µs per open |
+| --- | ---: | ---: |
+| No copy | 0 extra | 5.63 to 5.78 |
+| 4 | 2 | 9.06 to 9.43 |
+| 5 | 2 | Not measured |
+| 8 (current limit) | 2 | 11.17 to 11.35 |
+| 12 | 3 | 14.03 to 14.47 |
+| 16 | 3 | 16.12 to 16.27 |
+| 32 | 6 | Not measured |
+| 64 | 12 | 48.81 to 50.79 |
+
+All tested copies loaded enabled. The 12, 16, 32 and 64-root copies show the
+uncapped renderer's cost; the shipped eight-root limit keeps the largest
+render at about 1.2 times the four-root cost. Every extra `file_open` hook
+runs for every open on the host, including opens by processes outside the
+agent sessions.
 
 Workloads that open many files, such as builds, indexers and package
 installs, feel it most. Measure it on a pilot ring in `observe` before you

@@ -119,8 +119,9 @@ const (
 	DefaultPauseFor = 4 * time.Hour
 	MaxPauseFor     = 7 * 24 * time.Hour
 
-	// MaxPIDs is the total number of live roots a controls policy anchors.
-	MaxPIDs = 64
+	// MaxPIDs caps monitor roots at two four-PID groups. Larger renders
+	// load, but their file_open cost exceeds the measured host budget.
+	MaxPIDs = 8
 	// Tetragon's process filter evaluates at most four matchPIDs values even
 	// when it accepts a longer list. Split the total budget across selectors.
 	maxPIDsPerSelector = 4

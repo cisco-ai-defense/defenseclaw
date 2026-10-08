@@ -124,7 +124,7 @@ func TestAutoUpdateKeepsRunningOldVersionAnchored(t *testing.T) {
 	}
 }
 
-func TestSixtyFiveRootsAnchorSixtyFour(t *testing.T) {
+func TestSixtyFiveRootsAnchorEightWithinMeasuredHookBudget(t *testing.T) {
 	w := newWorld(t, baseTargets)
 	var procs []Proc
 	for i := 0; i < 65; i++ {
@@ -136,10 +136,10 @@ func TestSixtyFiveRootsAnchorSixtyFour(t *testing.T) {
 	}
 	c := w.compile(Input{Controls: &Scope{Mode: PolicyMonitor, UIDs: []int{1001}}, Roots: roots.Roots})
 	p := policyOf(t, c, FamilyControls)
-	if len(p.PIDs) != MaxPIDs || c.OverLimit != 1 {
+	if len(p.PIDs) != MaxPIDs || c.OverLimit != 65-MaxPIDs {
 		t.Fatalf("anchored %d, over limit %d", len(p.PIDs), c.OverLimit)
 	}
-	if p.PIDs[len(p.PIDs)-1] != 7063 {
+	if p.PIDs[len(p.PIDs)-1] != 7007 {
 		t.Fatalf("the oldest sessions must win the budget; last pid = %d", p.PIDs[len(p.PIDs)-1])
 	}
 	if !anyContains(c.Notes, WarnRootsOverLimit) {
@@ -160,11 +160,11 @@ func TestSixtyFiveRootsAnchorSixtyFour(t *testing.T) {
 			}
 		}
 	}
-	if seen[7004] == 0 || seen[7063] == 0 {
-		t.Fatalf("later roots are absent from effective pid selectors: %v", seen)
+	if seen[7004] == 0 || seen[7007] == 0 || seen[7008] != 0 {
+		t.Fatalf("PID groups include an over-limit root or omit a covered root: %v", seen)
 	}
-	if hooks := len(p.tp.Spec.LsmHooks); hooks > 12 {
-		t.Fatalf("%d LSM hook instances for 64 roots, want at most 12", hooks)
+	if hooks := len(p.tp.Spec.LsmHooks); hooks != 2 {
+		t.Fatalf("%d LSM hook instances for the eight-root cap, want 2", hooks)
 	}
 }
 

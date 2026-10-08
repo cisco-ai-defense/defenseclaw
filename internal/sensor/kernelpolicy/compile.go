@@ -65,7 +65,7 @@ type Compiled struct {
 	// Notes explain what was left out and why (no anchors, a path outside its
 	// home, a lint finding), for status.
 	Notes []string
-	// OverLimit counts roots left out of a pid anchor by the 64-pid limit.
+	// OverLimit counts roots left out of a pid anchor by the PID budget.
 	OverLimit int
 	// Anchored counts roots in a pid anchor per uid.
 	Anchored map[int]int
@@ -637,7 +637,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	}
 	if len(pids) > maxPIDsPerSelector {
 		// Several selectors for the same path can share a hook. This keeps a
-		// 64-root policy to a small number of LSM instances while each PID
+		// policy to a small number of LSM instances while each PID
 		// selector remains inside Tetragon's effective four-value limit.
 		tp.Spec.LsmHooks = nil
 		groups := make([][]int, 0, (len(pids)+maxPIDsPerSelector-1)/maxPIDsPerSelector)
