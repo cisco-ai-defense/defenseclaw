@@ -248,6 +248,38 @@ def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> No
     assert calls == [("POST", "/v1.0/groups")]
 
 
+def test_entra_apply_records_password_before_user_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","users":[{"name":"alice"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, _path):
+            return [{"verifiedDomains": [{"name": "example.test"}]}]
+
+        def get(self, _path):
+            raise entra.GraphError(404, "NotFound", "missing")
+
+        def request(self, method, path, _body):
+            calls.append((method, path))
+            return {"id": "user-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "user-id"}
+
+    def failed_sync(_descriptor):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(entra.os, "fsync", failed_sync)
+    args = entra.build_parser().parse_args(
+        ["apply", "--config", str(plan), "--apply", "--password-file", str(tmp_path / "passwords")]
+    )
+    with pytest.raises(OSError, match="disk full"):
+        entra.cmd_apply(Graph(), args)
+    assert calls == []
+
+
 def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatch) -> None:
     intune = _load(INTUNE)
     graph = intune.Graph("token")

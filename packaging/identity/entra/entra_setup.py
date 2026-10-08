@@ -434,6 +434,8 @@ def _record_password(path: str, upn: str, password: str) -> None:
         raise
     with handle:
         handle.write(f"{upn}\t{password}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
@@ -442,8 +444,8 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
     if apply and plan.get("users"):
         if not args.password_file:
             raise SystemExit("error: --password-file is required before creating users; passwords are never printed")
-        # Check the file before any Graph write: the password is recorded
-        # only after Graph creates the user.
+        # Check the file before any Graph write. Each generated password is
+        # recorded durably before creating its user.
         os.close(_open_password_file(args.password_file))
     orgs = graph.get_all("/v1.0/organization?$select=id,verifiedDomains")
     domain = plan["domain"].casefold()
@@ -510,9 +512,17 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
                 "usageLocation": usage,
                 "passwordProfile": {"forceChangePasswordNextSignIn": force_change, "password": password},
             }
+            # An append or sync failure must happen before Graph can create
+            # an account whose generated credential is unavailable on retry.
+            _record_password(args.password_file, upn, password)
             try:
                 made = graph.request("POST", "/v1.0/users", body)
             except GraphError as exc:
+                print(
+                    f"warning: a generated password was saved for {upn}, but Graph did not confirm creation; "
+                    "verify the account before using it",
+                    file=sys.stderr,
+                )
                 if exc.status != 400 or "already exist" not in str(exc).lower():
                     raise
                 user = find_user(graph, upn)
@@ -520,9 +530,8 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
                     raise GraphError(
                         409, "ExistingUserNotVisible", f"{upn} exists but Graph cannot read it yet"
                     ) from None
-                print(f"user {upn}: exists (left unchanged; no password recorded)")
+                print(f"user {upn}: exists (left unchanged; the newly saved password was not applied)")
             else:
-                _record_password(args.password_file, upn, password)
                 user = graph.get_after_create(
                     f"/v1.0/users/{made['id']}?$select=id,userPrincipalName,securityIdentifier"
                 )
