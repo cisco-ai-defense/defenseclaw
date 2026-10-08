@@ -901,10 +901,9 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     if proxy_in_use:
         ux.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
-    if gc.enabled and any(
-        gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
-        for name in actives
-    ):
+    if not gc.enabled:
+        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
+    elif any(gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True for name in actives):
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
     else:
         click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable --connector <name>")
