@@ -12,7 +12,8 @@ def test_repeat_install_keeps_other_sssd_domain(tmp_path):
               "[domain/ad]\nid_provider = ad\n"
     existing.write_text(content)
     rendered.write_text(content.replace("okta, ad", "okta").replace("[domain/ad]\nid_provider = ad\n", ""))
-    script = f"""source {KIT / 'install-sssd-okta.sh'}
+    source = (KIT / "install-sssd-okta.sh").read_text().rsplit('main "$@"', 1)[0]
+    script = source + f"""
 CONF={existing}
 DOMAIN=okta
 FORCE=0

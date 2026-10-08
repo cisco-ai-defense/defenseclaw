@@ -386,15 +386,25 @@ install_conf() {
     # another SSSD domain since the first run. Never drop that domain implicitly.
     local other_domains
     other_domains=$(python3 - "$CONF" "$DOMAIN" <<'PYCONF'
-import configparser
+import re
 import sys
 
-config = configparser.ConfigParser(interpolation=None, strict=False)
-config.read(sys.argv[1])
 wanted = sys.argv[2]
-listed = {name.strip() for name in config.get("sssd", "domains", fallback="").split(",") if name.strip()}
-sections = {name[7:] for name in config.sections() if name.startswith("domain/")}
-print(", ".join(sorted((listed | sections) - {wanted})))
+domains = set()
+section = ""
+with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+    for raw in handle:
+        line = raw.split("#", 1)[0].split(";", 1)[0].strip()
+        heading = re.fullmatch(r"\[([^]]+)\]", line)
+        if heading:
+            section = heading.group(1).strip()
+            if section.startswith("domain/"):
+                domains.add(section[7:])
+        elif section == "sssd":
+            setting = re.match(r"domains\s*=\s*(.*)", line, re.IGNORECASE)
+            if setting:
+                domains.update(name.strip() for name in setting.group(1).split(",") if name.strip())
+print(", ".join(sorted(domains - {wanted})))
 PYCONF
 )
     if [[ -n $other_domains ]] && ((FORCE == 0)); then
@@ -614,6 +624,4 @@ main() {
   fi
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  main "$@"
-fi
+main "$@"
