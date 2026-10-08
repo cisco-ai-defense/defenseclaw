@@ -141,8 +141,8 @@ func configureGuardrailInspectorObservabilityV8(
 			}
 		})
 	}
-	if inspector.ciscoClient != nil {
-		inspector.ciscoClient.bindObservabilityV8(metricRuntime)
+	if cisco := inspector.currentCiscoInspector(); cisco != nil {
+		cisco.bindObservabilityV8(metricRuntime)
 	}
 	capability, ok := runtime.(proxyGuardrailV8Runtime)
 	if !ok || capability == nil {

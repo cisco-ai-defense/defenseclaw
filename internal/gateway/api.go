@@ -1023,8 +1023,8 @@ func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 // the OpenClaw gateway RPCs (/skill/*, /plugin/*, /skills, /mcps,
 // /tools/catalog): only when openclaw is an active connector, and never on a
 // standalone enterprise deployment, which does not run OpenClaw. The Secure
-// Client path keeps its route set unchanged. A connector change restarts the
-// gateway, so the route set is fixed for the process.
+// Client path keeps its route set unchanged. An OpenClaw connector change restarts the
+// API listener so its route set follows the active config.
 func (a *APIServer) servesOpenClawRoutes() bool {
 	cfg := a.runtimeConfigSnapshot()
 	switch {

@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -132,6 +133,7 @@ type Sidecar struct {
 	proxyMu          sync.RWMutex
 	guardrailProxy   *GuardrailProxy
 	apiRestartCh     chan struct{}
+	fleetReloadCh    chan struct{}
 	watcherRestartCh chan struct{}
 	// enrolledWatchRoots are the enrolled user folders the previous
 	// watcher of this process watched (runWatcher only); nil before the
@@ -515,6 +517,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		aiDiscovery:             aiDiscovery,
 		osNotifier:              osNotifier,
 		apiRestartCh:            make(chan struct{}, 1),
+		fleetReloadCh:           make(chan struct{}, 1),
 		watcherRestartCh:        make(chan struct{}, 1),
 		guardrailRestartCh:      make(chan struct{}, 1),
 		aiRestartCh:             make(chan struct{}, 1),
@@ -1957,6 +1960,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	current := s.currentConfig()
 
 	apiRestart := apiNeedsRestart(oldCfg, newCfg)
+	fleetEnable := !gatewayShouldConnectForConfiguredConnector(oldCfg) && gatewayShouldConnectForConfiguredConnector(newCfg)
 	// A connector added, removed, enabled or disabled re-runs the connector
 	// setup in-process and restarts the install watcher, which watches the
 	// skill and plugin dirs of the connectors. Secure Client never gets here
@@ -2021,9 +2025,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if previousGen != nil && previousGen.active != nil {
 		rulePackChanged = previousGen.active.Summary().Digest != rulePackCandidate.active.Summary().Digest
 	}
-	judgeChanged := rulePackChanged ||
-		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+	judgeChanged := judgeNeedsRebuild(oldCfg, newCfg, rulePackChanged)
 
 	var nextJudge *LLMJudge
 	var nextJudgeUnavailable string
@@ -2298,6 +2300,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if apiRestart {
 		signalRestart(s.apiRestartCh)
 	}
+	if fleetEnable {
+		signalRestart(s.fleetReloadCh)
+	}
 	if aiRestart {
 		signalRestart(s.aiRestartCh)
 		signalRestart(s.aiRuntimeRestartCh)
@@ -2436,6 +2441,13 @@ func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailCon
 	return out
 }
 
+func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool) bool {
+	return rulePackChanged ||
+		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
+		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+}
+
 func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
@@ -2447,6 +2459,7 @@ func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
 		config.IsLegacyStandalone(oldCfg) != config.IsLegacyStandalone(newCfg) ||
 		oldCfg.Guardrail.Host != newCfg.Guardrail.Host ||
+		(!newCfg.SecureClientIntegration() && slices.Contains(oldCfg.ActiveConnectors(), "openclaw") != slices.Contains(newCfg.ActiveConnectors(), "openclaw")) ||
 		openShellListenersChanged(oldCfg, newCfg)
 }
 
@@ -3165,8 +3178,8 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 // codex/claudecode + loopback gateway.host, unknown connector, or an
 // openclaw connector implied only by claw.mode on a machine without
 // OpenClaw, reported as "OpenClaw is not installed"), we publish
-// StateDisabled with an explanatory hint and park on ctx.Done()
-// instead of looping ConnectWithRetry. This mirrors the
+// StateDisabled with an explanatory hint and park until config enables
+// fleet integration or ctx is cancelled instead of looping ConnectWithRetry. This mirrors the
 // observability-only branch in runGuardrail (sidecar.go::1283-1294)
 // and closes the historical "Gateway: RECONNECTING forever" symptom
 // on hook-only dev boxes where nothing is listening on
@@ -3175,7 +3188,7 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 // a real upstream, or set gateway.fleet_mode=enabled — those cases fall
 // through to the dial loop below.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
-	if !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+	for !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
 		connName := configuredConnectorName(s.currentConfig())
 		details := map[string]interface{}{
 			"summary": "no OpenClaw fleet configured (standalone mode)",
@@ -3212,9 +3225,13 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr,
 			"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — %s. Hooks + local audit continue normally.\n",
 			connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode, why)
-		<-ctx.Done()
-		s.health.SetGateway(StateStopped, "", nil)
-		return nil
+		select {
+		case <-ctx.Done():
+			s.health.SetGateway(StateStopped, "", nil)
+			return nil
+		case <-s.fleetReloadCh:
+			continue
+		}
 	}
 	// Initial connect is the process-boot path, not a reconnect. Only
 	// subsequent successful connects should increment the reconnection
@@ -6513,6 +6530,9 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "disabled", "off", "false":
 		return false
+	}
+	if !cfg.SecureClientIntegration() && slices.Contains(cfg.ActiveConnectors(), "openclaw") {
+		return !openClawImpliedButNotInstalled(cfg) && !openClawNotInstalledLocally(cfg)
 	}
 	switch configuredConnectorName(cfg) {
 	case "openclaw":
