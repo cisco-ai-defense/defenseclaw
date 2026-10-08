@@ -276,6 +276,9 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
             elif not self_read_only(have[name]):
                 report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
                                "Change the attribute permission in Okta Profile Editor.")
+            elif kind == "user" and name == "unixUsername" and have[name].get("unique") != "UNIQUE_VALIDATED":
+                report.problem("user attribute unixUsername must have UNIQUE_VALIDATED uniqueness",
+                               "Set uniqueness in Okta Profile Editor before using it as the Linux account name.")
             else:
                 report.ok(f"{kind} attribute {name}")
 
@@ -285,12 +288,19 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
         check_group(client, report, name, gid)
     check_duplicate_group_gids(client, report)
     uid_owners: dict[int, str] = {}
+    name_owners: dict[str, str] = {}
     for user in client.get_all("/api/v1/users?limit=200"):
-        value = user.get("profile", {}).get("uidNumber")
+        profile = user.get("profile", {})
+        login = str(profile.get("login", user.get("id")))
+        name = profile.get("unixUsername")
+        if name:
+            if name in name_owners and name_owners[name] != login:
+                report.problem(f"unixUsername {name} is shared by {name_owners[name]} and {login}")
+            name_owners[name] = login
+        value = profile.get("uidNumber")
         if value is None:
             continue
         uid = int(value)
-        login = str(user.get("profile", {}).get("login", user.get("id")))
         if uid in uid_owners and uid_owners[uid] != login:
             report.problem(f"uidNumber {uid} is shared by {uid_owners[uid]} and {login}")
         uid_owners[uid] = login
@@ -493,6 +503,10 @@ def ensure_attributes(client: Okta, report: Report, kind: str, wanted: dict[str,
         elif name in have and not self_read_only(have[name]):
             report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
                            "Change the attribute permission in Okta Profile Editor.")
+        elif (kind == "user" and name == "unixUsername" and name in have
+              and have[name].get("unique") != "UNIQUE_VALIDATED"):
+            report.problem("user attribute unixUsername must have UNIQUE_VALIDATED uniqueness",
+                           "Set uniqueness in Okta Profile Editor before assigning Unix names.")
         elif name in have:
             report.ok(f"{kind} attribute {name} exists")
     if not missing:
