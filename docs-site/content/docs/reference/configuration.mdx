@@ -717,7 +717,7 @@ writes the replacement.
 | `scanners.skill_scanner.virustotal_api_key` (inline), `virustotal_api_key_env` | `scanners.skill_scanner.analyzers.virustotal.api_key_env`, with the key in `.env` |
 | `update_check` | `update.check` |
 | Operator block and allow rows in the `audit.db` `actions` table | `asset_policy` |
-| `custom-providers.json` as an input | `llm_providers.custom` (the file is now derived) |
+| Ordinary `custom-providers.json` provider entries | `llm_providers.custom` after v9 migration; a legacy overlay with `request_overrides` remains a live input |
 | `DEFENSECLAW_JUDGE_TRACE`, `DEFENSECLAW_REPO` as the setting | `guardrail.judge.trace`, `update.source` |
 
 ### OpenClaw fleet link
@@ -1272,7 +1272,7 @@ An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching it
 
 The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
 
-`~/.defenseclaw/custom-providers.json` is **derived** from this section on every config write, for tools that read the file, and carries a `_derived_from` hash. Do not edit it: a hand edit is never read back, and `defenseclaw doctor` fails the **Custom-provider overlay** row (`was edited by hand; the gateway ignores those edits`). `defenseclaw doctor --fix` rewrites it from `llm_providers`. A hand-written `custom-providers.json` from 0.8.x, which has no `_derived_from` hash, is still merged until the next `setup provider add` or `remove` moves its entries into `llm_providers`. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
+A `custom-providers.json` marked `_derived_from` is rendered from this section on config writes. Do not edit that derived file: the gateway does not read its edits back, `defenseclaw doctor` reports drift in the **Custom-provider overlay** row, and `defenseclaw doctor --fix` regenerates it. During the v9 migration, an ordinary 0.8.x overlay is imported into `llm_providers` and retired. An overlay with `request_overrides` cannot be imported; migration reports it and leaves the unmarked file as a **live input** that the gateway still merges after config changes. Preserve and review it until the overrides are no longer needed. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
 
 ## Environment variables
 

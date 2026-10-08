@@ -375,12 +375,19 @@ Manage the entries with `defenseclaw setup provider add`, `list`, `show` and
 `remove`. `add` and `remove` write `llm_providers` in `config.yaml` through the
 config writer; `list` and `show` print the registry the running gateway reports
 and fall back, with a label, to the file on disk when the gateway is
-unreachable. `~/.defenseclaw/custom-providers.json` is **derived** from
-`llm_providers` on every config write and is never read back as input: do not
-edit it. If it drifts, `defenseclaw doctor` fails the **Custom-provider
-overlay** row and `defenseclaw doctor --fix` rewrites it. A hand-written
-`custom-providers.json` from DefenseClaw 0.8.x is imported into `llm_providers`
-by the next `setup provider add` or `remove`.
+unreachable. A file marked `_derived_from` is derived from
+`llm_providers` on config writes and is not read back as input: do not edit
+it. If that derived file drifts, `defenseclaw doctor` fails the
+**Custom-provider overlay** row and `defenseclaw doctor --fix` rewrites it.
+
+During the v9 migration, DefenseClaw imports an ordinary hand-written
+`custom-providers.json` from 0.8.x into `llm_providers`, then retires the old
+overlay. If any provider uses `request_overrides`, which `llm_providers`
+cannot represent, migration reports it and leaves the legacy file as a
+**live input**. The gateway continues to merge that overlay with
+`llm_providers` after config changes. Preserve and review the file until
+those request overrides are no longer needed; changing `llm_providers` alone
+does not remove them. See [v9 migration](/docs/reference/migrate-v9#custom-providers).
 
 ```bash
 defenseclaw setup provider add \
