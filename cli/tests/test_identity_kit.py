@@ -184,6 +184,19 @@ def test_entra_password_file_rejects_links_and_insecure_existing_file(tmp_path: 
     assert target.read_text(encoding="ascii").endswith("user@example.test\tgenerated-value\n")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the Windows owner and DACL check")
+def test_entra_password_file_windows_requires_private_dacl(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    target = tmp_path / "passwords"
+    entra._record_password(str(target), "user@example.test", "generated-value")
+    assert target.read_text(encoding="ascii") == "user@example.test\tgenerated-value\n"
+
+    subprocess.run(["icacls", str(target), "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True)
+    with pytest.raises(SystemExit, match="password file"):
+        entra._record_password(str(target), "user@example.test", "second-value")
+    assert target.read_text(encoding="ascii") == "user@example.test\tgenerated-value\n"
+
+
 def test_graph_add_member_retries_new_group_404(monkeypatch: pytest.MonkeyPatch) -> None:
     intune = _load(INTUNE)
     graph = intune.Graph("token")
