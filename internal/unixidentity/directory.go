@@ -47,9 +47,10 @@ import (
 // An SSSD account therefore takes its domain from its SID, which SSSD holds
 // for the uid itself (sssd_nss_linux.go): it gets the domain, realm and
 // principal of a joined realm only when SSSD holds a user of the same name
-// with the same SID in that realm's domain, and groups only inside the
-// domain of its SID. An account without a SID, such as one of a plain LDAP
-// domain, gets no realm and no principal (GAP-0497, GAP-0568, GAP-0605).
+// with the same SID in that realm's domain. A domain-qualified initgroups
+// lookup supplies its groups, including trusted-domain memberships. An
+// account without a SID, such as one of a plain LDAP domain, gets no
+// realm and no principal (GAP-0497, GAP-0568, GAP-0605).
 // UPN and mail need SSSD InfoPipe, which only root may call, so the root
 // guardian adds them (enterprisehooks identity spool).
 
@@ -192,8 +193,8 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		}
 	}
 	if includeGroups {
-		ids, err := r.accountGroupIDs(account, inDomain)
-		if err == nil && sssd != nil {
+		ids, qualified, err := r.accountGroupIDs(account, inDomain)
+		if err == nil && sssd != nil && !qualified {
 			ids, err = sssdGroupsOfDomain(sssd, ids, account.GID, sidDomain(sid))
 		}
 		if err != nil {
@@ -327,33 +328,38 @@ func sssdAccountSID(sssd *sssdNSS, uid int) (string, error) {
 // OS gives it at login, are read from /etc/group (GAP-0729). Its name
 // qualified with the domain is not matched: under short names that is the
 // passwd name of an account a domain names by e-mail address, and a group
-// listing it is that account's.
-func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, error) {
+// listing it is that account's. The boolean reports whether the
+// domain-qualified query succeeded, so its trusted-domain groups are kept.
+func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, bool, error) {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
 	if inDomain != "" {
 		ids, err := r.GroupIDs(Account{Name: inDomain + `\` + bare, GID: account.GID})
 		if !IsNotFound(err) {
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			local, err := localGroupsListing(account.Name)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			ids = append(ids, local...)
 			slices.Sort(ids)
-			return slices.Compact(ids), nil
+			return slices.Compact(ids), true, nil
 		}
 	}
-	return r.GroupIDs(account)
+	ids, err := r.GroupIDs(account)
+	return ids, false, err
 }
 
-// sssdGroupsOfDomain keeps the groups of an SSSD account that are inside
-// its own domain, the domain of its SID (domainSID, "" for an account
-// without one): groups SSSD holds a SID for in that domain, and, for an
-// account without a SID, the groups SSSD holds no SID for. initgroups looks
+// sssdGroupsOfDomain limits groups from an ambiguous, unqualified
+// initgroups lookup to the SSSD account domain, the domain of its SID
+// (domainSID, "" for an account without one): groups SSSD holds a SID
+// for in that domain, and, for an account without a SID, the groups SSSD
+// holds no SID for. initgroups looks
 // the account up by name, and two SSSD domains may hold the same short name,
-// so it may list the other account's groups (GAP-0563). A group of the
+// so it may list the other account's groups (GAP-0563). A successful
+// domain-qualified lookup is authoritative and skips this filter, allowing
+// trusted-domain groups of the confirmed account. A group of the
 // host's /etc/group counts for every account, and the primary group, which
 // comes with the uid's own entry, always counts. A group SSSD could not
 // answer for fails the lookup.
