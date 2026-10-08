@@ -13166,7 +13166,8 @@ function Invoke-DefenseClawGatewayCommand {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string[]]$Arguments,
         [switch]$Capture,
-        [switch]$AllowFailure
+        [switch]$AllowFailure,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300
     )
     $gateway = Resolve-DefenseClawFullPath -Path $Layout.GatewayPath -MustExist -Leaf
     Assert-DefenseClawNoReparsePath -Path $gateway
@@ -13238,7 +13239,8 @@ function Invoke-DefenseClawGatewayCommand {
         )
         $processResult = Invoke-DefenseClawProcess `
             -File $gateway `
-            -Arguments $Arguments
+            -Arguments $Arguments `
+            -TimeoutSeconds $TimeoutSeconds
         if ([int]$processResult.exit_code -ne 0 -and -not $AllowFailure) {
             throw "defenseclaw-gateway exited $($processResult.exit_code) for '$($Arguments -join ' ')': $(($processResult.output | Microsoft.PowerShell.Utility\Out-String).Trim())"
         }
@@ -13262,21 +13264,46 @@ function Invoke-DefenseClawGatewayCommand {
     }
 }
 
+# The first run of a freshly installed gateway on a cold device (antivirus
+# scanning the new binaries, many profiles) took more than the default 300
+# seconds, and the first MDM install failed twice with only "native process
+# timed out" (GAP-0561). The standalone profile allows 900 seconds and names
+# the step and the remedy.
+$script:StandaloneEnumeratorRefreshTimeoutSeconds = 900
+
 function Invoke-DefenseClawEnumeratorRefresh {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName
     )
-    $probe = Invoke-DefenseClawGatewayCommand `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName `
-        -Arguments @(
-            'enterprise', 'windows', 'enumerate',
-            '--manifest', [string]$Layout.ManifestPath,
-            '--once'
-        ) `
-        -Capture `
-        -AllowFailure
+    $timeoutSeconds = 300
+    if (Test-DefenseClawStandaloneProfile) {
+        $timeoutSeconds = $script:StandaloneEnumeratorRefreshTimeoutSeconds
+    }
+    try {
+        $probe = Invoke-DefenseClawGatewayCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Arguments @(
+                'enterprise', 'windows', 'enumerate',
+                '--manifest', [string]$Layout.ManifestPath,
+                '--once'
+            ) `
+            -Capture `
+            -AllowFailure `
+            -TimeoutSeconds $timeoutSeconds
+    }
+    catch {
+        if ((Test-DefenseClawStandaloneProfile) -and
+            ([string]$_.Exception.Message).StartsWith('native process timed out after ')) {
+            throw (
+                "enumerating this computer's user profiles (defenseclaw-gateway enterprise windows enumerate --once) " +
+                "did not finish within $timeoutSeconds seconds, so the lifecycle rolls back. On a first install this is " +
+                'usually antivirus scanning the new DefenseClaw binaries: run the install again'
+            )
+        }
+        throw
+    }
     if ([int]$probe.exit_code -ne 0) {
         $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
         throw "synchronous target enumeration failed with exit $($probe.exit_code): $detail"
