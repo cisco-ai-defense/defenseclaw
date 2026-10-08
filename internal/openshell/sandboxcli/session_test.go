@@ -876,6 +876,13 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
 		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
 			not: []string{"the next session takes a new undo point"}},
+		// GAP-0333: a sandbox the session could not stop (OpenShell's error
+		// state after a Docker restart) does not keep running.
+		{name: "keeping when the stop failed", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: sbName + " is in OpenShell's error state"}
+		}, want: []string{"✓ kept: the changes stay in the folder", "the undo point stays, since " + sbName + " could not be stopped"},
+			not: []string{"keeps running: `"}},
 		// The accept names the snapshot and the session it reviewed: the
 		// daemon refuses it once another start came in between.
 		{name: "keeping names the reviewed session", input: "y\n", opts: claude, during: func(_ *testing.T, ta *testApp) {
