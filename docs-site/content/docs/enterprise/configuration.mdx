@@ -387,7 +387,9 @@ rules on Linux and macOS:
    its folder name) sets the default levels: `strict` blocks findings of
    MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only
    CRITICAL findings and alerts on HIGH ones, and any other pack blocks
-   CRITICAL findings and alerts on MEDIUM and above. `guardrail.block_at` and
+   CRITICAL findings and alerts on MEDIUM and above. The manifest is part of
+   the pack's pin, so validate the pack again after you add or change it.
+   `guardrail.block_at` and
    `alert_at` (or a connector's own) override them; see
    [Thresholds](/docs/policies/thresholds).
 3. **Validate the pack** with the gateway's own loader:
