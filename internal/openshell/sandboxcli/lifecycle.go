@@ -344,6 +344,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	for _, w := range sb.Warnings {
 		a.warn(w)
 	}
+	if !sb.UnflushedAt.IsZero() {
+		a.warn(sandboxapi.UnflushedText(sb.Name, sb.UnflushedAt))
+	}
 	if sb.Hooks.Unreachable {
 		a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
 	}

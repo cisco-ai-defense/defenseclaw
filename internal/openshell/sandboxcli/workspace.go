@@ -886,7 +886,8 @@ func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace
 	if st == nil || st.Pulled == "" {
 		return nil, nil
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Reuse: st.Pulled, SensitiveGlobs: a.reviewGlobs(ctx, sb)})
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Reuse: st.Pulled, SensitiveGlobs: a.reviewGlobs(ctx, sb),
+		Unflushed: !sb.UnflushedAt.IsZero()})
 	if errors.Is(err, workspace.ErrNoReusablePull) {
 		return nil, nil
 	}
@@ -904,7 +905,8 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 	if announce {
 		a.note("Pulling " + sb.Name + "'s work…")
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(ctx, sb)})
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(ctx, sb),
+		Unflushed: !sb.UnflushedAt.IsZero()})
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))
 	}

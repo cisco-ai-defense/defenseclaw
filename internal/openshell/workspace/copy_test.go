@@ -640,6 +640,22 @@ func TestCopyPullFlagsAZeroFilledTail(t *testing.T) {
 	if len(flagged) != 1 || flagged[0] != "notes.txt" || pr.Review.Sensitive() {
 		t.Fatalf("zero-filled flags = %v (sensitive %v), want notes.txt only", flagged, pr.Review.Sensitive())
 	}
+
+	// GAP-0367: in a sandbox that went down without a flush, a file that
+	// came back empty is flagged too; elsewhere an empty file is just that.
+	fs.write(remoteRepo+"/draft.txt", "")
+	for _, unflushed := range []bool{false, true} {
+		pr, err := Pull(bg, PullOptions{DataDir: e.data, Name: "c1", Exec: fs, Unflushed: unflushed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty := slices.ContainsFunc(pr.Review.Flags, func(f Flag) bool {
+			return f.Path == "draft.txt" && f.Kind == RiskZeroFilled && strings.HasPrefix(f.Detail, "is empty, which a MicroVM stopped without a flush")
+		})
+		if empty != unflushed {
+			t.Fatalf("unflushed %v: flags = %+v", unflushed, pr.Review.Flags)
+		}
+	}
 }
 
 // TestCopyPullOfAStateAlreadyBroughtBack: a pull of the state the last one

@@ -231,6 +231,11 @@ type Sandbox struct {
 	// ProcessTree reports that the sandbox's processes are sampled while it
 	// runs (GET /sandboxes/{name}/processes, `sandbox ps`).
 	ProcessTree bool `json:"process_tree,omitempty"`
+	// UnflushedAt is when its MicroVM last went down without DefenseClaw
+	// stopping it (the OpenShell gateway restarted under it, for one), so
+	// without a flush: what it wrote in its last seconds may be missing,
+	// empty or cut short (UnflushedText).
+	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
 	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
 	// posture includes, without its content, as the launch banner names it.
 	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`
@@ -1171,6 +1176,14 @@ const ReasonUpstreamFailed = "upstream_failed"
 // ReasonModelKeyRejected is the Reason of the finding event a sandbox gets
 // when the model API rejected its model credential (HookCoverage.ModelKeyRejected).
 const ReasonModelKeyRejected = "model_credential_rejected"
+
+// UnflushedText is what Sandbox.UnflushedAt means for the work in sandbox
+// name, which `sandbox status` says.
+func UnflushedText(name string, at time.Time) string {
+	return name + "'s MicroVM went down without DefenseClaw stopping it at " + at.Local().Format("15:04:05") +
+		" (the OpenShell gateway restarted, for one), so files it wrote in its last seconds may be missing, empty or end in zero bytes: " +
+		"check them before you bring the work back (its pull flags the empty and cut ones)"
+}
 
 // ReasonPlaceholderRefused is the Reason of the finding event a sandbox gets
 // when OpenShell refused a request of its conversation that carried a
