@@ -251,6 +251,11 @@ func TestOpenShellDenialsCountConnections(t *testing.T) {
 	if sb := e.get("denialbox"); sb.Egress.Blocked != 4 || sb.Egress.Destinations != 0 {
 		t.Fatalf("egress = %+v; want the feed's four blocked destinations and none reached", sb.Egress)
 	}
+	// The agent's next post-tool hook says so too, with the flag (GAP-0326).
+	if got := e.m.EgressRefusals(e.binding("denialbox").ID, "denialbox"); len(got) != 1 || got[0].Note != NotePortClosed ||
+		got[0].Port != 29170 || !strings.Contains(got[0].Remedy, "--host-port 29170") {
+		t.Fatalf("refusals told the agent = %+v", got)
+	}
 	if asks, _ := e.m.Approvals(t.Context(), "denialbox"); len(asks) != 0 {
 		t.Fatalf("asks = %+v; an undeclared port does not ask", asks)
 	}
@@ -855,6 +860,38 @@ func TestConfigChangeIsEnforcedAfterAnEgressRefresh(t *testing.T) {
 // The first denied connection to a declared --host-port becomes an ask
 // (OpenShell drafts none for the host alias) whose approval opens the port;
 // one the organization closes gets the refusal on the feed, and no ask.
+// TestDeclaredHostPortThroughTheProxyAsks (GAP-0233): after a daemon
+// restart lost the pending ask, the agent retried 198.18.0.2:8765 through
+// the egress proxy, which read "(this machine)", and the agent told the
+// user to relaunch with the --host-port it had. The proxy's refusal of a
+// declared port raises the ask, and the agent hears that it waits.
+func TestDeclaredHostPortThroughTheProxyAsks(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "hpbox", HostPorts: []int{38830}})
+	b := e.binding("hpbox")
+	proxy := func(host string, port int) {
+		ev := egress.Event{Kind: egress.EventBlocked, Time: time.Now(), BindingID: b.ID, SandboxName: "hpbox", Method: "CONNECT",
+			Host: host, Port: port, Category: egress.CategoryHostInternal}
+		e.m.refusals.note(ev, ev.Time)
+		e.m.egressEvent(t.Context(), ev, 0)
+	}
+	proxy("198.18.0.2", 38830)
+	if asks, _ := e.m.Approvals(t.Context(), "hpbox"); len(asks) != 1 || asks[0].Port != 38830 {
+		t.Fatalf("asks = %+v; want the declared port's", asks)
+	}
+	if got := e.events("hpbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 0 {
+		t.Fatalf("the declared port read as blocked: %+v", got)
+	}
+	if got := e.m.EgressRefusals(b.ID, "hpbox"); len(got) != 1 || got[0].Note != NoteAsked || got[0].Host != openshellHostAlias {
+		t.Fatalf("agent notes = %+v; want the ask's", got)
+	}
+	// A port the run did not declare is the plain refusal.
+	proxy("198.18.0.2", 5999)
+	if got := e.events("hpbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 1 {
+		t.Fatalf("an undeclared port: %+v", got)
+	}
+}
+
 func TestDeclaredHostPortAsks(t *testing.T) {
 	e := newEnv(t, nil)
 	e.live(sandboxapi.CreateRequest{Name: "hpbox", HostPorts: []int{38830}})
@@ -880,6 +917,17 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 		recs[0].DecisionCode != "SANDBOX_EGRESS_HOST_PORT_ASK" || !strings.Contains(recs[0].Reason, "asks to reach port 38830 on your machine") {
 		t.Fatalf("audited %+v", recs)
 	}
+	// policy test reads the declared port as the ask it raises, not as a
+	// host_internal block (GAP-0265).
+	test := func() sandboxapi.PolicyDecision {
+		res, err := e.m.PolicyTest(t.Context(), sandboxapi.PolicyTestRequest{Sandbox: "hpbox",
+			Checks: []sandboxapi.PolicyCheck{{Host: openshellHostAlias, Port: 38830}}})
+		must(t, err)
+		return res.Decisions[0]
+	}
+	if d := test(); d.Allowed || !d.Ask || d.Rule != "host_port" || !strings.Contains(d.Reason, "sandbox approvals") {
+		t.Fatalf("policy test before the approval = %+v", d)
+	}
 	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)
 	}
@@ -894,6 +942,9 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	})
 	if e.approvedRules("hpbox")[rule] != actorOperator {
 		t.Fatal("the operator is not the recorded approver")
+	}
+	if d := test(); !d.Allowed || d.Ask {
+		t.Fatalf("policy test after the approval = %+v", d)
 	}
 	if len(where(&e.tel.mu, &e.tel.approvals, func(a audit.SandboxApprovalEvent) bool {
 		return a.ApprovalID == ask.ID && a.Stage == audit.SandboxApprovalResolved && a.Result == audit.SandboxApprovalApproved
@@ -919,6 +970,39 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	}
 	if asks, _ := e.m.Approvals(t.Context(), "hpadmin"); len(asks) != 0 {
 		t.Fatalf("asks = %+v", asks)
+	}
+}
+
+// GAP-0268, GAP-0236, GAP-0260: the connection that raised a host-port ask
+// failed at once, and the agent said no approval was needed; a reject said
+// only "rejected host.openshell.internal" and what it leaves was unsaid.
+// The agent's next hook tells it the connection waits, then that the user
+// declined; the reject names the port and how long its effect lasts.
+func TestHostPortAsksReachTheAgent(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "hpbox", HostPorts: []int{38830}})
+	b := e.binding("hpbox")
+	e.ocsf("hpbox", "CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18971,18972 mapping_id=m1", time.Now())
+	e.ocsf("hpbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:38830 [reason:transparent_tcp_mapping_denied]", time.Now())
+	if got := e.m.EgressRefusals(b.ID, "hpbox"); len(got) != 1 || got[0].Note != NoteAsked || got[0].Host != openshellHostAlias || got[0].Port != 38830 {
+		t.Fatalf("refusals while the ask waits = %+v", got)
+	}
+	asks, _ := e.m.Approvals(t.Context(), "hpbox")
+	if len(asks) != 1 {
+		t.Fatalf("asks = %+v", asks)
+	}
+	res, err := e.m.DecideApproval(t.Context(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject})
+	if err != nil || !strings.Contains(res.Message, "port 38830 on your machine (host.openshell.internal:38830) stays closed to hpbox") ||
+		!strings.Contains(res.Message, "the one after that asks again") {
+		t.Fatalf("reject = %+v, %v", res, err)
+	}
+	if !slices.ContainsFunc(e.events("hpbox", sandboxapi.ActivityApprovalResolved, ""), func(ev sandboxapi.ActivityEvent) bool {
+		return ev.Message == "rejected port 38830 on your machine (host.openshell.internal:38830)"
+	}) {
+		t.Fatalf("feed = %+v", e.events("hpbox", sandboxapi.ActivityApprovalResolved, ""))
+	}
+	if got := e.m.EgressRefusals(b.ID, "hpbox"); len(got) != 1 || got[0].Note != NoteDeclined {
+		t.Fatalf("refusals after the reject = %+v", got)
 	}
 }
 

@@ -58,7 +58,7 @@ to filter.
 | Key | Panel | What it shows |
 | --- | --- | --- |
 | `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied policy generation and digest](#policy-generation-and-digest), at-a-glance health |
-| `2` | Alerts | Recent guardrail and hook alerts |
+| `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them |
 | `3` | Skills | Scanned skill inventory, with [block and allow actions](#block-and-allow-from-the-panels) |
 | `4` | MCPs | Scanned MCP servers, with block and allow actions |
 | `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others), with block and allow actions |
@@ -439,6 +439,11 @@ what needs attention:
   says it).
 - **orphaned**: the sandbox has no DefenseClaw binding, so its hooks cannot
   authenticate. Delete it and run again.
+- **N alerts**: the alerts raised in the sandbox since it was created, such
+  as a rule's finding on one of its tool calls or a shadow AI
+  destination. The details count them by severity
+  (`Alerts  2 (1 CRITICAL, 1 LOW)`); in Alerts (`2`), `/` and the sandbox name
+  list them, as `defenseclaw alerts` does with `sandbox=NAME`.
 
 The TUI also toasts a blocked destination you can unblock (once per sandbox
 and host per minute), a new ask, hook tamper, hooks that stop or start

@@ -332,6 +332,12 @@ func recordGenerationBuildError(err error) {
 	}
 }
 
+// clearGenerationBuildError drops the reported rejection once a rebuild
+// matched the live generation: the refused change is gone from disk.
+func clearGenerationBuildError() {
+	liveReloadError.Store("")
+}
+
 // CurrentPolicyHealth is the "policy" object of /health and /status for the
 // live generation. ok is false before the first generation and under the
 // Secure Client integration, where the object is omitted.

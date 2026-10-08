@@ -52,6 +52,8 @@ suggests `defenseclaw sandbox doctor`.
 
 `Enter` opens the selected row's details, and `Esc` closes them.
 
+![DefenseClaw TUI Asks view on Linux: one ask waiting, with its sandbox, the kind (a port on this machine), the destination host.openshell.internal:9418, the program that asked (/usr/bin/git), the risk and the reason, and the keys to approve, reject and refresh](/images/sandboxes/screens/tui-sandboxes-asks.png)
+
 ### Keys
 
 | Key | Action |
@@ -62,7 +64,7 @@ suggests `defenseclaw sandbox doctor`.
 | `s` | Stop the sandbox (asks first). It is kept, so `c` resumes it. |
 | `d` | Delete the sandbox (asks first). Undo is no longer possible. |
 | `R` | Review the changed files that can run code on your machine (a live mount) |
-| `P` | Pull the work of a sandbox on a copy: show it, apply it, or put it on a branch |
+| `P` | Pull the work of a sandbox on a copy: show it, apply it, or put it on a branch (`dc/NAME`, or a name you type) |
 | `U` | Undo: restore the pre-session snapshot, or revert the last pull on a copy |
 | `u` | Unblock a blocked site: **Only in** this sandbox, or **In every sandbox (always)** |
 | `a` / `A` / `x` | Approve an ask once, always approve it, or reject it |
@@ -83,9 +85,15 @@ cannot be lifted here.
 
 ### Sandbox details
 
-`Enter` on a sandbox opens its details: the harness, phase, pack, project and
-the counts of sites and tool calls, the hook events DefenseClaw received, the
-last blocked tool call, the image the sandbox runs, and the process tree when
+`Enter` on a sandbox opens its details: the harness, phase, pack, the
+repository policy when the project has one (`.defenseclaw/sandbox.yaml:
+tightened 2 settings (network.mode, egress.block)`, as the launch banner
+says), project and
+the counts of sites and tool calls, how a stopped sandbox's last detached run
+ended (`finished: exited with status 0` or `did not finish: the sandbox stopped
+while it ran`, with its `sandbox logs` command), the hook events DefenseClaw
+received, the last blocked tool call, the image the sandbox runs, and the
+process tree when
 it is on (see
 [see what the sandbox runs](/docs/sandboxes/guide#see-what-the-sandbox-runs)).
 The dialog scrolls.

@@ -196,6 +196,12 @@ keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the
 old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`.
 Connector hooks are rewritten to the new paths when the gateway starts.
 
+1.0 starts a new audit history. The installer's summary says
+`The audit history 0.8.10 recorded is not carried over to 1.0; a copy is in
+C:\Users\<you>\.defenseclaw\previous\data\audit.db`, and the old events no
+longer appear in the TUI or in `defenseclaw audit export`. See
+[Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10).
+
 `defenseclaw rollback` cannot bring the Setup package back; it refuses and
 changes nothing. To go back to it by hand, run `defenseclaw uninstall`, then
 download `DefenseClawSetup-x64.exe` from the release you had and run it in
@@ -221,6 +227,16 @@ defenseclaw uninstall              # remove connector integrations; keep data an
 defenseclaw uninstall --binaries   # also remove the programs in %USERPROFILE%\.local\bin
 defenseclaw uninstall --all --binaries --yes   # remove everything, including %USERPROFILE%\.defenseclaw
 ```
+
+Close your agent sessions first. One that stays open goes on without
+DefenseClaw: its hooks fail (Codex shows `Hook failed: hook exited with code 1`)
+and nothing checks its tool calls. The plan says so before
+`Proceed? [y/N]`, and the end of the uninstall repeats it
+(`Close any agent session still open: it runs without DefenseClaw's hooks now.`).
+Restart a session once DefenseClaw is back. There are no OpenShell sandboxes
+on Windows, so the plan's sandbox teardown row says `no`.
+
+![defenseclaw uninstall on Windows: the plan lists the connectors claudecode and codex for teardown, warns that an agent session that is open now goes on without DefenseClaw, and shows sandbox teardown no because OpenShell sandboxes do not run on Windows](/images/get-started/windows-uninstall-open-session.png)
 
 For a machine-wide deployment managed by Intune or another MDM, see
 [enterprise deployment](/docs/enterprise). The Cisco Secure Client profile is

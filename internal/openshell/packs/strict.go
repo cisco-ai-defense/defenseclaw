@@ -22,10 +22,37 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// yamlParserProblems are the problems yaml.v3's parser (not its scanner)
+// reports. It names their line from a 0-based mark, one line short: an
+// unclosed '[' on line 5 read "line 4: did not find expected ',' or ']'"
+// (GAP-0245).
+var yamlParserProblems = []string{
+	"did not find expected ',' or ']'", "did not find expected ',' or '}'", "did not find expected '-' indicator",
+	"did not find expected <document start>", "did not find expected <stream-start>", "did not find expected key",
+	"did not find expected node content", "found duplicate %TAG directive", "found duplicate %YAML directive",
+	"found incompatible YAML document", "found undefined tag handle",
+}
+
+var yamlLineRE = regexp.MustCompile(`^line (\d+): (.*)$`)
+
+// yamlErrorText is a yaml.v3 syntax error as a file's reader counts lines.
+func yamlErrorText(err error) string {
+	msg := strings.TrimPrefix(err.Error(), "yaml: ")
+	m := yamlLineRE.FindStringSubmatch(msg)
+	if m == nil || !slices.Contains(yamlParserProblems, m[2]) {
+		return msg
+	}
+	n, _ := strconv.Atoi(m[1])
+	return fmt.Sprintf("line %d: %s", n+1, m[2])
+}
 
 // decodeStrict decodes exactly one YAML document into out after checking the
 // node tree against out's type. Like the guardrail rule-pack loader it closes
@@ -39,7 +66,7 @@ func decodeStrict(data []byte, source string, out any) error {
 		if errors.Is(err, io.EOF) {
 			return packErr(source, "", "yaml_empty", "the file contains no YAML document")
 		}
-		return packErr(source, "", "yaml_invalid", "%s", strings.TrimPrefix(err.Error(), "yaml: "))
+		return packErr(source, "", "yaml_invalid", "%s", yamlErrorText(err))
 	}
 	var extra yaml.Node
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {

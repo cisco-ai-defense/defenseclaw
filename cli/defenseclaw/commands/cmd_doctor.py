@@ -1193,10 +1193,13 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
     # Identity check: a stand-in config object must not read as enabled.
     enabled = getattr(openshell, "enabled", False) is True
     if host_os() == "windows":
+        # Skipped whatever openshell.enabled holds: a team config can carry
+        # it from Linux or macOS, and the platform wins (GAP-0246).
         _emit(
-            "warn" if enabled else "skip",
+            "skip",
             "Sandboxes",
-            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported",
+            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"
+            + ("; openshell.enabled has no effect here" if enabled else ""),
             r=r,
             check_id="doctor.sandbox.platform",
             reason_code="sandbox-platform-unsupported",
@@ -2099,6 +2102,45 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     )
 
 
+def _folder_custody_text(
+    reason: str, path: str, data_dir: str, what: str = "the audit database", itself: str = "the database"
+) -> tuple[str, str]:
+    """Detail and fix for a file (``what``) whose folders failed the private-custody check.
+
+    Restoring the file from a backup does not help there: the folders are
+    what need fixing, and the file was not touched (GAP-0300 for the audit
+    database, GAP-0344 for the device key).
+    """
+    from defenseclaw.doctor_recovery import RecoveryRefusedError, _controlled_directory_paths
+
+    try:
+        chain = _controlled_directory_paths(data_dir, os.path.dirname(path))
+    except RecoveryRefusedError:
+        chain = (data_dir,)
+    if reason == "directory-chain-is-writable-by-others":
+        writable = []
+        for folder in chain:
+            with contextlib.suppress(OSError):
+                if stat.S_IMODE(os.lstat(folder).st_mode) & 0o022:
+                    writable.append(folder)
+        folders = writable or [data_dir]
+        return (
+            f"{', '.join(folders)} can be written by other accounts, so {what} in it is not trusted; "
+            f"{itself} itself is untouched ({reason})",
+            "chmod go-w " + " ".join(shlex.quote(folder) for folder in folders),
+        )
+    if reason == "directory-owner-mismatch":
+        return (
+            f"a folder of {data_dir} on the way to {what} belongs to another account ({reason})",
+            f"make {data_dir} and the folders in it yours (chown), then run 'defenseclaw doctor' again",
+        )
+    return (
+        f"the folders that hold {what} failed the private custody check ({reason})",
+        f"keep {data_dir} a private folder of your own (chmod 700 {shlex.quote(data_dir)}), "
+        "then run 'defenseclaw doctor' again",
+    )
+
+
 def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import (
         _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
@@ -2147,6 +2189,10 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
                 "and if it keeps failing, run 'defenseclaw-gateway restart'"
             )
+        elif reason.startswith("directory-"):
+            # The folders that hold it failed the check, not the database
+            # (GAP-0300).
+            detail, remediation = _folder_custody_text(reason, db_path, str(getattr(cfg, "data_dir", "") or ""))
         else:
             detail = f"private custody validation failed ({reason})"
             remediation = "restore the audit database from a trusted backup"
@@ -2382,14 +2428,26 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
             remediation=("defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"),
         )
         return
+    detail = f"device key recovery is unsafe: {health.reason_code}"
+    remediation = "stop the gateway and restore the identity from a trusted backup; Doctor will not overwrite it"
+    if str(health.reason_code or "").startswith("directory-"):
+        # The folders that hold the key failed the check, not the key: a
+        # restore from backup would not help (GAP-0344, as GAP-0300).
+        detail, remediation = _folder_custody_text(
+            str(health.reason_code),
+            target,
+            str(getattr(cfg, "data_dir", "") or ""),
+            what="the device key",
+            itself="the key",
+        )
     _emit(
         "fail",
         "Device identity",
-        f"device key recovery is unsafe: {health.reason_code}",
+        detail,
         r=r,
         check_id="doctor.identity.device-key",
         reason_code=health.reason_code,
-        remediation="stop the gateway and restore the identity from a trusted backup; Doctor will not overwrite it",
+        remediation=remediation,
     )
 
 
@@ -10239,11 +10297,17 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
             "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
         )
     else:
+        # A running agent keeps the token it started with, so setup alone
+        # cannot stop a background server's attempts (GAP-0313).
         remediation = (
-            "attempts are recent: a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent "
-            "config usually causes this. Re-run 'defenseclaw setup <connector>' for each agent that "
-            "exports telemetry; if the count keeps growing, look for other OTLP senders pointed at "
-            "the gateway port"
+            "attempts are recent. An agent that was already running when its DefenseClaw token "
+            "changed (an upgrade, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
+            "token until it restarts: restart your agents and their background servers (Codex's "
+            "app-server outlives its sessions: run 'codex app-server daemon restart'). "
+            "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
+            "usually causes this: re-run 'defenseclaw setup <connector>' for each agent that "
+            "exports telemetry, then restart it; if the count keeps growing, look for other OTLP "
+            "senders pointed at the gateway port"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 

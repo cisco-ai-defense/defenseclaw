@@ -608,6 +608,21 @@ func TestHookLabelAndDisplayReason(t *testing.T) {
 // Hook requests and verdicts are counted, a block and an ask are on the feed,
 // and only an alert verdict (ran, flagged) is a finding there; another
 // binding's counts nothing.
+// GAP-0312: a match of a rule that blocks such calls, which could not decide
+// the call (it ran), says so on the feed instead of "allowed but flagged".
+func TestUndecidedMatchSaysWhyTheCallRan(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "hookbox"})
+	dec := e.decider("hookbox", "Bash")("PreToolUse", "", "allow")
+	dec.Severity, dec.Reason = "CRITICAL", "Allowed but flagged by DefenseClaw rule UN-MARKER-BLOCK: Certification marker command. "+sandboxapi.UndecidedNote
+	e.m.ObserveHookDecision(dec)
+	findings := e.events("hookbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding)
+	if len(findings) != 1 || !strings.HasPrefix(findings[0].Message,
+		"⚠ Bash ran although DefenseClaw rule UN-MARKER-BLOCK (Certification marker command) matched it: the rule could not decide the call") {
+		t.Fatalf("finding events = %+v", findings)
+	}
+}
+
 func TestHookCoverage(t *testing.T) {
 	e := newEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "hookbox"})
@@ -845,6 +860,35 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	advance(time.Hour)
 	if silence() != 2 {
 		t.Fatal("an idle harness raised a finding")
+	}
+}
+
+// TestHookSilenceIgnoresAnIdleHarnessTelemetry (GAP-0220): a Codex session
+// idle at its prompt after its last hook kept exporting OTLP, and 13 minutes
+// later raised a HIGH hook_silence finding. Telemetry exports are no work;
+// a model call after them still is.
+func TestHookSilenceIgnoresAnIdleHarnessTelemetry(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "idlebox"})
+	b := e.boxOf("idlebox")
+	e.m.ObserveIngress(e.binding("idlebox"), sandboxauth.RouteHook)
+	for range 20 {
+		advance(time.Minute)
+		e.m.ObserveIngress(e.binding("idlebox"), sandboxauth.RouteOTLP)
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 0 || e.get("idlebox").Hooks.Silent {
+		t.Fatalf("an idle harness exporting telemetry raised %d hook_silence finding(s)", n)
+	}
+	model := ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}
+	for range 11 {
+		e.m.ocsfEvent(t.Context(), b, model, now())
+		advance(time.Minute)
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 1 {
+		t.Fatalf("model calls without hooks raised %d hook_silence finding(s), want 1", n)
 	}
 }
 

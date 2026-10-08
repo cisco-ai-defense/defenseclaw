@@ -1235,6 +1235,59 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 	}
 }
 
+// TestConfigManagerRestoredConfigSettlesTheRejection pins GAP-0241: a
+// config.yaml the gateway refused and then restored to the running content
+// rebuilds on the next reload and clears policy.last_reload_error, which
+// otherwise stayed until a restart (no change was left to build).
+func TestConfigManagerRestoredConfigSettlesTheRejection(t *testing.T) {
+	t.Cleanup(clearGenerationBuildError)
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	var diffs []ConfigDiff
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+		diffs = append(diffs, diff)
+		if slices.Equal(diff.Changed, []string{configDiffAssets}) {
+			return errGenerationUnchanged
+		}
+		return nil
+	})
+	if err := mgr.Reload(context.Background(), "settle"); err != nil {
+		t.Fatalf("settle reload: %v", err)
+	}
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("openshell: [dccert-block-marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "test"); err == nil {
+		t.Fatal("reload of invalid YAML succeeded")
+	}
+	if msg, _ := liveReloadError.Load().(string); msg == "" {
+		t.Fatal("the refused change is not reported")
+	}
+	if err := os.WriteFile(path, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	diffs = nil
+	if err := mgr.Reload(context.Background(), "test"); err != nil {
+		t.Fatalf("reload of the restored file: %v", err)
+	}
+	if msg, _ := liveReloadError.Load().(string); msg != "" || len(diffs) != 1 {
+		t.Fatalf("after the restore last_reload_error = %q, rebuilds %d; want it cleared by one rebuild", msg, len(diffs))
+	}
+	diffs = nil
+	if err := mgr.Reload(context.Background(), "test"); err != nil || len(diffs) != 0 {
+		t.Fatalf("a settled, unchanged reload = %v, rebuilds %d; want none", err, len(diffs))
+	}
+}
+
 // A config_version 8 file whose in-memory migration fails is refused, not
 // run as raw v8 without its data.json admission and audit.db block/allow
 // policy (the reload keeps the previous generation).

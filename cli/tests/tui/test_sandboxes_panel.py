@@ -202,6 +202,30 @@ def test_sandbox_rows_carry_what_the_panel_shows() -> None:
     assert decode_sandbox({"phase": "ready"}) is None
 
 
+def test_the_alerts_cell_counts_the_alerts_a_sandbox_raised() -> None:
+    """GAP-0311: the Alerts cell named health alerts only, so a sandbox whose
+    tool call a rule blocked showed "-" while `defenseclaw alerts` listed it."""
+    from defenseclaw.tui.panels.alerts import AlertEvent
+
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [COPY, {**STOPPED, "created_at": "2026-10-08T05:00:00Z"}], [])
+    model.set_alert_events(
+        [
+            AlertEvent("a1", "CRITICAL", "block", "codex:PreToolUse", sandbox="fix-tests"),
+            AlertEvent("a2", "LOW", "allow", "api.openai.com", sandbox="fix-tests"),
+            AlertEvent("a3", "HIGH", "block", "claudecode:PreToolUse"),  # the host's own agent
+            # An earlier sandbox of the same name.
+            AlertEvent("a4", "HIGH", "block", "x", sandbox="docs", timestamp=datetime(2026, 10, 8, 4, tzinfo=timezone.utc)),
+        ]
+    )
+    cells = {row[0]: row[-1] for row in model.data_table_rows()}
+    assert cells == {"fix-tests": "silent, 2 alerts", "docs": "-"}
+    model.cursor = [row.name for row in model.rows].index("fix-tests")
+    assert dict(model.detail_pairs()[1])["Alerts"] == (
+        "2 (1 CRITICAL, 1 LOW): Alerts (2), then / fix-tests, lists them; or run defenseclaw alerts"
+    )
+
+
 def test_the_detail_says_kept_changes_get_a_new_undo_point() -> None:
     """The daemon's accept (the user kept the last session's changes) is on the
     snapshot: the next start takes a new undo point, whoever starts it."""
@@ -223,6 +247,15 @@ def test_snapshot_sorts_running_first_and_keeps_only_pending_asks() -> None:
     assert model.state() == "ready"
     assert "2 running" in model.headline() and "1 ask(s) waiting" in model.headline()
     assert "OpenShell 0.1.1 gateway openshell" in model.headline()
+
+
+def test_off_on_an_account_whose_gateway_another_account_runs_says_so() -> None:
+    """GAP-0307: not "set them up", which stops at the other account's gateway."""
+    model = SandboxesPanelModel()
+    model.set_snapshot({"enabled": False, "gateway_elsewhere": "127.0.0.1:17670 ... another account"}, [], [])
+    assert model.state() == "off"
+    assert model.headline().startswith("Sandboxes are off for this account: another account runs this machine's")
+    assert "Setup (0)" not in model.headline() and "sandbox doctor" in model.off_hint()
 
 
 @pytest.mark.parametrize(
@@ -262,6 +295,19 @@ def test_the_details_name_the_image_sandbox_image_list_shows() -> None:
     assert pairs["Image"] == image and "Run image" not in pairs
     assert pairs["Undo"] == "reverts the last pull --apply (U)" and pairs["Pull"].startswith("P brings the work back")
     assert "Image" not in dict(_model().detail_pairs()[1])
+
+
+def test_the_details_name_the_repository_policy() -> None:
+    # GAP-0244: the banner named .defenseclaw/sandbox.yaml and what it
+    # tightened; the detail showed only the pack and profile.
+    policy = {"path": "/p/.defenseclaw/sandbox.yaml", "digest": "sha256:ab", "tightened": ["network.mode", "egress.block"]}
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [{**COPY, "repo_policy": policy}], [])
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Repo policy"] == ".defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)"
+    model.set_snapshot(STATUS, [{**COPY, "repo_policy": {**policy, "tightened": []}}], [])
+    assert dict(model.detail_pairs()[1])["Repo policy"] == ".defenseclaw/sandbox.yaml: the policy is as strict already"
+    assert "Repo policy" not in dict(_model().detail_pairs()[1])
 
 
 def test_the_process_tree_is_in_the_details() -> None:
@@ -318,7 +364,7 @@ DESTINATIONS = {
         {"host": "api.anthropic.com", "kind": "model_provider", "provider": "Anthropic", "connections": 5},
         {"host": "pastebin.com", "kind": "blocked", "category": "paste_site", "blocked": 4},
         {"host": "example.net", "kind": "blocked", "category": "not_allowlisted", "blocked": 1},
-        {"host": "pypi.org", "kind": "package_registry", "category": "package_registry", "connections": 2},
+        {"host": "pypi.org", "kind": "package_registry", "category": "package_registry", "connections": 2, "failed": 1},
     ],
     "models": [{"provider": "anthropic", "model": "claude-haiku", "calls": 2, "failed": 1}],
 }
@@ -327,17 +373,20 @@ DESTINATIONS = {
 def test_the_detail_lists_the_destinations() -> None:
     model = SandboxesPanelModel()
     model.set_snapshot(
-        STATUS, [{**RUNNING, "egress": {"destinations": 23, "blocked": 1, "model_apis": 1, "shadow_ai": 1}}], []
+        STATUS,
+        [{**RUNNING, "egress": {"destinations": 23, "blocked": 1, "model_providers": 1, "harness_vendor": 2, "shadow_ai": 1}}],
+        [],
     )
     title, pairs = model.detail_pairs(DESTINATIONS)
-    assert dict(pairs)["Sites"] == "23 contacted, 1 blocked · AI: 1 model API, 1 shadow AI"
+    # Counted by the kinds the rows below name (GAP-0319).
+    assert dict(pairs)["Sites"] == "23 contacted, 1 blocked · AI: 1 model provider, 2 harness vendor hosts, 1 shadow AI"
     rows = [value for label, value in pairs if label == "Destination"]
     assert rows == [
         "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl",
         "api.anthropic.com — model provider (Anthropic) · 5 requests",
         "pastebin.com — blocked (paste site) · 0 requests, 4 refused",
         "example.net — blocked (not on the allowlist) · 0 requests, 1 refused",
-        "pypi.org — package registry · 2 requests",
+        "pypi.org — package registry · 3 requests, 1 failed upstream",
     ]
     assert dict(pairs)["Model calls"] == "anthropic claude-haiku: 2 (1 failed)"
     assert (
@@ -380,6 +429,29 @@ async def test_the_sandbox_detail_shows_its_destinations_at_80x24(fetch, monkeyp
         close = screen.query_one("#sandbox-detail-close").region
         assert close.height > 0 and close.y >= 0 and close.bottom <= 24
     assert ("Destination", "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl") in screen.model.pairs
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_sandbox_detail_says_how_its_detached_run_ended(fetch, monkeypatch) -> None:
+    # GAP-0273: only `sandbox logs` said a detached run finished or was cut.
+    from defenseclaw.tui.services.sandbox_state import detached_run_text
+
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls({"name": "docs", "state": "interrupted", "started_at": "2026-10-08T07:15:00Z", "log": "x"})
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        stopped = next(row for row in app.sandbox_model.rows if row.name == "docs")
+        running = next(row for row in app.sandbox_model.rows if row.running)
+        text = await app._fetch_sandbox_run(stopped)  # noqa: SLF001
+        assert await app._fetch_sandbox_run(running) == ""  # noqa: SLF001 - no call for a running one
+    assert text.startswith("did not finish: the sandbox stopped while it ran, started ")
+    assert text.endswith(" · log: defenseclaw sandbox logs docs")
+    assert calls.calls == [("sandbox_run_log", ("docs",), {"lines": 1})]
+    assert detached_run_text({"state": "exited", "exit": "0"}, "night-un") == (
+        "finished: exited with status 0 · log: defenseclaw sandbox logs night-un"
+    )
+    assert detached_run_text({}, "docs") == ""
 
 
 @pytest.mark.asyncio
@@ -691,18 +763,21 @@ def test_blocked_lines_read_like_the_cli_feed() -> None:
             _blocked(72, "168.63.129.16", 80, category="host_internal"),
             _blocked(73, "127.0.0.1", 8080, category="host_internal"),
             _blocked(74, "github.com", 22, reason="transparent_tcp_policy_denied", unblockable=True),
+            # GAP-0309: a folded line names the refusals it stands for.
+            _blocked(75, "pypi.org", 443, reason="transparent_tcp_policy_denied", repeats=5),
         ]
     )
     model.view = "activity"
     metadata = "(cloud metadata or link-local address, never reachable from a sandbox)"
     assert [row[3] for row in model.data_table_rows()] == [
+        "pypi.org (no OpenShell rule allows it) (and 5 more like it)",
         "github.com:22 (SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…))",
         "127.0.0.1:8080 (this machine)",
         f"168.63.129.16:80 {metadata}",
         f"169.254.169.254:80 {metadata}",
         f"169.254.169.254:80 {metadata}",
     ]
-    model.cursor = 0
+    model.cursor = 1
     assert dict(model.detail_pairs()[1])["Unblock"] == "no unblock opens SSH: use an HTTPS remote"
 
 
@@ -1235,6 +1310,8 @@ async def test_windows_shows_only_the_unsupported_message(monkeypatch) -> None:
         await pilot.pause()
         assert app.sandbox_model.view == "sandboxes"
         assert "t view" not in app.hint_text and "? help" in app.hint_text
+        # GAP-0256: the hint bar names the quit key; q only closes a drawer.
+        assert "Ctrl+C quit" in app.hint_text
         assert app.query_one("#sandboxes-controls").has_class("hidden")
 
 
@@ -1468,10 +1545,37 @@ async def test_pull_shows_applies_or_branches_through_the_command_line(fetch, mo
         await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
         await app._sandbox_pull("fix-tests")  # noqa: SLF001
     assert calls.calls == []
-    assert [action.action_id for action in menus[0].actions] == ["review", "apply", "branch", "cancel"]
+    assert [action.action_id for action in menus[0].actions] == ["review", "apply", "branch", "branch_name", "cancel"]
     assert "a copy of /home/dev/code/tests" in menus[0].subtitle
     argv = ["/opt/dc/defenseclaw-gateway", "sandbox", "pull", "fix-tests", *(flags or [])]
     assert ran == ([] if flags is None else [(argv, os.getcwd())])
+
+
+@pytest.mark.asyncio
+async def test_pull_puts_the_work_on_a_branch_the_user_names(fetch, monkeypatch) -> None:
+    # GAP-0266: the TUI fixed the branch to dc/<sandbox>; --branch-name took any.
+    from defenseclaw.tui.services.sandbox_state import branch_name_problem
+
+    fetch.sandboxes = [RUNNING, COPY]
+    app = DefenseClawTUI(config=_config())
+    ran = _fake_terminal(monkeypatch, app)
+    monkeypatch.setattr(app, "_sandbox_call", _Calls())
+    screens: list[Any] = []
+    answers = _screen_answers("branch_name", " dc/un-tui ", "branch_name", None)
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return await answers(screen)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_pull("fix-tests")  # noqa: SLF001
+        await app._sandbox_pull("fix-tests")  # noqa: SLF001 - the name editor cancelled
+    assert screens[1]._value == "dc/fix-tests"  # noqa: SLF001
+    assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "pull", "fix-tests", "--branch-name", "dc/un-tui"], os.getcwd())]
+    assert branch_name_problem("  ") and branch_name_problem("--force") and branch_name_problem("a b")
+    assert branch_name_problem("dc/un-tui") is None
 
 
 @pytest.mark.asyncio
@@ -2247,12 +2351,21 @@ async def test_stop_asks_first_then_runs_the_command_line(fetch, monkeypatch) ->
     calls = _Calls()
     ran = _fake_terminal(monkeypatch, app)
     monkeypatch.setattr(app, "_sandbox_call", calls)
-    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("cancel", "stop"))
+    answers = _screen_answers("cancel", "stop")
+    screens: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return await answers(screen)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
     async with app.run_test(size=(160, 44)):
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
         assert ran == []
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
     assert calls.calls == []
+    # GAP-0261: the dialog opens on Cancel, so s then Enter stops nothing.
+    assert screens[0].actions[screens[0].selected_index].action_id == "cancel"
     assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "stop", "myapp-claude-7f3a"], os.getcwd())]
 
 
@@ -2456,15 +2569,16 @@ async def test_irreversible_confirmations_focus_cancel(fetch, monkeypatch) -> No
     # Delete, and the undo of a running sandbox, ask on the command line,
     # whose questions default to no.
     assert [tuple(argv[1:3]) for argv, _cwd in ran] == [("sandbox", "delete"), ("sandbox", "undo")]
+    # Stop keeps the sandbox for connect, but ends the live agent session:
+    # a stray Enter after s did (GAP-0261), so it focuses Cancel too.
     for title in (
         "Unblock webhook.site in every sandbox?",
         "Always allow www.example.com?",
+        "Stop myapp-claude-7f3a?",
     ):
         screen = confirmations[title]
         assert screen.selected_index is not None, title
         assert screen.actions[screen.selected_index].action_id == "cancel", title
-    # Stop keeps the sandbox for connect: it keeps its default.
-    assert confirmations["Stop myapp-claude-7f3a?"].selected_index is None
 
 
 @pytest.mark.asyncio
@@ -2557,6 +2671,20 @@ def test_a_key_is_refused_once_when_its_ask_went_away() -> None:
     assert model.handle_key("x") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-3")
 
 
+def test_an_ask_that_went_away_while_its_view_was_hidden_is_no_lost_selection() -> None:
+    """GAP-0328: 7, then t to Asks with one ask listed: a said "The ask the
+    cursor was on is no longer waiting" for an ask the user never saw."""
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1)])
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-2", 2)])  # while the Sandboxes view was shown
+    assert model.handle_key("t").kind == "view" and model.handle_key("t").kind == "view" and model.view == "asks"
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-2")
+    # The same while another panel was shown: opening panel 7 shows the row.
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-3", 3)])
+    model.shown()
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-3")
+
+
 def test_the_activity_selection_follows_its_event() -> None:
     model = _model()
     model.add_events([BLOCKED])
@@ -2576,7 +2704,7 @@ def test_the_sandbox_selection_follows_its_row() -> None:
     assert model.handle_key("d") == SandboxPanelAction("delete", sandbox="docs")
     model.set_snapshot(STATUS, [RUNNING, COPY], [])
     refused = model.handle_key("d")
-    assert refused.kind == "hint" and "is gone" in refused.hint
+    assert refused.hint == "The sandbox the cursor was on is gone; nothing was done. Select one, then press the key again."
 
 
 @pytest.mark.asyncio

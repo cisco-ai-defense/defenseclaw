@@ -55,6 +55,10 @@ type Status struct {
 	// OpenShell gateway; Reason says why not.
 	Available bool   `json:"available"`
 	Reason    string `json:"reason,omitempty"`
+	// GatewayElsewhere says what holds this machine's OpenShell gateway
+	// port while sandboxes are off for this account and another account's
+	// process holds it: one gateway runs on a machine (GAP-0307).
+	GatewayElsewhere string `json:"gateway_elsewhere,omitempty"`
 	// Gateway describes the OpenShell gateway the daemon drives.
 	Gateway *Gateway `json:"gateway,omitempty"`
 	// IngressAddr and EgressAddr are the DefenseClaw listeners sandboxes
@@ -214,7 +218,10 @@ type Sandbox struct {
 	// no longer has, or "deleted" for a sandbox that is gone but whose
 	// pre-session snapshot is kept (delete --keep-snapshot, or deleted
 	// outside DefenseClaw): only undo, review and delete apply to it.
-	Phase       string `json:"phase"`
+	Phase string `json:"phase"`
+	// PhaseReason is why the sandbox is in the error phase, in words (its
+	// MicroVM's disk is full, what OpenShell says), when it is.
+	PhaseReason string `json:"phase_reason,omitempty"`
 	Pack        string `json:"pack,omitempty"`
 	PackDigest  string `json:"pack_digest,omitempty"`
 	Profile     string `json:"profile"`
@@ -224,6 +231,9 @@ type Sandbox struct {
 	// ProcessTree reports that the sandbox's processes are sampled while it
 	// runs (GET /sandboxes/{name}/processes, `sandbox ps`).
 	ProcessTree bool `json:"process_tree,omitempty"`
+	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
+	// posture includes, without its content, as the launch banner names it.
+	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`
 	// SessionYolo reports whether the session running now was launched in
 	// skip-permissions mode: Launch.Yolo as it was when the sandbox last
 	// became ready. Yolo and Launch.Yolo are what the next launch gets;
@@ -361,6 +371,12 @@ type HookCoverage struct {
 	HookFailed        int64     `json:"hook_failed,omitempty"`
 	LastHookFailure   string    `json:"last_hook_failure,omitempty"`
 	LastHookFailureAt time.Time `json:"last_hook_failure_at,omitzero"`
+	// ModelKeyRejected says the model API rejected the sandbox's model
+	// credential (Claude Code's StopFailure hook reported it) and how to
+	// hand the sandbox a fresh key, until a turn ends normally or a start
+	// hands it a new key. ModelKeyRejectedAt is the last rejection.
+	ModelKeyRejected   string    `json:"model_key_rejected,omitempty"`
+	ModelKeyRejectedAt time.Time `json:"model_key_rejected_at,omitzero"`
 	// IngressRefused counts the hook connections and requests to the
 	// DefenseClaw ingress that OpenShell refused (the sandbox's network
 	// policy does not allow its port or path).
@@ -403,17 +419,23 @@ type Endpoint struct {
 // a sandbox whose feed shows two ✗ destinations reports Blocked 2 however
 // often each was tried. BlockedRequests counts the refused requests.
 type EgressStats struct {
-	Destinations    int   `json:"destinations"`
-	Blocked         int   `json:"blocked"`
-	BlockedRequests int   `json:"blocked_requests"`
-	BytesUp         int64 `json:"bytes_up"`
-	BytesDown       int64 `json:"bytes_down"`
-	// ModelAPIs and ShadowAI count the AI destinations of the sandbox's
-	// destinations view (GET /sandboxes/{name}/destinations): its model
-	// provider and its harness's vendor, and the other AI APIs and
-	// inference-shaped hosts it reached or tried to reach.
-	ModelAPIs int `json:"model_apis,omitempty"`
-	ShadowAI  int `json:"shadow_ai,omitempty"`
+	Destinations    int `json:"destinations"`
+	Blocked         int `json:"blocked"`
+	BlockedRequests int `json:"blocked_requests"`
+	// UpstreamFailed counts the allowed tunnels and requests the egress
+	// proxy could not complete upstream (DestinationRow.Failed).
+	UpstreamFailed int   `json:"upstream_failed,omitempty"`
+	BytesUp        int64 `json:"bytes_up"`
+	BytesDown      int64 `json:"bytes_down"`
+	// ModelProviders, HarnessVendor and ShadowAI count the AI destinations
+	// of the sandbox's destinations view (GET /sandboxes/{name}/destinations)
+	// by the kind its KIND column names: its model provider, the AI APIs of
+	// its harness's vendor, and the other AI APIs and inference-shaped hosts
+	// it reached or tried to reach (one count of the first two read "3 model
+	// APIs" next to one model provider, GAP-0319).
+	ModelProviders int `json:"model_providers,omitempty"`
+	HarnessVendor  int `json:"harness_vendor,omitempty"`
+	ShadowAI       int `json:"shadow_ai,omitempty"`
 }
 
 // Destination kinds (DestinationRow.Kind), in the order they are told apart.
@@ -485,7 +507,11 @@ type DestinationRow struct {
 	Tunnels     int64 `json:"tunnels,omitempty"`
 	Refused     int64 `json:"refused,omitempty"`
 	Blocked     int64 `json:"blocked,omitempty"`
-	ModelTurns  int64 `json:"model_turns,omitempty"`
+	// Failed counts the tunnels and requests the proxy allowed and could
+	// not complete upstream (the host refused or dropped the connection,
+	// did not answer, or did not resolve); Tunnels does not count them.
+	Failed     int64 `json:"failed,omitempty"`
+	ModelTurns int64 `json:"model_turns,omitempty"`
 	// BytesUp and BytesDown are what the proxy relayed.
 	BytesUp   int64 `json:"bytes_up,omitempty"`
 	BytesDown int64 `json:"bytes_down,omitempty"`
@@ -753,6 +779,27 @@ const (
 	ApprovalFailed   = "failed"
 )
 
+// Who approved an ask: the Reason of the approval.resolved event of an
+// approval that was applied (ApprovalApplied).
+const (
+	ApprovedAutomatically = "automatic"
+	ApprovedByOperator    = "operator"
+	ApprovedByPolicy      = "policy"
+)
+
+// ApprovalApplied reports an approval.resolved event whose rule was
+// applied: the destination it names is open from then on.
+func ApprovalApplied(ev ActivityEvent) bool {
+	if ev.Kind != ActivityApprovalResolved {
+		return false
+	}
+	switch ev.Reason {
+	case ApprovedAutomatically, ApprovedByOperator, ApprovedByPolicy:
+		return true
+	}
+	return false
+}
+
 // Approval is one rare ask: an OpenShell draft proposal triage would not
 // decide on its own.
 type Approval struct {
@@ -944,6 +991,10 @@ type PolicyDecision struct {
 	Source      string `json:"source"`
 	Reason      string `json:"reason,omitempty"`
 	Unblockable bool   `json:"unblockable"`
+	// Ask is set for a destination that raises an ask the user answers
+	// (a --host-port of the sandbox not yet approved): not allowed until
+	// approved.
+	Ask bool `json:"ask,omitempty"`
 	// Direct names a provider of the sandbox (its --llm model endpoint, a
 	// --credential binding) whose OpenShell rule opens the destination to
 	// that provider's programs around the egress proxy.
@@ -1067,6 +1118,14 @@ const ReasonShadowAI = "shadow_ai"
 // verdict's.
 const ReasonHookFinding = "hook_finding"
 
+// UndecidedNote closes the reason of a sandbox verdict that let a tool
+// call run although a rule that blocks such calls matched it: the match
+// could not decide the call (GAP-0312). The feed and the session summary
+// say so, where they said only "allowed but flagged".
+const UndecidedNote = "The rule could not decide this call, so it ran: DefenseClaw decides only the commands it can read in full " +
+	"(a shell variable, a substitution or a construct it does not analyze leaves a match undecided). " +
+	"DefenseClaw recorded the finding for the user's review."
+
 // ReasonPolicyChanged is the Reason of the sandbox.lifecycle event a
 // sandbox gets when a configuration change moves the policy it runs under
 // (its pack, profile, network mode, approvals, skip-permissions or the
@@ -1088,6 +1147,25 @@ const (
 	ReasonHooksUnreachable = "hooks_unreachable"
 	ReasonHooksRestored    = "hooks_restored"
 )
+
+// ReasonToolHostRefused is the Reason of the (INFO) finding event the feed
+// gets the first time the policy refuses a host a tool of the harness calls
+// for every use (Claude Code's WebFetch and api.anthropic.com).
+const ReasonToolHostRefused = "tool_host_refused"
+
+// ReasonUnflushedStop is the Reason of the finding event a MicroVM gets
+// when it goes down without DefenseClaw stopping it: its last writes may
+// be lost (no flush).
+const ReasonUnflushedStop = "unflushed_stop"
+
+// ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
+// gets the first time the egress proxy could not complete an allowed
+// connection to a host upstream: an outage, not a policy block.
+const ReasonUpstreamFailed = "upstream_failed"
+
+// ReasonModelKeyRejected is the Reason of the finding event a sandbox gets
+// when the model API rejected its model credential (HookCoverage.ModelKeyRejected).
+const ReasonModelKeyRejected = "model_credential_rejected"
 
 // HooksUnreachableWarning opens every warning about hooks that do not
 // reach DefenseClaw; HooksDoctorHint closes it.
@@ -1135,6 +1213,9 @@ type ActivityEvent struct {
 	// it ends: BytesUp is what had been sent then, and the upload sent
 	// more than Threshold.
 	Threshold int64 `json:"threshold,omitempty"`
+	// Repeats counts the refusals like this one folded into it, after the
+	// first was reported on its own line ("(and N more like it)").
+	Repeats int `json:"repeats,omitempty"`
 	// Approval and hook fields.
 	ApprovalID string `json:"approval_id,omitempty"`
 	Tool       string `json:"tool,omitempty"`

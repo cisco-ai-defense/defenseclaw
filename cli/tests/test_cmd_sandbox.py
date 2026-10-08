@@ -311,12 +311,30 @@ def test_windows_is_refused_with_a_clear_message(monkeypatch: pytest.MonkeyPatch
     assert "Linux and macOS only" in result.output
 
 
+def test_windows_refusal_comes_before_a_broken_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0242: an unparsable config.yaml was reported (exit 1) instead of
+    # the Windows refusal (exit 3) for a feature that cannot run there.
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "windows")
+
+    def broken(**_kwargs: Any) -> None:
+        from defenseclaw.config import ConfigVersionError
+
+        raise ConfigVersionError("Cannot read the DefenseClaw configuration")
+
+    monkeypatch.setattr("defenseclaw.config.require_v8_config", broken)
+    monkeypatch.setattr(cmd_sandbox, "_execv", lambda *_: pytest.fail("exec on Windows"))
+    result = CliRunner().invoke(main_module.cli, ["sandbox", "list"])
+    assert result.exit_code == cmd_sandbox.UNSUPPORTED_EXIT_CODE, result.output
+    assert "Linux and macOS only" in result.output
+    assert "Cannot read" not in result.output
+
+
 def test_a_missing_gateway_binary_is_a_plain_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: None)
     result = CliRunner().invoke(sandbox, ["doctor"], obj=AppContext())
     assert result.exit_code == 1
-    assert "defenseclaw-gateway is not installed" in result.output
+    assert "defenseclaw-gateway was not found on PATH, next to this defenseclaw or in ~/.local/bin" in result.output
     assert "Traceback" not in result.output
 
 

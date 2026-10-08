@@ -46,7 +46,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
-  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t); each one also rings the bell here
 ```
 
 [Read the banner](/docs/sandboxes/first-session#read-the-banner) explains
@@ -133,6 +133,13 @@ host.
 Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They
 are not supported on Windows or WSL2, on Intel Macs, in `managed_enterprise`
 deployments, or when you run DefenseClaw as root.
+
+On Windows, DefenseClaw guards your agents through their connector hooks
+instead: Codex, Claude Code and the others run on your machine, and every
+tool call still goes through DefenseClaw's policy. See
+[Windows](/docs/get-started/windows) and
+[platform support](/docs/connectors#platform-support). Run sandboxes on a
+Linux machine or an Apple-silicon Mac.
 
 | Topic | Linux | macOS (Apple silicon) |
 | --- | --- | --- |

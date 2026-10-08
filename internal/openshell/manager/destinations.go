@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -58,8 +59,8 @@ import (
 // is its vendor's; any other catalogued AI provider is shadow AI, and so is
 // a host shaped like an inference endpoint the catalog does not know; any
 // other is blocked when it was only ever refused, else takes the category
-// the proxy allowed it under (a feed's, such as package_registry), else is
-// other. A shadow AI host
+// the proxy allowed it under (a feed's, such as package_registry), else the
+// curated allowlist's category for it, else is other. A shadow AI host
 // raises one shadow_ai finding per provider per session: LOW while the
 // sandbox was only refused it, MEDIUM once it reached it (a refusal first
 // and a contact later raise both).
@@ -157,7 +158,12 @@ type destRow struct {
 	Connections int64    `json:"connections,omitempty"`
 	Refused     int64    `json:"refused,omitempty"`
 	ModelTurns  int64    `json:"model_turns,omitempty"`
-	Rule        string   `json:"rule,omitempty"`
+	// Failed counts the proxy's allowed tunnels and requests that failed
+	// upstream (destinationFailed); failNoticed is set once the feed showed
+	// the host's first failure of this daemon run.
+	Failed      int64 `json:"failed,omitempty"`
+	failNoticed bool
+	Rule        string `json:"rule,omitempty"`
 	// ProviderRule marks a host OpenShell allowed under a provider rule of
 	// the sandbox's model provider, CredentialRule under one of a
 	// --credential binding (its endpoint).
@@ -222,6 +228,9 @@ type destinationSighting struct {
 	// credential marks a host one of the sandbox's --credential bindings
 	// names (and its model provider does not).
 	credential bool
+	// failed marks a proxy request the policy allowed and the host did not
+	// take (destinationFailed).
+	failed bool
 }
 
 // destinationInfo is what classifying and reporting a sandbox's
@@ -384,10 +393,15 @@ func (r *destRow) note(s destinationSighting) {
 		r.Ports = append(r.Ports, s.port)
 		slices.Sort(r.Ports)
 	}
-	if !s.denied {
+	if !s.denied && !s.failed {
 		r.Reached = true
 	}
 	switch {
+	case s.failed:
+		r.Failed++
+		if s.category != "" {
+			r.Category = truncate(s.category, 64)
+		}
 	case s.proxy && s.denied:
 		// The counter counts the proxy's tunnels and refusals.
 		r.Refusal = truncate(s.category, 64)
@@ -523,10 +537,12 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
 		return sandboxapi.DestinationCredential, provider, vendor
-	case harnessFetchHost(harnessName, r.Host, 0):
-		// The harness's own background request (OpenCode's model
-		// catalog), which an open pack lets through: its vendor's, no
-		// shadow AI.
+	case (hit != nil || catalog.InferenceShaped(r.Host)) && harnessFetchHost(harnessName, r.Host, 0):
+		// The harness's own background request to an AI host (OpenCode's
+		// model catalog), which an open pack lets through: its vendor's, no
+		// shadow AI. A fetch host that is no AI host (Codex's startup tip
+		// from raw.githubusercontent.com, which the agent's tools reach
+		// too) is what it is, not an AI API (GAP-0319).
 		if spec, ok := harness.Get(harnessName); ok {
 			provider = spec.DisplayName
 		}
@@ -537,13 +553,23 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 		return sandboxapi.DestinationOtherAI, catalogProviderName(hit), hit.Vendor
 	case catalog.InferenceShaped(r.Host):
 		return sandboxapi.DestinationUnknownAI, "", ""
-	case !r.contacted():
+	case !r.contacted() && r.Failed == 0:
+		// Only ever refused; a host the policy let through that failed
+		// upstream is no block (GAP-0340).
 		return sandboxapi.DestinationBlocked, "", ""
 	case r.Category != "":
 		return r.Category, "", ""
-	default:
-		return sandboxapi.DestinationOther, "", ""
 	}
+	// Reached without the allowlist's say (the open profile lets every
+	// host through uncategorised), a host the curated allowlist knows is
+	// still what it knows it as: package registry, source hosting
+	// (GAP-0198).
+	if allow, err := egress.BuiltinAllowlist(); err == nil {
+		if hit, ok := allow.Match(r.Host); ok {
+			return string(hit.Entry.Category), "", ""
+		}
+	}
+	return sandboxapi.DestinationOther, "", ""
 }
 
 // catalogProviderName is how a catalogued AI provider is named: by its
@@ -713,6 +739,57 @@ func (m *Manager) observeInference(b *box, provider, model string, failed bool, 
 	t.dirty = true
 }
 
+// destinationFailed counts a tunnel or request of b's that the egress
+// proxy allowed and could not complete upstream (the sandbox got a 502 or
+// 504: the host refused or reset the connection, did not answer, or its
+// name did not resolve), which the proxy's counter does not count. It
+// reports whether that is the host's first failure since the daemon
+// started, which the feed shows: an outage is not a policy block, and the
+// destination's clean record hid it (GAP-0284). A host that never answered
+// gets its row here: the proxy reports nothing else of a request whose dial
+// failed (GAP-0340: a name that did not resolve was only in the audit).
+func (m *Manager) destinationFailed(b *box, e egress.Event) bool {
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(e.Host)), ".")
+	if b == nil || host == "" || len(host) > 253 {
+		return false
+	}
+	info := m.destinationInfo(b)
+	if info.gone {
+		return false
+	}
+	m.destMu.Lock()
+	defer m.destMu.Unlock()
+	t := m.tableLocked(info.name)
+	r := t.row(m, host, e.Time, info.harness)
+	if r == nil {
+		return false
+	}
+	r.note(destinationSighting{host: host, port: e.Port, at: e.Time, proxy: true, failed: true, category: string(e.Category)})
+	t.dirty = true
+	first := !r.failNoticed
+	r.failNoticed = true
+	return first
+}
+
+// upstreamFailure says in a few words why the proxy could not complete a
+// request upstream: its error, or the gateway status the sandbox got.
+func upstreamFailure(e egress.Event) string {
+	why := strings.ToLower(firstNonEmpty(e.Error, e.Reason))
+	switch {
+	case e.Status == http.StatusGatewayTimeout || strings.Contains(why, "timeout") || strings.Contains(why, "deadline"):
+		return "it did not answer in time"
+	case strings.Contains(why, "no such host") || strings.Contains(why, "server misbehaving") || strings.Contains(why, "dns"):
+		return "its name did not resolve"
+	case strings.Contains(why, "refused"):
+		return "it refused the connection"
+	case strings.Contains(why, "reset") || strings.Contains(why, "broken pipe") || strings.Contains(why, "eof"):
+		return "it dropped the connection"
+	case why != "":
+		return truncate(sandboxapi.DisplayText(firstNonEmpty(e.Error, e.Reason)), 120)
+	}
+	return "it could not be reached"
+}
+
 // touchDestinations marks a sandbox's table changed: the proxy counted
 // more for it.
 func (m *Manager) touchDestinations(name string) {
@@ -854,7 +931,7 @@ func (r *destRow) view(info destinationInfo) sandboxapi.DestinationRow {
 		Host: sandboxapi.DisplayText(r.Host), Ports: slices.Clone(r.Ports), Kind: kind, Provider: sandboxapi.DisplayText(provider),
 		Vendor: sandboxapi.DisplayText(vendor), Category: firstNonEmpty(r.Category, r.Refusal), Rule: sandboxapi.DisplayText(r.Rule),
 		Sources: slices.Clone(r.Sources), Connections: r.Connections, Tunnels: total.Tunnels, Refused: r.Refused, Blocked: total.Blocked,
-		ModelTurns: r.ModelTurns, BytesUp: total.BytesUp, BytesDown: total.BytesDown, PID: r.PID,
+		Failed: r.Failed, ModelTurns: r.ModelTurns, BytesUp: total.BytesUp, BytesDown: total.BytesDown, PID: r.PID,
 		FirstSeen: r.FirstSeen, LastSeen: r.LastSeen,
 	}
 	if v.Sources == nil {
@@ -893,11 +970,14 @@ func (m *Manager) egressSummary(name, harnessName string, live map[string]egress
 			s.Blocked++
 		}
 		s.BlockedRequests += int(total.Blocked + r.Refused)
+		s.UpstreamFailed += int(r.Failed)
 		s.BytesUp += total.BytesUp
 		s.BytesDown += total.BytesDown
 		switch kind, _, _ := r.classify(harnessName); {
-		case kind == sandboxapi.DestinationModelProvider || kind == sandboxapi.DestinationHarnessVendor:
-			s.ModelAPIs++
+		case kind == sandboxapi.DestinationModelProvider:
+			s.ModelProviders++
+		case kind == sandboxapi.DestinationHarnessVendor:
+			s.HarnessVendor++
 		case sandboxapi.ShadowAIKind(kind):
 			s.ShadowAI++
 		}

@@ -357,21 +357,31 @@ func TestStreamGapAfterAGatewayRestart(t *testing.T) {
 	}
 }
 
-// A gateway that does not answer is recorded in words with the next step,
-// the client's error last (GAP-0169): another account's gateway on the port
-// read only "x509: certificate signed by unknown authority".
+// A gateway that does not answer is recorded in words with the next step
+// (GAP-0169): another account's gateway on the port read only "x509:
+// certificate signed by unknown authority".
+//
+// GAP-0317: a failure it can name is said in words only, in the record and
+// in the API's answer (`sandbox run`, status, the TUI); the client's error
+// stays for one it cannot name.
 func TestGatewayUnavailableSummary(t *testing.T) {
-	for _, tc := range []struct{ raw, want string }{
+	for _, tc := range []struct {
+		raw, want string
+		known     bool
+	}{
 		{`openshell: health: Unavailable: connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority"`,
-			"is not this account's"},
+			"is not this account's", true},
 		{`openshell: health: Unavailable: connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:17670: connect: connection refused"`,
-			"is not running"},
-		{"openshell: health: DeadlineExceeded: context deadline exceeded", "does not answer"},
+			"is not running: nothing listens on 127.0.0.1:17670", true},
+		{"openshell: health: DeadlineExceeded: context deadline exceeded", "does not answer", false},
 	} {
 		got := gatewayUnavailableSummary(errors.New(tc.raw))
 		if !strings.HasPrefix(got, "the OpenShell gateway ") || !strings.Contains(got, tc.want) ||
-			!strings.Contains(got, "run `defenseclaw sandbox doctor`") || !strings.HasSuffix(got, "("+tc.raw+")") {
+			!strings.Contains(got, "run `defenseclaw sandbox doctor`") || strings.Contains(got, tc.raw) != !tc.known {
 			t.Errorf("summary of %q = %q", tc.raw, got)
+		}
+		if msg := gatewayUnavailableError(errors.New(tc.raw)).Error(); strings.Contains(msg, tc.want) != tc.known || strings.Contains(msg, tc.raw) != !tc.known {
+			t.Errorf("answer for %q = %q", tc.raw, msg)
 		}
 	}
 }

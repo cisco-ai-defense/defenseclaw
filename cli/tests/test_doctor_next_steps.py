@@ -25,6 +25,7 @@ import os
 from contextlib import redirect_stdout
 from unittest import mock
 
+import pytest
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import _DoctorResult
 from defenseclaw.config_inspect import ConfigInspectError
@@ -319,6 +320,49 @@ def test_header_corrupt_audit_db_names_gateway_restart(tmp_path) -> None:
         cmd_doctor._check_audit_db_store(cfg, r)
     assert r.checks[-1]["status"] == "fail"
     assert "defenseclaw-gateway restart" in r.checks[-1]["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX folder modes")
+def test_a_writable_audit_folder_names_the_folder_not_a_restore(tmp_path) -> None:
+    # GAP-0300: a chmod 777 DEFENSECLAW_HOME read "restore the audit database
+    # from a trusted backup"; the folder was the fault and the database untouched.
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    home = tmp_path / "edge-ub-home"
+    home.mkdir()
+    home.chmod(0o777)
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="directory-chain-is-writable-by-others")
+    cfg = mock.MagicMock(audit_db=str(home / "audit.db"), data_dir=str(home))
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "fail"
+    assert row["remediation"] == f"chmod go-w {home}"
+    assert f"{home} can be written by other accounts" in row["detail"]
+
+
+def test_a_writable_folder_names_the_folder_for_the_device_key_too(tmp_path) -> None:
+    # GAP-0344: with the audit row fixed (GAP-0300), the Device identity row
+    # still sent the same chmod 777 home to a restore of the key from backup.
+    from defenseclaw.doctor_recovery import DeviceKeyHealthStatus
+
+    home = tmp_path / "edge-ub-home"
+    home.mkdir()
+    home.chmod(0o777)
+    health = mock.MagicMock(status=DeviceKeyHealthStatus.INVALID, reason_code="directory-chain-is-writable-by-others")
+    cfg = mock.MagicMock(data_dir=str(home))
+    cfg.gateway.device_key_file = str(home / "device.key")
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.doctor_recovery.inspect_device_key", return_value=health):
+        cmd_doctor._check_device_identity(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "fail"
+    assert row["remediation"] == f"chmod go-w {home}"
+    assert row["detail"] == (
+        f"{home} can be written by other accounts, so the device key in it is not trusted; "
+        "the key itself is untouched (directory-chain-is-writable-by-others)"
+    )
 
 
 def _bedrock_judge_cfg(tmp_path, auth_mode: str):
@@ -907,6 +951,10 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     recent = row("2026-10-03T06:10:00Z")
     assert "last 12 min ago" in recent["detail"]
     assert "defenseclaw setup <connector>" in recent["remediation"]
+    # GAP-0313: setup cannot change a running agent, such as Codex's
+    # background app-server that still sends the token it started with.
+    assert "keeps sending the old token until it restarts" in recent["remediation"]
+    assert "codex app-server daemon restart" in recent["remediation"]
 
     # GAP-2335: a few seconds old reads naturally, not "last 0 min ago".
     fresh = row("2026-10-03T06:21:55Z")

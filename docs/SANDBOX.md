@@ -1555,10 +1555,13 @@ Nothing is applied without a review: a session without a terminal, or with
 1. **Stage.** A git project becomes a sanitized shallow clone (depth
    `openshell.workdir.git_depth`, 200 by default; no hooks, config written by
    DefenseClaw, remotes without credentials) with the current working tree on
-   top. A plain folder is copied with a hidden git directory kept at
-   `/sandbox/.dc/git`. Secrets are held back by the mask rules, tracked files
-   included, and the committed versions of held-back files are removed from
-   the shipped history: the copy becomes a partial clone whose promisor
+   top. What git ignores and package caches (`node_modules/`, `.venv/`, build
+   output) are not copied; one warning after the upload names them, so the
+   dependencies are installed inside. A plain folder is copied with a hidden
+   git directory kept at `/sandbox/.dc/git`. Secrets are held back by the
+   mask rules, tracked files included, and the committed versions of
+   held-back files are removed from the shipped history: the copy becomes a
+   partial clone whose promisor
    remote has no URL, so asking git for one of those blobs fails instead of
    reading it. The size is checked first (`max_upload_mb`, 500 MiB in the
    `open` pack).
@@ -3015,7 +3018,8 @@ nothing of the vm driver, but the names of its caches carry the release
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, BuildKit through the buildx plugin,
-  host networking, file sharing, disk), systemd linger, the gateway service,
+  host networking, file sharing, disk), systemd linger (the `Login session`
+  row on macOS), the gateway service,
   CLI, ssh connection sharing, registration, mTLS files, gateway version and
   driver, global policy, bind mounts, OpenShell telemetry and the sandbox
   ports; on a vm gateway also `vm-driver` (e2fsprogs, the Hypervisor

@@ -626,7 +626,7 @@ func (a *App) preflight(ctx context.Context, api API) (*sandboxapi.Status, error
 		return nil, apiError(err)
 	}
 	if !st.Enabled {
-		return nil, errors.New(sandboxapi.DisabledMessage)
+		return nil, errors.New(st.OffMessage())
 	}
 	if !st.Available {
 		reason := firstNonEmpty(st.Reason, "the daemon is not connected to an OpenShell gateway")
@@ -1131,8 +1131,15 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 	if repoChanged {
 		ignored = append(ignored, "the changed repository policy "+packs.RepoPolicyPath)
 	}
+	next := "pass --new"
+	if sb.WorkdirMode == config.OpenShellWorkdirMount && !copyMode {
+		// The folder takes one live mount, and it is sb's.
+		next = "run with --new --copy, or delete " + sb.Name + " first (`" + CommandName + " delete " + sb.Name + "`)"
+	}
 	if len(ignored) > 0 {
-		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". "
+		// The way to get them is in the question, not only after a yes
+		// (GAP-0249).
+		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ", which only a new sandbox takes (" + next + "). "
 	}
 	if len(ignored) > 0 || len(grants) > 0 {
 		question += "Resume it anyway?"
@@ -1144,11 +1151,6 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 		return false, err
 	}
 	if len(ignored) > 0 {
-		next := "pass --new"
-		if sb.WorkdirMode == config.OpenShellWorkdirMount && !copyMode {
-			// The folder takes one live mount, and it is sb's.
-			next = "run with --new --copy, or delete " + sb.Name + " first (`" + CommandName + " delete " + sb.Name + "`)"
-		}
 		a.warn("resuming " + sb.Name + " without " + strings.Join(ignored, ", ") + " (they apply to a new sandbox: " + next + ")")
 	}
 	return true, a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
@@ -1479,7 +1481,8 @@ func (a *App) copyStageOptions(flags packs.Flags, name string) (workspace.StageO
 	home, _ := a.Home()
 	return workspace.StageOptions{
 		Project: flags.Project, Name: name, DataDir: a.dataDir(), Home: home, GitDepth: eff.Workspace.GitDepth,
-		MaxBytes: int64(eff.Workspace.MaxUploadMB) << 20, Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Replace: true,
+		MaxBytes: int64(eff.Workspace.MaxUploadMB) << 20, Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask,
+		UnmaskAsked: flags.Unmask, Replace: true,
 	}, nil
 }
 
@@ -1589,10 +1592,23 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	// its screen is the harness's, so a live session announces them in the
 	// terminal title (session.notice).
 	where := "shown here as they come"
-	if a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
+	live := a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args)
+	switch {
+	case b.o.Detach:
+		// Nothing in this terminal follows a background run (GAP-0345).
+		row("Asks", "the run is in the background, so watch for them: "+CommandName+" approvals --watch --sandbox "+sb.Name+
+			" (or `defenseclaw tui`: 7, then t)")
+	case live && titleTakers[sb.Harness]:
+		// The harness rewrites the title on and on (Claude Code's
+		// spinner): the title cannot be promised (GAP-0239).
+		row("Asks", firstNonEmpty(sb.HarnessName, sb.Harness)+" keeps this terminal's title, so watch for them in another terminal: "+
+			CommandName+" approvals --watch --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t); each one also rings the bell here")
+	case live:
 		where = "announced in this terminal's title as they come"
+		fallthrough
+	default:
+		row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
 	}
-	row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
 	if keys := sessionKeys[sb.Harness]; keys != "" && a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
 		row("Keys", keys)
 	}
@@ -1610,12 +1626,20 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		}
 	}
 	for _, w := range sb.Warnings {
-		if !b.shown[warningKey(w)] {
+		// The project's own warnings came with the Project lines above
+		// (GAP-0247).
+		if !b.shown[warningKey(w)] && (sb.Workspace == nil || sb.WorkdirMode == config.OpenShellWorkdirCopy || !slices.Contains(sb.Workspace.Warnings, w)) {
 			a.warn(w)
 		}
 	}
 	a.println()
 }
+
+// titleTakers are the harnesses that keep setting the terminal title
+// themselves while they run, so a notice there is overwritten at once:
+// Claude Code's spinner, and Codex, which names the project there
+// (GAP-0345).
+var titleTakers = map[string]bool{"claudecode": true, "codex": true}
 
 // hooksTierText is the banner's Hooks line for a sandbox whose hooks are
 // not in the managed tier: what of them the image protects and what the

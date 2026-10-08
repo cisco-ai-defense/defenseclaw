@@ -40,38 +40,38 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 8119,
-      "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
+      "size": 8934,
+      "sha256": "1da036b41531518fb1b4707bb61d85df0343dec6e92ec7b7f3d793fe58cb7a89"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6080,
-      "sha256": "4c902812d62c0e6aa34c9456ca928e3d2220acc200b76b91cf9256d75bf20281"
+      "size": 6076,
+      "sha256": "690611eadb4af43ffb7bc115345829a59a3db743d9d97c8444e7de3429682690"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5348,
-      "sha256": "162409810ca283d72527a14334c8c4ce300d0d8c06d7302af49b6f0ab37c4e30"
+      "size": 5344,
+      "sha256": "16758b9ee447c6a278ee5413c4f33af1aa49deda3fc5c5b1b24e2a31e97d0aaf"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5866,
-      "sha256": "b87cbb0023aee65e2f9164cf1becf16a69892fbe495920bd1f5bddaf36371e69"
+      "size": 5862,
+      "sha256": "97bab8eb73897066613ff0f909df896fc1c4d838a30ab9813b5efecd3e9b4c88"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6250,
-      "sha256": "c2cbe83f57d75c3e7bffad5b40d834b931047f33bc21c38ee522e455a7661f9b"
+      "size": 6246,
+      "sha256": "8452ad96e0ca242f330c3df0d921809fc95d6296912039c0587cf4393b7abbd0"
     },
     "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6347,
-      "sha256": "0cf0cca95e0202a1bad44217d1f6eb383b1482baa5bfd58e072bd720fe04bae5"
+      "size": 6343,
+      "sha256": "fd0e9302e7830c8107939d3b089dcad58ad2358cf398a6511bf1180f4311cb09"
     },
     "/usr/local/lib/defenseclaw/openhands/hooks.json": {
       "mode": "-rw-r--r--",

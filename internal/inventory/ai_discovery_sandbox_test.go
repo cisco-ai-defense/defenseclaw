@@ -210,6 +210,30 @@ func TestScanSandboxRootMarksACollectionShortfallPartial(t *testing.T) {
 	}
 }
 
+// GAP-0293: a skills folder past the evidence cap makes the scan partial,
+// and the report says the names stop there.
+func TestScanSandboxRootSaysANamesListStopsAtItsCap(t *testing.T) {
+	skipSandboxScansOnWindows(t)
+	root := t.TempDir()
+	files := map[string]string{}
+	for i := 0; i < maxEvidencePerSignal+40; i++ {
+		files[fmt.Sprintf("/sandbox/.dccert/skills/skill_%03d/", i)] = ""
+	}
+	writeSandboxTree(t, root, files)
+	report, err := ScanSandboxRoot(context.Background(), SandboxScan{Root: root, Home: "/sandbox"},
+		SandboxScanOptions{Mode: "enhanced", MaxFilesPerScan: 1000}, []AISignature{sandboxTestSignature()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := report.Summary.DetectorErrors["skill"]
+	if report.Summary.Result != "partial" || !strings.Contains(note, "DC Cert Agent lists only its first 255 names") {
+		t.Fatalf("summary = %+v, want partial naming the capped skills", report.Summary)
+	}
+	if err := ValidateUserScanReport(report, []AISignature{sandboxTestSignature()}); err != nil {
+		t.Fatalf("the report is refused: %v", err)
+	}
+}
+
 func TestScanSandboxRootRefusesARelativeTree(t *testing.T) {
 	if _, err := ScanSandboxRoot(context.Background(), SandboxScan{Root: "relative", Home: "/sandbox"}, SandboxScanOptions{}, nil); err == nil {
 		t.Fatal("want a relative tree refused")
@@ -262,6 +286,38 @@ func TestPlanSandboxScanNamesTheSandboxsPaths(t *testing.T) {
 	if err != nil || len(plan.Walk) != 0 || !plan.EnvNames {
 		t.Fatalf("plan = %+v, %v, want no walk without a project, and environment names", plan, err)
 	}
+}
+
+// A skill Claude Code keeps in the project (.claude/skills/<name>/SKILL.md)
+// is collected and named like one in its home (GAP-0280).
+func TestScanSandboxRootNamesClaudeCodeProjectSkills(t *testing.T) {
+	skipSandboxScansOnWindows(t)
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := SandboxScan{Home: "/sandbox", Workspace: "/sandbox/work/repo"}
+	plan, err := PlanSandboxScan(scan, SandboxScanOptions{}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(plan.Dirs, SandboxDir{Path: "/sandbox/work/repo/.claude/skills", Depth: sandboxSkillDepth}) {
+		t.Fatalf("dirs = %v, want the project's .claude/skills", plan.Dirs)
+	}
+	// The running agent backs the shared .claude/skills folder (GAP-1378).
+	scan.Root = t.TempDir()
+	scan.Processes = []SandboxProcess{{PID: 42, PPID: 1, Comm: "claude", StartedAt: time.Now().Add(-time.Minute)}}
+	writeSandboxTree(t, scan.Root, map[string]string{"/sandbox/work/repo/.claude/skills/dccert-demo/SKILL.md": "# dccert-block-marker\n"})
+	report, err := ScanSandboxRoot(context.Background(), scan, SandboxScanOptions{Mode: "enhanced"}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sig := range report.Signals {
+		if sig.Detector == "skill" && sig.Product == "Claude Code" && slices.Contains(sig.Basenames, "dccert-demo") {
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want the Claude Code project skill dccert-demo", report.Signals)
 }
 
 func sandboxScanFixture(t *testing.T) AIDiscoveryReport {

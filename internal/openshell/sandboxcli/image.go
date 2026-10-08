@@ -419,7 +419,9 @@ func (a *App) vmDiskShortage(ctx context.Context, d openshell.Driver, spec *harn
 	}
 	// An image to build first: its size is not known yet.
 	size, _ := a.Images.Size(ctx, spec, image.MicroVMTarget(d), ref)
-	return openshell.VMDiskShortage(a.tildePath(dir), free, size, what)
+	// The first starts under way take their room first (GAP-0219).
+	free, inFlight := image.FreeAfterStaging(dir, free, size, a.Now())
+	return openshell.VMDiskShortage(a.tildePath(dir), free, size, what+image.UnderWay(inFlight))
 }
 
 // gatewayDriverNow is the compute driver of the gateway sandboxes start
@@ -528,12 +530,15 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 	driver, driverKnown := a.gatewayDriverKnown(ctx)
 	microVMGateway := image.MicroVMTarget(driver)
 	rows := make([][]string, 0, len(recs))
-	var missing []string
+	var missing, superseded []string
 	unused := 0
 	for _, r := range recs {
 		if gone[r.Tag] {
 			missing = append(missing, fmt.Sprintf("%s (%s %s)", r.Tag, r.Connector, r.HarnessVersion))
 			continue
+		}
+		if r.DefenseClawVersion != manager.ImageVersion() {
+			superseded = append(superseded, r.Tag)
 		}
 		verified := "no"
 		if r.HookFireVerified {
@@ -560,6 +565,11 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 		a.note(fmt.Sprintf("this gateway runs sandboxes on the docker driver and boots only the docker images: it does not use the %s for MicroVMs",
 			plural(int64(unused), "image", "images")))
 	}
+	if len(superseded) > 0 {
+		// An upgrade's images are built on the next run (GAP-0320).
+		a.note(fmt.Sprintf("built by another DefenseClaw build than this one (%s), so no new sandbox uses them: %s; the next run of each harness builds its image "+
+			"for this build, and `%s image prune` removes these unless a sandbox runs one", manager.ImageVersion(), strings.Join(superseded, ", "), CommandName))
+	}
 	if len(missing) > 0 {
 		a.note(fmt.Sprintf("recorded but no longer in Docker: %s; the next run of the harness builds its image again, and `%s image prune` forgets the record",
 			strings.Join(missing, ", "), CommandName))
@@ -585,7 +595,8 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 // removed whatever the list says (staleVMDisks).
 func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	a.defaults()
-	opts := image.PruneOptions{DryRun: dryRun}
+	// Another DefenseClaw build's images are not current (GAP-0320).
+	opts := image.PruneOptions{DryRun: dryRun, DefenseClawVersion: manager.ImageVersion()}
 	vm, _ := openshell.LookupDriver(string(openshell.DriverVM))
 	listed := false
 	if api, err := a.api(); err == nil {
@@ -613,7 +624,8 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 		verb = "would remove"
 	}
 	stale, release := a.staleVMDisks(ctx)
-	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 && len(stale.disks) == 0 {
+	staging := a.abandonedVMStaging()
+	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 && len(stale.disks) == 0 && len(staging.disks) == 0 {
 		a.ok("nothing to prune")
 	}
 	for _, t := range rep.Removed {
@@ -656,7 +668,50 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	if len(stale.disks) > 0 {
 		a.removeStaleVMDisks(stale, release, dryRun)
 	}
+	if len(staging.disks) > 0 {
+		a.removeVMStaging(staging, dryRun)
+	}
 	return nil
+}
+
+// abandonedVMStaging lists the half-prepared MicroVM disks in the driver's
+// image cache that nothing has written to for image.VMStagingIdle: what a
+// first start that failed or was cancelled left (GAP-0218).
+func (a *App) abandonedVMStaging() vmDiskSet {
+	set := vmDiskSet{dir: a.vmImageCache()}
+	for _, d := range image.VMStaging(set.dir) {
+		if a.Now().Sub(d.Changed) >= image.VMStagingIdle {
+			set.disks = append(set.disks, d)
+			set.size += d.Bytes
+		}
+	}
+	return set
+}
+
+// removeVMStaging removes the half-prepared disks abandonedVMStaging
+// listed and says what it freed; with dryRun, what it would remove.
+func (a *App) removeVMStaging(set vmDiskSet, dryRun bool) {
+	what := func(n int, size int64) string {
+		return fmt.Sprintf("%s that failed or cancelled first starts left in %s (%s)", plural(int64(n), "half-prepared MicroVM disk", "half-prepared MicroVM disks"),
+			a.tildePath(set.dir), humanBytes(size))
+	}
+	if dryRun {
+		a.ok("would remove the " + what(len(set.disks), set.size))
+		return
+	}
+	var removed int
+	var freed int64
+	for _, d := range set.disks {
+		if err := image.RemoveVMStaging(d); err != nil {
+			a.warn("could not remove " + a.tildePath(d.Path) + ": " + err.Error())
+			continue
+		}
+		removed++
+		freed += d.Bytes
+	}
+	if removed > 0 {
+		a.ok("removed the " + what(removed, freed))
+	}
 }
 
 // staleVMDisks lists the disks in the MicroVM driver's image cache that

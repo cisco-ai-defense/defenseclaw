@@ -387,6 +387,8 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 	if spec.MicroVM {
 		b.WriteString(localhostStep())
 	}
+	py := harness.WorkloadPythonStep()
+	fmt.Fprintf(&b, "# %s\nRUN %s\n", py.Comment, py.Run)
 	for _, step := range steps {
 		fmt.Fprintf(&b, "# %s\n", step.Comment)
 		fmt.Fprintf(&b, "RUN %s\n", step.Run)

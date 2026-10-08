@@ -72,6 +72,17 @@ func TestMetadataBlocksAreNotThisMachine(t *testing.T) {
 // TestSSHBlocksSayUseHTTPS (GAP-0090, GAP-0111): git over SSH failed with
 // only the client's "Permission denied", and the feed offered an unblock
 // that cannot open port 22. A refused port 22 says to use an HTTPS remote.
+// GAP-0309: the second line of a folded burst of refusals read like the
+// first; it names the refusals it stands for.
+func TestFoldedRefusalsNameTheirCount(t *testing.T) {
+	ta := newTestApp(t, "")
+	line := ta.activityLine(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Host: "pypi.org", Port: 443,
+		Reason: "transparent_tcp_policy_denied", Repeats: 5, Time: ta.Now()}, false)
+	if !strings.HasSuffix(line, "pypi.org (no OpenShell rule allows it) (and 5 more like it)") {
+		t.Fatalf("line = %q", line)
+	}
+}
+
 func TestSSHBlocksSayUseHTTPS(t *testing.T) {
 	ta := newTestApp(t, "")
 	line := ta.activityLine(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "github.com", Port: 22,

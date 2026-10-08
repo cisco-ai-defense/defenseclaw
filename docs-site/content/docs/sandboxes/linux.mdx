@@ -118,6 +118,7 @@ Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gatewa
   Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
     Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
     Codex (codex)         model credential ~/.codex/auth.json ✓
+  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
   ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
 Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
 Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]
@@ -127,6 +128,36 @@ Build the Claude Code image now? (the first build downloads about 3 GB; otherwis
   ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972)
 
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
+```
+
+On a machine that already has OpenShell, the questions come in another
+order. Here OpenShell 0.1.1 is installed, its gateway service is not
+started for this account, and the gateway's configuration selects a
+compute driver DefenseClaw does not drive (the answers are the defaults;
+some lines are shortened):
+
+```text
+DefenseClaw sandbox setup
+  Checking this machine…  ✓ linux/amd64  ✓ Landlock  ✓ Docker 29.8.1  ⚠ OpenShell 0.1.1 (0.1.2 available)
+  ✗ Gateway service: openshell-gateway is inactive (dead)
+Fix "Gateway service" now: start the gateway and enable it at login, then register it (openshell gateway add https://127.0.0.1:17670 --local --name openshell)? [Y/n]
+  fixing "Gateway service"…
+  ✓ fixed "Gateway service"
+Upgrade OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's 0.1.2 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [y/N]
+  OpenShell 0.1.1 at /bin/openshell; OpenShell 0.1.2 fixes a supervisor bug that can stall a sandbox's first connection, and cuts the CPU an idle sandbox uses
+  → upgrade OpenShell to 0.1.2 in place (this pulls its supervisor images from ghcr.io and restarts the gateway, which drops the connections of every sandbox on it): defenseclaw sandbox setup --install-openshell
+Allow sandboxes to mount the project folder you launch from? (…) [Y/n]
+Disable OpenShell's anonymous usage telemetry? (…) [Y/n]
+Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the "podman" compute driver, which DefenseClaw does not drive; sandboxes made on the current driver cannot start after the switch) [Y/n]
+  OpenShell gateway configuration changes
+    edit /home/alice/.config/openshell/gateway.toml (a timestamped backup is kept)
+      …
+      set [openshell.gateway] compute_driver = "docker"
+    …
+    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again unless it is switched back (one gateway runs one driver)
+  ✓ gateway configured and restarted
+  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
+  …
 ```
 
 </Step>
@@ -149,6 +180,13 @@ Build the Claude Code image now? (the first build downloads about 3 GB; otherwis
   no Claude Code or Codex sandbox can start (DefenseClaw mounts their
   per-run settings read-only, on a `--copy` run too); other harnesses run
   on a copy.
+- **The compute driver.** DefenseClaw drives OpenShell's `docker` driver on
+  Linux. When the gateway's configuration selects another one, such as
+  `podman`, setup offers to switch it to `docker` in the same edit of
+  `gateway.toml` (`compute_driver = "docker"` under `[openshell.gateway]`)
+  and restart. One gateway runs one driver, so sandboxes made on the old
+  driver cannot start after the switch unless you switch it back. Say no,
+  and no sandbox starts until the gateway runs `docker`.
 - **DefenseClaw's config** gets `openshell.enabled: true` and the harnesses
   you set up in `openshell.harnesses`.
 - **The harness images** are built in Docker, and each is checked to prove
@@ -225,11 +263,13 @@ terminal:
 
 ```text
 Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
-  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
   Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t); each one also rings the bell here
 ```
 
 Continue with [your first session](/docs/sandboxes/first-session).
@@ -329,17 +369,39 @@ and runs as the `openshell-gateway` user service of the account that
 started it. A machine runs one gateway, so only that account can run
 sandboxes: a second account's gateway cannot get the port. On a second
 account, `sandbox setup` and `sandbox doctor` say that the gateway's port
-is held by a process of another account, and start nothing.
+is held by a process of another account, and start nothing. The doctor
+skips the checks that follow from it (`not checked: the OpenShell gateway
+on this machine is another account's`): the gateway, its registration and
+Docker, whose fixes would not help. `sandbox list`, `sandbox status`,
+`sandbox run` and the TUI's Sandboxes panel say the same in that account
+(`OpenShell sandboxes are off for this account, and another account runs
+this machine's OpenShell gateway`, with what holds the port), instead of
+sending you to `sandbox setup`.
 
 To hand sandboxes to another account, stop the gateway in the account that
-runs it:
+runs it. `disable --now` also keeps it from starting again at that
+account's next login or boot, which a plain `systemctl --user stop` would
+not, taking the port back:
 
 ```bash
 systemctl --user disable --now openshell-gateway
 ```
 
-Then run `defenseclaw sandbox setup` in the other account. Several users
-on one host are tracked upstream in
+Then run `defenseclaw sandbox setup` in the other account.
+
+<Callout type="warn" title="Handing the gateway over stops the sandboxes it runs">
+When the gateway stops, every sandbox it runs stops with it, and an agent
+working in one loses its session. A live-mounted sandbox's edits are
+already in your folder and its undo point is kept; a copy keeps its work
+in the sandbox. Neither account can connect to those sandboxes, or pull a
+copy's work, until the account that made them runs the gateway again. To
+hand it back, stop it in the other account
+(`systemctl --user disable --now openshell-gateway`), start it in yours
+(`systemctl --user enable --now openshell-gateway`), then resume a sandbox
+with `defenseclaw sandbox connect NAME`.
+</Callout>
+
+Several users on one host are tracked upstream in
 [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
 
 Membership in the `docker` group is root-equivalent on the machine.
@@ -367,7 +429,7 @@ machine.
 | `the DefenseClaw daemon is not running` (also at the end of `sandbox setup`), or `the DefenseClaw gateway has not started on this account yet` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
 | `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
-| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. The Python harnesses (Hermes Agent, OpenHands, OmniGent) carry a DefenseClaw workaround. Other Python programs in the sandbox, such as `pip`, keep failing until an OpenShell release after 0.1.2 fixes it. |
+| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses (Hermes Agent, OpenHands, OmniGent) and in the image's own Python: `python3`, `pip` and the virtual environments you make with them. A Python you download inside the sandbox, for example with `uv python install`, keeps failing until an OpenShell release after 0.1.2 fixes it: use the image's `python3`, or `uv pip`, which is not affected. |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

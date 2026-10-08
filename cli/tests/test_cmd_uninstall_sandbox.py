@@ -66,6 +66,28 @@ class SandboxTeardownTests(unittest.TestCase):
         self.assertIn("never pulled back is deleted with it", buf.getvalue())
         self.assertIn("sandbox teardown --dry-run", buf.getvalue())
 
+    def test_the_plan_names_live_mounted_sandboxes_and_what_stays(self):
+        # GAP-0295: nothing said a live sandbox stops, loses its undo point,
+        # and that what its agent wrote in the folder stays.
+        listed = (
+            '{"sandboxes": [{"name": "edge-ub-uninstall", "workdir_mode": "mount", "phase": "ready"},'
+            ' {"name": "copy-one", "workdir_mode": "copy", "phase": "stopped"}]}'
+        )
+        with patch("subprocess.run", return_value=_completed(stdout=listed)) as run:
+            live = cmd_uninstall._live_mounted_sandboxes(self.gateway)
+        self.assertEqual(run.call_args.args[0], [self.gateway, "sandbox", "list", "--output", "json"])
+        self.assertEqual(live, ("edge-ub-uninstall",))
+        plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, data_dir=self._tmp.name, live_sandboxes=live)
+        with capture_click_output() as buf:
+            cmd_uninstall._render_plan(plan, dry_run=True)
+        self.assertIn(
+            "a live-mounted sandbox (edge-ub-uninstall) is stopped and deleted with its undo point; what its agent "
+            "already wrote in your folder stays as it is",
+            " ".join(buf.getvalue().split()),
+        )
+        with patch("subprocess.run", return_value=_completed(returncode=1)):
+            self.assertEqual(cmd_uninstall._live_mounted_sandboxes(self.gateway), ())
+
     def test_teardown_runs_before_the_sidecar_stops(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)
         order = []

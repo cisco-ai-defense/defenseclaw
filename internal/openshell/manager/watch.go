@@ -373,13 +373,28 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if r.Class == ocsf.ClassHTTP {
 			ev.Scheme = schemeOf(r.URL)
 		}
-		if !m.connectionRequest(b, r, host, at) {
+		if r.Denied() && !quiet && r.Port == 22 && !replayed {
+			// The agent's git sees only "Permission denied": its next
+			// post-tool hook says to use HTTPS (GAP-0216).
+			m.refusals.noteDirect(id.BindingID, name, host, r.Port, NoteSSH, m.now())
+		}
+		var feed *sandboxapi.ActivityEvent
+		if r.Denied() && !quiet {
+			feed = &sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
+				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (" + openShellDenialText(r.Reason, host, r.Port) + ")",
+				Replayed: replayed}
+		}
+		recordFolded, lineFolded := false, false
+		if ev.Blocked && ev.Severity == "" && !replayed && m.sink != nil {
+			recordFolded, lineFolded = m.sink.foldOpenShell(name, ev, feed)
+		}
+		// A repeat of an alerted refusal is counted, then recorded once; a
+		// repeat of its feed line, by any program, likewise (GAP-0329).
+		if !recordFolded && !m.connectionRequest(b, r, host, at) {
 			m.tel.RecordSandboxEgress(ctx, ev)
 		}
-		if r.Denied() && !quiet {
-			m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
-				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
-				Replayed: replayed})
+		if feed != nil && !lineFolded {
+			m.publishEgress(*feed)
 		}
 	case ocsf.ClassProcess:
 		if harnessActivity(harnessName, r.Binary) {
@@ -913,6 +928,20 @@ func ocsfSeverity(s ocsf.Severity) string {
 	default:
 		return "INFO"
 	}
+}
+
+// openShellDenialText is why OpenShell refused a direct connection, worded
+// as `sandbox activity` and the TUI word the event: the stored message read
+// "direct connection denied by OpenShell" where they read "no OpenShell
+// rule allows it" (GAP-0309).
+func openShellDenialText(reason, host string, port int) string {
+	switch {
+	case port == 22:
+		return sandboxapi.SSHBlockedText(host)
+	case strings.TrimSpace(reason) == "":
+		return "direct connection denied by OpenShell"
+	}
+	return sandboxapi.BlockedText(reason, host)
 }
 
 func schemeOf(raw string) string {

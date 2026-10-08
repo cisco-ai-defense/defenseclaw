@@ -2923,6 +2923,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
         if panel == "sandboxes":
+            self.sandbox_model.shown()
             self._schedule_sandbox_poll()
         if panel == "policies":
             model = self.policy_model
@@ -5220,6 +5221,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if self._sandbox_supported():
                 # Under 100 columns the table leaves out what Enter's detail shows.
                 compact = 0 < self.size.width < 100
+                self.sandbox_model.set_alert_events(self.alerts_model.audit_events)
                 self._table_columns = self.sandbox_model.data_table_columns(compact)
                 # The table spans the body (6 columns of borders and padding).
                 self._table_rows = self.sandbox_model.data_table_rows(compact, max(0, self.size.width - 6))
@@ -14670,6 +14672,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if self._snapshot_panel_revisions.get("alerts") != snapshot.revision:
             self.alerts_model.set_events(list(snapshot.alert_events))
+            self.alerts_model.detection_only = snapshot.detection_only
             self._snapshot_panel_revisions["alerts"] = snapshot.revision
 
         self._apply_enforcement_counts(snapshot)

@@ -88,12 +88,16 @@ func TestDestinationsAreClassified(t *testing.T) {
 	proxy(egress.EventBlocked, "inference.example-llm.net", egress.CategoryNotAllowlisted)
 	proxy(egress.EventAllowed, "registry.npmjs.org", egress.CategoryPackageRegistry)
 	proxy(egress.EventAllowed, "api.mailgun.net", "")
+	// GAP-0198: allowed uncategorised (the open profile), a host on the
+	// curated allowlist still reads as what it is.
+	proxy(egress.EventAllowed, "pypi.org", "")
 
 	rows := destinationKinds(t, e, "destbox")
 	for host, kind := range map[string]string{
 		"api.anthropic.com": sandboxapi.DestinationModelProvider, "claude.ai": sandboxapi.DestinationHarnessVendor,
 		"api.openai.com": sandboxapi.DestinationOtherAI, "inference.example-llm.net": sandboxapi.DestinationUnknownAI,
 		"registry.npmjs.org": string(egress.CategoryPackageRegistry), "evil.example.com": sandboxapi.DestinationBlocked,
+		"pypi.org": string(egress.CategoryPackageRegistry),
 		// An ordinary REST API whose name happens to hold the letters "ai".
 		"api.mailgun.net": sandboxapi.DestinationOther,
 	} {
@@ -135,7 +139,7 @@ func TestDestinationsAreClassified(t *testing.T) {
 	if feed := e.events("destbox", sandboxapi.ActivityFinding, sandboxapi.ReasonShadowAI); len(feed) != 3 {
 		t.Errorf("shadow AI feed = %+v", feed)
 	}
-	if v := e.get("destbox"); v.Egress.ModelAPIs != 2 || v.Egress.ShadowAI != 2 {
+	if v := e.get("destbox"); v.Egress.ModelProviders != 1 || v.Egress.HarnessVendor != 1 || v.Egress.ShadowAI != 2 {
 		t.Errorf("egress summary = %+v", v.Egress)
 	}
 
@@ -215,7 +219,7 @@ func TestDestinationsTellCredentialEndpointsFromTheModelProvider(t *testing.T) {
 	if rows["api.anthropic.com"].Kind != sandboxapi.DestinationModelProvider || rows["api.stripe.com"].Kind != sandboxapi.DestinationCredential {
 		t.Fatalf("rows = %+v", rows)
 	}
-	if v := e.get("credbox"); v.Egress.ModelAPIs != 1 || v.Egress.ShadowAI != 0 {
+	if v := e.get("credbox"); v.Egress.ModelProviders != 1 || v.Egress.HarnessVendor != 0 || v.Egress.ShadowAI != 0 {
 		t.Fatalf("egress summary = %+v", v.Egress)
 	}
 }
@@ -469,5 +473,15 @@ func TestHermesModelMetadataIsItsOwn(t *testing.T) {
 	}
 	if kind, _, _ := r.classify("claudecode"); kind != sandboxapi.DestinationUnknownAI {
 		t.Fatalf("claudecode: %s, want unknown AI", kind)
+	}
+}
+
+// Codex fetches its startup tip from raw.githubusercontent.com, which is a
+// code host, not its vendor's AI API: in a Codex sandbox it reads as source
+// hosting and the Egress line counts no AI for it (GAP-0319).
+func TestAHarnessFetchFromACodeHostIsNoAIAPI(t *testing.T) {
+	r := &destRow{Host: "raw.githubusercontent.com", Connections: 1}
+	if kind, provider, _ := r.classify("codex"); kind != string(egress.CategorySourceHosting) || provider != "" {
+		t.Fatalf("codex: %s %q, want source hosting", kind, provider)
 	}
 }

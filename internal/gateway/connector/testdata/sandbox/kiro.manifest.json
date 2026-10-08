@@ -40,38 +40,38 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 8119,
-      "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
+      "size": 8934,
+      "sha256": "1da036b41531518fb1b4707bb61d85df0343dec6e92ec7b7f3d793fe58cb7a89"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6075,
-      "sha256": "74876854ee207b9ce6f501dd086f8fd3e8276e43632ccb5d121715774fa52239"
+      "size": 6071,
+      "sha256": "f329790d3aa39b80533f3358701b00faccefc65a505d4fa110f52712e29aded6"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5343,
-      "sha256": "8432419c91e876721900e15dc6a96c15251ca0eafa196d5ea25ff3400f1004ba"
+      "size": 5339,
+      "sha256": "a93bc7c207d2c109b18fa0f8cc77b889087617ed321f9884031bc05c8dfa8e3e"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5861,
-      "sha256": "d9d264a6e59fa4c6f8f8d4c3affab5e86cfc2134d6092af2af57c63f6bee9bd0"
+      "size": 5857,
+      "sha256": "017ac33469215aeaefb8a6f422a8345a603c9355aa116c1893e075851ba137f3"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6245,
-      "sha256": "f9ddf43c968783f9fd4f5889f69840059f6870eca924f9c480e0f7139c9bc9fa"
+      "size": 6241,
+      "sha256": "2d18f6a9ef46821d61a9d684b8f7b47f970e48605c45a6f36a78458ce7740679"
     },
     "/usr/local/lib/defenseclaw/hooks/kiro-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7935,
-      "sha256": "1b73e84f4f4ea2203ad779249bb8791c3ff85d3d7c098453f0a4e9e7907c84e4"
+      "size": 7931,
+      "sha256": "02eda05e8d1724508c6493574187560d2ac0e7f7a01d04e7b6447d39f8c32b4d"
     },
     "/usr/local/lib/defenseclaw/kiro/defenseclaw.json": {
       "mode": "-rw-r--r--",

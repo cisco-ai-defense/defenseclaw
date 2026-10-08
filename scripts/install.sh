@@ -609,7 +609,12 @@ fetch_failed() {
     die "Could not get ${asset} for ${VERSION}; nothing was changed"
 }
 
-info "Downloading and verifying release assets"
+# --local copies the assets, so it says so instead of "Downloading" (GAP-0190).
+if [[ -n "${LOCAL_DIR}" ]]; then
+    info "Verifying the release assets in ${LOCAL_DIR}"
+else
+    info "Downloading and verifying release assets"
+fi
 fetch checksums.txt "${STAGING}/checksums.txt" || fetch_failed checksums.txt
 checksum_ok() {
     local file="$1" name expected
@@ -664,7 +669,7 @@ for binary in ${MANAGED_BINARIES}; do
     fi
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
-    || die "The downloaded gateway does not report version ${VERSION}"
+    || die "The gateway in ${ARCHIVE} does not report version ${VERSION}"
 
 info "Building the Python environment (a first install can take several minutes)"
 make_venv() {
@@ -715,7 +720,15 @@ elif [[ -n "${PREV_VERSION}" ]]; then
         warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded (${DEFENSECLAW_HOME}/audit.db, $(du -sh "${DEFENSECLAW_HOME}/audit.db" 2>/dev/null | awk '{print $1}')) are deleted when DefenseClaw ${VERSION} first opens its audit database"
         info "A copy is kept in ${PREVIOUS}/data/audit.db; 'defenseclaw rollback' brings it back, and later upgrades keep it in ${DEFENSECLAW_HOME}/backups"
     fi
-    ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
+    if version_lt "${VERSION}" "${PREV_VERSION}"; then
+        # An older release over a newer one is a downgrade: ask with no as the
+        # answer, and say so even with --yes (GAP-0287).
+        [[ "${YES}" == true ]] && warn "Downgrading DefenseClaw ${PREV_VERSION} → ${VERSION} (--yes)"
+        ask_yes_no "Downgrade DefenseClaw ${PREV_VERSION} → ${VERSION}? (an older release; 'defenseclaw rollback' undoes it)" n \
+            || die "Cancelled; nothing was changed"
+    else
+        ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
+    fi
 fi
 if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" ]]; then
     pick_connector
@@ -810,7 +823,9 @@ rm -rf "${STAGING}"
 ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
-    printf "  Upgraded from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    changed="Upgraded"
+    version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded"
+    printf "  ${changed} from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi

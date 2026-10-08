@@ -18,8 +18,12 @@ package sandboxcli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -244,6 +248,33 @@ func adminText(s sandboxapi.AdminStatus) string {
 	return s.Authority + ": " + s.Detail
 }
 
+// repoPolicyChangedNote says, in a sandbox's explain, that its repository
+// policy file changed on the host since the sandbox was created: nothing
+// said that the running sandbox keeps the policy it was created with, and
+// that the change applies to the next new run (GAP-0338). "" when the file
+// is as it was, or cannot be read.
+func repoPolicyChangedNote(name string, rp *sandboxapi.RepoPolicy) string {
+	if rp.Path == "" || !strings.HasPrefix(rp.Digest, "sha256:") {
+		return ""
+	}
+	keeps := name + " keeps the policy it was created with, and the change applies to the next new run (which refuses one that loosens it)"
+	info, err := os.Stat(rp.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "the repository policy file is gone since " + name + " was created; " + keeps
+	case err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20:
+		return ""
+	}
+	data, err := os.ReadFile(rp.Path)
+	if err != nil {
+		return ""
+	}
+	if sum := sha256.Sum256(data); "sha256:"+hex.EncodeToString(sum[:]) == rp.Digest {
+		return ""
+	}
+	return "the repository policy file changed since " + name + " was created; " + keeps
+}
+
 // PolicyExplain prints every resolved setting with its provenance.
 func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	ex, err := a.explain(ctx, o)
@@ -263,6 +294,11 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	if rp := ex.RepoPolicy; rp != nil {
 		a.line(truncate("repository: "+rp.Path+" "+rp.Digest, explainWidth-2))
 		a.line(truncate("  "+repoPolicyText(rp)+"; settings it decided have the source repo", explainWidth-2))
+		if o.Sandbox != "" {
+			if note := repoPolicyChangedNote(o.Sandbox, rp); note != "" {
+				a.note(note)
+			}
+		}
 	} else if note := a.folderRepoPolicyNote(o, ex); note != "" {
 		a.line("repository: " + note)
 	}

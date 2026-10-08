@@ -78,6 +78,9 @@ class AlertEvent:
     # Labelled facts from the canonical record (connector, rule, scanner,
     # decision) that the flat audit row behind it does not carry.
     facts: tuple[tuple[str, str], ...] = ()
+    # The sandbox the alert was raised in (its record, or the hook decision
+    # of a finding's request), so the Sandboxes panel can count them.
+    sandbox: str = ""
 
 
 @dataclass(frozen=True)
@@ -384,6 +387,9 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
             decision = disposition.group(1).lower().replace("_", " ")
     if decision:
         facts.append(("Decision", decision))
+    sandbox = payload_text(payload, "defenseclaw.sandbox.name")
+    if sandbox and sandbox != target:
+        facts.append(("Sandbox", sandbox))
     severity = (row.severity or "INFO").upper()
     if row.bucket == "network.egress" and severity == "INFO":
         severity = "WARNING"
@@ -409,6 +415,7 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         session_id=row.session_id,
         connector=row.connector,
         facts=tuple(facts),
+        sandbox=sandbox,
     )
 
 
@@ -498,6 +505,9 @@ class AlertsPanelModel:
         self.audit_events: list[AlertEvent] = []
         self.scan_blocks: list[ScanBlock] = []
         self.egress_events: list[EgressEvent] = []
+        # Detection-only findings of the last 24 hours (the read snapshot's
+        # count): not alerts, so the panel only says how many (GAP-0314).
+        self.detection_only = 0
         self.expanded: set[str] = set()
         self.filter_text = ""
         self.filtering = False
@@ -1114,12 +1124,22 @@ class AlertsPanelModel:
             f"  [#9FB2CC]search:[/] {rich_escape(self.filter_text)}" if self.filter_text and not self.filtering else ""
         )
         search_prompt = f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]" if self.filtering else ""
+        # What `defenseclaw alerts` ends with, in two rows at 80 columns:
+        # rules that matched calls which then ran are not alerts, and the
+        # panel did not say there were any (GAP-0314).
+        unlisted_line = ""
+        if n := self.detection_only:
+            what = "1 detection-only finding" if n == 1 else f"{n} detection-only findings"
+            unlisted_line = (
+                f"\n[#9FB2CC]{what} (24 h) not listed: a rule matched but could not decide the call; "
+                "defenseclaw audit export --since 24h lists them[/]"
+            )
         return (
             "[bold #22D3EE]Alerts[/]  "
             f"[bold]Actionable {metrics.actionable_count}[/] · In scope {metrics.total_count} · "
             f"[#F87171]Critical {counts['CRITICAL']}[/] [#FB923C]High {counts['HIGH']}[/] "
             f"[#FBBF24]Medium {counts['MEDIUM']}[/] [#60A5FA]Low {counts['LOW']}[/]"
-            f"{selected_label}{filter_label}{search_prompt}"
+            f"{selected_label}{filter_label}{unlisted_line}{search_prompt}"
         )
 
     def data_table_columns(self) -> tuple[str, ...]:
@@ -1802,6 +1822,13 @@ def _with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list
             # An ACP prompt names its route like the audit row (GAP-1629).
             route = _acp_route_from_rows(rows)
             event = replace(event, facts=(*facts, ("Decision", decision), *((("Route", route),) if route else ())))
+        # A finding raised in a sandbox session names the sandbox, which only
+        # its hook decision records, as `defenseclaw alerts` does (GAP-0232).
+        sandbox = next((s for raw in rows if (s := parse_detail_tokens(raw or "").get("sandbox", "").strip())), "")
+        if sandbox and not event.sandbox:
+            event = replace(event, sandbox=sandbox)
+        if sandbox and all(fact[0] != "Sandbox" for fact in event.facts):
+            event = replace(event, facts=(*event.facts, ("Sandbox", sandbox)))
         out.append(event)
     return out
 

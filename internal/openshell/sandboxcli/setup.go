@@ -88,8 +88,29 @@ type SetupOptions struct {
 // Setup is the one-time `sandbox setup` flow: host checks, the consented
 // OpenShell install, bind mounts on the local gateway, the upstream
 // telemetry choice, harnesses, credentials, shell wrappers and images.
-func (a *App) Setup(ctx context.Context, o SetupOptions) error {
+func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	a.defaults()
+	defer func() {
+		if errors.Is(retErr, errInterrupted) {
+			// Ctrl-C at a question: say which, and that a new run finishes
+			// what is left (GAP-0286).
+			at := "a question"
+			if a.asked != "" {
+				at = fmt.Sprintf("%q", a.asked+"?")
+			}
+			retErr = &ExitError{Code: exitInterrupted, Err: fmt.Errorf("setup interrupted at %s: that step was not done, and the steps before it are kept; "+
+				"run `%s setup` again to finish", at, CommandName)}
+		}
+		if errors.Is(retErr, errNoAnswer) {
+			// Ctrl-D said only "no answer (end of input)" (GAP-0343).
+			at := "a question"
+			if a.asked != "" {
+				at = fmt.Sprintf("%q", a.asked+"?")
+			}
+			retErr = fmt.Errorf("setup stopped at %s, whose input ended before an answer (end of input): that step was not done, "+
+				"and the steps before it are kept; run `%s setup` again to finish", at, CommandName)
+		}
+	}()
 	if err := a.CheckSupported(); err != nil {
 		return err
 	}
@@ -1134,8 +1155,14 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 // landlockLater leaves out the Landlock check, which the question that
 // switches a Mac to MicroVMs decides.
 func (a *App) machineFailure(rep *openshell.DoctorReport, landlockLater bool) error {
-	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDUser, openshell.CheckIDLandlock, openshell.CheckIDDocker} {
+	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDUser, openshell.CheckIDGatewayService, openshell.CheckIDLandlock, openshell.CheckIDDocker} {
 		if id == openshell.CheckIDLandlock && landlockLater {
+			continue
+		}
+		if id == openshell.CheckIDGatewayService && !rep.GatewayPortElsewhere {
+			// Only another account's gateway on the port stops setup
+			// here, before the machine checks it decides: this account
+			// cannot set up a gateway of its own (GAP-0296).
 			continue
 		}
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {

@@ -89,6 +89,38 @@ async def test_shared_snapshot_alerts_get_the_hook_decision(tmp_path, monkeypatc
     assert all(("Decision", "would block (observe mode)") in e.facts for e in result.snapshot.alert_events)
 
 
+async def test_alerts_panel_says_how_many_detection_only_findings_it_leaves_out(tmp_path) -> None:
+    """GAP-0314: `defenseclaw alerts` named the detection-only findings it
+    leaves out (GAP-0176), the TUI's Alerts panel said nothing of them."""
+    import json
+    import sqlite3
+
+    path = tmp_path / "audit.db"
+    create_synthetic_v8_database(path, 8)
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(path) as db:
+        db.executemany(
+            """INSERT INTO audit_events (id, timestamp, action, actor, details, severity, bucket, event_name, payload_json)
+               VALUES (?, ?, 'scan-finding', 'defenseclaw', '', 'CRITICAL', 'security.finding', 'finding.observed', ?)""",
+            [
+                (f"det-{i}", (now - timedelta(hours=h)).isoformat(), json.dumps({"defenseclaw.finding.tags": ["detection-only"]}))
+                for i, h in enumerate((0, 2, 30))
+            ],
+        )
+    repository = read_repository.TUIReadRepository(path)
+    try:
+        result = await repository.refresh()
+    finally:
+        repository.close()
+    assert result.snapshot is not None and result.snapshot.detection_only == 2
+    model = alerts_panel.AlertsPanelModel()
+    model.detection_only = result.snapshot.detection_only
+    assert (
+        "2 detection-only findings (24 h) not listed: a rule matched but could not decide the call; "
+        "defenseclaw audit export --since 24h lists them"
+    ) in model.summary_text()
+
+
 def test_sandbox_finding_detail_has_the_openshell_decision() -> None:
     """GAP-1532: the TUI shows decision=blocked like ``defenseclaw alerts``."""
     (alert,) = alerts_from_v8_history(

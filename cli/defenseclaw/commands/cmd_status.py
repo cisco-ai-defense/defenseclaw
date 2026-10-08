@@ -356,10 +356,13 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Scope", _connector_scope_text(cfg))
     ux.echo()
 
-    if _sandboxes_enabled(cfg):
+    if _host_is_windows():
+        # The platform wins over openshell.enabled, which a team config can
+        # carry from Linux or macOS (GAP-0246).
+        note = " (openshell.enabled has no effect here)" if _sandboxes_enabled(cfg) else ""
+        _status_row("Sandbox", ux.dim("not supported on Windows" + note))
+    elif _sandboxes_enabled(cfg):
         _status_row("Sandbox", ux._style("on", fg="green") + ux.dim(" (details: defenseclaw sandbox status)"))
-    elif _host_is_windows():
-        _status_row("Sandbox", ux.dim("not supported on Windows"))
     else:
         _status_row("Sandbox", ux.dim("off (set up with: defenseclaw sandbox setup)"))
 

@@ -140,6 +140,9 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		return writeJSON(a.IO.Out, sb)
 	}
 	a.printSandbox(sb)
+	if sb.Phase == "ready" {
+		a.printDetachedRun(ctx, sb)
+	}
 	if sb.Phase == "stopped" {
 		if why := startRefusal(keptPolicy(ctx, api, sb), sb); why != "" {
 			a.warn(sb.Name + " cannot start under the current policy: " + why + "; delete it (`" + CommandName + " delete " + sb.Name +
@@ -149,9 +152,39 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 	return nil
 }
 
+// printDetachedRun says where a running sandbox's detached run is: one that
+// finished left the sandbox ready (and holding a mounted folder) with
+// nothing saying the job was done (GAP-0231).
+func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return
+	}
+	run, err := a.detachedRun(ctx, a.cli(gateway), sb)
+	if err != nil {
+		return
+	}
+	logs := "`" + CommandName + " logs " + sb.Name + "`"
+	switch run.State {
+	case sandboxapi.RunRunning:
+		a.note("its detached run" + a.startedText(run.Started) + " is still going; " + logs + " -f follows it")
+	case sandboxapi.RunExited:
+		exit := ""
+		if run.Exit != "" {
+			exit = " (exit status " + run.Exit + ")"
+		}
+		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it)")
+	}
+}
+
 func (a *App) printStatus(st *sandboxapi.Status) {
 	row := func(k, v string) { a.line(fmt.Sprintf("%-16s%s", k, v)) }
 	state := "off (run `" + CommandName + " setup`)"
+	if st.GatewayElsewhere != "" {
+		// Setup would stop at the other account's gateway (GAP-0307).
+		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
+	}
 	if st.Enabled {
 		state = "on"
 	}
@@ -200,7 +233,12 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	a.println(a.bold(sb.Name))
 	row("Harness", strings.TrimSpace(firstNonEmpty(sb.HarnessName, sb.Harness)+" "+sb.HarnessVersion))
-	row("Phase", phaseText(*sb))
+	phase := phaseText(*sb)
+	if sb.PhaseReason != "" && sb.Phase == "error" {
+		// Why, in words (GAP-0297): the phase alone said nothing.
+		phase += ": " + sb.PhaseReason
+	}
+	row("Phase", phase)
 	if sb.UptimeSeconds > 0 {
 		row("Uptime", humanDuration(time.Duration(sb.UptimeSeconds)*time.Second))
 	}
@@ -270,8 +308,16 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		}
 		row("Hook error", last+" (the hook failed closed)")
 	}
-	row("Egress", fmt.Sprintf("%s contacted, %d blocked, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
-		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
+	if sb.Hooks.ModelKeyRejected != "" {
+		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
+	}
+	failed := ""
+	if n := sb.Egress.UpstreamFailed; n > 0 {
+		// Allowed, and the host did not take them: an outage, not a block.
+		failed = fmt.Sprintf(", %d failed upstream", n)
+	}
+	row("Egress", fmt.Sprintf("%s contacted, %d blocked%s, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
+		failed, humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
 	for _, ep := range sb.Endpoints {
 		row("Endpoint", ep.Host+" "+ep.Result)
 	}
@@ -727,6 +773,14 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
+		if n := a.attachedSessions(name); n > 0 {
+			// Its sessions in other terminals end with it (GAP-0285).
+			what := attachedText(name, n) + "; deleting it ends " + them(n)
+			question = what + ". " + question
+			if o.Yes {
+				a.warn(what + " (--yes)")
+			}
+		}
 		yes, err := a.confirm(question, o.Yes)
 		if err != nil {
 			return err
@@ -858,6 +912,14 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	// tail's inside the sandbox and exit runNoLog without a log.
 	code, err := a.Streamer.Stream(ctx, inv, out, a.IO.Err)
 	_ = flush()
+	if o.Follow && ctx.Err() == nil {
+		// A stop under the follower ends its stream: it says so, as a later
+		// `sandbox logs` does, where it ended without a word (GAP-0318).
+		if now, gerr := api.Get(ctx, o.Name); gerr == nil && now.Phase != "ready" {
+			a.stoppedUnderFollower(ctx, api, now)
+			return nil
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -928,6 +990,12 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 		what = "the log of its detached run started " + a.clock(kept.StartedAt) + ","
 	}
 	a.note(fmt.Sprintf("%s is %s; this is %s kept when it stopped (%s)", sb.Name, sb.Phase, what, a.clock(kept.KeptAt)))
+	a.keptRunState(kept)
+	return nil
+}
+
+// keptRunState says how the run of a kept log ended.
+func (a *App) keptRunState(kept *sandboxapi.RunLog) {
 	switch kept.State {
 	case sandboxapi.RunExited:
 		a.note("the run exited with status " + kept.Exit)
@@ -936,5 +1004,18 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 	case sandboxapi.RunRunning:
 		a.note("the run was still going when the log was kept")
 	}
-	return nil
+}
+
+// stoppedUnderFollower ends `sandbox logs -f` of a sandbox that stopped
+// while it followed: what stopped, and how the run ended, from the log
+// DefenseClaw kept.
+func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.Sandbox) {
+	kept, err := api.RunLog(ctx, sb.Name, 1)
+	if err != nil || kept == nil {
+		a.warn(sb.Name + " is " + sb.Phase + ", so its run log ends here")
+		return
+	}
+	a.note(fmt.Sprintf("%s is %s (%s); DefenseClaw kept the log of its detached run (`%s logs %s` shows it)",
+		sb.Name, sb.Phase, a.clock(kept.KeptAt), CommandName, sb.Name))
+	a.keptRunState(kept)
 }

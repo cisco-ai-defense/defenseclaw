@@ -22,8 +22,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -58,6 +60,11 @@ type SandboxEgressRefusal struct {
 	// peer").
 	Cut  bool
 	Sent int64
+	// Note marks a connection the note tells of that is no block of the
+	// egress policy (manager.NoteSSH, NoteAsked, NoteDeclined): SSH, which
+	// no sandbox opens (Remedy names HTTPS), a connection that waits for
+	// the user's answer to an ask, or one the user declined.
+	Note string
 }
 
 const (
@@ -128,6 +135,14 @@ func (a *APIServer) addSandboxEgressRefusals(
 		return resp
 	}
 	refusals := st.egressRefusals(binding)
+	if len(refusals) == 0 && sandboxDirectRefusalResult(rawBody) {
+		// OpenShell's record of the refusal may still be on its way.
+		deadline := time.Now().Add(sandboxDirectRefusalWait)
+		for len(refusals) == 0 && ctx.Err() == nil && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			refusals = st.egressRefusals(binding)
+		}
+	}
 	if len(refusals) == 0 {
 		return resp
 	}
@@ -141,8 +156,52 @@ func (a *APIServer) addSandboxEgressRefusals(
 	return resp
 }
 
+// sandboxDirectRefusalWait bounds how long the post-tool hook of a call
+// whose result names a connection error to this machine's sandbox address
+// waits for OpenShell's record of the refusal, which its event stream can
+// deliver after the hook: a test that failed in 9 ms got no note of the ask
+// it raised (the note came with the next turn), and the agent took the
+// pending ask for the user's refusal (GAP-0325). A variable for tests.
+var sandboxDirectRefusalWait = 1500 * time.Millisecond
+
+// sandboxDirectRefusalErrors are the words of a connection a sandbox's
+// network policy refused, or a closed port, as tools print them.
+var sandboxDirectRefusalErrors = []string{"eacces", "econnrefused", "connection refused", "permission denied", "failed to connect"}
+
+// sandboxDirectRefusalResult reports a hook payload that names a refused
+// connection to the host alias or its synthetic sandbox address, the
+// direct connections OpenShell refuses (a --host-port ask among them).
+func sandboxDirectRefusalResult(rawBody []byte) bool {
+	body := strings.ToLower(string(rawBody))
+	if !strings.Contains(body, "host.openshell.internal") && !strings.Contains(body, "198.18.") {
+		return false
+	}
+	return slices.ContainsFunc(sandboxDirectRefusalErrors, func(e string) bool { return strings.Contains(body, e) })
+}
+
 // sandboxEgressRefusalNotice is the agent's note of refused destinations.
 func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
+	if len(refusals) == 1 {
+		switch r := refusals[0]; r.Note {
+		case manager.NoteSSH:
+			// Not a destination to leave alone: the same remote over HTTPS
+			// works (GAP-0216).
+			return "This sandbox's SSH connection to " + sandboxEgressTarget(r) + " was refused: SSH does not leave a DefenseClaw sandbox, " +
+				"and a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) + " Tell the user if the task needs SSH itself."
+		case manager.NoteAsked:
+			// Neither done nor a mystery error (GAP-0268).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " waits for the user: DefenseClaw asked them to approve it, " +
+				"and until they do a tool sees only a connection error. Tell the user, and try again once they approve it " +
+				"(`defenseclaw sandbox approvals`)."
+		case manager.NoteDeclined:
+			return "The user declined this sandbox's connection to " + sandboxAskTarget(r) + " when DefenseClaw asked them; " +
+				"a tool sees only a connection error. Do not try it again unless the user says so."
+		case manager.NotePortClosed, manager.NotePortRefused:
+			// The feed's hint, for the agent too (GAP-0326).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " was refused (" + r.What + "); " +
+				"a tool sees only a connection error. " + sentence(upperFirst(r.Remedy))
+		}
+	}
 	if len(refusals) == 1 {
 		r := refusals[0]
 		if r.Cut {
@@ -175,6 +234,10 @@ func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 	if more := len(refusals) - len(shown); more > 0 {
 		fmt.Fprintf(&b, "\n- and %d more", more)
 	}
+	if slices.ContainsFunc(refusals, func(r SandboxEgressRefusal) bool { return r.Note != "" }) {
+		b.WriteString("\nTell the user if the task needs them; do what each line says, and do not try to reach the others another way.")
+		return b.String()
+	}
 	b.WriteString("\nTell the user if the task needs them, and do not try to reach them another way.")
 	return b.String()
 }
@@ -190,6 +253,15 @@ func sandboxEgressTarget(r SandboxEgressRefusal) string {
 		host = "[" + host + "]"
 	}
 	return host + ":" + strconv.Itoa(r.Port)
+}
+
+// sandboxAskTarget names an asked destination: a port on the user's
+// machine (host.openshell.internal) as such.
+func sandboxAskTarget(r SandboxEgressRefusal) string {
+	if r.Host == "host.openshell.internal" && r.Port > 0 {
+		return "port " + strconv.Itoa(r.Port) + " on the user's machine (" + sandboxEgressTarget(r) + ")"
+	}
+	return sandboxEgressTarget(r)
 }
 
 // sandboxUploadSize is what went up before a cut: "1.0 MiB", "512 KiB", or

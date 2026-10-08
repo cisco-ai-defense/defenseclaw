@@ -305,7 +305,8 @@ stopped`. Nothing is changed; use the install command above.
   the opt-in process tree on, that process and its parents), survives
   daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
   sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
-  detail sum it up; the detail lists the hosts.
+  detail sum it up by the same kinds (`AI: 1 model provider, 1 harness
+  vendor host, 2 shadow AI`); the detail lists the hosts.
 - A sandbox's hook counts (`Hook traffic` and `Hook events` in `sandbox
   status NAME`, the tool calls in the TUI's Sandboxes list) survive daemon
   restarts like its destinations, so the end-of-session summary counts the
@@ -341,9 +342,9 @@ stopped`. Nothing is changed; use the install command above.
   (OpenShell or the DefenseClaw egress proxy) and decision, top blocked and
   allowed hosts, bytes up and down per destination, a destinations table,
   shadow-AI and other sandbox findings, integration health and the opt-in
-  process starts, with a Sandbox variable. The local Collector now adds the
-  record's sandbox name as the `defenseclaw.sandbox.name` log attribute (Loki
-  structured metadata) so the variable and the filters never parse log bodies;
+  process starts, with Environment, Host and Sandbox variables. The local
+  Collector now adds the record's sandbox name as the `defenseclaw.sandbox.name`
+  log attribute (Loki structured metadata) so the variable and the filters never parse log bodies;
   the body is unchanged and sandbox names stay out of metric labels. The
   Splunk Observability bundle adds an Egress blocks by source chart to
   Security and Policy, a Sandboxes dashboard and a sandbox egress-blocks
@@ -411,6 +412,21 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Local Splunk starts when the CLI was installed under a private umask.**
+  The package's files arrived 0600 and setup copied them so into
+  `~/.defenseclaw/splunk-bridge/splunk/`, which the container mounts and reads
+  as non-root users, so Splunk restarted on `Permission denied:
+  '/tmp/defaults/default.yml'` while `defenseclaw setup splunk --logs` waited
+  four minutes. Setup and init now make that folder readable to the
+  container (0755 folders, 0644 files, 0755 scripts; `env/.env` stays
+  private), and the bridge stops as soon as the container keeps restarting,
+  with its last log lines.
+- **`defenseclaw setup splunk --disable --logs` stops the local Splunk
+  container.** It ran the bridge's `down` without the env file the bridge
+  requires, ignored the failure and said the container stopped; it now passes
+  the file, checks the container is gone, and otherwise says why and how to
+  stop it. A setup re-run no longer takes DefenseClaw's own running Splunk
+  for a foreign holder of ports 8000 and 8088.
 - **Security: hooks keep the gateway token and the hook payload off process
   command lines and out of child environments.** The Claude Code,
   Antigravity, Copilot, Cursor, Devin, Hermes, Kiro and OpenHands shell
@@ -746,6 +762,12 @@ rest also reach per-user installs.
   fallback. A command that blocks in Claude Code or Codex could then run in
   Amp with a detection-only finding, for example one that writes its output
   to `~/out.txt`. Amp commands are now analyzed like the other agents'.
+- **`defenseclaw alerts` says how many detection-only findings it leaves
+  out.** A rule that matched a call it could not decide is not an alert, so
+  the list could read `No alerts. All clear.` while such calls ran. It now
+  ends with how many detection-only findings the last 24 hours had, says
+  `No alerts.` without `All clear`, and names
+  `defenseclaw audit export --since 24h` to read them.
 - **AI discovery on macOS skips the folders macOS protects.** Without Full
   Disk Access, every model file scan counted each folder macOS privacy
   protection keeps it out of (for example other apps' containers under
@@ -1242,7 +1264,10 @@ deleted.
   terminal, with `--yes` or after a skip, end with `N files changed; nothing
   was applied` and the `sandbox pull` command, and say when they keep a
   sandbox despite `--rm`. `sandbox review` of a copy-mode sandbox previews
-  its pull instead of failing. A copy above the upload cap names
+  its pull instead of failing. A git copy names, in one warning after the
+  upload, what it leaves out because git ignores it or it is a package cache
+  (`node_modules/`, `.venv/`, build output), and says to install the
+  dependencies inside the sandbox. A copy above the upload cap names
   `openshell.workdir.max_upload_mb`; on a Mac a full sandbox disk names the
   MicroVM's overlay (`overlay_disk_mib`).
 - Claude Code and Codex per-run managed settings are baked, root-owned and
@@ -1523,6 +1548,12 @@ deleted.
   "(sandbox NAME)", the TUI's AI discovery panel keeps them apart and names
   the sandbox, and the `ai_component.*` telemetry records carry
   `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`.
+- Claude Code skills and rules kept in a project (`.claude/skills`,
+  `.claude/rules`) are listed by name like the ones in `~/.claude`, in a
+  sandbox's project and in each `ai_discovery.scan_roots` folder.
+- The AI discovery Grafana board's Sandbox box narrows only the sandbox
+  signals table and the per-signal log; the sections and panels it does not
+  narrow say (all names) in their titles, as on the Sandboxes board.
 - Opt-in process tree: a pack's new `observe.process_tree: true` (off in
   `open`, `balanced` and `strict`) or `sandbox run --process-tree` samples the
   sandbox's processes every 5 seconds while it runs (every 15 seconds on a

@@ -280,6 +280,14 @@ allowlist of your servers by exact command or URL. Codex gets an
 definitions in `/etc/codex/managed_config.toml`. With `allow`, the allowlists
 are left out and your servers join the harness's user registry.
 
+So `claude mcp add` inside a Claude Code sandbox is refused: Claude Code says
+that an enterprise MCP configuration is active and has exclusive control over
+MCP servers. It is DefenseClaw's managed file, not your organization. To give
+a sandbox another server, add it on your machine in user scope
+(`claude mcp add --scope user …`, which writes `~/.claude.json`), then start a
+new sandbox: `mcp.import` brings it along. A sandbox you resume keeps the
+servers it was created with.
+
 ## Choose a pack
 
 Set `openshell.pack` in `~/.defenseclaw/config.yaml`:
@@ -618,8 +626,9 @@ are not part of a pack.
 Each sandbox has its own large-upload threshold:
 `openshell.egress.large_upload_mb` when it is above 0, else the
 `egress.large_upload_mb` of the pack the sandbox resolved to, including a
-run's `--pack` or `--profile`. So `sandbox run --pack balanced` on an `open`
-configuration reports uploads over 10 MiB. (Under the `strict` profile
+run's `--pack` (`--profile` changes no pack setting). So `sandbox run --pack
+balanced` on an `open` configuration reports uploads over 10 MiB, and
+`sandbox run --profile balanced` keeps the open pack's 25 MiB. (Under the `strict` profile
 traffic doesn't pass the proxy, so there is nothing to report.) A change to
 either key reaches running sandboxes on the next config reload, with the
 rest of their egress policy. The report is an activity event and a finding;
@@ -831,8 +840,11 @@ review list of every session, so a change to it is called out at the end.
 The launch banner names it (`Policy  repo policy .defenseclaw/sandbox.yaml:
 tightened 3 settings (…)`), `policy show` says what it tightened,
 `policy explain` lists it with its digest, and every setting it tightened
-has the source `repo` with the value it replaced. `openshell.admin` still
-applies on top.
+has the source `repo` with the value it replaced. A running sandbox keeps
+the repository policy it was created with: when the file changes on the
+host, `policy explain --sandbox NAME` says so, and the change applies to
+the next new run (which refuses it if it loosens the policy).
+`openshell.admin` still applies on top.
 
 ## Record, then lock
 
@@ -920,7 +932,9 @@ defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pac
 ```
 
 The command exits 1 when any decision does not match. `rule`, when set,
-must be the deciding rule.
+must be the deciding rule. It needs no `config.yaml` and no running daemon,
+but it runs `defenseclaw-gateway`: a CI job finds it on `PATH` or next to
+the `defenseclaw` it runs (both are in `~/.local/bin` after an install).
 
 ## Admin constraints
 
@@ -1277,7 +1291,12 @@ Sandboxes run only on installs where the user owns `config.yaml`. There the
 admin block applies to every run, but the user can edit or remove it. Use it
 for team defaults and to prevent mistakes, not to stop a determined user.
 `defenseclaw sandbox doctor`, `sandbox status`, and `sandbox policy explain`
-say which kind of block applies on a machine.
+say which kind of block applies on a machine. The doctor's **Organization
+policy** row also names each constraint in force, for example:
+
+```text
+  ✓ Organization policy        advisory (you own config.yaml and can change it): profile balanced or stricter, harnesses claudecode, codex only, copy mode for ~/customers/**, 1 blocked host, at most 4 CPUs and 8Gi memory, locked: profile
+```
 
 See [Sandbox policy pushdown](/docs/enterprise/configuration#sandbox-policy-pushdown)
 for rolling the admin block out to managed machines.

@@ -61,7 +61,8 @@ func TestForegroundTerminalSurvivesTerminalSignals(t *testing.T) {
 
 // While the attached harness owns the terminal, the interrupt signals are
 // its own: a Ctrl-C the terminal sends the whole job leaves the command's
-// context alone. Released, an interrupt is the command's again.
+// context alone. Released, an interrupt is the command's again, once the
+// keys that quit the harness are behind.
 func TestForegroundTerminalHoldsTheInterrupts(t *testing.T) {
 	ta := newTestApp(t, "")
 	ctx, done := ta.interruptible(bg)
@@ -73,6 +74,17 @@ func TestForegroundTerminalHoldsTheInterrupts(t *testing.T) {
 	if ctx.Err() != nil || ta.intr.fired.Load() {
 		t.Fatal("the harness's interrupt cancelled the command")
 	}
+	// A Ctrl-C right after the harness quit is the rest of the keys that
+	// quit it (Codex quits on Ctrl-C twice), not an interrupt (GAP-0321).
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if ctx.Err() != nil || ta.intr.fired.Load() {
+		t.Fatal("the Ctrl-C that quit the harness interrupted the command")
+	}
+	// Past that grace, an interrupt is the command's again.
+	harnessQuitAt.Store(0)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}

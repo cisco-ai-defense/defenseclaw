@@ -227,6 +227,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 				Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
 				SessionID: d.SessionID, ToolInput: d.ToolInput, ResultStatus: d.ResultStatus,
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
+				ModelError: d.ModelError, ModelStatus: d.ModelStatus,
 			})
 		},
 		OnHookFailure: func(f SandboxHookFailure) {
@@ -243,7 +244,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 			out := make([]SandboxEgressRefusal, 0, len(refused))
 			for _, r := range refused {
 				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
-					Cut: r.Cut, Sent: r.Sent})
+					Cut: r.Cut, Sent: r.Sent, Note: r.Note})
 			}
 			return out
 		},

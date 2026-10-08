@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -132,6 +133,11 @@ func TestStageGitProjectIsSanitized(t *testing.T) {
 			t.Fatalf("a warning repeats the held-back list: %q", w)
 		}
 	}
+	// What git ignores and an untracked package cache are named, directories
+	// first, with the way on (GAP-0194).
+	if w := "not copied (git ignores them, or they are package caches): node_modules/, debug.log; install the dependencies inside the sandbox"; !strings.Contains(strings.Join(rec.Warnings, "\n"), w) {
+		t.Fatalf("warnings = %q, want %q", rec.Warnings, w)
+	}
 	stage := rec.Stage
 	sg := func(args ...string) string { return runGit(t, e.home, stage, args...) }
 	if n := sg("rev-list", "--count", "HEAD"); n != "3" {
@@ -188,9 +194,91 @@ func TestStageRefusesOversizedFolders(t *testing.T) {
 	if _, err := LoadCopy(e.data, "p1"); !errors.Is(err, ErrCopyNotFound) {
 		t.Fatalf("refused stage left a record: %v", err)
 	}
+	// Nor a data directory teardown would list (GAP-0274).
+	if _, err := os.Stat(filepath.Join(e.data, "sandboxes", "p1")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused stage left sandboxes/p1: %v", err)
+	}
 	opts.MaxWalkEntries = 5
 	if rec, err := Stage(bg, opts); err != nil || rec.Kind != CopyPlain || rec.Files != 4 {
 		t.Fatalf("record: %+v, %v", rec, err)
+	}
+}
+
+// GAP-0250: a copy left a submodule's working tree out without a word, and
+// the baseline recorded the submodule as removed, so a sandbox that
+// initialized it (or the pull of an untouched one) showed it as a change.
+// The copy says so, and the submodule's commit survives an untouched pull.
+func TestCopyKeepsAnUninitializedSubmodule(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	sha := e.git(e.project, "rev-parse", "HEAD")
+	e.git(e.project, "update-index", "--add", "--cacheinfo", "160000,"+sha+",vendor/hello")
+	writeFile(t, e.project, ".gitmodules", "[submodule \"vendor/hello\"]\n\tpath = vendor/hello\n\turl = https://example.invalid/hello.git\n")
+	e.git(e.project, "add", ".gitmodules")
+	e.git(e.project, "commit", "-q", "-m", "submodule")
+	rec, fs := launchCopy(t, e, "c1", nil)
+	if !slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.HasPrefix(w, "1 submodule is not copied: vendor/hello") }) {
+		t.Fatalf("warnings = %v", rec.Warnings)
+	}
+	// Even with its empty folder gone, the submodule is not removed.
+	if err := os.RemoveAll(fs.local(remoteRepo + "/vendor/hello")); err != nil {
+		t.Fatal(err)
+	}
+	if pr := pull(t, e, fs, "c1"); !pr.Empty() {
+		t.Fatalf("pull of an untouched copy = %+v", pr.Changes)
+	}
+	// The agent's `git submodule update --init` checks out the same commit.
+	sub := fs.local(remoteRepo + "/vendor/hello")
+	if out, err := exec.Command("git", "clone", "-q", e.project, sub).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", sub, "checkout", "-q", sha).CombinedOutput(); err != nil {
+		t.Fatalf("checkout: %v %s", err, out)
+	}
+	if pr := pull(t, e, fs, "c1"); !pr.Empty() {
+		t.Fatalf("pull after the submodule was initialized = %+v", pr.Changes)
+	}
+}
+
+// GAP-0248: --unmask on a copy was silent both ways: a shared secret-looking
+// file got no line, and a pattern that matched only a git-ignored file
+// (never copied) said nothing. The record names both.
+func TestStageNamesWhatUnmaskShared(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", "local.env\n")
+	e.commit("ignore")
+	writeFile(t, e.project, ".env", "TOKEN=dccert-decoy\n")
+	writeFile(t, e.project, "local.env", "TOKEN=dccert-decoy\n")
+	opts := e.stageOpts("c1")
+	// .env.example is a pack default the project lacks: no warning for it,
+	// only for what the run asked (GAP-0308).
+	opts.Unmask = []string{".env", "local.env", ".env.example"}
+	opts.UnmaskAsked = []string{".env", "local.env"}
+	rec, err := Stage(bg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rec.Unmasked, ",") != ".env" || slices.Contains(rec.HeldBack, ".env") {
+		t.Fatalf("unmasked %v, held back %v", rec.Unmasked, rec.HeldBack)
+	}
+	if !slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.HasPrefix(w, "--unmask local.env matched no file the copy takes") }) ||
+		slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.Contains(w, ".env.example") }) {
+		t.Fatalf("warnings = %v", rec.Warnings)
+	}
+}
+
+// GAP-0207: a copy's work could be read only by writing a patch file;
+// PullDiff shows the last pull as the diff the patch would hold.
+func TestPullDiff(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	pull(t, e, fs, "c1")
+	diff, err := PullDiff(bg, e.data, "c1")
+	if err != nil || !strings.Contains(diff, "+++ b/README.md") || !strings.Contains(diff, "+agent version") {
+		t.Fatalf("diff = %q, %v", diff, err)
 	}
 }
 
@@ -514,6 +602,31 @@ func TestCopyGatesSensitiveAndBlocking(t *testing.T) {
 	}
 }
 
+// TestCopyPullFlagsAZeroFilledTail (GAP-0289): a MicroVM the gateway
+// restarted under wrote notes.txt, which came back as its text and a tail
+// of zero bytes, and the pull said nothing. The review flags it (info: it
+// runs no code), not a binary file of zeros.
+func TestCopyPullFlagsAZeroFilledTail(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/notes.txt", "line 1\nline 2\n"+strings.Repeat("\x00", 48))
+	fs.write(remoteRepo+"/zeros.bin", strings.Repeat("\x00", 64))
+	pr := pull(t, e, fs, "c1")
+	var flagged []string
+	for _, f := range pr.Review.Flags {
+		if f.Kind == RiskZeroFilled {
+			flagged = append(flagged, f.Path)
+			if f.Severity != SeverityInfo || !strings.HasPrefix(f.Detail, "ends in 48 zero bytes") {
+				t.Fatalf("flag = %+v", f)
+			}
+		}
+	}
+	if len(flagged) != 1 || flagged[0] != "notes.txt" || pr.Review.Sensitive() {
+		t.Fatalf("zero-filled flags = %v (sensitive %v), want notes.txt only", flagged, pr.Review.Sensitive())
+	}
+}
+
 // TestCopyPullOfAStateAlreadyBroughtBack: a pull of the state the last one
 // took, from the same point, counts as brought back when that one went to a
 // branch or a patch file (a new capture of uncommitted work is another
@@ -537,6 +650,49 @@ func TestCopyPullOfAStateAlreadyBroughtBack(t *testing.T) {
 	fs.write(remoteRepo+"/agent.txt", "more agent work\n")
 	if next := pull(t, e, fs, "c1"); next.HandedOver() {
 		t.Fatalf("a pull of new work counts as brought back: %+v", next)
+	}
+}
+
+// TestCopyBranchLeavesOutTheFoldersEdits (GAP-0282): a copy made from a
+// folder with uncommitted edits (another live sandbox had made them) put
+// them on its pull's branch as if the sandbox had made them. The branch
+// starts at the copy's HEAD with only the sandbox's changes, and the edits
+// stay in the folder; when the sandbox changed them further, the branch
+// keeps them and says so.
+func TestCopyBranchLeavesOutTheFoldersEdits(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	head := e.git(e.project, "rev-parse", "HEAD")
+	writeFile(t, e.project, "README.md", "hello\nhost edit\n")
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	pull(t, e, fs, "c1")
+	res, err := apply(e, "c1", ApplyBranch, nil)
+	if err != nil || !res.Applied || len(res.Warnings) != 1 ||
+		!strings.Contains(res.Warnings[0], "from when the copy was made (README.md) are not on it, and stay in your working tree") {
+		t.Fatalf("branch: %+v, %v", res, err)
+	}
+	if got := e.git(e.project, "diff", "--name-only", head, "dc/c1"); got != "agent.txt" {
+		t.Fatalf("the branch holds %q, want agent.txt only", got)
+	}
+	if parent := e.git(e.project, "rev-parse", "dc/c1^"); parent != head {
+		t.Fatalf("the branch starts at %s, want the copy's HEAD %s", parent, head)
+	}
+	if got := readFile(t, e.project, "README.md"); got != "hello\nhost edit\n" {
+		t.Fatalf("README.md = %q, want the folder's edit kept", got)
+	}
+	if held, err := CheckApply(bg, ApplyOptions{DataDir: e.data, Name: "c1", Mode: ApplyBranch}); err != nil || !held {
+		t.Fatalf("the branch does not hold the pull: %v, %v", held, err)
+	}
+	fs.write(remoteRepo+"/README.md", "hello\nhost edit, and the agent's\n")
+	pull(t, e, fs, "c1")
+	res, err = apply(e, "c1", ApplyBranch, func(o *ApplyOptions) { o.Branch = "dc/c1-more" })
+	if err != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "branch dc/c1-more also holds your folder's uncommitted edits") ||
+		!strings.Contains(res.Warnings[0], "the sandbox changed README.md further") {
+		t.Fatalf("branch of a further edit: %+v, %v", res, err)
+	}
+	if got := e.git(e.project, "show", "dc/c1-more:README.md"); got != "hello\nhost edit, and the agent's" {
+		t.Fatalf("the branch's README.md = %q", got)
 	}
 }
 

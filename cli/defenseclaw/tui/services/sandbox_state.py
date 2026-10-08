@@ -76,6 +76,38 @@ TOAST_DEDUPE_SECONDS = 60.0
 BLOCK_BANNER_SECONDS = 15 * 60
 
 ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
+
+# A project's repository sandbox policy (packs.RepoPolicyPath).
+REPO_POLICY_PATH = ".defenseclaw/sandbox.yaml"
+
+
+def detached_run_text(run: Any, name: str) -> str:
+    """The detail's line for the detached run whose log a stop kept, or "" (GAP-0273).
+
+    ``run`` is ``GET .../logs`` (state, exit, started_at), which the daemon
+    keeps whenever it stops the sandbox.
+    """
+    data = _dict(run)
+    outcome = {
+        "exited": f"finished: exited with status {_text(data.get('exit')) or '?'}",
+        "interrupted": "did not finish: the sandbox stopped while it ran",
+        "running": "was still going when the sandbox stopped",
+    }.get(_text(data.get("state")), "")
+    if not outcome:
+        return ""
+    started = _time(data.get("started_at"))
+    when = f", started {started.astimezone().strftime('%H:%M')}" if started else ""
+    return f"{outcome}{when} · log: defenseclaw sandbox logs {name}"
+
+
+def branch_name_problem(value: str) -> str | None:
+    """Why the TUI's Pull cannot use a branch name, or None; git judges the rest (GAP-0266)."""
+    name = value.strip()
+    if not name:
+        return "Type a branch name."
+    if name.startswith("-") or any(ch.isspace() for ch in name):
+        return "A branch name has no spaces and does not start with -."
+    return None
 # The next step after an openshell.admin.allow_unblock refusal.
 ADMIN_UNBLOCK_NEXT = "ask your DefenseClaw administrator (openshell.admin.allow_unblock is off)"
 # A saved unblock (openshell.egress.unblocked) the organization's policy ignores.
@@ -440,9 +472,11 @@ class SandboxRow:
     created_at: datetime | None = None
     destinations: int = 0
     blocked: int = 0
-    # The AI destinations: the model provider and the harness's vendor, and
-    # shadow AI (other AI APIs, inference-shaped hosts).
-    model_apis: int = 0
+    # The AI destinations by the kinds `sandbox destinations` names: the
+    # model provider, the harness's vendor, and shadow AI (other AI APIs,
+    # inference-shaped hosts).
+    model_providers: int = 0
+    harness_vendor: int = 0
     shadow_ai: int = 0
     pending_approvals: int = 0
     tool_calls: int = 0
@@ -478,6 +512,20 @@ class SandboxRow:
     image: str = ""
     # The sandbox's processes are sampled while it runs (observe.process_tree).
     process_tree: bool = False
+    # The repository policy (.defenseclaw/sandbox.yaml) its posture includes,
+    # and the settings it made stricter; the banner names both (GAP-0244).
+    repo_policy: bool = False
+    repo_tightened: tuple[str, ...] = ()
+
+    @property
+    def repo_policy_text(self) -> str:
+        """The repository policy as the launch banner words it, or ""."""
+        if not self.repo_policy:
+            return ""
+        if not self.repo_tightened:
+            return f"{REPO_POLICY_PATH}: the policy is as strict already"
+        settings = "1 setting" if len(self.repo_tightened) == 1 else f"{len(self.repo_tightened)} settings"
+        return f"{REPO_POLICY_PATH}: tightened {settings} ({', '.join(self.repo_tightened)})"
 
     @property
     def running(self) -> bool:
@@ -632,7 +680,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         created_at=_time(item.get("created_at")),
         destinations=_int(egress.get("destinations")),
         blocked=_int(egress.get("blocked")),
-        model_apis=_int(egress.get("model_apis")),
+        model_providers=_int(egress.get("model_providers")),
+        harness_vendor=_int(egress.get("harness_vendor")),
         shadow_ai=_int(egress.get("shadow_ai")),
         pending_approvals=_int(item.get("pending_approvals")),
         tool_calls=_int(hooks.get("tool_calls")),
@@ -656,6 +705,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         violations=tuple(v for v in violations if v),
         image=_text(item.get("image")),
         process_tree=bool(item.get("process_tree")),
+        repo_policy=bool(_dict(item.get("repo_policy"))),
+        repo_tightened=tuple(_text(s) for s in _list(_dict(item.get("repo_policy")).get("tightened")) if _text(s)),
     )
 
 
@@ -723,6 +774,8 @@ class ActivityRow:
     tool: str = ""
     severity: str = ""
     bytes_up: int = 0
+    # The refusals like this one folded into it ("(and N more like it)").
+    repeats: int = 0
     # An unblock (or an approved ask for the same host) lifted this block
     # since it happened; ``lifted_by`` says which.
     unblocked: bool = False
@@ -794,7 +847,8 @@ class ActivityRow:
             if not self.host:
                 return text or reason_label(self.reason) or "a destination was blocked"
             why = self.why
-            return host_port(self.host, self.port) + (f" ({why})" if why else "")
+            more = f" (and {self.repeats} more like it)" if self.repeats > 0 else ""
+            return host_port(self.host, self.port) + (f" ({why})" if why else "") + more
         if self.kind == "approval.requested":
             # The daemon's message is a whole sentence ("the sandbox asks to
             # reach port 5432 on your machine"), as the Go CLI prints it; a
@@ -857,6 +911,7 @@ def decode_activity(raw: Any) -> ActivityRow | None:
         tool=_text(item.get("tool")),
         severity=_text(item.get("severity")),
         bytes_up=_int(item.get("bytes_up")),
+        repeats=_int(item.get("repeats")),
     )
 
 
@@ -1010,6 +1065,9 @@ class SandboxStatus:
     sandboxes: int = 0
     running: int = 0
     pending_approvals: int = 0
+    # What holds this machine's OpenShell gateway port while sandboxes are
+    # off for this account and another account's process holds it (GAP-0307).
+    gateway_elsewhere: str = ""
     # gateway.driver: the compute driver the gateway runs ("docker", "vm");
     # empty from a daemon older than the field, or before a gateway answered.
     driver: str = ""
@@ -1041,6 +1099,7 @@ def decode_status(raw: Any) -> SandboxStatus:
         enabled=bool(item.get("enabled")),
         available=bool(item.get("available")),
         reason=_text(item.get("reason")),
+        gateway_elsewhere=_text(item.get("gateway_elsewhere")),
         gateway=gateway_text.strip(),
         driver=driver,
         ingress_addr=_text(item.get("ingress_addr")),
@@ -1143,6 +1202,10 @@ class SandboxesPanelModel:
     # The process tree of each sandbox whose detail was opened last
     # (set_processes), as the detail shows it.
     processes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # The Alerts panel's alerts raised in each sandbox, by severity
+    # (set_alert_events): the Alerts cell named only health alerts, so a
+    # sandbox whose tool call a rule blocked showed "-" (GAP-0311).
+    finding_alerts: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def set_processes(self, name: str, payload: Any) -> None:
         """Keep a sandbox's process tree for its detail."""
@@ -1177,6 +1240,44 @@ class SandboxesPanelModel:
     def set_error(self, message: str) -> None:
         """Record a failed refresh; the previous snapshot stays."""
         self.error = message
+
+    def set_alert_events(self, events: Any) -> None:
+        """Count the alerts (the Alerts panel's events) raised in each listed sandbox.
+
+        An alert older than the sandbox belongs to an earlier one of the same name.
+        """
+        created = {row.name: row.created_at for row in self.rows}
+        counts: dict[str, dict[str, int]] = {}
+        for event in events or ():
+            name = getattr(event, "sandbox", "")
+            if name not in created:
+                continue
+            since, at = created[name], getattr(event, "timestamp", None)
+            if since is not None and isinstance(at, datetime) and (at if at.tzinfo else at.replace(tzinfo=timezone.utc)) < since:
+                continue
+            severity = (getattr(event, "severity", "") or "INFO").upper()
+            by_severity = counts.setdefault(name, {})
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+        self.finding_alerts = counts
+
+    def alerts_cell(self, row: SandboxRow, *, short: bool = False) -> str:
+        """The Alerts cell: the row's health alerts, then how many alerts it raised."""
+        health = row.badge(short=short)
+        count = sum(self.finding_alerts.get(row.name, {}).values())
+        if not count:
+            return health
+        raised = "1 alert" if count == 1 else f"{count} alerts"
+        return raised if health == "-" else f"{health}, {raised}"
+
+    def alerts_text(self, row: SandboxRow) -> str:
+        """The detail's Alerts line, or "" when the sandbox raised none."""
+        by_severity = self.finding_alerts.get(row.name, {})
+        if not by_severity:
+            return ""
+        order = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+        ranked = sorted(by_severity.items(), key=lambda item: (order.index(item[0]) if item[0] in order else len(order), item[0]))
+        counts = ", ".join(f"{n} {severity}" for severity, n in ranked)
+        return f"{sum(by_severity.values())} ({counts}): Alerts (2), then / {row.name}, lists them; or run defenseclaw alerts"
 
     def set_config(self, cfg: object | None) -> None:
         self.admin = admin_policy_from_config(cfg)
@@ -1372,17 +1473,23 @@ class SandboxesPanelModel:
                 self._selection_lost.add(view)
         self._clamp()
 
+    def shown(self) -> None:
+        """The panel came into view: the rows under the cursors are what the user sees now (GAP-0328)."""
+        self._selection_lost.clear()
+
     def _take_lost_selection(self) -> str:
         """The refusal for an action key whose selected item went away, once."""
         if self.view not in self._selection_lost:
             return ""
         self._selection_lost.discard(self.view)
+        # The cursor's row, not a choice the user made: it may never have
+        # moved (GAP-0261).
         gone = {
-            "sandboxes": "The sandbox you selected is gone",
-            "asks": "The ask you selected is no longer waiting",
-            "activity": "The event you selected has left the feed",
+            "sandboxes": "The sandbox the cursor was on is gone",
+            "asks": "The ask the cursor was on is no longer waiting",
+            "activity": "The event the cursor was on has left the feed",
         }[self.view]
-        return f"{gone}; nothing was done. Check the selection, then press the key again."
+        return f"{gone}; nothing was done. Select one, then press the key again."
 
     @property
     def cursor(self) -> int:
@@ -1512,6 +1619,10 @@ class SandboxesPanelModel:
         if key == "t":
             index = SANDBOX_VIEWS.index(self.view)
             self.view = SANDBOX_VIEWS[(index + 1) % len(SANDBOX_VIEWS)]
+            # The row under the cursor of the view just opened is what the
+            # user sees: one that went away while the view was hidden is no
+            # selection of theirs (GAP-0328).
+            self._selection_lost.discard(self.view)
             return SandboxPanelAction("view")
         if key == "enter":
             if self._view_len(self.view):
@@ -1657,6 +1768,15 @@ class SandboxesPanelModel:
             return "unavailable"
         return "ready"
 
+    def off_hint(self) -> str:
+        """What an action that needs sandboxes says while they are off."""
+        if self.status.gateway_elsewhere:
+            return (
+                "Sandboxes are off for this account: another account runs this machine's OpenShell gateway; "
+                "see: defenseclaw sandbox doctor"
+            )
+        return "Sandboxes are off; run the Sandbox wizard (0 Setup) first"
+
     def headline(self, max_width: int = 0) -> str:
         """The status line; ``max_width`` drops the gateway name first when short of room."""
         state = self.state()
@@ -1665,6 +1785,12 @@ class SandboxesPanelModel:
         if state == "unreachable":
             return f"The DefenseClaw daemon is not answering: {self.error}"
         if state == "off":
+            if self.status.gateway_elsewhere:
+                # Setup would stop at the other account's gateway (GAP-0307).
+                return (
+                    "Sandboxes are off for this account: another account runs this machine's OpenShell gateway. "
+                    "Run sandboxes from that account, or have it hand the gateway over; see: defenseclaw sandbox doctor"
+                )
             return "Sandboxes are off. Set them up in Setup (0) → Sandboxes (OpenShell), or run: defenseclaw sandbox setup"
         if state == "unavailable":
             reason = self.status.reason or "the daemon is not connected to OpenShell"
@@ -1767,7 +1893,7 @@ class SandboxesPanelModel:
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),
-                    row.badge(short=True),
+                    self.alerts_cell(row, short=True),
                 )
                 for row in self.rows
             )
@@ -1783,7 +1909,7 @@ class SandboxesPanelModel:
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),
-                    row.alert_badge,
+                    self.alerts_cell(row),
                 )
                 for row in self.rows
             )
@@ -1853,12 +1979,13 @@ class SandboxesPanelModel:
         note = f"+{more} more · Enter" if more else "Enter for details"
         return f"⚠ {row.name}: {alert}", note
 
-    def detail_pairs(self, destinations: Any = None) -> tuple[str, tuple[tuple[str, str], ...]]:
+    def detail_pairs(self, destinations: Any = None, *, run: str = "") -> tuple[str, tuple[tuple[str, str], ...]]:
         """Title and label/value pairs for the detail modal.
 
         ``destinations`` is the selected sandbox's ``GET .../destinations``
         answer (the panel fetches it as the detail opens), or an error
-        string; ``None`` leaves the Destinations section out.
+        string; ``None`` leaves the Destinations section out. ``run`` is the
+        kept detached run's line (detached_run_text).
         """
         if self.view == "activity":
             event = self.selected_event()
@@ -1933,11 +2060,14 @@ class SandboxesPanelModel:
             ("Phase", row.phase or "-"),
             ("Up", row.uptime_text),
             ("Policy", row.policy_label),
+            *((("Repo policy", row.repo_policy_text),) if row.repo_policy else ()),
             ("Skip-permissions", "on" if row.yolo else "off"),
             ("Project", f"{row.project} → {row.workdir} ({row.workdir_mode or '-'})" if row.project else "-"),
             ("Sites", f"{row.destinations} contacted, {row.blocked} blocked{_ai_sites_text(row)}"),
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked" + (f", {row.tool_asked} asked)" if row.tool_asked else ")")),
         ]
+        if run:
+            pairs.append(("Detached run", run))
         if row.hook_events_text:
             pairs.append(("Hook events", row.hook_events_text))
         if row.last_blocked:
@@ -1964,6 +2094,8 @@ class SandboxesPanelModel:
             pairs.append(("Destinations", destinations))
         elif destinations is not None:
             pairs.extend(destination_pairs(destinations, row.name))
+        if raised := self.alerts_text(row):
+            pairs.append(("Alerts", raised))
         for alert in row.alerts:
             pairs.append(("Alert", alert))
         for violation in row.violations:
@@ -1996,11 +2128,15 @@ class SandboxesPanelModel:
 
 
 def _ai_sites_text(row: SandboxRow) -> str:
-    """The AI part of the Sites line: "" without AI destinations."""
-    if not row.model_apis and not row.shadow_ai:
-        return ""
-    text = f" · AI: {_plural(row.model_apis, 'model API', 'model APIs')}"
-    return text + (f", {row.shadow_ai} shadow AI" if row.shadow_ai else "")
+    """The AI part of the Sites line, by destination kind (GAP-0319): "" without AI destinations."""
+    parts = []
+    if row.model_providers:
+        parts.append(_plural(row.model_providers, "model provider", "model providers"))
+    if row.harness_vendor:
+        parts.append(_plural(row.harness_vendor, "harness vendor host", "harness vendor hosts"))
+    if row.shadow_ai:
+        parts.append(f"{row.shadow_ai} shadow AI")
+    return f" · AI: {', '.join(parts)}" if parts else ""
 
 
 # How a destination kind reads (sandboxapi Destination* kinds).
@@ -2046,9 +2182,13 @@ def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS
             provider = reason_label(_text(row.get("category")))
         if provider:
             what += f" ({provider})"
-        requests = _int(row.get("connections")) + _int(row.get("tunnels"))
+        # Failed counts what the proxy allowed and the host did not take
+        # (sandboxcli.destinationRequests, GAP-0284).
+        failed = _int(row.get("failed"))
+        requests = _int(row.get("connections")) + _int(row.get("tunnels")) + failed
         refused = _int(row.get("refused")) + _int(row.get("blocked"))
-        parts = [what, _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")]
+        counts = _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")
+        parts = [what, counts + (f", {failed} failed upstream" if failed else "")]
         if program := _destination_program(row):
             parts.append(program)
         pairs.append(("Destination", f"{_text(row.get('host'))} — " + " · ".join(parts)))

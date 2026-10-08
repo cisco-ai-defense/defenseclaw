@@ -53,6 +53,8 @@ type CopyWorkspace interface {
 	// CheckApply looks, before a pull, at what would stop its apply
 	// (workspace.CheckApply).
 	CheckApply(ctx context.Context, opts workspace.ApplyOptions) (bool, error)
+	// Diff is the last pull as a diff to read (workspace.PullDiff).
+	Diff(ctx context.Context, dataDir, name string) (string, error)
 }
 
 type defaultCopyWorkspace struct{}
@@ -89,6 +91,9 @@ func (defaultCopyWorkspace) PendingWork(ctx context.Context, dataDir, name strin
 }
 func (defaultCopyWorkspace) CheckApply(ctx context.Context, o workspace.ApplyOptions) (bool, error) {
 	return workspace.CheckApply(ctx, o)
+}
+func (defaultCopyWorkspace) Diff(ctx context.Context, dataDir, name string) (string, error) {
+	return workspace.PullDiff(ctx, dataDir, name)
 }
 
 // UndoOptions are the `sandbox undo` flags.
@@ -132,6 +137,9 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 			return nil
 		}
 		a.ok("nothing to undo: " + o.Name + "'s folder matches its undo point")
+		if r := preview.Result; r != nil && r.RefsKept && len(r.RefChanges) > 0 {
+			a.note("--keep-refs leaves its " + plural(int64(len(r.RefChanges)), "branch or tag", "branches and tags") + " as the session made them")
+		}
 		return nil
 	}
 	a.printUndo(preview.Result, true)
@@ -183,6 +191,9 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		a.note("stopped " + o.Name)
 	}
 	a.ok("restored: " + undoDone(res, "see above"))
+	if res.Result != nil && res.Result.RefsKept && len(res.Result.RefChanges) > 0 {
+		a.note("left " + plural(int64(len(res.Result.RefChanges)), "branch or tag", "branches and tags") + " as the session made them (--keep-refs)")
+	}
 	if res.Result != nil {
 		if c := res.Result.PostCommit; c != "" {
 			a.note("the session's state is kept in commit " + shortOID(c) + ": `git -C " + a.tildePath(firstNonEmpty(res.Result.Project, preview.Result.Project)) +
@@ -278,7 +289,7 @@ func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o 
 		case "D":
 			verb = "remove "
 		}
-		a.line("  " + verb + " " + c.Path)
+		a.line("  " + verb + " " + pathText(c.Path))
 	}
 	a.note("edits you made since the apply stay")
 	if o.Preview {
@@ -361,9 +372,11 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 			a.line(fmt.Sprintf("  … %d more", len(r.Changes)-20))
 			break
 		}
-		a.line("  " + undoVerb(c.Status) + " " + c.Path)
+		a.line("  " + undoVerb(c.Status) + " " + pathText(c.Path))
 	}
 	switch {
+	case r.RefsKept && (r.HeadBefore != r.HeadAfter || r.BranchBefore != r.BranchAfter):
+		a.line("  keep HEAD as the session left it (--keep-refs)")
 	case r.BranchBefore != "" && r.BranchBefore != r.BranchAfter:
 		a.line("  switch back to branch " + r.BranchBefore + " at " + firstNonEmpty(shortCommit(r.HeadBefore), "its undo point's commit"))
 	case r.HeadBefore != r.HeadAfter && r.HeadBefore != "":
@@ -379,7 +392,16 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 		for _, rc := range r.RefChanges {
 			refs = append(refs, strings.TrimPrefix(strings.TrimPrefix(rc.Ref, "refs/heads/"), "refs/tags/"))
 		}
-		a.line("  restore " + plural(int64(n), "branch or tag", "branches and tags") + ": " + strings.Join(firstN(refs, 6), ", "))
+		verb := "restore "
+		if r.RefsKept {
+			// --keep-refs leaves them as the session made them (GAP-0225).
+			verb = "keep "
+		}
+		line := "  " + verb + plural(int64(n), "branch or tag", "branches and tags") + ": " + strings.Join(firstN(refs, 6), ", ")
+		if r.RefsKept {
+			line += " (as the session left them: --keep-refs)"
+		}
+		a.line(line)
 	}
 	if n := len(r.ControlChanges); n > 0 {
 		a.line("  reset " + plural(int64(n), "git control file", "git control files") + ": " + strings.Join(firstN(r.ControlChanges, 6), ", "))
@@ -395,14 +417,14 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 	}
 	for _, c := range r.Ignored {
 		if c.Removed {
-			a.line(fmt.Sprintf("  remove  %s the session wrote to %s (a Python bytecode cache)", plural(int64(c.Added+c.Modified), "file", "files"), c.Path))
+			a.line(fmt.Sprintf("  remove  %s the session wrote to %s (a Python bytecode cache)", plural(int64(c.Added+c.Modified), "file", "files"), pathText(c.Path)))
 		}
 	}
 	for _, c := range r.RestoredIgnored() {
-		a.line("  restore " + c.Path + " from the copy the undo point keeps (" + c.Summary() + " during the session)")
+		a.line("  restore " + pathText(c.Path) + " from the copy the undo point keeps (" + c.Summary() + " during the session)")
 	}
 	for _, p := range r.PinnedChanges {
-		a.warn(p + " changed on this machine during the session; it is kept")
+		a.warn(pathText(p) + " changed on this machine during the session; it is kept")
 	}
 	a.printUnrestored(r.Unrestored())
 }
@@ -449,7 +471,7 @@ func (a *App) printUnrestored(list []workspace.IgnoredChange) {
 				missing = append(missing, base)
 			}
 		}
-		a.warn(fmt.Sprintf("undo cannot restore %s (%s): %s", c.Path, what, remedy))
+		a.warn(fmt.Sprintf("undo cannot restore %s (%s): %s", pathText(c.Path), what, remedy))
 	}
 	switch {
 	case !u.Enabled && (covered || len(missing) > 0):
@@ -493,10 +515,17 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 		return err
 	}
 	if sb, err := api.Get(ctx, o.Name); err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
-		if o.Diff && o.Output != OutputJSON {
-			a.note("--diff: the changes of a copy come back as a patch; `" + CommandName + " pull " + o.Name + " --patch-out FILE` writes one")
+		if err := a.Pull(ctx, PullOptions{Name: o.Name, Output: o.Output, preview: true}); err != nil || !o.Diff || o.Output == OutputJSON {
+			return err
 		}
-		return a.Pull(ctx, PullOptions{Name: o.Name, Output: o.Output, preview: true})
+		// The diff of the work the pull read, to decide on before
+		// applying it (GAP-0207).
+		diff, err := a.Workspace.Diff(ctx, a.dataDir(), o.Name)
+		if err != nil {
+			return workspaceFailure("diff "+o.Name, err, "")
+		}
+		a.page(diff)
+		return nil
 	}
 	rev, err := api.Review(ctx, o.Name, sandboxapi.ReviewRequest{Diff: o.Diff})
 	if err != nil {
@@ -524,12 +553,7 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 		a.line(a.style(line, ansiYellow))
 	}
 	if r := rev.Report; r != nil {
-		for _, f := range mergeFlags(r.Flags) {
-			a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), f.name, strings.Join(f.details, "; ")))
-		}
-		for _, f := range r.Findings {
-			a.line(findingLine(f))
-		}
+		a.printReviewDetail(r)
 		for _, w := range r.Warnings {
 			a.warn(w)
 		}
@@ -659,8 +683,9 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		a.line(a.style(line, ansiYellow))
 	}
 	for _, c := range res.Changes {
-		a.line(fmt.Sprintf("  %s %s", c.Status, c.Path))
+		a.line(fmt.Sprintf("  %s %s", c.Status, pathText(c.Path)))
 	}
+	a.printReviewDetail(&res.Review)
 	for _, d := range res.Dropped {
 		a.warn(d + " is held back from the sandbox; its change is not brought back")
 	}
@@ -696,12 +721,23 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return nil
 	}
 	// A branch that holds this work already takes nothing new, so there is
-	// nothing to confirm.
+	// nothing to confirm; nor does a patch file or a branch, which change
+	// nothing that runs until you apply or merge them (GAP-0262, GAP-0267),
+	// unless a secret would go into the branch's history.
+	if res.Review.Sensitive() && !o.AcceptSensitive && writesElsewhere(o.applyMode(), &res.Review) {
+		a.note(elsewhereNote(o.applyMode()))
+		o.AcceptSensitive = true
+	}
 	if res.Review.Sensitive() && !o.AcceptSensitive && !a.branchHolds(ctx, sb, o) {
 		yes, err := a.ask(a.bringBackQuestion(&res.Review), false, false)
 		if err != nil {
 			if errors.Is(err, ErrNoTerminal) {
 				return errors.New("some changes can run code on this machine; review them and pass --accept-sensitive")
+			}
+			if errors.Is(err, errInterrupted) {
+				// Ctrl-C: nothing was applied, as at a session's end (GAP-0290).
+				a.warn("interrupted: " + notBroughtBack(o.Name, res.Kind))
+				return &ExitError{Code: exitInterrupted, Err: &Silent{Err: err}}
 			}
 			return err
 		}
@@ -1010,7 +1046,7 @@ func alreadyMatched(pulled, written []workspace.TreeChange) int {
 // findingLine renders a scanner finding like the flag lines above it:
 // "  CRITICAL config/dev.env:3 — clawshield-secrets: AWS access key".
 func findingLine(f workspace.ScanFinding) string {
-	where := firstNonEmpty(f.Location, f.Path)
+	where := pathText(firstNonEmpty(f.Location, f.Path))
 	sev := strings.ToUpper(firstNonEmpty(f.Severity, "finding"))
 	text := where + " — " + f.Scanner
 	if title := firstNonEmpty(f.Title, f.RuleID); title != "" {
@@ -1101,18 +1137,67 @@ func notBroughtBack(name string, kind workspace.CopyKind) string {
 		"`, then pull with --accept-sensitive, or " + other
 }
 
+// writesElsewhere reports whether a pull in mode of review r's changes
+// lands where nothing of them runs, so it needs no confirmation: a patch
+// file, or a branch that takes no secret into the history.
+func writesElsewhere(mode workspace.ApplyMode, r *workspace.ReviewReport) bool {
+	return mode == workspace.ApplyPatch || mode == workspace.ApplyBranch && len(r.SecretPaths()) == 0
+}
+
+// elsewhereNote is what a pull of changes that can run code on this
+// machine says instead of asking, when they go to a branch or a patch file
+// (mode) rather than the working tree.
+func elsewhereNote(mode workspace.ApplyMode) string {
+	if mode == workspace.ApplyBranch {
+		return "nothing of it runs from a branch: review the flagged files before you merge or check out the branch"
+	}
+	return "nothing of it runs from a patch file: review the flagged files before you apply it"
+}
+
 // bringBackQuestion warns about what looks like a secret the sandbox
 // wrote and returns the question that confirms bringing sensitive changes
 // back: the same at a session's end and for `sandbox pull`.
 func (a *App) bringBackQuestion(r *workspace.ReviewReport) string {
-	secrets := r.SecretPaths()
-	if len(secrets) > 0 {
-		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
-		if riskLine(r) == "" {
-			return "Some changes hold what looks like a secret. Bring them back anyway?"
-		}
+	if len(r.SecretPaths()) > 0 && riskLine(r) == "" {
+		return "Some changes hold what looks like a secret. Bring them back anyway?"
 	}
 	return "Some changes can run code on this machine. Bring them back anyway?"
+}
+
+// printReviewDetail prints a review's flag and scanner finding lines and the
+// warning about what looks like a secret the sandbox wrote: the same for a
+// mounted project's review and a copy's review, pull and end of session,
+// where they showed only at `pull --apply` or in --output json (GAP-0237).
+func (a *App) printReviewDetail(r *workspace.ReviewReport) {
+	if r == nil {
+		return
+	}
+	a.printCommits(r)
+	for _, f := range mergeFlags(r.Flags) {
+		a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), pathText(f.name), strings.Join(f.details, "; ")))
+	}
+	for _, f := range r.Findings {
+		a.line(findingLine(f))
+	}
+	if secrets := r.SecretPaths(); len(secrets) > 0 {
+		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(pathTexts(firstN(secrets, 4)), ", "))
+	}
+}
+
+// printCommits names the commits HEAD gained since the undo point, which
+// may be the user's own made in the folder during the session: undo resets
+// them too (GAP-0223).
+func (a *App) printCommits(r *workspace.ReviewReport) {
+	if len(r.Commits) == 0 {
+		return
+	}
+	shown := r.Commits
+	more := ""
+	if len(shown) > 4 {
+		shown, more = shown[:4], ", and more"
+	}
+	a.note(plural(int64(len(r.Commits)), "commit", "commits") + " since the undo point (the session's, or yours if you committed in the folder " +
+		"meanwhile; undo resets them all): " + strings.Join(pathTexts(shown), "; ") + more)
 }
 
 // riskLine is the review's warning about changed files that can run code
@@ -1124,7 +1209,7 @@ func riskLine(r *workspace.ReviewReport) string {
 	var names []string
 	for _, f := range mergeFlags(r.Flags) {
 		if severityRank[f.severity] >= severityRank[workspace.SeverityMedium] {
-			names = append(names, f.name)
+			names = append(names, pathText(f.name))
 		}
 	}
 	if len(names) == 0 {

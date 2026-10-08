@@ -330,6 +330,15 @@ var inferenceShapedFragments = []string{
 	"generativeai", "bedrock", "vertexai", "aiplatform",
 }
 
+// vendorSites maps the domain of a vendor named in inferenceShapedFragments
+// to that name. The catalog lists the vendor's model APIs (api.openai.com,
+// api.anthropic.com); any other host of its own (docs, help, status, the
+// console) is its website, so the vendor's name in it is no sign of an AI
+// endpoint the catalog misses (GAP-0214: a Codex sandbox reading
+// developers.openai.com raised shadow AI). A host of anyone else that carries
+// the name (my-openai-proxy.example.net, x.openai.azure.com) still is one.
+var vendorSites = map[string]string{"openai.com": "openai", "anthropic.com": "anthropic"}
+
 // InferenceShaped reports whether a hostname looks like an AI endpoint the
 // catalog does not know.
 func InferenceShaped(hostname string) bool {
@@ -337,8 +346,9 @@ func InferenceShaped(hostname string) bool {
 	if domain == "" {
 		return false
 	}
+	own := siteVendor(domain)
 	for _, fragment := range inferenceShapedFragments {
-		if strings.Contains(domain, fragment) {
+		if fragment != own && strings.Contains(domain, fragment) {
 			return true
 		}
 	}
@@ -353,6 +363,17 @@ func InferenceShaped(hostname string) bool {
 		}
 	}
 	return false
+}
+
+// siteVendor is the vendorSites name of the vendor whose own site domain is
+// on, "" for any other host.
+func siteVendor(domain string) string {
+	for site, name := range vendorSites {
+		if domain == site || strings.HasSuffix(domain, "."+site) {
+			return name
+		}
+	}
+	return ""
 }
 
 // aiWord reports a domain that has "ai" as a word: a label or a part of one

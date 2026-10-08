@@ -54,19 +54,24 @@ image also prepares a MicroVM disk, which takes about a minute.
 ### Read the banner
 
 Before the harness takes over your terminal, DefenseClaw prints what the
-sandbox can see and use.
+sandbox can see and use. On a Mac, where the agent works on a copy, the lines
+just before the banner say what the copy left out, such as
+`⚠ 1 secret file held back from the copy: .env`. With an Amazon Bedrock key
+the `Model` line names the model and the key:
+`Model     anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)`.
 
 <Tabs items={['Linux', 'macOS']}>
 <Tab value="Linux">
 
 ```text
 Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
-  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
   Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t); each one also rings the bell here
 ```
 
 </Tab>
@@ -78,7 +83,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
-  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t); each one also rings the bell here
 ```
 
 </Tab>
@@ -88,7 +93,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
 | --- | --- |
 | `Sandbox …` | The name, the harness, and the permission mode. `skip-permissions ON` means the harness's own prompts are off. `--safe` keeps them. |
 | `network: …` | The network profile: `open + blocklist` (the default), `allowlist (balanced)` or `provider hosts only (strict)`. See [network and egress](/docs/sandboxes/network). |
-| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy. |
+| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy, without what git ignores (such as `node_modules/` and `.venv/`), so the dependencies are installed inside. |
 | `Hidden` | Secret files that appear empty inside a live mount. On a copy they are held back instead. |
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook that runs on your machine. |
 | `Model` | Which credential the harness uses. The sandbox gets a placeholder; OpenShell adds the real key only on requests to the model provider. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. |
@@ -110,10 +115,17 @@ defenseclaw sandbox activity -f
 ```text
 14:02:11 myapp-7f3a ✓ registry.npmjs.org
 14:02:13 myapp-7f3a ✓ docs.python.org
-14:02:20 myapp-7f3a ⚠ Bash: Allowed but flagged by DefenseClaw rule C2-WEBHOOK-SITE: webhook.site (known exfil). The action was allowed; DefenseClaw recorded the finding for the user's review.
+14:02:20 myapp-7f3a ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
 14:02:20 myapp-7f3a ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
+
+The model calls do not appear: OpenShell opens the model provider's hosts
+to the harness directly (the banner's second `Model` line). Other calls of
+the harness to its own vendor do. With an Amazon Bedrock key, for example,
+Claude Code's calls to `api.anthropic.com` go through the egress proxy and
+show as `✓ api.anthropic.com`; `sandbox destinations` lists that host as
+`harness vendor`.
 
 The same feed from a real session on a Mac, for a sandbox named with
 `--name myapp-claude` and printed with
@@ -125,7 +137,7 @@ The same feed from a real session on a Mac, for a sandbox named with
 | --- | --- |
 | `✓ host` | The sandbox reached a site through the egress proxy. |
 | `✗ host (why)` | The egress proxy blocked a site. The line ends with the unblock command when the block can be lifted. |
-| `⚠` | A finding: DefenseClaw allowed a tool call but recorded something for your review. |
+| `⚠` | A finding: DefenseClaw allowed a tool call but recorded something for your review. `⚠ Bash ran although DefenseClaw rule … matched it` means a rule that blocks such calls matched one it could not decide: DefenseClaw decides only the commands it can read in full, and a shell variable, a substitution or a construct it does not analyze leaves a match undecided. |
 | `✗ tool … blocked` | DefenseClaw's hooks blocked a tool call. The harness shows the reason too. |
 | `? ask …` | The sandbox asks to reach something only you can open, such as a port on your machine. |
 
@@ -238,7 +250,8 @@ the like.
 
 ```text
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
-✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since
+  ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
+  ✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
@@ -254,7 +267,7 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
 ```text
   Pulling myapp-1c2d's work…
 Session ended · 14 tool calls · 2 new sites contacted · 3 files changed (+41 −6)
-Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
   ✓ applied 3 changes to ~/code/myapp
   your previous working tree is kept at refs/defenseclaw/copy/myapp-1c2d/pre-apply; `defenseclaw sandbox undo myapp-1c2d` reverts the apply
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-1c2d   delete: defenseclaw sandbox delete myapp-1c2d
@@ -264,6 +277,7 @@ Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch f
 - `b` puts it on a new branch, `dc/myapp-1c2d`.
 - `p` writes a patch file.
 - `s` leaves it in the sandbox for a later `sandbox pull`.
+- `d` shows the diff, then asks again.
 
 The end of a real session on a Mac, for a sandbox started with
 `--name myapp-claude`, after three blocked sites, two of them AI services the
@@ -350,12 +364,24 @@ delete a copy whose work you did not bring back.
 
 ## Run without a terminal
 
-`--prompt` runs the harness headless with one prompt and streams its output.
-The sandbox is deleted at the end unless you pass `--keep`:
+`--prompt` runs the harness headless with one prompt and streams its output:
 
 ```bash
 defenseclaw sandbox run codex --prompt "fix the failing tests"
 ```
+
+When the run changed a mounted folder and you started it in a terminal, it
+ends with the same `Keep changes?` question as a session, and `u` undoes
+them. Once nothing is left in the sandbox to bring back or undo, because
+you kept the changes or there were none, the sandbox is deleted, and its
+undo point with it, so a later `sandbox undo NAME` finds no sandbox:
+
+```text
+  ✓ kept: the changes stay in the folder, and the next session takes a new undo point
+  ✓ sandbox myapp-7f3a deleted: nothing is left in it to bring back or undo (a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it)
+```
+
+Pass `--keep` to keep the sandbox and its undo point.
 
 `--detach` starts a run in the background. `sandbox logs` shows its output,
 and keeps the end of it after the sandbox stops:
@@ -373,16 +399,45 @@ myapp-7f3a is stopped; this is the log of its detached run started 07:15, kept w
 
 ## If the hooks cannot reach DefenseClaw
 
-The sandbox hooks fail closed. If DefenseClaw's daemon stops during a
-session, every tool call is blocked, and your terminal says so:
+The sandbox hooks fail closed: while they cannot reach DefenseClaw, every
+tool call is blocked, and the harness shows why with each blocked call.
+
+If DefenseClaw's daemon stops during a session (or is restarting), the
+reason the agent shows is:
 
 ```text
-[defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor
+defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there if it is stopped, and after a start retries in a minute (`defenseclaw sandbox doctor` says what is wrong)
 ```
 
-Start the daemon again (`defenseclaw-gateway start`) and the agent can carry
-on. The end-of-session summary repeats the warning, and the run exits with
-status 69 when not one hook got through.
+The run also rings the bell and puts
+`[defenseclaw] ⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed: …`
+in the terminal's title for a moment (Claude Code takes the title back at
+once; a terminal with desktop notifications shows it as one). The activity
+feed and the TUI cannot say it: they come from the daemon. Start it again
+(`defenseclaw-gateway start`) and, once it answers, the agent can carry on.
+The daemon can take up to a minute to answer the sandbox after a start; a
+call blocked in that minute goes through when retried. The end-of-session
+summary says how long it was away
+(`⚠ the DefenseClaw daemon was not reachable from 11:05:12 to 11:06:40; the hooks failed closed meanwhile`).
+If it is still stopped when you leave the harness, the run cannot review
+the session. It prints
+``⚠ the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run: start it with `defenseclaw-gateway start`, then `defenseclaw sandbox review NAME` shows its changes and `defenseclaw sandbox undo NAME` reverts them; NAME and its undo point are kept``
+and exits with status 1, without the summary or the keep question. In a
+copy-mode sandbox the line ends with `defenseclaw sandbox pull NAME`, which
+brings the work back. Start the daemon, then run the command the line names.
+
+If the daemon runs but the hooks still cannot reach it, for example when
+the path through OpenShell is broken, DefenseClaw flags the session. The
+feed and the TUI show:
+
+```text
+⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor
+```
+
+The terminal's title shows it for a moment and the bell rings (Claude Code
+takes the title back at once); a run without a terminal, such as
+`--prompt`, prints it as a `[defenseclaw]` line. The end-of-session summary
+repeats it, and the run exits with status 69 when not one hook got through.
 
 ## Next
 

@@ -1025,6 +1025,17 @@ func TestBanner(t *testing.T) {
 			lacks(t, ta.output(), c.not...)
 		})
 	}
+	// GAP-0247: the project's own warning, which the sandbox's warnings
+	// repeat, is shown once, with the Project lines.
+	ta := newTestApp(t, "")
+	sb := sampleSandbox("box")
+	w := "/p/web is inside the git repository at /p; the sandbox sees it as a plain folder (launch from /p to give the agent git)"
+	sb.Workspace = &sandboxapi.WorkspaceSummary{Project: sb.Project, Warnings: []string{w}}
+	sb.Warnings = []string{w}
+	ta.banner(&sb, bannerInfo{})
+	if n := strings.Count(ta.output(), "inside the git repository at /p"); n != 1 {
+		t.Fatalf("the project warning shows %d times:\n%s", n, ta.output())
+	}
 	for name, want := range map[string]string{"OpenHands": "an OpenHands", "OmniGent": "an OmniGent", "Codex": "a Codex"} {
 		if got := withArticle(name); got != want {
 			t.Errorf("withArticle(%s) = %q", name, got)

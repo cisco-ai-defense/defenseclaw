@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "OpenShell sandboxes: active sandboxes by connector, phase transitions, egress decisions by source (OpenShell vs the DefenseClaw egress proxy) and outcome, top blocked and allowed hosts, bytes up and down per destination, shadow-AI and other sandbox findings, integration health, and opt-in process starts. Fleet gauges and counters come from Prometheus; per-sandbox detail comes from Loki and follows the Sandbox variable.",
+  "description": "OpenShell sandboxes: active sandboxes by connector, phase transitions, egress decisions by source (OpenShell vs the DefenseClaw egress proxy) and outcome, top blocked and allowed hosts, bytes up and down per destination, shadow-AI and other sandbox findings, integration health, and opt-in process starts. Every panel follows Environment and Host. Fleet gauges and counters come from Prometheus and ignore the Sandbox variable (their titles say all names); per-sandbox detail comes from Loki and follows it.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -68,8 +68,8 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Active sandboxes",
-      "description": "Sandboxes provisioning, starting, ready or stopping, from the defenseclaw.sandbox.active gauge (latest value per connector in the last hour, so an idle fleet still reads correctly). Filtered by Connector; the metric carries no sandbox identity.",
+      "title": "Active (all names)",
+      "description": "Sandboxes provisioning, starting, ready or stopping now, from the defenseclaw.sandbox.active gauge that every running gateway exports each metric interval (the largest value per host, so a restarted gateway is not counted twice; a stopped gateway drops out after five minutes). Follows Environment, Host and Connector. The metric carries no sandbox identity, so this count ignores the Sandbox box.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -86,7 +86,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum(max by (connector) (last_over_time(defenseclaw_sandbox_active{connector=~\"$connector\"}[1h])))",
+          "expr": "sum(max by (deployment_environment, host_name, connector) (defenseclaw_sandbox_active{deployment_environment=~\"$environment\", host_name=~\"$host\", connector=~\"$connector\"}))",
           "refId": "A",
           "instant": true
         }
@@ -123,7 +123,7 @@
       "id": 3,
       "type": "stat",
       "title": "Sandboxes seen",
-      "description": "Distinct sandboxes that recorded a lifecycle change in the selected range.",
+      "description": "Distinct sandboxes, by host and name, that recorded a lifecycle change in the selected range: two hosts' sandboxes with the same name count twice. Pick a Host to see one computer's.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -140,7 +140,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -195,7 +195,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -250,7 +250,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -309,7 +309,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -351,7 +351,7 @@
       "id": 7,
       "type": "stat",
       "title": "Health degraded",
-      "description": "OpenShell integration health records with state degraded or failed in the range (includes gateway-wide records that name no sandbox).",
+      "description": "OpenShell integration health records with state degraded or failed in the range: sandboxes counts the records of the sandboxes in the Sandbox box, gateway-wide the records about the whole integration (they name no sandbox). Both follow Environment and Host.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -368,8 +368,18 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"$sandbox\" [$__range])) or vector(0)",
           "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=\"\" [$__range])) or vector(0)",
+          "refId": "B",
           "instant": true,
           "queryType": "instant"
         }
@@ -392,7 +402,32 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "sandboxes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "gateway-wide"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "colorMode": "value",
@@ -403,7 +438,8 @@
           ],
           "fields": "",
           "values": false
-        }
+        },
+        "textMode": "value_and_name"
       }
     },
     {
@@ -421,8 +457,8 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Active sandboxes by connector",
-      "description": "The defenseclaw.sandbox.active gauge per harness connector. Sandbox identities are never metric labels; use the Loki panels and the Sandbox variable for a single sandbox.",
+      "title": "Active sandboxes by connector (all names)",
+      "description": "The defenseclaw.sandbox.active gauge per harness connector (the largest value per host, as in Active sandboxes). Follows Environment, Host and Connector. Sandbox identities are never metric labels, so this chart ignores the Sandbox box; use the log panels for one sandbox.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -439,7 +475,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (connector) (defenseclaw_sandbox_active{connector=~\"$connector\"})",
+          "expr": "sum by (connector) (max by (deployment_environment, host_name, connector) (defenseclaw_sandbox_active{deployment_environment=~\"$environment\", host_name=~\"$host\", connector=~\"$connector\"}))",
           "refId": "A",
           "legendFormat": "{{connector}}",
           "range": true
@@ -489,7 +525,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (phase) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | label_format phase=\"{{.body_defenseclaw_sandbox_phase}}\" [$__interval]))",
+          "expr": "sum by (phase) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | label_format phase=\"{{.body_defenseclaw_sandbox_phase}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{phase}}"
         }
@@ -541,7 +577,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_phase_previous}}{{.body_defenseclaw_sandbox_phase_previous}}{{else}}?{{end}} → {{.body_defenseclaw_sandbox_phase}} · trigger {{.body_defenseclaw_sandbox_lifecycle_trigger}} · {{.body_defenseclaw_sandbox_condition_reason}}\"",
+          "expr": "{service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_phase_previous}}{{.body_defenseclaw_sandbox_phase_previous}}{{else}}?{{end}} → {{.body_defenseclaw_sandbox_phase}} · trigger {{.body_defenseclaw_sandbox_lifecycle_trigger}} · {{.body_defenseclaw_sandbox_condition_reason}}\"",
           "refId": "A"
         }
       ],
@@ -587,7 +623,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (net_source, net_decision) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=~\"egress[.]allowed|egress[.]blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format net_source=\"{{.body_defenseclaw_network_source}}\", net_decision=\"{{.body_defenseclaw_network_decision}}\" [$__interval]))",
+          "expr": "sum by (net_source, net_decision) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=~\"egress[.]allowed|egress[.]blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format net_source=\"{{.body_defenseclaw_network_source}}\", net_decision=\"{{.body_defenseclaw_network_decision}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{net_source}} · {{net_decision}}"
         }
@@ -621,8 +657,8 @@
     {
       "id": 14,
       "type": "timeseries",
-      "title": "Egress by source and decision (metric)",
-      "description": "The defenseclaw.egress.events counter across all sandboxes, by egress source and decision. Filtered by Connector (the harness connector); the counter has no sandbox label. Counters miss a series' first increment, so the log panel is the exact count.",
+      "title": "Egress by source and decision (metric, all names)",
+      "description": "The defenseclaw.egress.events counter across all sandboxes, by egress source and decision. Follows Environment, Host and Connector (the harness connector); the counter has no sandbox label, so it ignores the Sandbox box. Counters miss a series' first increment, so the log panel is the exact count.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -639,7 +675,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "sum by (source, decision) (increase(defenseclaw_egress_events_total{connector=~\"$connector\", source=~\"openshell|dc-egress-proxy\"}[$__rate_interval]))",
+          "expr": "sum by (source, decision) (increase(defenseclaw_egress_events_total{deployment_environment=~\"$environment\", host_name=~\"$host\", connector=~\"$connector\", source=~\"openshell|dc-egress-proxy\"}[$__rate_interval]))",
           "refId": "A",
           "legendFormat": "{{source}} · {{decision}}",
           "range": true
@@ -692,7 +728,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -751,7 +787,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -818,7 +854,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -873,7 +909,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
+          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{dest}}",
           "instant": true,
@@ -928,7 +964,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(sum_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__interval]))",
+          "expr": "sum(sum_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__interval]))",
           "refId": "A",
           "legendFormat": "bytes up"
         },
@@ -937,7 +973,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(sum_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__interval]))",
+          "expr": "sum(sum_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__interval]))",
           "refId": "B",
           "legendFormat": "bytes down"
         }
@@ -1001,7 +1037,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "ALLOWED",
           "instant": true,
           "queryType": "instant"
@@ -1011,7 +1047,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
           "refId": "BLOCKED",
           "instant": true,
           "queryType": "instant"
@@ -1021,7 +1057,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
           "refId": "UP",
           "instant": true,
           "queryType": "instant"
@@ -1031,7 +1067,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
+          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
           "refId": "DOWN",
           "instant": true,
           "queryType": "instant"
@@ -1168,7 +1204,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_network_source}} · {{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}:{{.body_server_port}} · {{.body_defenseclaw_network_decision_code}} · {{.body_defenseclaw_sandbox_process_executable}}\"",
+          "expr": "{service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_network_source}} · {{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}:{{.body_server_port}} · {{.body_defenseclaw_network_decision_code}} · {{.body_defenseclaw_sandbox_process_executable}}\"",
           "refId": "A"
         }
       ],
@@ -1214,7 +1250,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (kind) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | label_format kind=\"{{.body_defenseclaw_finding_category}}\" [$__range]))",
+          "expr": "sum by (kind) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | label_format kind=\"{{.body_defenseclaw_finding_category}}\" [$__range]))",
           "refId": "A",
           "legendFormat": "{{kind}}",
           "instant": true,
@@ -1277,7 +1313,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (target, severity) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" | label_format target=\"{{.body_defenseclaw_finding_target_ref}}\", severity=\"{{.body_defenseclaw_security_severity}}\" [$__range])))",
+          "expr": "topk(50, sum by (target, severity) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" | label_format target=\"{{.body_defenseclaw_finding_target_ref}}\", severity=\"{{.body_defenseclaw_security_severity}}\" [$__range])))",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -1339,7 +1375,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | line_format \"{{.body_defenseclaw_security_severity}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_finding_rule_id}} · {{.body_defenseclaw_finding_target_ref}}\"",
+          "expr": "{service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | line_format \"{{.body_defenseclaw_security_severity}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_finding_rule_id}} · {{.body_defenseclaw_finding_target_ref}}\"",
           "refId": "A"
         }
       ],
@@ -1385,7 +1421,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (state) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | label_format state=\"{{.event_name}}\" [$__interval]))",
+          "expr": "sum by (state) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | label_format state=\"{{.event_name}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{state}}"
         }
@@ -1437,7 +1473,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_sandbox_name}}{{.body_defenseclaw_sandbox_name}}{{else}}gateway{{end}} · {{.body_defenseclaw_schema_error_code}} · {{.body_defenseclaw_health_error_summary}}\"",
+          "expr": "{service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_sandbox_name}}{{.body_defenseclaw_sandbox_name}}{{else}}gateway{{end}} · {{.body_defenseclaw_schema_error_code}} · {{.body_defenseclaw_health_error_summary}}\"",
           "refId": "A"
         }
       ],
@@ -1483,7 +1519,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum by (seen) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format seen=\"{{.body_defenseclaw_sandbox_process_source}}\" [$__interval]))",
+          "expr": "sum by (seen) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format seen=\"{{.body_defenseclaw_sandbox_process_source}}\" [$__interval]))",
           "refId": "A",
           "legendFormat": "{{seen}}"
         }
@@ -1535,7 +1571,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(10, sum by (program) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format program=\"{{if .body_defenseclaw_sandbox_process_name}}{{.body_defenseclaw_sandbox_process_name}}{{else}}{{.body_defenseclaw_sandbox_process_executable}}{{end}}\" [$__range])))",
+          "expr": "topk(10, sum by (program) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format program=\"{{if .body_defenseclaw_sandbox_process_name}}{{.body_defenseclaw_sandbox_process_name}}{{else}}{{.body_defenseclaw_sandbox_process_executable}}{{end}}\" [$__range])))",
           "refId": "A",
           "legendFormat": "{{program}}",
           "instant": true,
@@ -1582,6 +1618,82 @@
   "templating": {
     "list": [
       {
+        "name": "environment",
+        "label": "Environment",
+        "description": "deployment.environment.name of the DefenseClaw gateway (set with defenseclaw setup observability add --environment). Applies to every panel, metric and log. Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\"}, deployment_environment)",
+        "query": {
+          "query": "label_values({service_name=\"defenseclaw\"}, deployment_environment)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "host",
+        "label": "Host",
+        "description": "host.name of the computer the DefenseClaw gateway runs on. Applies to every panel, metric and log, so one host shows only its own sandboxes (none on a computer that cannot run them). Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name!=\"\", host_name)",
+        "query": {
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name!=\"\", host_name)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      },
+      {
         "name": "connector",
         "label": "Connector",
         "description": "Harness connector of the sandbox. Applies to the metric panels (defenseclaw_sandbox_active, defenseclaw_egress_events_total). Defaults to All.",
@@ -1590,9 +1702,9 @@
           "type": "prometheus",
           "uid": "defenseclaw-prometheus"
         },
-        "definition": "label_values(defenseclaw_sandbox_active, connector)",
+        "definition": "label_values(defenseclaw_sandbox_active{deployment_environment=~\"$environment\", host_name=~\"$host\"}, connector)",
         "query": {
-          "query": "label_values(defenseclaw_sandbox_active, connector)",
+          "query": "label_values(defenseclaw_sandbox_active{deployment_environment=~\"$environment\", host_name=~\"$host\"}, connector)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -1622,15 +1734,15 @@
       {
         "name": "sandbox",
         "label": "Sandbox",
-        "description": "DefenseClaw sandbox name. Applies to the log panels. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox, so listing sandboxes never parses log bodies. Sandbox identities are never metric labels. Defaults to All.",
+        "description": "DefenseClaw sandbox name. Applies to the log panels; the panels marked (all names) ignore it. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox, so listing sandboxes never parses log bodies. Sandbox identities are never metric labels. Defaults to All.",
         "type": "query",
         "datasource": {
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

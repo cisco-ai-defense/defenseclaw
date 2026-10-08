@@ -936,13 +936,16 @@ harness's own event names in `events`, at most 48 names with the rest in
 `on_silence` with `silence_after`: `stop` or `alert`, what silent hooks
 lead to once the harness has worked that long without them),
 `endpoints` (the last result of each credentialed endpoint),
-`egress` totals (with `model_apis` and `shadow_ai`, the AI destinations of
-its destinations view), `pending_approvals`, the
+`egress` totals (with `model_providers`, `harness_vendor` and `shadow_ai`,
+the AI destinations of its destinations view by kind), `pending_approvals`, the
 `workspace` and `mcp` banner views, `snapshot`, `session` (a count that goes
 up each time the daemon sees the sandbox become ready), `violations` (settings the
 policy clamped), `warnings`, `orphaned`, `nested_repos` (repositories the
-nested-repository guard found in a mounted project), and `process_tree`
-when its processes are sampled (`GET …/{name}/processes`). `launch` holds what the
+nested-repository guard found in a mounted project), `process_tree`
+when its processes are sampled (`GET …/{name}/processes`), and `repo_policy`
+when the project's `.defenseclaw/sandbox.yaml` is part of its posture
+(`path`, `digest`, and `tightened`, the settings it made stricter; never its
+content). `launch` holds what the
 CLI needs to start the harness. `credentials` lists the sandbox's
 `--credential` bindings (`name`, `host` and `port`, never the value) and
 `host_ports` the host ports it may ask to reach: what a resume keeps.

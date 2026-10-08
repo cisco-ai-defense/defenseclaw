@@ -50,38 +50,38 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 8119,
-      "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
+      "size": 8934,
+      "sha256": "1da036b41531518fb1b4707bb61d85df0343dec6e92ec7b7f3d793fe58cb7a89"
     },
     "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 10727,
-      "sha256": "c335978bccfe4c006cd5ce4f2d14daf971ed2ee259d430c5190fcf73b7353651"
+      "size": 10723,
+      "sha256": "452e5ac977ce5f13b0f82825d148a1be494b3019ed6fcba8b6a344851289d600"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6081,
-      "sha256": "00719f8f413aa60fc156be9350a5e5727027d200248edb935e256a6e59f2785a"
+      "size": 6077,
+      "sha256": "9c167489a3f308dc6d04c7a4ea714f7e449a126e18c115ce4cd554d58a5b467b"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5349,
-      "sha256": "a1e91831b60998a3f2d62322f723aeecf918ead37f6fc869891039a1d7f499da"
+      "size": 5345,
+      "sha256": "b6a06752cca0d14ef922933f1ed4409f5312aec1bad8748102495e364697335c"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5867,
-      "sha256": "24caff3cb7edd58a5e6b5adc0503c4ff9c9a51d35411147c446b748f74364a58"
+      "size": 5863,
+      "sha256": "de1b2b2cfa9474cf387654943b6bb5221bbf0e87aa5ae3439b0b91882165d94c"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6251,
-      "sha256": "2b6b662d4e9816542518e8c5a0a6edd5c7202461edfdc88fbb4968a697f81082"
+      "size": 6247,
+      "sha256": "89397a83e9968d490b3d072396c5027f0a6b4477bbcbe7ac0cd65accac742665"
     },
     "/usr/local/lib/defenseclaw/otel-headers.sh": {
       "mode": "-rwxr-xr-x",

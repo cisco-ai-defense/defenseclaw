@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
@@ -553,7 +554,8 @@ func TestPruneRunImages(t *testing.T) {
 	var oldRuns []RunImage
 	for i, body := range []string{`{"b":1}`, `{"c":1}`, `{"d":1}`} {
 		ri := RunImage{Tag: RunRepository(testAliasRepo) + ":claudecode-old-" + string(rune('a'+i)) + "-u1000", ImageID: "sha256:" + strings.Repeat(string(rune('3'+i)), 64),
-			Digest: RunConfigDigest(claudeRunFiles(body)), BaseTag: old.Tag, BaseImageID: old.ImageID, Connector: "claudecode", UID: 1000, GID: 1000, Owner: testOwner}
+			Digest: RunConfigDigest(claudeRunFiles(body)), BaseTag: old.Tag, BaseImageID: old.ImageID, Connector: "claudecode", UID: 1000, GID: 1000, Owner: testOwner,
+			BuiltAt: old.BuiltAt.Add(time.Duration(i) * time.Minute)}
 		daemon.images[ri.ImageID] = fakeImage{labels: map[string]string{LabelSandboxImage: "1", LabelOwner: testOwner, LabelRunImage: "1"}}
 		daemon.tags[ri.Tag] = ri.ImageID
 		must(b.Store.putRunImage(ri))
@@ -578,10 +580,13 @@ func TestPruneRunImages(t *testing.T) {
 		t.Fatalf("dry prune without the alias repository = %+v, %v", rep, err)
 	}
 
-	// A sandbox that runs the old overlay image, named by its ID, keeps it
-	// and so its run images.
+	// A sandbox that runs the old overlay image, named by its ID, keeps it,
+	// its alias and its newest run image; the run images no sandbox runs go
+	// with their disks (GAP-0334).
 	rep, err = b.Prune(ctx, PruneOptions{Repository: "e-defenseclaw-sandbox", AliasRepository: testAliasRepo, Keep: []string{old.ImageID}, DryRun: true})
-	if err != nil || len(rep.Removed) != 0 || !slices.Equal(rep.InUse, []string{old.Tag, oldAlias.Tag}) {
+	if err != nil || !slices.Equal(rep.Removed, []string{oldRuns[0].Tag, oldRuns[1].Tag}) || !slices.Contains(rep.Kept, oldRuns[2].Tag) ||
+		// oldRuns[0]'s image ID stays under another data dir's tag.
+		!slices.Equal(rep.InUse, []string{old.Tag, oldAlias.Tag}) || !slices.Equal(rep.RemovedImageIDs, []string{oldRuns[1].ImageID}) {
 		t.Fatalf("dry prune keeping the old image = %+v, %v", rep, err)
 	}
 
@@ -775,6 +780,53 @@ func TestStoreRunImagesRoundTrip(t *testing.T) {
 	}
 	if recs, _ := reopened.List(); len(recs) != 1 {
 		t.Fatalf("Remove of a run image took overlay records: %+v", recs)
+	}
+}
+
+// GAP-0218, GAP-0219: two first starts on a full Mac left half-prepared
+// disks (.staging directories, 13 GiB) that image prune never listed, and
+// three starts at once each saw room for its own disk. The staging
+// directories are listed with when they last changed: the room check counts
+// those under way, prune removes the ones left, and nothing else.
+func TestVMStaging(t *testing.T) {
+	cache := t.TempDir()
+	disk := "sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.2-configured-501-20-sha256-" + strings.Repeat("ab", 32)
+	old, now := time.Now().Add(-time.Hour), time.Now()
+	for name, at := range map[string]time.Time{disk: old, disk + ".staging-1759880000-1": old, disk + ".staging-1759883000-2": now,
+		"sandbox-bootstrap-rootfs-ext4-v5.staging-1": old} {
+		p := filepath.Join(cache, name, "rootfs.ext4")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, bytes.Repeat([]byte{1}, 1<<20), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{p, filepath.Dir(p)} {
+			if err := os.Chtimes(q, at, at); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	staging := VMStaging(cache)
+	if len(staging) != 2 || staging[0].Changed.After(now.Add(-VMStagingIdle)) || staging[1].Changed.Before(now.Add(-time.Minute)) || staging[0].Bytes < 1<<20 {
+		t.Fatalf("staging = %+v", staging)
+	}
+	if got := VMDisks(cache, "sha256:"+strings.Repeat("ab", 32)); len(got) != 1 || got[0].Path != filepath.Join(cache, disk) {
+		t.Fatalf("a staging directory counted as a prepared disk: %+v", got)
+	}
+	// Only the preparation under way takes room, what it has still to write.
+	need, _, _ := openshell.VMDiskRoom(4 << 30)
+	if free, n := FreeAfterStaging(cache, 20<<30, 4<<30, now); n != 1 || free != 20<<30-(need-uint64(staging[1].Bytes)) {
+		t.Fatalf("free after staging = %d (%d under way)", free, n)
+	}
+	if err := RemoveVMStaging(staging[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveVMStaging(VMDisk{Path: filepath.Join(cache, disk)}); err == nil {
+		t.Fatal("removed a prepared disk as a staging directory")
+	}
+	if left := VMStaging(cache); len(left) != 1 || left[0].Path != staging[1].Path {
+		t.Fatalf("left = %+v", left)
 	}
 }
 
