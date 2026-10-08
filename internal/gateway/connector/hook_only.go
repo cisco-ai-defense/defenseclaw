@@ -1918,7 +1918,7 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			discardManagedFileBackup(opts.DataDir, c.name, logicalName)
 		}
 	}
-	if c.name == "antigravity" && opts.ManagedEnterprise {
+	if c.name == "antigravity" {
 		// DefenseClaw's Antigravity entries are its own by their outer key,
 		// also in a hooks.json the restore just put back that was captured
 		// after an earlier DefenseClaw setup (one a rolled-back install left),
@@ -2127,6 +2127,12 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		}
 	}
 	if c.name == "antigravity" {
+		if owned, err := AntigravityHooksHoldOwnedEntries(path); err != nil || owned {
+			if err != nil {
+				return fmt.Errorf("antigravity teardown verification could not read %s: %w", path, err)
+			}
+			return fmt.Errorf("antigravity teardown incomplete: DefenseClaw hook registrations remain in %s", path)
+		}
 		ownedCommands := antigravityOwnedHookCommands(needle)
 		ownedCommands = append(ownedCommands,
 			legacyAntigravityWindowsHookCommand(),

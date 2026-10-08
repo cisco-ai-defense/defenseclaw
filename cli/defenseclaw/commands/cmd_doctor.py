@@ -13444,6 +13444,20 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
             if os.path.isfile(full):
                 found.append((name, full))
 
+    if "antigravity" in inactive:
+        hooks = os.path.join(connector_home("antigravity"), "hooks.json")
+        if os.path.isfile(hooks) and not os.path.islink(hooks):
+            try:
+                if os.path.getsize(hooks) <= 1024 * 1024:
+                    with open(hooks, encoding="utf-8") as stream:
+                        document = json.load(stream)
+                    if isinstance(document, dict) and any(
+                        key.startswith("defenseclaw-antigravity-") for key in document
+                    ):
+                        found.append(("antigravity", hooks))
+            except (OSError, ValueError):
+                pass
+
     # OpenClaw's pristine backup is its only residue marker and lives
     # next to openclaw.json, not under data_dir. Only flag it when
     # OpenClaw is *not* among the active connectors.
