@@ -115,10 +115,17 @@ defenseclaw sandbox activity -f
 ```text
 14:02:11 myapp-7f3a ✓ registry.npmjs.org
 14:02:13 myapp-7f3a ✓ docs.python.org
-14:02:20 myapp-7f3a ⚠ Bash: Allowed but flagged by DefenseClaw rule C2-WEBHOOK-SITE: webhook.site (known exfil). The action was allowed; DefenseClaw recorded the finding for the user's review.
+14:02:20 myapp-7f3a ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
 14:02:20 myapp-7f3a ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
+
+The model calls do not appear: OpenShell opens the model provider's hosts
+to the harness directly (the banner's second `Model` line). Other calls of
+the harness to its own vendor do. With an Amazon Bedrock key, for example,
+Claude Code's calls to `api.anthropic.com` go through the egress proxy and
+show as `✓ api.anthropic.com`; `sandbox destinations` lists that host as
+`harness vendor`.
 
 The same feed from a real session on a Mac, for a sandbox named with
 `--name myapp-claude` and printed with
