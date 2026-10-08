@@ -49,12 +49,31 @@ func TestScanFindsAnInstallationBelowAFolderItCannotStat(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Put back the exact DACLs afterwards. Revoking the account's entries
+	// instead also drops the inherited full-control entry on a runner whose
+	// temp root grants only that account, and TempDir cleanup then fails with
+	// "Access is denied".
+	restore := func(path string) {
+		t.Helper()
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		original, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, original, nil); err != nil {
+				t.Errorf("restore the DACL of %s: %v", path, err)
+			}
+			runtime.KeepAlive(sd)
+		})
+	}
+	restore(home)
+	restore(kiro)
 	setACE(home, windows.DENY_ACCESS, windows.FILE_LIST_DIRECTORY)
 	setACE(kiro, windows.DENY_ACCESS, windows.FILE_READ_ATTRIBUTES)
-	t.Cleanup(func() {
-		setACE(kiro, windows.REVOKE_ACCESS, 0)
-		setACE(home, windows.REVOKE_ACCESS, 0)
-	})
 	// Scan as the same account without its backup and restore privileges,
 	// which an elevated administrator holds and the gateway service does not.
 	runtime.LockOSThread()
