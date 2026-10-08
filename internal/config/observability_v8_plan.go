@@ -77,8 +77,8 @@ type ObservabilityV8EffectiveTracePolicy struct {
 	// CompatibilityAliases is the retired alias switch. Only the plan of a
 	// Secure Client source carries it, as on main: the plan digest stamps
 	// every local audit record (provenance.config_digest, content_hash), so
-	// Secure Client keeps the digest of main (issue #1092). Only the managed
-	// AI Defense destination reads it (ObservabilityV8ManagedAIDDeploymentAliases).
+	// Secure Client keeps the digest of main (issue #1092). The v8 provider
+	// and managed AI Defense destination also use it for legacy aliases.
 	CompatibilityAliases *bool                            `json:"compatibility_aliases,omitempty"`
 	Limits               ObservabilityV8TraceLimitsSource `json:"limits"`
 }

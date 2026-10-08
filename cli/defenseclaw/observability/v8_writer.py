@@ -107,9 +107,16 @@ def mutate_v8_config(
             installed_backup = ""
             if backup_path is not None:
                 installed_backup = _write_private_backup(path, os.fspath(backup_path), original)
-            replace_file_durable(candidate_path, path)
-            candidate_path = ""
-            config_writer.record_generation(path, prepared.candidate_sha256, writer_actor, "observability policy edit")
+            original_mode = stat.S_IMODE(os.stat(path).st_mode)
+            try:
+                replace_file_durable(candidate_path, path)
+                candidate_path = ""
+                config_writer.record_generation(
+                    path, prepared.candidate_sha256, writer_actor, "observability policy edit"
+                )
+            except Exception:
+                config_writer._undo_failed_commit(path, prepared.candidate, original, original_mode, True)
+                raise
         finally:
             if candidate_path:
                 try:

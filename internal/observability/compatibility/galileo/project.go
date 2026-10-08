@@ -595,7 +595,7 @@ func projectResource(value any, maximum int) (map[string]any, bool) {
 	if !ok {
 		return nil, false
 	}
-	if err := observability.ValidateTelemetryResourceAttributes(attributes); err != nil {
+	if err := observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(attributes); err != nil {
 		return nil, false
 	}
 	projected := make(map[string]any, len(attributes))

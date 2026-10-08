@@ -345,3 +345,17 @@ def test_mutate_v8_config_rejects_symlink_target(tmp_path: Path) -> None:
             validator=lambda *_: None,
         )
     assert real.read_text() == _source()
+
+def test_mutate_v8_config_failed_generation_restores_original(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    (tmp_path / "config.generation.json").mkdir()
+
+    with pytest.raises(IsADirectoryError):
+        mutate_v8_config(
+            path,
+            [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+            validator=lambda *_: None,
+        )
+
+    assert path.read_text() == _source()

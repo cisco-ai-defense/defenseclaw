@@ -3502,12 +3502,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		return nil
 	})
-	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
-	})
-	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
-	})
+	w.SetPolicyStamp(livePolicyStampV8)
+	audit.SetPolicyStamp(livePolicyStampV8)
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
 		w.SetMCPServerSource(enrolled.live.list)
