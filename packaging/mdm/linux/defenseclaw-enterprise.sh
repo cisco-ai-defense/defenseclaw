@@ -440,7 +440,7 @@ dc_require_product_version() {
 # rpm version names. The epoch and the Debian revision are dropped and the
 # "~" packages use for a prerelease reads as "-", so 1:1.4.0~rc1-1 is 1.4.0-rc1.
 dc_package_release_version() {
-    printf '%s' "$1" | sed -e 's/^[0-9][0-9]*://' -e 's/-[^-]*$//' -e 's/~/-/'
+    printf '%s' "$1" | sed -e 's/^[0-9][0-9]*://' -e 's/-[0-9][0-9]*$//' -e 's/~/-/'
 }
 
 # dc_install_package: install the staged package when its version differs
