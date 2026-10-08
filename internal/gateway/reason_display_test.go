@@ -264,6 +264,14 @@ func TestAgentVerdictReasonNamesAssetPolicyBlock(t *testing.T) {
 	if got != want {
 		t.Errorf("agentVerdictReason(%q) = %q, want %q", source, got, want)
 	}
+	// GAP-0572: a non-ASCII name gets the same plain sentence.
+	cafe := assetPolicyResponseReason(config.AssetPolicyDecision{
+		Source: "admin-deny", TargetType: "skill", TargetName: "epa-caf\u00e9", Connector: "claudecode", RuntimeSurface: "hook",
+	})
+	got = agentVerdictReason("block", cafe, agentDisplayReason(cafe, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault)
+	if want := "DefenseClaw policy blocked this action (skill epa-caf\u00e9 is denied by asset policy). " + agentBlockNoRetry; got != want {
+		t.Errorf("non-ASCII name: got %q, want %q", got, want)
+	}
 	// A name outside the plain shape keeps the existing redaction.
 	odd := "ASSET-POLICY reason_code=not-in-approved-registry asset_type=mcp asset_name=a;b"
 	oddDisplay := agentDisplayReason(odd, redaction.SinkPolicyDefault)
