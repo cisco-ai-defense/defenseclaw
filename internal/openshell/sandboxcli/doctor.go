@@ -207,6 +207,10 @@ func (a *App) probeDaemon(ctx context.Context) *statusProbe {
 		case serr != nil:
 			c.Status, c.Detail = openshell.StatusFail, apiError(serr).Error()
 			c.Fix = &openshell.Fix{Summary: "start the daemon", Command: "defenseclaw-gateway start"}
+		case !st.Enabled && st.GatewayElsewhere != "":
+			// The Gateway service row names the one cause and the way on;
+			// setup would stop there (GAP-0307).
+			c.Status, c.Detail = openshell.StatusSkip, "running; sandboxes are off for this account: the OpenShell gateway on this machine is another account's (see Gateway service)"
 		case !st.Enabled:
 			c.Status, c.Detail = openshell.StatusWarn, "openshell.enabled is false: sandboxes are off"
 			c.Fix = &openshell.Fix{Summary: "turn sandboxes on", Command: CommandName + " setup"}

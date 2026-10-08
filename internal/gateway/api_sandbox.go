@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -255,8 +256,28 @@ func (a *APIServer) sandboxDisabledError() *sandboxapi.Error {
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.OpenShell.Enabled {
 		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the sandbox subsystem is not running; see `defenseclaw sandbox doctor`")
 	}
-	return sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
+	st := sandboxapi.Status{GatewayElsewhere: sandboxGatewayElsewhere()}
+	return sandboxapi.Errorf(sandboxapi.CodeDisabled, "%s", st.OffMessage())
 }
+
+// sandboxGatewayElsewhere is openshell.AnotherAccountsGateway, asked at most
+// every 30 s: every sandbox call while sandboxes are off names it, and the
+// TUI polls the status. A variable for tests.
+var sandboxGatewayElsewhere = func() func() string {
+	var (
+		mu   sync.Mutex
+		at   time.Time
+		held string
+	)
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if at.IsZero() || time.Since(at) > 30*time.Second {
+			held, at = openshell.AnotherAccountsGateway(), time.Now()
+		}
+		return held
+	}
+}()
 
 func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) {
 	c, release := a.leaseSandboxController()
@@ -266,6 +287,9 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 		st := &sandboxapi.Status{Reason: a.sandboxDisabledError().Message}
 		if cfg != nil {
 			st.Enabled = cfg.OpenShell.Enabled
+		}
+		if !st.Enabled {
+			st.GatewayElsewhere = sandboxGatewayElsewhere()
 		}
 		st.IngressAddr = a.SandboxIngressAddr()
 		st.DaemonUID = daemonUID()

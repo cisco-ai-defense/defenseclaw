@@ -225,6 +225,15 @@ def test_snapshot_sorts_running_first_and_keeps_only_pending_asks() -> None:
     assert "OpenShell 0.1.1 gateway openshell" in model.headline()
 
 
+def test_off_on_an_account_whose_gateway_another_account_runs_says_so() -> None:
+    """GAP-0307: not "set them up", which stops at the other account's gateway."""
+    model = SandboxesPanelModel()
+    model.set_snapshot({"enabled": False, "gateway_elsewhere": "127.0.0.1:17670 ... another account"}, [], [])
+    assert model.state() == "off"
+    assert model.headline().startswith("Sandboxes are off for this account: another account runs this machine's")
+    assert "Setup (0)" not in model.headline() and "sandbox doctor" in model.off_hint()
+
+
 @pytest.mark.parametrize(
     ("gateway", "text", "note"),
     [

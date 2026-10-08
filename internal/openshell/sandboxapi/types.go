@@ -55,6 +55,10 @@ type Status struct {
 	// OpenShell gateway; Reason says why not.
 	Available bool   `json:"available"`
 	Reason    string `json:"reason,omitempty"`
+	// GatewayElsewhere says what holds this machine's OpenShell gateway
+	// port while sandboxes are off for this account and another account's
+	// process holds it: one gateway runs on a machine (GAP-0307).
+	GatewayElsewhere string `json:"gateway_elsewhere,omitempty"`
 	// Gateway describes the OpenShell gateway the daemon drives.
 	Gateway *Gateway `json:"gateway,omitempty"`
 	// IngressAddr and EgressAddr are the DefenseClaw listeners sandboxes

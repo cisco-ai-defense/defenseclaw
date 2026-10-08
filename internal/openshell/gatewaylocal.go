@@ -186,6 +186,24 @@ func (r *doctorRun) gatewayPortHeld() (held string, other bool) {
 	return addr + ", the gateway's port, is held by " + who, other
 }
 
+// AnotherAccountsGateway says what holds the machine's OpenShell gateway
+// port (the package default) when that is another account's process, ""
+// otherwise. One gateway runs on a machine, under the account that started
+// it: while sandboxes are off for this account, the sandbox API names it,
+// since setup would stop there (GAP-0307).
+func AnotherAccountsGateway() string {
+	d := &Doctor{}
+	d.defaults()
+	if CheckPlatform(d.GOOS) != nil {
+		return ""
+	}
+	held, other := (&doctorRun{Doctor: d}).gatewayPortHeld()
+	if !other {
+		return ""
+	}
+	return held
+}
+
 // portHeldFix is the Gateway service fix while something else holds the
 // gateway's port: nothing to start until it is free.
 func (r *doctorRun) portHeldFix(other bool) *Fix {

@@ -181,6 +181,10 @@ func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
 func (a *App) printStatus(st *sandboxapi.Status) {
 	row := func(k, v string) { a.line(fmt.Sprintf("%-16s%s", k, v)) }
 	state := "off (run `" + CommandName + " setup`)"
+	if st.GatewayElsewhere != "" {
+		// Setup would stop at the other account's gateway (GAP-0307).
+		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
+	}
 	if st.Enabled {
 		state = "on"
 	}

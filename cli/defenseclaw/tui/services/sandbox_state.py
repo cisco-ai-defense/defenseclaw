@@ -1058,6 +1058,9 @@ class SandboxStatus:
     sandboxes: int = 0
     running: int = 0
     pending_approvals: int = 0
+    # What holds this machine's OpenShell gateway port while sandboxes are
+    # off for this account and another account's process holds it (GAP-0307).
+    gateway_elsewhere: str = ""
     # gateway.driver: the compute driver the gateway runs ("docker", "vm");
     # empty from a daemon older than the field, or before a gateway answered.
     driver: str = ""
@@ -1089,6 +1092,7 @@ def decode_status(raw: Any) -> SandboxStatus:
         enabled=bool(item.get("enabled")),
         available=bool(item.get("available")),
         reason=_text(item.get("reason")),
+        gateway_elsewhere=_text(item.get("gateway_elsewhere")),
         gateway=gateway_text.strip(),
         driver=driver,
         ingress_addr=_text(item.get("ingress_addr")),
@@ -1707,6 +1711,15 @@ class SandboxesPanelModel:
             return "unavailable"
         return "ready"
 
+    def off_hint(self) -> str:
+        """What an action that needs sandboxes says while they are off."""
+        if self.status.gateway_elsewhere:
+            return (
+                "Sandboxes are off for this account: another account runs this machine's OpenShell gateway; "
+                "see: defenseclaw sandbox doctor"
+            )
+        return "Sandboxes are off; run the Sandbox wizard (0 Setup) first"
+
     def headline(self, max_width: int = 0) -> str:
         """The status line; ``max_width`` drops the gateway name first when short of room."""
         state = self.state()
@@ -1715,6 +1728,12 @@ class SandboxesPanelModel:
         if state == "unreachable":
             return f"The DefenseClaw daemon is not answering: {self.error}"
         if state == "off":
+            if self.status.gateway_elsewhere:
+                # Setup would stop at the other account's gateway (GAP-0307).
+                return (
+                    "Sandboxes are off for this account: another account runs this machine's OpenShell gateway. "
+                    "Run sandboxes from that account, or have it hand the gateway over; see: defenseclaw sandbox doctor"
+                )
             return "Sandboxes are off. Set them up in Setup (0) → Sandboxes (OpenShell), or run: defenseclaw sandbox setup"
         if state == "unavailable":
             reason = self.status.reason or "the daemon is not connected to OpenShell"
