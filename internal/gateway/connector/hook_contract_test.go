@@ -691,24 +691,32 @@ func TestOmniGentSandboxStartsAt0130(t *testing.T) {
 	}
 }
 
-// TestContentEnvelopeKeyDeclarations pins every connector to the official
-// top-level payload shape. The generic decoder must never open an undeclared
-// sub-object, including an inferred Hermes extra envelope.
-func TestContentEnvelopeKeyDeclarations(t *testing.T) {
+// TestContentEnvelopeDeclarations pins the one connector whose hook content
+// is nested: Hermes puts every hook argument but tool_name, tool_input,
+// session_id, cwd and profile under extra (GAP-0898). Every other connector
+// is flat, so the decoder never opens a sub-object for it.
+func TestContentEnvelopeDeclarations(t *testing.T) {
 	for name, contracts := range builtinHookContracts {
 		for _, contract := range contracts {
-			if contract.ContentEnvelopeKey != "" {
-				t.Errorf("%s %s ContentEnvelopeKey=%q want empty", name, contract.ContractID, contract.ContentEnvelopeKey)
+			want := ContentEnvelope{}
+			if name == "hermes" {
+				want = hermesContentEnvelope()
+			}
+			if !reflect.DeepEqual(contract.ContentEnvelope.clone(), want) {
+				t.Errorf("%s %s ContentEnvelope=%+v want %+v", name, contract.ContractID, contract.ContentEnvelope, want)
 			}
 		}
 	}
 	hermes := NewHermesConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
-	if hermes.ContentEnvelopeKey != "" {
-		t.Fatalf("hermes profile ContentEnvelopeKey=%q want empty", hermes.ContentEnvelopeKey)
+	if got := hermes.ContentEnvelope.Field("pre_llm_call"); hermes.ContentEnvelope.Key != "extra" || got != "user_message" {
+		t.Fatalf("hermes profile envelope=%+v, pre_llm_call field %q", hermes.ContentEnvelope, got)
+	}
+	if got := hermes.ContentEnvelope.Field("pre_tool_call"); got != "" {
+		t.Fatalf("hermes pre_tool_call envelope field=%q want none", got)
 	}
 	cursor := NewCursorConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
-	if cursor.ContentEnvelopeKey != "" {
-		t.Fatalf("cursor profile ContentEnvelopeKey=%q want empty", cursor.ContentEnvelopeKey)
+	if cursor.ContentEnvelope.Key != "" {
+		t.Fatalf("cursor profile ContentEnvelope=%+v want zero", cursor.ContentEnvelope)
 	}
 }
 
@@ -743,9 +751,12 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		AIDSurfaces             []string                            `json:"aid_surfaces"`
 		SupportsTraceparent     bool                                `json:"supports_traceparent"`
 		NativeOTLP              bool                                `json:"native_otlp"`
-		ContentEnvelopeKey      string                              `json:"content_envelope_key"`
-		ToolCallLifecycle       ToolCallLifecycleContract           `json:"tool_call_lifecycle"`
-		Capabilities            struct {
+		ContentEnvelope         struct {
+			Key    string            `json:"key"`
+			Fields map[string]string `json:"fields"`
+		} `json:"content_envelope"`
+		ToolCallLifecycle ToolCallLifecycleContract `json:"tool_call_lifecycle"`
+		Capabilities      struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
 			AskEvents          []string `json:"ask_events"`
@@ -933,8 +944,8 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			if manifestContract.NativeOTLP != runtime.NativeOTLP {
 				t.Fatalf("%s native_otlp=%v want %v", runtime.ContractID, manifestContract.NativeOTLP, runtime.NativeOTLP)
 			}
-			if manifestContract.ContentEnvelopeKey != runtime.ContentEnvelopeKey {
-				t.Fatalf("%s content_envelope_key=%q want %q", runtime.ContractID, manifestContract.ContentEnvelopeKey, runtime.ContentEnvelopeKey)
+			if got := (ContentEnvelope{Key: manifestContract.ContentEnvelope.Key, Fields: manifestContract.ContentEnvelope.Fields}); !reflect.DeepEqual(got.clone(), runtime.ContentEnvelope.clone()) {
+				t.Fatalf("%s content_envelope=%+v want %+v", runtime.ContractID, got, runtime.ContentEnvelope)
 			}
 			if !reflect.DeepEqual(manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle) {
 				t.Fatalf("%s tool_call_lifecycle manifest/runtime drift:\nmanifest=%+v\nruntime=%+v", runtime.ContractID, manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle)

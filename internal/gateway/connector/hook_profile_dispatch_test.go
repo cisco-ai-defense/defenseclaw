@@ -40,8 +40,8 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"codex", func() Connector { return NewCodexConnector() }, true, true, true},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, true, true, true},
 		// Hermes needs no Decode: its nested `extra` content is
-		// recovered by the generic decoder's ContentEnvelopeKey
-		// fallback (declared on the hermes hook contract), and its
+		// read by the generic decoder from the ContentEnvelope its
+		// hook contract declares, and its
 		// wire replies come from the shared hookOnlyProfileRespond
 		// hermes case.
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
