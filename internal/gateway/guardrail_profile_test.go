@@ -87,6 +87,19 @@ func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
 	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "action" {
 		t.Fatalf("reloaded unmatched hook mode = %q, want action", got)
 	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?connector=opencode", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var explained struct {
+		Effective map[string]any `json:"effective"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &explained); err != nil {
+		t.Fatalf("decode profile explain: %v", err)
+	}
+	if got := explained.Effective["mode"]; got != "action" {
+		t.Fatalf("explain mode = %v, live hook mode = action", got)
+	}
 }
 
 // A reload during a request must attribute records to the profile enforced
