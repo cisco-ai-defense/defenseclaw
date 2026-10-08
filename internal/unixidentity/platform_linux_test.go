@@ -234,16 +234,14 @@ func (f *fakeSSSD) serve(conn net.Conn) {
 // which confirmed the LDAP frank (mail frank@corp.example.com) and the LDAP
 // erin@corp.example.com in the AD domain (GAP-0605, GAP-0568); a short LDAP
 // name gets no AD realm (GAP-0497), nor does an account of another domain
-// with its own SID that shares an AD account's name, or one that copies an AD
-// account's SID, which SSSD maps to the AD account's uid. Groups count only
-// inside the domain of the account's SID: the LDAP carol does not get the
-// AD groups initgroups lists for the name carol (GAP-0563), and the AD alice
-// keeps her AD groups and the /etc/group groups that list alice, which
-// initgroups by domain\name never lists (GAP-0729), but not another
-// domain's, nor one that lists alice@corp.example.com, the name of an
-// account that a domain names by e-mail address. An SSSD that is
-// stopped, while its memory cache still answers the uid, fails the lookup
-// instead of dropping the realm and the groups (GAP-0606).
+// with its own SID that shares an AD account name, or one that copies an AD
+// account SID, which SSSD maps to the AD account uid. The AD alice keeps
+// trusted-domain memberships returned for her qualified name, plus local
+// groups listing alice (GAP-0729). The LDAP carol does not get the AD
+// groups returned for her ambiguous short name (GAP-0563). A local group
+// listing alice@corp.example.com belongs to an account with that exact name.
+// An SSSD that is stopped while its memory cache still answers the uid
+// fails the lookup instead of dropping the realm and groups (GAP-0606).
 func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	origNSS, origRealms, origPasswd, origGroup := nsswitchPath, hostRealms, localPasswdPath, localGroupPath
 	t.Cleanup(func() {
@@ -277,6 +275,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	f := &fakeRun{results: map[string]commandResult{
 		"initgroups corp.example.com\\alice": {stdout: []byte("corp.example.com\\alice 80001 5000 5300\n")},
 		"group 5000 7000 80001":              {stdout: []byte("domain users:*:5000:\ndocker:*:7000:\nalice:*:80001:\n")},
+		"group 5000 5300 7000 80001":         {stdout: []byte("domain users:*:5000:\ntrusted-admins:*:5300:\ndocker:*:7000:\nalice:*:80001:\n")},
 		"initgroups carol":                   {stdout: []byte("carol 80003 5000 5100\n")},
 		"group 5100 80003":                   {stdout: []byte("ldap-devs:*:5100:\ncarol:*:80003:\n")},
 	}}
@@ -306,7 +305,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 			t.Errorf("uid %d (%s) = %+v, %v; want %+v", uid, accounts[uid], got, err, want)
 		}
 	}
-	for uid, want := range map[int][]string{80001: {"domain users", "docker", "alice"}, 80003: {"ldap-devs", "carol"}} {
+	for uid, want := range map[int][]string{80001: {"domain users", "trusted-admins", "docker", "alice"}, 80003: {"ldap-devs", "carol"}} {
 		if facts, err := r.DirectoryFactsForUID(uid, time.Now()); err != nil || !reflect.DeepEqual(facts.Groups, want) {
 			t.Errorf("uid %d groups = %q, %v; want %q", uid, facts.Groups, err, want)
 		}

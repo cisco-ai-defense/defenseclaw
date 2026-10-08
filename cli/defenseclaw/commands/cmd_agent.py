@@ -3675,6 +3675,9 @@ def signatures() -> None:
 def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
     """List the merged AI discovery signature catalog."""
     cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     pins, require_pins = ai_signatures.pack_pins(cfg)
     try:
@@ -3685,12 +3688,18 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
             disabled_signature_ids=disabled,
             pack_digests=pins,
             require_digests=require_pins,
+            secure_client=secure_client,
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps([asdict(sig) for sig in sigs], indent=2, sort_keys=True))
+        payload = [asdict(sig) for sig in sigs]
+        if secure_client:
+            for sig in payload:
+                for field in ai_signatures.IDE_INVENTORY_FIELDS:
+                    sig.pop(field, None)
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
         click.echo(_render_signatures_table(sigs).rstrip())
     # A pack that fails its pin is not loaded: its signatures are not listed.
@@ -5949,7 +5958,15 @@ def identities(
         return
     if not rows:
         if user or connector_name:
-            existing = client.agent_identities(limit=1).get("total", 0)
+            try:
+                existing = client.agent_identities(limit=1).get("total", 0)
+            except requests.ConnectionError as exc:
+                raise click.ClickException(_sidecar_unavailable(exc)) from exc
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+            except requests.RequestException as exc:
+                raise click.ClickException(f"sidecar request failed: {exc}") from exc
             label = f"--user {user}" if user else f"--connector {connector_name}"
             click.echo(
                 f"No agent identity matches {label} "

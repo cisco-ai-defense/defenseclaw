@@ -2976,7 +2976,20 @@ class TestCheckHookHealth(unittest.TestCase):
                 return_value=("pass", f"live effective config verified through --config={config}"),
             ):
                 _check_omnigent_policy_health(cfg, r)
-        self.assertEqual(r.checks[-1]["status"], "pass")
+            self.assertEqual(r.checks[-1]["status"], "pass")
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+                    return_value=("fail", "live server policy does not match"),
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_tmux_requirement",
+                    return_value="; managed terminals require tmux 3.3 or newer",
+                ),
+            ):
+                _check_omnigent_policy_health(cfg, r)
+            self.assertEqual(r.checks[-1]["status"], "fail")
+            self.assertIn("tmux 3.3", r.checks[-1]["detail"])
 
     def test_omnigent_repair_command_preserves_action_closed_hilt_posture(self) -> None:
         cfg = MagicMock()

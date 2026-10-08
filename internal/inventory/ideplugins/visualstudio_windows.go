@@ -26,18 +26,24 @@ func init() {
 // reading, so it must never receive the path in the user's profile. It reads
 // the value names of
 // ExtensionManager\EnabledExtensions, which are "<id>,<version>".
-func readVisualStudioEnabled(instanceDir, instanceName string) (map[string]bool, bool) {
+func readVisualStudioEnabled(s *scanner, instanceDir, instanceName string) (map[string]bool, bool) {
 	hive := filepath.Join(instanceDir, "privateregistry.bin")
 	const maxHiveBytes = 64 << 20
-	info, err := os.Lstat(hive)
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxHiveBytes {
+	if !s.isFile(hive) {
 		return nil, false
 	}
-	source, err := os.Open(hive)
+	source, err := openNonblocking(hive, s.limits.FollowSymlinks)
 	if err != nil {
 		return nil, false
 	}
 	defer source.Close()
+	info, err := source.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxHiveBytes {
+		return nil, false
+	}
+	if !s.charge(info.Size()) {
+		return nil, false
+	}
 	privateDir, err := os.MkdirTemp("", "defenseclaw-vs-hive-")
 	if err != nil {
 		return nil, false
@@ -48,9 +54,9 @@ func readVisualStudioEnabled(instanceDir, instanceName string) (map[string]bool,
 	if err != nil {
 		return nil, false
 	}
-	copied, copyErr := io.Copy(copyFile, io.LimitReader(source, maxHiveBytes+1))
+	copied, copyErr := io.Copy(copyFile, io.LimitReader(source, info.Size()))
 	closeErr := copyFile.Close()
-	if copyErr != nil || closeErr != nil || copied <= 0 || copied > maxHiveBytes {
+	if copyErr != nil || closeErr != nil || copied != info.Size() {
 		return nil, false
 	}
 	path, err := windows.UTF16PtrFromString(copyPath)

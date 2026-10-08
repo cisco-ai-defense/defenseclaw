@@ -559,6 +559,17 @@ func ideGaugePoints(inv *inventory.IDEInventory) ([]ideGaugeKey, map[ideGaugeKey
 // emitIDEPluginMetricsV8 records the defenseclaw.inventory.ide_plugins
 // gauge: the plugin count per IDE product, AI flag and enabled state.
 func emitIDEPluginMetricsV8(recorder *aiDiscoveryV8MetricRecorder, inv *inventory.IDEInventory) {
+	if inv == nil {
+		return
+	}
+	// The unlabeled sample is the current total. Product series can persist
+	// in the metric SDK after inventory is disabled, so dashboards must use
+	// this sample for the aggregate instead of summing product series.
+	recorder.record(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins, func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+		return builder.BuildMetricDefenseClawInventoryIdePlugins(observability.MetricDefenseClawInventoryIdePluginsInput{
+			Envelope: envelope, Value: int64(len(inv.Plugins)),
+		})
+	})
 	keys, counts := ideGaugePoints(inv)
 	for _, k := range keys {
 		k, value := k, counts[k]

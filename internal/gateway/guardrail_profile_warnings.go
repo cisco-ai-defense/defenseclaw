@@ -494,8 +494,8 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	facts, fetchedAt, ok := cachedDirectoryFacts(explained.UserID)
 	if !ok {
 		// No facts are cached. When the gateway's own lookups for the account
-		// fail, its requests get default_lookup_failed whatever this fresh
-		// lookup found (GAP-0212).
+		// fail, directory-dependent assignments get default_lookup_failed
+		// whatever this fresh lookup found (GAP-0212).
 		since, reason, failing := cachedDirectoryFailure(explained.UserID)
 		if !failing {
 			return nil, ""
@@ -546,8 +546,8 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 //
 // A directory that does not answer (a domain controller down, SSSD offline)
 // leaves no trace on the tools an administrator uses: the accounts without
-// cached facts get the default profile, and the only sign was match
-// default_lookup_failed on each record. directoryHealthView reports the
+// cached facts get default_lookup_failed for directory-dependent assignments,
+// and the only sign was that match on each record. directoryHealthView reports the
 // accounts whose lookups failed in the last cache lifetime, with the reason
 // and the age of the facts still served, to explain, status and doctor
 // (GAP-0145).
@@ -581,7 +581,7 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 		return nil, ""
 	}
 	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); accounts without cached facts "+
-		"get the default profile (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
+		"use the default profile for directory-dependent assignments (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
 	if h.Stale > 0 {
 		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
 			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)

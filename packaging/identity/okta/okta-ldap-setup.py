@@ -273,6 +273,9 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
                 report.problem(f"{kind} attribute {name} is missing", "Run: okta-ldap-setup.py posix-schema")
             elif have[name].get("type") != definition["type"]:
                 report.problem(f"{kind} attribute {name} has type {have[name].get('type')}, not {definition['type']}")
+            elif not self_read_only(have[name]):
+                report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
+                               "Change the attribute permission in Okta Profile Editor.")
             else:
                 report.ok(f"{kind} attribute {name}")
 
@@ -324,8 +327,13 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
             report.problem(f"group {name} does not exist; cannot verify its sign-on rule")
 
     bind_covered = False
+    bind_decided = False
     group_covered = {name: False for name in groups}
-    for rule in client.get_all(f"/api/v1/policies/{policy['id']}/rules"):
+    group_decided = {name: False for name in groups}
+    rules = sorted(client.get_all(f"/api/v1/policies/{policy['id']}/rules"),
+                   key=lambda rule: int(rule.get("priority", 2**31)))
+    bind_groups: set[str] | None = None
+    for rule in rules:
         action = (rule.get("actions") or {}).get("appSignOn") or {}
         method = action.get("verificationMethod") or {}
         factor = method.get("factorMode", "?")
@@ -334,18 +342,30 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
         scoped_groups = people.get("groups") or {}
         user_ids = set(users.get("include") or [])
         group_ids = set(scoped_groups.get("include") or [])
+        excluded_users = set(users.get("exclude") or [])
+        excluded_groups = set(scoped_groups.get("exclude") or [])
         scope = f"{len(user_ids)} user(s), {len(group_ids)} group(s)" if people else "everyone"
         report.note(f"rule '{rule.get('name')}' ({rule.get('status')}, priority {rule.get('priority')}): "
                     f"{factor}, {scope}")
-        if (rule.get("status") != "ACTIVE" or action.get("access") != "ALLOW"
-                or not password_only_method(method) or users.get("exclude") or scoped_groups.get("exclude")):
+        if rule.get("status") != "ACTIVE":
             continue
-        # Okta ANDs users and groups on the same rule. An unrestricted rule covers both.
-        if bind and not group_ids and (not user_ids or bind["id"] in user_ids):
-            bind_covered = True
+        password_allow = action.get("access") == "ALLOW" and password_only_method(method)
+        # Okta evaluates active rules in priority order; users and groups on one rule are ANDed.
+        if bind and not bind_decided and bind["id"] not in excluded_users:
+            if bind_groups is None and (group_ids or excluded_groups):
+                bind_groups = {item["id"] for item in client.get_all(
+                    f"/api/v1/users/{bind['id']}/groups?limit=200")}
+            if ((not user_ids or bind["id"] in user_ids)
+                    and (not group_ids or bool(group_ids & (bind_groups or set())))
+                    and not excluded_groups & (bind_groups or set())):
+                bind_covered = password_allow
+                bind_decided = True
         for name, group in groups.items():
-            if group and not user_ids and (not group_ids or group["id"] in group_ids):
-                group_covered[name] = True
+            if group and not group_decided[name] and not user_ids and not excluded_users:
+                if ((not group_ids or group["id"] in group_ids)
+                        and group["id"] not in excluded_groups):
+                    group_covered[name] = password_allow
+                    group_decided[name] = True
     if bind and bind_covered:
         report.ok(f"password-only sign-on covers bind user {bind_login}")
     elif bind:
@@ -425,11 +445,23 @@ def check_group(client: Okta, report: Report, name: str, gid: int | None) -> Non
     else:
         report.ok(f"gidNumber {have}")
     members = client.get_all(f"/api/v1/groups/{group['id']}/users?limit=200")
-    bare = [m.get("profile", {}).get("login") for m in members if m.get("profile", {}).get("uidNumber") is None]
-    if bare:
-        report.problem(f"{len(bare)} member(s) have no uidNumber: " + ", ".join(str(b) for b in bare[:5]))
+    incomplete = [(m.get("profile", {}).get("login"), [
+        attr for attr in ("uidNumber", "gidNumber", "unixUsername")
+        if m.get("profile", {}).get(attr) in (None, "")
+    ]) for m in members]
+    incomplete = [(login, missing) for login, missing in incomplete if missing]
+    if incomplete:
+        detail = ", ".join(f"{login} ({', '.join(missing)})" for login, missing in incomplete[:5])
+        report.problem(f"{len(incomplete)} member(s) have incomplete POSIX attributes: {detail}")
     else:
-        report.ok(f"{len(members)} member(s), all with a uidNumber")
+        report.ok(f"{len(members)} member(s), all with POSIX identity attributes")
+
+
+def self_read_only(attribute: dict[str, Any]) -> bool:
+    permissions = attribute.get("permissions")
+    return (isinstance(permissions, list)
+            and [entry.get("action") for entry in permissions
+                 if isinstance(entry, dict) and entry.get("principal") == "SELF"] == ["READ_ONLY"])
 
 
 def ensure_attributes(client: Okta, report: Report, kind: str, wanted: dict[str, dict[str, Any]]) -> None:
@@ -439,6 +471,9 @@ def ensure_attributes(client: Okta, report: Report, kind: str, wanted: dict[str,
         if name in have and have[name].get("type") != definition["type"]:
             found = have[name].get("type")
             report.problem(f"{kind} attribute {name} exists with type {found}, not {definition['type']}")
+        elif name in have and not self_read_only(have[name]):
+            report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
+                           "Change the attribute permission in Okta Profile Editor.")
         elif name in have:
             report.ok(f"{kind} attribute {name} exists")
     if not missing:
@@ -818,7 +853,16 @@ def cmd_signon_policy(client: Okta, args: argparse.Namespace) -> int:
                 "description": "Password-only LDAP binds for Linux hosts (DefenseClaw Okta kit)",
             })
     else:
-        report.ok(f"policy '{args.policy_name}' exists")
+        # A shared app sign-on policy changes authentication for every mapped app.
+        mappings = client.get_all(f"/api/v1/policies/{policy['id']}/mappings")
+        for mapping in mappings:
+            href = (((mapping.get("_links") or {}).get("application") or {}).get("href") or "")
+            path = urllib.parse.urlsplit(href).path
+            if not path.startswith("/api/v1/apps/") or path.rsplit("/", 1)[-1] != app["id"]:
+                report.problem(f"policy '{args.policy_name}' is mapped to another or unknown app",
+                               "Choose a policy dedicated to the LDAP Interface.")
+                return report.finish()
+        report.ok(f"policy '{args.policy_name}' exists and is dedicated to the LDAP Interface")
 
     # Okta ANDs the users and groups conditions of one rule, so the bind user and the group need a rule each.
     existing = client.get_all(f"/api/v1/policies/{policy['id']}/rules") if policy is not None else []

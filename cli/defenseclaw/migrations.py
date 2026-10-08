@@ -3529,8 +3529,7 @@ def migrate(
     if version is None:
         return MigrateResult(None, CURRENT_CONFIG_VERSION)
     if version == 0 and (damage := config_damage_message(config_path)):
-        # An empty or cut-short file is not a 0.x install to import
-        # (GAP-1633, GAP-0482).
+        # An empty file is not a 0.x install to import (GAP-1633).
         raise MigrationError(damage)
     if version > CURRENT_CONFIG_VERSION:
         raise ConfigTooNewError(

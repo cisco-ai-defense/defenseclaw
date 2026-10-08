@@ -117,15 +117,28 @@ func ensureAgentIdentitiesTable(ctx context.Context, exec interface {
 	return nil
 }
 
-// UpsertAgentIdentities writes one batch in a single transaction. A known
-// agent keeps its first_seen, moves last_seen forward, adds the sessions of
-// the batch it had not counted and takes the newest session id and user
-// name.
+// AgentIdentitySession identifies a counted session that later proved to
+// belong to a child agent.
+type AgentIdentitySession struct {
+	AgentID   string
+	SessionID string
+}
+
+// UpsertAgentIdentities writes one batch in a single transaction.
 func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []AgentIdentityRecord) error {
+	return s.UpsertAgentIdentitiesAndExclude(ctx, batch, nil)
+}
+
+// UpsertAgentIdentitiesAndExclude writes sightings and late child-session
+// exclusions atomically. A known agent keeps its first_seen, moves last_seen
+// forward, and counts each named session only once.
+func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
+	ctx context.Context, batch []AgentIdentityRecord, excluded []AgentIdentitySession,
+) error {
 	if s == nil || s.db == nil {
 		return errors.New("inventory store: not open")
 	}
-	if len(batch) == 0 || s.legacySchema {
+	if len(batch) == 0 && len(excluded) == 0 || s.legacySchema {
 		return nil
 	}
 	return s.runInTx(ctx, "agent_identities.upsert", func(tx *sql.Tx) error {
@@ -169,11 +182,11 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 			sessions := max(rec.SessionsSeen-int64(len(rec.SessionIDs)), 0)
 			lastNewSessionID := ""
 			lastSessionWasNamed := false
-			for _, sessionID := range rec.SessionIDs {
+			for i, sessionID := range rec.SessionIDs {
 				if sessionID == "" {
 					continue
 				}
-				inserted, err := sessionStmt.ExecContext(ctx, rec.AgentID, sessionID, formatAgentIdentityTime(last))
+				inserted, err := sessionStmt.ExecContext(ctx, rec.AgentID, sessionID, formatAgentIdentityTime(last.Add(time.Duration(i)*time.Nanosecond)))
 				if err != nil {
 					return err
 				}
@@ -196,6 +209,35 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
 				lastSessionID, sessions); err != nil {
+				return err
+			}
+		}
+		// A child link can arrive after the batch that first counted its
+		// session. DELETE is idempotent, including when the session was
+		// still only pending or the same link is reported twice.
+		for _, child := range excluded {
+			if child.AgentID == "" || child.SessionID == "" {
+				continue
+			}
+			result, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions WHERE agent_id = ? AND session_id = ?`,
+				child.AgentID, child.SessionID)
+			if err != nil {
+				return err
+			}
+			removed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if removed == 0 {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_identities SET
+				sessions_seen = max(sessions_seen - 1, 0),
+				last_session_id = CASE WHEN last_session_id = ? THEN
+					COALESCE((SELECT session_id FROM agent_identity_sessions
+						WHERE agent_id = ? ORDER BY first_seen DESC, session_id DESC LIMIT 1), '')
+					ELSE last_session_id END
+				WHERE agent_id = ?`, child.SessionID, child.AgentID, child.AgentID); err != nil {
 				return err
 			}
 		}

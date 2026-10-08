@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -579,13 +580,70 @@ func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
 	}
 	// Every (enabled, ai) series of each IDE is recorded, zeros included, so
 	// pycharm, whose only plugin was removed, drops to 0 instead of keeping
-	// its last value (GAP-0014).
-	if gauges != 2*len(ideGaugeEnabledStates)*2 {
-		t.Fatalf("ide_plugins gauge records = %d, want every (enabled, ai) series of vscode and pycharm", gauges)
+	// its last value (GAP-0014). One unlabeled series carries the current total.
+	if gauges != 1+2*len(ideGaugeEnabledStates)*2 {
+		t.Fatalf("ide_plugins gauge records = %d, want the total and every (enabled, ai) series of vscode and pycharm", gauges)
 	}
 	_, counts := ideGaugePoints(report.IDEInventory)
 	if counts[ideGaugeKey{"pycharm", "enabled", true}] != 0 || counts[ideGaugeKey{"vscode", "enabled", true}] != 1 ||
 		counts[ideGaugeKey{"vscode", "disabled", false}] != 1 {
 		t.Fatalf("ide_plugins gauge points = %v", counts)
 	}
+}
+
+func TestIDEPluginTotalGaugeCoversEmptyAndOffScans(t *testing.T) {
+	fixture := newOTLPV8MetricFixture(t)
+	runtime := &discoveryMetricFailureRuntime{aiDiscoveryV8Runtime: fixture.runtime}
+	adapter := &aiDiscoveryV8Adapter{runtime: runtime}
+	report := inventory.AIDiscoveryReport{
+		Summary:      inventory.AIDiscoverySummary{ScanID: "scan-empty", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok"},
+		IDEInventory: &inventory.IDEInventory{},
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		n := 0
+		for _, family := range runtime.snapshot() {
+			if family == observability.EventName(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins) {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("empty scan gauge samples = %d, want one total zero", got)
+	}
+	report.IDEInventory.Scope = "off"
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(); got != 2 {
+		t.Fatalf("off scan gauge samples = %d, want a fresh total zero", got)
+	}
+
+	dashboard, err := os.ReadFile("../../bundles/local_observability_stack/grafana/dashboards/defenseclaw-ai-discovery.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal(dashboard, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, panel := range parsed.Panels {
+		if panel.Title == "IDE plugins installed" {
+			if len(panel.Targets) != 1 || panel.Targets[0].Expr != `sum(defenseclaw_inventory_ide_plugins{ide_product=""})` {
+				t.Fatalf("installed panel does not select only the current total: %+v", panel.Targets)
+			}
+			return
+		}
+	}
+	t.Fatal("IDE plugins installed panel missing")
 }

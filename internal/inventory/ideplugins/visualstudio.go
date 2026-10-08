@@ -26,7 +26,7 @@ var visualStudioInstanceDir = regexp.MustCompile(`^(\d+)\.(\d+)_[0-9A-Za-z]+$`)
 // instance (from its privateregistry.bin hive), and false when the hive
 // could not be read (it is locked while Visual Studio runs). Replaced on
 // Windows.
-var visualStudioEnabledLookup = func(instanceDir, instanceName string) (map[string]bool, bool) {
+var visualStudioEnabledLookup = func(_ *scanner, instanceDir, instanceName string) (map[string]bool, bool) {
 	return nil, false
 }
 
@@ -62,7 +62,7 @@ func (s *scanner) scanVisualStudio() {
 		if !s.isDir(extDir) {
 			continue
 		}
-		enabled, known := visualStudioEnabledLookup(instance, name)
+		enabled, known := visualStudioEnabledLookup(s, instance, name)
 		inst := Install{Family: FamilyVisualStudio, Product: "visual-studio", Channel: "stable", Version: m[1] + "." + m[2], Root: extDir}
 		if strings.HasSuffix(name, "Exp") {
 			inst.Channel = "experimental"

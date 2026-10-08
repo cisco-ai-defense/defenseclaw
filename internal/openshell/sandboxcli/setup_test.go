@@ -794,8 +794,8 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	if c.OpenShell.Workdir.Mode != "copy" || !slices.Equal(c.OpenShell.Harnesses, []string{"codex"}) {
 		t.Fatalf("config = %+v", c.OpenShell)
 	}
-	// Setup again, allowing the mounts this time: the copy mode the first
-	// setup recorded goes, so the answer takes effect.
+	// Setup again, allowing mounts this time: copy remains selected until
+	// the operator explicitly changes it.
 	ta.Cfg.OpenShell.Workdir.Mode = c.OpenShell.Workdir.Mode
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 	again := SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, Harnesses: []string{"codex"}}
@@ -803,8 +803,8 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	if len(ta.gateway.planned) != 1 || !ta.gateway.planned[0].EnableBindMounts {
 		t.Fatalf("gateway plans = %+v", ta.gateway.planned)
 	}
-	if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != "" {
-		t.Fatalf("workdir.mode after allowing mounts = %q, want the pack's", c.OpenShell.Workdir.Mode)
+	if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != config.OpenShellWorkdirCopy {
+		t.Fatalf("workdir.mode after allowing mounts = %q, want copy", c.OpenShell.Workdir.Mode)
 	}
 	// Mounts already on and a copy mode in the config: setup says why runs
 	// still copy.
@@ -1545,8 +1545,8 @@ func TestDoctorFixNamesChecksAsItAsked(t *testing.T) {
 
 // TestDoctorFixRecordsItsGatewayEdit: the bind-mount fix's gateway.toml
 // edit goes in setup's receipt, so teardown restores the file from setup's
-// first backup instead of leaving it as someone else's change, and the copy
-// mode setup recorded without bind mounts goes (GAP-0089).
+// first backup instead of leaving it as someone else's change. An explicitly
+// selected copy mode stays in force after bind mounts become available.
 func TestDoctorFixRecordsItsGatewayEdit(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "  workdir:\n    mode: copy\n")
@@ -1569,7 +1569,7 @@ func TestDoctorFixRecordsItsGatewayEdit(t *testing.T) {
 	if r, rerr := ta.loadReceipt(); err != nil || rerr != nil || len(r.GatewayFiles) != 1 || r.GatewayFiles[0].Backup != toml+".first.bak" || r.GatewayFiles[0].SHA256 != sum {
 		t.Fatalf("receipt = %+v, %v, %v", r, rerr, err)
 	}
-	if mode := loadConfig(t, ta).OpenShell.Workdir.Mode; mode != "" {
+	if mode := loadConfig(t, ta).OpenShell.Workdir.Mode; mode != config.OpenShellWorkdirCopy {
 		t.Fatalf("openshell.workdir.mode = %q after the bind-mount fix", mode)
 	}
 }

@@ -401,6 +401,9 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		return nil, ErrInstallDeclined
 	}
 
+	// An old keg is already present during an upgrade. Only a change made
+	// by this invocation shows that the formula installation completed.
+	kegBefore := formulaKegState(i.BrewPrefix)
 	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}); err != nil {
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
@@ -408,7 +411,7 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 			// Xcode or Command Line Tools older than the oldest it builds
 			// with on this macOS (homebrewMinimums): the error says which
 			// are here.
-			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp), FormulaInstalled: formulaKegInstalled(i.BrewPrefix)}
+			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp), FormulaInstalled: formulaKegState(i.BrewPrefix) != kegBefore}
 		}
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)
 	}

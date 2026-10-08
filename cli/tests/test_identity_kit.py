@@ -294,6 +294,82 @@ def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> No
     assert calls == [("POST", "/v1.0/groups")]
 
 
+def test_entra_apply_checks_all_groups_before_creating_any(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.test", "groups": [
+        {"name": "new-team"}, {"name": "existing-mail-group"}]}))
+    writes = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/organization?" in path:
+                return [{"verifiedDomains": [{"name": "example.test"}]}]
+            if "existing-mail-group" in path:
+                return [{"id": "mail-id", "securityEnabled": False}]
+            return []
+
+        def request(self, method, path, body):
+            writes.append((method, path))
+            return {"id": "new-id"}
+
+        def get_after_create(self, path):
+            return {"id": "new-id"}
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    with pytest.raises(entra.GraphError, match="NotSecurityGroup"):
+        entra.cmd_apply(Graph(), args)
+    assert writes == []
+
+
+def test_entra_plan_rejects_repeated_group_names_before_graph_calls(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.test", "groups": [
+        {"name": "new-team"}, {"name": "NEW-TEAM"}]}))
+    with pytest.raises(SystemExit, match="duplicate group"):
+        entra.cmd_apply(object(), argparse.Namespace(config=str(plan), apply=True, password_file=None))
+
+
+def test_entra_ssh_apply_example_grants_previewed_group() -> None:
+    doc = (ROOT / "docs-site/content/docs/enterprise/identity-entra-id.mdx").read_text()
+    # Read the first command block under the SSH heading.
+    commands = doc.split("### Azure VMs with Entra SSH sign-in", 1)[1].split(chr(96) * 3 + "bash", 1)[1]
+    commands = commands.split(chr(96) * 3, 1)[0].splitlines()
+    preview = next(line for line in commands if line.startswith("./setup-entra-ssh-linux.sh") and "--apply" not in line)
+    apply = next(line for line in commands if line.startswith("./setup-entra-ssh-linux.sh") and "--apply" in line)
+    group = preview.split("--group ", 1)[1].split()[0]
+    assert "--group " + group in apply
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_entra_ssh_resolves_every_principal_before_vm_changes(tmp_path: Path) -> None:
+    az = tmp_path / "az-fake"
+    log = tmp_path / "az.log"
+    az.write_text("""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AZ_LOG"
+case "$*" in
+  "account show"*) echo subscription-id ;;
+  "vm show"*) printf '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm\nLinux\nNone\n' ;;
+  "ad user show"*) echo user-id ;;
+  "ad group show"*) exit 1 ;;
+  "vm extension list"*) ;;
+  "role assignment list"*) echo 0 ;;
+esac
+""", encoding="ascii")
+    az.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(ENTRA.parent / "setup-entra-ssh-linux.sh"), "-g", "rg", "-n", "vm",
+         "--user", "alice@example.test", "--group", "missing", "--apply"],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "AZ": str(az), "AZ_LOG": str(log)},
+    )
+    calls = log.read_text().splitlines()
+    assert result.returncode == 1
+    assert not any("identity assign" in call or "extension set" in call
+                   or "role assignment create" in call for call in calls)
+
+
 def test_entra_apply_records_password_before_user_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     entra = _load(ENTRA)
     plan = tmp_path / "tenant.json"
@@ -365,6 +441,67 @@ def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatc
     args = argparse.Namespace(name=["new-group"], add_device=["device:new-group"], apply=True)
     assert intune.cmd_groups(graph, args) == 0
     assert ("group-id", "device-id", "new-group") in posts
+
+
+def test_intune_groups_validate_all_names_before_graph_write() -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+        def wait_for_named_object(self, _path):
+            return []
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {"id": "group-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "group-id"}
+
+    args = intune.build_parser().parse_args([
+        "groups", "--name", "valid", "--name", "!!!", "--apply",
+    ])
+    with pytest.raises(SystemExit, match="mail nickname"):
+        intune.cmd_groups(Graph(), args)
+    assert writes == []
+
+    class ExistingGraph(Graph):
+        def get_all(self, path):
+            return [{"id": "existing", "securityEnabled": True}] if intune.odata_eq("displayName", "!!!") in path else []
+
+    assert intune.cmd_groups(ExistingGraph(), args) == 0
+    assert len(writes) == 1
+
+
+def test_intune_groups_unicode_name_previews_and_applies(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+        def wait_for_named_object(self, _path):
+            return []
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {"id": "group-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "group-id"}
+
+    graph = Graph()
+    args = intune.build_parser().parse_args(["groups", "--name", "研究"])
+    assert intune.cmd_groups(graph, args) == 0
+    assert "would create" in capsys.readouterr().out
+    args = intune.build_parser().parse_args(["groups", "--name", "研究", "--apply"])
+    assert intune.cmd_groups(graph, args) == 0
+    nickname = writes[0][2]["mailNickname"]
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", nickname)
 
 
 def test_okta_group_name_with_spaces_and_admin_url(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -32,6 +32,7 @@ const agentIdentityRecorderMaxPending = 4096
 // agentIdentityRecorder buffers agent identities seen on the hook path and
 // upserts them in one batch per flush.
 type agentIdentityRecorder struct {
+	flushMu sync.Mutex // serialize API, ticker and final writes
 	mu      sync.Mutex
 	pending map[string]*inventory.AgentIdentityRecord
 	// hints keeps the latest claimed install hint per identity. Hints are not
@@ -44,6 +45,9 @@ type agentIdentityRecorder struct {
 	// dropped, and one of them that hooks again counts as a session.
 	subSessions     map[string]struct{}
 	subSessionOrder []string
+	// exclusions are late child links awaiting the next inventory write.
+	// They must survive a failed write and are removed only after commit.
+	exclusions map[string]inventory.AgentIdentitySession
 
 	// persistErr is why the last write to inventory.db failed, "" after
 	// one succeeded: the ledger then runs from memory, and its counts and
@@ -133,34 +137,51 @@ func (r *agentIdentityRecorder) markSubagentSession(agentID, sessionID string) {
 		}
 		r.subSessions[key] = struct{}{}
 		r.subSessionOrder = append(r.subSessionOrder, key)
+		if r.exclusions == nil {
+			r.exclusions = make(map[string]inventory.AgentIdentitySession)
+		}
+		r.exclusions[key] = inventory.AgentIdentitySession{AgentID: agentID, SessionID: sessionID}
 	}
 	if rec, ok := r.pending[agentID]; ok {
 		rec.ForgetSession(sessionID)
 	}
 }
 
-// take removes and returns the buffered batch.
-func (r *agentIdentityRecorder) take() []inventory.AgentIdentityRecord {
+// take removes and returns the buffered sightings and child exclusions.
+func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inventory.AgentIdentitySession) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.pending) == 0 {
-		return nil
-	}
 	batch := make([]inventory.AgentIdentityRecord, 0, len(r.pending))
 	for _, rec := range r.pending {
 		batch = append(batch, *rec)
 	}
+	excluded := make([]inventory.AgentIdentitySession, 0, len(r.exclusions))
+	for _, child := range r.exclusions {
+		excluded = append(excluded, child)
+	}
 	r.pending = make(map[string]*inventory.AgentIdentityRecord)
-	return batch
+	r.exclusions = nil
+	return batch, excluded
 }
 
-// restore puts back a batch whose write failed, merging it with whatever the
-// hook path buffered since.
-func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord) {
+// restore puts back a failed write, merging it with hooks and child links
+// buffered while the write was in flight.
+func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, excluded []inventory.AgentIdentitySession) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.exclusions == nil {
+		r.exclusions = make(map[string]inventory.AgentIdentitySession)
+	}
+	for _, child := range excluded {
+		r.exclusions[subSessionKey(child.AgentID, child.SessionID)] = child
+	}
 	for i := range batch {
 		old := batch[i]
+		for _, sessionID := range append([]string(nil), old.SessionIDs...) {
+			if _, child := r.subSessions[subSessionKey(old.AgentID, sessionID)]; child {
+				old.ForgetSession(sessionID)
+			}
+		}
 		cur, ok := r.pending[old.AgentID]
 		if !ok {
 			if len(r.pending) >= agentIdentityRecorderMaxPending {
@@ -202,15 +223,17 @@ func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRe
 
 // flush writes the buffered batch to store.
 func (r *agentIdentityRecorder) flush(ctx context.Context, store *inventory.InventoryStore) error {
+	r.flushMu.Lock()
+	defer r.flushMu.Unlock()
 	if store == nil {
 		return nil
 	}
-	batch := r.take()
-	if len(batch) == 0 {
+	batch, excluded := r.take()
+	if len(batch) == 0 && len(excluded) == 0 {
 		return nil
 	}
-	if err := store.UpsertAgentIdentities(ctx, batch); err != nil {
-		r.restore(batch)
+	if err := store.UpsertAgentIdentitiesAndExclude(ctx, batch, excluded); err != nil {
+		r.restore(batch, excluded)
 		r.notePersist(err)
 		return err
 	}
@@ -404,7 +427,7 @@ func (r *agentIdentityRecorder) sweepOwnStore(ctx context.Context) {
 func (r *agentIdentityRecorder) pendingCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.pending)
+	return len(r.pending) + len(r.exclusions)
 }
 
 // agentIdentityRow is one row of GET /api/v1/agents/identities.

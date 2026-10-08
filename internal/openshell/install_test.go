@@ -468,21 +468,54 @@ func TestInstallInAHomebrewOfYourOwn(t *testing.T) {
 			t.Fatalf("env %v under /opt/homebrew", f.scriptRun().Env)
 		}
 	}
-	// A script that fails with the formula in place failed after it.
-	for _, keg := range []bool{false, true} {
-		f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
-		f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
-		if keg {
-			if err := os.MkdirAll(filepath.Join(prefix, "opt", "openshell"), 0o755); err != nil {
-				t.Fatal(err)
+	// An old keg must not make a failed upgrade look like installation
+	// finished. A new keg written before a later failure still counts.
+	for _, scenario := range []struct {
+		name, before, during string
+		installed            bool
+	}{
+		{"no keg", "", "", false},
+		{"old keg", "0.1.0", "", false},
+		{"new keg", "0.1.0", "0.1.1", true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			prefix := filepath.Join(t.TempDir(), "homebrew")
+			keg := filepath.Join(prefix, "Cellar", "openshell")
+			link := filepath.Join(prefix, "opt", "openshell")
+			linkKeg := func(version string) {
+				t.Helper()
+				target := filepath.Join(keg, version)
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
-		f.runner.On("/bin/sh", "", errors.New("exit status 1"))
-		_, err := f.inst.Install(context.Background())
-		var hb *openshell.HomebrewInstallError
-		if !errors.As(err, &hb) || hb.FormulaInstalled != keg || strings.Contains(err.Error(), "formula is installed, but") != keg {
-			t.Fatalf("keg %t: Install = %v", keg, err)
-		}
+			if scenario.before != "" {
+				linkKeg(scenario.before)
+			}
+			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
+			f.runner.OnFunc("/bin/sh", func(context.Context, openshell.Command) ([]byte, error) {
+				if scenario.during != "" {
+					linkKeg(scenario.during)
+				}
+				return nil, errors.New("exit status 1")
+			})
+			_, err := f.inst.Install(context.Background())
+			var hb *openshell.HomebrewInstallError
+			if !errors.As(err, &hb) || hb.FormulaInstalled != scenario.installed ||
+				strings.Contains(err.Error(), "formula is installed, but") != scenario.installed {
+				t.Fatalf("%s: Install = %v", scenario.name, err)
+			}
+		})
 	}
 }
 

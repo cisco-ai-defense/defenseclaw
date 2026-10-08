@@ -2222,3 +2222,25 @@ func TestWindowsEnterpriseWarnsAboutAMissingProtectedCredential(t *testing.T) {
 		t.Fatalf("a host with nothing installed warned %+v", got)
 	}
 }
+
+// A Secure Client deployment keeps its profile-conflict refusal for a
+// standard user's explicit standalone repair request.
+func TestWindowsEnterpriseStandardUserStandaloneRepairOnSecureClient(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		"secure_client": winpath.EnterpriseDeploymentInstalled,
+	})
+	originalElevated := windowsEnterpriseIsElevated
+	windowsEnterpriseIsElevated = func() bool { return false }
+	t.Cleanup(func() { windowsEnterpriseIsElevated = originalElevated })
+
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&output)
+	err := runWindowsEnterpriseLifecycle(context.Background(), command, "repair",
+		&windowsEnterpriseLifecycleOptions{profile: "standalone"})
+	if err == nil || !strings.Contains(err.Error(), "profile_conflict") ||
+		!strings.Contains(output.String(), "this host carries a secure_client enterprise deployment") ||
+		strings.Contains(output.String(), "elevation_required") {
+		t.Fatalf("repair --profile standalone: %v, output %q; want profile conflict", err, output.String())
+	}
+}

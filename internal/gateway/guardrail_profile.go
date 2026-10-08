@@ -64,8 +64,8 @@ type profileSubject struct {
 	// Groups are verified directory group names and SIDs.
 	Groups []string
 	// LookupFailed is set when the directory lookup for this subject failed
-	// and no cached facts within their TTL exist. The subject then gets the
-	// default profile, with the reason default_lookup_failed.
+	// and no cached facts within their TTL exist. Directory-dependent
+	// assignments then select default_lookup_failed; a verified ID can match.
 	LookupFailed bool
 	// LookupError is why the lookup failed, when `explain` knows (the live
 	// path only records default_lookup_failed).
@@ -597,7 +597,7 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // view. lookupAttempted says the directory lookup was waited on (a group or
 // user assignment is configured); a subject whose facts then never resolved
 // (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
-// has unknown groups, not empty ones, and gets the default profile.
+// has unknown groups, not empty ones. A verified ID remains usable.
 //
 // The account name is the bare one (alice for alice@corp.example.com and
 // CORP\alice) here, for every caller: a request and `explain --user` both
@@ -646,7 +646,7 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 	}
 	facts, err := profileExplainDirectoryFacts(id)
 	if err != nil {
-		// A required lookup failure selects default_lookup_failed. With
+		// A required lookup failure leaves directory-dependent assignments unresolved. With
 		// agent- or connector-only assignments, live requests can still match
 		// without directory facts. Keep the error for explain (GAP-0124).
 		return profileSubject{
@@ -740,10 +740,9 @@ func accountGroups(account *osuser.User) ([]string, error) {
 // assignment the set keys AND together and the values of a key OR together.
 // Identity keys (users, groups, agents) match only a verified subject; a
 // connector-only assignment matches any other request authenticated for that
-// connector. A subject whose directory lookup failed gets the default profile
-// (default_lookup_failed): its groups are unknown, so an identity assignment
-// listed before a connector-only one might have selected it, and the reason
-// must show the outage (GAP-0312).
+// connector. A failed directory lookup leaves groups and names unknown, so
+// their assignments select default_lookup_failed (GAP-0312). An assignment
+// naming the kernel-verified UID or SID can still select its profile.
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	if set.matches == nil {
 		return set.matchUncached(subject, source, connectorName, agent)
@@ -759,7 +758,7 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	if subject != nil && subject.LookupFailed {
-		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+		return set.matchWithFailedLookup(subject, source, connectorName, agent)
 	}
 	verified := subject != nil && source != ""
 	groups := &subjectGroups{}
@@ -780,6 +779,57 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 		reason = profileMatchDefaultUnverified
 	}
 	return set.decision(set.defaultProfile, reason, "", source)
+}
+
+// matchWithFailedLookup can use a kernel-verified UID or SID even when
+// directory names and groups are unknown. Preserve assignment order: an
+// earlier assignment that could depend on missing facts still selects the
+// outage default rather than letting a later assignment shadow it.
+func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	fallback := func() profileDecision {
+		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	}
+	if source == "" || subject.UserID == "" {
+		return fallback()
+	}
+	idOnly := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind}
+	for i, assignment := range set.assignments {
+		m := assignment.Match
+		if len(m.Connectors) > 0 && !anyMatches(m.Connectors, func(v string) bool {
+			return config.NormalizeConnectorName(v) == connectorName && connectorName != ""
+		}) {
+			continue
+		}
+		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
+			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
+		}) {
+			continue
+		}
+		uidMatches := anyMatches(m.Users, func(v string) bool {
+			return useridentity.EqualFold(strings.TrimSpace(v), subject.UserID)
+		})
+		if len(m.Users) > 0 && !uidMatches {
+			// A list of other IDs is known not to match, regardless of
+			// its group condition. A name or principal could still
+			// name this account, so fail closed.
+			for _, entry := range m.Users {
+				if useridentity.KindForID(entry) == "" {
+					return fallback()
+				}
+			}
+			continue
+		}
+		if len(m.Groups) > 0 || len(m.Users) == 0 {
+			return fallback()
+		}
+		reason, group, ok := assignmentMatches(m, idOnly, &subjectGroups{}, true, connectorName, agent)
+		if ok {
+			decision := set.decision(assignment.Profile, reason, group, source)
+			decision.Assignment = i + 1
+			return decision
+		}
+	}
+	return fallback()
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {

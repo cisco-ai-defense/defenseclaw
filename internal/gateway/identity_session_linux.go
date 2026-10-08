@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -30,7 +31,8 @@ import (
 // match GetSessionByPID for the kernel-verified peer PID. Only then are the
 // session's kind, remote host and terminal reported as verified. Without
 // logind, /run/utmp confirms a claimed terminal belongs to the peer's
-// account. Session attestations are not cached because a session can end.
+// kernel session as well as its account. Session attestations are not cached
+// because a session can end.
 
 const (
 	logindService       = "org.freedesktop.login1"
@@ -44,6 +46,7 @@ const (
 
 var (
 	utmpSessionPath     = utmpPath
+	utmpSessionID       = unix.Getsid
 	logindSessionLookup = logindSessionFacts
 )
 
@@ -64,10 +67,10 @@ func verifyPeerSession(uid, pid int, name string, claimed useridentity.SessionFa
 			return useridentity.SessionFacts{}, false
 		}
 	}
-	if claimed.TTY != "" && name != "" {
+	if claimed.TTY != "" && name != "" && pid > 0 {
 		// A TTY can be reused immediately after logout. Read utmp on every
 		// claim and use it when logind is unavailable or cannot verify.
-		session, err := utmpSessionFacts(claimed.TTY, name)
+		session, err := utmpSessionFacts(claimed.TTY, name, pid)
 		return session, err == nil && session.Assurance == useridentity.AssuranceVerified
 	}
 	return useridentity.SessionFacts{}, false
@@ -193,12 +196,19 @@ func sessionUser(v dbus.Variant) int {
 }
 
 // utmpSessionFacts confirms a claimed terminal from /run/utmp: a login
-// record on that line for the peer's account.
-func utmpSessionFacts(tty, name string) (useridentity.SessionFacts, error) {
-	return utmpSessionFactsFrom(utmpSessionPath, tty, name)
+// record on that line for the peer's account and kernel session.
+func utmpSessionFacts(tty, name string, peerPID int) (useridentity.SessionFacts, error) {
+	return utmpSessionFactsFrom(utmpSessionPath, tty, name, peerPID)
 }
 
-func utmpSessionFactsFrom(path, tty, name string) (useridentity.SessionFacts, error) {
+func utmpSessionFactsFrom(path, tty, name string, peerPID int) (useridentity.SessionFacts, error) {
+	if peerPID <= 0 {
+		return useridentity.SessionFacts{}, nil
+	}
+	peerSID, err := utmpSessionID(peerPID)
+	if err != nil || peerSID <= 0 {
+		return useridentity.SessionFacts{}, nil
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return useridentity.SessionFacts{}, err
@@ -209,7 +219,11 @@ func utmpSessionFactsFrom(path, tty, name string) (useridentity.SessionFacts, er
 		return useridentity.SessionFacts{}, err
 	}
 	for _, entry := range parseUtmp(data, binary.NativeEndian) {
-		if entry.Line != tty || entry.User != name {
+		if entry.Line != tty || entry.User != name || entry.PID <= 0 {
+			continue
+		}
+		recordSID, err := utmpSessionID(int(entry.PID))
+		if err != nil || recordSID != peerSID {
 			continue
 		}
 		facts := useridentity.SessionFacts{TTY: tty, Assurance: useridentity.AssuranceClaimed}

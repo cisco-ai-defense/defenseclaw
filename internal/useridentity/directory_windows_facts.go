@@ -203,8 +203,10 @@ func validTenantID(id string) bool {
 }
 
 const (
-	// adUPNTTL is how long a TranslateNameW answer is reused.
-	adUPNTTL = 24 * time.Hour
+	// adUPNTTL stays below the 15-minute directory refresh interval so a
+	// UPN-only rename is checked on each refresh even when SID and SAM name
+	// remain unchanged.
+	adUPNTTL = 5 * time.Minute
 	// adUPNFailureTTL is how long a failed lookup (no domain controller
 	// reachable) is reused. It is short so a laptop that starts the gateway
 	// off the corporate network gets its UPN minutes after it is back, not a

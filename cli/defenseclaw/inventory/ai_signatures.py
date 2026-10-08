@@ -26,7 +26,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -144,6 +144,28 @@ class RefusedPack:
 # from packs written by 0.8.x and early 1.0 builds are no longer supported.
 _OPERATOR_KEEPS_IDS = frozenset({"jetbrains-ai"})
 
+_POST_RELEASE_EXTENSION_IDS = {"codex": "openai.chatgpt", "claudecode": "anthropic.claude-code"}
+IDE_INVENTORY_FIELDS = frozenset({"jetbrains_plugin_ids", "zed_extension_ids", "vim_plugins"})
+
+
+def _secure_client_signatures(builtins: list[AISignature]) -> list[AISignature]:
+    """Keep the pre-1.0 Secure Client catalog, as the Go loader does."""
+    return [
+        replace(
+            sig,
+            extension_ids=tuple(
+                extension_id
+                for extension_id in sig.extension_ids
+                if extension_id != _POST_RELEASE_EXTENSION_IDS.get(sig.id)
+            ),
+            jetbrains_plugin_ids=(),
+            zed_extension_ids=(),
+            vim_plugins=(),
+        )
+        for sig in builtins
+        if sig.id not in _OPERATOR_KEEPS_IDS
+    ]
+
 
 def load_ai_signatures(
     *,
@@ -151,6 +173,7 @@ def load_ai_signatures(
     allow_workspace_signatures: bool = False,
     scan_roots: list[str] | tuple[str, ...] = (),
     disabled_signature_ids: list[str] | tuple[str, ...] = (),
+    secure_client: bool = False,
 ) -> list[AISignature]:
     """Load the built-in catalog plus the configured operator signature packs
     (``ai_discovery.signature_packs``, the only operator source since
@@ -160,6 +183,7 @@ def load_ai_signatures(
         allow_workspace_signatures=allow_workspace_signatures,
         scan_roots=scan_roots,
         disabled_signature_ids=disabled_signature_ids,
+        secure_client=secure_client,
     )[0]
 
 
@@ -171,11 +195,14 @@ def load_ai_signature_catalog(
     disabled_signature_ids: list[str] | tuple[str, ...] = (),
     pack_digests: Mapping[str, str] | None = None,
     require_digests: bool = False,
+    secure_client: bool = False,
 ) -> tuple[list[AISignature], list[RefusedPack]]:
     """:func:`load_ai_signatures` as the gateway loads it: a pack that fails
     its pin, or whose file is gone, is left out and returned as refused, the
     rest of the catalog still loads."""
     builtins = _parse_catalog_text(_catalog_text(), source="builtin")
+    if secure_client:
+        builtins = _secure_client_signatures(builtins)
     disabled = {_normalize_id(s) for s in disabled_signature_ids if _normalize_id(s)}
     merged: list[AISignature] = []
     seen: dict[str, str] = {}

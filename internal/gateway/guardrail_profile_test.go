@@ -175,6 +175,32 @@ func TestGuardrailProfileTelemetryBoundsTheMatchedGroup(t *testing.T) {
 	}
 }
 
+func TestGuardrailWaitsForAPIProfilePublication(t *testing.T) {
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	liveGuardrailProfiles.Store(nil)
+	s := &Sidecar{apiProfilesReady: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- s.waitForAPIProfilePublication(t.Context()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("guardrail started before API profile publication: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	cfg.Guardrail.DefaultProfile = "strict"
+	api := newAPIServer(nil, "127.0.0.1:0", nil, nil, nil, nil, cfg)
+	s.setAPIServer(api)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if set := liveGuardrailProfiles.Load(); set == nil || set.defaultProfile != "strict" {
+		t.Fatal("guardrail started without the action profile")
+	}
+}
+
 // The guardrail proxy scans the requests a profile selects with the
 // profile's rule pack and applies its HILT, as explain says it does
 // (GAP-0313). Its thresholds come from requestThresholds.
@@ -1284,5 +1310,23 @@ func TestUnconfirmedQualifiedNameMatchesNoUsersEntry(t *testing.T) {
 		if !matches(ad, entry) {
 			t.Errorf("users [%s] does not select the AD account %+v", entry, ad)
 		}
+	}
+}
+
+// A verified UID is sufficient for a users assignment during a directory outage.
+func TestVerifiedUIDAssignmentSurvivesDirectoryFailure(t *testing.T) {
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		profiles: map[string]config.DerivedGuardrailProfile{
+			"strict": {}, "watch": {},
+		},
+		assignments: []config.ProfileAssignment{
+			{Profile: "watch", Match: config.ProfileMatch{Users: []string{"1002"}, Groups: []string{"ops"}}},
+			{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+		},
+	}
+	subject := &profileSubject{UserID: "1001", LookupFailed: true}
+	if got := set.matchUncached(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchUser {
+		t.Fatalf("verified UID selected %+v; want strict user assignment", got)
 	}
 }

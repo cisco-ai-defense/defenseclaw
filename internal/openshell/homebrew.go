@@ -100,6 +100,17 @@ func formulaKegInstalled(prefix string) bool {
 	return false
 }
 
+// formulaKegState records the active Homebrew opt link. A new Cellar
+// directory can appear before installation completes, while opt is linked
+// only after Homebrew has installed the formula.
+func formulaKegState(prefix string) string {
+	target, err := filepath.EvalSymlinks(filepath.Join(prefix, "opt", path.Base(GatewayFormula)))
+	if err != nil {
+		return ""
+	}
+	return target
+}
+
 // findHomebrewPrefix finds the Homebrew prefix like `brew --prefix`
 // without running brew: HOMEBREW_PREFIX (which `brew shellenv` sets),
 // else the prefix of the brew on PATH (the one holding a Cellar, through

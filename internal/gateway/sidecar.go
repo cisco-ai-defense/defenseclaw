@@ -124,6 +124,7 @@ type Sidecar struct {
 	aiRuntimeMu       sync.RWMutex
 	apiMu             sync.RWMutex
 	apiServer         *APIServer
+	apiProfilesReady  chan struct{}
 	hookGuardsMu      sync.RWMutex
 	hookGuards        map[*HookConfigGuard]struct{}
 	hookGuardsChanged chan struct{}
@@ -1217,6 +1218,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
+	// A proxy with configured profiles must not bind before the API worker
+	// publishes its initial profile set. Secure Client has no profiles.
+	if !s.currentConfig().SecureClientIntegration() && s.currentConfig().Guardrail.HasProfiles() {
+		s.apiMu.Lock()
+		s.apiProfilesReady = make(chan struct{})
+		s.apiMu.Unlock()
+	}
+
 	// Goroutine 3: REST API server (always runs)
 	wg.Add(1)
 	go func() {
@@ -1438,6 +1447,9 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 }
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
+	if err := s.waitForAPIProfilePublication(ctx); err != nil {
+		return err
+	}
 	runGuardrailFn := s.runGuardrail
 	if len(s.currentConfig().ActiveConnectors()) > 1 {
 		runGuardrailFn = s.runGuardrailMulti
@@ -2462,6 +2474,23 @@ func webhooksChanged(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability)
 }
 
+// waitForAPIProfilePublication keeps the proxy listener closed until the API
+// worker has installed the initial profile set used by proxy requests.
+func (s *Sidecar) waitForAPIProfilePublication(ctx context.Context) error {
+	s.apiMu.RLock()
+	ready := s.apiProfilesReady
+	s.apiMu.RUnlock()
+	if ready == nil {
+		return nil
+	}
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *Sidecar) setAPIServer(api *APIServer) {
 	if s == nil {
 		return
@@ -2480,6 +2509,10 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
 	}
 	s.apiServer = api
+	if api != nil && s.apiProfilesReady != nil {
+		close(s.apiProfilesReady)
+		s.apiProfilesReady = nil
+	}
 	s.apiMu.Unlock()
 	s.observabilityV8Mu.Unlock()
 }

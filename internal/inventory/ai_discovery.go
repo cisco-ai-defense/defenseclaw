@@ -1355,7 +1355,15 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 				})
 			}
 		}
-		_ = observer.EmitReport(ctx, reportForObservabilityV8(report), components)
+		telemetryReport := reportForObservabilityV8(report)
+		// A completed full scan with IDE inventory off must publish a zero
+		// total. Keep the API and persisted report nil in this mode; the
+		// synthetic empty inventory exists only at the telemetry boundary.
+		if full && telemetryReport.IDEInventory == nil && !s.opts.SecureClient &&
+			s.ideInventoryScope() == config.IDEInventoryOff {
+			telemetryReport.IDEInventory = &IDEInventory{Scope: config.IDEInventoryOff}
+		}
+		_ = observer.EmitReport(ctx, telemetryReport, components)
 	}
 	// emit is the same live managed-mode indicator snapshot read at
 	// the top of this function; reuse it so a concurrent

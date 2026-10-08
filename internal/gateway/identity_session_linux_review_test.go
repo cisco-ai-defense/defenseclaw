@@ -34,17 +34,18 @@ func writeReviewUtmp(t *testing.T, path, host string, addr net.IP) {
 
 func TestReusedTTYReadsCurrentUtmpRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "utmp")
-	old := utmpSessionPath
+	old, oldSID := utmpSessionPath, utmpSessionID
 	utmpSessionPath = path
-	t.Cleanup(func() { utmpSessionPath = old })
+	utmpSessionID = func(int) (int, error) { return 77, nil }
+	t.Cleanup(func() { utmpSessionPath, utmpSessionID = old, oldSID })
 	claim := useridentity.SessionFacts{TTY: "pts/1"}
 	writeReviewUtmp(t, path, "first.example", net.ParseIP("192.0.2.10"))
-	first, ok := verifyPeerSession(1001, 0, "alice", claim)
+	first, ok := verifyPeerSession(1001, 4201, "alice", claim)
 	if !ok || first.ClientAddr != "192.0.2.10" {
 		t.Fatalf("first session = %+v, verified %v", first, ok)
 	}
 	writeReviewUtmp(t, path, "second.example", net.ParseIP("192.0.2.11"))
-	second, ok := verifyPeerSession(1001, 0, "alice", claim)
+	second, ok := verifyPeerSession(1001, 4201, "alice", claim)
 	if !ok || second.ClientAddr != "192.0.2.11" {
 		t.Fatalf("reused tty session = %+v, verified %v", second, ok)
 	}
@@ -94,12 +95,33 @@ func TestLogindFailureFallsBackToUtmp(t *testing.T) {
 	}
 	t.Cleanup(func() { logindSessionLookup = old })
 	path := filepath.Join(t.TempDir(), "utmp")
-	oldPath := utmpSessionPath
+	oldPath, oldSID := utmpSessionPath, utmpSessionID
 	utmpSessionPath = path
-	t.Cleanup(func() { utmpSessionPath = oldPath })
+	utmpSessionID = func(int) (int, error) { return 77, nil }
+	t.Cleanup(func() { utmpSessionPath, utmpSessionID = oldPath, oldSID })
 	writeReviewUtmp(t, path, "ssh.example", net.ParseIP("192.0.2.21"))
 	facts, ok := verifyPeerSession(1001, 4200, "alice", useridentity.SessionFacts{LogindSession: "ssh-1", TTY: "pts/1"})
 	if !ok || facts.ClientAddr != "192.0.2.21" || facts.LogindSession != "" {
 		t.Fatalf("utmp fallback = %+v, verified %v", facts, ok)
+	}
+}
+
+// A same-account peer in another kernel session cannot borrow the login TTY.
+func TestUtmpFallbackRequiresPeerSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "utmp")
+	oldPath, oldLookup, oldSID := utmpSessionPath, logindSessionLookup, utmpSessionID
+	utmpSessionPath = path
+	utmpSessionID = func(pid int) (int, error) { return pid, nil }
+	logindSessionLookup = func(int, int, string) (useridentity.SessionFacts, error) {
+		return useridentity.SessionFacts{}, errors.New("bus unavailable")
+	}
+	t.Cleanup(func() { utmpSessionPath, logindSessionLookup, utmpSessionID = oldPath, oldLookup, oldSID })
+	writeReviewUtmp(t, path, "ssh.example", net.ParseIP("192.0.2.21"))
+	claim := useridentity.SessionFacts{LogindSession: "ssh-1", TTY: "pts/1"}
+	if facts, ok := verifyPeerSession(1001, 4201, "alice", claim); ok {
+		t.Fatalf("another login session was verified: %+v", facts)
+	}
+	if facts, ok := verifyPeerSession(1001, 0, "alice", claim); ok {
+		t.Fatalf("peer without a verified PID was verified: %+v", facts)
 	}
 }

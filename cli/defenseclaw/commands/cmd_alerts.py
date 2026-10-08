@@ -545,7 +545,7 @@ def _exit_if_unknown_connector(app: AppContext, needle: str, pool: list) -> None
     raise SystemExit(1)
 
 
-def _render_table(alert_list: list, store, connector: str | None = None) -> None:
+def _render_table(alert_list: list, store, connector: str | None = None, *, secure_client: bool = False) -> None:
     """Plain Rich table: the single renderer for ``defenseclaw alerts``."""
     from rich import box
     from rich.console import Console
@@ -556,7 +556,10 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     term_width = console.size.width
     # A wide terminal shows the whole hook event (UserPromptSubmit,
     # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
-    w_target = _W_TARGET if term_width < 100 else 20
+    w_target = (
+        _W_TARGET if term_width < 100 else
+        20 if secure_client else min(40, max(20, (term_width - 60) // 2))
+    )
     w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 
     scope = f" — connector={connector}" if (connector or "").strip() else ""
@@ -592,14 +595,18 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
         hook_target = copilot_hook_target(e.target or "", _event_connector(e))
-        target = _trunc_path(_short_hook_target(hook_target, _event_connector(e)), w_target)
+        shown_target = _short_hook_target(hook_target, _event_connector(e)) if secure_client else hook_target
+        target = _trunc_path(shown_target, w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         facts = _finding_facts(e, hook_details, targets)
         quarantined = _quarantine_facts(e, targets)
         if facts is not None:
-            short = _path_name(_short_hook_target(facts["target"], facts.get("connector", "")))
-            target = _trunc_path(short, w_target)
+            shown_target = (
+                _short_hook_target(facts["target"], facts.get("connector", ""))
+                if secure_client else facts["target"]
+            )
+            target = _trunc_path(_path_name(shown_target), w_target)
             raw_details = _finding_details(facts)
         elif quarantined is not None:
             target = _trunc_path(quarantined["target"], w_target)
@@ -886,7 +893,12 @@ def _alerts_default(
             click.echo(ux.dim(f"  Acknowledge: defenseclaw alerts acknowledge --id {e.id}"))
         return
 
-    _render_table(alert_list, app.store, connector=needle)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    _render_table(
+        alert_list, app.store, connector=needle,
+        secure_client=_enterprise_profile(app.cfg) == "secure_client",
+    )
 
 
 @alerts.command("acknowledge")
