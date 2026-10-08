@@ -1159,3 +1159,32 @@ func TestMigrateV9ReadsAuditDBUnderAnAwkwardPath(t *testing.T) {
 		t.Fatalf("rows after clear = %d, err = %v", len(rows), err)
 	}
 }
+
+// A comment about the old data document does not make a custom Rego module
+// depend on it. Migration must leave the operator's active rules in place.
+func TestMigrateV9KeepsCustomRegoWithLegacyComment(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(dir, "policies", "rego", "admission.rego")
+	if err := os.MkdirAll(filepath.Dir(module), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	custom := []byte("package defenseclaw.admission\nimport rego.v1\n# old data.config was removed\nverdict := \"blocked\" if { input.target.name == \"marker\" }\n")
+	if err := os.WriteFile(module, custom, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(custom) {
+		t.Fatalf("custom admission module was replaced: %s", got)
+	}
+}

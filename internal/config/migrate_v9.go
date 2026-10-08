@@ -36,6 +36,7 @@ import (
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
+	"github.com/open-policy-agent/opa/ast"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
@@ -738,6 +739,28 @@ func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
 // evaluation input, so such a module sees nothing and fails open.
 var v9LegacyRegoData = regexp.MustCompile(`\bdata\.(config|actions|scanner_overrides|first_party_allow_list|guardrail|severity_ranking)\b`)
 
+// v9RegoReadsLegacyData inspects references in parsed rules, not comments or
+// string literals. A custom module that only mentions a v8 key in prose must
+// keep its active enforcement rules.
+func v9RegoReadsLegacyData(name string, raw []byte) (bool, error) {
+	mod, err := ast.ParseModuleWithOpts(name, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1})
+	if err != nil {
+		return false, err
+	}
+	legacy := false
+	ast.WalkRefs(mod, func(ref ast.Ref) bool {
+		if len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
+			return false
+		}
+		key, ok := ref[1].Value.(ast.String)
+		if ok && v9LegacyRegoData.MatchString("data."+string(key)) {
+			legacy = true
+		}
+		return legacy
+	})
+	return legacy, nil
+}
+
 // planRegoRefresh finds the pre-9 vendor modules left under
 // <policy_dir>/rego: init only seeded missing files, so an upgrade keeps the
 // old ones. On a per-user install they are replaced with the shipped module
@@ -758,7 +781,15 @@ func (m *v9Migrator) planRegoRefresh() error {
 	for _, name := range []string{"admission.rego", "guardrail.rego", "skill_actions.rego"} {
 		path := filepath.Join(dir, name)
 		raw, err := os.ReadFile(path)
-		if err != nil || !v9LegacyRegoData.Match(raw) {
+		if err != nil {
+			continue
+		}
+		legacy, parseErr := v9RegoReadsLegacyData(name, raw)
+		if parseErr != nil {
+			m.note("%s could not be parsed to check its data references (%v); it was left in place", path, parseErr)
+			continue
+		}
+		if !legacy {
 			continue
 		}
 		if m.in.Managed || m.leftOutsideRollbackCopy(path) {
