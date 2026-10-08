@@ -2446,10 +2446,6 @@ func watcherPathAtOrBelow(path, root string) bool {
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
-// emitQuarantineFailure reports an asset the verdict blocked but the watcher
-// could not move: it stays in place, so besides the log line and the metric
-// the audit log records an enforcement failure the administrator can find
-// (GAP-0133).
 // settleAdmissionIssue records what the admission of evt could not finish
 // (its scan failed, or its files could not be moved to quarantine), so the
 // watcher admits it again and status reports it, and a rejection take_action
@@ -2486,6 +2482,10 @@ func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionRes
 	w.state.setIssue(issue)
 }
 
+// emitQuarantineFailure reports an asset the verdict blocked but the watcher
+// could not move: it stays in place, so besides the log line and the metric
+// the audit log records an enforcement failure the administrator can find
+// (GAP-0133).
 func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallEvent, err error) {
 	// A removal the hook guardian deferred to the user's next sign-in is the
 	// guardian's to finish; status reports it from the guardian's list.
