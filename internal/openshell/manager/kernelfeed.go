@@ -84,6 +84,9 @@ type kernelFeed struct {
 	// The pacing (kernelFeedPoll and the others); tests shorten it before
 	// the manager runs.
 	poll, idle, retry, skewRetry time.Duration
+	// socketID names the feed's socket as it is now ("" when there is
+	// none): an install, update or restart of the feed replaces it.
+	socketID func() string
 
 	mu     sync.Mutex
 	state  sandboxapi.ProcessKernelFeed
@@ -92,7 +95,7 @@ type kernelFeed struct {
 
 func newKernelFeed(dial KernelFeedDialer, version string, logf func(string, ...any)) *kernelFeed {
 	return &kernelFeed{dial: dial, version: version, logf: logf, logged: map[string]bool{},
-		poll: kernelFeedPoll, idle: kernelFeedIdle, retry: kernelFeedRetry, skewRetry: kernelFeedSkewRetry,
+		poll: kernelFeedPoll, idle: kernelFeedIdle, retry: kernelFeedRetry, skewRetry: kernelFeedSkewRetry, socketID: feedSocketID,
 		state: sandboxapi.ProcessKernelFeed{Source: audit.SandboxProcessSourceTetragon, Reason: sandboxfeed.ReasonNotInstalled}}
 }
 
@@ -150,7 +153,7 @@ func (k *kernelFeed) run(ctx context.Context, m *Manager) {
 		stream, err := k.dial(ctx)
 		if err != nil {
 			wait := k.down(err)
-			if !sleepCtx(ctx, wait) {
+			if !k.sleepUntilReplaced(ctx, wait) {
 				return
 			}
 			continue
@@ -315,6 +318,38 @@ func kernelFeedUpdateCommand() string {
 		gateway = exe
 	}
 	return "sudo " + gateway + " sandbox kernel-feed install"
+}
+
+// sleepUntilReplaced waits d, or only until the feed's socket is replaced:
+// the install, update or restart that the printed fix runs. Without it a feed
+// updated after a version skew stayed unused for the rest of the skew pause,
+// up to five minutes after `sandbox kernel-feed install` (GAP-0033). A look
+// at the socket costs a stat per poll, and no connection the feed logs. It
+// reports false when ctx ended.
+func (k *kernelFeed) sleepUntilReplaced(ctx context.Context, d time.Duration) bool {
+	if k.socketID == nil || d <= k.poll {
+		return sleepCtx(ctx, d)
+	}
+	start := k.socketID()
+	for waited := time.Duration(0); waited < d; waited += k.poll {
+		if !sleepCtx(ctx, min(k.poll, d-waited)) {
+			return false
+		}
+		if k.socketID() != start {
+			return true
+		}
+	}
+	return true
+}
+
+// feedSocketID names the installed feed's socket by its change time: binding
+// a new socket (the feed restarted) gives it a new one.
+func feedSocketID() string {
+	info, err := os.Lstat(sandboxfeed.DefaultSocketPath)
+	if err != nil {
+		return ""
+	}
+	return info.ModTime().UTC().Format(time.RFC3339Nano)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

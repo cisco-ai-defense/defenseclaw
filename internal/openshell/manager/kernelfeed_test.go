@@ -366,6 +366,41 @@ func TestKernelFeedVersionSkewFallsBackToTheSample(t *testing.T) {
 	}
 }
 
+// GAP-0033: after a version skew the feed is dialled again as soon as its
+// socket is replaced (the printed install restarts it), not after the skew
+// pause.
+func TestKernelFeedRetriesOnceTheSocketIsReplaced(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the kernel feed is Linux only")
+	}
+	e := newEnv(t, nil)
+	stream := newFakeFeedStream()
+	var updated atomic.Bool
+	var dials atomic.Int32
+	k := withKernelFeed(e, func(context.Context) (KernelFeedStream, error) {
+		dials.Add(1)
+		if !updated.Load() {
+			return nil, &sandboxfeed.SkewError{Server: sandboxfeed.ProtocolVersion + 1, Client: sandboxfeed.ProtocolVersion, Build: "9.0.0"}
+		}
+		return stream, nil
+	})
+	k.skewRetry = time.Hour
+	k.socketID = func() string {
+		if updated.Load() {
+			return "the updated feed's socket"
+		}
+		return "the old feed's socket"
+	}
+	e.live(sandboxapi.CreateRequest{Name: "updatebox", ProcessTree: true})
+	eventually(t, "the skew to be noted", func() bool { v := k.view(); return v != nil && v.Reason == sandboxfeed.ReasonVersionSkew })
+	before := dials.Load()
+	updated.Store(true)
+	eventually(t, "the updated feed to be read", func() bool { v := k.view(); return v != nil && v.Connected })
+	if dials.Load() != before+1 {
+		t.Fatalf("dials %d after the skew, want one more", dials.Load()-before)
+	}
+}
+
 // No sandbox with its tree on: no connection. A missing feed is not in the
 // list at all; one this account may not read is.
 func TestKernelFeedIsDialledOnlyWhenWanted(t *testing.T) {
