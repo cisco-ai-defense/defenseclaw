@@ -12,8 +12,9 @@ import (
 
 // appendAdmissionIssueWarnings reports the skills, plugins and MCP servers
 // whose install admission the gateway with data folder dataDir could not
-// finish: status and verify printed ok while a CRITICAL skill the gateway
-// could not scan or move stayed in a user's folder (GAP-0825, GAP-0826).
+// finish or did not enforce: status and verify printed ok while a CRITICAL
+// skill the gateway could not scan or move, or rejected with take_action
+// false, stayed in a user's folder (GAP-0825, GAP-0826, GAP-0774).
 // A skill or plugin no longer in its folder is not reported.
 func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir string) {
 	issues, err := watcher.ReadAdmissionIssues(dataDir)
@@ -39,6 +40,9 @@ func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir strin
 			result.AddWarning("asset_not_scanned", subject+" could not be scanned, so it is blocked and disabled where it is; the gateway scans it again: "+issue.Detail)
 		case watcher.AdmissionNotQuarantined:
 			result.AddWarning("asset_not_quarantined", subject+" is blocked and disabled, but its files could not be moved to quarantine and are still in place; the gateway tries again: "+issue.Detail)
+		case watcher.AdmissionNotEnforced:
+			result.AddWarning("asset_rejected_not_enforced", subject+" was rejected by install admission ("+issue.Detail+
+				") and stays installed and usable; the gateway enforces the verdict once take_action is true again")
 		}
 	}
 }

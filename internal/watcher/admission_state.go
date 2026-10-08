@@ -177,6 +177,22 @@ func (s *admissionState) clearIssue(path string) {
 	s.writeLocked()
 }
 
+// issuesOf returns the recorded problems of kind.
+func (s *admissionState) issuesOf(kind string) []AdmissionIssue {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []AdmissionIssue
+	for _, issue := range s.issues {
+		if issue.Kind == kind {
+			out = append(out, issue)
+		}
+	}
+	return out
+}
+
 // dueIssues returns the skills and plugins whose unfinished admission is
 // due, and forgets those no longer in their folder. Each waits a full delay
 // before it is due again.

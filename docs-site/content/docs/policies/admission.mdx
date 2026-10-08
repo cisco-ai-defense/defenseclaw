@@ -89,7 +89,10 @@ server when it appears in a watched directory, and the `defenseclaw` install
 and scan commands run the same check. The watcher applies a `rejected` verdict
 only while `gateway.watcher.skill.take_action` (or `plugin` / `mcp`) is true,
 which is the default; with it false, the verdict is recorded and nothing else
-happens.
+happens. A skill or plugin rejected that way is enforced when `take_action` is
+true again (the watcher restarts on the change and admits it again), and until
+then a managed computer's `status` and `verify` warn with
+`asset_rejected_not_enforced`.
 
 ## The admission block
 

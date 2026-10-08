@@ -845,6 +845,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
+	// A skill or plugin rejected while take_action was false is enforced
+	// once it is true again: changing it restarts the watcher (GAP-0774).
+	for _, issue := range w.state.issuesOf(AdmissionNotEnforced) {
+		if evt := w.classifyEvent(issue.Path); w.takeActionFor(evt) {
+			w.queuePending(issue.Path)
+		}
+	}
 	if w.cfg.Watch.RescanEnabled {
 		go w.rescanLoop(ctx)
 	}
@@ -1566,6 +1573,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 			fmt.Sprintf("type=%s severity=%s scanner=%s install_action=%s file_action=%s",
 				targetType, result.MaxSeverity(), scannerName, out.InstallAction, out.FileAction))
 
+		if !w.takeActionFor(evt) && !w.secureClientActive() && evt.Type != InstallMCP {
+			// Recorded, so status reports it and the watcher enforces it once
+			// take_action is true again (GAP-0774).
+			w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotEnforced,
+				Detail: fmt.Sprintf("%s findings while gateway.watcher.%s.take_action is false", result.MaxSeverity(), evt.Type)})
+		}
 		if w.takeActionFor(evt) {
 			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
 			if !w.secureClientActive() {
