@@ -177,7 +177,21 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		row["token_copy"] != "present" || row["setup"] != "not run" {
 		t.Fatalf("list row = %v, want alice zed/kiro with the token copy present and setup not run", row)
 	}
-	if err := os.WriteFile(acpContractLockPath(userData, "zed", "kiro"), []byte("contract"), 0o600); err != nil {
+	// A done setup: the lock pins an editor file in the home whose managed
+	// entry points at this data directory's token copy and lock.
+	doneLock := acpContractLockPath(userData, "zed", "kiro")
+	editorFile := filepath.Join(userHome, ".config", "zed", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(editorFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := json.Marshal(map[string]any{"agent_servers": map[string]any{
+		acpManagedEntryName("kiro"): map[string]any{"args": []string{"--token-file", tokenPath, "--contract-lock", doneLock}},
+	}})
+	if err := os.WriteFile(editorFile, entry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, _ := json.Marshal(map[string]any{"version": 1, "client": map[string]any{"id": "zed", "config_path": editorFile}})
+	if err := os.WriteFile(doneLock, lock, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
