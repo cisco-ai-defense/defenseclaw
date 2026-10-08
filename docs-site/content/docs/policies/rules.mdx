@@ -205,7 +205,7 @@ Most keys have a command that edits them through the config writer (`sensitive_t
 | `defenseclaw guardrail suppress remove ID` | removes that suppression |
 | `defenseclaw guardrail protection list` | read only: the opt-in packs and where they are on |
 | `defenseclaw guardrail protection enable NAME` | `guardrail.rules.protections` |
-| `defenseclaw guardrail protection disable NAME` | removes the pack from `protections` |
+| `defenseclaw guardrail protection disable NAME` | removes the pack from this scope's `protections`; an inherited pack must be disabled at the wider scope |
 
 ```bash
 defenseclaw guardrail rule disable CMD-REVSHELL-NC
