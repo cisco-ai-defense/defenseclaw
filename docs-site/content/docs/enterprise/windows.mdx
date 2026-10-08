@@ -43,6 +43,7 @@ cannot change either tree.
 | --- | --- |
 | Binaries | `C:\Program Files\Cisco\DefenseClaw\bin` (`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`) |
 | Lifecycle scripts | `C:\Program Files\Cisco\DefenseClaw\libexec` (`install-enterprise.ps1`, `DefenseClawEnterprise.psm1`) |
+| Managed OpenCode plugin | `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`. Users hold read and execute plus write attributes on this one file, because OpenCode's runtime opens every module with that right; its content, owner and access list stay administrator-only. See [Managed OpenCode plugin](/docs/enterprise/machine-policy#managed-opencode-plugin). |
 | Config | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` |
 | Secrets | `C:\ProgramData\Cisco\DefenseClaw\secrets` |
 | Target manifest | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml` (the enumerator writes it) |
