@@ -379,8 +379,9 @@ PY
 }
 
 write_admin_config() {
+    local config_version=${1:-9}
     cat >"$stage/config.yaml" <<EOF
-config_version: 9
+config_version: $config_version
 deployment_mode: managed_enterprise
 data_dir: $data_dir
 policy_dir: $vendor_policy_dir
@@ -426,7 +427,7 @@ upgrade_lane() {
         --action ensure --installed --version "$previous_version"
 
     step "apply the v8 administrator config on the previous release"
-    write_admin_config
+    write_admin_config 8
     lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"

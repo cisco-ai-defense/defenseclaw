@@ -144,7 +144,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
-		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, accounts, cleanupFailed)...)
+		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)...)
 	}
 	runs := retryTimedOutWorkers(cmd.Context(), runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism))
 	for _, run := range runs {
@@ -421,11 +421,10 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 // enrolls with the purge of that account's DefenseClaw per-user state (each
 // data directory its rows name) and per-user binaries, except for the
 // accounts in skip, whose pending cleanup failed and whose backups a retry
-// still needs. A host that protects only machine-policy connectors has no
-// manifest rows, so its eligible accounts are enrolled too (their
-// ~/.defenseclaw). It returns every enrolled account it did not add a purge
+// still needs. Eligible accounts without a manifest row are not proof of
+// managed enrollment. It returns every enrolled account it did not add a purge
 // for, as "user: reason", so the report names each account whose data stays.
-func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, accounts []enterprisehooks.UnixEligibleAccount, skip map[int]bool) []string {
+func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) []string {
 	dataDirs := map[int][]string{}
 	notPurged := map[string]string{}
 	for _, target := range manifest.Targets {
@@ -455,35 +454,6 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifes
 		if !slices.Contains(dataDirs[*target.UID], dataDir) {
 			dataDirs[*target.UID] = append(dataDirs[*target.UID], dataDir)
 		}
-	}
-	inManifest := map[int]bool{}
-	for _, target := range manifest.Targets {
-		if target.UID != nil {
-			inManifest[*target.UID] = true
-		}
-	}
-	for _, account := range accounts {
-		if account.UID <= 0 || inManifest[account.UID] {
-			continue
-		}
-		home := filepath.Clean(account.Home)
-		if jobs[account.UID] == nil {
-			switch enterpriseHookCheckHome(home, account.UID).State {
-			case enterprisehooks.HomeAvailable:
-				jobs[account.UID] = newEnterpriseHookRemoveJob(enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: home})
-			case enterprisehooks.HomePending:
-				notPurged[account.User] = "its home is not available; rerun the purge when it is"
-				continue
-			default:
-				notPurged[account.User] = "its home is not trusted"
-				continue
-			}
-		}
-		if skip[account.UID] {
-			notPurged[account.User] = "its pending hook cleanup failed; the state stays for a retry"
-			continue
-		}
-		dataDirs[account.UID] = []string{filepath.Join(home, ".defenseclaw")}
 	}
 	index := 0
 	for _, job := range jobs {

@@ -189,9 +189,34 @@ def test_upgrade_config_check_requires_every_v8_value_kept_or_recorded(tmp_path:
 
     kept = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\nadmission:\n  skill:\n    actions: {high: block}\n"
     assert run(kept).returncode == 0, run(kept).stderr
+    moved_changed = run(kept.replace("actions: {high: block}", "actions: {high: allow}"))
+    assert moved_changed.returncode == 1
+    assert "skill_actions.high.install moved to admission.skill.actions.high" in moved_changed.stderr
+    record["moved"].append({"from": "update_check", "to": "update.check", "value": False})
+    (tmp_path / "v8.yaml").write_bytes(before + b"update_check: true\n")
+    record["source_sha256"] = hashlib.sha256((tmp_path / "v8.yaml").read_bytes()).hexdigest()
+    (tmp_path / "record.json").write_text(json.dumps(record), encoding="utf-8")
+    changed_boolean = run(kept + "update: {check: false}\n")
+    assert changed_boolean.returncode == 1
+    assert "update_check moved to update.check" in changed_boolean.stderr
     changed = run(kept.replace("mode: observe", "mode: action"))
     assert changed.returncode == 1
     assert "  - guardrail.mode changed from 'observe' to 'action'" in changed.stderr.splitlines()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_upgrade_lane_applies_v8_to_previous_package(tmp_path: Path) -> None:
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    writer = re.search(r"^write_admin_config\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    upgrade = re.search(r"^upgrade_lane\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert writer and upgrade
+    assert "write_admin_config 8" in upgrade.group(0)
+    env = {**os.environ, "stage": str(tmp_path), "data_dir": str(tmp_path / "data"),
+           "vendor_policy_dir": str(tmp_path / "policy")}
+    result = subprocess.run(["bash", "-c", writer.group(0) + "\nwrite_admin_config 8"],
+                            env=env, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "config.yaml").read_text().startswith("config_version: 8\n")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")

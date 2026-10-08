@@ -60,14 +60,21 @@ def problems(before_raw: bytes, after: Any, record: dict[str, Any]) -> list[str]
         found.append(f"migration conflict at {conflict.get('to')}: {conflict.get('reason')}")
     if lookup(after, "config_version") != 9:
         found.append(f"config_version is {lookup(after, 'config_version')!r}, want 9")
-    moved = {move.get("from"): move.get("to") for move in record.get("moved") or []}
+    moved = {move.get("from"): move for move in record.get("moved") or []}
     removed = set(record.get("removed") or [])
     for path, value in leaves(before):
         if path == "config_version" or path in removed:
             continue
         if path in moved:
-            if lookup(after, moved[path]) is MISSING:
-                found.append(f"{path} moved to {moved[path]}, which the upgraded config does not set")
+            destination = moved[path].get("to")
+            kept = lookup(after, destination) if isinstance(destination, str) else MISSING
+            # Boolean settings keep their original meaning; a
+            # changed value in the record cannot authorize a changed setting.
+            expected = value if isinstance(value, bool) else moved[path].get("value", value)
+            if kept is MISSING:
+                found.append(f"{path} moved to {destination}, which the upgraded config does not set")
+            elif kept != expected:
+                found.append(f"{path} moved to {destination}, but changed from {expected!r} to {kept!r}")
             continue
         kept = lookup(after, path)
         if kept is MISSING:
