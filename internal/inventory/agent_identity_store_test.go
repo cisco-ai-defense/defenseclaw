@@ -77,3 +77,26 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 		t.Fatalf("connector filter rows = %+v, err %v", rows, err)
 	}
 }
+// A resumed older chat is already counted and cannot replace the last new chat.
+func TestAgentIdentityResumedOlderSessionKeepsLastSession(t *testing.T) {
+	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	rec := AgentIdentityRecord{AgentID: "agt-resumed", UserID: "1001", Connector: "codex", MachineHash: "m", FirstSeen: now, LastSeen: now, SessionsSeen: 1, SessionIDs: []string{"s-old"}, LastSessionID: "s-old"}
+	for _, session := range []string{"s-old", "s-new", "s-old"} {
+		rec.SessionIDs = []string{session}
+		rec.LastSessionID = session
+		if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{rec}); err != nil {
+			t.Fatal(err)
+		}
+		rec.LastSeen = rec.LastSeen.Add(time.Minute)
+	}
+	rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{})
+	if err != nil || len(rows) != 1 || rows[0].SessionsSeen != 2 || rows[0].LastSessionID != "s-new" {
+		t.Fatalf("rows = %+v, err %v; want 2 sessions, last s-new", rows, err)
+	}
+}

@@ -167,6 +167,8 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 			// Sightings the batch holds no id for count as they are; each
 			// named session counts once, ever.
 			sessions := max(rec.SessionsSeen-int64(len(rec.SessionIDs)), 0)
+			lastNewSessionID := ""
+			lastSessionWasNamed := false
 			for _, sessionID := range rec.SessionIDs {
 				if sessionID == "" {
 					continue
@@ -177,11 +179,23 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 				}
 				if added, err := inserted.RowsAffected(); err == nil {
 					sessions += added
+					if added > 0 {
+						lastNewSessionID = sessionID
+					}
 				}
+				if sessionID == rec.LastSessionID {
+					lastSessionWasNamed = true
+				}
+			}
+			// A resumed older session was already counted. Its later hook
+			// must not replace the last genuinely new session.
+			lastSessionID := rec.LastSessionID
+			if lastSessionWasNamed && lastNewSessionID != rec.LastSessionID {
+				lastSessionID = lastNewSessionID
 			}
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
-				rec.LastSessionID, sessions); err != nil {
+				lastSessionID, sessions); err != nil {
 				return err
 			}
 		}
