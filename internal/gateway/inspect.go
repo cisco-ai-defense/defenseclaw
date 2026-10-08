@@ -1302,8 +1302,14 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
 	connector = canonicalConnectorRulePackKey(connector)
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
-		if pack := resolved.set.packs[effectiveRulePackKey(resolved.derived, connector)]; pack != nil {
+		key := effectiveRulePackKey(resolved.derived, connector)
+		if pack := resolved.set.packs[key]; pack != nil {
 			return pack
+		}
+		if retry := resolved.set.missing[key]; retry != nil {
+			if pack := retry.pack.Load(); pack != nil {
+				return pack
+			}
 		}
 	}
 	g := a.generation()
