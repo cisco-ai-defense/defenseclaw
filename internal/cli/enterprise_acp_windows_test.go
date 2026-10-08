@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"golang.org/x/sys/windows"
 )
@@ -30,6 +31,27 @@ func TestEnterpriseACPWindowsAccountRefusalsArePlain(t *testing.T) {
 	if got := enterpriseACPNoHomeText(`HOST\dcw-new`, `C:\Users\dcw-new`, "S-1-5-21-1-2-3-1002"); !strings.Contains(got, "has not signed in") ||
 		strings.Contains(got, "/ensure") {
 		t.Fatalf("never-signed-in refusal = %q", got)
+	}
+}
+
+// A transient LSA failure cannot prove that an enrolled account was deleted.
+func TestEnterpriseACPWindowsListKeepsUnknownLookupFailures(t *testing.T) {
+	previous := enterpriseACPLookupWindowsAccount
+	t.Cleanup(func() { enterpriseACPLookupWindowsAccount = previous })
+	const principal = "sid:S-1-5-21-1-2-3-1117"
+	enterpriseACPLookupWindowsAccount = func(string) (string, string, error) {
+		return "", "", windows.ERROR_TIMEOUT
+	}
+	row := describeEnterpriseACPEnrollment(acp.EnterpriseEnrollment{Principal: principal})
+	if row.Account != "unknown" || row.TokenCopy != "unknown" || row.Setup != "unknown" {
+		t.Fatalf("transient lookup listed as %+v", row)
+	}
+	enterpriseACPLookupWindowsAccount = func(string) (string, string, error) {
+		return "", "", windows.ERROR_NONE_MAPPED
+	}
+	row = describeEnterpriseACPEnrollment(acp.EnterpriseEnrollment{Principal: principal})
+	if row.Account != "deleted" {
+		t.Fatalf("definitive missing account listed as %+v", row)
 	}
 }
 

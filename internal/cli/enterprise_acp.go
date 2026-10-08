@@ -376,6 +376,25 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 			return enterpriseACPResult(cmd, nil, enterpriseACPRefusal(err))
 		}
 	}
+	// The service credential and the user's published copy form one enrollment
+	// transaction. Hold a service-owned lock across both writes and rollback,
+	// including when two administrators use different user data directories.
+	// Secure Client keeps the main branch's enrollment sequence.
+	if !secureClient {
+		var unlock func()
+		err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+			var lockErr error
+			unlock, lockErr = acp.AcquireEnterpriseCredentialEnrollmentLock(cfg.DataDir)
+			return lockErr
+		})
+		if err != nil {
+			if unlock != nil {
+				unlock()
+			}
+			return enterpriseACPResult(cmd, nil, err)
+		}
+		defer unlock()
+	}
 	var credential acp.EnterpriseCredential
 	minted := false
 	// discardMinted removes a credential this call minted when the

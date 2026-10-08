@@ -166,6 +166,44 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	hermes := outcome.result
 	validate("hermes", hermesBinary, hermes.contractLock)
 	validate("kiro", kiroBinary, result.contractLock)
+
+	// An older lock pins the whole settings file. The next enrollment uses
+	// another data directory but still rewrites that one shared editor file.
+	kiroLock, err := os.ReadFile(result.contractLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(kiroLock, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := acpFileSHA256(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy["client"].(map[string]any)["config_sha256"] = digest
+	kiroLock, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(result.contractLock, kiroLock, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	customDir := filepath.Join(home, "custom-acp")
+	hermesCredential, err := acp.LoadEnterpriseCredential(serviceDir, "uid:1001", "zed", "hermes", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acp.PublishEnterpriseUserToken(customDir, "zed", "hermes", hermesCredential.Token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
+		client: "zed", agent: "hermes", profile: "locked", mode: acp.ModeAction, dataDir: customDir,
+		guard: guard, agentBinary: hermesBinary, gatewayURL: "http://127.0.0.1:18970/api/v1/acp/evaluate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	validate("kiro", kiroBinary, result.contractLock)
 }
 
 // stubEnterpriseACPGuardCustody accepts the test binary as the guard: it is

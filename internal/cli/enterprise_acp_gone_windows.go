@@ -44,6 +44,9 @@ func removeEnterpriseACPUserCopyAsUser(entry acp.EnterpriseUserCopyCleanup) (boo
 	return err == nil, err
 }
 
+// enterpriseACPLookupWindowsAccount is replaceable in tests.
+var enterpriseACPLookupWindowsAccount = gateway.LookupWindowsAccount
+
 // enterpriseACPDescribePrincipal names the account of a sid:S principal
 // through the LSA and its profile through ProfileList.
 var enterpriseACPDescribePrincipal = func(principal string) (enterpriseACPAccount, error) {
@@ -51,9 +54,12 @@ var enterpriseACPDescribePrincipal = func(principal string) (enterpriseACPAccoun
 	if kind != "sid" || sid == "" {
 		return enterpriseACPAccount{}, fmt.Errorf("%s names no account", principal)
 	}
-	_, name, err := gateway.LookupWindowsAccount(sid)
+	_, name, err := enterpriseACPLookupWindowsAccount(sid)
 	if err != nil {
-		// The LSA cannot name a deleted account's SID.
+		if !enterpriseACPUnknownAccount(err) {
+			return enterpriseACPAccount{}, err
+		}
+		// ERROR_NONE_MAPPED is the LSA's definitive deleted-account result.
 		return enterpriseACPAccount{sid: sid, uid: -1, gid: -1}, nil
 	}
 	return enterpriseACPAccount{exists: true, name: name, home: useridentity.HomeForID(sid), sid: sid, uid: -1, gid: -1}, nil

@@ -225,7 +225,15 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	}
 	lockPath := acpContractLockPath(in.dataDir, in.client, in.agent)
 
-	siblings, err := acpSiblingLockPaths(in.dataDir, in.client, in.agent)
+	document, prefix, err := readACPClientConfig(clientPath)
+	if err != nil {
+		return result, err
+	}
+	servers, _ := document["agent_servers"].(map[string]any)
+	if _, present := document["agent_servers"]; present && servers == nil {
+		return result, fmt.Errorf("agent_servers must be an object in %s", clientPath)
+	}
+	siblings, err := acpSiblingLockPaths(in.dataDir, in.client, in.agent, servers)
 	if err != nil {
 		return result, err
 	}
@@ -262,14 +270,6 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 		}
 	}()
 
-	document, prefix, err := readACPClientConfig(clientPath)
-	if err != nil {
-		return result, err
-	}
-	servers, _ := document["agent_servers"].(map[string]any)
-	if _, present := document["agent_servers"]; present && servers == nil {
-		return result, fmt.Errorf("agent_servers must be an object in %s", clientPath)
-	}
 	if servers == nil {
 		servers = map[string]any{}
 		document["agent_servers"] = servers
@@ -426,26 +426,66 @@ func acpContractLockPath(dataDir, client, agent string) string {
 // Python CLI writes and verifies.
 func acpManagedEntryName(agent string) string { return acp.ManagedEntryName(agent) }
 
-// acpSiblingLockPaths lists the contract locks of the other agents of the same
-// editor that exist in dataDir.
-func acpSiblingLockPaths(dataDir, client, agent string) ([]string, error) {
+// acpSiblingLockPaths finds existing locks both in the new enrollment's data
+// directory and in the managed entries of the shared editor settings file.
+func acpSiblingLockPaths(dataDir, client, agent string, servers map[string]any) ([]string, error) {
 	var paths []string
+	seen := map[string]bool{}
+	add := func(path string) error {
+		if seen[path] {
+			return nil
+		}
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > maxACPContractLockBytes {
+			return fmt.Errorf("managed ACP contract lock is missing or unsafe: %s", path)
+		}
+		seen[path] = true
+		paths = append(paths, path)
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
 	for _, other := range acp.AgentIDs() {
 		if other == agent {
 			continue
 		}
-		path := acpContractLockPath(dataDir, client, other)
-		info, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
+		if err := add(acpContractLockPath(dataDir, client, other)); err != nil {
 			return nil, err
 		}
-		if !info.Mode().IsRegular() || info.Size() > maxACPContractLockBytes {
-			return nil, fmt.Errorf("managed ACP contract lock is missing or unsafe: %s", path)
+		entry, ok := servers[acpManagedEntryName(other)].(map[string]any)
+		if !ok {
+			continue
 		}
-		paths = append(paths, path)
+		args, ok := entry["args"].([]any)
+		if !ok {
+			continue
+		}
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] != "--contract-lock" {
+				continue
+			}
+			path, ok := args[i+1].(string)
+			if !ok || !filepath.IsAbs(path) || filepath.Clean(path) != path ||
+				path != acpContractLockPath(filepath.Dir(filepath.Dir(path)), client, other) {
+				return nil, fmt.Errorf("managed ACP contract lock path is unsafe for %s", other)
+			}
+			relative, relErr := filepath.Rel(home, path)
+			if relErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				return nil, fmt.Errorf("managed ACP contract lock for %s is outside the user home", other)
+			}
+			if err := add(path); err != nil {
+				return nil, err
+			}
+			break
+		}
 	}
 	return paths, nil
 }

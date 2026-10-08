@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -142,6 +143,33 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(tokenPath); err != nil {
 		t.Fatal(err)
+	}
+	// A second administrator cannot start an enrollment transaction while
+	// the first still owns the service credential and its publication step.
+	var release func()
+	if err := withEnterpriseACPServiceOwner(serviceData, func() error {
+		var lockErr error
+		release, lockErr = acp.AcquireEnterpriseCredentialEnrollmentLock(serviceData)
+		return lockErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() {
+		var output bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&output)
+		finished <- runEnterpriseACPEnroll(command, nil)
+	}()
+	select {
+	case err := <-finished:
+		release()
+		t.Fatalf("concurrent enrollment passed the active transaction: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	release()
+	if err := <-finished; err != nil {
+		t.Fatalf("enrollment after transaction release: %v", err)
 	}
 	// verify tells a published token from a completed setup, and list
 	// names who is enrolled and how far they got (GAP-0400).
