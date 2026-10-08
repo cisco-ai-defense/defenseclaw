@@ -673,15 +673,19 @@ type plan struct {
 	config  *validatedConfig
 	// configFromInstalled is set when config came from the installed file.
 	configFromInstalled bool
-	secrets             []string
-	secretsSHA          string
-	dirs                []desiredDir
-	files               []desiredFile
-	binaries            []desiredFile
-	createdDirs         []string
-	stale               []string
-	systemd             int
-	installedAt         string
+	// configWritable says how an account other than root could write the
+	// installed config.yaml when it could (installedConfigWritable); the
+	// transaction then replaces the file before it changes anything.
+	configWritable string
+	secrets        []string
+	secretsSHA     string
+	dirs           []desiredDir
+	files          []desiredFile
+	binaries       []desiredFile
+	createdDirs    []string
+	stale          []string
+	systemd        int
+	installedAt    string
 	// intended are the machine-policy connectors the config asks for;
 	// machinePolicy is the subset the descriptor records (all of intended
 	// unless a previous transaction with the same config could not place
@@ -760,10 +764,10 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
-	if fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
-		if err := env.writableInstalledConfig(); err != nil {
-			return nil, &codedError{code: codeConfig, err: err}
-		}
+	writable := env.installedConfigWritable()
+	if writable != "" && fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
+		return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s changed while %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+			env.Layout.ConfigPath, writable, env.lifecycleCommand(ActionEnsure))}
 	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
@@ -813,6 +817,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	p.configFromInstalled = fromInstalled
+	p.configWritable = writable
 	p.config = validated
 
 	p.secrets, p.secretsSHA, err = env.listSecrets()
@@ -993,27 +998,78 @@ func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	return nil, false, err
 }
 
-// writableInstalledConfig refuses an installed config.yaml that is not the
-// applied config while its mode or owner lets an account other than root
-// write it: that account could have written the change. The apply trigger
-// applied a standard user's edit (guardrail mode action to observe) to a
-// config.yaml a bad profile push had left 0666, and status and verify stayed
-// green (GAP-0524). The refused edit is reverted like any rejected one.
-func (e *Env) writableInstalledConfig() error {
-	path := e.P(e.Layout.ConfigPath)
-	_, _, mode, err := statOwnerMode(path)
-	if err != nil {
-		return nil // configBytes read it; the transaction reports a file that went away
+// installedConfigWritable says how an account other than root could write
+// the installed config.yaml: its mode or owner, or a folder that account can
+// write (it could put another file in its place). "" when only root can, or
+// when there is no file. The apply trigger applied an edit by a standard
+// user (guardrail mode action to observe) to a config.yaml a bad profile push
+// had left 0666, and status and verify stayed green (GAP-0524).
+func (e *Env) installedConfigWritable() string {
+	for _, canonical := range []string{e.Layout.ConfigPath, filepath.Dir(e.Layout.ConfigPath)} {
+		path := e.P(canonical)
+		_, _, mode, err := statOwnerMode(path)
+		if err != nil {
+			continue // configBytes reads or defaults the file; the transaction reports one that went away
+		}
+		uid, _, err := e.OwnerOf(path)
+		if err != nil {
+			continue
+		}
+		folder := canonical != e.Layout.ConfigPath
+		writable := mode.Perm()&0o022 != 0 && (!folder || mode&os.ModeSticky == 0)
+		if writable || (uid != 0 && uid != os.Geteuid()) {
+			return fmt.Sprintf("%s was %04o and owned by uid %d", canonical, mode.Perm(), uid)
+		}
 	}
-	uid, _, err := e.OwnerOf(path)
-	if err != nil {
-		return nil
+	return ""
+}
+
+// replaceWritableConfig puts a new file in place of an installed config.yaml
+// another account could write (p.configWritable), before the transaction
+// changes anything. Re-owning the file in place blessed what that account
+// wrote after this run read it, and a descriptor it opened while it could
+// write kept writing the live file: a standard user rewrote config.yaml a
+// moment after the mode was loosened, the run re-owned the file, and its
+// follow-up transaction applied the edit (GAP-0524). The new file holds the
+// applied config, so a later write through such a descriptor goes nowhere.
+// When config.yaml no longer holds the bytes this run read from it, that edit
+// is refused: the applied config is returned for the caller to revert to.
+func (l *lifecycle) replaceWritableConfig(record *Deployment, p *plan) ([]byte, error) {
+	env := l.env
+	if record == nil {
+		return nil, nil // no applied config to put there; an installed one was refused
 	}
-	if mode.Perm()&0o022 == 0 && (uid == 0 || uid == os.Geteuid()) {
-		return nil
+	trusted, err := readBounded(env.committedConfigPath(), maxInputBytes)
+	if err != nil || sha256Bytes(trusted) != record.ConfigSHA256 {
+		trusted = nil
 	}
-	return fmt.Errorf("%s changed while it was %04o and owned by uid %d, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
-		e.Layout.ConfigPath, mode.Perm(), uid, e.lifecycleCommand(ActionEnsure))
+	path := env.P(env.Layout.ConfigPath)
+	current, readErr := readBounded(path, maxInputBytes)
+	if trusted == nil && readErr == nil && sha256Bytes(current) == record.ConfigSHA256 {
+		trusted = current
+	}
+	if trusted == nil {
+		return nil, nil
+	}
+	if p.configFromInstalled && readErr == nil && sha256Bytes(current) != record.ConfigSHA256 {
+		return trusted, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+			env.Layout.ConfigPath, p.configWritable, env.lifecycleCommand(ActionEnsure))}
+	}
+	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	// A refused edit stays current (status and verify report it) when the
+	// new file replaces the reverted one.
+	kept, keptErr := os.Stat(env.rejectedConfigPath())
+	keep := keptErr == nil && !env.rejectionSuperseded(kept)
+	if err := env.writeFileAtomic(path, trusted, 0o640, fileOwner{UID: 0, GID: p.account.GID}); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	if replaced, err := os.Stat(path); keep && err == nil {
+		_ = os.Chtimes(env.rejectedConfigPath(), replaced.ModTime(), replaced.ModTime())
+	}
+	l.noteChange("replaced %s with a new file holding the applied config: %s, so another account could write it", env.Layout.ConfigPath, p.configWritable)
+	return nil, nil
 }
 
 type codedError struct {
@@ -1059,8 +1115,20 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	committedConfig := l.inPlaceConfigEdit(record)
 	p, err := l.buildPlan(ctx, record, account)
+	if err == nil && p.configWritable != "" {
+		var applied []byte
+		if applied, err = l.replaceWritableConfig(record, p); applied != nil {
+			committedConfig = applied
+		}
+	}
 	if err != nil {
 		code := errorCode(err, codeApply)
+		if committedConfig == nil && code == codeConfig {
+			// An edit written after the check above, while this run planned
+			// (a standard user writing a config.yaml whose mode was just
+			// loosened, GAP-0524), is reverted the same way.
+			committedConfig = l.inPlaceConfigEdit(record)
+		}
 		r.AddError(code, err.Error())
 		if record == nil && account.Created {
 			// Refused before any change: the service account this run
@@ -1963,8 +2031,9 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		return false, ""
 	}
 	p, err := l.buildPlan(ctx, record, account)
-	if err != nil {
-		// apply reports the same error with rollback semantics.
+	if err != nil || p.configWritable != "" {
+		// apply reports the same error with rollback semantics, or replaces
+		// a config.yaml another account could write.
 		return false, ""
 	}
 	if p.version != record.ProductVersion || p.channel != record.Channel || p.config.SHA != record.ConfigSHA256 || p.secretsSHA != record.SecretsSHA256 || len(p.stale) > 0 {

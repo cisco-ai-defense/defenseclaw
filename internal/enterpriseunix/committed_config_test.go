@@ -74,6 +74,38 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 			t.Fatalf("the edit written while config.yaml was 0666 was applied (%04o):\n%s", h.mode(h.env.Layout.ConfigPath), got)
 		}
 	})
+	// The live repro: right after the mode was loosened (and the runtime
+	// descriptor removed) a standard user rewrote config.yaml through a
+	// descriptor opened while it was 0666, moments after the apply run read
+	// it. The run re-owned the file in place and its follow-up transaction
+	// applied the edit (GAP-0524); the run now puts a new file there.
+	t.Run("written while the run applies it", func(t *testing.T) {
+		h := newTestHost(t, "darwin")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		applied := h.read(h.env.Layout.ConfigPath)
+		before, _ := h.env.loadDeployment()
+		if err := os.Remove(h.env.P(h.env.Layout.DescriptorPath)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(h.env.P(h.env.Layout.ConfigPath), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		held, err := os.OpenFile(h.env.P(h.env.Layout.ConfigPath), os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Close()
+		edited := []byte(strings.Replace(applied, "mode: observe", "mode: action", 1))
+		h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(string) {
+			_ = held.Truncate(0)
+			_, _ = held.WriteAt(edited, 0)
+		}}
+		requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+		after, _ := h.env.loadDeployment()
+		if got := h.read(h.env.Layout.ConfigPath); got != applied || after.ConfigSHA256 != before.ConfigSHA256 || h.mode(h.env.Layout.ConfigPath) != 0o640 {
+			t.Fatalf("the edit written while config.yaml was 0666 was applied (%04o):\n%s", h.mode(h.env.Layout.ConfigPath), got)
+		}
+	})
 	t.Run("activation fails", func(t *testing.T) {
 		h := newTestHost(t, "linux")
 		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
