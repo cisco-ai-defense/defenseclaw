@@ -224,6 +224,9 @@ type Sandbox struct {
 	// ProcessTree reports that the sandbox's processes are sampled while it
 	// runs (GET /sandboxes/{name}/processes, `sandbox ps`).
 	ProcessTree bool `json:"process_tree,omitempty"`
+	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
+	// posture includes, without its content, as the launch banner names it.
+	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`
 	// SessionYolo reports whether the session running now was launched in
 	// skip-permissions mode: Launch.Yolo as it was when the sandbox last
 	// became ready. Yolo and Launch.Yolo are what the next launch gets;

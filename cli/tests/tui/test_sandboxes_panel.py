@@ -264,6 +264,19 @@ def test_the_details_name_the_image_sandbox_image_list_shows() -> None:
     assert "Image" not in dict(_model().detail_pairs()[1])
 
 
+def test_the_details_name_the_repository_policy() -> None:
+    # GAP-0244: the banner named .defenseclaw/sandbox.yaml and what it
+    # tightened; the detail showed only the pack and profile.
+    policy = {"path": "/p/.defenseclaw/sandbox.yaml", "digest": "sha256:ab", "tightened": ["network.mode", "egress.block"]}
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [{**COPY, "repo_policy": policy}], [])
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Repo policy"] == ".defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)"
+    model.set_snapshot(STATUS, [{**COPY, "repo_policy": {**policy, "tightened": []}}], [])
+    assert dict(model.detail_pairs()[1])["Repo policy"] == ".defenseclaw/sandbox.yaml: the policy is as strict already"
+    assert "Repo policy" not in dict(_model().detail_pairs()[1])
+
+
 def test_the_process_tree_is_in_the_details() -> None:
     model = SandboxesPanelModel()
     model.set_snapshot(STATUS, [{**COPY, "process_tree": True}], [])

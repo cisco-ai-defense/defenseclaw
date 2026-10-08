@@ -76,6 +76,9 @@ TOAST_DEDUPE_SECONDS = 60.0
 BLOCK_BANNER_SECONDS = 15 * 60
 
 ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
+
+# A project's repository sandbox policy (packs.RepoPolicyPath).
+REPO_POLICY_PATH = ".defenseclaw/sandbox.yaml"
 # The next step after an openshell.admin.allow_unblock refusal.
 ADMIN_UNBLOCK_NEXT = "ask your DefenseClaw administrator (openshell.admin.allow_unblock is off)"
 # A saved unblock (openshell.egress.unblocked) the organization's policy ignores.
@@ -478,6 +481,20 @@ class SandboxRow:
     image: str = ""
     # The sandbox's processes are sampled while it runs (observe.process_tree).
     process_tree: bool = False
+    # The repository policy (.defenseclaw/sandbox.yaml) its posture includes,
+    # and the settings it made stricter; the banner names both (GAP-0244).
+    repo_policy: bool = False
+    repo_tightened: tuple[str, ...] = ()
+
+    @property
+    def repo_policy_text(self) -> str:
+        """The repository policy as the launch banner words it, or ""."""
+        if not self.repo_policy:
+            return ""
+        if not self.repo_tightened:
+            return f"{REPO_POLICY_PATH}: the policy is as strict already"
+        settings = "1 setting" if len(self.repo_tightened) == 1 else f"{len(self.repo_tightened)} settings"
+        return f"{REPO_POLICY_PATH}: tightened {settings} ({', '.join(self.repo_tightened)})"
 
     @property
     def running(self) -> bool:
@@ -656,6 +673,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         violations=tuple(v for v in violations if v),
         image=_text(item.get("image")),
         process_tree=bool(item.get("process_tree")),
+        repo_policy=bool(_dict(item.get("repo_policy"))),
+        repo_tightened=tuple(_text(s) for s in _list(_dict(item.get("repo_policy")).get("tightened")) if _text(s)),
     )
 
 
@@ -1933,6 +1952,7 @@ class SandboxesPanelModel:
             ("Phase", row.phase or "-"),
             ("Up", row.uptime_text),
             ("Policy", row.policy_label),
+            *((("Repo policy", row.repo_policy_text),) if row.repo_policy else ()),
             ("Skip-permissions", "on" if row.yolo else "off"),
             ("Project", f"{row.project} → {row.workdir} ({row.workdir_mode or '-'})" if row.project else "-"),
             ("Sites", f"{row.destinations} contacted, {row.blocked} blocked{_ai_sites_text(row)}"),
