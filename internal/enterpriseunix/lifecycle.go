@@ -150,6 +150,9 @@ type lifecycle struct {
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
+	// machinePolicyPublished is set once a transaction of this run wrote
+	// vendor machine policy for its config, which a rollback then undoes.
+	machinePolicyPublished bool
 	// machinePolicyErr is the error of the last vendor machine policy
 	// publish: a file DefenseClaw could not write its hooks into.
 	machinePolicyErr error
@@ -1198,6 +1201,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		restored, err := l.rollback(ctx, snap, pending, false, revertConfig)
 		if newerConfig != nil {
 			l.restoreNewerConfig(record, newerConfig)
+		}
+		if restored && record != nil && l.machinePolicyPublished {
+			l.restoreMachinePolicy(record)
 		}
 		if err != nil {
 			message := err.Error()

@@ -267,9 +267,22 @@ func isCoded(err error, code string) bool {
 // Invalid options fail the transaction.
 func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error {
 	env, r := l.env, l.result
+	l.machinePolicyPublished = true
 	result, err := env.MachinePolicy.Publish(p.config.Loaded)
 	if isCoded(err, codeMachinePolicy) {
 		return err
+	}
+	// A connector that leaves machine policy while its vendor file cannot be
+	// written keeps DefenseClaw's hooks there, and the new config's gateway
+	// refuses every call they make: retiring Claude Code with
+	// 90-defenseclaw.json held by chattr +i returned ok and locked every
+	// Claude Code user out while status and verify read healthy (GAP-0743).
+	// The transaction fails and rolls back instead; the previous config,
+	// which still serves that connector, stays in force.
+	if retire := (*enterprisepolicy.RetireError)(nil); errors.As(err, &retire) {
+		return &codedError{code: codeMachinePolicy, err: fmt.Errorf(
+			"%s; the previous config stays in force. Make the file writable (another tool holds it, for example with chattr +i) and run ensure again, or keep %s in guardrail.connectors",
+			strings.ReplaceAll(err.Error(), "\n", "; "), retire.Connector)}
 	}
 	l.machinePolicyErr = err
 	reportMachinePolicy(r, p.intended, result, err)
@@ -305,6 +318,28 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return nil
 	}
 	return &codedError{code: codeApply, err: errors.New("the plan has no runtime descriptor")}
+}
+
+// restoreMachinePolicy puts vendor machine policy back to the previous
+// deployment's config after a rollback of a transaction that published the
+// new one. Otherwise a connector the failed run added or retired would keep
+// entries the restored gateway does not serve.
+func (l *lifecycle) restoreMachinePolicy(record *Deployment) {
+	env, r := l.env, l.result
+	raw, err := readBounded(env.committedConfigPath(), maxInputBytes)
+	if err != nil || sha256Bytes(raw) != record.ConfigSHA256 {
+		r.AddWarning(codeMachinePolicyIncomplete, "the previous config is not on record, so vendor machine policy was not restored after the rollback; run `"+
+			env.lifecycleCommand(ActionRepair)+"`")
+		return
+	}
+	validated, err := env.validateConfig(raw)
+	if err == nil {
+		_, err = env.MachinePolicy.Publish(validated.Loaded)
+	}
+	if err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "restore vendor machine policy for the previous config after the rollback: "+
+			strings.ReplaceAll(err.Error(), "\n", "; ")+"; run `"+env.lifecycleCommand(ActionRepair)+"`")
+	}
 }
 
 // machinePolicyDrift reports whether the vendor machine policy no longer

@@ -105,6 +105,22 @@ func targetNames() []string {
 	return names
 }
 
+// RetireError is a connector that left machine policy whose DefenseClaw
+// entries could not be removed from its vendor file (another tool holds the
+// file, for example with chattr +i). The entries stay and keep calling the
+// hook for a connector the new config no longer serves, so a caller fails
+// the transaction instead of committing that config.
+type RetireError struct {
+	Connector string
+	Err       error
+}
+
+func (e *RetireError) Error() string {
+	return fmt.Sprintf("retire %s machine policy: %v", e.Connector, e.Err)
+}
+
+func (e *RetireError) Unwrap() error { return e.Err }
+
 // retireUnpublished removes DefenseClaw's entries from every candidate
 // target that still holds an ownership record but is no longer intended,
 // so disabling a connector or setting ownership: off takes DefenseClaw's
@@ -139,7 +155,7 @@ func retireUnpublished(opts Options, intended, candidates []string) ([]State, er
 		}
 		state, err := target.RemoveOwned(opts)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("retire %s machine policy: %w", name, err))
+			errs = append(errs, &RetireError{Connector: name, Err: err})
 		}
 		state.detail("%s is no longer published through machine policy; removed DefenseClaw's entries", name)
 		retired = append(retired, state)
