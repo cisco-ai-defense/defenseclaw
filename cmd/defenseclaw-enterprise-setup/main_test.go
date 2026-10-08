@@ -483,6 +483,22 @@ func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
 	}
 }
 
+// GAP-0920, GAP-1041: the standalone Setup takes FORCE=1 with /uninstall, the
+// last resort for a transaction no run can recover, and refuses it with
+// another action; the Secure Client Setup has no such property.
+func TestStandaloneSetupForceIsAnUninstallProperty(t *testing.T) {
+	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/uninstall", "FORCE=1", "JSON=1"}, true)
+	if err != nil || !opts.Force || opts.Action != "uninstall" {
+		t.Fatalf("standalone /uninstall FORCE=1: opts %+v, err %v", opts, err)
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", "FORCE=1"}, true); err == nil {
+		t.Fatal("FORCE=1 with /ensure was accepted")
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/uninstall", "FORCE=1"}, false); err == nil {
+		t.Fatal("the Secure Client Setup accepted FORCE=1")
+	}
+}
+
 // GAP-0562: with JSON=1 the standalone Setup reports a refusal of its own in
 // the lifecycle's schema-2 shape (code, message, exit_code 1639), so an MDM
 // reads one shape whoever refused; the Secure Client Setup keeps schema 1.

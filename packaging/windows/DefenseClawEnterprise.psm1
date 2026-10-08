@@ -24650,6 +24650,96 @@ function Suspend-DefenseClawStandaloneSensorHelperForServicing {
     return $true
 }
 
+function Invoke-DefenseClawForcedUninstallPreparation {
+    <#
+        Standalone Setup /uninstall FORCE=1, the last resort when no
+        lifecycle can recover a pending transaction (for example a snapshot
+        that cannot be taken, GAP-0920, or a teardown journal that no longer
+        matches, GAP-1041). It reads nothing of the transaction: it stops the
+        DefenseClaw services (after checking they are this deployment's) and
+        moves StateRoot aside, so the uninstall goes on as the state-absent
+        exact-scope purge, which removes the exact services, their IPC grant,
+        InstallRoot and the machine-wide hook files, and names what stays.
+        Returns the moved StateRoot, or an empty string when there was none.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GatewayServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GuardianServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Guardian
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $enumeratorServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Enumerator
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $Layout.SensorHelperServiceName `
+        -ExpectedGatewayPath $Layout.SensorHelperPath `
+        -ExpectedSensorHelperImage (Get-DefenseClawSensorHelperImage `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) `
+        -SensorHelper
+    foreach ($name in @(
+            $enumeratorServiceName,
+            $GuardianServiceName,
+            $GatewayServiceName,
+            [string]$Layout.SensorHelperServiceName
+        )) {
+        if (Test-DefenseClawServiceExists -Name $name) {
+            Set-DefenseClawServiceStartMode -Name $name -StartMode 4
+            Stop-DefenseClawService -Name $name
+        }
+    }
+    $stateRoot = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stateRoot -PathType Container)) {
+        return ''
+    }
+    Assert-DefenseClawNoReparsePath -Path $stateRoot
+    $moved = $stateRoot + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+    [IO.Directory]::Move($stateRoot, $moved)
+    return $moved
+}
+
+function Complete-DefenseClawForcedUninstall {
+    <#
+        Removes the StateRoot a forced uninstall moved aside, as every
+        standalone uninstall removes StateRoot, and marks the result. A folder
+        that cannot be removed is named in forced_state_root_kept.
+    #>
+    param(
+        [Parameter(Mandatory)]$Result,
+        [AllowEmptyString()][string]$MovedStateRoot
+    )
+    $kept = ''
+    if (-not [string]::IsNullOrWhiteSpace($MovedStateRoot)) {
+        try {
+            Remove-DefenseClawManagedTree `
+                -Path $MovedStateRoot `
+                -RequiredBase $script:ProgramData `
+                -Label 'moved StateRoot'
+        }
+        catch {
+            $kept = "${MovedStateRoot}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+        }
+    }
+    $Result |
+        Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name forced -Value $true -Force
+    if ($kept) {
+        $Result |
+            Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name forced_state_root_kept -Value $kept -Force
+    }
+    return $Result
+}
+
 function Remove-DefenseClawRolledBackTeardownJournal {
     <#
         Standalone. Removes the managed-hook teardown journal of a teardown
@@ -25777,7 +25867,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$ProductVersion,
         # Standalone: the launching CLI's own protected PowerShell temp folder
         # (install-enterprise.ps1 passes the TEMP it was started with).
-        [string]$LauncherTemp
+        [string]$LauncherTemp,
+        # Standalone Uninstall only: remove the deployment without recovering
+        # its pending transaction (Setup /uninstall FORCE=1).
+        [switch]$Force
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
@@ -25862,6 +25955,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -AllowMissing:($Action -in @('Status', 'Verify'))
     if ($Purge -and $Action -ne 'Uninstall') {
         throw '-Purge is valid only with Uninstall'
+    }
+    if ($Force -and ($Action -ne 'Uninstall' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-Force is valid only with a standalone Uninstall'
     }
     if ($SelfUninstallCallerPID -lt 0 -or
         ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
@@ -26119,6 +26215,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # any managed layout directory is created. It is therefore sufficient
         # authority to resume a crash-interrupted purge after StateRoot itself
         # has been partially or completely deleted.
+        $forcedStateRoot = ''
+        if ($Force) {
+            $forcedStateRoot = Invoke-DefenseClawForcedUninstallPreparation `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+        }
         $preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery `
             -Action $Action `
             -Layout $layout `
@@ -26130,7 +26233,15 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -RequestedCoreHardeningCertification:$CoreHardeningCertification `
             -SelfUninstallCallerPID $SelfUninstallCallerPID
         if ([bool]$preLayoutRecovery.handled) {
+            if ($Force) {
+                return Complete-DefenseClawForcedUninstall `
+                    -Result $preLayoutRecovery.result `
+                    -MovedStateRoot $forcedStateRoot
+            }
             return $preLayoutRecovery.result
+        }
+        if ($Force) {
+            throw "the forced uninstall moved StateRoot aside but did not reach the state-absent removal; the moved state is $forcedStateRoot"
         }
 
         if ($Action -eq 'Reconcile') {

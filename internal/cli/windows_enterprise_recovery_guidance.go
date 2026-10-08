@@ -397,10 +397,14 @@ func windowsEnterpriseStandaloneNextStep(
 	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
 	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
+	// The last resort when no recovery finishes: it removes the deployment
+	// without recovering the transaction (GAP-0920, GAP-1041).
+	lastResort := " If you cannot wait for that, remove the deployment without recovering the transaction, as LocalSystem: " +
+		windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure."
 	if len(runs) != 0 {
 		return lead + " Recovery ran with this Setup's verified gateway and still did not finish." +
 			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
-			" and run a DefenseClaw Setup that fixes this failure as LocalSystem: " + command + "."
+			" and run a DefenseClaw Setup that fixes this failure as LocalSystem: " + command + "." + lastResort
 	}
 	code := ""
 	detail := ""
@@ -438,10 +442,14 @@ func windowsEnterpriseStandaloneNextStep(
 	default:
 		if windowsEnterpriseRunningAsLocalSystem() {
 			// This run was the LocalSystem recovery the default step names;
-			// repeating it unchanged fails the same way (GAP-0920).
+			// repeating it unchanged fails the same way (GAP-0920). The
+			// error does not always name a path or an account to correct
+			// (GAP-1041), so the step does not say it does.
 			return lead + " This run was LocalSystem and its recovery did not finish, so running it again unchanged fails the same way." +
-				" Next step: correct what the error above names (the path and the account), then run " + command +
-				"; if it names neither, send the lifecycle log (" + windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
+				" Next step: if the error above names something to fix (a path, an account or an icacls command), fix it and run " + command +
+				". Otherwise, or if it fails the same way, remove the deployment without recovering the transaction, as LocalSystem: " +
+				windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure, and send the lifecycle log (" +
+				windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
 		}
 		return lead + " Next step: run DefenseClaw Setup (this release or a newer one) as LocalSystem: " + command + recovers
 	}

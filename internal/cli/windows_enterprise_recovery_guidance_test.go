@@ -126,16 +126,17 @@ func TestWindowsEnterpriseInstallerBuildMismatchText(t *testing.T) {
 	}
 }
 
-// GAP-0920: a LocalSystem run whose recovery failed is not told to run the
-// same LocalSystem Setup command again; it is told to correct the named
-// cause first.
+// GAP-0920, GAP-1041: a LocalSystem run whose recovery failed is not told to
+// run the same LocalSystem Setup command again, nor to correct a path and an
+// account the error may not name; it gets the FORCE=1 last resort.
 func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing.T) {
 	original := windowsEnterpriseRunningAsLocalSystem
 	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
 	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil)
 	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
-		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) {
+		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) || strings.Contains(got, "(the path and the account)") ||
+		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") {
 		t.Fatalf("next step = %q", got)
 	}
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }

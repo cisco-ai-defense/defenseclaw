@@ -151,6 +151,10 @@ type enterpriseSetupOptions struct {
 	// signer thumbprints the standalone lifecycle accepts (customer
 	// re-signing). Standalone Setup only.
 	AllowedSigners string
+	// Force, with /uninstall, removes the deployment without recovering a
+	// pending transaction: the last resort when no ensure, repair or
+	// uninstall can recover it (GAP-0920, GAP-1041). Standalone Setup only.
+	Force bool
 
 	// Set from the embedded payload, never from the command line.
 	Standalone         bool
@@ -332,6 +336,7 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "spec 003 UCB-friendly install: --config and --manifest optional; services registered stopped")
 	if standalone {
 		flags.StringVar(&opts.AllowedSigners, "allowed-signers", "", "standalone: comma-separated SHA-256 thumbprints of accepted Authenticode signer certificates")
+		flags.BoolVar(&opts.Force, "force", false, "standalone /uninstall: remove the deployment without recovering a pending transaction (last resort)")
 	}
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
 	flags.IntVar(&timeoutSeconds, "timeout-seconds", timeoutSeconds, "bounded lifecycle timeout")
@@ -425,6 +430,9 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	if opts.Purge && opts.Action != "uninstall" {
 		return opts, false, errors.New("--purge is valid only with uninstall")
 	}
+	if opts.Force && opts.Action != "uninstall" {
+		return opts, false, errors.New("FORCE=1 is valid only with /uninstall")
+	}
 	if opts.AllowUnsigned && strings.TrimSpace(opts.CertificationCodexHome) == "" {
 		return opts, false, errors.New("--allow-unsigned requires --certification-codex-home")
 	}
@@ -505,6 +513,7 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers"} {
 			valueNames[name] = canonical
 		}
+		boolNames["force"] = "force"
 		for switchName, action := range map[string]string{"/ensure": "ensure"} {
 			actions[switchName] = action
 		}
@@ -551,7 +560,7 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 				continue
 			}
 			if standalone {
-				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (CONFIG=, MANIFEST=, JSON=1, NOSTART=1, PURGE=1, TIMEOUTSECONDS=, ALLOWEDSIGNERS=, ATTESTCLAUDEEFFECTIVEPOLICY=1)",
+				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (CONFIG=, MANIFEST=, JSON=1, NOSTART=1, PURGE=1, FORCE=1, TIMEOUTSECONDS=, ALLOWEDSIGNERS=, ATTESTCLAUDEEFFECTIVEPOLICY=1)",
 					trimmed[:separator], standaloneSetupArtifactName)
 			}
 		}
@@ -772,6 +781,7 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
 	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")
 	fmt.Fprintln(output, "  PURGE=1                        with /uninstall: also remove the DefenseClaw files of each enrolled account")
+	fmt.Fprintln(output, "  FORCE=1                        with /uninstall, last resort: remove the deployment without recovering a pending transaction")
 	fmt.Fprintln(output, "  TIMEOUTSECONDS=<n>             lifecycle timeout, 60 to 7200 seconds (default 1800)")
 	fmt.Fprintln(output, "  ALLOWEDSIGNERS=<sha256>,...    accept only these Authenticode signer certificates")
 	fmt.Fprintln(output, "  ATTESTCLAUDEEFFECTIVEPOLICY=1  with /repair: record that Claude Code runs the managed hooks")

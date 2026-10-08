@@ -68,7 +68,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	attestClaudeEffectivePolicy   bool
 	noStart                       bool
 	purge                         bool
-	allowUnsigned                 bool
+	// force is the standalone uninstall last resort: remove the deployment
+	// without recovering a pending transaction (GAP-0920, GAP-1041).
+	force         bool
+	allowUnsigned bool
 	// deferredConfig requests the UCB-friendly install path (spec 003
 	// / Workstream B). When true: --config and --manifest are
 	// optional at install time; the installer provisions the
@@ -266,6 +269,10 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.attestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "refresh live proof that DefenseClaw is Claude's effective managed-policy source")
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
 	flags.BoolVar(&opts.purge, "purge", false, "also remove managed state (Secure Client; a standalone uninstall always removes it) and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
+	if action == "uninstall" {
+		flags.BoolVar(&opts.force, "force", false,
+			"standalone, last resort: remove the deployment without recovering a pending transaction that no ensure, repair or uninstall can recover; run it from Setup (FORCE=1) as LocalSystem")
+	}
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
 	// Spec 003 Workstream B: UCB-friendly late-config install.
 	// Requires managed-enterprise deployment mode; enforced by the
@@ -394,6 +401,9 @@ func runWindowsEnterpriseLifecycle(
 			return failPreflight(windowsEnterpriseInvalidArguments("--purge is valid only with enterprise windows uninstall"))
 		}
 		return failPreflight(errors.New("--purge is valid only with enterprise windows uninstall"))
+	}
+	if opts.force && !windowsEnterpriseStandalone(opts) {
+		return failPreflight(errors.New("--force is valid only with enterprise windows uninstall --profile standalone"))
 	}
 	if opts.noStart && action != "install" && action != "upgrade" && action != "repair" {
 		if !windowsEnterpriseStandalone(opts) {
@@ -839,6 +849,9 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	}
 	if opts.purge {
 		args = append(args, "-Purge")
+	}
+	if opts.force {
+		args = append(args, "-Force")
 	}
 	if opts.allowUnsigned {
 		args = append(args, "-AllowUnsigned")

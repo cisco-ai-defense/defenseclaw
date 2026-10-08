@@ -321,6 +321,7 @@ dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
 | `JSON=1` | Print the result document on standard output |
 | `NOSTART=1` | Install or update with the services stopped and disabled. A later `/repair` starts them. |
 | `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
+| `FORCE=1` | With `/uninstall`, the last resort: remove the deployment without recovering a pending transaction. See [Recover a pending transaction](#recover-a-pending-transaction) |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. The default is 1800. |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`,
@@ -868,7 +869,28 @@ DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
 ```
 
 `/repair` also recovers the transaction; after a failed first install it
-then stops with "run Install", so `/ensure` is the one-step command. Outside
+then stops with "run Install", so `/ensure` is the one-step command.
+
+If no recovery finishes (a LocalSystem run says "running it again unchanged
+fails the same way"), first fix what its error names, if anything. As the
+last resort, remove the deployment without recovering the transaction, then
+install it again:
+
+```powershell title="As LocalSystem, last resort"
+DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall FORCE=1 JSON=1
+DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
+```
+
+`FORCE=1` reads nothing of the pending transaction. It stops the DefenseClaw
+services after it checks they belong to this deployment, moves
+`C:\ProgramData\Cisco\DefenseClaw` aside, removes the services,
+`C:\Program Files\Cisco\DefenseClaw` and the machine-wide hook files, and
+then deletes the moved folder. The result has a `forced_uninstall` warning, and
+`forced_state_root_kept` names the moved folder if it could not be deleted.
+Hook registrations in each account's profile cannot be attributed without the
+deployment state, so the result lists what stays. Keep the lifecycle log
+(`C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log`) for DefenseClaw
+support. Run it from Setup, not from the installed CLI. Outside
 an MDM, a one-time scheduled task that runs as SYSTEM gives the same context
 (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 From a payload folder (see [Run the lifecycle CLI from a payload

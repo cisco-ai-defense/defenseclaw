@@ -117,6 +117,11 @@ type windowsEnterpriseInstallerReport struct {
 	// lifecycle removed because an earlier uninstall that was refused or
 	// rolled back left it (GAP-1041).
 	StaleTeardownJournalRemoved string `json:"stale_teardown_journal_removed"`
+	// Forced is set by Setup /uninstall FORCE=1, which removed the
+	// deployment without recovering its transaction; ForcedStateRootKept
+	// names the moved-aside managed state it could not delete.
+	Forced              bool   `json:"forced"`
+	ForcedStateRootKept string `json:"forced_state_root_kept"`
 	// CursorAdapterRestored is set when the lifecycle wrote this release's
 	// Cursor enterprise adapter back over a changed or deleted one (GAP-2480).
 	CursorAdapterRestored bool `json:"cursor_adapter_restored"`
@@ -986,6 +991,20 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Code: "stale_lifecycle_journal_removed",
 			Message: "Setup removed the stale managed-hook teardown journal " + windowsEnterpriseBoundedDiagnostic(removed) +
 				", which an earlier uninstall left when it was refused or rolled back; its rollback had finished, so nothing used it",
+		})
+	}
+	if report.Forced {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "forced_uninstall",
+			Message: "FORCE=1 removed the deployment without recovering its pending transaction: the services, the binaries, " +
+				"the managed state and the machine-wide hook files; what it could not remove is listed in this result",
+		})
+	}
+	if kept := strings.TrimSpace(report.ForcedStateRootKept); kept != "" {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "forced_state_root_kept",
+			Message: "the forced uninstall moved the managed state aside but could not delete it; delete that folder once " +
+				"DefenseClaw support has the lifecycle log: " + windowsEnterpriseBoundedDiagnostic(kept),
 		})
 	}
 	for _, note := range report.SquattedRootNotes {
