@@ -49,14 +49,9 @@ var enterpriseHookIdentitySpoolState struct {
 	failed      bool
 }
 
-func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return
-	}
-	dir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	if dir == "" {
-		return
-	}
+// enterpriseHookIdentitySpoolAccounts lists the accounts a pass resolves
+// identity facts for, and the keys that tell whether they changed.
+func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookReconcileRun) ([]enterprisehooks.IdentitySpoolAccount, []string) {
 	accounts := []enterprisehooks.IdentitySpoolAccount{}
 	keys := []string{}
 	seen := map[int]bool{}
@@ -77,6 +72,9 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 		if err != nil {
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: eligible accounts: %v\n", err)
 		}
+		if enterpriseHookManifestEnrollment() {
+			extra = enterprisehooks.ManifestEnrolledAccounts(extra, enterprisehooks.Manifest{Targets: run.Targets})
+		}
 		for _, account := range extra {
 			if account.UID <= 0 || seen[account.UID] {
 				continue
@@ -86,6 +84,18 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			keys = append(keys, strconv.Itoa(account.UID)+":"+account.User)
 		}
 	}
+	return accounts, keys
+}
+
+func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return
+	}
+	dir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	if dir == "" {
+		return
+	}
+	accounts, keys := enterpriseHookIdentitySpoolAccounts(stderr, run)
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")
 	now := time.Now()
