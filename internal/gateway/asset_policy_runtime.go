@@ -234,7 +234,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
 		return config.AssetPolicyDecision{}, false
 	}
-	probe = a.resolveMCPProbeEndpoint(connector, probe)
+	probe = a.resolveMCPProbeEndpoint(cfg, connector, probe)
 	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
@@ -255,7 +255,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	// already covered by the operator's default-deny posture
 	// (i.e. when the asset policy is in observe mode OR
 	// MCP.Default isn't deny).
-	mcpAssetMode, mcpDefaultDeny := assetMCPModeFor(a, decision)
+	mcpAssetMode, mcpDefaultDeny := assetMCPModeFor(cfg, decision)
 	if isUnknownTerminalMCP(probe) &&
 		!assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) &&
 		decision.RawAction == "block" &&
@@ -284,14 +284,14 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 // this an approved server never matched at runtime and registry-required
 // blocked every MCP tool call (GAP-2488). A server the connector does not
 // list keeps the bare name and matches only name-only rules.
-func (a *APIServer) resolveMCPProbeEndpoint(connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
-	if a == nil || a.scannerCfg == nil || !a.scannerCfg.AssetPolicy.Enabled {
+func (a *APIServer) resolveMCPProbeEndpoint(cfg *config.Config, connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
+	if cfg == nil || !cfg.AssetPolicy.Enabled {
 		return probe
 	}
 	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
 		return probe
 	}
-	entry, ok := a.scannerCfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	entry, ok := cfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
 	if !ok {
 		return probe
 	}
@@ -622,18 +622,18 @@ func isUnknownTerminalMCP(probe mcpRuntimeProbe) bool {
 // the operator's MCP.Default is "deny". Used by to refuse the
 // `unknown_terminal_mcp=observe` downgrade when the operator has
 // already opted into MCP default-deny in action mode.
-func assetMCPModeFor(a *APIServer, decision config.AssetPolicyDecision) (string, bool) {
-	if a == nil || a.scannerCfg == nil {
+func assetMCPModeFor(cfg *config.Config, decision config.AssetPolicyDecision) (string, bool) {
+	if cfg == nil {
 		return decision.Mode, false
 	}
 	// Resolve mode + MCP.Default per-connector (OTHER-7) so a connector with
 	// an override gets its own posture rather than the global one. The
 	// connector travels on the decision (set from AssetPolicyInput.Connector).
-	mode := strings.TrimSpace(a.scannerCfg.EffectiveAssetPolicyModeForConnector(decision.Connector))
+	mode := strings.TrimSpace(cfg.EffectiveAssetPolicyModeForConnector(decision.Connector))
 	if mode == "" {
 		mode = decision.Mode
 	}
-	mcpPolicy, _ := a.scannerCfg.EffectiveAssetTypePolicy(decision.Connector, "mcp")
+	mcpPolicy, _ := cfg.EffectiveAssetTypePolicy(decision.Connector, "mcp")
 	defaultDeny := strings.EqualFold(strings.TrimSpace(mcpPolicy.Default), "deny")
 	return mode, defaultDeny
 }

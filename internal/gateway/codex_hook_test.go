@@ -1794,3 +1794,27 @@ func TestSanitizeHookCWD_Traversal(t *testing.T) {
 		t.Error("sanitizeHookCWD(valid absolute dir) returned empty")
 	}
 }
+
+func TestUnknownTerminalMCPUsesReloadedDefaultDeny(t *testing.T) {
+	startup := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	startup.Guardrail.Connector = "codex"
+	startup.Guardrail.Mode = "action"
+	startup.AssetPolicy.Enabled = true
+	startup.AssetPolicy.Mode = "action"
+	live := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	live.Guardrail.Connector = "codex"
+	live.Guardrail.Mode = "action"
+	live.AssetPolicy.Enabled = true
+	live.AssetPolicy.Mode = "action"
+	live.AssetPolicy.MCP.Default = "deny"
+	api := &APIServer{scannerCfg: startup}
+	api.SetConfigRuntime(nil, func() *config.Config { return live })
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput:     map[string]interface{}{"command": "npx -y @modelcontextprotocol/server-filesystem /tmp"},
+	})
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("reloaded default deny: action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+}
