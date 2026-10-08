@@ -284,7 +284,9 @@ class profile::defenseclaw (
   $provider = $format ? { 'deb' => 'dpkg', default => 'rpm' }
   $pkg = "defenseclaw-enterprise-${version}-linux-${arch}.${format}"
   $gateway = '/opt/defenseclaw/bin/defenseclaw-gateway'
-  $ensure_cmd = "${gateway} enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json"
+  $ensure_once = "${gateway} enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json"
+  # Retry only lifecycle_busy (75). Discard repeated JSON result documents.
+  $ensure_cmd = "/bin/sh -c 'attempt=0; while :; do ${ensure_once} >/dev/null; rc=\$?; [ \$rc -eq 0 ] && exit 0; [ \$rc -ne 75 ] && exit \$rc; attempt=\$((attempt + 1)); [ \$attempt -ge 5 ] && exit 75; sleep 30; done'"
 
   file { '/etc/mdm':
     ensure => directory,
@@ -338,16 +340,14 @@ class profile::defenseclaw (
     command     => $ensure_cmd,
     refreshonly => true,
     subscribe   => [File['/etc/mdm/defenseclaw/config.yaml'], Package['defenseclaw-enterprise']],
-    tries       => 5,
-    try_sleep   => 30,
+    tries       => 1,
   }
   # Repair drift: run ensure only when verify fails.
   exec { 'defenseclaw-repair':
     command   => $ensure_cmd,
     unless    => "${gateway} enterprise linux verify --json",
     require   => Exec['defenseclaw-ensure'],
-    tries     => 5,
-    try_sleep => 30,
+    tries     => 1,
   }
 
   $key = lookup('defenseclaw::ai_defense_key', Optional[String], 'first', undef)
@@ -377,8 +377,8 @@ Notes:
 - `ensure => latest` with a `source` installs the package, and upgrades it when
   `source` points at a newer file; the `dpkg` and `rpm` providers read the
   version from the file.
-- `exec` retries any failing exit code with `tries` and `try_sleep`, so a busy
-  lock (`75`) is retried.
+- The `ensure` and repair commands retry only exit `75` (busy); an invalid
+  config exits immediately. Puppet receives only a short failure result.
 - The key stays in a root-only file so that Puppet can tell when it changes.
   If you do not want that copy, run `enterprise secret set` from standard
   input in a one-off task instead.
