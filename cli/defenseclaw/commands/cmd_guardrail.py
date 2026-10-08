@@ -2861,7 +2861,9 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
         raise click.UsageError("PATH must not be empty.")
 
     # A bare pack name has the same meaning here as in list-packs/use-pack.
-    if not any(sep in path for sep in (os.sep, os.altsep) if sep) and not path.startswith(("~", ".")):
+    if not os.path.exists(os.path.expanduser(path)) and not any(
+        sep in path for sep in (os.sep, os.altsep) if sep
+    ) and not path.startswith(("~", ".")):
         from defenseclaw import config, policy_catalog
 
         named = next((p.path for p in policy_catalog.discover_rule_packs(config.load()) if p.name == path), None)
