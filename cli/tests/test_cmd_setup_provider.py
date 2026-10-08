@@ -163,6 +163,90 @@ class TestRoundTrip(unittest.TestCase):
 
 
 class TestProviderConfigBacked(unittest.TestCase):
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_offline_list_uses_config_not_stale_overlay(self, client_cls: mock.Mock) -> None:
+        from defenseclaw.config import Config, _merge_llm_providers
+
+        client_cls.return_value.provider_registry.side_effect = requests.ConnectionError()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            _write_overlay(path, _Overlay([{"name": "Stale", "domains": ["old.test"]}], []))
+            cfg = Config()
+            cfg.data_dir = d
+            cfg.llm_providers = _merge_llm_providers(
+                {"custom": [{"name": "Current", "domains": ["current.test"]}]}
+            )
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d}
+            result = CliRunner().invoke(provider, ["list", "--json"], obj=app, env=env)
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["source"], "config-fallback")
+            self.assertEqual([item["name"] for item in payload["providers"]], ["Current"])
+            cfg.llm_providers = _merge_llm_providers({})
+            empty = CliRunner().invoke(provider, ["show", "--json"], obj=app, env=env)
+            self.assertEqual(empty.exit_code, 0, empty.output)
+            self.assertEqual(json.loads(empty.output)["providers"], [])
+
+    def test_add_reloads_config_after_provider_lock(self) -> None:
+        import yaml
+        from defenseclaw.config import Config, load
+
+        with tempfile.TemporaryDirectory() as d:
+            config_path = os.path.join(d, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("config_version: 9\n")
+            first = AppContext()
+            second = AppContext()
+            first.cfg = load(data_dir=d)
+            second.cfg = load(data_dir=d)
+            env = {**os.environ, OVERLAY_ENV: os.path.join(d, "custom-providers.json"),
+                   "DEFENSECLAW_OVERLAY_ROOT": d}
+
+            def save(cfg: Config) -> None:
+                payload = {"config_version": 9, "llm_providers": {
+                    "custom": [{"name": item.name, "domains": item.domains}
+                               for item in cfg.llm_providers.custom]}}
+                with open(config_path, "w", encoding="utf-8") as handle:
+                    yaml.safe_dump(payload, handle)
+
+            with mock.patch.object(Config, "save", save):
+                for app, name in ((first, "First"), (second, "Second")):
+                    result = CliRunner().invoke(
+                        provider, ["add", "--name", name, "--domain",
+                                   f"{name.lower()}.test", "--no-reload"], obj=app, env=env,
+                    )
+                    self.assertEqual(result.exit_code, 0, result.output)
+            with open(config_path, encoding="utf-8") as handle:
+                names = [item["name"] for item in yaml.safe_load(handle)["llm_providers"]["custom"]]
+            self.assertEqual(names, ["First", "Second"])
+
+    def test_secure_client_keeps_overlay_persistence(self) -> None:
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            cfg = Config()
+            cfg.data_dir = d
+            cfg.deployment_mode = "managed_enterprise"
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d,
+                   "DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}
+            with mock.patch.object(Config, "save") as save:
+                added = CliRunner().invoke(
+                    provider, ["add", "--name", "Legacy", "--domain",
+                               "legacy.test", "--no-reload"], obj=app, env=env,
+                )
+                self.assertEqual(added.exit_code, 0, added.output)
+                removed = CliRunner().invoke(
+                    provider, ["remove", "--name", "Legacy", "--no-reload"], obj=app, env=env,
+                )
+                self.assertEqual(removed.exit_code, 0, removed.output)
+            save.assert_not_called()
+            self.assertEqual(_read_overlay(path).providers, [])
+
     def test_add_writes_llm_providers_and_a_derived_overlay(self) -> None:
         """`setup provider add` writes config.yaml llm_providers (through the
         config writer) and renders custom-providers.json from it; a hand edit of
