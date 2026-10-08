@@ -800,6 +800,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			if w.connectorForPath(event.Name) == "claudecode" {
 				if depth, inside := w.claudeCacheDepth(event.Name); inside {
+					if w.inClaudePluginStaging(event.Name, 0) {
+						continue
+					}
 					if info, statErr := os.Stat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
 						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
@@ -2058,6 +2061,49 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 		}
 		w.mu.Unlock()
 	}
+}
+
+// claudeStagingGrace is how long the rescan leaves a Claude Code plugin
+// staging folder alone; one that stays longer is scanned as a plugin.
+const claudeStagingGrace = 15 * time.Minute
+
+// inClaudePluginStaging reports a path below a Claude Code plugin staging
+// folder (cache/temp_local_<id>), younger than grace when grace is set.
+// Claude Code builds a plugin there and then moves it to
+// <marketplace>/<plugin>/<version>: the watcher scanned the staging copy as
+// a plugin, blocked it for its missing manifest and held its files while the
+// move ran, so even a clean plugin failed to install with EPERM (GAP-0629).
+// The final folder is admitted as before. The Secure Client profile keeps
+// the earlier behaviour.
+func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration) bool {
+	if w.secureClientActive() {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
+		if !strings.HasPrefix(strings.ToLower(first), "temp_") {
+			return false
+		}
+		if grace <= 0 {
+			return true
+		}
+		info, statErr := os.Lstat(filepath.Join(rootAbs, first))
+		return statErr == nil && time.Since(info.ModTime()) < grace
+	}
+	return false
 }
 
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {

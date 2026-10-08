@@ -376,7 +376,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	for _, dir := range w.pluginDirs {
 		if w.connectorForPath(dir) == "claudecode" {
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
-				if w.isOwnPlugin(plugin) {
+				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
 					continue
 				}
 				targets = append(targets, InstallEvent{
