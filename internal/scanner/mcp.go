@@ -131,6 +131,9 @@ type MCPScanner struct {
 	Config         config.MCPScannerConfig
 	LLM            config.LLMConfig
 	CiscoAIDefense config.CiscoAIDefenseConfig
+	// ServerEntry is the exact watcher registration for a local stdio scan.
+	// It is sent to the Windows runtime on stdin, not on its command line.
+	ServerEntry *config.MCPServerEntry
 	// RulePack is the guardrail rule pack the Windows scanner runtime lays
 	// over the server definition (GAP-0296). The Python CLI resolves its own
 	// from config.yaml, so only the runtime command line carries it.
@@ -189,6 +192,9 @@ func (s *MCPScanner) commandArgs(target string) ([]string, error) {
 		}
 		args = append(args, "--rule-pack", pack)
 	}
+	if s.ServerEntry != nil && s.ServerEntry.Command != "" && s.ServerEntry.URL == "" {
+		args = append(args, "--server-entry-stdin")
+	}
 	return append(args, target), nil
 }
 
@@ -215,6 +221,23 @@ func (s *MCPScanner) buildArgs(target string) []string {
 
 	args = append(args, target)
 	return args
+}
+
+// runtimeServerEntry contains only the local launch fields understood by the
+// Python wrapper. The bytes travel over stdin so entry env values and args
+// do not appear in the runtime process arguments.
+func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
+	entry := s.ServerEntry
+	if entry == nil {
+		return nil, errors.New("missing MCP server entry")
+	}
+	return json.Marshal(struct {
+		Name    string            `json:"name"`
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+		CWD     string            `json:"cwd"`
+	}{entry.Name, entry.Command, entry.Args, entry.Env, entry.CWD})
 }
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
@@ -263,6 +286,13 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		cmd.Env = s.runtimeEnv()
 	}
 
+	if usesScannerRuntime(s.Config.Binary) && s.ServerEntry != nil && s.ServerEntry.Command != "" && s.ServerEntry.URL == "" {
+		entry, err := s.runtimeServerEntry()
+		if err != nil {
+			return nil, fmt.Errorf("scanner: encode MCP server entry: %w", err)
+		}
+		cmd.Stdin = bytes.NewReader(entry)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

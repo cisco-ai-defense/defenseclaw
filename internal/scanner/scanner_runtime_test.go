@@ -7,6 +7,7 @@ package scanner
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,5 +96,45 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 	plugin := &PluginScanner{BinaryPath: runtimeBinary, IncludeSelf: true}
 	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--include-self"}) {
 		t.Fatalf("plugin args = %v", args)
+	}
+}
+
+// GAP-0710: the Windows runtime must receive the exact stdio definition,
+// not only its name (which the wrapper would otherwise parse as a URL).
+func TestMCPRuntimeStdioEntry(t *testing.T) {
+	mcp := &MCPScanner{
+		Config: config.MCPScannerConfig{Binary: "defenseclaw-scanners.exe"},
+		ServerEntry: &config.MCPServerEntry{
+			Name: "local", Command: "npx", Args: []string{"-y", "example-mcp"},
+			Env: map[string]string{"MODE": "test"}, CWD: "C:/workspace",
+		},
+	}
+	args, err := mcp.commandArgs("local")
+	if err != nil || !slices.Contains(args, "--server-entry-stdin") {
+		t.Fatalf("local runtime args = %v (%v)", args, err)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "example-mcp") || strings.Contains(arg, "MODE") {
+			t.Fatalf("server definition leaked to command line: %v", args)
+		}
+	}
+	body, err := mcp.runtimeServerEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Name    string            `json:"name"`
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+		CWD     string            `json:"cwd"`
+	}
+	if err := json.Unmarshal(body, &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Name != "local" || entry.Command != "npx" ||
+		!reflect.DeepEqual(entry.Args, []string{"-y", "example-mcp"}) ||
+		entry.Env["MODE"] != "test" || entry.CWD != "C:/workspace" {
+		t.Fatalf("stdio entry lost launch fields: %+v", entry)
 	}
 }
