@@ -3863,8 +3863,11 @@ func TestAPIPolicyDirHotReloadUsesLiveGeneration(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), policyDir) {
-		t.Fatalf("reload = %d %s; want live policy_dir", w.Code, w.Body.String())
+	var body struct {
+		PolicyDir string `json:"policy_dir"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &body) != nil || body.PolicyDir != policyDir {
+		t.Fatalf("reload = %d %s; want live policy_dir %q", w.Code, w.Body.String(), policyDir)
 	}
 }
 
