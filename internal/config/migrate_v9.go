@@ -586,6 +586,11 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 		written = append(written, envPath)
 	}
+	// Provider CA files must exist before the committed config can reference
+	// them. The legacy overlay cannot supply TLS trust once config wins.
+	if err := m.writeProviderCAs(&written); err != nil {
+		return written, err
+	}
 	if _, err := txn.Commit(migrated, mode, m.record.Actor, "config_version 9 migration"); err != nil {
 		return written, err
 	}
@@ -2419,23 +2424,25 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 	m.providersOverlay = path
 }
 
-// retireProvidersOverlay writes the moved CA bundles and renames the legacy
-// overlay once its providers are in the committed config; the next config
-// write renders the derived file. A CA bundle that can not be written
-// leaves the overlay in place.
-func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
+// writeProviderCAs places TLS roots before the config commit. A failure must
+// abort migration while the v8 config can still use its inline CA overlay.
+func (m *v9Migrator) writeProviderCAs(written *[]string) error {
 	for _, ca := range m.providerCAs {
-		if err := func() error {
-			if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
-				return err
-			}
-			return cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600)
-		}(); err != nil {
-			m.note("could not write the provider CA bundle %s: %v; %s stays in place", ca.path, err, m.providersOverlay)
-			return
+		if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
+			return fmt.Errorf("config: create provider CA directory for %s: %w", ca.path, err)
+		}
+		if err := cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600); err != nil {
+			return fmt.Errorf("config: write provider CA bundle %s: %w", ca.path, err)
 		}
 		*written = append(*written, ca.path)
 	}
+	return nil
+}
+
+// retireProvidersOverlay renames the legacy overlay once its providers and
+// CA files are in the committed config. The next config write renders the
+// derived file.
+func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
 	if err := os.Rename(m.providersOverlay, m.providersOverlay+DataJSONMigratedSuffix); err != nil {
 		m.note("could not rename %s: %v", m.providersOverlay, err)
 		return

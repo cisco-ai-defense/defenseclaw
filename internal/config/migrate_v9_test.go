@@ -1188,3 +1188,34 @@ func TestMigrateV9KeepsCustomRegoWithLegacyComment(t *testing.T) {
 		t.Fatalf("custom admission module was replaced: %s", got)
 	}
 }
+
+// A missing provider CA changes TLS trust. If its destination is obstructed,
+// the v8 config and live overlay must still be the active inputs.
+func TestMigrateV9RefusesMissingProviderCA(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, ProvidersOverlayFile)
+	if err := os.WriteFile(overlay, []byte(`{"providers":[{"name":"acme","domains":["llm.acme.internal"],"env_keys":["ACME_KEY"],"tls":{"ca_cert_pem":"-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "provider-ca"), []byte("obstruction"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+		t.Fatal("migration succeeded without writing the provider CA")
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "config_version: 8") {
+		t.Fatalf("config committed without the provider CA: %s", raw)
+	}
+	if _, err := os.Stat(overlay); err != nil {
+		t.Fatalf("legacy overlay was removed: %v", err)
+	}
+}
