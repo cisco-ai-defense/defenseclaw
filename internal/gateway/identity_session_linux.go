@@ -30,7 +30,7 @@ import (
 // the session's User must be the kernel-verified peer uid. Only then are the
 // session's kind, remote host and terminal reported as verified. Without
 // logind, /run/utmp confirms a claimed terminal belongs to the peer's
-// account. Answers are cached per (uid, session).
+// account. Only logind session ids are cached; a tty can be reused at logout.
 
 const (
 	logindService       = "org.freedesktop.login1"
@@ -44,6 +44,7 @@ const (
 )
 
 var (
+	utmpSessionPath  = utmpPath
 	peerSessionsOnce sync.Once
 	peerSessions     *identityCache[useridentity.SessionFacts]
 )
@@ -58,7 +59,10 @@ func verifyPeerSession(uid int, name string, claimed useridentity.SessionFacts) 
 	case claimed.LogindSession != "":
 		key = strings.Join([]string{strconv.Itoa(uid), "ls", claimed.LogindSession}, sessionCacheKeySep)
 	case claimed.TTY != "" && name != "":
-		key = strings.Join([]string{strconv.Itoa(uid), "tty", claimed.TTY, name}, sessionCacheKeySep)
+		// A pts number is reusable immediately after logout. Read utmp on
+		// every claim so a new login cannot inherit the prior address.
+		session, err := utmpSessionFacts(claimed.TTY, name)
+		return session, err == nil && session.Assurance == useridentity.AssuranceVerified
 	default:
 		return useridentity.SessionFacts{}, false
 	}
@@ -93,11 +97,6 @@ func resolvePeerSession(key string) (useridentity.SessionFacts, error) {
 			return useridentity.SessionFacts{}, err
 		}
 		return session, nil
-	case "tty":
-		if len(parts) < 4 {
-			return useridentity.SessionFacts{}, errors.New("malformed session key")
-		}
-		return utmpSessionFacts(parts[2], parts[3])
 	}
 	return useridentity.SessionFacts{}, errors.New("malformed session key")
 }
@@ -115,8 +114,21 @@ func logindConn(ctx context.Context) (*dbus.Conn, error) {
 	if logindBus != nil && logindBus.Connected() {
 		return logindBus, nil
 	}
-	conn, err := dbus.ConnectSystemBus(dbus.WithContext(context.Background()))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// godbus Auth and Hello can wait for a bus reply without honoring the
+	// call context. Closing the connection on deadline interrupts both.
+	connCtx, cancel := context.WithCancel(context.Background())
+	stop := context.AfterFunc(ctx, cancel)
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(connCtx))
+	stop()
 	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		cancel()
 		return nil, err
 	}
 	logindBus = conn
@@ -200,7 +212,11 @@ func sessionUser(v dbus.Variant) int {
 // utmpSessionFacts confirms a claimed terminal from /run/utmp: a login
 // record on that line for the peer's account.
 func utmpSessionFacts(tty, name string) (useridentity.SessionFacts, error) {
-	file, err := os.Open(utmpPath)
+	return utmpSessionFactsFrom(utmpSessionPath, tty, name)
+}
+
+func utmpSessionFactsFrom(path, tty, name string) (useridentity.SessionFacts, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		return useridentity.SessionFacts{}, err
 	}
@@ -213,16 +229,14 @@ func utmpSessionFacts(tty, name string) (useridentity.SessionFacts, error) {
 		if entry.Line != tty || entry.User != name {
 			continue
 		}
-		facts := useridentity.SessionFacts{TTY: tty, Assurance: useridentity.AssuranceVerified}
-		if entry.Host != "" {
+		facts := useridentity.SessionFacts{TTY: tty, Assurance: useridentity.AssuranceClaimed}
+		if entry.Addr != nil && !entry.Addr.IsUnspecified() {
 			facts.Kind = useridentity.SessionSSH
-			if entry.Addr != nil && !entry.Addr.IsUnspecified() {
-				facts.ClientAddr = entry.Addr.String()
-			} else if ip := net.ParseIP(entry.Host); ip != nil {
-				facts.ClientAddr = ip.String()
-			}
-		} else if strings.HasPrefix(tty, "tty") {
+			facts.Assurance = useridentity.AssuranceVerified
+			facts.ClientAddr = entry.Addr.String()
+		} else if entry.Host == "" && strings.HasPrefix(tty, "tty") {
 			facts.Kind = useridentity.SessionConsole
+			facts.Assurance = useridentity.AssuranceVerified
 		}
 		return facts, nil
 	}

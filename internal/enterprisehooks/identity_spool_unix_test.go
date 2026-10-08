@@ -47,6 +47,25 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "94401104.json")); !os.IsNotExist(err) {
 		t.Errorf("a record older than IdentitySpoolMaxAge was kept (stat error %v)", err)
 	}
+	const reassigned = "94401105"
+	data, err := MarshalIdentitySpoolRecord(IdentitySpoolRecord{
+		Key: reassigned, User: "alice", UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, reassigned+".json")
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	// The canceled lookup fails and the pass reports it; the record of the
+	// previous owner must be gone either way.
+	_ = WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("reassigned uid kept previous account record: %v", err)
+	}
 }
 
 // GAP-0284: a record that resolved no UPN (a signed-out Windows user) keeps
@@ -66,5 +85,15 @@ func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {
 	}
 	if other := KeepLastKnownUPN(IdentitySpoolRecord{Key: "S-1-5-21-1111-2222-3333-1106"}, previous); other.Facts.UPN != "" {
 		t.Fatalf("another account took the UPN: %+v", other)
+	}
+}
+
+// A lookup failure must reach the guardian so its next pass uses the short
+// retry interval rather than treating partial directory facts as refreshed.
+func TestIdentitySpoolReportsFailedAccount(t *testing.T) {
+	err := WriteIdentitySpool(context.Background(), t.TempDir(),
+		[]IdentitySpoolAccount{{UID: 999999999, User: ""}}, nil, nil)
+	if err == nil {
+		t.Fatal("failed account lookup was reported as a successful spool pass")
 	}
 }

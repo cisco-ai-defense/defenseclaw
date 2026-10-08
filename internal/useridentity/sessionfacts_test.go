@@ -199,3 +199,27 @@ func TestSessionFactsDoNotWaitOnAFIFOCredentialCache(t *testing.T) {
 		}
 	}
 }
+
+func TestCurrentSessionFactsHeaderRefreshesAfterTicketAppears(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix credential caches only")
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, "krb5cc")
+	t.Setenv("HOME", home)
+	t.Setenv("KRB5CCNAME", "FILE:"+path)
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("XDG_SESSION_ID", "")
+	first := CurrentSessionFactsHeader()
+	var cache bytes.Buffer
+	cache.Write([]byte{5, 4, 0, 0})
+	cache.Write(ccachePrincipalBytes("corp.example", "alice"))
+	if err := os.WriteFile(path, cache.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := CurrentSessionFactsHeader()
+	if first == second || second != "v1;k=local;krb=alice@CORP.EXAMPLE;cc=FILE" {
+		t.Fatalf("session facts stayed at %q after a ticket appeared: %q", first, second)
+	}
+}

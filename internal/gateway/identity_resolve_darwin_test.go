@@ -42,7 +42,7 @@ func TestResolvePeerDirectoryFactsKeepsGroupsUnderSpool(t *testing.T) {
 	}
 	dir := t.TempDir()
 	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
-		Key: current.Uid, UpdatedAt: time.Now().UTC(),
+		Key: current.Uid, User: current.Username, UpdatedAt: time.Now().UTC(),
 		Facts: useridentity.DirectoryFacts{
 			Principal: "alice@CORP.EXAMPLE.COM", Directory: useridentity.DirectoryActiveDirectory,
 			ResolvedAt: time.Now().UTC(),

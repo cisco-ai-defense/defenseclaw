@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -43,7 +44,63 @@ func withEnterpriseACPServiceOwner(dataDir string, fn func() error) error {
 	if stat.Uid == 0 {
 		return fn()
 	}
+	if err := repairEnterpriseACPLegacyLock(dataDir, int(stat.Uid), int(stat.Gid)); err != nil {
+		return err
+	}
 	return enterpriseACPRunAsAccount(int(stat.Uid), int(stat.Gid), fn)
+}
+
+// Earlier builds left this persistent lock owned by root even after handing
+// the ACP directory to the service account. Change only that exact legacy
+// file, by descriptor, before dropping root privileges.
+func repairEnterpriseACPLegacyLock(dataDir string, uid, gid int) error {
+	lockDir := filepath.Join(dataDir, "acp")
+	dir, err := os.Lstat(lockDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enterprise ACP: inspect credential directory: %w", err)
+	}
+	dirOwner, ok := dir.Sys().(*syscall.Stat_t)
+	if !dir.IsDir() || !ok || int(dirOwner.Uid) != uid {
+		return fmt.Errorf("enterprise ACP: credential directory has an unexpected owner")
+	}
+	path := filepath.Join(lockDir, ".enterprise-credentials.lock")
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enterprise ACP: inspect credential lock: %w", err)
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || !ok || owner.Nlink != 1 || info.Size() != 0 || info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("enterprise ACP: credential lock is not a private empty regular file")
+	}
+	if int(owner.Uid) == uid {
+		return nil
+	}
+	if owner.Uid != 0 {
+		return fmt.Errorf("enterprise ACP: credential lock has an unexpected owner")
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("enterprise ACP: open legacy credential lock: %w", err)
+	}
+	defer syscall.Close(fd)
+	var opened syscall.Stat_t
+	if err := syscall.Fstat(fd, &opened); err != nil {
+		return err
+	}
+	named, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, named) || opened.Ino != owner.Ino || opened.Dev != owner.Dev {
+		return fmt.Errorf("enterprise ACP: credential lock changed during owner repair")
+	}
+	if err := syscall.Fchown(fd, uid, gid); err != nil {
+		return fmt.Errorf("enterprise ACP: repair credential lock owner: %w", err)
+	}
+	return nil
 }
 
 // alignEnterpriseACPCredentialOwner has nothing to do on Unix: the data_dir

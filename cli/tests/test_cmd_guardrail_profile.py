@@ -142,6 +142,26 @@ def test_explain_on_windows_asks_for_the_token_sid(monkeypatch):
     assert mine["user"] == "EntraAlice"
 
 
+
+def test_profile_timeout_displays_account_name_instead_of_windows_sid(monkeypatch):
+    from defenseclaw import gateway
+    from requests.exceptions import ReadTimeout
+
+    app = AppContext()
+    app.cfg = default_config()
+    app.cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
+    monkeypatch.setattr(gateway, "current_profile_account", lambda: ("S-1-12-1-1-2-3-4", "EntraAlice"))
+
+    def timeout(self, *, user=""):
+        assert user == "S-1-12-1-1-2-3-4"
+        raise ReadTimeout("profile lookup")
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "guardrail_profile_resolve", timeout)
+    result = gateway.current_user_guardrail_profile(app.cfg)
+
+    assert result["user"] == "EntraAlice"
+    assert "unknown for EntraAlice" in cmd_guardrail.profile_status_text(app.cfg, result)
+
 def _explain(monkeypatch, result, *args):
     """Run ``guardrail profile explain`` against a gateway that answers *result*."""
     from defenseclaw.gateway import OrchestratorClient

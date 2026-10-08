@@ -726,7 +726,19 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 	var report inventory.AIDiscoveryReport
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&report); err != nil {
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.SecureClientIntegration() {
+		// Decode the pre-1.0 request shape so Secure Client still rejects
+		// ide_inventory as an unknown field.
+		var legacy struct {
+			Summary inventory.AIDiscoverySummary `json:"summary"`
+			Signals []inventory.AISignal         `json:"signals"`
+		}
+		if err := dec.Decode(&legacy); err != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		report.Summary, report.Signals = legacy.Summary, legacy.Signals
+	} else if err := dec.Decode(&report); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}

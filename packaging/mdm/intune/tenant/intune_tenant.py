@@ -394,12 +394,13 @@ def check_items(graph: Graph, platforms: list[str], groups: list[str]) -> list[d
         members = graph.get_all(f"{V1}/groups/{found[0]['id']}/members?$select=id")
         add(PASS, f"group {name}", f"{len(members)} member(s)")
 
-    data, err = try_get(graph, f"{BETA}/deviceManagement/managedDevices?$select=operatingSystem,complianceState")
-    if err:
-        add(WARN, "managed devices", f"cannot read: {err}")
+    try:
+        devices = graph.get_all(f"{BETA}/deviceManagement/managedDevices?$select=operatingSystem,complianceState")
+    except GraphError as exc:
+        add(WARN, "managed devices", f"cannot read: {exc}")
     else:
         counts: dict[str, int] = {}
-        for device in data.get("value", []):
+        for device in devices:
             key = f"{str(device.get('operatingSystem')).lower()}/{device.get('complianceState')}"
             counts[key] = counts.get(key, 0) + 1
         add(INFO, "managed devices", ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "none")
@@ -424,16 +425,18 @@ def cmd_check(graph: Graph, args: argparse.Namespace) -> int:
 
 
 def cmd_devices(graph: Graph, args: argparse.Namespace) -> int:
-    select = (
-        "id,deviceName,operatingSystem,osVersion,complianceState,managementState,lastSyncDateTime,userPrincipalName"
-    )
+    select = "id,azureADDeviceId,deviceName,operatingSystem,osVersion,complianceState,managementState,lastSyncDateTime"
+    if args.show_users:
+        select += ",userPrincipalName"
     devices = graph.get_all(f"{BETA}/deviceManagement/managedDevices?$select={select}")
     if args.group:
         group = group_by_name(graph, args.group)
-        member_names = {
-            m.get("displayName") for m in graph.get_all(f"{V1}/groups/{group['id']}/members?$select=displayName")
-        }
-        devices = [d for d in devices if d.get("deviceName") in member_names]
+        members = graph.get_all(
+            f"{V1}/groups/{group['id']}/members/microsoft.graph.device?$select=deviceId&$count=true",
+            {"ConsistencyLevel": "eventual"},
+        )
+        member_ids = {str(m["deviceId"]).casefold() for m in members if m.get("deviceId")}
+        devices = [d for d in devices if str(d.get("azureADDeviceId", "")).casefold() in member_ids]
     if args.os:
         devices = [d for d in devices if str(d.get("operatingSystem", "")).lower().startswith(args.os)]
     if args.noncompliant:
@@ -451,7 +454,10 @@ def cmd_devices(graph: Graph, args: argparse.Namespace) -> int:
         for d in devices
     ]
     if args.json:
-        print(json.dumps(devices, indent=2))
+        output = devices if args.show_users else [
+            {key: value for key, value in device.items() if key != "userPrincipalName"} for device in devices
+        ]
+        print(json.dumps(output, indent=2))
     else:
         headers = [
             "device",
@@ -645,9 +651,9 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
         "remediationScriptContent": b64(remediate),
     }
     collection = f"{BETA}/deviceManagement/deviceHealthScripts"
+    group = group_by_name(graph, args.group) if args.group else None
     script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package")
-    if args.group:
-        group = group_by_name(graph, args.group)
+    if group:
         existing = graph.get_all(f"{collection}/{script_id}/assignments") if script_id else []
         kept = [a for a in existing if a.get("target", {}).get("groupId") != group["id"]]
         if len(kept) != len(existing):
@@ -691,9 +697,9 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
         "executionFrequency": args.frequency,
     }
     collection = f"{BETA}/deviceManagement/deviceShellScripts"
+    group = group_by_name(graph, args.group) if args.group else None
     script_id = _upsert(graph, collection, args.name, body, args.apply, "macOS shell script")
-    if args.group:
-        group = group_by_name(graph, args.group)
+    if group:
         existing = graph.get_all(f"{collection}/{script_id}/groupAssignments") if script_id else []
         if any(a.get("targetGroupId") == group["id"] for a in existing):
             print(f"{plan_tag(args.apply)}{args.name!r} is already assigned to {args.group}")

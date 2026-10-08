@@ -412,6 +412,13 @@ func (r *AgentRegistry) resolve(ctx context.Context, agentIdentityID, sessionID,
 		SidecarInstanceID: r.SidecarInstanceID(),
 	}
 	minted := false
+	// Without an agent identity, a shared gateway cannot prove who owns a
+	// caller-supplied session id. Leave its instance empty instead of joining
+	// another user's hook session, even during the unauthenticated peek.
+	if !ManagedEnterpriseActive() && agentIdentityID == "" &&
+		(serviceAccountGatewayFromContext(ctx) || gatewayRunsAsServiceAccount()) {
+		return id, false
+	}
 	if sessionID != "" {
 		if mint {
 			// agent_instance_id is session-scoped so every record for one

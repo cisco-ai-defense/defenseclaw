@@ -537,6 +537,23 @@ var inventoryMigrations = []invMigration{
 			return nil
 		},
 	},
+	{
+		description: "v5: mark every persisted IDE inventory, including empty snapshots",
+		apply: func(ex invDBExecer) error {
+			for _, q := range []string{
+				`CREATE TABLE IF NOT EXISTS ide_inventory_snapshots (
+					scan_id TEXT PRIMARY KEY REFERENCES ai_scans(scan_id) ON DELETE CASCADE
+				)`,
+				`INSERT OR IGNORE INTO ide_inventory_snapshots(scan_id)
+				SELECT DISTINCT scan_id FROM ide_installations`,
+			} {
+				if _, err := ex.Exec(q); err != nil {
+					return fmt.Errorf("ai inventory: v5 migration: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 type invMigration struct {
@@ -793,6 +810,10 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 
 // recordIDEInventory writes a scan's IDE installations and plugins.
 func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDEInventory) error {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO ide_inventory_snapshots(scan_id) VALUES (?)`, scanID); err != nil {
+		return fmt.Errorf("inventory store: mark ide inventory: %w", err)
+	}
 	for _, inst := range inv.Installations {
 		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO ide_installations
 			(scan_id, install_id, user_id, user_name, ide_family, ide_product,
@@ -805,7 +826,11 @@ func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDE
 			return fmt.Errorf("inventory store: insert ide installation: %w", err)
 		}
 	}
-	for _, p := range inv.Plugins {
+	plugins := inv.Plugins
+	if inv.savedPlugins != nil {
+		plugins = inv.savedPlugins
+	}
+	for _, p := range plugins {
 		var installed sql.NullTime
 		if p.InstalledAt != nil {
 			installed = sql.NullTime{Time: p.InstalledAt.UTC(), Valid: true}
@@ -842,7 +867,9 @@ func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, err
 		       p.scope, p.is_ai, p.ai_signature_id, p.path_hash, p.installed_at, p.last_seen
 		FROM ide_plugins p
 		LEFT JOIN ide_installations i ON i.scan_id = p.scan_id AND i.install_id = p.install_id
-		WHERE p.scan_id = (SELECT scan_id FROM ide_installations ORDER BY last_seen DESC, scan_id DESC LIMIT 1)`)
+		WHERE p.scan_id = (SELECT snap.scan_id FROM ide_inventory_snapshots snap
+			JOIN ai_scans sc ON sc.scan_id = snap.scan_id
+			ORDER BY sc.scanned_at DESC, snap.scan_id DESC LIMIT 1)`)
 	if err != nil {
 		return nil, fmt.Errorf("inventory store: list ide plugins: %w", err)
 	}
@@ -872,6 +899,21 @@ func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, err
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// LatestIDEInventoryRecordedAt also works for an empty recorded inventory.
+func (s *InventoryStore) LatestIDEInventoryRecordedAt(ctx context.Context) (time.Time, error) {
+	if s == nil || s.db == nil || s.legacySchema {
+		return time.Time{}, nil
+	}
+	var at time.Time
+	err := s.db.QueryRowContext(ctx, `SELECT sc.scanned_at FROM ide_inventory_snapshots snap
+		JOIN ai_scans sc ON sc.scan_id = snap.scan_id
+		ORDER BY sc.scanned_at DESC, snap.scan_id DESC LIMIT 1`).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	return at, err
 }
 
 func nullString(value string) sql.NullString {

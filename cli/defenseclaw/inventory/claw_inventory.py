@@ -298,7 +298,7 @@ def attach_ide_plugins(inv: dict[str, Any], payload: dict[str, Any] | None, note
         "users": len(users),
         "scope": str((payload or {}).get("scope") or ""),
     }
-    if payload is None or payload.get("enabled") is False:
+    if payload is None or payload.get("enabled") is False or payload.get("scope") == "off":
         entry["collected"] = False
     if note:
         inv["ide_plugins_note"] = note

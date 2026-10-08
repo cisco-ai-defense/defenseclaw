@@ -14,10 +14,12 @@ package enterprisehooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -36,8 +38,10 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // an account no longer enrolled. setOwnership gives each new file (and the
 // directory) the guardian authorization ownership, root:<gateway group>,
 // before it is renamed into place, so the gateway never reads a partial or
-// unreadable record. An account whose lookups fail keeps no record; the
-// gateway then reports only what it resolves itself.
+// unreadable record. A failed privileged lookup keeps a previous verified
+// record only while it still names the same account (the gateway checks the
+// name again); a newly enrolled or reassigned account gets its basic facts
+// until a retry succeeds.
 //
 // The record of an account missing from accounts is removed only once it is
 // older than IdentitySpoolMaxAge, when the gateway ignores it anyway. A pass
@@ -62,25 +66,48 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 	}
 	keep := map[string]bool{}
+	var passErr error
 	for _, account := range accounts {
 		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
 			continue
 		}
 		name := strconv.Itoa(account.UID) + ".json"
+		if account.User != "" {
+			if previous, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); err == nil &&
+				previous.User != "" && !strings.EqualFold(previous.User, account.User) {
+				// A UID assigned to a different account must not retain its
+				// previous owner's privileged facts if this lookup fails.
+				if err := os.Remove(filepath.Join(dir, name)); err != nil {
+					return fmt.Errorf("remove reassigned identity spool record: %w", err)
+				}
+			}
+		}
 		keep[name] = true
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
 		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
+		} else if record.Key != "" {
+			// Keep a previous verified UPN through a transient lookup
+			// failure. For a newly enrolled account, still provide its
+			// basic NSS facts while the privileged lookup is retried.
+			if _, statErr := os.Stat(filepath.Join(dir, name)); errors.Is(statErr, os.ErrNotExist) {
+				err = errors.Join(err, writeIdentitySpoolFile(dir, name, record, setOwnership))
+			} else if statErr != nil {
+				err = errors.Join(err, statErr)
+			}
 		}
-		if err != nil && logf != nil {
-			logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
+		if err != nil {
+			passErr = errors.Join(passErr, fmt.Errorf("uid %d: %w", account.UID, err))
+			if logf != nil {
+				logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
+			}
 		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
 	}
 	for _, entry := range entries {
 		if keep[entry.Name()] {
@@ -91,5 +118,5 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
-	return nil
+	return passErr
 }

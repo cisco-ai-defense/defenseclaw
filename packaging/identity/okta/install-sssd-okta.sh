@@ -273,10 +273,15 @@ render() {
 import os
 import re
 import sys
+import tempfile
 
 template, out = sys.argv[1:3]
 prefix = "OKTA_KIT_"
 values = {k[len(prefix):]: v for k, v in os.environ.items() if k.startswith(prefix)}
+# Never let a remote Okta group shadow a local group used by sudoers or PAM.
+with open("/etc/group", encoding="utf-8", errors="replace") as groups:
+    local_groups = {line.partition(":")[0] for line in groups if ":" in line}
+values["FILTER_GROUPS"] = ", ".join(sorted(local_groups | {"root", "wheel", "sudo", "adm"}))
 keep_upn = values.get("UPN") == "1"
 text = []
 for line in open(template, encoding="ascii"):
@@ -291,9 +296,14 @@ if unknown:
     sys.exit("template placeholders without a value: " + ", ".join(unknown))
 # One pass, so a value that looks like a placeholder is never expanded again.
 body = re.sub(r"@([A-Z_]+)@", lambda m: values[m.group(1)], body)
-fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="ascii") as handle:
-    handle.write(body)
+fd, temporary = tempfile.mkstemp(prefix=".sssd-okta-", dir=os.path.dirname(out) or ".")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    os.replace(temporary, out)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 PY
 }
 
@@ -374,6 +384,7 @@ install_conf() {
     if ((DRY_RUN)); then
       log "  would replace $CONF; changes (password hidden):"
       diff -u <(mask "$CONF") <(mask "$rendered") | sed 's/^/    /' || true
+      CONF_CHANGED=1
       return 0
     fi
     local backup
@@ -382,6 +393,7 @@ install_conf() {
     log "  backup: $backup"
   elif ((DRY_RUN)); then
     log "  would create $CONF (mode 0600, root)"
+    CONF_CHANGED=1
     return 0
   fi
   [[ -d $(dirname "$CONF") ]] || install -d -m 0711 -o root -g root "$(dirname "$CONF")"
@@ -391,11 +403,21 @@ install_conf() {
   log "  installed: $CONF"
 }
 
+authselect_profile_check() {
+  ((NO_PAM)) && return 0
+  local current
+  current=$(authselect current --raw 2> /dev/null || true)
+  if [[ -n $current && $current != sssd* ]] && ((FORCE == 0)); then
+    fail 3 "authselect uses '$current'; replacing a custom or winbind profile removes its PAM features. Review the change and rerun with --force, or use --no-pam."
+  fi
+}
+
 pam_step() {
   if ((NO_PAM)); then
     log "  skipped: authselect and oddjobd (--no-pam)"
     return 0
   fi
+  authselect_profile_check
   local current="" features=() force=()
   current=$(authselect current --raw 2> /dev/null || true)
   if [[ $current == sssd* && $current == *with-mkhomedir* ]]; then
@@ -476,14 +498,27 @@ check_allow_group() {
   fi
 }
 
+sssd_config_stale() {
+  # A previous run may have installed the config and then failed at PAM or sshd.
+  # Compare nanoseconds so a rerun in the same second still notices that change.
+  local started config_time service_time
+  systemctl is-active sssd > /dev/null 2>&1 || return 0
+  started=$(systemctl show sssd -p ActiveEnterTimestamp --value 2> /dev/null) || return 0
+  config_time=$(date -d "$(stat -c %y "$CONF" 2> /dev/null)" +%s%N 2> /dev/null) || return 0
+  service_time=$(date -d "$started" +%s%N 2> /dev/null) || return 0
+  ((config_time > service_time))
+}
+
 restart_sssd() {
   if ((DRY_RUN)); then
-    if ((${CONF_CHANGED:-0})); then log "  would restart sssd and wait for the $DOMAIN domain to be Online"; fi
+    if ((${CONF_CHANGED:-0})) || sssd_config_stale; then
+      log "  would restart sssd and wait for the $DOMAIN domain to be Online"
+    fi
     log "  would enable sssd at boot"
     return 0
   fi
   systemctl enable sssd > /dev/null 2>&1
-  if ((CONF_CHANGED)) || ! systemctl is-active sssd > /dev/null 2>&1; then
+  if ((CONF_CHANGED)) || sssd_config_stale; then
     systemctl restart sssd
     sss_cache -E > /dev/null 2>&1 || true
     if wait_online; then
@@ -535,6 +570,7 @@ main() {
   render "$WORK/sssd.conf" "$pw"
   config_check "$WORK/sssd.conf"
   bind_test
+  authselect_profile_check
   log "SSSD config ($CONF)"
   install_conf "$WORK/sssd.conf"
   log "PAM and home directories"
