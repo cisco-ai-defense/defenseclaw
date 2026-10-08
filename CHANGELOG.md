@@ -82,6 +82,10 @@ stopped`. Nothing is changed; use the install command above.
 
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
+- Before an upgrade, reinstall or rollback on macOS or Linux restarts the
+  gateway, the installer names the OpenShell sandboxes that are running: their
+  hooks fail closed until the gateway is back, so their agents' tool calls are
+  refused meanwhile.
 
 ### Sandbox telemetry and destinations
 
