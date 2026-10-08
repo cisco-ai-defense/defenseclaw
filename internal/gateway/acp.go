@@ -868,15 +868,30 @@ func (a *APIServer) acpScopedTokenReady() bool {
 	now := time.Now()
 	a.acpReadinessMu.Lock()
 	defer a.acpReadinessMu.Unlock()
-	if key == a.acpReadinessKey && now.Sub(a.acpReadinessCheckedAt) < 500*time.Millisecond {
+	window := a.acpReadinessWindow
+	if window < acpReadinessMinWindow {
+		window = acpReadinessMinWindow
+	}
+	if key == a.acpReadinessKey && now.Sub(a.acpReadinessCheckedAt) < window {
 		return a.acpReadinessValue
 	}
 	ready := a.acpScopedTokenReadyUncached()
 	a.acpReadinessKey = key
 	a.acpReadinessCheckedAt = now
 	a.acpReadinessValue = ready
+	// The managed check reads every enrollment record: keep its share of an
+	// unauthenticated /health poll at about 5% however large the inventory
+	// (GAP-0706).
+	a.acpReadinessWindow = min(max(20*time.Since(now), acpReadinessMinWindow), acpReadinessMaxWindow)
 	return ready
 }
+
+// The readiness answer is reused for 500 ms, or longer for a large managed
+// inventory, but never for more than 30 s.
+const (
+	acpReadinessMinWindow = 500 * time.Millisecond
+	acpReadinessMaxWindow = 30 * time.Second
+)
 
 func (a *APIServer) acpScopedTokenReadyUncached() bool {
 	if managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {

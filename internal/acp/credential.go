@@ -27,7 +27,6 @@ import (
 
 const (
 	enterpriseCredentialVersion  = 1
-	maxEnterpriseCredentials     = 1024
 	maxEnterpriseCredentialBytes = 16 << 10
 	maxEnterpriseIndexBytes      = 1 << 10
 )
@@ -269,15 +268,18 @@ func MatchEnterpriseCredentialKeyID(dataDir, keyID string) (EnterpriseCredential
 	return credential, credential.Token, true
 }
 
-// EnterpriseCredentialsReady validates the bounded managed credential
-// inventory and reports whether at least one enrollment is usable.
+// EnterpriseCredentialsReady validates the managed credential inventory and
+// reports whether at least one enrollment is usable. It reads every record;
+// the gateway caches the answer for a time that grows with the inventory.
+// A cap of 1,024 records turned a healthy fleet past it not ready
+// (GAP-0706).
 func EnterpriseCredentialsReady(dataDir string) bool {
 	dir := enterpriseCredentialDir(dataDir)
 	if err := validateEnterpriseCredentialDirectory(dir); err != nil {
 		return false
 	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 || len(entries) > maxEnterpriseCredentials {
+	if err != nil || len(entries) == 0 {
 		return false
 	}
 	indexDir := enterpriseCredentialIndexDir(dataDir)
@@ -285,7 +287,7 @@ func EnterpriseCredentialsReady(dataDir string) bool {
 		return false
 	}
 	indexes, err := os.ReadDir(indexDir)
-	if err != nil || len(indexes) != len(entries) || len(indexes) > maxEnterpriseCredentials {
+	if err != nil || len(indexes) != len(entries) {
 		return false
 	}
 	for _, entry := range entries {

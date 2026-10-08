@@ -4,7 +4,9 @@
 package acp
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,6 +60,39 @@ func TestEnterpriseCredentialIsStableScopedAndRevocable(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("credential directory retains revocation artifacts: %v", entries)
+	}
+}
+
+// The inventory stays ready past 1,024 enrollments (GAP-0706).
+func TestEnterpriseCredentialsReadyPastAThousandEnrollments(t *testing.T) {
+	requireDirectEnterpriseCredentialTest(t)
+	dataDir := t.TempDir()
+	if _, err := EnsureEnterpriseCredential(dataDir, "uid:2000", "zed", "hermes", "obs"); err != nil {
+		t.Fatal(err)
+	}
+	// The other records are written directly: the store syncs every write.
+	for uid := 2001; uid < 2000+1025; uid++ {
+		principal := fmt.Sprintf("uid:%d", uid)
+		token := fmt.Sprintf("%064x", uid)
+		recordPath, err := EnterpriseCredentialPath(dataDir, principal, "zed", "hermes", "obs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		indexPath, err := EnterpriseCredentialIndexPath(dataDir, token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, _ := json.Marshal(EnterpriseCredential{Version: 1, Principal: principal, ClientID: "zed", AgentID: "hermes", Profile: "obs", Token: token})
+		index, _ := json.Marshal(enterpriseCredentialIndex{Version: 1, Record: filepath.Base(recordPath)})
+		if err := os.WriteFile(recordPath, record, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(indexPath, index, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !EnterpriseCredentialsReady(dataDir) {
+		t.Fatal("an inventory of 1,025 valid enrollments is not ready")
 	}
 }
 

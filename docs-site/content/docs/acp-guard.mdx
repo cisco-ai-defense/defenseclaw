@@ -557,7 +557,10 @@ it.
 | `GET /health` | ACP enabled/mode/schema/configuration/token readiness |
 
 In managed mode, `scoped_token_ready` is true only when every enrollment
-record is private and valid; one bad record makes it false.
+record is private and valid; one bad record makes it false. There is no limit
+on the number of enrollments. The check reads every record, so the gateway
+reuses its answer for a while: 500 ms for a small fleet, longer for a large one
+(at most 30 seconds).
 
 Use `defenseclaw acp catalog` for the local catalog and
 `defenseclaw acp remove --client zed --agent kiro` for surgical removal.

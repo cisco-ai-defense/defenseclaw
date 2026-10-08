@@ -123,6 +123,7 @@ type APIServer struct {
 	acpReadinessCheckedAt time.Time
 	acpReadinessKey       string
 	acpReadinessValue     bool
+	acpReadinessWindow    time.Duration
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
