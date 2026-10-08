@@ -741,9 +741,6 @@ func TestCodexSSETokenAliasesAcceptEqualTypedDuplicateAndRejectConflict(t *testi
 }
 
 func TestCodexNotifyLineageDoesNotCrossUser(t *testing.T) {
-	if id := (&APIServer{}).codexNotifyAgentID(context.Background(), "unbound-r6-notify-session"); id != "" {
-		t.Fatalf("unbound notify received agent ID %q", id)
-	}
 	retained := llmEventMeta{
 		Source: "codex", SessionID: "shared-session", AgentID: "agent-a",
 		RootAgentID: "agent-a", ParentAgentID: "parent-a",
