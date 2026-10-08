@@ -831,10 +831,10 @@ def test_linux_preinstall_holds_the_apply_trigger_until_the_postinstall(tmp_path
 def test_linux_preinstall_refuses_a_config_newer_than_the_package(tmp_path: Path) -> None:
     script = (LINUX / "preinstall.sh").read_text(encoding="utf-8")
     limit = re.search(r"^max_config_version=(\d+)$", script, re.M)
-    go_limit = re.search(
-        r"const MaxSupportedConfigVersion = (\d+)",
-        (ROOT / "internal" / "config" / "observability_v8_types.go").read_text(encoding="utf-8"),
-    )
+    go_config = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "internal" / "config").glob("*.go"))
+    go_limit = re.search(r"const MaxSupportedConfigVersion = (\w+)", go_config)
+    if go_limit and not go_limit.group(1).isdigit():
+        go_limit = re.search(rf"const {go_limit.group(1)} = (\d+)", go_config)
     assert limit and go_limit and limit.group(1) == go_limit.group(1)
     host = _Host(tmp_path, apply_path_active=True)
     config = tmp_path / "config.yaml"
