@@ -94,6 +94,8 @@ DC_RESULT=""
 DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
+DC_INSTALL_ROOT=""     # the install tree whose volume the package fills
+DC_PACKAGE_RESULT=""   # the result the macOS package's own scripts write
 
 dc_platform() {
     case "$(uname -s)" in
@@ -328,10 +330,13 @@ dc_validate_args() {
 dc_layout() {
     if [ "$DC_SCRIPT_OS" = darwin ]; then
         DC_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+        DC_INSTALL_ROOT=/opt/cisco/defenseclaw
+        DC_PACKAGE_RESULT=/opt/cisco/defenseclaw/lifecycle/last-package-result.json
         DC_OS_GROUP=macos
         [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
     else
         DC_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway
+        DC_INSTALL_ROOT=/opt/defenseclaw
         DC_OS_GROUP=linux
         [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
     fi
@@ -504,10 +509,18 @@ dc_install_package() {
             if [ "$installed" = "$version" ]; then
                 dc_log "package $version already installed"
             else
+                dc_require_free_space "$(sed -n 's/.*installKBytes="\([0-9][0-9]*\)".*/\1/p' "$expanded"/*/PackageInfo 2>/dev/null | head -n 1)"
+                started="$DC_STAGE/installer.started"
+                : >"$started"
                 if ! output=$(installer -pkg "$file" -target / 2>&1); then
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "another installation is running; retry later"
                     fi
+                    case "$output" in
+                        *"No space left"* | *"not enough space"* | *"not enough disk space"*)
+                            dc_fail_result "$DC_EXIT_FAILURE" mdm_disk_full "the installer ran out of disk space; free some space, then rerun: $output" ;;
+                    esac
+                    dc_package_script_result "$started"
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "installer failed: $output"
                 fi
                 dc_package_step "$installed" "$version"
@@ -518,6 +531,38 @@ dc_install_package() {
             return 0
             ;;
     esac
+}
+
+# dc_require_free_space <KB the package installs>: refuse before the package
+# manager runs when the volume of the install tree lacks room for the
+# package plus the lifecycle snapshot and logs. A full data volume failed the
+# Installer with its generic "The upgrade failed" text and left no lifecycle
+# result (GAP-0539).
+dc_require_free_space() {
+    case "$1" in '' | *[!0-9]*) return 0 ;; esac
+    [ -n "$DC_INSTALL_ROOT" ] || return 0
+    dir=$DC_INSTALL_ROOT
+    while [ ! -d "$dir" ]; do dir=$(dirname "$dir"); done
+    free=$(df -Pk "$dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    case "$free" in '' | *[!0-9]*) return 0 ;; esac
+    need=$(($1 + 102400))
+    [ "$free" -ge "$need" ] ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_disk_full "not enough free disk space on the volume of $DC_INSTALL_ROOT: the package needs about $((need / 1024)) MB and $((free / 1024)) MB is free; nothing was installed. Free some space, then rerun"
+}
+
+# dc_package_script_result <marker>: after a failed installer run, print the
+# result the package's preinstall or postinstall wrote during it and exit 1.
+# The Installer only says "an error occurred while running scripts", while
+# that result names the cause: a refused downgrade with both versions, or a
+# rejected config (GAP-0538).
+dc_package_script_result() {
+    result=$DC_PACKAGE_RESULT
+    [ -n "$result" ] && [ -f "$result" ] && [ ! -L "$result" ] || return 0
+    [ -n "$(find "$result" -newer "$1" 2>/dev/null)" ] || return 0
+    cp "$result" "$DC_STAGE/package-result.json" 2>/dev/null || return 0
+    DC_RESULT="$DC_STAGE/package-result.json"
+    dc_emit_result
+    exit "$DC_EXIT_FAILURE"
 }
 
 # dc_package_step <previous version> <installed version>: record that the

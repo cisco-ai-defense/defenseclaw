@@ -170,7 +170,8 @@ codes above. For the full contract, see [Exit codes](/docs/enterprise/mdm#exit-c
 | `mdm_input_too_large` | The config is over 1 MiB or the credential is over 16 KiB |
 | `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture` | Linux and macOS: the archive or package is not a DefenseClaw enterprise artifact for this host |
 | `mdm_package_manager_busy` | Linux and macOS: dpkg, rpm, or the installer held its lock. Exit `75`; retry |
-| `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | Linux and macOS: the package manager failed or is missing |
+| `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | Linux and macOS: the package manager failed or is missing. On macOS, when the package's own preinstall or postinstall refused (a downgrade, a rejected config), the wrapper prints that result instead, with its own code such as `downgrade_refused` or `config_invalid` |
+| `mdm_disk_full` | macOS: the volume of `/opt/cisco/defenseclaw` has less free space than the package needs plus about 100 MB, or the installer ran out of space. Nothing was installed; free some space and rerun |
 | `mdm_download_failed`, `mdm_download_unavailable` | Linux and macOS: the HTTPS download failed, or there is no curl or wget |
 | `mdm_not_installed` | A read-only action, or an `ensure` without a source, found no deployment |
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | The lifecycle did not start or printed no result |
