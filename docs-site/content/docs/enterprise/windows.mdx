@@ -604,7 +604,12 @@ per-user install:
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
   user adds goes through admission within about 30 seconds, also while a
-  periodic rescan is running.
+  periodic rescan is running, such as the first one after an upgrade.
+- Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
+  in the profile folder, which the gateway service cannot read. The hook
+  enumerator reads that file, and the `.mcp.json` of each project inside the
+  profile, every 30 seconds and publishes the servers to the gateway, so
+  `claude mcp add` (any scope) reaches admission within about a minute.
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
 

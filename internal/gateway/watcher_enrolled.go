@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -124,7 +126,7 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 	seenSkill := map[string]bool{}
 	seenPlugin := map[string]bool{}
 	seenMCP := map[string]bool{}
-	type userConnector struct{ home, connector string }
+	type userConnector struct{ home, connector, sid string }
 	var targets []userConnector
 	for _, target := range authorization.ProtectedTargets {
 		home := strings.TrimSpace(target.UserHome)
@@ -135,7 +137,7 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 		if !target.OK || home == "" || name == "" || !filepath.IsAbs(home) {
 			continue
 		}
-		targets = append(targets, userConnector{filepath.Clean(home), name})
+		targets = append(targets, userConnector{filepath.Clean(home), name, strings.TrimSpace(target.SID)})
 	}
 	// A folder several connectors list (Amp and OpenCode also read Claude
 	// Code's ~/.claude/skills) belongs to the connector that owns its layout,
@@ -188,7 +190,11 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 		}
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
-		for _, entry := range config.ReadUserMCPServersForHome(target.connector, target.home) {
+		entries := config.ReadUserMCPServersForHome(target.connector, target.home)
+		if target.connector == "claudecode" {
+			entries = append(entries, enrolledClaudeMCPServers(cfg, target.sid)...)
+		}
+		for _, entry := range entries {
 			entry.Home = target.home
 			key := watcher.MCPEventPath(entry)
 			if entry.Name == "" || entry.Bundled || seenMCP[key] {
@@ -199,6 +205,19 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 		}
 	}
 	return set
+}
+
+// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
+// published for the account sid: the gateway service account cannot read
+// ~/.claude.json in the profile root, which holds the user-scope and
+// local-scope servers (GAP-0424).
+func enrolledClaudeMCPServers(cfg *config.Config, sid string) []config.MCPServerEntry {
+	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	servers, err := enterprisehooks.ReadClaudeMCPSpool(dir, sid, validateManagedGuardianAuthorization)
+	if err != nil {
+		return nil
+	}
+	return servers
 }
 
 // EnrolledWatchRoot is a skill or plugin folder a managed Windows gateway
