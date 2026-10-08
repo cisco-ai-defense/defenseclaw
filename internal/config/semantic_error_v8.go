@@ -143,6 +143,12 @@ func annotateObservabilityV8SemanticError(document *V8YAMLDocument, err error) e
 	}
 	if node != nil {
 		result.Line, result.Column = node.Line, node.Column
+		if strings.HasSuffix(path, ".redaction_profile") && node.Kind == yaml.ScalarNode &&
+			strings.Contains(err.Error(), "unknown profile") {
+			result.Summary = "unknown redaction profile " + strconv.Quote(node.Value)
+			result.Expected = "one of the defined redaction profiles: content, none, sensitive, strict, or a name under observability.redaction_profiles"
+			result.Action = "choose a defined profile and restart the gateway"
+		}
 	}
 	return result
 }
