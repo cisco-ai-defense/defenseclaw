@@ -29,8 +29,8 @@ const maxClaudeProjectMCPBytes = 1 << 20
 // reads ~/.claude.json, and the .mcp.json of each project inside the
 // profile, without following a link or junction below the profile, so a
 // user cannot point the LocalSystem read anywhere else. A record is rewritten
-// only when its servers change; records of users no longer enrolled are
-// removed. An unreadable state file keeps the last record.
+// only when its servers change; records of users no longer enrolled or whose
+// state is unreadable are removed.
 func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
 		return nil
@@ -61,7 +61,11 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 				logf("[hook-enumerator] WARN Claude Code MCP servers for %s: %v", key, err)
 			}
 			if !errors.Is(err, os.ErrNotExist) {
-				continue // keep the last record
+				// Never present an old definition as the user's current state.
+				if removeErr := os.Remove(filepath.Join(dir, name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return fmt.Errorf("remove stale Claude Code MCP spool record for %s: %w", key, removeErr)
+				}
+				continue
 			}
 		}
 		data, err := MarshalClaudeMCPSpoolRecord(key, servers)

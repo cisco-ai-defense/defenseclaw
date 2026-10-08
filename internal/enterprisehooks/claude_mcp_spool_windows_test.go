@@ -57,3 +57,29 @@ func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 		t.Fatalf("published %v, want user-srv, local-srv and shared-proj only", got)
 	}
 }
+
+// An unreadable or malformed state must not leave the previously admitted
+// definition in the gateway's inventory.
+func TestWriteWindowsClaudeMCPSpoolDropsStaleState(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(state, []byte(`{"mcpServers":{"old":{"command":"old"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	const sid = "S-1-5-21-1-1001"
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err == nil && len(servers) != 0 {
+		t.Fatalf("stale servers remain: %v", servers)
+	}
+}
