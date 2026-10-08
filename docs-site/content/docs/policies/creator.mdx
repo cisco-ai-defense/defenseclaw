@@ -25,6 +25,13 @@ inputs you test against are never uploaded. Saved progress lives in `localStorag
 does not execute ActionFacts parsers, CEL, regex, YARA, or bounded tool-call chains.
 </Callout>
 
+<Callout type="warn" title="Firewall and audit choices are planning notes">
+`defenseclaw policy activate` does not apply the Creator's firewall or audit
+choices. They are excluded from the generated policy and install script. Configure
+host egress controls and audit retention separately, and verify them on the host
+before relying on those choices.
+</Callout>
+
 ## Build a policy
 
 <PolicyCreator />
@@ -96,7 +103,7 @@ findings block installs); Strict is for regulated workloads where false-positive
 
 **Step 2 — What to block.** Ten cards grouped under five headers (Data leaks, Network exfiltration,
 Code execution, LLM-layer attacks, Multi-step attack patterns). Multi-select. Each card lists the
-bundled rule IDs, firewall destinations, or guardrail patterns it enables, with a link to the
+bundled rule IDs and guardrail patterns it enables, plus firewall destinations to plan separately, with a link to the
 [regex cookbook](/docs/policies/regex-cookbook). The multi-step card describes the two session
 correlator patterns, which are compiled in and always run, so it adds nothing to the export.
 
@@ -105,7 +112,7 @@ correlator patterns, which are compiled in and always run, so it adds nothing to
 <Step>
 
 **Step 3 — What to allow.** Two cards: first-party plugins, which skip admission scans through
-`first_party_allow_list`, and internal domains, which the firewall allows. Free-form text inputs
+`first_party_allow_list`, and internal domains to plan separately (the generated policy does not allow them through the firewall). Free-form text inputs
 let you add your own globs and domains. To tune LLM-judge noise, use the Suppressions section in
 the Playground and the [suppression cookbook](/docs/policies/suppression-cookbook).
 
@@ -121,7 +128,7 @@ the HITL configuration (the `guardrail.hilt` key), and the skill\_actions matrix
 
 <Step>
 
-**Step 5 — Sinks.** Toggle local audit log, stdout, Splunk HEC, Slack webhook, or a generic webhook.
+**Step 5 — Sinks.** Plan local audit and stdout settings, and configure Splunk HEC, Slack webhook, or a generic webhook.
 Secrets are referenced by env var name only — never typed inline.
 
 </Step>
@@ -176,11 +183,11 @@ The **Backed by** column names the keys in the exported policy file. `policy act
 | LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |
 | Session correlator (Layer 5) | Read-only view of the two post-event correlator patterns compiled into the gateway. They always run and aren't exported. These are distinct from the 26 fixed ActionFacts chains. |
 | Deterministic coverage | Read-only inventory of code-owned ActionFacts capabilities, the 26 bounded tool-call chains, and the ten MCP-description YARA signatures; also applies selectable high-assurance rule packs to the custom pack. |
-| Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
+| Firewall         | Planning notes only: `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports` are excluded from export. |
 | Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
 | Watch (rescan)   | `watch.rescan_enabled`, `watch.rescan_interval_min`.                                                                                    |
 | Enforcement      | `enforcement.max_enforcement_delay_seconds` is exported but not read by the gateway since `config_version: 9`.                          |
-| Audit            | `audit.log_all_actions`, `audit.log_scan_results`, `audit.retention_days`.                                                             |
+| Audit            | Planning notes only: `audit.log_all_actions`, `audit.log_scan_results`, `audit.retention_days` are excluded from export. |
 | Scanner profiles | `scanners.<scanner>` profile selection (codeguard / plugin-scanner / skill-scanner).                                                   |
 | Cisco AI Defense (optional · enterprise) | `cisco_ai_defense.enabled` / `endpoint` / `api_key_env` / `scan_hook_surface` — the optional remote lane read by `internal/config`. |
 | Custom Rego      | Per-snippet `package defenseclaw.custom.<name>` modules emitted into `policies/rego/custom-<name>.rego`.                               |

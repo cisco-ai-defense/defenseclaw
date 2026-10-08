@@ -239,6 +239,7 @@ export function AuditSection({
 }) {
   return (
     <div className="space-y-3">
+      <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">Audit choices are planning notes only. Policy activation does not apply them; configure retention and logging separately.</p>
       <Toggle
         label="log_all_actions"
         hint="Persist every gateway action (allow/deny/block/quarantine)."
