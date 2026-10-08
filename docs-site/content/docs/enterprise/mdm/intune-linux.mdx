@@ -187,6 +187,13 @@ applies it.
 ## Remove DefenseClaw
 
 First remove the devices from the install script's assignment. Then assign a
+If the config names a custom rule pack, run and confirm the pack-delivery
+script before the package/config script. After an uninstall with purge,
+`/etc/defenseclaw` and its pack are gone. Reassign or change the pack
+script so Intune executes it again, confirm the pack is staged, then reassign
+the install script. A missing pack causes `config_invalid`; do not retry the
+install before the pack is restored.
+
 root platform script with `packaging/mdm/linux/uninstall.sh`. It stops and
 removes the services, removes DefenseClaw's hooks and machine-policy entries
 (administrator entries stay), removes the machine state (config, policies,
