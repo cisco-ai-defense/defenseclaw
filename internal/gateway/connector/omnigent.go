@@ -317,7 +317,7 @@ func (c *OmnigentConnector) renderPolicyModule(opts SetupOpts) ([]byte, error) {
 	// A standalone managed install reads the Kerberos principal through its
 	// administrator-owned hook binary; a per-user one has its own gateway.
 	return []byte(renderOmnigentPolicyFull(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID,
-		managedSessionFactsBinary(opts))), nil
+		managedSessionFactsBinary(opts), shellHookSecureClientProfile(opts))), nil
 }
 
 func prepareOmnigentManagedBackup(dataDir, connectorName, logicalName, targetPath string) error {
@@ -971,17 +971,21 @@ func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string 
 // and the gateway service uid trusted beside root as its owner; an empty
 // socket keeps the bridge on the TCP transport with its scoped credential.
 func renderOmnigentPolicyWithTransport(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int) string {
-	return renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket, serviceUID, "")
+	return renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket, serviceUID, "", false)
 }
 
 // renderOmnigentPolicyFull also names the administrator-owned hook binary
 // that reads the user's Kerberos credential cache for a standalone managed
 // install; empty uses the per-user gateway binary.
-func renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int, factsBinary string) string {
+func renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int, factsBinary string, secureClient bool) string {
 	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
 	uid := ""
 	if hookSocket != "" && serviceUID > 0 {
 		uid = strconv.Itoa(serviceUID)
+	}
+	secureClientFlag := ""
+	if secureClient {
+		secureClientFlag = "1"
 	}
 	replacer := strings.NewReplacer(
 		"{{API_ADDR_B64}}", encode(strings.TrimSpace(apiAddr)),
@@ -990,6 +994,7 @@ func renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket
 		"{{HOOK_SOCKET_B64}}", encode(hookSocket),
 		"{{SERVICE_UID_B64}}", encode(uid),
 		"{{SESSION_FACTS_BIN_B64}}", encode(factsBinary),
+		"{{SECURE_CLIENT_B64}}", encode(secureClientFlag),
 	)
 	return replacer.Replace(template)
 }

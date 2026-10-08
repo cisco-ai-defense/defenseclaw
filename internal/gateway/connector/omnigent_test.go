@@ -1798,3 +1798,59 @@ func TestOmnigentSetupRejectsNonMappingPoliciesWithoutClobberingConfig(t *testin
 		}
 	}
 }
+
+func TestOmnigentSecureClientKeepsOriginalIdentityHeaders(t *testing.T) {
+	requireOmnigentHost(t)
+	python := omnigentTestPython(t)
+	script := `
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("rendered_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+calls = []
+def facts():
+    calls.append(True)
+    return "v1;k=ssh;ca=192.0.2.10"
+module._session_facts_header = facts
+os.environ["SSH_CONNECTION"] = "192.0.2.10 12345 192.0.2.20 22"
+print(json.dumps({"headers": module._identity_headers(), "calls": len(calls)}))
+`
+	for _, tc := range []struct {
+		name    string
+		managed bool
+		want    bool
+	}{
+		{"secure-client", true, false},
+		{"per-user", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &OmnigentConnector{}
+			module, err := conn.renderPolicyModule(SetupOpts{
+				DataDir:           t.TempDir(),
+				ManagedEnterprise: tc.managed,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "omnigent-policy.py")
+			if err := os.WriteFile(path, module, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run rendered policy: %v\n%s", err, output)
+			}
+			var got struct {
+				Headers map[string]string `json:"headers"`
+				Calls   int               `json:"calls"`
+			}
+			if err := json.Unmarshal(output, &got); err != nil {
+				t.Fatal(err)
+			}
+			_, hasFacts := got.Headers["X-DefenseClaw-Session-Facts"]
+			if hasFacts != tc.want || (got.Calls > 0) != tc.want {
+				t.Fatalf("session facts header=%v, subprocess path called=%d; want %v", hasFacts, got.Calls, tc.want)
+			}
+		})
+	}
+}
