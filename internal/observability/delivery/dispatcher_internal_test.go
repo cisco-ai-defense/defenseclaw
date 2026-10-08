@@ -341,6 +341,33 @@ func TestCircuitCooldownHalfOpenRecoveryAndGenerationReset(t *testing.T) {
 	}
 }
 
+func TestLegacyCircuitHealthRemainsOpenAfterCooldownWithoutAdmission(t *testing.T) {
+	start := time.Date(2026, time.October, 8, 12, 0, 0, 0, time.UTC)
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	config := circuitTestConfig(1)
+	config.LegacyCircuit = true
+	dispatcher, err := NewDispatcher(config, &circuitTestAdapter{outcomes: []DeliveryOutcome{OutcomeAuthentication}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	dispatcher.Activate()
+	if result := dispatcher.Enqueue(circuitTestPayload(t, "authentication")); !result.Accepted() {
+		t.Fatalf("authentication enqueue=%+v", result)
+	}
+	opened := waitForCircuitSnapshot(t, dispatcher, func(snapshot HealthSnapshot) bool {
+		return snapshot.CircuitState == CircuitOpen && snapshot.State == HealthFailing
+	})
+	clock.Store(opened.CircuitOpenUntil.UnixNano())
+	snapshot := dispatcher.DeliveryHealthSnapshot()
+	if snapshot.CircuitState != CircuitOpen || snapshot.State != HealthFailing ||
+		snapshot.Reason != string(HealthReasonCircuitOpen) {
+		t.Fatalf("legacy circuit health changed without admission: %+v", snapshot)
+	}
+	closeCircuitTestDispatcher(t, dispatcher)
+}
+
 func TestTransientCircuitPersistsAcrossBatchesAndFailsFastWhileOpen(t *testing.T) {
 	adapter := &circuitTestAdapter{outcomes: []DeliveryOutcome{
 		OutcomeTransient, OutcomeTransient, OutcomeTransient, OutcomeDelivered,
