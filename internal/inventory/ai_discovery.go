@@ -3156,9 +3156,16 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return nil
 			}
 			files++
-			// The file the walk found, never what a link there points
-			// at, and never a device, FIFO or oversized file (GAP-0694).
-			raw, readErr := readBoundedRegularFileNoFollow(path, s.opts.MaxFileBytes)
+			// Standalone scans read only the walked file. Secure Client
+			// keeps following links; both readers reject devices, FIFOs,
+			// and oversized files (GAP-0694).
+			readManifest := readBoundedRegularFileNoFollow
+			if s.opts.SecureClient {
+				// The released Secure Client follows regular manifest links.
+				// Both readers bound size and reject non-regular targets.
+				readManifest = readBoundedRegularFile
+			}
+			raw, readErr := readManifest(path, s.opts.MaxFileBytes)
 			if readErr != nil {
 				return nil
 			}

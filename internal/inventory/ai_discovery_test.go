@@ -2249,6 +2249,38 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	}
 }
 
+func TestSecureClientManifestSymlinkKeepsDependencySignal(t *testing.T) {
+	home := t.TempDir()
+	work := filepath.Join(home, "work")
+	target := filepath.Join(home, "manifest.json")
+	mustWrite(t, target, `{"dependencies":{"ai":"^3.0.0"}}`)
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(work, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, SecureClient: true, HomeDir: home, ScanRoots: []string{work},
+		DataDir: filepath.Join(home, "data"), MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
+	signals, _, err := svc.detectPackageManifests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sig := range signals {
+		if sig.Component != nil && sig.Component.Name == "ai" {
+			return
+		}
+	}
+	t.Fatalf("Secure Client missed symlinked manifest dependency: %+v", signals)
+}
+
 // Without Full Disk Access the scans never open a folder that makes macOS
 // prompt the user, so an employee is not asked about "defenseclaw-gateway"
 // (GAP-0128); with it, or elsewhere, they walk them like any other folder.
