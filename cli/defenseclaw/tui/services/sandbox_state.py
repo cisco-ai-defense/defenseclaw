@@ -1396,12 +1396,14 @@ class SandboxesPanelModel:
         if self.view not in self._selection_lost:
             return ""
         self._selection_lost.discard(self.view)
+        # The cursor's row, not a choice the user made: it may never have
+        # moved (GAP-0261).
         gone = {
-            "sandboxes": "The sandbox you selected is gone",
-            "asks": "The ask you selected is no longer waiting",
-            "activity": "The event you selected has left the feed",
+            "sandboxes": "The sandbox the cursor was on is gone",
+            "asks": "The ask the cursor was on is no longer waiting",
+            "activity": "The event the cursor was on has left the feed",
         }[self.view]
-        return f"{gone}; nothing was done. Check the selection, then press the key again."
+        return f"{gone}; nothing was done. Select one, then press the key again."
 
     @property
     def cursor(self) -> int:

@@ -996,6 +996,9 @@ class SandboxPanelMixin:
             f"DefenseClaw keeps its log for `defenseclaw sandbox logs {name}`. The sandbox is kept: connect (c) "
             "resumes it.",
             MenuAction("stop", "Stop", variant="warning"),
+            # Ending a live agent session takes a deliberate choice: s then a
+            # stray Enter stopped a running Codex session (GAP-0261).
+            cancel_first=True,
         )
         if not confirmed:
             self._set_status("Stop cancelled.")  # type: ignore[attr-defined]

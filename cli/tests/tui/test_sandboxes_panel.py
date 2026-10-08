@@ -2260,12 +2260,21 @@ async def test_stop_asks_first_then_runs_the_command_line(fetch, monkeypatch) ->
     calls = _Calls()
     ran = _fake_terminal(monkeypatch, app)
     monkeypatch.setattr(app, "_sandbox_call", calls)
-    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("cancel", "stop"))
+    answers = _screen_answers("cancel", "stop")
+    screens: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return await answers(screen)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
     async with app.run_test(size=(160, 44)):
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
         assert ran == []
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
     assert calls.calls == []
+    # GAP-0261: the dialog opens on Cancel, so s then Enter stops nothing.
+    assert screens[0].actions[screens[0].selected_index].action_id == "cancel"
     assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "stop", "myapp-claude-7f3a"], os.getcwd())]
 
 
@@ -2589,7 +2598,7 @@ def test_the_sandbox_selection_follows_its_row() -> None:
     assert model.handle_key("d") == SandboxPanelAction("delete", sandbox="docs")
     model.set_snapshot(STATUS, [RUNNING, COPY], [])
     refused = model.handle_key("d")
-    assert refused.kind == "hint" and "is gone" in refused.hint
+    assert refused.hint == "The sandbox the cursor was on is gone; nothing was done. Select one, then press the key again."
 
 
 @pytest.mark.asyncio
