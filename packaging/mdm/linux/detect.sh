@@ -185,7 +185,7 @@ done
 case "$DC_FORMAT" in exit | value | jamf) ;; *) printf 'defenseclaw detect: --format must be exit, value or jamf\n' >&2; exit 2 ;; esac
 
 [ "$(dc_platform)" = "$DC_SCRIPT_OS" ] || dc_report 0 not-installed "this copy of detect.sh is for $DC_SCRIPT_OS"
-[ "$(id -u)" = 0 ] || dc_report 0 not-installed "run as root"
+[ "$(id -u)" = 0 ] || dc_report 0 unknown "run as root"
 
 if [ "$DC_SCRIPT_OS" = darwin ]; then
     gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos
