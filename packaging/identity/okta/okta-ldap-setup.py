@@ -280,6 +280,7 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
         check_bind_user(client, report, args.bind_login)
     for name, gid in args.group or []:
         check_group(client, report, name, gid)
+    check_duplicate_group_gids(client, report)
     uid_owners: dict[int, str] = {}
     for user in client.get_all("/api/v1/users?limit=200"):
         value = user.get("profile", {}).get("uidNumber")
@@ -392,6 +393,22 @@ def check_bind_user(client: Okta, report: Report, login: str) -> None:
         return
     report.ok("only the read-only user and group role is assigned")
 
+
+
+def check_duplicate_group_gids(client: Okta, report: Report) -> set[int]:
+    """Report ambiguous POSIX group IDs and return the IDs already in use."""
+    owners: dict[int, str] = {}
+    for group in client.get_all("/api/v1/groups?limit=200"):
+        value = group.get("profile", {}).get("gidNumber")
+        if value is None:
+            continue
+        gid = int(value)
+        name = str(group.get("profile", {}).get("name", group.get("id")))
+        if gid in owners and owners[gid] != name:
+            report.problem(f"gidNumber {gid} is shared by {owners[gid]} and {name}")
+        else:
+            owners[gid] = name
+    return set(owners)
 
 def check_group(client: Okta, report: Report, name: str, gid: int | None) -> None:
     print(f"Group {name}")
@@ -521,11 +538,9 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
         return report.finish()
 
     print("Groups")
-    used_gids = {
-        int(g["profile"]["gidNumber"])
-        for g in client.get_all("/api/v1/groups?limit=200")
-        if g.get("profile", {}).get("gidNumber") is not None
-    }
+    used_gids = check_duplicate_group_gids(client, report)
+    if report.problems:
+        return report.finish()
     primary, primary_gid = ensure_group(client, report, args.primary_group, args.primary_gid, used_gids, args.gid_base)
     for name, gid in args.group or []:
         ensure_group(client, report, name, gid, used_gids, args.gid_base)
