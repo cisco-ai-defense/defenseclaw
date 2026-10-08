@@ -79,8 +79,11 @@ class TestF0241RuntimeVocabulary(unittest.TestCase):
         # as runtime disable, never as an allow.
         for runtime in ("block", "disable", "  BLOCK "):
             self.assertEqual(_admission_triple({"runtime": runtime})["runtime"], "disable")
-        for runtime in ("enable", "allow", "something-else"):
+        for runtime in ("enable", "allow"):
             self.assertEqual(_admission_triple({"runtime": runtime})["runtime"], "enable")
+        # An unknown spelling is an error, never a silent allow.
+        with self.assertRaises(ValueError):
+            _admission_triple({"runtime": "something-else"})
 
 
 class TestF0543ProvenanceComponentMatch(unittest.TestCase):
